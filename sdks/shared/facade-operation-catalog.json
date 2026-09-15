@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "extension_protocol_version": 1,
-  "total_items": 23570,
+  "total_items": 23661,
   "routes": [
     {
       "family": "bridge",
@@ -24,7 +24,7 @@
       "handler_operation": null,
       "route": "bridge:agent_component",
       "signature_digests": [
-        "sha256:d1cab6eb140f9bfe1f68175b5d15612ca328c7d362b5849e1224c34f9afad81c"
+        "sha256:c997f29d584e70981eb9d682462e0141582867d62fad12dc24b7049939fba862"
       ],
       "operation_signatures": [],
       "required_feature": null,
@@ -7631,6 +7631,20 @@
       "method": null,
       "operation": null,
       "handler_operation": null,
+      "route": "intrinsic:process-local-skill-activation-authority",
+      "signature_digests": [
+        "sha256:e3a275b5a8d9444774872a2b635b7395248d4801812923922914600a789597a8"
+      ],
+      "operation_signatures": [],
+      "required_feature": null,
+      "required_features": [],
+      "feature_semantics": "default"
+    },
+    {
+      "family": "intrinsic",
+      "method": null,
+      "operation": null,
+      "handler_operation": null,
       "route": "intrinsic:process-local-skill-registry-object",
       "signature_digests": [
         "sha256:3468916c9bfddef98bfd9dae9e52206004ef2011bb64596c62d41898a973037c"
@@ -11689,6 +11703,22 @@
       "required_feature": null,
       "required_features": [
         "mcp"
+      ],
+      "feature_semantics": "any_of"
+    },
+    {
+      "family": "source_operation",
+      "method": "_echo_agent/facade/invoke",
+      "operation": "echo_orchestration::human_loop::service::PermissionService::current_mode",
+      "handler_operation": null,
+      "route": "source:echo_orchestration::human_loop::service::PermissionService::current_mode",
+      "signature_digests": [
+        "sha256:e660b12e3a1abad063a6245838b21f1fca639ec2207d70cadc459e6d1d0c878a"
+      ],
+      "operation_signatures": [],
+      "required_feature": null,
+      "required_features": [
+        "human-loop"
       ],
       "feature_semantics": "any_of"
     },
