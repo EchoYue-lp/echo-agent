@@ -3,19 +3,19 @@ schema_version: 1
 id: finding.mcp-client-capability-advertisement
 kind: finding
 type: intent_gap
-status: open
+status: resolved
 severity: high
 primary_focus: contract_evidence
 focus: [result_side_effect, time_lifecycle, permission_external]
 boundary_ref: boundary.extension-lifecycle
 behavior_refs: [behavior.extension-publication]
 rule_refs: [rule.extension-generation-authority]
-evidence_refs: [evidence.effects-extensions]
-audit_refs: [audit.extension-lifecycle.time-lifecycle, audit.extension-lifecycle.permission-external]
+evidence_refs: [evidence.effects-extensions, evidence.mcp-client-capability-advertisement-repair, evidence.mcp-client-capability-advertisement-verification]
+audit_refs: [audit.extension-lifecycle.time-lifecycle, audit.extension-lifecycle.permission-external, audit.mcp-client-capability-advertisement-rereview]
 decision_refs: []
-repair_evidence_refs: []
-verification_evidence_refs: []
-rereview_audit_refs: []
+repair_evidence_refs: [evidence.mcp-client-capability-advertisement-repair]
+verification_evidence_refs: [evidence.mcp-client-capability-advertisement-verification]
+rereview_audit_refs: [audit.mcp-client-capability-advertisement-rereview]
 discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 ---
 
@@ -39,4 +39,5 @@ Server 根据协商结果发出对应 request/notification 时，Client 可能�
 
 ## 处理记录
 
-Discovery 记录；下一阶段对照当前 MCP 规范，选择实现或停止广告。
+commit `f30a1fc05153832870c420d5415d436aadb8b07f`停止广告未实现client capability，
+四版本协商与空capabilities wire通过独立复审。

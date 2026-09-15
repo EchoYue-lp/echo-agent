@@ -3,19 +3,19 @@ schema_version: 1
 id: finding.lsp-manager-derived-handle-resurrection
 kind: finding
 type: authority_conflict
-status: open
+status: resolved
 severity: high
 primary_focus: time_lifecycle
 focus: [state_authority, failure_concurrency, result_side_effect]
 boundary_ref: boundary.extension-lifecycle
 behavior_refs: [behavior.extension-publication, behavior.protocol-projection]
 rule_refs: [rule.extension-generation-authority, rule.protocol-role-separation]
-evidence_refs: [evidence.effects-extensions, evidence.provider-protocol-quality]
-audit_refs: [audit.extension-lifecycle.time-lifecycle]
+evidence_refs: [evidence.effects-extensions, evidence.provider-protocol-quality, evidence.lsp-derived-handle-lifecycle-repair, evidence.lsp-derived-handle-lifecycle-verification]
+audit_refs: [audit.extension-lifecycle.time-lifecycle, audit.lsp-derived-handle-lifecycle-rereview]
 decision_refs: []
-repair_evidence_refs: []
-verification_evidence_refs: []
-rereview_audit_refs: []
+repair_evidence_refs: [evidence.lsp-derived-handle-lifecycle-repair]
+verification_evidence_refs: [evidence.lsp-derived-handle-lifecycle-verification]
+rereview_audit_refs: [audit.lsp-derived-handle-lifecycle-rereview]
 discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 ---
 
@@ -39,4 +39,6 @@ Manager close 被消费者理解为资源树关闭后，旧派生 handle 可启�
 
 ## 处理记录
 
-Time-lifecycle Audit 确认；需 semantic-decide 裁决 derived handle 是级联失效还是独立 ownership，再设计 generation fence。
+ADR 0043确认manager级联ownership；commits `20ddba34`与
+`2eab1ac9923e0f99a70cc08d88de0ee64ea90ee6`实现generation/closed fence与Host级联结算，
+独立复审通过。

@@ -8,10 +8,10 @@ risk: high
 primary_focus: failure_concurrency
 focus: [state_authority, time_lifecycle, result_side_effect, permission_external, data_durability]
 boundary: boundary.extension-lifecycle
-observed_at: f1e9027246760661144786e9e35615cd46d580c6
+observed_at: 2eab1ac9923e0f99a70cc08d88de0ee64ea90ee6
 code_refs: [echo-integration/src/mcp/mod.rs, echo-execution/src/skills/hooks.rs, echo-execution/src/skills/registry.rs, echo-core/src/plugin/registry.rs, src/plugin/prepared.rs, echo-integration/src/lsp/manager.rs]
 rule_refs: [rule.extension-generation-authority]
-evidence_refs: [evidence.effects-extensions, evidence.skill-activation-authority-repair, evidence.skill-activation-authority-verification, evidence.mcp-tool-local-classification-repair, evidence.mcp-tool-local-classification-verification]
+evidence_refs: [evidence.effects-extensions, evidence.skill-activation-authority-repair, evidence.skill-activation-authority-verification, evidence.mcp-tool-local-classification-repair, evidence.mcp-tool-local-classification-verification, evidence.mcp-client-capability-advertisement-repair, evidence.mcp-client-capability-advertisement-verification, evidence.lsp-derived-handle-lifecycle-repair, evidence.lsp-derived-handle-lifecycle-verification]
 finding_refs: [finding.skill-activation-authority, finding.hook-permission-precedence, finding.mcp-client-capability-advertisement, finding.mcp-tool-permission-classification, finding.plugin-mcp-owner-isolation, finding.plugin-failure-isolation-contract, finding.plugin-lifecycle-coordination, finding.lsp-runtime-state, finding.lsp-manager-derived-handle-resurrection, finding.extension-cleanup-settlement, finding.extension-credential-debug-redaction, finding.mcp-version-doc-drift]
 ---
 
@@ -23,7 +23,7 @@ finding_refs: [finding.skill-activation-authority, finding.hook-permission-prece
 
 ## 当前行为
 
-McpManager 管命名连接，HookRegistry 管 source/order/action reduction，SkillLoader/Registry 管文件与 activation；Skill definition view可为异步tool适配而复制，但Agent reconciliation同步其变更，主registry、tool adapter、run snapshot与checkpoint共享epoch-fenced activation handle。PluginRegistry/Integrator/Lifecycle 管持久状态、不可变 generation 与 callback，LspManager 管 server 路由。
+McpManager管命名连接且client只广告已实现capability；HookRegistry管source/order/action reduction；Skill definition view可为异步tool适配而复制，但主registry、tool adapter、run snapshot与checkpoint共享epoch-fenced activation handle。PluginRegistry/Integrator/Lifecycle管持久状态、不可变generation与callback。LspManager唯一拥有client child process，派生handle共享其generation/closed fence。
 
 ## 期望行为
 
@@ -43,4 +43,4 @@ Prepare/apply/rollback、transport close、pending call、LSP EOF/restart、Plug
 
 ## 裁决记录
 
-Skill activation双权威已由canonical handle、Agent reconciliation和独立复审关闭；Hook precedence、Plugin/MCP owner、Plugin failure isolation、LSP recovery 与异步 cleanup 仍为待审 Finding。
+Skill activation、Hook permission precedence、MCP capability advertisement/local classification、LSP派生handle均已修复并独立复审；Plugin/MCP owner、Plugin failure isolation、LSP runtime status与异步cleanup仍为待审Finding。
