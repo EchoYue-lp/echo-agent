@@ -397,6 +397,35 @@ impl Tool for McpToolAdapter {
 
 对 Agent 来说，MCP 工具和本地 Rust 工具没有任何区别，都可以通过 `execute()` 调用。
 
+### 本地能力分类
+
+MCP 工具的 `readOnlyHint`、`destructiveHint` 等 annotation 是服务端提供的建议性
+元数据，不能授予权限，也不能决定失败后的副作用结算。默认情况下，每个适配后的
+MCP 工具都由框架本地保守分类为 `Mutating`、`Standard`，并声明
+`ToolPermission::Write`。因此未知远端副作用不会混入 Agent 的只读模式，同时用户主动
+连接 MCP 的流程保持不变。
+
+embedding application 在通过本地配置或其它可信 policy 验证工具后，可以显式应用更
+精确的分类：
+
+```rust,no_run
+use echo_agent::tools::{ToolCapabilities, permission::ToolPermission};
+use echo_integration::mcp::McpToolAdapter;
+
+# fn classify(
+#     client: std::sync::Arc<echo_integration::mcp::McpClient>,
+#     tool: echo_integration::mcp::McpTool,
+# ) {
+let adapter = McpToolAdapter::new(client, tool).with_local_capabilities(
+    ToolCapabilities::read_only(vec![ToolPermission::Read]),
+);
+# let _ = adapter;
+# }
+```
+
+不得直接把 MCP annotation 转换成这个值。同一个本地 `ToolCapabilities` 决策同时提供
+access、risk、permissions 和协议失败时的 side-effect 分类。
+
 ---
 
 ## 资源（Resources）访问

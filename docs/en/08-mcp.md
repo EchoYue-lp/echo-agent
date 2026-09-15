@@ -405,6 +405,36 @@ impl Tool for McpToolAdapter {
 
 To an Agent, MCP tools are indistinguishable from native Rust tools—both are invoked via `execute()`.
 
+### Local capability classification
+
+MCP tool annotations such as `readOnlyHint` and `destructiveHint` are server-provided
+advisory metadata. They never grant permissions or determine side-effect settlement.
+By default, every adapted MCP tool is classified locally as `Mutating`, `Standard`,
+with `ToolPermission::Write`. This conservative default keeps unknown remote effects
+out of read-only Agent modes while leaving user-initiated MCP connection unchanged.
+
+An embedding application may apply a more precise classification after validating the
+tool against local configuration or another trusted policy source:
+
+```rust,no_run
+use echo_agent::tools::{ToolCapabilities, permission::ToolPermission};
+use echo_integration::mcp::McpToolAdapter;
+
+# fn classify(
+#     client: std::sync::Arc<echo_integration::mcp::McpClient>,
+#     tool: echo_integration::mcp::McpTool,
+# ) {
+let adapter = McpToolAdapter::new(client, tool).with_local_capabilities(
+    ToolCapabilities::read_only(vec![ToolPermission::Read]),
+);
+# let _ = adapter;
+# }
+```
+
+Do not derive this value directly from MCP annotations. The one local
+`ToolCapabilities` decision supplies access, risk, permissions, and protocol-failure
+side-effect classification together.
+
 ---
 
 ## Resource Access

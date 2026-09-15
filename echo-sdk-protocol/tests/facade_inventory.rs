@@ -131,7 +131,7 @@ fn sdk_scope_is_complete_deterministic_and_alias_safe() -> TestResult {
         (SdkScope::HostOrRustOnly, 1_765usize),
         (SdkScope::LanguageIntrinsic, 781usize),
         (SdkScope::InternalHelper, 90usize),
-        (SdkScope::Deferred, 1_441usize),
+        (SdkScope::Deferred, 1_442usize),
     ]);
     assert_eq!(counts, expected);
 
@@ -2248,7 +2248,7 @@ fn facade_route_table_is_mechanically_closed() -> TestResult {
 
 #[test]
 fn intrinsic_routes_are_an_explicit_frozen_snapshot() -> TestResult {
-    const EXPECTED: &str = "13b9920a374c7853ef576a1b2c196c6378e93ca807bcfc3b11c943f15dc39fcd";
+    const EXPECTED: &str = "f618e82301fb94e16c8dd0de39bd4f13bb9ee074a3ceacea3e8e3bdd4a36aa1f";
     let mut routes = manifest()?
         .entries
         .into_iter()
