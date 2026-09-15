@@ -7,11 +7,11 @@ expectation: inferred
 risk: high
 primary_focus: contract_evidence
 focus: [failure_concurrency, time_lifecycle, trigger_input]
-observed_at: f1e9027246760661144786e9e35615cd46d580c6
+observed_at: e842d87bb787fb0b1fd39afbc04f834df07aec84
 behavior_refs: [behavior.llm-provider-execution]
 code_refs: [echo-core/src/llm/mod.rs, echo-core/src/llm/capabilities.rs, echo-integration/src/providers/config.rs, echo-integration/src/providers/client.rs, docs/adr/0022-typed-llm-timeouts.md]
-evidence_refs: [evidence.provider-protocol-quality]
-finding_refs: [finding.structured-output-main-path, finding.provider-capability-authority, finding.nonstream-cancellation-parity]
+evidence_refs: [evidence.provider-protocol-quality, evidence.sse-eof-framing-acceptance-repair, evidence.sse-eof-framing-acceptance-verification]
+finding_refs: [finding.structured-output-main-path, finding.provider-capability-authority, finding.nonstream-cancellation-parity, finding.sse-eof-framing-acceptance]
 ---
 
 # Provider Wire 与 Harness Policy 分离
@@ -26,7 +26,7 @@ LlmClient/ChatRequest 定义 provider-neutral 合同，provider adapter 只翻�
 
 ## 当前实现
 
-Typed config 构造 concrete client，共享 SSE transport 处理 stream；ModelProfileResolver 是独立可注入 policy。
+Typed config构造concrete client，共享SSE transport处理stream并拒绝未以空行完成framing的EOF残余；ModelProfileResolver是独立可注入policy。
 
 ## 期望行为
 
