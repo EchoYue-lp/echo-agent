@@ -57,6 +57,7 @@ where
 }
 
 /// Redact nested credential fields before diagnostic formatting.
+#[cfg(any(feature = "channels", test))]
 pub(crate) fn json(value: &Value) -> Value {
     let mut sanitized = value.clone();
     ContentRetentionPolicy::default().sanitize_json(&mut sanitized);
@@ -146,6 +147,7 @@ where
 }
 
 /// Preserve whether an optional secret was configured without exposing it.
+#[cfg(any(feature = "channels", test))]
 pub(crate) fn optional<T>(value: Option<&T>) -> Option<&'static str> {
     value.map(|_| REDACTED)
 }
