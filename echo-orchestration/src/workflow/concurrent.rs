@@ -5,6 +5,7 @@ use echo_core::agent::Agent;
 use echo_core::error::Result;
 use futures::future::BoxFuture;
 use std::time::Instant;
+use tokio::task::JoinSet;
 use tracing::{debug, info};
 
 /// Result merge function
@@ -94,12 +95,12 @@ impl Workflow for ConcurrentWorkflow {
                 agent_count
             );
 
-            let mut handles = Vec::with_capacity(agent_count);
+            let mut handles = JoinSet::new();
 
             for agent_handle in &self.agents {
                 let agent_handle = agent_handle.clone();
                 let input = input.to_string();
-                handles.push(tokio::spawn(async move {
+                handles.spawn(async move {
                     let step_start = Instant::now();
                     let agent = agent_handle.as_ref();
                     let agent_name = agent.name().to_string();
@@ -107,29 +108,28 @@ impl Workflow for ConcurrentWorkflow {
                     let result = agent.execute(&input).await;
                     let elapsed = step_start.elapsed();
                     (agent_name, input, result, elapsed)
-                }));
+                });
             }
 
             let mut step_outputs = Vec::with_capacity(agent_count);
             let mut results = Vec::with_capacity(agent_count);
 
             let mut first_error = None;
-            for handle in &mut handles {
-                let joined = handle.await;
+            while let Some(joined) = handles.join_next().await {
                 let (agent_name, step_input, result, elapsed) = match joined {
                     Ok(value) => value,
                     Err(error) => {
-                        first_error.get_or_insert_with(|| {
-                            echo_core::error::ReactError::Other(format!("task join error: {error}"))
-                        });
-                        continue;
+                        first_error = Some(echo_core::error::ReactError::Other(format!(
+                            "task join error: {error}"
+                        )));
+                        break;
                     }
                 };
                 let output = match result {
                     Ok(output) => output,
                     Err(error) => {
-                        first_error.get_or_insert(error);
-                        continue;
+                        first_error = Some(error);
+                        break;
                     }
                 };
                 info!(
@@ -148,11 +148,8 @@ impl Workflow for ConcurrentWorkflow {
                 results.push(output);
             }
             if let Some(error) = first_error {
-                for handle in &handles {
-                    if !handle.is_finished() {
-                        handle.abort();
-                    }
-                }
+                handles.abort_all();
+                while handles.join_next().await.is_some() {}
                 return Err(error);
             }
 
@@ -197,5 +194,76 @@ impl ConcurrentWorkflowBuilder {
             agents: self.agents,
             merge: self.merge.unwrap_or_else(|| Box::new(default_merge)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use echo_core::agent::AgentEvent;
+    use echo_core::error::ReactError;
+    use futures::stream::{self, BoxStream};
+    use std::time::Duration;
+
+    struct TestAgent {
+        name: &'static str,
+        fail: bool,
+        delay: Duration,
+    }
+
+    impl Agent for TestAgent {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn model_name(&self) -> &str {
+            "test"
+        }
+
+        fn system_prompt(&self) -> &str {
+            "test"
+        }
+
+        fn execute<'a>(&'a self, _task: &'a str) -> BoxFuture<'a, Result<String>> {
+            Box::pin(async move {
+                tokio::time::sleep(self.delay).await;
+                if self.fail {
+                    Err(ReactError::Other(format!("{} failed", self.name)))
+                } else {
+                    Ok(self.name.to_string())
+                }
+            })
+        }
+
+        fn execute_stream<'a>(
+            &'a self,
+            _task: &'a str,
+        ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+            Box::pin(async move {
+                let stream: BoxStream<'a, Result<AgentEvent>> = Box::pin(stream::empty());
+                Ok(stream)
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_concurrent_workflow_aborts_and_drains_siblings() {
+        let mut workflow = ConcurrentWorkflow::builder()
+            .agent(TestAgent {
+                name: "fail",
+                fail: true,
+                delay: Duration::from_millis(1),
+            })
+            .agent(TestAgent {
+                name: "slow",
+                fail: false,
+                delay: Duration::from_secs(60),
+            })
+            .build();
+
+        let result = tokio::time::timeout(Duration::from_secs(1), workflow.run("input"))
+            .await
+            .unwrap();
+        assert!(result.is_err());
     }
 }

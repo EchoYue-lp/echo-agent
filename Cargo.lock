@@ -1537,6 +1537,7 @@ dependencies = [
  "dashmap",
  "echo_core",
  "fastrand",
+ "fs2",
  "futures",
  "regex",
  "reqwest",
