@@ -7,6 +7,7 @@
 
 use echo_core::utils::retention::ContentRetentionPolicy;
 use serde_json::Value;
+#[cfg(any(feature = "mcp", test))]
 use std::collections::HashMap;
 
 pub(crate) const REDACTED: &str = "[REDACTED]";
@@ -154,6 +155,7 @@ pub(crate) fn optional<T>(value: Option<&T>) -> Option<&'static str> {
 
 /// Preserve whether a secret-bearing collection was configured without
 /// exposing either its keys or values.
+#[cfg(any(feature = "mcp", test))]
 pub(crate) fn collection_is_redacted(is_empty: bool) -> &'static str {
     if is_empty { "[]" } else { REDACTED }
 }
@@ -161,6 +163,7 @@ pub(crate) fn collection_is_redacted(is_empty: bool) -> &'static str {
 /// Return exact values that must be removed from HTTP diagnostics.  For an
 /// Authorization header, include both the full wire value and the credential
 /// after its scheme because servers commonly echo only the payload.
+#[cfg(any(feature = "mcp", test))]
 pub(crate) fn header_secrets(headers: &HashMap<String, String>) -> Vec<String> {
     let mut secrets = Vec::new();
     for (name, value) in headers {
