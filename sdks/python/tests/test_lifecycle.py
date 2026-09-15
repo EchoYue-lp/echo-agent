@@ -798,7 +798,9 @@ def test_workflow_checkpoint_generation_claim_and_heartbeat_contracts() -> None:
         )
     with pytest.raises(ValueError, match="1 to 300000"):
         AgentComponentDescriptor(
-            "workflow_checkpoint_store", "too-large", claim_heartbeat_interval_ms=300_001
+            "workflow_checkpoint_store",
+            "too-large",
+            claim_heartbeat_interval_ms=300_001,
         )
 
     payload = {

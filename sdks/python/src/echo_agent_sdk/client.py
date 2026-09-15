@@ -193,9 +193,7 @@ _AGENT_COMPONENT_INPUT_FIELDS: dict[str, frozenset[str]] = {
     "workflow_checkpoint_load": frozenset({"checkpoint_id"}),
     "workflow_checkpoint_claim": frozenset({"checkpoint_id"}),
     "workflow_checkpoint_ack_claim": frozenset({"checkpoint_id", "attempt_id"}),
-    "workflow_checkpoint_requeue_claim": frozenset(
-        {"checkpoint_id", "attempt_id"}
-    ),
+    "workflow_checkpoint_requeue_claim": frozenset({"checkpoint_id", "attempt_id"}),
     "workflow_checkpoint_renew_claim": frozenset({"checkpoint_id", "attempt_id"}),
     "workflow_checkpoint_list": frozenset(),
     "workflow_checkpoint_list_by_graph": frozenset({"graph_name"}),
