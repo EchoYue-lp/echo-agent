@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.checkpoint-journal-binding-verification
 kind: evidence
-observed_at: dcd25a8a19c21c3247965e527684d89c96d68ac7
+observed_at: source:b69e5e4f1ed0f4f44d80ff658771701f5ce167ff7f200ec4e28a5e84fca61100
 source_refs:
   - echo-state/src/journal/mod.rs
   - echo-state/src/journal/file.rs
@@ -14,7 +14,7 @@ source_refs:
   - docs/adr/0055-checkpoint-journal-identity.md
 supports: [behavior.observation-persistence, rule.fact-projection-separation]
 limitations:
-  - full workspace all-feature integration gate and remote CI remain pending for the final delivery branch
+  - 远端Linux、Windows、dependency与SDK CI等待PR执行
   - validation used macOS local file semantics and did not inject process crash or power-loss faults beyond existing deterministic fault fixtures
 ---
 
@@ -32,6 +32,13 @@ limitations:
 
 命令在`fix/Echoyue/checkpoint-journal-identity`的实现候选`dcd25a8a19c21c3247965e527684d89c96d68ac7`形成前后对同一源码内容执行。独立只读review与后续增量review均pass；高风险semantic strict snapshot和base require-change-evidence也在候选形成前退出0。
 
+集成分支在最终实现后执行`./scripts/verify.sh`，91项SDK生成物、两档workspace Clippy、全部
+all-target/all-feature测试与bench、no-default check均通过；17个独立feature全部编译通过。
+TypeScript 157项、Python 177项、Java Maven测试与真实Host连接通过。Journal identity public面已按
+5622 external、1774 Host/Rust-only、790 language intrinsic、90 internal helper、1448 deferred冻结，
+没有新增逐identity语言包装。
+
 ## 已知缺口
 
-本证据不代表完整workspace/all-feature合并门禁、Linux/Windows CI、远端PR或最终delivery分支的全局语义归并已完成。Finding #43因此继续保持open，等待integration final gate。
+远端Linux/Windows、dependency policy及SDK CI等待PR执行；本地验证使用macOS文件语义，未执行真实
+断电注入。

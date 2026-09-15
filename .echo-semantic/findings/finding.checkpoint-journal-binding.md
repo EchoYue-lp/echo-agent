@@ -3,14 +3,14 @@ schema_version: 1
 id: finding.checkpoint-journal-binding
 kind: finding
 type: authority_conflict
-status: open
+status: resolved
 severity: high
 primary_focus: data_durability
 focus: [state_authority, failure_concurrency, contract_evidence]
 boundary_ref: boundary.observation-persistence-delivery
 behavior_refs: [behavior.observation-persistence]
 rule_refs: [rule.fact-projection-separation]
-evidence_refs: [evidence.persistence-observation, evidence.checkpoint-journal-binding-repair, evidence.checkpoint-journal-binding-verification]
+evidence_refs: [evidence.persistence-observation, evidence.checkpoint-journal-binding-repair, evidence.checkpoint-journal-binding-verification, evidence.checkpoint-journal-sdk-inventory]
 audit_refs: [audit.observation-persistence-delivery.data-durability, audit.checkpoint-journal-binding-rereview]
 decision_refs: []
 repair_evidence_refs: [evidence.checkpoint-journal-binding-repair]
@@ -39,4 +39,4 @@ CheckpointFrame 与文件摘要只包含 sequence/state，recover 只检查序�
 
 ## 处理记录
 
-Data-durability Audit 确认。当前源码候选已把 checkpoint 绑定到 Journal generation identity，并加入同序号异源、异源receipt、同路径换代、schema v1、跨segment mix与prefix prune反例；独立源码和增量测试构造复审已pass，116项Journal focused tests、direct checks、两档Clippy与fmt全部通过。本 Finding 仍保持open，等待integration final gate和交付分支全局语义归并。
+Data-durability Audit 确认。修复已把checkpoint绑定到Journal generation identity，并加入同序号异源、异源receipt、同路径换代、schema v1、跨segment mix与prefix prune反例。116项Journal focused tests、完整workspace/all-feature门禁、17-feature矩阵、SDK生成与三语言合同、语义strict/change-evidence和独立复审全部通过；本Finding已闭合，远端Issue随MR进入main后关闭。

@@ -4,7 +4,7 @@ id: map.observation-persistence-delivery
 kind: capability_map
 title: Observation、Persistence、Projection 与 Delivery
 risk: high
-observed_at: source:30afe69aad7929c1209c14a6296bde079aec0cfdb45b8b8bd04601fe0d73220b
+observed_at: source:b69e5e4f1ed0f4f44d80ff658771701f5ce167ff7f200ec4e28a5e84fca61100
 boundary_refs: [boundary.observation-persistence-delivery]
 behavior_refs: [behavior.observation-persistence]
 rule_refs: [rule.fact-projection-separation]
@@ -19,13 +19,11 @@ scenarios:
     behavior_refs: [behavior.observation-persistence]
     rule_refs: [rule.fact-projection-separation]
   journal-checkpoint-recovery:
-    status: needs_review
+    status: mapped
     source_refs: [echo-state/src/journal/mod.rs, echo-state/src/journal/file.rs, echo-state/src/journal/segmented.rs]
     rule_refs: [rule.fact-projection-separation]
-    evidence_refs: [evidence.persistence-observation, evidence.checkpoint-journal-binding-repair, evidence.checkpoint-journal-binding-verification]
+    evidence_refs: [evidence.persistence-observation, evidence.checkpoint-journal-binding-repair, evidence.checkpoint-journal-binding-verification, evidence.checkpoint-journal-sdk-inventory]
     finding_refs: [finding.checkpoint-journal-binding]
-    unknown: Journal generation绑定的focused验证与独立复审已通过，integration final gate和交付分支语义归并尚未完成
-    next_step: 在最终delivery分支完成integration gate与全局语义归并后再关闭Finding
   store-role-separation:
     status: mapped
     source_refs: [src/state/mod.rs, echo-core/src/memory/conversation.rs, echo-core/src/memory/store.rs, src/trace/mod.rs]

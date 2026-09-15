@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.workflow-entry-loop-authority-verification
 kind: evidence
-observed_at: c7e54e6785f85422af83d4b384f01c2493eddc79
+observed_at: source:b69e5e4f1ed0f4f44d80ff658771701f5ce167ff7f200ec4e28a5e84fca61100
 source_refs:
   - echo-orchestration/src/workflow/graph.rs
   - echo-orchestration/src/workflow/node.rs
@@ -12,8 +12,8 @@ source_refs:
   - echo-agent-learning/tests/example_contracts/demo39_workflow.rs
 supports: [behavior.task-subagent-execution]
 limitations:
-  - 完整workspace门禁、all-features、远端Linux/Windows CI与真实provider副作用未执行
-  - 独立rereview已PASS；Finding关闭与共享source snapshot刷新等待integration final gate
+  - 远端Linux、Windows、dependency与SDK CI等待PR执行
+  - 真实provider的不可取消外部副作用不由本地mock覆盖
 ---
 
 # Workflow 入口循环权威验证证据
@@ -36,7 +36,11 @@ unwrap/expect/panic/unreachable严格Clippy通过；package formatter写入后ch
 无incremental、2 jobs约束下执行。仅覆盖Workflow Graph及其直接example contract，不把
 SDK、Scheduler或完整workspace结果推导为通过。
 
+最终集成分支随后执行`./scripts/verify.sh`，91项SDK生成物、两档workspace Clippy、全部
+all-target/all-feature测试与bench、no-default check均通过；17个独立feature全部编译通过，
+TypeScript 157项、Python 177项、Java Maven测试与真实Host连接也通过。
+
 ## 已知缺口
 
 第一次未启用`testing`的demo39命令收集到0项，不计为验收；随后使用真实feature入口重跑1项
-通过。未运行完整workspace、all-features、逐feature矩阵或远端CI。
+通过。远端平台CI与真实provider网络故障不在本地证据内。

@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.checkpoint-journal-sdk-inventory
 kind: evidence
-observed_at: source:30afe69aad7929c1209c14a6296bde079aec0cfdb45b8b8bd04601fe0d73220b
+observed_at: source:b69e5e4f1ed0f4f44d80ff658771701f5ce167ff7f200ec4e28a5e84fca61100
 source_refs:
   - echo-state/src/journal/mod.rs
   - echo-sdk-protocol/src/facade.rs
@@ -13,11 +13,15 @@ source_refs:
   - contracts/sdk/source-contract.json
   - sdks/shared/facade-operation-catalog.json
   - sdks/shared/contract-digests.json
+  - scripts/check-language-sdks.sh
+  - sdks/typescript/test/catalog.test.js
+  - sdks/python/tests/test_catalog.py
+  - sdks/java/src/test/java/com/echoagent/sdk/FacadeParityTest.java
 supports: [behavior.observation-persistence, behavior.sdk-facade-routing, rule.fact-projection-separation, rule.sdk-rust-authority]
 limitations:
-  - 本Evidence只证明Journal identity公共面已进入现有inventory分类和生成链，不证明全部SDK facade能力已经完成
+  - 本Evidence只证明Journal identity公共面已进入现有inventory分类和生成链，不证明其它deferred SDK能力已经完成
   - 本切片没有增加TypeScript、Python或Java源码，也没有改变extension wire schema或fixture
-  - echo-sdk-host与echo-sdk-protocol独立仓库迁移继续由Issue 122跟踪
+  - echo-sdk-host与echo-sdk-protocol独立仓库迁移继续由Issue 122跟踪，远端平台CI等待PR执行
 ---
 
 # Checkpoint 与 Journal identity SDK inventory 证据
@@ -40,4 +44,4 @@ intrinsic 790、internal helper 90、deferred 1448。extension schema和全部fi
 
 ## 已知缺口
 
-本地完整SDK合同、三语言合同、workspace门禁和远端CI在最终delivery分支执行后才能关闭Finding。
+本地完整SDK合同、三语言合同和workspace门禁已通过；远端平台CI等待PR执行。
