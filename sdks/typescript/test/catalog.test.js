@@ -90,10 +90,10 @@ test("every external SDK contract has a completed TypeScript mapping", () => {
     assert.match(entry.languages.typescript.contract_test, /^sdk-parity\//u, entry.path);
   }
   assert.deepEqual(Object.fromEntries(counts), {
-    deferred: 1441,
-    external_contract: 5607,
-    host_or_rust_only: 1765,
+    deferred: 1443,
+    external_contract: 5620,
+    host_or_rust_only: 1773,
     internal_helper: 90,
-    language_intrinsic: 781,
+    language_intrinsic: 787,
   });
 });
