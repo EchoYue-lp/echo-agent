@@ -114,6 +114,15 @@ Resource cleanup is part of controlled sandbox execution's terminal contract.
   settlement. It deliberately does not use `--force --grace-period=0`, because
   Kubernetes documents that force deletion removes the API object without
   confirmation that the process on the node has terminated.
+- Pod creation and cleanup have an ambiguous commit boundary: killing the
+  `kubectl run` client does not prove that an already-sent create request will
+  not commit after an initial delete observes NotFound. Named deletion therefore
+  requests `--output=name` as a stable receipt. An empty successful delete is
+  not terminal evidence; the owner polls `kubectl get` within the same absolute
+  cleanup deadline, deletes again if the Pod becomes visible, and only returns
+  success after a deletion receipt plus confirmed absence. If the Pod remains
+  absent without any deletion receipt until the deadline, cleanup returns typed
+  debt instead of guessing that the create request was never committed.
 - A kubectl deletion spawn failure, timeout, or non-zero exit is cleanup debt.
   An awaiting caller receives a typed sandbox I/O error containing bounded
   primary terminal facts plus the cleanup failure. The detached owner records
@@ -177,7 +186,10 @@ cancellation, blocked/failed stdin, leader-exit with an inherited output pipe,
 and caller abort all reach settled Pod deletion; deletion is graceful, bounded,
 and waits for API disappearance. Cleanup failure preserves success, non-zero,
 timeout, and cancellation facts instead of returning a false terminal, and
-detached join-failure recovery survives loss of its waiter.
+detached join-failure recovery survives loss of its waiter. A delayed-visibility
+fixture proves that an initially absent Pod which appears after the first delete
+is deleted again and confirmed absent; a never-visible fixture proves ambiguous
+absence exhausts the shared deadline as typed cleanup debt.
 
 ## References
 
