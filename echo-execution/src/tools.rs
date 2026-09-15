@@ -9,6 +9,7 @@ use echo_core::error::{AgentError, ReactError, Result, ToolError};
 use echo_core::llm::types::ToolDefinition;
 use echo_core::sandbox::SandboxExecutor;
 use echo_core::tokenizer::{HeuristicTokenizer, Tokenizer};
+use echo_core::tools::{ToolAccess, ToolCapabilities};
 use parking_lot::RwLock;
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -336,6 +337,14 @@ impl Tool for ToolSearchTool {
         // Activation mutates invocation-local visibility, so this must bypass
         // the read-only result cache even though it has no external side effect.
         ToolRiskLevel::Standard
+    }
+
+    fn capabilities(&self) -> ToolCapabilities {
+        ToolCapabilities {
+            access: ToolAccess::ReadOnly,
+            risk: ToolRiskLevel::Standard,
+            permissions: Vec::new(),
+        }
     }
 
     fn parameters(&self) -> Value {

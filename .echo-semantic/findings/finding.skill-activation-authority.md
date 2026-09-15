@@ -3,19 +3,19 @@ schema_version: 1
 id: finding.skill-activation-authority
 kind: finding
 type: authority_conflict
-status: open
+status: resolved
 severity: high
 primary_focus: state_authority
 focus: [data_durability, time_lifecycle, contract_evidence]
 boundary_ref: boundary.extension-lifecycle
 behavior_refs: [behavior.extension-publication]
 rule_refs: [rule.extension-generation-authority]
-evidence_refs: [evidence.effects-extensions]
-audit_refs: [audit.extension-lifecycle.state-authority]
+evidence_refs: [evidence.effects-extensions, evidence.skill-activation-authority-repair, evidence.skill-activation-authority-verification]
+audit_refs: [audit.extension-lifecycle.state-authority, audit.skill-activation-authority-rereview]
 decision_refs: []
-repair_evidence_refs: []
-verification_evidence_refs: []
-rereview_audit_refs: []
+repair_evidence_refs: [evidence.skill-activation-authority-repair]
+verification_evidence_refs: [evidence.skill-activation-authority-verification]
+rereview_audit_refs: [audit.skill-activation-authority-rereview]
 discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 ---
 
@@ -39,4 +39,4 @@ API 激活或进程恢复后，prompt 可显示 Skill 已激活，而 resource/s
 
 ## 处理记录
 
-Discovery 记录为 authority conflict；下一阶段确定一个 registry 并做 API/tool/checkpoint round trip。
+首轮review发现checkpoint telemetry镜像、definition mutation、in-flight publication和doc-hidden inventory四类缺口；第二轮又发现deny replacement先删除旧代。epoch-fenced handle、descriptor-derived policy restore、prevalidate-then-swap Agent reconciliation、single-flight/cancel poison与Host-only classifier逐项修复后，同一reviewer最终复审Critical/Important/Minor均为0，本Finding已关闭。

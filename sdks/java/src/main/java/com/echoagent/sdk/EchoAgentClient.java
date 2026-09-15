@@ -100,29 +100,41 @@ public final class EchoAgentClient implements AutoCloseable {
             });
             notificationHandlers.put("_echo_agent/event", params -> {
                 JsonNode event = transport.unmarshalFrom(params, JSON_NODE);
-                String streamId = event.path("stream").path("id").asText("");
-                if (!streamId.isEmpty()) {
-                    BoundedPublisher publisher = holder[0].eventPublishers
-                            .computeIfAbsent(streamId, ignored -> holder[0].newEventPublisher(event.path("stream")));
-                    publisher.publishEvent(event, streamId);
-                    String eventType = event.path("envelope").path("payload")
-                            .path("event_type").asText("");
-                    if ("final_answer".equals(eventType)
-                            || "cancelled".equals(eventType)
-                            || "error".equals(eventType)) {
-                        publisher.close();
-                    }
+                final WireHandle stream;
+                try {
+                    stream = incomingStream(event);
+                } catch (RuntimeException error) {
+                    holder[0].failEventPublishers(new EchoAgentException(
+                            "serialization_violation", "event notification has an invalid stream handle",
+                            "never", "_echo_agent/event", event));
+                    return Mono.empty();
+                }
+                BoundedPublisher publisher = holder[0].eventPublishers
+                        .computeIfAbsent(stream.id(), ignored -> holder[0].newEventPublisher(stream));
+                publisher.publishEvent(event, stream.id());
+                String eventType = event.path("envelope").path("payload")
+                        .path("event_type").asText("");
+                if ("final_answer".equals(eventType)
+                        || "cancelled".equals(eventType)
+                        || "error".equals(eventType)) {
+                    publisher.close();
                 }
                 return Mono.empty();
             });
             notificationHandlers.put("_echo_agent/gap", params -> {
                 JsonNode gap = transport.unmarshalFrom(params, JSON_NODE);
-                String streamId = gap.path("stream").path("id").asText("");
-                if (!streamId.isEmpty()) {
-                    holder[0].eventPublishers
-                            .computeIfAbsent(streamId, ignored -> holder[0].newEventPublisher(gap.path("stream")))
-                            .publishGap(gap, streamId);
+                final WireHandle stream;
+                try {
+                    stream = incomingStream(gap);
+                } catch (RuntimeException error) {
+                    holder[0].failEventPublishers(new EchoAgentException(
+                            "serialization_violation", "gap notification has an invalid stream handle",
+                            "never", "_echo_agent/gap", gap));
+                    return Mono.empty();
                 }
+                holder[0].eventPublishers
+                        .computeIfAbsent(stream.id(), ignored -> holder[0].newEventPublisher(stream))
+                        .publishGap(gap, stream.id());
                 return Mono.empty();
             });
             notificationHandlers.put("session/update", params -> {
@@ -537,14 +549,30 @@ public final class EchoAgentClient implements AutoCloseable {
     }
 
     Flow.Publisher<JsonNode> events(WireHandle stream) {
-        BoundedPublisher publisher = eventPublishers.computeIfAbsent(stream.id(), ignored -> newEventPublisher(stream.toJson()));
+        BoundedPublisher publisher = eventPublishers.computeIfAbsent(stream.id(), ignored -> newEventPublisher(stream));
+        publisher.validateExpectedStream(stream);
         if (closed) publisher.close();
         return publisher;
     }
 
-    private BoundedPublisher newEventPublisher(JsonNode stream) {
+    private BoundedPublisher newEventPublisher(WireHandle stream) {
         return new BoundedPublisher(BoundedPublisher.DEFAULT_CAPACITY,
-                event -> acknowledgeEvent(stream, event));
+                event -> acknowledgeEvent(stream.toJson(), event), stream);
+    }
+
+    private static WireHandle incomingStream(JsonNode value) {
+        if (value == null || !value.isObject()) {
+            throw new IllegalArgumentException("notification must be an object");
+        }
+        WireHandle stream = WireHandle.fromJson(value.path("stream"));
+        if (!"stream".equals(stream.kind())) {
+            throw new IllegalArgumentException("notification requires a stream handle");
+        }
+        return stream;
+    }
+
+    private void failEventPublishers(EchoAgentException error) {
+        eventPublishers.values().forEach(publisher -> publisher.fail(error));
     }
 
     private void acknowledgeEvent(JsonNode stream, JsonNode event) {
@@ -570,7 +598,7 @@ public final class EchoAgentClient implements AutoCloseable {
         ObjectNode event = JsonSupport.MAPPER.createObjectNode();
         event.set("stream", stream.toJson());
         event.set("envelope", envelope);
-        eventPublishers.computeIfAbsent(stream.id(), ignored -> new BoundedPublisher())
+        eventPublishers.computeIfAbsent(stream.id(), ignored -> newEventPublisher(stream))
                 .publishEvent(event, stream.id());
         String eventType = envelope.path("payload").path("event_type").asText("");
         if ("final_answer".equals(eventType)

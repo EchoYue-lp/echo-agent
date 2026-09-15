@@ -11,7 +11,7 @@ boundary: boundary.tool-permission-sandbox
 observed_at: e59fe773d92bca409fe0606b608c4812f87f7ac2
 code_refs: [echo-core/src/tools/mod.rs, echo-core/src/tools/permission.rs, echo-core/src/tools/cell.rs, echo-execution/src/tools.rs, echo-orchestration/src/human_loop/service.rs, echo-orchestration/src/tasks/command_cell.rs, echo-execution/src/sandbox/local.rs, echo-execution/src/skills/hooks.rs, src/agent/react/run/pipeline.rs]
 rule_refs: [rule.permission-effect-order]
-evidence_refs: [evidence.effects-extensions, evidence.streaming-tool-validation-repair, evidence.streaming-tool-validation-verification, evidence.tool-read-cache-authority-repair, evidence.tool-read-cache-authority-verification, evidence.tool-registry-owned-handle-repair, evidence.tool-registry-owned-handle-verification]
+evidence_refs: [evidence.effects-extensions, evidence.streaming-tool-validation-repair, evidence.streaming-tool-validation-verification, evidence.tool-read-cache-authority-repair, evidence.tool-read-cache-authority-verification, evidence.tool-registry-owned-handle-repair, evidence.tool-registry-owned-handle-verification, evidence.mcp-tool-local-classification-repair, evidence.mcp-tool-local-classification-verification]
 finding_refs: [finding.tool-read-cache-scope, finding.tool-read-cache-inflight-invalidation-race, finding.tool-registry-mutation-active-call-deadlock, finding.streaming-tool-validation, finding.plan-mode-write-surface, finding.approval-authority, finding.hook-protected-path, finding.sandbox-minimum-isolation, finding.guard-direction-contract, finding.trace-effect-event-producers, finding.trace-audit-secret-boundary, finding.effect-cleanup-owner, finding.tool-pipeline-example-drift]
 ---
 

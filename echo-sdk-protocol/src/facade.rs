@@ -2094,6 +2094,18 @@ const PROVEN_PROCESS_LOCAL_OPERATION_REASONS: &[(&str, &str)] = &[
         "process-local-shell-and-sandbox-context",
     ),
     (
+        "echo_execution::skills::registry::SkillRegistry::activation_handle",
+        "process-local-skill-activation-authority",
+    ),
+    (
+        "echo_execution::skills::registry::SkillRegistry::activation_view",
+        "process-local-skill-activation-authority",
+    ),
+    (
+        "echo_execution::skills::registry::SkillRegistry::restore_activation_state",
+        "process-local-skill-activation-authority",
+    ),
+    (
         "echo_agent::a2a::auth::get_claims",
         "process-local-http-request-extension",
     ),
@@ -2196,6 +2208,10 @@ const PROVEN_PROCESS_LOCAL_OPERATION_REASONS: &[(&str, &str)] = &[
 ];
 
 const PROVEN_PROCESS_LOCAL_OPERATION_TYPES: &[(&str, &str)] = &[
+    (
+        "echo_execution::skills::registry::SkillActivationHandle",
+        "process-local-skill-activation-authority",
+    ),
     (
         "echo_core::agent::AgentSteerReceipt",
         "process-local-turn-input-receipt-state",
@@ -2608,8 +2624,10 @@ const PROVEN_REACT_AGENT_LOCAL_METHODS: &[&str] = &[
     "permission_service",
     "register_agent",
     "register_agents",
+    "register_prepared_skill",
     "register_mcp_tools",
     "register_prepared_plugin_skills",
+    "register_skill_descriptor",
     "register_subagent_definition",
     "register_subagent_factory",
     "register_subagent_with_definition",
@@ -2619,14 +2637,15 @@ const PROVEN_REACT_AGENT_LOCAL_METHODS: &[&str] = &[
     // The concrete ReactAgent API returns an opaque Box<dyn Tool>; only the
     // core Agent trait's boolean removal projection is wire-adaptable.
     "remove_tool",
+    "record_code_skill_info",
     "replace_system_context_projection",
     "run_store",
     "sandbox_manager",
     "skill_registry",
-    "skill_registry_mut",
     "state_store",
     "subagent_executor",
     "subagent_registry",
+    "tag_skills_source_with_variables",
     "set_approval_provider",
     "set_canonical_context",
     "set_circuit_breaker",
@@ -2871,7 +2890,7 @@ fn family_operation_for_source(
                 .starts_with("echo_orchestration::human_loop::service::PermissionService::") =>
         {
             match method {
-                "mode" => Some("permission.mode"),
+                "mode" | "current_mode" => Some("permission.mode"),
                 "set_mode" => Some("permission.set_mode"),
                 "check" => Some("permission.check"),
                 "apply_update" => Some("permission.apply_update"),
@@ -3965,6 +3984,35 @@ mod tests {
             language_local_source_reason("echo_core::plugin::manifest::PluginManifest").is_none(),
             "value type itself must not be swallowed by helper classification"
         );
+    }
+
+    #[test]
+    fn skill_activation_authority_has_an_explicit_process_local_route() {
+        for identity in [
+            "echo_execution::skills::registry::SkillActivationHandle",
+            "echo_execution::skills::registry::SkillActivationHandle::activated_names",
+            "echo_execution::skills::registry::SkillRegistry::activation_handle",
+            "echo_execution::skills::registry::SkillRegistry::activation_view",
+            "echo_execution::skills::registry::SkillRegistry::restore_activation_state",
+        ] {
+            assert_eq!(
+                language_local_source_reason(identity),
+                Some("process-local-skill-activation-authority"),
+                "missing explicit Skill activation classification for {identity}"
+            );
+        }
+        for identity in [
+            "echo_agent::agent::react::ReactAgent::record_code_skill_info",
+            "echo_agent::agent::react::ReactAgent::register_prepared_skill",
+            "echo_agent::agent::react::ReactAgent::register_skill_descriptor",
+            "echo_agent::agent::react::ReactAgent::tag_skills_source_with_variables",
+        ] {
+            assert_eq!(
+                language_local_source_reason(identity),
+                Some("process-local-react-agent-composition"),
+                "missing explicit Agent reconciliation classification for {identity}"
+            );
+        }
     }
 
     #[test]

@@ -91,8 +91,12 @@ AGENT_COMPONENT_OPERATIONS = frozenset(
         "guard_check",
         "search_provider_search",
         "workflow_checkpoint_save",
+        "workflow_checkpoint_save_if_generation",
         "workflow_checkpoint_load",
         "workflow_checkpoint_claim",
+        "workflow_checkpoint_ack_claim",
+        "workflow_checkpoint_requeue_claim",
+        "workflow_checkpoint_renew_claim",
         "workflow_checkpoint_list",
         "workflow_checkpoint_list_by_graph",
         "workflow_checkpoint_list_filtered",
@@ -183,8 +187,14 @@ _AGENT_COMPONENT_INPUT_FIELDS: dict[str, frozenset[str]] = {
     "guard_check": frozenset({"content", "direction"}),
     "search_provider_search": frozenset({"query", "max_results"}),
     "workflow_checkpoint_save": frozenset({"checkpoint"}),
+    "workflow_checkpoint_save_if_generation": frozenset(
+        {"checkpoint", "expected_generation"}
+    ),
     "workflow_checkpoint_load": frozenset({"checkpoint_id"}),
     "workflow_checkpoint_claim": frozenset({"checkpoint_id"}),
+    "workflow_checkpoint_ack_claim": frozenset({"checkpoint_id", "attempt_id"}),
+    "workflow_checkpoint_requeue_claim": frozenset({"checkpoint_id", "attempt_id"}),
+    "workflow_checkpoint_renew_claim": frozenset({"checkpoint_id", "attempt_id"}),
     "workflow_checkpoint_list": frozenset(),
     "workflow_checkpoint_list_by_graph": frozenset({"graph_name"}),
     "workflow_checkpoint_list_filtered": frozenset({"filter"}),
@@ -458,6 +468,7 @@ class AgentComponentDescriptor:
     isolation_level: str | None = None
     supports_streaming: bool = False
     supports_notifications: bool = False
+    claim_heartbeat_interval_ms: int | None = None
 
     def __post_init__(self) -> None:
         if self.component not in _AGENT_COMPONENTS:
@@ -482,18 +493,36 @@ class AgentComponentDescriptor:
             raise ValueError("unknown sandbox isolation level")
         if self.supports_notifications and self.component != "mcp_transport":
             raise ValueError("notifications are only valid for mcp_transport")
+        if self.component == "workflow_checkpoint_store":
+            if (
+                isinstance(self.claim_heartbeat_interval_ms, bool)
+                or not isinstance(self.claim_heartbeat_interval_ms, int)
+                or not 1 <= self.claim_heartbeat_interval_ms <= 300_000
+            ):
+                raise ValueError(
+                    "workflow checkpoint stores require a claim heartbeat from 1 to 300000 ms"
+                )
+        elif self.claim_heartbeat_interval_ms is not None:
+            raise ValueError(
+                "claim_heartbeat_interval_ms is only valid for workflow_checkpoint_store"
+            )
 
     def to_wire(self) -> dict[str, Any]:
+        capabilities: dict[str, Any] = {
+            "isolation_level": self.isolation_level,
+            "supports_streaming": self.supports_streaming,
+            "supports_notifications": self.supports_notifications,
+        }
+        if self.claim_heartbeat_interval_ms is not None:
+            capabilities["claim_heartbeat_interval_ms"] = _canonical_u64_text(
+                self.claim_heartbeat_interval_ms, "claim_heartbeat_interval_ms"
+            )
         return {
             "kind": "agent_component",
             "descriptor_version": 1,
             "component": self.component,
             "name": self.name,
-            "capabilities": {
-                "isolation_level": self.isolation_level,
-                "supports_streaming": self.supports_streaming,
-                "supports_notifications": self.supports_notifications,
-            },
+            "capabilities": capabilities,
         }
 
 
@@ -915,6 +944,34 @@ class WorkflowCheckpointSaveRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class WorkflowCheckpointSaveIfGenerationRequest:
+    checkpoint: Mapping[str, Any]
+    expected_generation: int
+    operation: Literal["workflow_checkpoint_save_if_generation"] = (
+        "workflow_checkpoint_save_if_generation"
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class WorkflowCheckpointClaimAttemptRequest:
+    checkpoint_id: str
+    attempt_id: str
+    operation: Literal[
+        "workflow_checkpoint_ack_claim",
+        "workflow_checkpoint_requeue_claim",
+        "workflow_checkpoint_renew_claim",
+    ] = "workflow_checkpoint_ack_claim"
+
+    def __post_init__(self) -> None:
+        if self.operation not in {
+            "workflow_checkpoint_ack_claim",
+            "workflow_checkpoint_requeue_claim",
+            "workflow_checkpoint_renew_claim",
+        }:
+            raise ValueError("invalid workflow checkpoint claim-attempt operation")
+
+
+@dataclass(frozen=True, slots=True)
 class WorkflowCheckpointIdRequest:
     checkpoint_id: str
     operation: Literal[
@@ -1217,6 +1274,15 @@ def _component_request(
         )
     if operation == "workflow_checkpoint_save":
         return WorkflowCheckpointSaveRequest(wire("checkpoint"))
+    if operation == "workflow_checkpoint_save_if_generation":
+        return WorkflowCheckpointSaveIfGenerationRequest(
+            wire("checkpoint"),
+            int(
+                _canonical_u64_text(
+                    arguments.get("expected_generation"), "expected_generation"
+                )
+            ),
+        )
     if operation in {
         "workflow_checkpoint_load",
         "workflow_checkpoint_claim",
@@ -1229,6 +1295,23 @@ def _component_request(
                     "workflow_checkpoint_load",
                     "workflow_checkpoint_claim",
                     "workflow_checkpoint_delete",
+                ],
+                operation,
+            ),
+        )
+    if operation in {
+        "workflow_checkpoint_ack_claim",
+        "workflow_checkpoint_requeue_claim",
+        "workflow_checkpoint_renew_claim",
+    }:
+        return WorkflowCheckpointClaimAttemptRequest(
+            text("checkpoint_id"),
+            text("attempt_id"),
+            cast(
+                Literal[
+                    "workflow_checkpoint_ack_claim",
+                    "workflow_checkpoint_requeue_claim",
+                    "workflow_checkpoint_renew_claim",
                 ],
                 operation,
             ),
@@ -1743,6 +1826,34 @@ class WorkflowCheckpointResult:
         )
 
     @staticmethod
+    def saved_if_generation(committed: bool) -> AgentComponentResult:
+        if not isinstance(committed, bool):
+            raise TypeError("committed must be a bool")
+        return _TypedAgentComponentResult(
+            "workflow_checkpoint_store",
+            "workflow_checkpoint_save_if_generation",
+            {"committed": committed},
+        )
+
+    @staticmethod
+    def claim_acked() -> AgentComponentResult:
+        return _TypedAgentComponentResult(
+            "workflow_checkpoint_store", "workflow_checkpoint_ack_claim"
+        )
+
+    @staticmethod
+    def claim_requeued() -> AgentComponentResult:
+        return _TypedAgentComponentResult(
+            "workflow_checkpoint_store", "workflow_checkpoint_requeue_claim"
+        )
+
+    @staticmethod
+    def claim_renewed() -> AgentComponentResult:
+        return _TypedAgentComponentResult(
+            "workflow_checkpoint_store", "workflow_checkpoint_renew_claim"
+        )
+
+    @staticmethod
     def loaded(checkpoint: Mapping[str, Any] | None) -> AgentComponentResult:
         return _TypedAgentComponentResult(
             "workflow_checkpoint_store",
@@ -1928,6 +2039,9 @@ def _validate_component_result(operation: str, value: Mapping[str, Any] | None) 
         "runtime_clear_conversation",
         "audit_log",
         "workflow_checkpoint_save",
+        "workflow_checkpoint_ack_claim",
+        "workflow_checkpoint_requeue_claim",
+        "workflow_checkpoint_renew_claim",
         "workflow_checkpoint_delete",
         "workflow_checkpoint_clear",
         "sandbox_cleanup",
@@ -1962,6 +2076,7 @@ def _validate_component_result(operation: str, value: Mapping[str, Any] | None) 
         "memory_trigger": {"disposition"},
         "guard_check": {"result"},
         "search_provider_search": {"results"},
+        "workflow_checkpoint_save_if_generation": {"committed"},
         "workflow_checkpoint_load": {"checkpoint"},
         "workflow_checkpoint_claim": {"checkpoint"},
         "workflow_checkpoint_list": {"checkpoints"},
@@ -1984,6 +2099,11 @@ def _validate_component_result(operation: str, value: Mapping[str, Any] | None) 
     expected_fields = fields_by_operation.get(operation)
     if expected_fields is None or set(value) != expected_fields:
         raise ValueError(f"{operation} result fields do not match its typed contract")
+
+    if operation == "workflow_checkpoint_save_if_generation":
+        if not isinstance(value.get("committed"), bool):
+            raise TypeError("committed must be a bool")
+        return
 
     def wire(field: str, nullable: bool = False) -> None:
         candidate = value.get(field)
@@ -2402,7 +2522,9 @@ class _AsyncQueue:
             return
         self._items.append(value)
 
-    def fail(self, error: BaseException) -> None:
+    def fail(self, error: BaseException, *, discard_pending: bool = False) -> None:
+        if discard_pending:
+            self._items.clear()
         if self._closed:
             return
         self._closed = True
@@ -2451,6 +2573,116 @@ class _AsyncQueue:
                 yield await self.get()
             except StopAsyncIteration:
                 return
+
+
+@dataclass(slots=True)
+class _EventFeed:
+    """One generation-fenced event feed owned by a stream id."""
+
+    queue: _AsyncQueue
+    handle: WireHandle | None = None
+    last_sequence: int = 0
+
+    def bind(self, handle: WireHandle) -> None:
+        if handle.kind != "stream":
+            raise EchoAgentError(
+                "serialization_violation", "event stream handle kind is invalid"
+            )
+        if self.handle is not None and self.handle != handle:
+            raise EchoAgentError(
+                "handle_mismatch", "event stream handle changed generation"
+            )
+        self.handle = handle
+
+    def accept_event(self, value: Mapping[str, Any]) -> bool:
+        stream = _parse_event_stream(value)
+        self.bind(stream)
+        envelope = value.get("envelope")
+        if not isinstance(envelope, Mapping):
+            raise EchoAgentError(
+                "serialization_violation", "event notification is missing its envelope"
+            )
+        if envelope.get("stream_id") != stream.id:
+            raise EchoAgentError(
+                "serialization_violation",
+                "event envelope stream_id does not match its handle",
+            )
+        sequence = _parse_positive_sequence(envelope.get("sequence"), "event sequence")
+        if sequence == self.last_sequence:
+            return False
+        if self.last_sequence > 0 and sequence != self.last_sequence + 1:
+            raise EchoAgentError(
+                "event_gap", "event sequence is not contiguous; replay is required"
+            )
+        self.last_sequence = sequence
+        return True
+
+    def accept_gap(self, value: Mapping[str, Any]) -> bool:
+        stream = _parse_event_stream(value)
+        self.bind(stream)
+        gap = value.get("gap")
+        if not isinstance(gap, Mapping):
+            raise EchoAgentError(
+                "serialization_violation", "gap notification is missing its gap"
+            )
+        from_sequence = _parse_positive_sequence(
+            gap.get("from_sequence"), "gap from_sequence"
+        )
+        to_sequence = _parse_positive_sequence(
+            gap.get("to_sequence"), "gap to_sequence"
+        )
+        watermark = _parse_positive_sequence(
+            gap.get("snapshot_watermark"), "gap snapshot_watermark"
+        )
+        reason = gap.get("reason")
+        if (
+            not isinstance(reason, str)
+            or not reason.strip()
+            or to_sequence < from_sequence
+            or watermark < to_sequence
+            or watermark < self.last_sequence
+            or (
+                watermark > self.last_sequence
+                and self.last_sequence > 0
+                and from_sequence != self.last_sequence + 1
+            )
+        ):
+            raise EchoAgentError(
+                "serialization_violation", "gap sequence range is malformed"
+            )
+        if watermark == self.last_sequence:
+            return False
+        self.last_sequence = watermark
+        return True
+
+
+def _parse_positive_sequence(value: Any, name: str) -> int:
+    if not isinstance(value, str):
+        raise EchoAgentError("serialization_violation", f"{name} must be decimal text")
+    try:
+        text = _canonical_u64_text(value, name)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise EchoAgentError(
+            "serialization_violation", f"{name} must be canonical u64 text"
+        ) from error
+    parsed = int(text)
+    if parsed < 1:
+        raise EchoAgentError("serialization_violation", f"{name} must be positive")
+    return parsed
+
+
+def _parse_event_stream(value: Mapping[str, Any]) -> WireHandle:
+    try:
+        stream = WireHandle.from_dict(value.get("stream"))
+    except (TypeError, ValueError, OverflowError) as error:
+        raise EchoAgentError(
+            "serialization_violation", "event notification has an invalid stream handle"
+        ) from error
+    if stream.kind != "stream":
+        raise EchoAgentError(
+            "serialization_violation", "event notification has an invalid stream handle"
+        )
+    return stream
 
 
 class _Callbacks:
@@ -2560,7 +2792,7 @@ class EchoAgentClient:
         catalog: FacadeCatalog,
         capability: Mapping[str, Any],
         updates: dict[str, _AsyncQueue],
-        events: dict[str, _AsyncQueue],
+        events: dict[str, _EventFeed],
         callbacks: _Callbacks,
         event_queue_size: int,
         update_queue_size: int,
@@ -2572,13 +2804,13 @@ class EchoAgentClient:
         self.catalog = catalog
         self.capability = dict(capability)
         self._updates = updates
-        self._events = events
+        self._events: dict[str, _EventFeed] = events
         self._callbacks = callbacks
         self._event_queue_size = event_queue_size
         self._update_queue_size = update_queue_size
         self._process_watch = process_watch
         self._close_lock = asyncio.Lock()
-        self._event_cursors: dict[str, int] = {}
+        self._event_cursors: dict[WireHandle, int] = {}
         self._closed = False
 
     @classmethod
@@ -2598,7 +2830,7 @@ class EchoAgentClient:
         _validate_queue_size(max_buffered_updates, "max_buffered_updates")
         catalog = FacadeCatalog(catalog_path)
         updates: dict[str, _AsyncQueue] = {}
-        events: dict[str, _AsyncQueue] = {}
+        events: dict[str, _EventFeed] = {}
 
         async def observe(event: StreamEvent) -> None:
             if event.direction is not StreamDirection.INCOMING:
@@ -2608,12 +2840,26 @@ class EchoAgentClient:
                 return
             params = message.get("params")
             if not isinstance(params, dict):
-                return
-            stream = params.get("stream")
-            if isinstance(stream, dict) and isinstance(stream.get("id"), str):
-                events.setdefault(stream["id"], _AsyncQueue(max_buffered_events)).push(
-                    params
+                error = EchoAgentError(
+                    "serialization_violation", "event notification must be an object"
                 )
+                for feed in events.values():
+                    feed.queue.fail(error)
+                return
+            try:
+                stream = _parse_event_stream(params)
+            except EchoAgentError as error:
+                for feed in events.values():
+                    feed.queue.fail(error)
+                return
+            feed = events.setdefault(
+                stream.id, _EventFeed(_AsyncQueue(max_buffered_events))
+            )
+            try:
+                if feed.accept_event(params):
+                    feed.queue.push(params)
+            except EchoAgentError as error:
+                feed.queue.fail(error)
 
         async def observe_gap(event: StreamEvent) -> None:
             if event.direction is not StreamDirection.INCOMING:
@@ -2623,12 +2869,26 @@ class EchoAgentClient:
                 return
             params = message.get("params")
             if not isinstance(params, dict):
-                return
-            stream = params.get("stream")
-            if isinstance(stream, dict) and isinstance(stream.get("id"), str):
-                events.setdefault(stream["id"], _AsyncQueue(max_buffered_events)).push(
-                    params
+                error = EchoAgentError(
+                    "serialization_violation", "gap notification must be an object"
                 )
+                for feed in events.values():
+                    feed.queue.fail(error)
+                return
+            try:
+                stream = _parse_event_stream(params)
+            except EchoAgentError as error:
+                for feed in events.values():
+                    feed.queue.fail(error)
+                return
+            feed = events.setdefault(
+                stream.id, _EventFeed(_AsyncQueue(max_buffered_events))
+            )
+            try:
+                if feed.accept_gap(params):
+                    feed.queue.push(params)
+            except EchoAgentError as error:
+                feed.queue.fail(error)
 
         callback_client = _Callbacks(updates, max_buffered_updates)
         merged_env = dict(os.environ)
@@ -2759,7 +3019,9 @@ class EchoAgentClient:
                 details={"returncode": self.process.returncode},
             )
         self._callbacks.cancel_all()
-        for queue in (*self._updates.values(), *self._events.values()):
+        for feed in self._events.values():
+            feed.queue.fail(failure)
+        for queue in self._updates.values():
             queue.fail(failure)
 
     async def notify(self, method: str, params: Any = None) -> None:
@@ -2847,8 +3109,20 @@ class EchoAgentClient:
     def events_for(
         self, stream_id: str, stream: WireHandle | None = None
     ) -> AsyncIterator[Any]:
-        queue = self._events.setdefault(stream_id, _AsyncQueue(self._event_queue_size))
-        return self._iterate_events(queue, stream)
+        feed = self._events.setdefault(
+            stream_id, _EventFeed(_AsyncQueue(self._event_queue_size))
+        )
+        if stream is not None:
+            try:
+                if stream.id != stream_id:
+                    raise EchoAgentError(
+                        "handle_mismatch",
+                        "event stream id does not match the requested feed",
+                    )
+                feed.bind(stream)
+            except EchoAgentError as error:
+                feed.queue.fail(error, discard_pending=True)
+        return self._iterate_events(feed.queue, stream)
 
     async def _iterate_events(
         self, queue: _AsyncQueue, stream: WireHandle | None
@@ -2877,6 +3151,12 @@ class EchoAgentClient:
             if isinstance(gap, dict)
             else None
         )
+        try:
+            event_stream = _parse_event_stream(value)
+        except EchoAgentError:
+            return
+        if event_stream != stream:
+            return
         if (
             not isinstance(sequence, str)
             or not sequence.isascii()
@@ -2886,9 +3166,8 @@ class EchoAgentClient:
         if sequence.startswith("0") and sequence != "0":
             return
         parsed = int(sequence)
-        if parsed < 1 or parsed <= self._event_cursors.get(stream.id, 0):
+        if parsed < 1 or parsed <= self._event_cursors.get(stream, 0):
             return
-        self._event_cursors[stream.id] = parsed
         await self.notify(
             "echo_agent/event/ack",
             {
@@ -2898,6 +3177,7 @@ class EchoAgentClient:
                 }
             },
         )
+        self._event_cursors[stream] = parsed
 
     def stream_writer(self, stream: WireHandle) -> ExtensionStreamWriter:
         return ExtensionStreamWriter(self, stream)
@@ -3130,7 +3410,9 @@ class EchoAgentClient:
                 return
             self._closed = True
             self._callbacks.cancel_all()
-            for queue in (*self._updates.values(), *self._events.values()):
+            for feed in self._events.values():
+                feed.queue.close()
+            for queue in self._updates.values():
                 queue.close()
             process_watch = self._process_watch
             self._process_watch = None
@@ -3558,9 +3840,9 @@ class RunHandle:
         if self._closed:
             return
         self._closed = True
-        queue = self.client._events.get(self.stream.id)
-        if queue is not None:
-            queue.close()
+        feed = self.client._events.get(self.stream.id)
+        if feed is not None:
+            feed.queue.close()
 
     def _ensure_open(self, operation: str) -> None:
         if self._closed:

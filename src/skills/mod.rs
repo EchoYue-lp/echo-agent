@@ -43,4 +43,4 @@ pub use echo_core::tools::skill::{
 };
 
 // Execution-layer types (SkillRegistry, etc.)
-pub use echo_execution::skills::SkillRegistry;
+pub use echo_execution::skills::{SkillActivationHandle, SkillRegistry};

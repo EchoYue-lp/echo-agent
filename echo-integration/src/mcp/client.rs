@@ -8,13 +8,14 @@ use super::transport::http::HttpTransport;
 use super::transport::sse::SseTransport;
 use super::transport::stdio::StdioTransport;
 use super::types::{
-    ClientCapabilities, ClientInfo, ElicitationCapability, InitializeParams, InitializeResult,
-    JsonRpcNotification, JsonRpcRequest, MCP_PROTOCOL_VERSION, McpContent, McpPrompt,
-    McpPromptGetParams, McpPromptGetResult, McpPromptsListResult, McpResource,
-    McpResourceReadParams, McpResourceReadResult, McpResourceTemplate,
-    McpResourceTemplatesListResult, McpResourcesListResult, McpTool, McpToolCallParams,
-    McpToolCallResult, McpToolsListResult, RootsCapability, SamplingCapability, ServerCapabilities,
+    ClientCapabilities, ClientInfo, InitializeParams, InitializeResult, JsonRpcNotification,
+    JsonRpcRequest, MCP_PROTOCOL_VERSION, McpContent, McpPrompt, McpPromptGetParams,
+    McpPromptGetResult, McpPromptsListResult, McpResource, McpResourceReadParams,
+    McpResourceReadResult, McpResourceTemplate, McpResourceTemplatesListResult,
+    McpResourcesListResult, McpTool, McpToolCallParams, McpToolCallResult, McpToolsListResult,
+    SUPPORTED_PROTOCOL_VERSIONS, ServerCapabilities,
 };
+use crate::redaction::{text as redact_text, url as redact_url};
 use echo_core::error::{McpError, ReactError, Result};
 
 /// MCP 客户端
@@ -103,7 +104,7 @@ impl McpClient {
 
         if let Some(err) = init_resp.error {
             return Err(ReactError::Mcp(Box::new(McpError::InitializationFailed(
-                err.message,
+                redact_text(&err.message),
             ))));
         }
 
@@ -115,6 +116,14 @@ impl McpClient {
             })?)?;
 
         let negotiated_version = init_result.protocol_version.clone();
+        if !SUPPORTED_PROTOCOL_VERSIONS.contains(&negotiated_version.as_str()) {
+            return Err(ReactError::Mcp(Box::new(McpError::InitializationFailed(
+                format!(
+                    "server selected unsupported MCP protocol version '{negotiated_version}'; supported versions: {}",
+                    SUPPORTED_PROTOCOL_VERSIONS.join(", ")
+                ),
+            ))));
+        }
         tracing::info!(
             "MCP: 已连接 '{}' (协议版本: {}, 请求版本: {})",
             server_name,
@@ -122,12 +131,16 @@ impl McpClient {
             MCP_PROTOCOL_VERSION
         );
         if let Some(info) = &init_result.server_info {
-            tracing::info!("MCP: 服务端信息: {} v{}", info.name, info.version);
+            tracing::info!(
+                "MCP: 服务端信息已接收 (name chars={}, version chars={})",
+                info.name.chars().count(),
+                info.version.chars().count()
+            );
         }
         if let Some(instructions) = &init_result.instructions {
             tracing::info!(
-                "MCP: 服务端指令: {}",
-                instructions.chars().take(100).collect::<String>()
+                "MCP: 服务端指令已接收 (chars={})",
+                instructions.chars().count()
             );
         }
 
@@ -173,14 +186,11 @@ impl McpClient {
 
     /// 构建客户端能力声明
     fn build_client_capabilities() -> ClientCapabilities {
-        ClientCapabilities {
-            roots: Some(RootsCapability {
-                list_changed: Some(true),
-            }),
-            sampling: Some(SamplingCapability::default()),
-            elicitation: Some(ElicitationCapability::default()),
-            experimental: None,
-        }
+        // Do not advertise server-to-client callbacks until the transport has
+        // a real request/notification dispatcher and typed handlers for them.
+        // An empty capability object is truthful: this client currently only
+        // sends requests and notifications to the MCP server.
+        ClientCapabilities::default()
     }
 
     // ── 工具相关方法 ──────────────────────────────────────────────────────────
@@ -222,7 +232,7 @@ impl McpClient {
                 tracing::warn!(
                     "MCP: '{}' tools/list 返回错误: {}",
                     server_name,
-                    err.message
+                    redact_text(&err.message)
                 );
                 break;
             }
@@ -265,7 +275,7 @@ impl McpClient {
         if let Some(err) = resp.error {
             return Err(ReactError::Mcp(Box::new(McpError::ToolCallFailed {
                 code: err.code,
-                message: format!("工具 '{}' 调用失败: {}", name, err.message),
+                message: format!("工具 '{}' 调用失败: {}", name, redact_text(&err.message)),
             })));
         }
 
@@ -316,7 +326,7 @@ impl McpClient {
             if let Some(err) = resp.error {
                 return Err(ReactError::Mcp(Box::new(McpError::ProtocolError(format!(
                     "MCP 服务端 '{server_name}' 获取资源列表失败: {}",
-                    err.message
+                    redact_text(&err.message)
                 )))));
             }
 
@@ -386,7 +396,8 @@ impl McpClient {
             if let Some(error) = response.error {
                 return Err(ReactError::Mcp(Box::new(McpError::ProtocolError(format!(
                     "MCP 服务端 '{}' 获取资源模板失败: {}",
-                    self.server_name, error.message
+                    self.server_name,
+                    redact_text(&error.message)
                 )))));
             }
 
@@ -414,7 +425,8 @@ impl McpClient {
         if let Some(err) = resp.error {
             return Err(ReactError::Mcp(Box::new(McpError::ProtocolError(format!(
                 "读取资源 '{}' 失败: {}",
-                uri, err.message
+                redact_url(uri),
+                redact_text(&err.message)
             )))));
         }
 
@@ -472,7 +484,7 @@ impl McpClient {
                 tracing::warn!(
                     "MCP: '{}' prompts/list 返回错误: {}",
                     server_name,
-                    err.message
+                    redact_text(&err.message)
                 );
                 break;
             }
@@ -519,7 +531,8 @@ impl McpClient {
         if let Some(err) = resp.error {
             return Err(ReactError::Mcp(Box::new(McpError::ProtocolError(format!(
                 "获取提示词 '{}' 失败: {}",
-                name, err.message
+                name,
+                redact_text(&err.message)
             )))));
         }
 
@@ -548,7 +561,7 @@ impl McpClient {
         if let Some(err) = resp.error {
             return Err(ReactError::Mcp(Box::new(McpError::ProtocolError(format!(
                 "ping 失败: {}",
-                err.message
+                redact_text(&err.message)
             )))));
         }
 
@@ -617,6 +630,7 @@ mod tests {
     use super::*;
     use futures::future::BoxFuture;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use tokio::sync::Mutex;
 
     struct FailingInitializeTransport {
         closed: Arc<AtomicBool>,
@@ -669,5 +683,180 @@ mod tests {
                 .is_err()
         );
         assert!(closed.load(Ordering::Acquire));
+    }
+
+    struct RecordingInitializeTransport {
+        initialize: Arc<Mutex<Option<JsonRpcRequest>>>,
+    }
+
+    struct VersionInitializeTransport {
+        protocol_version: String,
+        initialized: Arc<AtomicBool>,
+        closed: Arc<AtomicBool>,
+    }
+
+    impl McpTransport for VersionInitializeTransport {
+        fn send(
+            &self,
+            request: JsonRpcRequest,
+        ) -> BoxFuture<'_, Result<super::super::types::JsonRpcResponse>> {
+            let protocol_version = self.protocol_version.clone();
+            Box::pin(async move {
+                Ok(super::super::types::JsonRpcResponse {
+                    jsonrpc: "2.0".to_string(),
+                    id: request.id,
+                    result: Some(serde_json::json!({
+                        "protocolVersion": protocol_version,
+                        "capabilities": {},
+                        "serverInfo": {"name": "version-fixture", "version": "1.0"}
+                    })),
+                    error: None,
+                })
+            })
+        }
+
+        fn notify(&self, notification: JsonRpcNotification) -> BoxFuture<'_, Result<()>> {
+            if notification.method == "notifications/initialized" {
+                self.initialized.store(true, Ordering::Release);
+            }
+            Box::pin(async { Ok(()) })
+        }
+
+        fn close(&self) -> BoxFuture<'_, ()> {
+            self.closed.store(true, Ordering::Release);
+            Box::pin(async {})
+        }
+
+        fn notification_rx(
+            &self,
+        ) -> Option<Arc<dyn super::super::types::JsonRpcNotificationReceiver>> {
+            None
+        }
+    }
+
+    #[tokio::test]
+    async fn client_accepts_supported_versions_and_rejects_unknown_selection()
+    -> std::result::Result<(), String> {
+        for version in SUPPORTED_PROTOCOL_VERSIONS {
+            let initialized = Arc::new(AtomicBool::new(false));
+            let closed = Arc::new(AtomicBool::new(false));
+            let transport: Arc<dyn McpTransport> = Arc::new(VersionInitializeTransport {
+                protocol_version: (*version).to_string(),
+                initialized: initialized.clone(),
+                closed: closed.clone(),
+            });
+            let client = McpClient::from_transport("supported", transport)
+                .await
+                .map_err(|error| error.to_string())?;
+            assert_eq!(client.protocol_version(), *version);
+            assert!(initialized.load(Ordering::Acquire));
+            assert!(!closed.load(Ordering::Acquire));
+        }
+
+        let initialized = Arc::new(AtomicBool::new(false));
+        let closed = Arc::new(AtomicBool::new(false));
+        let transport: Arc<dyn McpTransport> = Arc::new(VersionInitializeTransport {
+            protocol_version: "2099-01-01".to_string(),
+            initialized: initialized.clone(),
+            closed: closed.clone(),
+        });
+        let error = McpClient::from_transport("unsupported", transport)
+            .await
+            .err()
+            .ok_or_else(|| "unknown protocol version was accepted".to_string())?;
+        match error {
+            ReactError::Mcp(error) => match *error {
+                McpError::InitializationFailed(message) => {
+                    assert!(message.contains("2099-01-01"));
+                    assert!(message.contains(MCP_PROTOCOL_VERSION));
+                }
+                other => return Err(format!("unexpected MCP error: {other}")),
+            },
+            other => return Err(format!("unexpected error: {other}")),
+        }
+        assert!(!initialized.load(Ordering::Acquire));
+        assert!(closed.load(Ordering::Acquire));
+        Ok(())
+    }
+
+    impl McpTransport for RecordingInitializeTransport {
+        fn send(
+            &self,
+            request: JsonRpcRequest,
+        ) -> BoxFuture<'_, Result<super::super::types::JsonRpcResponse>> {
+            let initialize = self.initialize.clone();
+            Box::pin(async move {
+                {
+                    let mut recorded = initialize.lock().await;
+                    if request.method == "initialize" {
+                        *recorded = Some(request.clone());
+                    }
+                }
+
+                let result = if request.method == "initialize" {
+                    serde_json::json!({
+                        "protocolVersion": MCP_PROTOCOL_VERSION,
+                        "capabilities": {},
+                        "serverInfo": {"name": "fixture", "version": "1.0"}
+                    })
+                } else {
+                    serde_json::json!({"tools": []})
+                };
+
+                Ok(super::super::types::JsonRpcResponse {
+                    jsonrpc: "2.0".to_string(),
+                    id: request.id,
+                    result: Some(result),
+                    error: None,
+                })
+            })
+        }
+
+        fn notify(&self, _notification: JsonRpcNotification) -> BoxFuture<'_, Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn close(&self) -> BoxFuture<'_, ()> {
+            Box::pin(async {})
+        }
+
+        fn notification_rx(
+            &self,
+        ) -> Option<Arc<dyn super::super::types::JsonRpcNotificationReceiver>> {
+            None
+        }
+    }
+
+    #[tokio::test]
+    async fn initialize_wire_does_not_advertise_unimplemented_callbacks()
+    -> std::result::Result<(), String> {
+        let initialize = Arc::new(Mutex::new(None));
+        let transport: Arc<dyn McpTransport> = Arc::new(RecordingInitializeTransport {
+            initialize: initialize.clone(),
+        });
+
+        let client = McpClient::from_transport("fixture", transport)
+            .await
+            .map_err(|error| error.to_string())?;
+        let request = initialize
+            .lock()
+            .await
+            .clone()
+            .ok_or_else(|| "initialize request was not recorded".to_string())?;
+        let params = request
+            .params
+            .ok_or_else(|| "initialize params were missing".to_string())?;
+        let capabilities = params
+            .get("capabilities")
+            .ok_or_else(|| "capabilities were missing".to_string())?;
+
+        assert_eq!(request.method, "initialize");
+        assert_eq!(
+            params.get("protocolVersion"),
+            Some(&serde_json::json!(MCP_PROTOCOL_VERSION))
+        );
+        assert_eq!(capabilities, &serde_json::json!({}));
+        assert!(client.server_capabilities().tools.is_none());
+        Ok(())
     }
 }

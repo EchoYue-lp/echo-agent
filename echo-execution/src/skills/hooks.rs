@@ -1067,7 +1067,11 @@ async fn execute_action(
                     );
                 }
             }
-            result.stop_propagation = true;
+            // Permission decisions are reduced across every matching source.
+            // In particular, an early allow/ask must not hide a later deny.
+            // A deny still sets `block` above and therefore stops execution
+            // after the highest-priority decision has been observed; callers
+            // can still request an explicit propagation stop with `continue`.
             result
         }
         HookAction::Http {
@@ -1722,6 +1726,7 @@ fn which_exists(cmd: &str) -> bool {
 // ── Result Merging ─────────────────────────────────────────────────────
 
 fn merge_result(combined: &mut HookResult, incoming: HookResult) {
+    let carries_permission_decision = incoming.permission_decision.is_some();
     if incoming.block {
         combined.block = true;
         combined.block_reason = incoming.block_reason.or(combined.block_reason.take());
@@ -1730,11 +1735,16 @@ fn merge_result(combined: &mut HookResult, incoming: HookResult) {
         combined.updated_input = incoming.updated_input;
     }
     combined.messages.extend(incoming.messages);
-    if incoming.stop_propagation {
+    // An external command/HTTP/programmatic hook may return both a permission
+    // decision and `continue: false`. Permission safety is reduced across all
+    // matching sources, so allow/ask/require-approval cannot use that stop bit
+    // to hide a later deny. Results without a permission decision retain the
+    // ordinary stop-propagation contract.
+    if incoming.stop_propagation && !carries_permission_decision {
         combined.stop_propagation = true;
     }
 
-    // Permission decision with priority: deny > ask > allow
+    // Permission decision with priority: deny > ask > require_approval > allow
     if let Some(new_decision) = incoming.permission_decision {
         let should_replace = match (&combined.permission_decision, &new_decision) {
             // If we already have deny, keep it
@@ -2491,6 +2501,130 @@ Notification:
             combined.permission_decision.clone().unwrap(),
             PermissionDecision::Deny { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn permission_hooks_reduce_across_sources_before_allow_or_ask_short_circuit() {
+        let mut registry = HookRegistry::new();
+
+        let permission_rule = |decision: &str| HookRule {
+            matcher: "Bash".to_string(),
+            hooks: vec![HookAction::Permission {
+                decision: decision.to_string(),
+                reason: Some(format!("{decision} decision")),
+                suggestions: vec!["allow".to_string()],
+            }],
+        };
+
+        let mut user = HooksDefinition::default();
+        user.add_rules(HookEvent::PreToolUse, vec![permission_rule("allow")]);
+        registry.register_user_hooks(user);
+
+        let mut plugin = HooksDefinition::default();
+        plugin.add_rules(HookEvent::PreToolUse, vec![permission_rule("ask")]);
+        assert!(registry.register_plugin_hooks("policy", "/tmp/policy", "/tmp/data", plugin));
+
+        let mut skill = HooksDefinition::default();
+        skill.add_rules(HookEvent::PreToolUse, vec![permission_rule("deny")]);
+        registry.register("guard", "/tmp/guard", skill);
+
+        let result = registry
+            .run_pre_tool_use("Bash", &json!({"command": "git status"}), "session")
+            .await;
+
+        assert!(matches!(
+            result.permission_decision,
+            Some(PermissionDecision::Deny { ref reason }) if reason == "deny decision"
+        ));
+        assert!(result.block);
+        assert_eq!(result.block_reason.as_deref(), Some("deny decision"));
+    }
+
+    #[test]
+    fn permission_output_stop_cannot_hide_later_deny() {
+        let mut combined = HookResult::default();
+        for decision in ["allow", "ask"] {
+            let incoming = parse_hook_output(
+                &format!(r#"{{"permission_decision":"{decision}","continue":false}}"#),
+                "",
+                0,
+            );
+            assert!(incoming.stop_propagation);
+            merge_result(&mut combined, incoming);
+            assert!(!combined.stop_propagation);
+        }
+        merge_result(&mut combined, HookResult::deny("later deny".to_string()));
+        assert!(matches!(
+            combined.permission_decision,
+            Some(PermissionDecision::Deny { ref reason }) if reason == "later deny"
+        ));
+
+        let mut non_permission = HookResult::default();
+        merge_result(
+            &mut non_permission,
+            HookResult {
+                stop_propagation: true,
+                ..HookResult::default()
+            },
+        );
+        assert!(non_permission.stop_propagation);
+    }
+
+    #[tokio::test]
+    async fn command_permission_stop_cannot_hide_later_source_deny() {
+        #[cfg(target_os = "windows")]
+        let command = |decision: &str| {
+            format!(r#"echo {{"permission_decision":"{decision}","continue":false}}"#)
+        };
+        #[cfg(not(target_os = "windows"))]
+        let command = |decision: &str| {
+            format!(r#"printf '%s' '{{"permission_decision":"{decision}","continue":false}}'"#)
+        };
+
+        let mut registry = HookRegistry::new();
+        let mut user = HooksDefinition::default();
+        user.add_rules(
+            HookEvent::PreToolUse,
+            vec![HookRule {
+                matcher: "Bash".to_string(),
+                hooks: vec![
+                    HookAction::Command {
+                        command: command("allow"),
+                        shell: None,
+                        timeout: 5,
+                    },
+                    HookAction::Command {
+                        command: command("ask"),
+                        shell: None,
+                        timeout: 5,
+                    },
+                ],
+            }],
+        );
+        registry.register_user_hooks(user);
+
+        let mut skill = HooksDefinition::default();
+        skill.add_rules(
+            HookEvent::PreToolUse,
+            vec![HookRule {
+                matcher: "Bash".to_string(),
+                hooks: vec![HookAction::Permission {
+                    decision: "deny".to_string(),
+                    reason: Some("later source deny".to_string()),
+                    suggestions: Vec::new(),
+                }],
+            }],
+        );
+        registry.register("guard", "/tmp/guard", skill);
+
+        let result = registry
+            .run_pre_tool_use("Bash", &json!({"command": "git status"}), "session")
+            .await;
+        assert!(matches!(
+            result.permission_decision,
+            Some(PermissionDecision::Deny { ref reason }) if reason == "later source deny"
+        ));
+        assert!(result.block);
     }
 
     #[test]

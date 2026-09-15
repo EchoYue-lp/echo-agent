@@ -4,12 +4,12 @@ id: map.sdk-facade-parity
 kind: capability_map
 title: 多语言 SDK facade 对等边界
 risk: high
-observed_at: source:8ff7eb397767728069b01b9098b224a6840a8adb663717e5c4fd7a584eb4063e
+observed_at: source:1bcfbd1131476ae872a2dc89326675abd7c02dd26d56c8d29a058cd91fb308fc
 boundary_refs: [boundary.sdk-facade-parity]
 behavior_refs: [behavior.sdk-facade-routing]
 rule_refs: [rule.sdk-rust-authority]
 evidence_refs: [evidence.sdk-contracts, evidence.tool-registry-owned-handle-verification, evidence.background-task-terminal-authority-verification, evidence.framework-concept-navigation]
-finding_refs: [finding.sdk-component-stream-terminal, finding.sdk-sandbox-cancellation, finding.sdk-mcp-publication-cleanup, finding.sdk-skill-load-policy-bridge, finding.sdk-no-bridge-warnings]
+finding_refs: [finding.sdk-component-stream-terminal, finding.sdk-sandbox-cancellation, finding.sdk-mcp-publication-cleanup, finding.sdk-skill-load-policy-bridge, finding.sdk-no-bridge-warnings, finding.sdk-gap-ack-replay-watermark]
 audit_refs: [audit.sdk-facade-plan08-final, audit.sdk-facade-scope-contract]
 related_map_refs: [map.protocol-surfaces]
 scenarios:
@@ -41,6 +41,12 @@ scenarios:
     behavior_refs: [behavior.sdk-facade-routing]
     rule_refs: [rule.sdk-rust-authority]
     evidence_refs: [evidence.sdk-contracts, evidence.background-task-terminal-authority-verification]
+  gap-ack-replay-watermark:
+    status: needs_review
+    source_refs: [echo-sdk-host/src/core_profile/events.rs, echo-sdk-protocol/src/event.rs, echo-sdk-host/tests/core_profile_e2e.rs]
+    finding_refs: [finding.sdk-gap-ack-replay-watermark]
+    unknown: Client确认gap snapshot watermark后，Host resume watermark仍可能回退到旧live ACK并重发已被snapshot覆盖的事件
+    next_step: 统一gap ACK与resume watermark的单调权威，并补gap到ACK再到replay/live continuation的端到端反例
 ---
 
 # 多语言 SDK facade 对等边界
@@ -79,7 +85,7 @@ permission operation复用Session Agent的`PermissionService`。Host不得引入
 
 ## 场景处置清单
 
-ACP、core与extension已有真实Host证据；Plan 8 focused测试证明source operation逐项命中adapter。Manifest schema v2以identity级`sdk_scope`区分5607个当前external contract、1765个Host/Rust-only、781个language intrinsic、90个internal helper与1441个deferred，总量9684；新增项仅为BackgroundTask Clone的Rust trait impl，551个已完成intrinsic仍属于external contract。
+ACP、core与extension已有真实Host证据；Plan 8 focused测试证明source operation逐项命中adapter。Manifest schema v2以identity级`sdk_scope`区分5620个当前external contract、1773个Host/Rust-only、787个language intrinsic、90个internal helper与1443个deferred，总量9713；551个已完成intrinsic仍属于external contract。Gap generation校验已闭合，gap ACK后的replay watermark仍保持needs_review。
 
 ## 未展开项
 

@@ -61,6 +61,16 @@ class TypedExtensionTest {
 
         var policy = AgentComponentDescriptor.of("skill_load_policy", "java-policy").toJson();
         assertEquals("skill_load_policy", policy.path("component").asText());
+
+        var checkpointStore = AgentComponentDescriptor.workflowCheckpointStore(
+                "java-checkpoints", BigInteger.valueOf(1_000)).toJson();
+        assertEquals("1000", checkpointStore.path("capabilities")
+                .path("claim_heartbeat_interval_ms").asText());
+        assertThrows(IllegalArgumentException.class,
+                () -> AgentComponentDescriptor.of("workflow_checkpoint_store", "missing-heartbeat"));
+        assertThrows(IllegalArgumentException.class,
+                () -> AgentComponentDescriptor.workflowCheckpointStore(
+                        "too-large", BigInteger.valueOf(300_001)));
     }
 
     @Test
@@ -156,6 +166,33 @@ class TypedExtensionTest {
         var typedStream = AgentComponentCall.from(streamComponentCall);
         assertEquals("agent_component_call_stream", typedStream.operation());
         assertEquals(true, typedStream.request() instanceof AgentComponentRequest.WorkflowRunStream);
+
+        var checkpointCall = componentCall.deepCopy();
+        var checkpointInput = (com.fasterxml.jackson.databind.node.ObjectNode)
+                checkpointCall.path("invocation").path("input");
+        checkpointInput.put("component", "workflow_checkpoint_store");
+        var checkpointRequest = checkpointInput.putObject("call");
+        checkpointRequest.put("operation", "workflow_checkpoint_save_if_generation");
+        checkpointRequest.putObject("input")
+                .set("checkpoint", WireValues.value(Map.of("status", "running")));
+        ((com.fasterxml.jackson.databind.node.ObjectNode) checkpointRequest.path("input"))
+                .put("expected_generation", "7");
+        var typedCheckpoint = AgentComponentCall.from(checkpointCall);
+        assertEquals(true, typedCheckpoint.request()
+                instanceof AgentComponentRequest.WorkflowCheckpointSaveIfGeneration);
+
+        var claimCall = componentCall.deepCopy();
+        var claimInput = (com.fasterxml.jackson.databind.node.ObjectNode)
+                claimCall.path("invocation").path("input");
+        claimInput.put("component", "workflow_checkpoint_store");
+        var claimRequest = claimInput.putObject("call");
+        claimRequest.put("operation", "workflow_checkpoint_ack_claim");
+        claimRequest.putObject("input")
+                .put("checkpoint_id", "checkpoint-1")
+                .put("attempt_id", "attempt-1");
+        var typedClaim = AgentComponentCall.from(claimCall);
+        assertEquals(true, typedClaim.request()
+                instanceof AgentComponentRequest.WorkflowCheckpointAckClaim);
     }
 
     @Test
@@ -220,6 +257,17 @@ class TypedExtensionTest {
                 "skill_load_policy", new AgentComponentResult.SkillLoadAllowed(false)).toJson();
         assertEquals(false, policy.path("result").path("value").path("result")
                 .path("value").path("allowed").asBoolean());
+
+        var committed = AgentComponentOutcome.result(
+                "workflow_checkpoint_store",
+                new AgentComponentResult.WorkflowCheckpointSavedIfGeneration(true)).toJson();
+        assertEquals(true, committed.path("result").path("value").path("result")
+                .path("value").path("committed").asBoolean());
+        var acked = AgentComponentOutcome.result(
+                "workflow_checkpoint_store",
+                new AgentComponentResult.WorkflowCheckpointClaimAcked()).toJson();
+        assertEquals("workflow_checkpoint_ack_claim", acked.path("result").path("value")
+                .path("result").path("operation").asText());
     }
 
     @Test

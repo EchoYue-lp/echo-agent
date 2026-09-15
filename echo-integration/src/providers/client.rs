@@ -6,8 +6,11 @@ use futures::StreamExt;
 use reqwest::Client;
 use reqwest::RequestBuilder;
 use reqwest::header::HeaderMap;
+use serde::de::DeserializeOwned;
+use std::io::{Cursor, Read};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 use tracing::{info, trace};
 
 fn timeout_error(kind: &str, duration: Duration) -> LlmError {
@@ -15,6 +18,18 @@ fn timeout_error(kind: &str, duration: Duration) -> LlmError {
         "LLM stream {kind} timeout after {}ms",
         duration.as_millis()
     ))
+}
+
+fn request_cancelled_error() -> LlmError {
+    LlmError::NetworkError("LLM request cancelled".to_string())
+}
+
+pub(crate) fn ensure_request_not_cancelled(cancel_token: Option<&CancellationToken>) -> Result<()> {
+    if cancel_token.is_some_and(CancellationToken::is_cancelled) {
+        Err(request_cancelled_error().into())
+    } else {
+        Ok(())
+    }
 }
 
 async fn wait_for_deadline(
@@ -104,14 +119,17 @@ impl SseDecoder {
         split_sse_event(&mut self.buffer)
     }
 
-    pub(crate) fn finish(mut self) -> Result<Option<String>> {
+    pub(crate) fn finish(self) -> Result<Option<String>> {
         if !self.pending_bytes.is_empty() {
             return Err(LlmError::InvalidResponse("truncated UTF-8 at SSE EOF".to_string()).into());
         }
-        if self.buffer.trim().is_empty() {
+        // An SSE event is complete only after a blank-line delimiter.  A
+        // delimiterless payload must never be reinterpreted as a valid event
+        // merely because its JSON happens to be complete.
+        if self.buffer.is_empty() {
             Ok(None)
         } else {
-            Ok(Some(std::mem::take(&mut self.buffer)))
+            Err(LlmError::InvalidResponse("truncated SSE event at EOF".to_string()).into())
         }
     }
 }
@@ -164,13 +182,14 @@ fn parse_sse_chunk(data: &str) -> Result<Option<ParsedSseChunk>> {
     Ok(Some(ParsedSseChunk::Chunk(chunk)))
 }
 
-#[tracing::instrument(skip(client, request_body, header_map), fields(model = %request_body.model))]
+#[tracing::instrument(skip(client, request_body, header_map, cancel_token), fields(model = %request_body.model))]
 pub(crate) async fn post(
     client: Arc<Client>,
     request_body: &ChatCompletionRequest,
     header_map: HeaderMap,
     url: &str,
     timeouts: LlmTimeouts,
+    cancel_token: Option<CancellationToken>,
 ) -> Result<ChatCompletionResponse> {
     trace!(
         model = %request_body.model,
@@ -178,17 +197,16 @@ pub(crate) async fn post(
         "Post completion request"
     );
 
-    let value = post_json(
+    let completion_response: ChatCompletionResponse = post_json(
         client,
         serde_json::to_value(request_body)
             .map_err(|error| LlmError::InvalidResponse(error.to_string()))?,
         header_map,
         url,
         timeouts,
+        cancel_token,
     )
     .await?;
-    let completion_response: ChatCompletionResponse = serde_json::from_value(value)
-        .map_err(|error| LlmError::InvalidResponse(error.to_string()))?;
 
     trace!(
         choice_count = completion_response.choices.len(),
@@ -199,44 +217,157 @@ pub(crate) async fn post(
 }
 
 /// Send a JSON request and return the complete JSON response body.
-pub(crate) async fn post_json(
+pub(crate) async fn post_json<T>(
     client: Arc<Client>,
     request_body: serde_json::Value,
     header_map: HeaderMap,
     url: &str,
     timeouts: LlmTimeouts,
-) -> Result<serde_json::Value> {
+    cancel_token: Option<CancellationToken>,
+) -> Result<T>
+where
+    T: DeserializeOwned + Send + 'static,
+{
     let request = client.post(url).headers(header_map).json(&request_body);
     let request = match timeouts.request_timeout() {
         Some(timeout) => request.timeout(timeout),
         None => request,
     };
-    let response = request
-        .send()
-        .await
-        .map_err(|e| LlmError::NetworkError(e.to_string()))?;
-    if !response.status().is_success() {
-        let status = response.status().as_u16();
-        let error_text = response
-            .text()
+    post_json_request(request, cancel_token).await
+}
+
+/// Send a request and decode its complete JSON response while honoring the
+/// owning request cancellation token across the entire transport lifecycle.
+///
+/// The same boundary covers waiting for response headers, reading an error or
+/// success body, and decoding JSON. Dropping the in-flight reqwest future on
+/// cancellation closes the response body and releases the connection.
+pub(crate) async fn post_json_request<T>(
+    request: RequestBuilder,
+    cancel_token: Option<CancellationToken>,
+) -> Result<T>
+where
+    T: DeserializeOwned + Send + 'static,
+{
+    let transport_future = async {
+        let response = request
+            .send()
             .await
-            .unwrap_or_else(|_| "Unknown error".to_string());
-        return Err(LlmError::ApiError {
-            status,
-            message: error_text,
+            .map_err(|error| LlmError::NetworkError(error.to_string()))?;
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let error_text = response.bytes().await.map_or_else(
+                |_| "Unknown error".to_string(),
+                |bytes| String::from_utf8_lossy(&bytes).into_owned(),
+            );
+            return Err::<Vec<u8>, echo_core::error::ReactError>(
+                LlmError::ApiError {
+                    status,
+                    message: error_text,
+                }
+                .into(),
+            );
         }
-        .into());
+
+        response
+            .bytes()
+            .await
+            .map(|bytes| bytes.to_vec())
+            .map_err(|error| LlmError::InvalidResponse(error.to_string()).into())
+    };
+    tokio::pin!(transport_future);
+
+    let transport_result = tokio::select! {
+        biased;
+        _ = async {
+            match cancel_token.as_ref() {
+                Some(token) => token.cancelled().await,
+                None => std::future::pending().await,
+            }
+        } => Err(request_cancelled_error().into()),
+        result = &mut transport_future => result,
+    };
+    ensure_request_not_cancelled(cancel_token.as_ref())?;
+    let raw_bytes = transport_result?;
+
+    tracing::debug!(raw_len = raw_bytes.len(), "Raw API response received");
+
+    decode_json_bytes(raw_bytes, cancel_token).await
+}
+
+struct CancellationReader<R> {
+    inner: R,
+    cancel_token: CancellationToken,
+}
+
+impl<R: Read> Read for CancellationReader<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        if self.cancel_token.is_cancelled() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::ConnectionAborted,
+                "LLM request cancelled during JSON decode",
+            ));
+        }
+        let bounded_len = buffer.len().min(8 * 1024);
+        let bounded = buffer.get_mut(..bounded_len).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "JSON decode buffer boundary was invalid",
+            )
+        })?;
+        self.inner.read(bounded)
+    }
+}
+
+fn decode_json_reader<T, R>(reader: R, cancel_token: CancellationToken) -> Result<T>
+where
+    T: DeserializeOwned,
+    R: Read,
+{
+    let decoded = serde_json::from_reader(CancellationReader {
+        inner: reader,
+        cancel_token: cancel_token.clone(),
+    });
+    if cancel_token.is_cancelled() {
+        return Err(request_cancelled_error().into());
+    }
+    decoded.map_err(|error| LlmError::InvalidResponse(error.to_string()).into())
+}
+
+async fn decode_json_bytes<T>(
+    raw_bytes: Vec<u8>,
+    cancel_token: Option<CancellationToken>,
+) -> Result<T>
+where
+    T: DeserializeOwned + Send + 'static,
+{
+    let cancel_token = cancel_token.unwrap_or_default();
+    if cancel_token.is_cancelled() {
+        return Err(request_cancelled_error().into());
     }
 
-    let raw_text = response
-        .text()
-        .await
-        .map_err(|e| LlmError::InvalidResponse(e.to_string()))?;
-
-    tracing::debug!(raw_len = raw_text.len(), raw = %raw_text.chars().take(2000).collect::<String>(), "Raw API response");
-
-    serde_json::from_str(&raw_text)
-        .map_err(|error| LlmError::InvalidResponse(error.to_string()).into())
+    let decode_cancel = cancel_token.clone();
+    let mut decode_task = tokio::task::spawn_blocking(move || {
+        decode_json_reader(Cursor::new(raw_bytes), decode_cancel)
+    });
+    tokio::select! {
+        biased;
+        _ = cancel_token.cancelled() => {
+            decode_task.abort();
+            let _settled = decode_task.await;
+            Err(request_cancelled_error().into())
+        },
+        result = &mut decode_task => {
+            let decoded = result.map_err(|error| {
+                LlmError::InvalidResponse(format!("JSON decode task failed: {error}"))
+            })??;
+            if cancel_token.is_cancelled() {
+                Err(request_cancelled_error().into())
+            } else {
+                Ok(decoded)
+            }
+        },
+    }
 }
 
 /// Send a request with `stream: true`, returning a parsed SSE chunk stream.
@@ -415,6 +546,12 @@ pub(crate) async fn stream_json_sse(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::providers::{AnthropicClient, LlmConfig, OpenAiClient, ResponsesClient};
+    use echo_core::llm::{
+        ChatRequest, LlmApiProtocol, LlmClient, Message, ModelInputModality, ThinkingProtocol,
+    };
+    use std::fmt::Debug;
+    use std::sync::mpsc;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
     use tokio::sync::Notify;
@@ -514,6 +651,34 @@ mod tests {
         let mut decoder = SseDecoder::new();
         decoder.push(&[0xe4])?;
         assert!(decoder.finish().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn decoder_rejects_delimiterless_event_at_eof() -> Result<()> {
+        let mut decoder = SseDecoder::new();
+        decoder.push(br#"data: {"text":"complete JSON but no SSE delimiter"}"#)?;
+
+        let error = decoder.finish().err().ok_or_else(|| {
+            LlmError::InvalidResponse("delimiterless SSE event was accepted".to_string())
+        })?;
+        assert!(matches!(
+            error,
+            echo_core::error::ReactError::Llm(inner)
+                if matches!(inner.as_ref(), LlmError::InvalidResponse(message) if message == "truncated SSE event at EOF")
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn decoder_rejects_whitespace_residue_at_eof() -> Result<()> {
+        let mut decoder = SseDecoder::new();
+        decoder.push(b" \n")?;
+        assert!(matches!(
+            decoder.finish(),
+            Err(echo_core::error::ReactError::Llm(inner))
+                if matches!(inner.as_ref(), LlmError::InvalidResponse(message) if message == "truncated SSE event at EOF")
+        ));
         Ok(())
     }
 
@@ -625,6 +790,253 @@ mod tests {
                 if matches!(error.as_ref(), LlmError::NetworkError(message) if message.contains("cancelled"))
         ));
         server.abort();
+        Ok(())
+    }
+
+    fn assert_request_cancellation<T: Debug>(result: Result<T>) -> Result<()> {
+        match result {
+            Err(echo_core::error::ReactError::Llm(error)) if matches!(error.as_ref(), LlmError::NetworkError(message) if message.contains("cancelled")) => {
+                Ok(())
+            }
+            Err(error) => Err(LlmError::InvalidResponse(format!(
+                "expected typed network cancellation, got {error}"
+            ))
+            .into()),
+            Ok(value) => Err(LlmError::InvalidResponse(format!(
+                "request unexpectedly succeeded with {value:?}"
+            ))
+            .into()),
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum TestProvider {
+        OpenAi,
+        Responses,
+        Anthropic,
+    }
+
+    impl TestProvider {
+        const ALL: [Self; 3] = [Self::OpenAi, Self::Responses, Self::Anthropic];
+
+        fn name(self) -> &'static str {
+            match self {
+                Self::OpenAi => "openai",
+                Self::Responses => "responses",
+                Self::Anthropic => "anthropic",
+            }
+        }
+    }
+
+    fn test_provider_client(
+        provider: TestProvider,
+        base_url: String,
+    ) -> Result<Box<dyn LlmClient>> {
+        let timeouts = LlmTimeouts::default().without_request_timeout();
+        match provider {
+            TestProvider::OpenAi => {
+                let config = LlmConfig {
+                    provider_name: Some(provider.name().to_string()),
+                    api_protocol: LlmApiProtocol::ChatCompletions,
+                    base_url,
+                    api_key: "test-key".to_string(),
+                    model: "test-model".to_string(),
+                    input_modalities: ModelInputModality::text_only(),
+                    thinking_protocol: ThinkingProtocol::None,
+                    timeouts,
+                };
+                Ok(Box::new(OpenAiClient::new(config)?))
+            }
+            TestProvider::Responses => {
+                let config = LlmConfig {
+                    provider_name: Some(provider.name().to_string()),
+                    api_protocol: LlmApiProtocol::Responses,
+                    base_url,
+                    api_key: "test-key".to_string(),
+                    model: "test-model".to_string(),
+                    input_modalities: ModelInputModality::text_only(),
+                    thinking_protocol: ThinkingProtocol::None,
+                    timeouts,
+                };
+                Ok(Box::new(ResponsesClient::new(config)?))
+            }
+            TestProvider::Anthropic => Ok(Box::new(
+                AnthropicClient::with_base_url(base_url, "test-key", "test-model")
+                    .with_timeouts(timeouts),
+            )),
+        }
+    }
+
+    async fn assert_provider_cancels_while_stalled(
+        provider: TestProvider,
+        after_headers: bool,
+    ) -> Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let stalled = Arc::new(Notify::new());
+        let server_stalled = stalled.clone();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await?;
+            let mut request = vec![0_u8; 4096];
+            let _request_bytes = socket.read(&mut request).await?;
+            if after_headers {
+                socket
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 64\r\nConnection: keep-alive\r\n\r\n",
+                    )
+                    .await?;
+                socket.flush().await?;
+            }
+            server_stalled.notify_one();
+            std::future::pending::<std::io::Result<()>>().await
+        });
+
+        let client = test_provider_client(provider, format!("http://{address}"))?;
+        let cancel_token = CancellationToken::new();
+        let cancel_after_stall = cancel_token.clone();
+        let cancel_task = tokio::spawn(async move {
+            tokio::time::timeout(Duration::from_secs(2), stalled.notified())
+                .await
+                .map_err(|_| {
+                    LlmError::NetworkError("provider request did not stall".to_string())
+                })?;
+            cancel_after_stall.cancel();
+            Result::<()>::Ok(())
+        });
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            client.chat(ChatRequest {
+                messages: vec![Message::user("hello".to_string())],
+                cancel_token: Some(cancel_token),
+                timeouts: Some(LlmTimeouts::default().without_request_timeout()),
+                ..Default::default()
+            }),
+        )
+        .await
+        .map_err(|_| {
+            LlmError::NetworkError(format!(
+                "{} non-stream cancellation timed out",
+                provider.name()
+            ))
+        })?;
+        cancel_task
+            .await
+            .map_err(|error| LlmError::NetworkError(format!("cancel task failed: {error}")))??;
+        assert_request_cancellation(result)?;
+        server.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn all_nonstream_providers_cancel_before_response_headers() -> Result<()> {
+        for provider in TestProvider::ALL {
+            assert_provider_cancels_while_stalled(provider, false).await?;
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn all_nonstream_providers_cancel_after_response_headers() -> Result<()> {
+        for provider in TestProvider::ALL {
+            assert_provider_cancels_while_stalled(provider, true).await?;
+        }
+        Ok(())
+    }
+
+    struct PausingReader {
+        inner: Cursor<Vec<u8>>,
+        started: Option<tokio::sync::oneshot::Sender<()>>,
+        resume: mpsc::Receiver<()>,
+    }
+
+    impl Read for PausingReader {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            if let Some(started) = self.started.take() {
+                started.send(()).map_err(|()| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::BrokenPipe,
+                        "decode-start observer was dropped",
+                    )
+                })?;
+                self.resume.recv().map_err(|error| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::BrokenPipe,
+                        format!("decode resume sender was dropped: {error}"),
+                    )
+                })?;
+            }
+            std::io::Read::read(&mut self.inner, buffer)
+        }
+    }
+
+    #[tokio::test]
+    async fn cancellation_wins_after_json_decode_has_started() -> Result<()> {
+        let cancel_token = CancellationToken::new();
+        let decode_cancel = cancel_token.clone();
+        let (started_sender, started_receiver) = tokio::sync::oneshot::channel();
+        let (resume_sender, resume_receiver) = mpsc::channel();
+        let decode_task = tokio::task::spawn_blocking(move || {
+            decode_json_reader::<serde_json::Value, _>(
+                PausingReader {
+                    inner: Cursor::new(br#"{"answer":"ready"}"#.to_vec()),
+                    started: Some(started_sender),
+                    resume: resume_receiver,
+                },
+                decode_cancel,
+            )
+        });
+
+        tokio::time::timeout(Duration::from_secs(2), started_receiver)
+            .await
+            .map_err(|_| LlmError::NetworkError("JSON decode did not start".to_string()))?
+            .map_err(|_| LlmError::NetworkError("JSON decode observer closed".to_string()))?;
+        cancel_token.cancel();
+        resume_sender
+            .send(())
+            .map_err(|error| LlmError::NetworkError(format!("decode resume failed: {error}")))?;
+        let result = tokio::time::timeout(Duration::from_secs(2), decode_task)
+            .await
+            .map_err(|_| LlmError::NetworkError("JSON decode cancellation timed out".to_string()))?
+            .map_err(|error| LlmError::InvalidResponse(format!("decode task failed: {error}")))?;
+        assert_request_cancellation(result)
+    }
+
+    #[tokio::test]
+    async fn anthropic_nonstream_rejects_invalid_utf8_json() -> Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await?;
+            let mut request = vec![0_u8; 4096];
+            let _request_bytes = socket.read(&mut request).await?;
+            let mut body = br#"{"content":[{"type":"text","text":""#.to_vec();
+            body.push(0xff);
+            body.extend_from_slice(br#""}],"stop_reason":"end_turn"}"#);
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            socket.write_all(headers.as_bytes()).await?;
+            socket.write_all(&body).await?;
+            socket.flush().await
+        });
+
+        let client =
+            AnthropicClient::with_base_url(format!("http://{address}"), "test-key", "test-model");
+        let result = client
+            .chat(ChatRequest {
+                messages: vec![Message::user("hello".to_string())],
+                ..Default::default()
+            })
+            .await;
+        assert!(matches!(
+            result,
+            Err(echo_core::error::ReactError::Llm(error))
+                if matches!(error.as_ref(), LlmError::InvalidResponse(_))
+        ));
+        server
+            .await
+            .map_err(|error| LlmError::NetworkError(format!("server task failed: {error}")))??;
         Ok(())
     }
 }

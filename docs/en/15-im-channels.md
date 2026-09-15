@@ -293,6 +293,12 @@ pub struct QqConfig {
 
 Tokens are automatically cached and refreshed 5 minutes before expiration.
 
+`QqConfig` and `FeishuConfig` implement credential-safe `Debug`. Client/app
+secrets, webhook verification tokens, and signing keys are represented as
+`[REDACTED]`. Channel transport logs and returned diagnostics also sanitize
+credential-shaped response text and URLs before formatting them; request and
+connection behavior is unchanged.
+
 ## Feishu
 
 ### Connection Method

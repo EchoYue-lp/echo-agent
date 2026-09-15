@@ -3,19 +3,19 @@ schema_version: 1
 id: finding.scheduler-task-id-uniqueness
 kind: finding
 type: authority_conflict
-status: open
+status: resolved
 severity: high
 primary_focus: state_authority
 focus: [data_durability, failure_concurrency]
 boundary_ref: boundary.task-subagent-workflow
 behavior_refs: [behavior.task-subagent-execution]
 rule_refs: []
-evidence_refs: [evidence.task-subagent-workflow]
-audit_refs: [audit.task-subagent-workflow.data-durability]
+evidence_refs: [evidence.task-subagent-workflow, evidence.scheduler-occurrence-authority-repair, evidence.scheduler-occurrence-authority-verification]
+audit_refs: [audit.task-subagent-workflow.data-durability, audit.scheduler-occurrence-authority-rereview]
 decision_refs: []
-repair_evidence_refs: []
-verification_evidence_refs: []
-rereview_audit_refs: []
+repair_evidence_refs: [evidence.scheduler-occurrence-authority-repair]
+verification_evidence_refs: [evidence.scheduler-occurrence-authority-verification]
+rereview_audit_refs: [audit.scheduler-occurrence-authority-rereview]
 discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 ---
 
@@ -39,4 +39,5 @@ CronTask ID 可公开赋值且 add 不校验唯一；重复 ID 被 last_fired �
 
 ## 处理记录
 
-Data-durability Audit 确认；无需等待 delivery guarantee 裁决即可增加唯一性约束和迁移检查。
+CronTaskStore在load/add/save和legacy migration中拒绝空或重复ID，migration不覆盖已存在目标；
+唯一性与冲突反例通过独立复审，不依赖#84的delivery guarantee裁决。

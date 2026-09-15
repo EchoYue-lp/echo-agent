@@ -196,6 +196,11 @@ while let Some(event) = stream.next().await {
 }
 ```
 
+`NodeError` is a terminal diagnostic event: the stream emits it before ending
+with the same error and never emits `Completed` after a failed node. When a
+parallel branch fails, the workflow cancels and drains its remaining siblings
+so a hung branch cannot mask the failure or outlive caller cancellation.
+
 ---
 
 ## Declarative YAML Workflow
@@ -308,6 +313,15 @@ let result = graph.run_with_checkpoints(state.clone(), &checkpoint_store).await?
 let checkpoint_id = checkpoint_store.latest()?.id;
 let resumed = graph.resume_from_checkpoint(&checkpoint_store, &checkpoint_id).await?;
 ```
+
+Resume uses the `CheckpointStore` claim lease. A successful continuation is
+acknowledged; a node or restore failure requeues the claim. File-store claims
+remain visible to `load` and `list`; `Graph` renews the exact attempt while a
+long continuation is active, and only a missed heartbeat can make a crashed
+claim discoverable again. Tagging an active claim fails its generation
+compare-and-save instead of resurrecting the continuation. Custom and
+SDK-backed stores must implement renew, acknowledge, requeue, and
+generation-CAS; unsupported settlement fails closed.
 
 ---
 

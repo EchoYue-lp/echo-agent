@@ -8,11 +8,11 @@ risk: high
 primary_focus: state_authority
 focus: [time_lifecycle, failure_concurrency, result_side_effect, contract_evidence]
 boundary: boundary.task-subagent-workflow
-observed_at: 9d1f3f2b5fdc204c08ecdec32ed22e8df95870e9
-code_refs: [echo-orchestration/src/tasks/revisioned.rs, echo-orchestration/src/tasks/runtime_service.rs, echo-orchestration/src/tasks/runtime_executor.rs, src/agent/subagent/registry.rs, src/agent/subagent/executor.rs, echo-orchestration/src/workflow/graph.rs, echo-orchestration/src/workflow/dag.rs, echo-orchestration/src/workflow/mod.rs, echo-orchestration/src/scheduler/runner.rs, echo-orchestration/src/scheduler/cron_task.rs, echo-orchestration/src/tasks/background_task.rs, echo-orchestration/src/tasks/background_state.rs, echo-orchestration/src/tasks/command_cell.rs, docs/adr/0039-background-task-terminal-authority.md]
+observed_at: eb8744566dcd5a734531869ebde9f3506b132163
+code_refs: [echo-orchestration/src/tasks/revisioned.rs, echo-orchestration/src/tasks/runtime_service.rs, echo-orchestration/src/tasks/runtime_executor.rs, src/agent/subagent/registry.rs, src/agent/subagent/executor.rs, echo-orchestration/src/workflow/graph.rs, echo-orchestration/src/workflow/dag.rs, echo-orchestration/src/workflow/concurrent.rs, echo-orchestration/src/workflow/mod.rs, echo-orchestration/src/scheduler/runner.rs, echo-orchestration/src/scheduler/cron_task.rs, echo-orchestration/src/tasks/background_task.rs, echo-orchestration/src/tasks/background_state.rs, echo-orchestration/src/tasks/command_cell.rs, docs/adr/0039-background-task-terminal-authority.md, docs/adr/0040-workflow-checkpoint-lease-and-sibling-settlement.md]
 rule_refs: [rule.task-subagent-authority]
-evidence_refs: [evidence.task-subagent-workflow, evidence.subagent-factory-singleflight-repair, evidence.subagent-factory-singleflight-verification, evidence.background-task-terminal-authority-repair, evidence.background-task-terminal-authority-verification]
-finding_refs: [finding.task-patch-claim-race, finding.task-subagent-attempt-link, finding.subagent-factory-cancellation, finding.subagent-factory-publication-race, finding.workflow-dag-authority, finding.workflow-entry-loop-drift, finding.workflow-checkpoint-claim-recovery, finding.scheduler-cache-delivery, finding.background-task-wait, finding.subagent-definition-catalog]
+evidence_refs: [evidence.task-subagent-workflow, evidence.subagent-factory-singleflight-repair, evidence.subagent-factory-singleflight-verification, evidence.background-task-terminal-authority-repair, evidence.background-task-terminal-authority-verification, evidence.workflow-parallel-failure-settlement-repair, evidence.workflow-parallel-failure-settlement-verification, evidence.workflow-checkpoint-claim-settlement-repair, evidence.workflow-checkpoint-claim-settlement-verification, evidence.scheduler-occurrence-authority-repair, evidence.scheduler-occurrence-authority-verification]
+finding_refs: [finding.task-patch-claim-race, finding.task-subagent-attempt-link, finding.subagent-factory-cancellation, finding.subagent-factory-publication-race, finding.workflow-dag-authority, finding.workflow-entry-loop-drift, finding.workflow-checkpoint-claim-recovery, finding.workflow-checkpoint-resurrection-race, finding.workflow-parallel-failure-settlement, finding.scheduler-cache-delivery, finding.scheduler-control-fire-race, finding.scheduler-task-id-uniqueness, finding.background-task-wait, finding.subagent-definition-catalog]
 ---
 
 # Task、Subagent 与 Workflow 执行
@@ -35,7 +35,7 @@ Task tools、Team/agent dispatch、programmatic runtime、Workflow 和 Scheduler
 
 ## 失败、重试与恢复
 
-循环依赖、无ready frontier、timeout、cancel、pause、skip、retry exhaustion、superseded claim和restart必须保留typed状态与一致性提交点；process-local wait不能丢wake，queued cancel/deadline与execution panic必须结算。
+循环依赖、无ready frontier、timeout、cancel、pause、skip、retry exhaustion、superseded claim和restart必须保留typed状态与一致性提交点；Workflow checkpoint使用renewable attempt lease，失败requeue、成功ack且tag只做pending generation CAS。并行Workflow在first failure后取消并drain sibling，成功结果按注册/拓扑顺序投影。
 
 ## 证据
 

@@ -119,7 +119,7 @@ impl Tool for ActivateSkillTool {
                 .and_then(|v| v.as_str())
                 .map(str::to_string);
 
-            let registry = self.registry.write().await;
+            let registry = self.registry.read().await;
 
             if let Some(descriptor) = registry.get_descriptor(&name)
                 && !descriptor.paths.is_empty()

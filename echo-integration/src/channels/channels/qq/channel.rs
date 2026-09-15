@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use echo_core::error::ChannelError;
 use echo_core::error::ReactError;
 use echo_core::error::Result;
+use std::fmt;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -15,12 +16,22 @@ use tracing::{info, warn};
 // ── Config ────────────────────────────────────────────────────────────────────
 
 /// QQ Bot channel configuration
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct QqConfig {
     /// QQ Bot App ID
     pub app_id: String,
     /// QQ Bot Client Secret
     pub client_secret: String,
+}
+
+impl fmt::Debug for QqConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("QqConfig")
+            .field("app_id", &self.app_id)
+            .field("client_secret", &crate::redaction::REDACTED)
+            .finish()
+    }
 }
 
 impl QqConfig {
@@ -145,7 +156,10 @@ impl ChannelPlugin for QqChannel {
                 let token = match token_manager_clone2.get_token().await {
                     Ok(t) => t,
                     Err(e) => {
-                        warn!("QQ Gateway: failed to get token: {:?}", e);
+                        warn!(
+                            "QQ Gateway: failed to get token: {}",
+                            crate::redaction::text(&e.to_string())
+                        );
                         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                         continue;
                     }
@@ -154,7 +168,10 @@ impl ChannelPlugin for QqChannel {
                 let ws_url = match get_gateway_url(&http_for_gw, &token).await {
                     Ok(u) => u,
                     Err(e) => {
-                        warn!("QQ Gateway: failed to get gateway URL: {:?}", e);
+                        warn!(
+                            "QQ Gateway: failed to get gateway URL: {}",
+                            crate::redaction::text(&e.to_string())
+                        );
                         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                         continue;
                     }
@@ -175,7 +192,8 @@ impl ChannelPlugin for QqChannel {
                     Err(e) => {
                         warn!(
                             "QQ Gateway: connection error: {:?}, reconnecting in {}s...",
-                            e, reconnect_delay
+                            crate::redaction::text(&e.to_string()),
+                            reconnect_delay
                         );
                     }
                 }
@@ -266,5 +284,21 @@ impl MessageHandler for QqMessageHandler {
 
     async fn reply(&self, msg: OutboundMessage) -> Result<()> {
         super::super::reply_with_empty_guard(&self.send_tx, msg).await
+    }
+}
+
+#[cfg(test)]
+mod config_tests {
+    use super::*;
+
+    #[test]
+    fn debug_does_not_expose_client_secret() {
+        let config = QqConfig::new("app-id", "qq-client-secret");
+        let debug = format!("{config:?}");
+        assert!(debug.contains("app-id"));
+        assert!(
+            !debug.contains("qq-client-secret"),
+            "debug leaked client secret: {debug}"
+        );
     }
 }

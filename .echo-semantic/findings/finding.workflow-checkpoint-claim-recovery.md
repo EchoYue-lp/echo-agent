@@ -3,19 +3,19 @@ schema_version: 1
 id: finding.workflow-checkpoint-claim-recovery
 kind: finding
 type: implementation_bug
-status: open
+status: resolved
 severity: high
 primary_focus: data_durability
 focus: [failure_concurrency, time_lifecycle, state_authority]
 boundary_ref: boundary.task-subagent-workflow
 behavior_refs: [behavior.task-subagent-execution]
 rule_refs: [rule.task-subagent-authority]
-evidence_refs: [evidence.task-subagent-workflow]
-audit_refs: [audit.task-subagent-workflow.failure-concurrency]
+evidence_refs: [evidence.task-subagent-workflow, evidence.workflow-checkpoint-claim-settlement-repair, evidence.workflow-checkpoint-claim-settlement-verification]
+audit_refs: [audit.task-subagent-workflow.failure-concurrency, audit.workflow-checkpoint-claim-settlement-rereview]
 decision_refs: []
-repair_evidence_refs: []
-verification_evidence_refs: []
-rereview_audit_refs: []
+repair_evidence_refs: [evidence.workflow-checkpoint-claim-settlement-repair]
+verification_evidence_refs: [evidence.workflow-checkpoint-claim-settlement-verification]
+rereview_audit_refs: [audit.workflow-checkpoint-claim-settlement-rereview]
 discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 ---
 
@@ -39,4 +39,5 @@ Claim 后任一失败可能永久隐藏可恢复 continuation；state snapshot �
 
 ## 处理记录
 
-Discovery 记录；下一阶段以 crash-cut 测试决定 requeue、保留 claim 或显式失败记录合同。
+commit `eb8744566dcd5a734531869ebde9f3506b132163`实现attempt-fenced renewable claim、
+失败requeue、成功ack、crash-cut恢复与四语言远程结算；最终独立复审通过。

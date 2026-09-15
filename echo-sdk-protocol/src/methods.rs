@@ -15,7 +15,7 @@
 use agent_client_protocol::{JsonRpcNotification, JsonRpcRequest, JsonRpcResponse};
 use serde::{Deserialize, Serialize};
 
-use crate::error::EchoSdkError;
+use crate::error::{AgentFailureWire, EchoSdkError};
 use crate::event::WireEventEnvelope;
 use crate::handle::{HandleKind, WireHandle};
 use crate::scalar::{
@@ -582,6 +582,25 @@ impl RunReceiptWire {
         if !matches!(self.outcome.as_str(), "completed" | "cancelled" | "failed") {
             return Err("receipt outcome must match its terminal");
         }
+        if let Some(delivery) = self.delivery.as_deref()
+            && !matches!(
+                delivery,
+                "not_attempted" | "delivered" | "closed" | "failed"
+            )
+        {
+            return Err("receipt delivery must be a known delivery status");
+        }
+        if self.delivery.as_deref() == Some("failed") && self.delivery_error.is_none() {
+            return Err("failed delivery must include delivery_error");
+        }
+        if self.delivery.as_deref() != Some("failed") && self.delivery_error.is_some() {
+            return Err("delivery_error requires failed delivery");
+        }
+        if let Some(failure) = &self.delivery_error {
+            failure
+                .validate()
+                .map_err(|_| "delivery_error is invalid")?;
+        }
         if self
             .final_answer
             .as_ref()
@@ -593,6 +612,11 @@ impl RunReceiptWire {
             message_id.trim().is_empty() || message_id.chars().count() > 256
         }) {
             return Err("receipt final_message_id must be non-empty and bounded");
+        }
+        if self.outcome != "completed"
+            && (self.final_answer.is_some() || self.final_message_id.is_some())
+        {
+            return Err("non-completed receipt must not carry final fields");
         }
         Ok(())
     }
@@ -798,6 +822,14 @@ pub struct RunReceiptWire {
     /// `completed`, `cancelled`, or `failed` — identical to the terminal.
     #[schemars(length(min = 1, max = 32))]
     pub outcome: String,
+    /// Delivery status from the driven event sink. Optional only for legacy
+    /// persisted receipts created before delivery accounting existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 32))]
+    pub delivery: Option<String>,
+    /// Lossless delivery failure details when `delivery` is `failed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_error: Option<AgentFailureWire>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub final_answer: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -806,8 +838,9 @@ pub struct RunReceiptWire {
     pub completion_tokens: WireU64,
     pub llm_calls: WireU64,
     pub compaction_count: WireU64,
-    /// Sequence watermark of the last emitted event; aligned with the
-    /// journal and replay cursors.
+    /// Sequence watermark of the last event observed by the driver. A sink
+    /// failure may leave the committed Journal/Ledger watermark behind this
+    /// value; replay APIs continue to report their own committed watermark.
     pub last_event_sequence: WireU64,
     /// Total wall time of the run in milliseconds.
     pub elapsed_ms: WireU64,
@@ -1841,8 +1874,12 @@ pub enum AgentComponentOperationWire {
     GuardCheck,
     SearchProviderSearch,
     WorkflowCheckpointSave,
+    WorkflowCheckpointSaveIfGeneration,
     WorkflowCheckpointLoad,
     WorkflowCheckpointClaim,
+    WorkflowCheckpointAckClaim,
+    WorkflowCheckpointRequeueClaim,
+    WorkflowCheckpointRenewClaim,
     WorkflowCheckpointList,
     WorkflowCheckpointListByGraph,
     WorkflowCheckpointListFiltered,
@@ -1900,8 +1937,12 @@ impl AgentComponentOperationWire {
             Self::GuardCheck => AgentComponentKindWire::Guard,
             Self::SearchProviderSearch => AgentComponentKindWire::SearchProvider,
             Self::WorkflowCheckpointSave
+            | Self::WorkflowCheckpointSaveIfGeneration
             | Self::WorkflowCheckpointLoad
             | Self::WorkflowCheckpointClaim
+            | Self::WorkflowCheckpointAckClaim
+            | Self::WorkflowCheckpointRequeueClaim
+            | Self::WorkflowCheckpointRenewClaim
             | Self::WorkflowCheckpointList
             | Self::WorkflowCheckpointListByGraph
             | Self::WorkflowCheckpointListFiltered
@@ -2071,11 +2112,27 @@ pub enum AgentComponentCallInputWire {
     WorkflowCheckpointSave {
         checkpoint: WireValue,
     },
+    WorkflowCheckpointSaveIfGeneration {
+        checkpoint: WireValue,
+        expected_generation: WireU64,
+    },
     WorkflowCheckpointLoad {
         checkpoint_id: String,
     },
     WorkflowCheckpointClaim {
         checkpoint_id: String,
+    },
+    WorkflowCheckpointAckClaim {
+        checkpoint_id: String,
+        attempt_id: String,
+    },
+    WorkflowCheckpointRequeueClaim {
+        checkpoint_id: String,
+        attempt_id: String,
+    },
+    WorkflowCheckpointRenewClaim {
+        checkpoint_id: String,
+        attempt_id: String,
     },
     WorkflowCheckpointList,
     WorkflowCheckpointListByGraph {
@@ -2187,11 +2244,23 @@ impl AgentComponentCallInputWire {
             Self::WorkflowCheckpointSave { .. } => {
                 AgentComponentOperationWire::WorkflowCheckpointSave
             }
+            Self::WorkflowCheckpointSaveIfGeneration { .. } => {
+                AgentComponentOperationWire::WorkflowCheckpointSaveIfGeneration
+            }
             Self::WorkflowCheckpointLoad { .. } => {
                 AgentComponentOperationWire::WorkflowCheckpointLoad
             }
             Self::WorkflowCheckpointClaim { .. } => {
                 AgentComponentOperationWire::WorkflowCheckpointClaim
+            }
+            Self::WorkflowCheckpointAckClaim { .. } => {
+                AgentComponentOperationWire::WorkflowCheckpointAckClaim
+            }
+            Self::WorkflowCheckpointRequeueClaim { .. } => {
+                AgentComponentOperationWire::WorkflowCheckpointRequeueClaim
+            }
+            Self::WorkflowCheckpointRenewClaim { .. } => {
+                AgentComponentOperationWire::WorkflowCheckpointRenewClaim
             }
             Self::WorkflowCheckpointList => AgentComponentOperationWire::WorkflowCheckpointList,
             Self::WorkflowCheckpointListByGraph { .. } => {
@@ -2314,12 +2383,18 @@ pub enum AgentComponentCallResultWire {
         results: Vec<WireValue>,
     },
     WorkflowCheckpointSave,
+    WorkflowCheckpointSaveIfGeneration {
+        committed: bool,
+    },
     WorkflowCheckpointLoad {
         checkpoint: Option<WireValue>,
     },
     WorkflowCheckpointClaim {
         checkpoint: Option<WireValue>,
     },
+    WorkflowCheckpointAckClaim,
+    WorkflowCheckpointRequeueClaim,
+    WorkflowCheckpointRenewClaim,
     WorkflowCheckpointList {
         checkpoints: Vec<WireValue>,
     },
@@ -2416,11 +2491,23 @@ impl AgentComponentCallResultWire {
             Self::GuardCheck { .. } => AgentComponentOperationWire::GuardCheck,
             Self::SearchProviderSearch { .. } => AgentComponentOperationWire::SearchProviderSearch,
             Self::WorkflowCheckpointSave => AgentComponentOperationWire::WorkflowCheckpointSave,
+            Self::WorkflowCheckpointSaveIfGeneration { .. } => {
+                AgentComponentOperationWire::WorkflowCheckpointSaveIfGeneration
+            }
             Self::WorkflowCheckpointLoad { .. } => {
                 AgentComponentOperationWire::WorkflowCheckpointLoad
             }
             Self::WorkflowCheckpointClaim { .. } => {
                 AgentComponentOperationWire::WorkflowCheckpointClaim
+            }
+            Self::WorkflowCheckpointAckClaim => {
+                AgentComponentOperationWire::WorkflowCheckpointAckClaim
+            }
+            Self::WorkflowCheckpointRequeueClaim => {
+                AgentComponentOperationWire::WorkflowCheckpointRequeueClaim
+            }
+            Self::WorkflowCheckpointRenewClaim => {
+                AgentComponentOperationWire::WorkflowCheckpointRenewClaim
             }
             Self::WorkflowCheckpointList { .. } => {
                 AgentComponentOperationWire::WorkflowCheckpointList
@@ -2486,6 +2573,9 @@ pub struct AgentComponentCapabilitiesWire {
     pub supports_streaming: bool,
     #[serde(default)]
     pub supports_notifications: bool,
+    /// Renewal interval requested by a remote workflow checkpoint store.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim_heartbeat_interval_ms: Option<WireU64>,
 }
 
 /// Versioned per-kind registration descriptor. Exactly one variant matches
@@ -2763,6 +2853,21 @@ impl ExtensionDescriptor {
                 && capabilities.supports_notifications
             {
                 return Err("notifications are only valid for MCP transport components");
+            }
+            let claim_heartbeat_ms = capabilities
+                .claim_heartbeat_interval_ms
+                .as_ref()
+                .and_then(WireU64::to_u64);
+            if *component == AgentComponentKindWire::WorkflowCheckpointStore {
+                if !claim_heartbeat_ms.is_some_and(|value| (1..=300_000).contains(&value)) {
+                    return Err(
+                        "workflow checkpoint stores require a claim heartbeat from 1 to 300000 ms",
+                    );
+                }
+            } else if capabilities.claim_heartbeat_interval_ms.is_some() {
+                return Err(
+                    "claim_heartbeat_interval_ms is only valid for workflow checkpoint stores",
+                );
             }
         }
         if let ExtensionDescriptor::ChannelPlugin(value) = self {

@@ -8,7 +8,7 @@ use reqwest::header::HeaderMap;
 use std::sync::Arc;
 use tracing::{Instrument, info_span};
 
-use super::client::{post, stream_post};
+use super::client::{ensure_request_not_cancelled, post, stream_post};
 use super::config::LlmConfig;
 use super::thinking_translate::translate_thinking_openai_compat;
 
@@ -227,17 +227,20 @@ impl LlmClient for OpenAiClient {
                     self.header_map.clone(),
                     &self.config.base_url,
                     timeouts,
+                    request.cancel_token.clone(),
                 )
                 .await?;
 
                 let choice = raw.choices.first().ok_or(LlmError::EmptyResponse)?;
 
-                Ok(ChatResponse {
+                let response = ChatResponse {
                     message: choice.message.clone(),
                     finish_reason: choice.finish_reason.clone(),
                     usage: raw.usage.clone(),
                     raw,
-                })
+                };
+                ensure_request_not_cancelled(request.cancel_token.as_ref())?;
+                Ok(response)
             }
             .instrument(info_span!("openai_chat", model = %model)),
         )

@@ -3,6 +3,7 @@
 use chrono::{DateTime, Utc};
 use cron::Schedule;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::{Arc, OnceLock};
@@ -150,11 +151,13 @@ impl CronTaskStore {
                         serde_json::Value::String(s) => s.clone(),
                         other => other.to_string(),
                     };
-                    serde_json::from_str(&json_str).map_err(|e| {
+                    let tasks: Vec<CronTask> = serde_json::from_str(&json_str).map_err(|e| {
                         echo_core::error::ReactError::Other(format!(
                             "Failed to deserialize cron tasks: {e}"
                         ))
-                    })
+                    })?;
+                    validate_task_ids(&tasks)?;
+                    Ok(tasks)
                 }
                 None => Ok(vec![]),
             }
@@ -165,6 +168,7 @@ impl CronTaskStore {
 
     /// Save all cron tasks.
     async fn save_all_unlocked(&self, tasks: &[CronTask]) -> echo_core::error::Result<()> {
+        validate_task_ids(tasks)?;
         let json = serde_json::to_string_pretty(tasks).map_err(|e| {
             echo_core::error::ReactError::Other(format!("Failed to serialize cron tasks: {e}"))
         })?;
@@ -181,8 +185,15 @@ impl CronTaskStore {
 
     /// Add a task and persist.
     pub async fn add(&self, task: CronTask) -> echo_core::error::Result<()> {
+        unique_id(&task.id)?;
         let _guard = self.mutation_lock.lock().await;
         let mut tasks = self.load_all().await?;
+        if tasks.iter().any(|existing| existing.id == task.id) {
+            return Err(echo_core::error::ReactError::Other(format!(
+                "Cron task ID '{}' already exists",
+                task.id
+            )));
+        }
         tasks.push(task);
         self.save_all_unlocked(&tasks).await
     }
@@ -232,26 +243,46 @@ impl CronTaskStore {
     /// Update last_run info after a task fires.
     pub async fn update_last_run(&self, id: &str, result: &str) -> echo_core::error::Result<()> {
         let id = unique_id(id)?;
-        let _guard = self.mutation_lock.lock().await;
-        let mut tasks = self.load_all().await?;
-        let mut found = false;
-        for task in &mut tasks {
-            if task.id == id {
-                task.last_run_at = Some(echo_core::utils::time::now_local().to_rfc3339());
-                task.last_result = Some(result.chars().take(500).collect());
-                found = true;
-                break;
-            }
-        }
-        if !found {
-            return Err(echo_core::error::ReactError::Other(format!(
-                "Cron task '{id}' not found"
-            )));
-        }
-        self.save_all_unlocked(&tasks).await
+        let task = self.get(id).await?.ok_or_else(|| {
+            echo_core::error::ReactError::Other(format!("Cron task '{id}' not found"))
+        })?;
+        self.update_last_run_for_task(&task, result)
+            .await
+            .map(|_| ())
     }
 
-    /// Get a task by ID prefix.
+    /// Update last-run information only for the captured task definition.
+    ///
+    /// `created_at` is part of the definition identity.  Matching it prevents
+    /// a callback from an older definition from updating a task that was
+    /// removed and recreated with the same public ID.
+    pub(crate) async fn update_last_run_for_task(
+        &self,
+        expected: &CronTask,
+        result: &str,
+    ) -> echo_core::error::Result<CronTask> {
+        let id = unique_id(&expected.id)?;
+        let _guard = self.mutation_lock.lock().await;
+        let mut tasks = self.load_all().await?;
+        let updated = tasks.iter_mut().find_map(|task| {
+            if task.id == id && task.created_at == expected.created_at {
+                task.last_run_at = Some(echo_core::utils::time::now_local().to_rfc3339());
+                task.last_result = Some(result.chars().take(500).collect());
+                Some(task.clone())
+            } else {
+                None
+            }
+        });
+        let Some(updated) = updated else {
+            return Err(echo_core::error::ReactError::Other(format!(
+                "Cron task '{id}' definition is no longer current"
+            )));
+        };
+        self.save_all_unlocked(&tasks).await?;
+        Ok(updated)
+    }
+
+    /// Get a task by its unique ID.
     pub async fn get(&self, id: &str) -> echo_core::error::Result<Option<CronTask>> {
         let id = unique_id(id)?;
         let tasks = self.load_all().await?;
@@ -270,9 +301,11 @@ impl CronTaskStore {
         if content.trim().is_empty() {
             return Ok(vec![]);
         }
-        serde_json::from_str(&content).map_err(|e| {
+        let tasks: Vec<CronTask> = serde_json::from_str(&content).map_err(|e| {
             echo_core::error::ReactError::Other(format!("Failed to parse cron tasks: {e}"))
-        })
+        })?;
+        validate_task_ids(&tasks)?;
+        Ok(tasks)
     }
 
     fn save_to_file(&self, json: &str) -> echo_core::error::Result<()> {
@@ -290,11 +323,24 @@ impl CronTaskStore {
     }
 
     async fn migrate_from_file(&self) -> echo_core::error::Result<()> {
+        let _guard = self.mutation_lock.lock().await;
+        let Some(backend) = self.backend.as_ref() else {
+            return Ok(());
+        };
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
         let legacy_path = PathBuf::from(home).join(".echo-agent/scheduler/tasks.json");
         if !legacy_path.exists() {
             return Ok(());
         }
+
+        // A present destination is already authoritative, even when it stores
+        // an empty list.  Never replace it with a legacy snapshot.
+        if backend.get(STORE_NAMESPACE, STORE_KEY).await?.is_some() {
+            let _ = self.load_all().await?;
+            debug!("Scheduler store already contains cron tasks; preserving legacy file");
+            return Ok(());
+        }
+
         debug!("Migrating cron tasks from file to Store backend");
         let content = std::fs::read_to_string(&legacy_path).map_err(|error| {
             echo_core::error::ReactError::Other(format!(
@@ -309,6 +355,7 @@ impl CronTaskStore {
                 "Failed to parse legacy cron tasks: {error}"
             ))
         })?;
+        validate_task_ids(&tasks)?;
         self.save_all_unlocked(&tasks).await?;
         // Remove legacy file after successful migration
         let _ = std::fs::remove_file(&legacy_path);
@@ -327,6 +374,20 @@ fn unique_id(id: &str) -> echo_core::error::Result<&str> {
         ));
     }
     Ok(id)
+}
+
+fn validate_task_ids(tasks: &[CronTask]) -> echo_core::error::Result<()> {
+    let mut seen = HashSet::with_capacity(tasks.len());
+    for task in tasks {
+        unique_id(&task.id)?;
+        if !seen.insert(task.id.as_str()) {
+            return Err(echo_core::error::ReactError::Other(format!(
+                "Duplicate cron task ID '{}'",
+                task.id
+            )));
+        }
+    }
+    Ok(())
 }
 
 impl Default for CronTaskStore {
@@ -419,6 +480,53 @@ mod tests {
         assert_eq!(tasks.len(), 2);
         assert!(tasks.iter().any(|task| task.name == "first"));
         assert!(tasks.iter().any(|task| task.name == "second"));
+        std::fs::remove_dir_all(&temp).map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn add_rejects_duplicate_task_ids() -> Result<(), String> {
+        let temp = std::env::temp_dir().join(format!(
+            "echo-scheduler-duplicate-id-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&temp).map_err(|error| error.to_string())?;
+        let store = CronTaskStore::new().with_path(temp.join("cron-tasks.json"));
+        let first = CronTask::new("first", "*/5 * * * *", "first");
+        let mut duplicate = CronTask::new("second", "*/5 * * * *", "second");
+        duplicate.id = first.id.clone();
+        store.add(first).await.map_err(|error| error.to_string())?;
+        assert!(store.add(duplicate).await.is_err());
+        assert_eq!(
+            store
+                .load_all()
+                .await
+                .map_err(|error| error.to_string())?
+                .len(),
+            1
+        );
+        std::fs::remove_dir_all(&temp).map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn load_rejects_duplicate_task_ids_in_persisted_file() -> Result<(), String> {
+        let temp = std::env::temp_dir().join(format!(
+            "echo-scheduler-duplicate-file-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&temp).map_err(|error| error.to_string())?;
+        let path = temp.join("cron-tasks.json");
+        let mut first = CronTask::new("first", "*/5 * * * *", "first");
+        let mut duplicate = CronTask::new("second", "*/5 * * * *", "second");
+        duplicate.id = first.id.clone();
+        first.created_at = "2026-01-01T00:00:00Z".to_string();
+        duplicate.created_at = "2026-01-01T00:00:01Z".to_string();
+        let payload =
+            serde_json::to_string(&vec![first, duplicate]).map_err(|error| error.to_string())?;
+        std::fs::write(&path, payload).map_err(|error| error.to_string())?;
+        let store = CronTaskStore::new().with_path(path);
+        assert!(store.load_all().await.is_err());
         std::fs::remove_dir_all(&temp).map_err(|error| error.to_string())?;
         Ok(())
     }

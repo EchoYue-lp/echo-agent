@@ -15,6 +15,33 @@ use tokio::sync::{Mutex, oneshot};
 
 use super::jsonrpc::{self, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse};
 
+/// Shared manager lifecycle fence captured by every derived client handle.
+///
+/// The fence is intentionally internal to the framework. SDK handles retain
+/// the existing client shape, while the manager remains the only authority
+/// that can keep a child process live.
+pub(crate) struct LspLifecycle {
+    pub(crate) generation: u64,
+    closed: AtomicBool,
+}
+
+impl LspLifecycle {
+    pub(crate) fn new(generation: u64) -> Self {
+        Self {
+            generation,
+            closed: AtomicBool::new(false),
+        }
+    }
+
+    pub(crate) fn close(&self) {
+        self.closed.store(true, Ordering::SeqCst);
+    }
+
+    pub(crate) fn is_live(&self, generation: u64) -> bool {
+        !self.closed.load(Ordering::SeqCst) && self.generation == generation
+    }
+}
+
 const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const MAX_LSP_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
 
@@ -49,11 +76,27 @@ pub struct StdioLspClient {
     last_error: Option<String>,
     /// Cached diagnostics per file URI.
     diagnostics_cache: Arc<Mutex<HashMap<String, Vec<Diagnostic>>>>,
+    /// Manager lifecycle captured when this derived handle was created.
+    lifecycle: Arc<LspLifecycle>,
+    /// Generation associated with this client handle.
+    lifecycle_generation: u64,
+    /// Client-level close fence, set by explicit stop/shutdown.
+    closed: AtomicBool,
 }
 
 impl StdioLspClient {
     /// Create a new client (does not start the server yet).
     pub fn new(config: LspServerConfig) -> Self {
+        let lifecycle = Arc::new(LspLifecycle::new(0));
+        Self::new_bound(config, lifecycle, 0)
+    }
+
+    /// Create a client bound to a manager lifecycle.
+    pub(crate) fn new_bound(
+        config: LspServerConfig,
+        lifecycle: Arc<LspLifecycle>,
+        lifecycle_generation: u64,
+    ) -> Self {
         let language = config.language.clone();
         Self {
             language,
@@ -67,7 +110,29 @@ impl StdioLspClient {
             restart_count: 0,
             last_error: None,
             diagnostics_cache: Arc::new(Mutex::new(HashMap::new())),
+            lifecycle,
+            lifecycle_generation,
+            closed: AtomicBool::new(false),
         }
+    }
+
+    fn ensure_live(&self) -> LspResult<()> {
+        if self.closed.load(Ordering::SeqCst) || !self.lifecycle.is_live(self.lifecycle_generation)
+        {
+            return Err(LspError::NotInitialized);
+        }
+        Ok(())
+    }
+
+    /// Kill a process without sending more protocol messages.
+    async fn abort_process(&mut self) {
+        self.writer_tx = None;
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill().await;
+        }
+        self.pending.lock().await.clear();
+        self.running.store(false, Ordering::SeqCst);
+        self.initialized.store(false, Ordering::SeqCst);
     }
 
     /// Spawn the server process and set up communication channels.
@@ -215,6 +280,7 @@ impl StdioLspClient {
         method: &str,
         params: Option<serde_json::Value>,
     ) -> LspResult<serde_json::Value> {
+        self.ensure_live()?;
         let writer_tx = self.writer_tx.as_ref().ok_or(LspError::NotInitialized)?;
 
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
@@ -257,6 +323,8 @@ impl StdioLspClient {
             }
         };
 
+        self.ensure_live()?;
+
         if let Some(err) = response.error {
             return Err(LspError::ServerError(err.to_string()));
         }
@@ -272,6 +340,7 @@ impl StdioLspClient {
         method: &str,
         params: Option<serde_json::Value>,
     ) -> LspResult<()> {
+        self.ensure_live()?;
         let writer_tx = self.writer_tx.as_ref().ok_or(LspError::NotInitialized)?;
 
         let notification = JsonRpcNotification::new(method, params);
@@ -302,8 +371,17 @@ impl LspClient for StdioLspClient {
 
     fn initialize<'a>(&'a mut self, root_uri: &'a str) -> BoxFuture<'a, LspResult<()>> {
         Box::pin(async move {
+            self.ensure_live()?;
             // Spawn the process
             self.spawn_process()?;
+
+            // Shutdown may win while spawning or while the child is starting.
+            // Abort the just-created child instead of allowing an unowned
+            // process to survive the manager that created it.
+            if let Err(error) = self.ensure_live() {
+                self.abort_process().await;
+                return Err(error);
+            }
 
             // Send initialize request
             let params = serde_json::json!({
@@ -328,11 +406,24 @@ impl LspClient for StdioLspClient {
                 }
             });
 
-            let _result = self.send_request("initialize", Some(params)).await?;
+            if let Err(error) = self.send_request("initialize", Some(params)).await {
+                self.abort_process().await;
+                return Err(error);
+            }
 
             // Send initialized notification
-            self.send_notification("initialized", Some(serde_json::json!({})))
-                .await?;
+            if let Err(error) = self
+                .send_notification("initialized", Some(serde_json::json!({})))
+                .await
+            {
+                self.abort_process().await;
+                return Err(error);
+            }
+
+            if let Err(error) = self.ensure_live() {
+                self.abort_process().await;
+                return Err(error);
+            }
 
             self.initialized.store(true, Ordering::SeqCst);
             Ok(())
@@ -347,12 +438,10 @@ impl LspClient for StdioLspClient {
                 // Send exit notification
                 let _ = self.send_notification("exit", None).await;
 
-                // Kill the process
-                if let Some(ref mut child) = self.child {
-                    let _ = child.kill().await;
-                }
-
-                self.running.store(false, Ordering::SeqCst);
+                self.closed.store(true, Ordering::SeqCst);
+                self.abort_process().await;
+            } else {
+                self.closed.store(true, Ordering::SeqCst);
                 self.initialized.store(false, Ordering::SeqCst);
             }
             Ok(())

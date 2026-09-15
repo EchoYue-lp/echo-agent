@@ -18,9 +18,12 @@ use tokio_util::sync::CancellationToken;
 use super::super::types::{
     JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, NotificationReceiver,
 };
+use crate::redaction::{
+    header_secrets, request_error, text as redact_text, text_with_secrets, url as redact_url,
+};
 use echo_core::error::{McpError, ReactError, Result};
 
-use super::McpTransport;
+use super::{McpTransport, redact_response_error};
 
 /// HTTP/SSE 传输层
 pub struct SseTransport {
@@ -42,7 +45,7 @@ impl SseTransport {
             .map_err(|e| {
                 ReactError::Mcp(Box::new(McpError::ConnectionFailed(format!(
                     "创建 HTTP 客户端失败: {}",
-                    e
+                    request_error(e, std::iter::empty::<&str>())
                 ))))
             })?;
 
@@ -106,12 +109,12 @@ impl SseTransport {
                                 break;
                             }
                             tracing::warn!(
-                                "SSE: 连接断开（{}），{}ms 后重试 ({}/{})（Last-Event-ID={:?}）",
-                                e,
+                                "SSE: 连接断开（{}），{}ms 后重试 ({}/{})（Last-Event-ID 已隐藏={}）",
+                                redact_text(&e.to_string()),
                                 retry_ms,
                                 retry_count,
                                 MAX_RETRIES,
-                                last_event_id
+                                last_event_id.is_some()
                             );
                             tokio::select! {
                                 _ = tokio::time::sleep(std::time::Duration::from_millis(retry_ms)) => {}
@@ -180,7 +183,10 @@ impl SseTransport {
 
         let response = tokio::select! {
             resp = builder.send() => resp.map_err(|e| {
-                ReactError::Mcp(Box::new(McpError::ConnectionFailed(format!("SSE 连接失败: {}", e))))
+                ReactError::Mcp(Box::new(McpError::ConnectionFailed(format!(
+                    "SSE 连接失败: {}",
+                    request_error(e, header_secrets(headers))
+                ))))
             })?,
             _ = cancel.cancelled() => {
                 return Ok(());
@@ -203,14 +209,14 @@ impl SseTransport {
             let chunk = chunk.map_err(|e| {
                 ReactError::Mcp(Box::new(McpError::ConnectionFailed(format!(
                     "SSE 读取错误: {}",
-                    e
+                    request_error(e, header_secrets(headers))
                 ))))
             })?;
 
             let text = std::str::from_utf8(&chunk).map_err(|e| {
                 ReactError::Mcp(Box::new(McpError::ProtocolError(format!(
                     "SSE 编码错误: {}",
-                    e
+                    text_with_secrets(&e.to_string(), header_secrets(headers))
                 ))))
             })?;
 
@@ -246,7 +252,7 @@ impl SseTransport {
                     {
                         let mut endpoint_guard = message_endpoint.lock().await;
                         *endpoint_guard = Some(uri.to_string());
-                        tracing::info!("SSE: 获取到 POST 端点 URI: {}", uri);
+                        tracing::info!("SSE: 获取到 POST 端点 URI: {}", redact_url(uri));
                         continue;
                     }
                 }
@@ -265,7 +271,10 @@ impl SseTransport {
                 }
 
                 let Ok(value) = serde_json::from_str::<Value>(&data) else {
-                    tracing::debug!("SSE: 忽略非 JSON 数据: {}", data);
+                    tracing::debug!(
+                        "SSE: 忽略非 JSON 数据: {}",
+                        text_with_secrets(&data, header_secrets(headers))
+                    );
                     continue;
                 };
 
@@ -276,7 +285,9 @@ impl SseTransport {
 
                 if has_rpc_id && (has_result || has_error) {
                     match serde_json::from_value::<JsonRpcResponse>(value) {
-                        Ok(resp) => {
+                        Ok(mut resp) => {
+                            let secrets = header_secrets(headers);
+                            redact_response_error(&mut resp, &secrets);
                             if let Some(id_val) = &resp.id {
                                 let id_u64 = match id_val {
                                     Value::Number(n) => n.as_u64().unwrap_or(0),
@@ -292,7 +303,9 @@ impl SseTransport {
                                 }
                             }
                         }
-                        Err(e) => tracing::warn!("SSE: 解析响应失败: {}", e),
+                        Err(e) => {
+                            tracing::warn!("SSE: 解析响应失败: {}", redact_text(&e.to_string()))
+                        }
                     }
                 } else if has_method && !has_rpc_id {
                     match serde_json::from_value::<JsonRpcNotification>(value) {
@@ -300,7 +313,9 @@ impl SseTransport {
                             tracing::debug!("SSE: 收到通知 method={}", notif.method);
                             let _ = notification_tx.send(notif);
                         }
-                        Err(e) => tracing::warn!("SSE: 解析通知失败: {}", e),
+                        Err(e) => {
+                            tracing::warn!("SSE: 解析通知失败: {}", redact_text(&e.to_string()))
+                        }
                     }
                 } else {
                     tracing::debug!("SSE: 收到未知格式数据，已忽略");
@@ -353,7 +368,8 @@ impl McpTransport for SseTransport {
             let post_resp = builder.send().await.map_err(|e| {
                 ReactError::Mcp(Box::new(McpError::ConnectionFailed(format!(
                     "POST {} 失败: {}",
-                    endpoint_uri, e
+                    redact_url(&endpoint_uri),
+                    request_error(e, header_secrets(&self.headers))
                 ))))
             })?;
 
@@ -362,7 +378,12 @@ impl McpTransport for SseTransport {
                 let body = post_resp.text().await.unwrap_or_default();
                 self.pending.lock().await.remove(&id);
                 return Err(ReactError::Mcp(Box::new(McpError::ConnectionFailed(
-                    format!("POST {} 返回服务器错误 {}: {}", endpoint_uri, status, body),
+                    format!(
+                        "POST {} 返回服务器错误 {}: {}",
+                        redact_url(&endpoint_uri),
+                        status,
+                        text_with_secrets(&body, header_secrets(&self.headers))
+                    ),
                 ))));
             }
 

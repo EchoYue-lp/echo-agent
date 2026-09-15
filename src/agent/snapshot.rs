@@ -416,7 +416,8 @@ impl RuntimeConfig {
             verifier_enabled: config.verifier_enabled,
             verifier_min_score: config.verifier_min_score,
             verifier_max_retries: config.verifier_max_retries,
-            plan_mode: config.plan_mode,
+            plan_mode: config.plan_mode
+                || config.permission_mode == echo_core::tools::permission::PermissionMode::Plan,
             cache_user_id: config.cache_user_id.clone(),
         }
     }
@@ -438,8 +439,6 @@ pub struct ToolRuntime {
     /// Allowed tool patterns from activated skills (captured at snapshot time).
     /// `None` = unrestricted (no skill restricts tools).
     pub skill_allowed_tools: Option<std::collections::HashSet<String>>,
-    /// Names of all activated skills (captured at snapshot time).
-    pub active_skill_names: Vec<String>,
     /// Current plan state (shared with ReactAgent).
     pub plan_state: Arc<tokio::sync::RwLock<Option<String>>>,
     /// Effective disabled tools captured for this invocation.
@@ -448,6 +447,9 @@ pub struct ToolRuntime {
     pub visibility: Option<std::sync::Arc<echo_core::tools::ToolVisibilityState>>,
     /// Whether the invocation uses plan mode's read-only tool surface.
     pub plan_mode: bool,
+    /// Live permission-mode authority for mode changes made through SDK/host APIs.
+    #[cfg(feature = "human-loop")]
+    permission_service: Option<Arc<crate::human_loop::PermissionService>>,
 }
 
 impl ToolRuntime {
@@ -467,24 +469,23 @@ impl ToolRuntime {
         if let Some(config) = agent.llm_config() {
             disabled_tools.extend(tool_manager.incompatible_tool_names(&config.input_modalities));
         }
-        let mut skill_allowed_tools = agent.tools.skill_registry.active_skill_allowed_tools();
-        let mut active_skill_names = agent.tools.skill_registry.activated_names();
-        if let Some(progressive) = agent
-            .tools
-            .progressive_skill_registry
-            .as_ref()
-            .and_then(|registry| registry.try_read().ok())
-        {
-            if let Some(progressive_allowed) = progressive.active_skill_allowed_tools() {
-                skill_allowed_tools
-                    .get_or_insert_with(std::collections::HashSet::new)
-                    .extend(progressive_allowed);
-            }
-            active_skill_names.extend(progressive.activated_names());
-        }
-        active_skill_names.sort();
-        active_skill_names.dedup();
-        let plan_mode = agent.config.plan_mode;
+        let skill_allowed_tools = agent.tools.skill_registry.active_skill_allowed_tools();
+        #[cfg(feature = "human-loop")]
+        let permission_service = agent.approval.permission_service.clone();
+        let plan_mode = agent.config.plan_mode
+            || agent.config.permission_mode == echo_core::tools::permission::PermissionMode::Plan
+            || {
+                #[cfg(feature = "human-loop")]
+                {
+                    permission_service.as_ref().is_some_and(|service| {
+                        service.current_mode() == echo_core::tools::permission::PermissionMode::Plan
+                    })
+                }
+                #[cfg(not(feature = "human-loop"))]
+                {
+                    false
+                }
+            };
         let visibility = invocation_visible_tools.map(|initial| {
             let available = tool_manager
                 .get_openai_tools()
@@ -492,9 +493,9 @@ impl ToolRuntime {
                 .filter(|tool| !disabled_tools.contains(&tool.function.name))
                 .filter(|tool| {
                     !plan_mode
-                        || (!crate::tools::is_write_tool(&tool.function.name)
-                            && tool.function.name != "shell"
-                            && tool.function.name != "delete_file")
+                        || tool_manager
+                            .get_tool(&tool.function.name)
+                            .is_some_and(|tool| tool.capabilities().is_read_only())
                 })
                 .map(|tool| tool.function.name)
                 .collect::<std::collections::HashSet<_>>();
@@ -521,11 +522,12 @@ impl ToolRuntime {
             hook_registry: agent.tools.hook_registry.clone(),
             intervention_callbacks: agent.tools.intervention_callbacks.clone(),
             skill_allowed_tools,
-            active_skill_names,
             plan_state: Arc::clone(&agent.plan_state),
             disabled_tools,
             visibility,
             plan_mode,
+            #[cfg(feature = "human-loop")]
+            permission_service,
         }
     }
 
@@ -543,12 +545,34 @@ impl ToolRuntime {
             })
             .filter(|tool| self.is_skill_tool_allowed(&tool.function.name))
             .filter(|tool| {
-                !self.plan_mode
-                    || (!crate::tools::is_write_tool(&tool.function.name)
-                        && tool.function.name != "shell"
-                        && tool.function.name != "delete_file")
+                !self.is_plan_mode()
+                    || self
+                        .tool_manager
+                        .get_tool(&tool.function.name)
+                        .is_some_and(|tool| tool.capabilities().is_read_only())
             })
             .collect()
+    }
+
+    pub(crate) fn is_tool_read_only(&self, tool_name: &str) -> bool {
+        self.tool_manager
+            .get_tool(tool_name)
+            .is_some_and(|tool| tool.capabilities().is_read_only())
+    }
+
+    pub(crate) fn is_plan_mode(&self) -> bool {
+        self.plan_mode || {
+            #[cfg(feature = "human-loop")]
+            {
+                self.permission_service.as_ref().is_some_and(|service| {
+                    service.current_mode() == echo_core::tools::permission::PermissionMode::Plan
+                })
+            }
+            #[cfg(not(feature = "human-loop"))]
+            {
+                false
+            }
+        }
     }
 
     pub(crate) fn is_skill_tool_allowed(&self, tool_name: &str) -> bool {
@@ -597,9 +621,8 @@ pub struct AgentRunSnapshot {
     pub context: Arc<tokio::sync::Mutex<crate::compression::ContextManager>>,
     /// Tool execution state (tools, hooks).
     pub tools: Arc<ToolRuntime>,
-    /// Invocation-scoped activation names, updated when a skill is activated
-    /// through a tool during the turn.
-    skill_telemetry_active_skills: Arc<std::sync::Mutex<Vec<String>>>,
+    /// Canonical activation authority shared with the owning agent and Skill tools.
+    skill_activation: crate::skills::SkillActivationHandle,
     /// Guard / safety state.
     pub guard: Arc<GuardRuntime>,
     /// Snapshot manager (from memory subsystem).
@@ -751,8 +774,8 @@ impl AgentRunSnapshot {
             invocation.and_then(|context| context.disabled_tools.as_ref()),
             invocation.and_then(|context| context.visible_tools.as_ref()),
         );
-        let skill_telemetry_active_skills =
-            Arc::new(std::sync::Mutex::new(tools.active_skill_names.clone()));
+        let skill_activation = agent.tools.skill_registry.activation_handle();
+        config.plan_mode = tools.is_plan_mode();
         Self {
             config: Arc::new(config),
             context: agent.memory.context.clone(),
@@ -865,25 +888,12 @@ impl AgentRunSnapshot {
                 .unwrap_or_else(|error| error.into_inner())
                 .clone(),
             skill_curator: agent.skill_curator.clone(),
-            skill_telemetry_active_skills,
+            skill_activation,
         }
     }
 
-    fn active_skill_names_for_telemetry(&self) -> Vec<String> {
-        self.skill_telemetry_active_skills
-            .lock()
-            .map(|names| names.clone())
-            .unwrap_or_else(|_| self.tools.active_skill_names.clone())
-    }
-
-    fn note_skill_activation(&self, skill_name: &str) {
-        let Ok(mut names) = self.skill_telemetry_active_skills.lock() else {
-            return;
-        };
-        if !names.iter().any(|name| name == skill_name) {
-            names.push(skill_name.to_string());
-            names.sort();
-        }
+    fn active_skill_names(&self) -> Vec<String> {
+        self.skill_activation.activated_names()
     }
 
     /// Persist one best-effort observation for every skill active in this
@@ -899,7 +909,7 @@ impl AgentRunSnapshot {
         let Some(store) = self.memory_store.clone() else {
             return;
         };
-        let skill_names = self.active_skill_names_for_telemetry();
+        let skill_names = self.active_skill_names();
         if skill_names.is_empty() {
             return;
         }
@@ -1028,7 +1038,7 @@ impl AgentRunSnapshot {
             conversation_id: conv_id.clone(),
             messages_json,
             current_plan,
-            active_skills: self.active_skill_names_for_telemetry(),
+            active_skills: self.active_skill_names(),
             blocked_reason,
             working_dir: self.config.working_dir.clone(),
             timestamp: chrono::Utc::now(),
@@ -1801,12 +1811,6 @@ impl AgentRunSnapshot {
                 }
             }
 
-            if let Some(result) = ctx.result.as_ref()
-                && let crate::tools::ToolResultKind::SkillActivation { name } = &result.kind
-            {
-                self.note_skill_activation(name);
-            }
-
             match pipeline_result {
                 Ok(()) => {
                     // Check if execution was blocked
@@ -1933,13 +1937,21 @@ mod transcript_filter_tests {
         merge_generation_projection,
     };
     use crate::compression::{ContextManager, ContextProjection};
-    use crate::error::Result;
+    use crate::error::{ReactError, Result};
     use echo_core::llm::types::Message;
     use echo_core::tools::{Tool, ToolParameters, ToolResult};
     use std::collections::HashSet;
     use std::sync::Arc;
 
     struct NamedTool(&'static str);
+
+    struct ReadOnlyNamedTool(&'static str);
+
+    #[cfg(feature = "mcp")]
+    struct McpPlanProbe {
+        name: String,
+        executions: Arc<std::sync::atomic::AtomicUsize>,
+    }
 
     #[cfg(feature = "human-loop")]
     struct ApprovalTool;
@@ -2001,6 +2013,63 @@ mod transcript_filter_tests {
             _parameters: ToolParameters,
         ) -> futures::future::BoxFuture<'a, echo_core::error::Result<ToolResult>> {
             Box::pin(async { Ok(ToolResult::success("ok")) })
+        }
+    }
+
+    impl Tool for ReadOnlyNamedTool {
+        fn name(&self) -> &str {
+            self.0
+        }
+
+        fn description(&self) -> &str {
+            "locally classified read-only snapshot policy test tool"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        fn risk_level(&self) -> echo_core::tools::ToolRiskLevel {
+            echo_core::tools::ToolRiskLevel::ReadOnly
+        }
+
+        fn execute<'a>(
+            &'a self,
+            _parameters: ToolParameters,
+        ) -> futures::future::BoxFuture<'a, echo_core::error::Result<ToolResult>> {
+            Box::pin(async { Ok(ToolResult::success("ok")) })
+        }
+    }
+
+    #[cfg(feature = "mcp")]
+    impl Tool for McpPlanProbe {
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        fn description(&self) -> &str {
+            "MCP plan-mode capability probe"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        fn permissions(&self) -> Vec<echo_core::tools::permission::ToolPermission> {
+            vec![echo_core::tools::permission::ToolPermission::Write]
+        }
+
+        fn risk_level(&self) -> echo_core::tools::ToolRiskLevel {
+            echo_core::tools::ToolRiskLevel::Standard
+        }
+
+        fn execute<'a>(
+            &'a self,
+            _parameters: ToolParameters,
+        ) -> futures::future::BoxFuture<'a, echo_core::error::Result<ToolResult>> {
+            self.executions
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async { Ok(ToolResult::success("mutated")) })
         }
     }
 
@@ -2096,6 +2165,42 @@ mod transcript_filter_tests {
                 .await?
                 .is_empty()
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn checkpoint_reads_live_canonical_skill_activation_after_snapshot() -> Result<()> {
+        use crate::state::RuntimeStateStore;
+
+        let temp = tempfile::tempdir()?;
+        let store = Arc::new(crate::state::FileRuntimeStateStore::new(temp.path())?);
+        let config = crate::agent::AgentConfig::new("test-model", "agent", "system")
+            .conversation_id("skill-authority");
+        let mut agent = crate::agent::ReactAgent::new(config);
+        agent.set_state_store(store.clone());
+        assert!(agent.tools.skill_registry.mark_activated("before-snapshot"));
+        let snapshot = AgentRunSnapshot::from_agent(&agent);
+
+        agent.tools.skill_registry.reset_activation_state();
+        assert!(agent.tools.skill_registry.mark_activated("after-snapshot"));
+        snapshot
+            .save_runtime_checkpoint(&agent.memory.context, None)
+            .await?;
+        let checkpoint = store
+            .get_checkpoint("skill-authority")
+            .await?
+            .ok_or_else(|| ReactError::Other("skill checkpoint missing".to_string()))?;
+        assert_eq!(checkpoint.active_skills, vec!["after-snapshot".to_string()]);
+
+        agent.tools.skill_registry.reset_activation_state();
+        snapshot
+            .save_runtime_checkpoint(&agent.memory.context, None)
+            .await?;
+        let reset_checkpoint = store
+            .get_checkpoint("skill-authority")
+            .await?
+            .ok_or_else(|| ReactError::Other("reset checkpoint missing".to_string()))?;
+        assert!(reset_checkpoint.active_skills.is_empty());
         Ok(())
     }
 
@@ -2514,7 +2619,14 @@ mod transcript_filter_tests {
     #[test]
     fn tool_visibility_combines_skill_plan_and_disabled_policies() {
         let manager = Arc::new(crate::tools::ToolManager::new());
-        for name in ["read_file", "write_file", "shell", "final_answer", "custom"] {
+        manager.register(Box::new(ReadOnlyNamedTool("read_file")));
+        for name in [
+            "write_file",
+            "shell",
+            "final_answer",
+            "custom",
+            "mcp__malicious__write",
+        ] {
             manager.register(Box::new(NamedTool(name)));
         }
         let runtime = ToolRuntime {
@@ -2526,12 +2638,14 @@ mod transcript_filter_tests {
                 "write_file".to_string(),
                 "shell".to_string(),
                 "final_answer".to_string(),
+                "mcp__malicious__write".to_string(),
             ])),
-            active_skill_names: Vec::new(),
             plan_state: Arc::new(tokio::sync::RwLock::new(None)),
             disabled_tools: HashSet::from(["final_answer".to_string()]),
             visibility: None,
             plan_mode: true,
+            #[cfg(feature = "human-loop")]
+            permission_service: None,
         };
 
         let visible: Vec<String> = runtime
@@ -2541,6 +2655,121 @@ mod transcript_filter_tests {
             .collect();
 
         assert_eq!(visible, vec!["read_file"]);
+    }
+
+    #[cfg(feature = "mcp")]
+    #[tokio::test]
+    async fn permission_plan_hides_and_blocks_locally_mutating_mcp_tool() -> Result<()> {
+        let tool_name = crate::mcp::McpToolAdapter::exposed_name_for("malicious", "write");
+        let executions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut agent = crate::agent::ReactAgent::new(
+            crate::agent::AgentConfig::new("test-model", "agent", "system")
+                .permission_mode(echo_core::tools::permission::PermissionMode::Plan),
+        );
+        agent.add_tool(Box::new(McpPlanProbe {
+            name: tool_name.clone(),
+            executions: Arc::clone(&executions),
+        }));
+
+        let snapshot = AgentRunSnapshot::from_agent(&agent);
+        assert!(snapshot.config.plan_mode);
+        assert!(!tool_names(&snapshot).contains(&tool_name));
+
+        let input = serde_json::json!({});
+        let result = snapshot
+            .execute_tool_with_policy(
+                "call-mcp-plan".to_string(),
+                &tool_name,
+                &ToolParameters::new(),
+                &input,
+                None,
+            )
+            .await;
+        let Err(failure) = result else {
+            return Err(echo_core::error::ReactError::Other(
+                "mutating MCP tool executed in permission plan mode".to_string(),
+            ));
+        };
+        assert!(
+            failure
+                .result
+                .error
+                .as_deref()
+                .is_some_and(|reason| reason.contains("Plan mode"))
+        );
+        assert_eq!(executions.load(std::sync::atomic::Ordering::SeqCst), 0);
+        Ok(())
+    }
+
+    #[cfg(all(feature = "mcp", feature = "human-loop"))]
+    #[tokio::test]
+    async fn live_permission_plan_precedes_hook_allow_for_mutating_mcp_tool() -> Result<()> {
+        use crate::skills::hooks::{HookAction, HookEvent, HookRule, HooksDefinition};
+
+        let tool_name = crate::mcp::McpToolAdapter::exposed_name_for("malicious", "write");
+        let executions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let service = Arc::new(
+            crate::human_loop::PermissionService::new()
+                .with_mode(echo_core::tools::permission::PermissionMode::Default),
+        );
+        let agent = crate::agent::ReactAgentBuilder::new()
+            .model("test-model")
+            .permission_service(Arc::clone(&service))
+            .tool(Box::new(McpPlanProbe {
+                name: tool_name.clone(),
+                executions: Arc::clone(&executions),
+            }))
+            .build()?;
+        let mut hooks = HooksDefinition::default();
+        hooks.add_rules(
+            HookEvent::PermissionRequest,
+            vec![HookRule {
+                matcher: "*".to_string(),
+                hooks: vec![HookAction::Permission {
+                    decision: "allow".to_string(),
+                    reason: None,
+                    suggestions: Vec::new(),
+                }],
+            }],
+        );
+        agent
+            .hook_registry()
+            .write()
+            .await
+            .register_user_hooks(hooks);
+
+        let snapshot = AgentRunSnapshot::from_agent(&agent);
+        assert!(!snapshot.config.plan_mode);
+        service
+            .set_mode(echo_core::tools::permission::PermissionMode::Plan)
+            .await;
+        assert!(snapshot.tools.is_plan_mode());
+        assert!(!tool_names(&snapshot).contains(&tool_name));
+
+        let input = serde_json::json!({});
+        let result = snapshot
+            .execute_tool_with_policy(
+                "call-mcp-live-plan".to_string(),
+                &tool_name,
+                &ToolParameters::new(),
+                &input,
+                None,
+            )
+            .await;
+        let Err(failure) = result else {
+            return Err(echo_core::error::ReactError::Other(
+                "hook allow bypassed live permission Plan mode".to_string(),
+            ));
+        };
+        assert!(
+            failure
+                .result
+                .error
+                .as_deref()
+                .is_some_and(|reason| reason.contains("Plan mode"))
+        );
+        assert_eq!(executions.load(std::sync::atomic::Ordering::SeqCst), 0);
+        Ok(())
     }
 
     #[test]

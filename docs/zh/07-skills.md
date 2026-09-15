@@ -287,6 +287,24 @@ Skill directory: ...
 
 `ReactAgent::activate_skill` 用 `ContextManager::replace_projection` 把该块写到精确 marker `echo-agent:skill:<name>`。`activate_skill` 工具返回 typed activation fact，ReAct 工具阶段再把其内容投影到同一 marker。重复激活会替换旧投影，不会累积第二份权威。上下文压缩会跳过 projection，并在压缩后重新插回。
 
+Agent 的主 `SkillRegistry` 与 `activate_skill`、`read_skill_resource`、
+`run_skill_script` 使用的并发 descriptor view 共享同一个运行时 activation
+权威。因此直接 API 激活、工具激活、checkpoint 保存/恢复、allowed-tool 过滤和
+resource/script 访问读取同一组 active names。Catalog descriptor 仍是定义数据，
+不构成第二份 activation 状态。
+
+Activation 以 `(name, arguments, source)` 为 single-flight identity。同一 identity
+重复调用会返回已提交内容，不会再次执行 inline command；不同 arguments 或 source 会在
+上一代完成后创建新 generation。reset、descriptor replacement 和 remove 会 fence 旧的
+in-flight completion。Checkpoint 保存直接读取这一实时权威，恢复则从当前 descriptor
+原子派生 sandbox policy。如果取消时 inline command 的结算结果不确定，该 activation
+identity 会保持 poisoned，直到显式 reset 或 remove，避免自动重放外部 effect。
+
+应用修改 Agent 持有的文件型 Skill 时，使用 `register_skill_descriptor`、
+`register_prepared_skill`、`tag_skills_source{_with_variables}`、
+`unregister_skill_names` 或 `unregister_skills_by_source`。这些 API 会同时归并 catalog
+与 progressive tool definition view；`ReactAgent` 不再暴露原始可变 registry accessor。
+
 ### triggers 来自哪里
 
 标准 frontmatter 没有 trigger 字段，因此文件型 skill 的
@@ -362,7 +380,7 @@ Skill 与用户和插件 Hook 文件使用同一套 31 事件系统，覆盖工�
 
 这些规范 wire 字段名区分大小写；`modified_input`、`message` 和 `permission_mode` 不是别名。
 
-若多个匹配 hook 都返回 `permission_mode_override`，运行时仅保留最后一个非空覆盖值。权限决策本身仍按更严格的优先级处理：`deny > ask > allow`。
+若多个匹配 hook 都返回 `permission_mode_override`，运行时仅保留最后一个非空覆盖值。权限决策本身按更严格的优先级归约：`deny > ask > require_approval > allow`。返回结果前会归约所有匹配的 permission decision；较早的 `allow` 或 `ask` 不会阻止后续来源贡献 `deny`。携带 permission decision 的结果即使同时返回 `continue: false`，也不能停止安全归约；不含 permission decision 的结果仍保留正常 stop 语义。`deny` 还会阻止 Agent 自动工具调用。
 
 插件拥有的 Skill 会在解析 frontmatter 前，对完整 `SKILL.md` 应用 `PluginVariables`
 替换。因此 `${ECHO_PLUGIN_ROOT}`、`${ECHO_PLUGIN_DATA}`、`${ECHO_PROJECT_DIR}`、

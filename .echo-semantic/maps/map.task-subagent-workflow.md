@@ -4,13 +4,13 @@ id: map.task-subagent-workflow
 kind: capability_map
 title: Task、Subagent、Workflow 与 Scheduler
 risk: high
-observed_at: source:8ff7eb397767728069b01b9098b224a6840a8adb663717e5c4fd7a584eb4063e
+observed_at: source:1bcfbd1131476ae872a2dc89326675abd7c02dd26d56c8d29a058cd91fb308fc
 boundary_refs: [boundary.task-subagent-workflow]
 behavior_refs: [behavior.task-subagent-execution]
 rule_refs: [rule.task-subagent-authority]
-evidence_refs: [evidence.task-subagent-workflow, evidence.high-risk-audit-frontier, evidence.task-patch-claim-cas-repair, evidence.task-patch-claim-cas-verification, evidence.subagent-factory-singleflight-repair, evidence.subagent-factory-singleflight-verification, evidence.background-task-terminal-authority-repair, evidence.background-task-terminal-authority-verification, evidence.framework-concept-navigation]
+evidence_refs: [evidence.task-subagent-workflow, evidence.high-risk-audit-frontier, evidence.task-patch-claim-cas-repair, evidence.task-patch-claim-cas-verification, evidence.subagent-factory-singleflight-repair, evidence.subagent-factory-singleflight-verification, evidence.background-task-terminal-authority-repair, evidence.background-task-terminal-authority-verification, evidence.command-cell-cancel-artifact-settlement-repair, evidence.command-cell-cancel-artifact-settlement-verification, evidence.workflow-parallel-failure-settlement-repair, evidence.workflow-parallel-failure-settlement-verification, evidence.workflow-checkpoint-claim-settlement-repair, evidence.workflow-checkpoint-claim-settlement-verification, evidence.scheduler-occurrence-authority-repair, evidence.scheduler-occurrence-authority-verification, evidence.framework-concept-navigation]
 finding_refs: [finding.task-patch-claim-race, finding.task-subagent-attempt-link, finding.subagent-factory-cancellation, finding.subagent-factory-publication-race, finding.workflow-dag-authority, finding.workflow-entry-loop-drift, finding.workflow-checkpoint-claim-recovery, finding.workflow-checkpoint-resurrection-race, finding.workflow-parallel-failure-settlement, finding.scheduler-cache-delivery, finding.scheduler-task-id-uniqueness, finding.scheduler-control-fire-race, finding.background-task-wait, finding.command-cell-retention-lease-prune-race, finding.command-cell-cancel-artifact-settlement, finding.subagent-definition-catalog]
-audit_refs: [audit.task-subagent-workflow.state-authority, audit.task-subagent-workflow.failure-concurrency, audit.task-subagent-workflow.data-durability, audit.task-subagent-workflow.time-lifecycle, audit.task-patch-claim-cas-rereview, audit.subagent-factory-singleflight-rereview, audit.background-task-terminal-authority-rereview]
+audit_refs: [audit.task-subagent-workflow.state-authority, audit.task-subagent-workflow.failure-concurrency, audit.task-subagent-workflow.data-durability, audit.task-subagent-workflow.time-lifecycle, audit.task-patch-claim-cas-rereview, audit.subagent-factory-singleflight-rereview, audit.background-task-terminal-authority-rereview, audit.workflow-parallel-failure-settlement-rereview, audit.workflow-checkpoint-claim-settlement-rereview, audit.scheduler-occurrence-authority-rereview]
 related_map_refs: [map.agent-session-turn, map.observation-persistence-delivery, map.tool-permission-sandbox]
 scenarios:
   revisioned-task-graph:
@@ -36,16 +36,18 @@ scenarios:
     status: needs_review
     source_refs: [echo-orchestration/src/workflow/graph.rs, echo-orchestration/src/workflow/checkpoint_store.rs, echo-orchestration/src/workflow/dag.rs]
     finding_refs: [finding.workflow-dag-authority, finding.workflow-entry-loop-drift, finding.workflow-checkpoint-claim-recovery, finding.workflow-checkpoint-resurrection-race, finding.workflow-parallel-failure-settlement]
-    evidence_refs: [evidence.task-subagent-workflow]
-    unknown: Graph/DagWorkflow authority、四执行入口事件对等与 checkpoint claim recovery 尚未闭合
-    next_step: 分别执行 consolidation、entry parity 与 crash-cut audit
+    evidence_refs: [evidence.task-subagent-workflow, evidence.workflow-parallel-failure-settlement-repair, evidence.workflow-parallel-failure-settlement-verification, evidence.workflow-checkpoint-claim-settlement-repair, evidence.workflow-checkpoint-claim-settlement-verification]
+    audit_refs: [audit.workflow-parallel-failure-settlement-rereview, audit.workflow-checkpoint-claim-settlement-rereview]
+    unknown: checkpoint claim/lease与并行sibling settlement已关闭；Graph/DagWorkflow authority及四执行入口事件对等仍未闭合
+    next_step: 分别执行DAG consolidation与entry parity audit
   cron-scheduler:
     status: needs_review
     source_refs: [echo-orchestration/src/scheduler/runner.rs, echo-orchestration/src/scheduler/cron_task.rs]
     finding_refs: [finding.scheduler-cache-delivery, finding.scheduler-task-id-uniqueness, finding.scheduler-control-fire-race]
-    evidence_refs: [evidence.task-subagent-workflow]
-    unknown: store/cache 可见状态、migration overwrite 与 callback delivery guarantee 未闭合
-    next_step: audit cache refresh、持久 claim/ledger 与 migration target collision
+    evidence_refs: [evidence.task-subagent-workflow, evidence.scheduler-occurrence-authority-repair, evidence.scheduler-occurrence-authority-verification]
+    audit_refs: [audit.scheduler-occurrence-authority-rereview]
+    unknown: store/cache、唯一ID、migration collision与control/admission已闭合；callback durable occurrence claim与crash replay仍未定义
+    next_step: 为#84裁决并实现持久claim/ledger及崩溃恢复语义
   process-local-background-task:
     status: mapped
     source_refs: [echo-orchestration/src/tasks/background_task.rs, docs/en/29-long-running-tasks.md, docs/zh/29-long-running-tasks.md, docs/adr/0039-background-task-terminal-authority.md]
@@ -55,13 +57,12 @@ scenarios:
     evidence_refs: [evidence.background-task-terminal-authority-repair, evidence.background-task-terminal-authority-verification]
     audit_refs: [audit.background-task-terminal-authority-rereview]
   command-cell-runtime:
-    status: needs_review
+    status: mapped
     source_refs: [echo-core/src/tools/cell.rs, echo-orchestration/src/tasks/command_cell.rs, docs/adr/0025-deterministic-command-cell-watcher.md]
-    evidence_refs: [evidence.task-subagent-workflow, evidence.effects-extensions]
+    evidence_refs: [evidence.task-subagent-workflow, evidence.effects-extensions, evidence.command-cell-cancel-artifact-settlement-repair, evidence.command-cell-cancel-artifact-settlement-verification]
     behavior_refs: [behavior.task-subagent-execution, behavior.effect-permission-execution]
     finding_refs: [finding.command-cell-retention-lease-prune-race, finding.command-cell-cancel-artifact-settlement]
-    unknown: retained lease prune 与普通 cancel artifact settlement 存在确认的生命周期竞态
-    next_step: 分别 repair lease-aware prune 与 cancellation-bounded finalization
+    audit_refs: [audit.command-cell-settlement-rereview]
 ---
 
 # Task、Subagent、Workflow 与 Scheduler

@@ -1049,7 +1049,7 @@ impl ToolExecutionPipeline {
 
 // ── PlanModeStage ──────────────────────────────────────────────────
 
-/// In plan mode, blocks write/destructive tools — the agent can only read and analyze.
+/// In plan mode, only locally classified read-only tools may execute.
 pub struct PlanModeStage;
 
 #[async_trait]
@@ -1061,15 +1061,12 @@ impl PipelineStage for PlanModeStage {
     async fn run(
         &self,
         ctx: &mut ToolExecutionContext,
-        _snapshot: &crate::agent::snapshot::AgentRunSnapshot,
+        snapshot: &crate::agent::snapshot::AgentRunSnapshot,
     ) -> Result<()> {
-        if !ctx.plan_mode {
+        if !ctx.plan_mode && !snapshot.tools.is_plan_mode() {
             return Ok(());
         }
-        if is_write_tool(&ctx.tool_name)
-            || ctx.tool_name == "shell"
-            || ctx.tool_name == "delete_file"
-        {
+        if !snapshot.tools.is_tool_read_only(&ctx.tool_name) {
             ctx.block(crate::tools::ToolFailureCategory::Unavailable, format!(
                 "Plan mode: '{}' is blocked. Read and analyze only. Use /plan off to enable writes.",
                 ctx.tool_name

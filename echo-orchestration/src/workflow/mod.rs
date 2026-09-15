@@ -63,6 +63,11 @@ use futures::stream::BoxStream;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Maximum time spent draining cancelled workflow siblings before returning a
+/// terminal error. A bounded drain prevents detached node futures while still
+/// allowing cooperative cancellation to settle.
+pub(crate) const WORKFLOW_TASK_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Shareable agent handle for safe access across async tasks.
 ///
 /// Because the [`Agent`] trait takes `&self` for all methods and concrete
@@ -99,7 +104,9 @@ pub enum WorkflowEvent {
     },
     /// Token produced by node (forwarded during streaming agent output)
     Token { node_name: String, token: String },
-    /// Node execution error (non-fatal; error is recorded but stream continues)
+    /// Node execution error. The stream emits this terminal diagnostic before
+    /// yielding the same error through its `Result` item; no Completed event
+    /// follows a failed node.
     NodeError { node_name: String, error: String },
     /// Workflow execution completed
     Completed {

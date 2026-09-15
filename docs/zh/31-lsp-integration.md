@@ -327,6 +327,16 @@ new() ─> initialize(root_uri) ─> [请求 / 通知]* ─> shutdown()
                                     └─ ...
 ```
 
+### 派生 client 与关闭
+
+`get_client` 和 `get_client_for_file` 返回的是当前管理器生命周期的派生
+handle。管理器拥有子进程，并向这些 handle 共享一个代次 fence。
+`shutdown_all()` 会先关闭 fence，再等待子进程结算，因此调用方保留的旧
+handle 会立即变为 stale。stale handle 调用 `initialize` 或其它 I/O 操作时
+返回类型化的 `NotInitialized` 生命周期错误，不能重新启动脱离管理器的子
+进程。需要新生命周期时应创建新的 `LspManager`；旧 client handle 永远不
+会成为独立的进程 owner。
+
 ---
 
 ## 示例：为 Rust 项目配置 rust-analyzer

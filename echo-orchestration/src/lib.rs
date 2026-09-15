@@ -11,7 +11,7 @@
 //! | [`tasks`] | Revisioned task graphs, DAG execution, scheduling, and progress events |
 //! | [`scheduler`] | Cron-based task scheduling — `CronTask`, `SchedulerRunner` |
 //! | [`planning`] | Structural validation for revisioned task graphs |
-//! | [`runtime`] | Generic turn driver — `AgentTurnDriver`, `TurnRequest`, `TurnOutcome` |
+//! | [`runtime`] | Generic turn driver — `AgentTurnDriver`, `TurnRequest`, execution and delivery outcomes |
 //!
 //! ## Feature Flags
 //!

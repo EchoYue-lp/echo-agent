@@ -6,6 +6,7 @@ use echo_core::error::{AgentError, ReactError, Result};
 use futures::future::BoxFuture;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Instant;
+use tokio::task::JoinSet;
 use tracing::{debug, info};
 
 /// A node in the DAG
@@ -136,9 +137,9 @@ impl Workflow for DagWorkflow {
                     batch.len()
                 );
 
-                let mut handles = Vec::with_capacity(batch.len());
+                let mut handles = JoinSet::new();
 
-                for node_id in &batch {
+                for (batch_index, node_id) in batch.iter().enumerate() {
                     let agent_handle = self.nodes.get(node_id).cloned().ok_or_else(|| {
                         ReactError::Other(format!("DAG node {node_id:?} has no registered agent"))
                     })?;
@@ -159,35 +160,66 @@ impl Workflow for DagWorkflow {
                     };
 
                     let nid = node_id.clone();
-                    handles.push(tokio::spawn(async move {
+                    handles.spawn(async move {
                         let step_start = Instant::now();
                         let agent = agent_handle.as_ref();
                         let agent_name = agent.name().to_string();
                         let result = agent.execute(&node_input).await;
                         let elapsed = step_start.elapsed();
-                        (nid, agent_name, node_input, result, elapsed)
-                    }));
+                        (batch_index, nid, agent_name, node_input, result, elapsed)
+                    });
                 }
 
+                let mut completed = Vec::with_capacity(batch.len());
+                completed.resize_with(batch.len(), || None);
                 let mut first_error = None;
-                for handle in &mut handles {
-                    let (node_id, agent_name, node_input, result, elapsed) = match handle.await {
-                        Ok(value) => value,
-                        Err(error) => {
-                            first_error.get_or_insert_with(|| {
-                                ReactError::Other(format!("task join error: {error}"))
-                            });
-                            continue;
-                        }
-                    };
+                while let Some(joined) = handles.join_next().await {
+                    let (batch_index, node_id, agent_name, node_input, result, elapsed) =
+                        match joined {
+                            Ok(value) => value,
+                            Err(error) => {
+                                first_error =
+                                    Some(ReactError::Other(format!("task join error: {error}")));
+                                break;
+                            }
+                        };
                     let output = match result {
                         Ok(output) => output,
                         Err(error) => {
-                            first_error.get_or_insert(error);
-                            continue;
+                            first_error = Some(error);
+                            break;
                         }
                     };
 
+                    let Some(slot) = completed.get_mut(batch_index) else {
+                        first_error = Some(ReactError::Other(format!(
+                            "DAG node completed with invalid batch index {batch_index}"
+                        )));
+                        break;
+                    };
+                    if slot
+                        .replace((node_id, agent_name, node_input, output, elapsed))
+                        .is_some()
+                    {
+                        first_error = Some(ReactError::Other(format!(
+                            "DAG node completed more than once for batch index {batch_index}"
+                        )));
+                        break;
+                    }
+                }
+                if let Some(error) = first_error {
+                    handles.abort_all();
+                    while handles.join_next().await.is_some() {}
+                    return Err(error);
+                }
+
+                for completed_node in completed {
+                    let (node_id, agent_name, node_input, output, elapsed) = completed_node
+                        .ok_or_else(|| {
+                            ReactError::Other(
+                                "DAG batch completed without a registered result".to_string(),
+                            )
+                        })?;
                     info!(
                         workflow = "dag",
                         node = %node_id,
@@ -195,14 +227,12 @@ impl Workflow for DagWorkflow {
                         elapsed_ms = elapsed.as_millis(),
                         "✓ Node completed"
                     );
-
                     step_outputs.push(StepOutput {
                         agent_name,
                         input: node_input,
                         output: output.clone(),
                         elapsed,
                     });
-
                     node_results.insert(node_id.clone(), output);
 
                     if let Some(succs) = successors.get(node_id.as_str()) {
@@ -215,14 +245,6 @@ impl Workflow for DagWorkflow {
                             }
                         }
                     }
-                }
-                if let Some(error) = first_error {
-                    for handle in &handles {
-                        if !handle.is_finished() {
-                            handle.abort();
-                        }
-                    }
-                    return Err(error);
                 }
             }
 
@@ -467,6 +489,50 @@ fn detect_cycle(nodes: &[String], edges: &[DagEdge]) -> Option<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use echo_core::agent::AgentEvent;
+    use futures::stream::{self, BoxStream};
+    use std::time::Duration;
+
+    struct TestAgent {
+        name: &'static str,
+        fail: bool,
+        delay: Duration,
+    }
+
+    impl Agent for TestAgent {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn model_name(&self) -> &str {
+            "test"
+        }
+
+        fn system_prompt(&self) -> &str {
+            "test"
+        }
+
+        fn execute<'a>(&'a self, _task: &'a str) -> BoxFuture<'a, Result<String>> {
+            Box::pin(async move {
+                tokio::time::sleep(self.delay).await;
+                if self.fail {
+                    Err(ReactError::Other(format!("{} failed", self.name)))
+                } else {
+                    Ok(self.name.to_string())
+                }
+            })
+        }
+
+        fn execute_stream<'a>(
+            &'a self,
+            _task: &'a str,
+        ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+            Box::pin(async move {
+                let stream: BoxStream<'a, Result<AgentEvent>> = Box::pin(stream::empty());
+                Ok(stream)
+            })
+        }
+    }
 
     #[test]
     fn test_topological_sort_simple() {
@@ -552,5 +618,67 @@ mod tests {
             },
         ];
         assert!(detect_cycle(&nodes, &edges).is_none());
+    }
+
+    #[tokio::test]
+    async fn failed_dag_aborts_and_drains_sibling_tasks() {
+        let mut workflow = DagWorkflow::builder()
+            .node(
+                "fail",
+                TestAgent {
+                    name: "fail",
+                    fail: true,
+                    delay: Duration::from_millis(1),
+                },
+            )
+            .node(
+                "slow",
+                TestAgent {
+                    name: "slow",
+                    fail: false,
+                    delay: Duration::from_secs(60),
+                },
+            )
+            .build()
+            .unwrap();
+
+        let result = tokio::time::timeout(Duration::from_secs(1), workflow.run("input"))
+            .await
+            .unwrap();
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn successful_dag_preserves_topological_step_order() -> Result<()> {
+        let mut workflow = DagWorkflow::builder()
+            .node(
+                "registered-first",
+                TestAgent {
+                    name: "registered-first",
+                    fail: false,
+                    delay: Duration::from_millis(30),
+                },
+            )
+            .node(
+                "completed-first",
+                TestAgent {
+                    name: "completed-first",
+                    fail: false,
+                    delay: Duration::from_millis(1),
+                },
+            )
+            .build()?;
+
+        let output = workflow.run("input").await?;
+        assert_eq!(
+            output
+                .steps
+                .iter()
+                .map(|step| step.agent_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["registered-first", "completed-first"]
+        );
+        assert_eq!(output.result, "registered-first\n\ncompleted-first");
+        Ok(())
     }
 }

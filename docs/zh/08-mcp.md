@@ -4,7 +4,18 @@
 
 MCP（Model Context Protocol）是 Anthropic 于 2024 年提出的开放标准，用于统一 LLM 应用与外部工具服务之间的通信格式。MCP 服务端暴露工具（tools）、资源（resources）和提示词（prompts），客户端（即 Agent）连接后自动发现并调用这些能力。
 
-echo-agent 实现了完整的 MCP 客户端，支持最新的协议版本（2025-03-26），可以连接任何符合 MCP 规范的服务端，并将其工具无缝适配为框架的 `Tool` trait。
+echo-agent 实现了完整的 MCP 客户端，支持 MCP `2025-11-25`，并兼容
+`2025-06-18`、`2025-03-26` 和 `2024-11-05`。它可以连接符合规范的服务端，
+并将服务端工具无缝适配为框架的 `Tool` trait。
+
+当前客户端在 `initialize.capabilities` 中只发送空对象。由于尚未实现服务端到
+客户端的请求/通知处理器，客户端不会广告 roots、sampling 或 elicitation；完成
+对应处理链路后才会增加这些能力。服务端支持上面列出的四个协议版本，并在握手
+时回显客户端请求的受支持版本。
+
+客户端也会在发送 `notifications/initialized` 和发现能力前，用同一四版本集合校验
+服务端返回的 `initialize.protocolVersion`。未知版本会以
+`McpError::InitializationFailed` 失败并关闭 transport，不会发布部分初始化的 client。
 
 ---
 
@@ -139,7 +150,7 @@ McpServerConfig::stdio(
 
 ### 2. HTTP（Streamable HTTP，推荐远程服务）
 
-符合 MCP 2025-03-26 规范的现代 HTTP 传输：
+符合 MCP 2025-11-25 规范的现代 HTTP 传输：
 
 ```
 ┌───────────────────┐                    ┌───────────────────┐
@@ -167,6 +178,12 @@ let mut headers = HashMap::new();
 headers.insert("Authorization".to_string(), "Bearer token".to_string());
 McpServerConfig::http_with_headers("secure-api", "https://api.example.com/mcp", headers);
 ```
+
+带凭据的 MCP 配置采用脱敏 `Debug`：stdio 参数和环境变量值、HTTP/SSE
+headers 以及 URL 凭据都不会按原值格式化。Transport diagnostic 对原始
+stderr、响应 body、server error 和 endpoint URL 使用相同脱敏策略；MCP
+session 与 SSE event 标识只记录是否存在。脱敏只影响诊断，不改变实际发送给用户所选
+MCP server 的值。
 
 ### 3. SSE（旧版 HTTP+SSE，兼容旧 SDK）
 
@@ -379,6 +396,35 @@ impl Tool for McpToolAdapter {
 ```
 
 对 Agent 来说，MCP 工具和本地 Rust 工具没有任何区别，都可以通过 `execute()` 调用。
+
+### 本地能力分类
+
+MCP 工具的 `readOnlyHint`、`destructiveHint` 等 annotation 是服务端提供的建议性
+元数据，不能授予权限，也不能决定失败后的副作用结算。默认情况下，每个适配后的
+MCP 工具都由框架本地保守分类为 `Mutating`、`Standard`，并声明
+`ToolPermission::Write`。因此未知远端副作用不会混入 Agent 的只读模式，同时用户主动
+连接 MCP 的流程保持不变。
+
+embedding application 在通过本地配置或其它可信 policy 验证工具后，可以显式应用更
+精确的分类：
+
+```rust,no_run
+use echo_agent::tools::{ToolCapabilities, permission::ToolPermission};
+use echo_agent::mcp::{McpClient, McpTool, McpToolAdapter};
+
+# fn classify(
+#     client: std::sync::Arc<McpClient>,
+#     tool: McpTool,
+# ) {
+let adapter = McpToolAdapter::new(client, tool).with_local_capabilities(
+    ToolCapabilities::read_only(vec![ToolPermission::Read]),
+);
+# let _ = adapter;
+# }
+```
+
+不得直接把 MCP annotation 转换成这个值。同一个本地 `ToolCapabilities` 决策同时提供
+access、risk、permissions 和协议失败时的 side-effect 分类。
 
 ---
 

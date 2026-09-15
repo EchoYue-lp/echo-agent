@@ -51,9 +51,8 @@ impl AcpEventProjector {
     }
 
     /// Render and send the standard updates for one committed envelope.
-    /// A bounds violation or a failed send fails the whole run through the
-    /// driver's exactly-one-terminal contract — the projection is part of
-    /// the run's accepted output, not best-effort decoration.
+    /// A bounds violation or a failed send is surfaced as delivery failure;
+    /// it never becomes a second Agent execution terminal.
     pub async fn emit(&self, envelope: &EventEnvelope) -> Result<()> {
         for notification in self.project(envelope)? {
             self.reserve(&notification)?;

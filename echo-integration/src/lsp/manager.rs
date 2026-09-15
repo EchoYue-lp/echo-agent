@@ -10,8 +10,11 @@ use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use super::client::StdioLspClient;
+use super::client::{LspLifecycle, StdioLspClient};
 use super::config::LspConfig;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static NEXT_MANAGER_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 /// Manages multiple language server processes.
 ///
@@ -26,16 +29,24 @@ pub struct LspManager {
     extension_map: HashMap<String, String>,
     /// Project root URI (e.g., `file:///path/to/project`).
     project_root_uri: Option<String>,
+    /// Shared close fence for all clients derived from this manager.
+    lifecycle: Arc<LspLifecycle>,
 }
 
 impl LspManager {
     /// Create a new empty manager.
     pub fn new() -> Self {
+        let generation = NEXT_MANAGER_GENERATION
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                current.checked_add(1)
+            })
+            .unwrap_or(1);
         Self {
             clients: HashMap::new(),
             configs: HashMap::new(),
             extension_map: HashMap::new(),
             project_root_uri: None,
+            lifecycle: Arc::new(LspLifecycle::new(generation)),
         }
     }
 
@@ -62,13 +73,28 @@ impl LspManager {
 
     /// Start a language server for the given language.
     pub async fn start_server(&mut self, language: &str) -> Result<(), String> {
+        if !self.lifecycle.is_live(self.lifecycle.generation) {
+            return Err("LSP manager is closed".to_string());
+        }
         let config = self
             .configs
             .get(language)
             .cloned()
             .ok_or_else(|| format!("No configuration for language: {language}"))?;
 
-        let mut client = StdioLspClient::new(config);
+        // Replacing a language entry must first close the previous client.
+        // Otherwise a retained derived handle would remain live after the
+        // manager map points at the replacement and could spawn an unowned
+        // child.
+        if self.clients.contains_key(language) {
+            self.stop_server(language).await?;
+        }
+
+        let mut client = StdioLspClient::new_bound(
+            config,
+            Arc::clone(&self.lifecycle),
+            self.lifecycle.generation,
+        );
 
         // Initialize with project root
         let root_uri = self.project_root_uri.as_deref().unwrap_or("file:///");
@@ -112,6 +138,9 @@ impl LspManager {
         &self,
         file_path: &str,
     ) -> Option<(String, Arc<RwLock<StdioLspClient>>)> {
+        if !self.lifecycle.is_live(self.lifecycle.generation) {
+            return None;
+        }
         let ext = Path::new(file_path)
             .extension()
             .and_then(|e| e.to_str())
@@ -124,6 +153,9 @@ impl LspManager {
 
     /// Get a client for a specific language.
     pub fn get_client(&self, language: &str) -> Option<Arc<RwLock<StdioLspClient>>> {
+        if !self.lifecycle.is_live(self.lifecycle.generation) {
+            return None;
+        }
         self.clients.get(language).cloned()
     }
 
@@ -166,6 +198,9 @@ impl LspManager {
 
     /// Shutdown all servers.
     pub async fn shutdown_all(&mut self) {
+        // Close the fence first. Handles retained by SDK callers then become
+        // stale immediately, even while child teardown awaits I/O.
+        self.lifecycle.close();
         let languages: Vec<String> = self.clients.keys().cloned().collect();
         for lang in languages {
             let _ = self.stop_server(&lang).await;
@@ -183,6 +218,94 @@ impl Default for LspManager {
 mod tests {
     use super::*;
     use std::fs;
+
+    fn test_config(language: &str) -> LspServerConfig {
+        LspServerConfig {
+            language: language.to_string(),
+            command: "nonexistent-lsp-test-command".to_string(),
+            args: Vec::new(),
+            extensions: vec![".test".to_string()],
+            env: HashMap::new(),
+            initialization_options: None,
+            max_restarts: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn retained_client_is_stale_after_manager_shutdown() -> Result<(), String> {
+        let mut manager = LspManager::new();
+        let language = "test";
+        let client = StdioLspClient::new_bound(
+            test_config(language),
+            Arc::clone(&manager.lifecycle),
+            manager.lifecycle.generation,
+        );
+        manager
+            .clients
+            .insert(language.to_string(), Arc::new(RwLock::new(client)));
+        let retained = manager
+            .get_client(language)
+            .ok_or_else(|| "test client was not registered".to_string())?;
+
+        manager.shutdown_all().await;
+
+        let mut retained = retained.write().await;
+        let error = retained
+            .initialize("file:///tmp/lsp-test")
+            .await
+            .err()
+            .ok_or_else(|| "stale client unexpectedly initialized".to_string())?;
+        if !matches!(error, echo_core::lsp::LspError::NotInitialized) {
+            return Err(format!("unexpected stale client error: {error}"));
+        }
+        if retained.is_running() {
+            return Err("stale client reports a running child".to_string());
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn replacing_language_client_closes_retained_handle() -> Result<(), String> {
+        let mut manager = LspManager::new();
+        let language = "test";
+        let client = StdioLspClient::new_bound(
+            test_config(language),
+            Arc::clone(&manager.lifecycle),
+            manager.lifecycle.generation,
+        );
+        manager
+            .clients
+            .insert(language.to_string(), Arc::new(RwLock::new(client)));
+        let retained = manager
+            .get_client(language)
+            .ok_or_else(|| "test client was not registered".to_string())?;
+
+        let config = LspConfig {
+            servers: [(language.to_string(), test_config(language))]
+                .into_iter()
+                .collect(),
+        };
+        manager.load_config(&config);
+        let error = manager
+            .start_server(language)
+            .await
+            .err()
+            .ok_or_else(|| "test server unexpectedly started".to_string())?;
+        if !error.contains("Failed to initialize") {
+            return Err(format!("unexpected replacement error: {error}"));
+        }
+
+        let mut retained = retained.write().await;
+        let stale_error = retained
+            .initialize("file:///tmp/lsp-test")
+            .await
+            .err()
+            .ok_or_else(|| "replaced client unexpectedly initialized".to_string())?;
+        if !matches!(stale_error, echo_core::lsp::LspError::NotInitialized) {
+            return Err(format!("unexpected stale replacement error: {stale_error}"));
+        }
+        Ok(())
+    }
 
     #[test]
     fn test_load_config() -> Result<(), String> {

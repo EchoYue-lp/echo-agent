@@ -36,11 +36,13 @@ surface request
 | Authority | AgentTurnDriver and TurnReceipt for driven execution; raw Agent remains a lower-level API |
 | Events and effects | Model output, Tool calls, tracked input, file/process/network effects, and owner-defined projections can occur during execution |
 | Cancellation and failure | Cancellation is requested, producers are settled within their contract, and failure remains typed |
-| Terminal | Completed, Failed, or Cancelled receipt; no terminal is inferred from stream EOF |
+| Terminal | Completed, Failed, or Cancelled execution receipt plus an independent delivery result; no terminal is inferred from stream EOF |
 | Recovery and projection | Session/runtime policy restores state; each Trace, transcript, checkpoint, sink, and adapter owns its write/close ordering |
 
 Reply and Wait operations return or observe the owner's result or receipt. They
 do not turn partial text, a notification, or an EOF into a new terminal fact.
+Delivery failure is reported beside the execution terminal and cannot rewrite
+an execution result already emitted by the producer.
 Trace, transcript, and checkpoint writes can occur before or during finalization.
 Their independently stored status and ordering do not define the TurnReceipt,
 but a write error explicitly propagated by the Agent producer contract can make

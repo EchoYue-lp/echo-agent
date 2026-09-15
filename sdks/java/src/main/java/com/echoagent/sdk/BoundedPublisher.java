@@ -31,6 +31,7 @@ final class BoundedPublisher implements Flow.Publisher<JsonNode>, AutoCloseable 
     private final ArrayDeque<JsonNode> pending = new ArrayDeque<>();
     private final int capacity;
     private final Consumer<JsonNode> onConsumed;
+    private WireHandle expectedStream;
     private BigInteger lastSequence = BigInteger.ZERO;
     private boolean closed;
 
@@ -47,6 +48,30 @@ final class BoundedPublisher implements Flow.Publisher<JsonNode>, AutoCloseable 
         this.onConsumed = Objects.requireNonNull(onConsumed, "onConsumed");
         this.capacity = capacity;
         this.delegate = new SubmissionPublisher<>(ForkJoinPool.commonPool(), capacity);
+    }
+
+    BoundedPublisher(int capacity, Consumer<JsonNode> onConsumed, WireHandle expectedStream) {
+        this(capacity, onConsumed);
+        if (expectedStream != null && !"stream".equals(expectedStream.kind())) {
+            throw new IllegalArgumentException("event publisher requires a stream handle");
+        }
+        this.expectedStream = expectedStream;
+    }
+
+    synchronized boolean validateExpectedStream(WireHandle stream) {
+        Objects.requireNonNull(stream, "stream");
+        if (!"stream".equals(stream.kind())) {
+            fail(new EchoAgentException("serialization_violation", "event publisher requires a stream handle",
+                    "never", "_echo_agent/event", stream.toJson()));
+            return false;
+        }
+        if (expectedStream == null) expectedStream = stream;
+        if (!expectedStream.equals(stream)) {
+            fail(new EchoAgentException("handle_mismatch", "event stream handle changed generation",
+                    "never", "_echo_agent/event", stream.toJson()));
+            return false;
+        }
+        return true;
     }
 
     @Override
@@ -71,8 +96,8 @@ final class BoundedPublisher implements Flow.Publisher<JsonNode>, AutoCloseable 
                 subscriber.onSubscribe(subscription);
             }
             @Override public void onNext(JsonNode item) {
-                onConsumed.accept(item);
                 subscriber.onNext(item);
+                onConsumed.accept(item);
             }
             @Override public void onError(Throwable throwable) { subscriber.onError(throwable); }
             @Override public void onComplete() { subscriber.onComplete(); }
@@ -99,19 +124,33 @@ final class BoundedPublisher implements Flow.Publisher<JsonNode>, AutoCloseable 
     /** Publish one full event envelope, enforcing stream identity and order. */
     synchronized void publishEvent(JsonNode value, String expectedStreamId) {
         if (value == null || !value.isObject()) {
-            fail(new EchoAgentException("serialization_error", "event must be an object",
+            fail(new EchoAgentException("serialization_violation", "event must be an object",
                     "never", "_echo_agent/event", null));
             return;
         }
         JsonNode stream = value.path("stream");
         JsonNode envelope = value.path("envelope");
-        String streamId = stream.path("id").asText("");
+        final WireHandle actualStream;
+        try {
+            actualStream = WireHandle.fromJson(stream);
+        } catch (RuntimeException error) {
+            fail(new EchoAgentException("serialization_violation", "event stream handle is malformed",
+                    "never", "_echo_agent/event", value));
+            return;
+        }
+        if (!"stream".equals(actualStream.kind())) {
+            fail(new EchoAgentException("serialization_violation", "event stream handle kind is invalid",
+                    "never", "_echo_agent/event", value));
+            return;
+        }
+        if (!validateExpectedStream(actualStream)) return;
+        String streamId = actualStream.id();
         String envelopeStreamId = envelope.path("stream_id").asText("");
         String sequenceText = envelope.path("sequence").isTextual()
                 ? envelope.path("sequence").textValue() : "";
         if (streamId.isEmpty() || !streamId.equals(expectedStreamId)
                 || !streamId.equals(envelopeStreamId)) {
-            fail(new EchoAgentException("invalid_value", "event stream identity does not match",
+            fail(new EchoAgentException("serialization_violation", "event stream identity does not match",
                     "never", "_echo_agent/event", value));
             return;
         }
@@ -123,12 +162,12 @@ final class BoundedPublisher implements Flow.Publisher<JsonNode>, AutoCloseable 
             WireValues.u64(sequenceText);
             sequence = new BigInteger(sequenceText);
         } catch (RuntimeException error) {
-            fail(new EchoAgentException("serialization_error", "event sequence is not canonical u64",
+            fail(new EchoAgentException("serialization_violation", "event sequence is not canonical u64",
                     "never", "_echo_agent/event", value));
             return;
         }
         if (sequence.signum() == 0) {
-            fail(new EchoAgentException("invalid_value", "event sequence must be positive",
+            fail(new EchoAgentException("serialization_violation", "event sequence must be positive",
                     "never", "_echo_agent/event", value));
             return;
         }
@@ -148,21 +187,61 @@ final class BoundedPublisher implements Flow.Publisher<JsonNode>, AutoCloseable 
     /** Publish a typed gap and move the contiguous cursor to its watermark. */
     synchronized void publishGap(JsonNode value, String expectedStreamId) {
         if (value == null || !value.isObject()) {
-            fail(new EchoAgentException("serialization_error", "gap must be an object",
+            fail(new EchoAgentException("serialization_violation", "gap must be an object",
                     "never", "_echo_agent/gap", null));
             return;
         }
-        String streamId = value.path("stream").path("id").asText("");
-        String watermark = value.path("gap").path("snapshot_watermark").asText("");
-        if (!streamId.equals(expectedStreamId) || !watermark.matches("[1-9][0-9]*")) {
-            fail(new EchoAgentException("serialization_error", "gap identity or watermark is malformed",
+        final WireHandle actualStream;
+        try {
+            actualStream = WireHandle.fromJson(value.path("stream"));
+        } catch (RuntimeException error) {
+            fail(new EchoAgentException("serialization_violation", "gap stream handle is malformed",
+                    "never", "_echo_agent/gap", value));
+            return;
+        }
+        if (!"stream".equals(actualStream.kind())) {
+            fail(new EchoAgentException("serialization_violation", "gap stream handle kind is invalid",
+                    "never", "_echo_agent/gap", value));
+            return;
+        }
+        if (!validateExpectedStream(actualStream)) return;
+        String streamId = actualStream.id();
+        JsonNode gap = value.path("gap");
+        String from = gap.path("from_sequence").isTextual()
+                ? gap.path("from_sequence").textValue() : "";
+        String to = gap.path("to_sequence").isTextual()
+                ? gap.path("to_sequence").textValue() : "";
+        String watermark = gap.path("snapshot_watermark").isTextual()
+                ? gap.path("snapshot_watermark").textValue() : "";
+        String reason = gap.path("reason").asText("");
+        if (!streamId.equals(expectedStreamId) || reason.isBlank()
+                || !from.matches("[1-9][0-9]*") || !to.matches("[1-9][0-9]*")
+                || !watermark.matches("[1-9][0-9]*")) {
+            fail(new EchoAgentException("serialization_violation", "gap identity or range is malformed",
                     "never", "_echo_agent/gap", value));
             return;
         }
         try {
-            lastSequence = WireValues.u64(watermark).path("value").bigIntegerValue();
+            WireValues.u64(from);
+            WireValues.u64(to);
+            WireValues.u64(watermark);
+            BigInteger fromValue = new BigInteger(from);
+            BigInteger toValue = new BigInteger(to);
+            BigInteger watermarkValue = new BigInteger(watermark);
+            if (toValue.compareTo(fromValue) < 0
+                    || watermarkValue.compareTo(toValue) < 0
+                    || watermarkValue.compareTo(lastSequence) < 0
+                    || (watermarkValue.compareTo(lastSequence) > 0
+                        && lastSequence.signum() > 0
+                        && !fromValue.equals(lastSequence.add(BigInteger.ONE)))) {
+                fail(new EchoAgentException("serialization_violation", "gap sequence range is malformed",
+                        "never", "_echo_agent/gap", value));
+                return;
+            }
+            if (watermarkValue.equals(lastSequence)) return;
+            lastSequence = watermarkValue;
         } catch (RuntimeException error) {
-            fail(new EchoAgentException("serialization_error", "gap watermark is not canonical u64",
+            fail(new EchoAgentException("serialization_violation", "gap watermark is not canonical u64",
                     "never", "_echo_agent/gap", value));
             return;
         }
@@ -191,6 +270,10 @@ final class BoundedPublisher implements Flow.Publisher<JsonNode>, AutoCloseable 
 
     synchronized boolean isClosed() {
         return closed;
+    }
+
+    synchronized BigInteger lastSequence() {
+        return lastSequence;
     }
 
     int capacity() {

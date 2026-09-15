@@ -1,0 +1,25 @@
+{
+  "name": "run-receipt-delivery-failed",
+  "kind": "valid",
+  "target": "RunReceiptWire",
+  "description": "Execution completion and delivery failure remain independently observable.",
+  "payload": {
+    "turn_id": "run-8",
+    "outcome": "completed",
+    "delivery": "failed",
+    "delivery_error": {
+      "category": "io",
+      "terminal_kind": "failed",
+      "retryable": true,
+      "code": "delivery",
+      "message": "projection unavailable"
+    },
+    "final_answer": "done",
+    "prompt_tokens": "120",
+    "completion_tokens": "48",
+    "llm_calls": "2",
+    "compaction_count": "0",
+    "last_event_sequence": "14",
+    "elapsed_ms": "1834"
+  }
+}

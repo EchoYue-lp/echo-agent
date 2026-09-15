@@ -10,9 +10,10 @@ use tokio::sync::Mutex;
 use super::super::types::{
     JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, MCP_PROTOCOL_VERSION,
 };
+use crate::redaction::{header_secrets, request_error, text_with_secrets};
 use echo_core::error::{McpError, ReactError, Result};
 
-use super::McpTransport;
+use super::{McpTransport, redact_response_error};
 
 /// HTTP 传输层（MCP Streamable HTTP）
 ///
@@ -117,13 +118,19 @@ impl McpTransport for HttpTransport {
                                 attempt = retry_count,
                                 max = MAX_RETRIES,
                                 delay_ms = delay.as_millis() as u64,
-                                error = %e,
+                                error = %request_error(
+                                    e,
+                                    header_secrets(&self.headers),
+                                ),
                                 "MCP HTTP 请求失败，重试中..."
                             );
                             tokio::time::sleep(delay).await;
                         } else {
                             return Err(ReactError::Mcp(Box::new(McpError::ConnectionFailed(
-                                format!("HTTP 请求失败: {}", e),
+                                format!(
+                                    "HTTP 请求失败: {}",
+                                    request_error(e, header_secrets(&self.headers))
+                                ),
                             ))));
                         }
                     }
@@ -136,7 +143,7 @@ impl McpTransport for HttpTransport {
             {
                 let mut sid_guard = self.session_id.lock().await;
                 *sid_guard = Some(sid.to_string());
-                tracing::debug!("HTTP: 保存 Mcp-Session-Id: {}", sid);
+                tracing::debug!("HTTP: 保存 Mcp-Session-Id（值已隐藏）");
             }
 
             let status = response.status().as_u16();
@@ -153,18 +160,28 @@ impl McpTransport for HttpTransport {
             // 非 2xx 错误
             if !response.status().is_success() {
                 let body = response.text().await.unwrap_or_default();
+                let session_id = self.session_id.lock().await.clone();
                 return Err(ReactError::Mcp(Box::new(McpError::ConnectionFailed(
-                    format!("HTTP 错误 {}: {}", status, body),
+                    format!("HTTP 错误 {}: {}", status, {
+                        let mut secrets = header_secrets(&self.headers);
+                        secrets.extend(session_id);
+                        text_with_secrets(&body, secrets)
+                    }),
                 ))));
             }
 
             // 直接同步响应
-            let rpc_response: JsonRpcResponse = response.json().await.map_err(|e| {
+            let mut rpc_response: JsonRpcResponse = response.json().await.map_err(|e| {
                 ReactError::Mcp(Box::new(McpError::ProtocolError(format!(
                     "解析 HTTP 响应失败: {}",
-                    e
+                    request_error(e, header_secrets(&self.headers))
                 ))))
             })?;
+            let mut secrets = header_secrets(&self.headers);
+            if let Some(session_id) = self.session_id.lock().await.clone() {
+                secrets.push(session_id);
+            }
+            redact_response_error(&mut rpc_response, &secrets);
 
             Ok(rpc_response)
         })

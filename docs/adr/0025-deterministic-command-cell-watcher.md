@@ -35,6 +35,13 @@ framework consumer and contains no EKO workspace or conversation policy.
 5. Embedding applications own address validation, durable receipts, result
    delivery, acknowledgement, recovery, surface projection, and any explicit
    command-stop operation.
+6. Cell and owner cancellation also interrupt artifact finalization. A cell is
+   published terminal only after its finalizer settles or records a bounded
+   interruption, and interruption is reported as a typed artifact failure
+   without reopening the command process.
+7. Terminal retention treats its candidate scan as advisory. Removal rechecks
+   terminal state and all observation/waiter leases while holding the map shard
+   lock, so a lease acquired during pruning protects the cell.
 
 ## Consequences
 
@@ -44,3 +51,9 @@ framework consumer and contains no EKO workspace or conversation policy.
   registry lease and cursor contract.
 - Applications must not recreate a model-driven polling role or infer terminal
   state from prose, active-process maps, or cancellation alone.
+
+## References
+
+- Tokio `select!` cancellation branches: <https://tokio.rs/tokio/tutorial/select>
+- DashMap conditional removal (`remove_if`):
+  <https://docs.rs/dashmap/6.2.1/dashmap/struct.DashMap.html#method.remove_if>

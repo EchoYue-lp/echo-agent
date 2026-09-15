@@ -4,7 +4,22 @@
 
 MCP (Model Context Protocol) is an open standard proposed by Anthropic in 2024 that unifies communication between LLM applications and external tool services. An MCP server exposes tools, resources, and prompts; an MCP client (i.e., an Agent) connects and automatically discovers and invokes those capabilities.
 
-echo-agent implements a complete MCP client supporting the latest protocol version (2025-03-26), capable of connecting to any spec-compliant server and seamlessly adapting its tools to the framework's `Tool` trait.
+echo-agent implements a complete MCP client supporting MCP `2025-11-25` and the
+compatibility versions `2025-06-18`, `2025-03-26`, and `2024-11-05`. It can
+connect to spec-compliant servers and seamlessly adapt their tools to the
+framework's `Tool` trait.
+
+The framework's client currently advertises an empty `initialize.capabilities`
+object. Roots, sampling, and elicitation are not advertised until their
+server-to-client request/notification handlers are implemented. The server
+side supports the four protocol versions listed above and echoes a supported
+client version during initialization.
+
+The client validates the server-selected `initialize.protocolVersion` against
+that same four-version set before sending `notifications/initialized` or
+discovering capabilities. An unknown selection fails as
+`McpError::InitializationFailed`, and the transport is closed instead of
+publishing a partially initialized client.
 
 ---
 
@@ -139,7 +154,7 @@ McpServerConfig::stdio(
 
 ### 2. HTTP (Streamable HTTP, recommended for remote services)
 
-Modern HTTP transport compliant with MCP 2025-03-26 specification:
+Modern HTTP transport compliant with MCP 2025-11-25 specification:
 
 ```
 ┌───────────────────┐                    ┌───────────────────┐
@@ -167,6 +182,14 @@ let mut headers = HashMap::new();
 headers.insert("Authorization".to_string(), "Bearer token".to_string());
 McpServerConfig::http_with_headers("secure-api", "https://api.example.com/mcp", headers);
 ```
+
+Credential-bearing MCP configuration has redacted `Debug` output: stdio
+arguments and environment values, HTTP/SSE headers, and URL credentials are
+never formatted verbatim. Transport diagnostics apply the same redaction to
+raw stderr, response bodies, server errors, and endpoint URLs; MCP session and
+SSE event identifiers are recorded only as presence metadata. Redaction affects
+diagnostics only and does not change the values sent to the user-selected MCP
+server.
 
 ### 3. SSE (Legacy HTTP+SSE, for older SDKs)
 
@@ -381,6 +404,36 @@ impl Tool for McpToolAdapter {
 ```
 
 To an Agent, MCP tools are indistinguishable from native Rust tools—both are invoked via `execute()`.
+
+### Local capability classification
+
+MCP tool annotations such as `readOnlyHint` and `destructiveHint` are server-provided
+advisory metadata. They never grant permissions or determine side-effect settlement.
+By default, every adapted MCP tool is classified locally as `Mutating`, `Standard`,
+with `ToolPermission::Write`. This conservative default keeps unknown remote effects
+out of read-only Agent modes while leaving user-initiated MCP connection unchanged.
+
+An embedding application may apply a more precise classification after validating the
+tool against local configuration or another trusted policy source:
+
+```rust,no_run
+use echo_agent::tools::{ToolCapabilities, permission::ToolPermission};
+use echo_agent::mcp::{McpClient, McpTool, McpToolAdapter};
+
+# fn classify(
+#     client: std::sync::Arc<McpClient>,
+#     tool: McpTool,
+# ) {
+let adapter = McpToolAdapter::new(client, tool).with_local_capabilities(
+    ToolCapabilities::read_only(vec![ToolPermission::Read]),
+);
+# let _ = adapter;
+# }
+```
+
+Do not derive this value directly from MCP annotations. The one local
+`ToolCapabilities` decision supplies access, risk, permissions, and protocol-failure
+side-effect classification together.
 
 ---
 

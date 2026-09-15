@@ -466,8 +466,8 @@ fn critic_invocation_and_result_are_typed_and_bounded() {
 #[test]
 fn agent_component_extended_methods_and_stream_capabilities_are_closed() {
     use echo_sdk_protocol::methods::{
-        AgentComponentCallInputWire, AgentComponentKindWire, AgentComponentOperationWire,
-        ExtensionDescriptor,
+        AgentComponentCallInputWire, AgentComponentCallResultWire, AgentComponentKindWire,
+        AgentComponentOperationWire, ExtensionDescriptor,
     };
 
     let cases = [
@@ -483,6 +483,34 @@ fn agent_component_extended_methods_and_stream_capabilities_are_closed() {
                 event: WireValue::Null,
             },
             AgentComponentOperationWire::RunAppendEvent,
+        ),
+        (
+            AgentComponentCallInputWire::WorkflowCheckpointSaveIfGeneration {
+                checkpoint: WireValue::Null,
+                expected_generation: WireU64::from_u64(3),
+            },
+            AgentComponentOperationWire::WorkflowCheckpointSaveIfGeneration,
+        ),
+        (
+            AgentComponentCallInputWire::WorkflowCheckpointAckClaim {
+                checkpoint_id: "checkpoint".to_string(),
+                attempt_id: "attempt".to_string(),
+            },
+            AgentComponentOperationWire::WorkflowCheckpointAckClaim,
+        ),
+        (
+            AgentComponentCallInputWire::WorkflowCheckpointRequeueClaim {
+                checkpoint_id: "checkpoint".to_string(),
+                attempt_id: "attempt".to_string(),
+            },
+            AgentComponentOperationWire::WorkflowCheckpointRequeueClaim,
+        ),
+        (
+            AgentComponentCallInputWire::WorkflowCheckpointRenewClaim {
+                checkpoint_id: "checkpoint".to_string(),
+                attempt_id: "attempt".to_string(),
+            },
+            AgentComponentOperationWire::WorkflowCheckpointRenewClaim,
         ),
         (
             AgentComponentCallInputWire::SandboxExecuteStream {
@@ -508,6 +536,31 @@ fn agent_component_extended_methods_and_stream_capabilities_are_closed() {
         assert_eq!(input.operation(), operation);
     }
 
+    for (result, operation) in [
+        (
+            AgentComponentCallResultWire::WorkflowCheckpointSaveIfGeneration { committed: true },
+            AgentComponentOperationWire::WorkflowCheckpointSaveIfGeneration,
+        ),
+        (
+            AgentComponentCallResultWire::WorkflowCheckpointAckClaim,
+            AgentComponentOperationWire::WorkflowCheckpointAckClaim,
+        ),
+        (
+            AgentComponentCallResultWire::WorkflowCheckpointRequeueClaim,
+            AgentComponentOperationWire::WorkflowCheckpointRequeueClaim,
+        ),
+        (
+            AgentComponentCallResultWire::WorkflowCheckpointRenewClaim,
+            AgentComponentOperationWire::WorkflowCheckpointRenewClaim,
+        ),
+    ] {
+        assert_eq!(result.operation(), operation);
+        assert_eq!(
+            operation.component(),
+            AgentComponentKindWire::WorkflowCheckpointStore
+        );
+    }
+
     let sandbox = ExtensionDescriptor::AgentComponent {
         descriptor_version: 1,
         component: AgentComponentKindWire::SandboxExecutor,
@@ -528,6 +581,33 @@ fn agent_component_extended_methods_and_stream_capabilities_are_closed() {
         },
     };
     assert!(audit.validate().is_err());
+    let checkpoint_store = ExtensionDescriptor::AgentComponent {
+        descriptor_version: 1,
+        component: AgentComponentKindWire::WorkflowCheckpointStore,
+        name: "checkpoints".to_string(),
+        capabilities: AgentComponentCapabilitiesWire {
+            claim_heartbeat_interval_ms: Some(WireU64::from_u64(30_000)),
+            ..AgentComponentCapabilitiesWire::default()
+        },
+    };
+    assert!(checkpoint_store.validate().is_ok());
+    let checkpoint_without_heartbeat = ExtensionDescriptor::AgentComponent {
+        descriptor_version: 1,
+        component: AgentComponentKindWire::WorkflowCheckpointStore,
+        name: "checkpoints".to_string(),
+        capabilities: AgentComponentCapabilitiesWire::default(),
+    };
+    assert!(checkpoint_without_heartbeat.validate().is_err());
+    let misplaced_heartbeat = ExtensionDescriptor::AgentComponent {
+        descriptor_version: 1,
+        component: AgentComponentKindWire::AuditLogger,
+        name: "audit".to_string(),
+        capabilities: AgentComponentCapabilitiesWire {
+            claim_heartbeat_interval_ms: Some(WireU64::from_u64(30_000)),
+            ..AgentComponentCapabilitiesWire::default()
+        },
+    };
+    assert!(misplaced_heartbeat.validate().is_err());
 }
 
 #[test]

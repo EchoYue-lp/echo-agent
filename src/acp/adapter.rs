@@ -7,7 +7,7 @@ use super::session::{
     AcpSession, AcpSessionFactory, ActiveTurnLease, SessionRegistry, validate_session_paths,
 };
 use crate::agent::EventIdentity;
-use crate::runtime::{TurnMode, TurnOutcome, TurnRequest};
+use crate::runtime::{TurnDeliveryOutcome, TurnMode, TurnOutcome, TurnRequest};
 use agent_client_protocol::schema::{ProtocolVersion, v1};
 use agent_client_protocol::{Agent as AcpRole, Client, ConnectTo, ConnectionTo, Error, Responder};
 use std::sync::{
@@ -565,6 +565,22 @@ async fn drive_prompt<P: AcpConnectionProfile>(
     if let Err(error) = profile.persist_run_settled(&entry, &receipt) {
         return responder.respond_with_error(framework_error(error));
     }
+    match (&receipt.outcome, &receipt.delivery) {
+        (_, TurnDeliveryOutcome::Failed(failure)) => {
+            return responder.respond_with_error(Error::internal_error().data(bounded(&format!(
+                "turn delivery failed: {}",
+                failure.message
+            ))));
+        }
+        (TurnOutcome::Completed, TurnDeliveryOutcome::Delivered) => {}
+        (TurnOutcome::Completed, delivery) => {
+            return responder.respond_with_error(Error::internal_error().data(bounded(&format!(
+                "turn completed with delivery status {}",
+                delivery_status(delivery)
+            ))));
+        }
+        (TurnOutcome::Cancelled, _) | (TurnOutcome::Failed(_), _) => {}
+    }
     let mut response = match &receipt.outcome {
         TurnOutcome::Completed => v1::PromptResponse::new(v1::StopReason::EndTurn),
         TurnOutcome::Cancelled => v1::PromptResponse::new(v1::StopReason::Cancelled),
@@ -584,6 +600,15 @@ async fn drive_prompt<P: AcpConnectionProfile>(
         }
     }
     responder.respond(response)
+}
+
+fn delivery_status(delivery: &TurnDeliveryOutcome) -> &'static str {
+    match delivery {
+        TurnDeliveryOutcome::NotAttempted => "not_attempted",
+        TurnDeliveryOutcome::Delivered => "delivered",
+        TurnDeliveryOutcome::Closed => "closed",
+        TurnDeliveryOutcome::Failed(_) => "failed",
+    }
 }
 
 fn invalid_params(error: crate::error::ReactError) -> Error {

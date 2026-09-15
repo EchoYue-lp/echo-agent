@@ -36,12 +36,14 @@ completion result.
 ## Decision
 
 1. `TurnReceipt` is the single framework summary for one driven invocation.
-   It includes typed terminal, final answer, final message identity, reported
-   prompt/completion tokens, usage call count, explicit compaction count, last
-   event sequence, and elapsed time.
-2. `AgentTurnDriver` records those fields before handing each envelope to the
-   sink. If delivery fails, terminal-only result fields are cleared with the
-   failed receipt rather than being retained as a successful completion.
+   It includes the typed execution terminal, an orthogonal delivery result,
+   final answer, final message identity, reported prompt/completion tokens,
+   usage call count, explicit compaction count, last event sequence, and
+   elapsed time.
+2. `AgentTurnDriver` records the producer terminal before handing each
+   envelope to the sink. A delivery failure is recorded separately and never
+   overwrites an execution terminal or clears terminal-only result fields that
+   the producer already emitted.
 3. Product adapters consume the receipt for generic facts. Their event
    observers retain only product behavior such as tool webhooks, persistence,
    rendering, and product-specific policy.
@@ -60,9 +62,10 @@ completion result.
 ## Consequences
 
 Framework consumers receive one bounded completion receipt without replaying
-the stream. EKO keeps its durable product journal and webhook adapter, but no
-longer recalculates generic turn accounting. New generic receipt fields are a
-public API addition: ordinary receipt readers remain source-compatible, while
+the stream and can distinguish execution completion from delivery settlement.
+EKO keeps its durable product journal and webhook adapter, but no longer
+recalculates generic turn accounting. New generic receipt fields are a public
+API addition: ordinary receipt readers remain source-compatible, while
 downstream code that directly constructs a `TurnReceipt` literal must provide
 the new fields.
 

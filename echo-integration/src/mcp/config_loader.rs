@@ -42,11 +42,13 @@
 //! ```
 
 use std::collections::HashMap;
+use std::fmt;
 use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
 use super::server_config::{McpServerConfig, TransportConfig};
+use crate::redaction::{collection_is_redacted, url as redact_url};
 use echo_core::error::{McpError, ReactError, Result};
 
 /// Canonical Agent Plugins 1.0 MCP schema identifier.
@@ -58,7 +60,7 @@ pub const AGENT_PLUGIN_MCP_SCHEMA_V1: &str =
 /// mcp.json 文件的顶层结构
 ///
 /// 与 Claude Desktop / Cursor 的 `mcp.json` 格式完全兼容。
-#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[derive(Serialize, Deserialize, Clone, Default)]
 pub struct McpConfigFile {
     /// Optional schema identifier. General EchoAgent MCP files do not require
     /// it; Agent Plugin packages use [`McpConfigFile::parse_agent_plugin`].
@@ -70,12 +72,22 @@ pub struct McpConfigFile {
     pub mcp_servers: HashMap<String, McpServerEntry>,
 }
 
+impl fmt::Debug for McpConfigFile {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("McpConfigFile")
+            .field("schema", &self.schema)
+            .field("mcp_servers", &self.mcp_servers)
+            .finish()
+    }
+}
+
 /// 单个 MCP 服务端的配置项
 ///
 /// 支持两种模式：
 /// - **stdio**：提供 `command`，可选 `args` 和 `env`
 /// - **HTTP**：提供 `url`，可选 `headers` 和 `transport`
-#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Default, PartialEq, Eq)]
 pub struct McpServerEntry {
     /// Explicit transport discriminator used by Agent Plugins 1.0.
     #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
@@ -119,6 +131,23 @@ pub struct McpServerEntry {
     /// 设为 `true` 时跳过该服务端（默认为 `false`）
     #[serde(default)]
     pub disabled: bool,
+}
+
+impl fmt::Debug for McpServerEntry {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("McpServerEntry")
+            .field("server_type", &self.server_type)
+            .field("command", &self.command)
+            .field("args", &collection_is_redacted(self.args.is_empty()))
+            .field("env", &collection_is_redacted(self.env.is_empty()))
+            .field("cwd", &self.cwd)
+            .field("url", &self.url.as_deref().map(redact_url))
+            .field("headers", &collection_is_redacted(self.headers.is_empty()))
+            .field("transport", &self.transport)
+            .field("disabled", &self.disabled)
+            .finish()
+    }
 }
 
 impl McpServerEntry {
@@ -667,5 +696,30 @@ mod tests {
             expand_agent_plugin_variables("前缀/${PLUGIN_ROOT}", root, data),
             "前缀//tmp/${PLUGIN_DATA}/插件"
         );
+    }
+
+    #[test]
+    fn parsed_config_debug_redacts_environment_and_headers() -> std::result::Result<(), String> {
+        let config = McpConfigFile::parse(
+            r#"{
+                "mcpServers": {
+                    "local": {
+                        "command": "node",
+                        "env": {"TOKEN": "stdio-secret"}
+                    },
+                    "remote": {
+                        "url": "https://example.invalid/mcp",
+                        "headers": {"Authorization": "Bearer header-secret"}
+                    }
+                }
+            }"#,
+        )
+        .map_err(|error| error.to_string())?;
+
+        let debug = format!("{config:?}");
+        for secret in ["stdio-secret", "header-secret"] {
+            assert!(!debug.contains(secret), "debug leaked secret: {debug}");
+        }
+        Ok(())
     }
 }

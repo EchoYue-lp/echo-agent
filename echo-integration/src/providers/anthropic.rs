@@ -17,7 +17,9 @@ use futures::StreamExt;
 use futures::future::BoxFuture;
 
 use super::anthropic_cache::AnthropicCachePlan;
-use super::client::{JsonSseEvent, stream_json_sse};
+use super::client::{
+    JsonSseEvent, ensure_request_not_cancelled, post_json_request, stream_json_sse,
+};
 use super::config::validate_model_input_modalities;
 use futures::stream::BoxStream;
 use reqwest::Client;
@@ -474,47 +476,24 @@ impl LlmClient for AnthropicClient {
                 self.validate_request_features(&request)?;
                 let timeouts = request.timeouts.unwrap_or(self.timeouts);
                 let body = self.convert_request(&request);
-
-                let request_future = async {
-                    let request = self.client
-                        .post(&self.base_url)
-                        .header("x-api-key", &self.api_key)
-                        .header("anthropic-version", "2023-06-01")
-                        .header("anthropic-beta", "prompt-caching-2024-07-31")
-                        .header("content-type", "application/json")
-                        .json(&body);
-                    let request = match timeouts.request_timeout() {
-                        Some(timeout) => request.timeout(timeout),
-                        None => request,
-                    };
-                    let resp = request
-                        .send()
-                        .await
-                        .map_err(|e| LlmError::NetworkError(e.to_string()))?;
-                    let status = resp.status();
-                    if !status.is_success() {
-                        let text = resp.text().await.unwrap_or_default();
-                        return Err(LlmError::ApiError { status: status.as_u16(), message: text });
-                    }
-                    Ok(resp)
+                let request_builder = self
+                    .client
+                    .post(&self.base_url)
+                    .header("x-api-key", &self.api_key)
+                    .header("anthropic-version", "2023-06-01")
+                    .header("anthropic-beta", "prompt-caching-2024-07-31")
+                    .header("content-type", "application/json")
+                    .json(&body);
+                let request_builder = match timeouts.request_timeout() {
+                    Some(timeout) => request_builder.timeout(timeout),
+                    None => request_builder,
                 };
-                let resp = tokio::select! {
-                    biased;
-                    _ = async {
-                        match request.cancel_token.as_ref() {
-                            Some(token) => token.cancelled().await,
-                            None => std::future::pending().await,
-                        }
-                    } => return Err(LlmError::NetworkError("Anthropic request cancelled".to_string()).into()),
-                    response = request_future => response?,
-                };
+                let anthropic_resp: AnthropicResponse =
+                    post_json_request(request_builder, request.cancel_token.clone()).await?;
 
-                let anthropic_resp: AnthropicResponse = resp
-                    .json()
-                    .await
-                    .map_err(|e| LlmError::InvalidResponse(format!("Response parse error: {e}")))?;
-
-                Ok(self.convert_response(anthropic_resp))
+                let response = self.convert_response(anthropic_resp);
+                ensure_request_not_cancelled(request.cancel_token.as_ref())?;
+                Ok(response)
             }
             .instrument(info_span!("anthropic_chat", model = %model)),
         )

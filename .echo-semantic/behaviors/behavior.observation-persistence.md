@@ -8,11 +8,11 @@ risk: high
 primary_focus: data_durability
 focus: [state_authority, time_lifecycle, failure_concurrency, contract_evidence]
 boundary: boundary.observation-persistence-delivery
-observed_at: 81e2756cee9127fa23a9bb1023bd56aa8f954964
-code_refs: [echo-core/src/agent/event_envelope.rs, echo-state/src/journal/mod.rs, echo-state/src/delivery.rs, src/trace/mod.rs, src/eval/runner.rs, src/agent/react/mod.rs, src/state/mod.rs, echo-core/src/memory/conversation.rs, docs/adr/0038-eval-trace-correlation-identity.md]
+observed_at: cba8e08f3e3f0ccf1d4df3a22be11589f63b2ecd
+code_refs: [echo-core/src/agent/event_envelope.rs, echo-state/src/journal/mod.rs, echo-state/src/delivery.rs, src/trace/mod.rs, src/eval/runner.rs, src/agent/react/mod.rs, src/state/mod.rs, echo-core/src/memory/conversation.rs, echo-sdk-host/src/core_profile/persistence.rs, echo-sdk-host/src/core_profile/state.rs, docs/adr/0038-eval-trace-correlation-identity.md, docs/adr/0046-turn-execution-delivery-settlement.md]
 rule_refs: [rule.fact-projection-separation]
-evidence_refs: [evidence.persistence-observation, evidence.eval-trace-correlation-repair, evidence.eval-trace-correlation-verification]
-finding_refs: [finding.trace-effect-event-producers, finding.eval-trace-identity, finding.trace-audit-secret-boundary]
+evidence_refs: [evidence.persistence-observation, evidence.eval-trace-correlation-repair, evidence.eval-trace-correlation-verification, evidence.turn-terminal-delivery-settlement-repair, evidence.turn-terminal-delivery-settlement-verification]
+finding_refs: [finding.trace-effect-event-producers, finding.eval-trace-identity, finding.trace-audit-secret-boundary, finding.turn-terminal-commit-projection-order]
 ---
 
 # Observation、Persistence 与 Delivery
@@ -23,7 +23,7 @@ Durable fact、checkpoint、live stream、bounded replay、projection 和 diagno
 
 ## 当前行为
 
-`EventEnvelope`提供identity/sequence/hash/parent；Journal保存有序事实；Delivery Ledger归约投递生命周期；RuntimeStateStore、ConversationStore、Store与RunStore保存不同数据域。Trace producer分配真实Run ID，调用方identity只作为parent/turn/execution correlation；Eval只投影已从RunStore验证的真实trace ID。
+`EventEnvelope`提供identity/sequence/hash/parent；Journal保存有序事实；Delivery Ledger归约投递生命周期；RuntimeStateStore、ConversationStore、Store与RunStore保存不同数据域。TurnReceipt把execution与delivery作为两个不可互相覆盖的结果；SDK恢复要求Journal、index和receipt watermark一致。Trace producer分配真实Run ID，调用方identity只作为parent/turn/execution correlation。
 
 ## 期望行为
 

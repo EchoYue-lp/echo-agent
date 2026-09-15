@@ -297,6 +297,90 @@ test("agent component decoder covers extended variants and unit inputs", async (
   assert.deepEqual(outcome.result.value.result.value.vector, [0.25, 0.75]);
 });
 
+test("workflow checkpoint Agent component keeps generation and claim settlement typed", async () => {
+  const save = decodeExtensionInvokeCall({
+    extension,
+    invocation_id: "checkpoint-cas",
+    deadline,
+    invocation: {
+      operation: "agent_component_call",
+      input: {
+        component: "workflow_checkpoint_store",
+        call: {
+          operation: "workflow_checkpoint_save_if_generation",
+          input: { checkpoint: { kind: "map", value: [] }, expected_generation: "7" },
+        },
+      },
+    },
+  }, "agent_component");
+  assert.equal(save.invocation.input.call.input.expected_generation, "7");
+
+  const ack = decodeExtensionInvokeCall({
+    extension,
+    invocation_id: "checkpoint-ack",
+    deadline,
+    invocation: {
+      operation: "agent_component_call",
+      input: {
+        component: "workflow_checkpoint_store",
+        call: {
+          operation: "workflow_checkpoint_ack_claim",
+          input: { checkpoint_id: "checkpoint-1", attempt_id: "attempt-1" },
+        },
+      },
+    },
+  }, "agent_component");
+  assert.equal(ack.invocation.input.call.input.attempt_id, "attempt-1");
+
+  const calls = [];
+  const sdk = {
+    registerExtension(...args) {
+      calls.push(args);
+      return Promise.resolve("registered");
+    },
+  };
+  const descriptor = {
+    kind: "agent_component",
+    descriptor_version: 1,
+    component: "workflow_checkpoint_store",
+    name: "checkpoint-store",
+    capabilities: { claim_heartbeat_interval_ms: "1000" },
+  };
+  await EchoAgentClient.prototype.registerAgentComponent.call(sdk, "checkpoint-1", descriptor, async () => ({
+    operation: "agent_component_call",
+    value: {
+      component: "workflow_checkpoint_store",
+      result: { operation: "workflow_checkpoint_save_if_generation", value: { committed: true } },
+    },
+  }));
+  const outcome = await calls[0][3]({
+    extension,
+    invocation_id: "checkpoint-result",
+    deadline,
+    invocation: save.invocation,
+  }, new AbortController().signal);
+  assert.equal(outcome.result.value.result.value.committed, true);
+
+  await assert.rejects(
+    EchoAgentClient.prototype.registerAgentComponent.call(
+      sdk,
+      "missing-heartbeat",
+      { ...descriptor, capabilities: {} },
+      async () => undefined,
+    ),
+    /require a canonical claim heartbeat/,
+  );
+  await assert.rejects(
+    EchoAgentClient.prototype.registerAgentComponent.call(
+      sdk,
+      "wrong-component",
+      { ...descriptor, component: "audit_logger" },
+      async () => undefined,
+    ),
+    /only valid for workflow checkpoint stores/,
+  );
+});
+
 test("streaming Agent components preserve nested and outer discriminators", () => {
   const stream = { id: "component-stream", generation: "1", kind: "stream" };
   const call = decodeExtensionInvokeCall({

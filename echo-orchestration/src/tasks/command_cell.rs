@@ -887,7 +887,21 @@ fn prune_terminal_history(
     cells: &DashMap<String, Arc<CommandCellHandle>>,
     max_terminal_history: usize,
 ) {
-    let mut terminal = cells
+    let mut terminal = terminal_retention_candidates(cells);
+    let remove_count = terminal.len().saturating_sub(max_terminal_history);
+    if remove_count == 0 {
+        return;
+    }
+    terminal.sort_by_key(|(sequence, _)| *sequence);
+    for (_, id) in terminal.into_iter().take(remove_count) {
+        remove_terminal_candidate(cells, &id);
+    }
+}
+
+fn terminal_retention_candidates(
+    cells: &DashMap<String, Arc<CommandCellHandle>>,
+) -> Vec<(u64, String)> {
+    cells
         .iter()
         .filter(|entry| {
             entry.value().is_terminal()
@@ -895,15 +909,18 @@ fn prune_terminal_history(
                 && entry.value().observation_leases.load(Ordering::Acquire) == 0
         })
         .map(|entry| (entry.value().sequence, entry.key().clone()))
-        .collect::<Vec<_>>();
-    let remove_count = terminal.len().saturating_sub(max_terminal_history);
-    if remove_count == 0 {
-        return;
-    }
-    terminal.sort_by_key(|(sequence, _)| *sequence);
-    for (_, id) in terminal.into_iter().take(remove_count) {
-        cells.remove(&id);
-    }
+        .collect()
+}
+
+fn remove_terminal_candidate(cells: &DashMap<String, Arc<CommandCellHandle>>, cell_id: &str) {
+    // The candidate scan is only a retention snapshot. A waiter/observer can
+    // acquire a lease after the scan, so removal must re-check the predicates
+    // while DashMap holds the shard lock.
+    let _ = cells.remove_if(cell_id, |_id, handle| {
+        handle.is_terminal()
+            && handle.waiter_leases.load(Ordering::Acquire) == 0
+            && handle.observation_leases.load(Ordering::Acquire) == 0
+    });
 }
 
 impl CommandCellRegistry for BackgroundCommandManager {
@@ -1084,6 +1101,7 @@ async fn supervise_prepared_cell(
     terminal_history: usize,
 ) {
     let deadline = run_spec.deadline;
+    let owner_cancel = run_spec.owner_cancel.clone();
     let mut outcome = tokio::select! {
         biased;
         _ = shutdown.cancelled() => CellOutcome::cancelled(),
@@ -1118,7 +1136,7 @@ async fn supervise_prepared_cell(
         mark_artifact_finalize_interrupted(&handle, ArtifactFinalizeOutcome::DeadlineElapsed);
         ArtifactFinalizeOutcome::DeadlineElapsed
     } else {
-        finish_output_artifact(&handle, deadline, &shutdown).await
+        finish_output_artifact(&handle, deadline, &shutdown, owner_cancel.as_ref()).await
     };
     match finalization {
         ArtifactFinalizeOutcome::DeadlineElapsed
@@ -1129,9 +1147,13 @@ async fn supervise_prepared_cell(
         ArtifactFinalizeOutcome::Shutdown if outcome.cause == CommandCellTerminalCause::Exited => {
             outcome = CellOutcome::cancelled();
         }
+        ArtifactFinalizeOutcome::Cancelled if outcome.cause == CommandCellTerminalCause::Exited => {
+            outcome = CellOutcome::cancelled();
+        }
         ArtifactFinalizeOutcome::Finished
         | ArtifactFinalizeOutcome::DeadlineElapsed
-        | ArtifactFinalizeOutcome::Shutdown => {}
+        | ArtifactFinalizeOutcome::Shutdown
+        | ArtifactFinalizeOutcome::Cancelled => {}
     }
     *handle.state.write().await = CellState {
         phase: outcome.phase,
@@ -1638,12 +1660,14 @@ enum ArtifactFinalizeOutcome {
     Finished,
     DeadlineElapsed,
     Shutdown,
+    Cancelled,
 }
 
 async fn finish_output_artifact(
     handle: &CommandCellHandle,
     deadline: Instant,
     shutdown: &CancellationToken,
+    owner_cancel: Option<&Arc<CancellationToken>>,
 ) -> ArtifactFinalizeOutcome {
     let writer = {
         let mut artifact = handle
@@ -1684,6 +1708,9 @@ async fn finish_output_artifact(
         let interrupted = tokio::select! {
             biased;
             _ = shutdown.cancelled() => Some(ArtifactFinalizeOutcome::Shutdown),
+            _ = cancellation_requested(&handle.cancel, owner_cancel) => {
+                Some(ArtifactFinalizeOutcome::Cancelled)
+            }
             _ = tokio::time::sleep_until(deadline) => Some(ArtifactFinalizeOutcome::DeadlineElapsed),
             _ = hook.release.notified() => None,
         };
@@ -1698,6 +1725,10 @@ async fn finish_output_artifact(
         _ = shutdown.cancelled() => {
             mark_artifact_finalize_interrupted(handle, ArtifactFinalizeOutcome::Shutdown);
             return ArtifactFinalizeOutcome::Shutdown;
+        }
+        _ = cancellation_requested(&handle.cancel, owner_cancel) => {
+            mark_artifact_finalize_interrupted(handle, ArtifactFinalizeOutcome::Cancelled);
+            return ArtifactFinalizeOutcome::Cancelled;
         }
         _ = tokio::time::sleep_until(deadline) => {
             mark_artifact_finalize_interrupted(handle, ArtifactFinalizeOutcome::DeadlineElapsed);
@@ -1746,6 +1777,9 @@ fn mark_artifact_finalize_interrupted(
         }
         ArtifactFinalizeOutcome::Shutdown => {
             "artifact finalization cancelled during command-cell shutdown".to_string()
+        }
+        ArtifactFinalizeOutcome::Cancelled => {
+            "artifact finalization cancelled with the command cell".to_string()
         }
         ArtifactFinalizeOutcome::Finished => "artifact finalization failed".to_string(),
     });
@@ -1940,6 +1974,53 @@ mod tests {
             .await
             .map(|receipt| receipt.cell_id)
             .map_err(|error| error.to_string())
+    }
+
+    async fn launch_with_blocking_artifact_finalizer(
+        manager: &BackgroundCommandManager,
+        root: &std::path::Path,
+        owner_cancel: Option<Arc<CancellationToken>>,
+        call_id: &str,
+    ) -> std::result::Result<(String, Arc<TestArtifactFinalizeHook>), String> {
+        let mut launch = request("printf blocking-finalizer-output");
+        launch.timeout_secs = Some(30);
+        launch.cancel = owner_cancel;
+        launch.output_artifacts = Some(
+            echo_core::tools::artifact::ToolOutputArtifactConfig::new(root, "test")
+                .threshold_bytes(1),
+        );
+        launch.artifact_identity = Some(echo_core::tools::artifact::ToolOutputArtifactIdentity {
+            conversation_id: Some("conversation".to_string()),
+            run_id: Some("run".to_string()),
+            call_id: call_id.to_string(),
+            tool_name: "shell".to_string(),
+        });
+        let reservation = manager
+            .prepare_launch(launch)
+            .await
+            .map_err(|error| error.to_string())?;
+        let cell_id = reservation.receipt().cell_id.clone();
+        let hook = Arc::new(TestArtifactFinalizeHook {
+            entered: Notify::new(),
+            release: Notify::new(),
+        });
+        let entry = manager
+            .cells
+            .get(&cell_id)
+            .ok_or_else(|| "prepared cell was not published".to_string())?;
+        *entry
+            .artifact_finalize_hook
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(hook.clone());
+        drop(entry);
+        let _receipt = manager
+            .start_prepared(reservation)
+            .await
+            .map_err(|error| error.to_string())?;
+        tokio::time::timeout(Duration::from_secs(2), hook.entered.notified())
+            .await
+            .map_err(|_| "artifact finalizer did not enter the injected wait".to_string())?;
+        Ok((cell_id, hook))
     }
 
     /// 循环 wait 直到终态, 拼接全部增量输出。wait 会在"有新输出"时就返回
@@ -2505,6 +2586,7 @@ mod tests {
                 &handle,
                 Instant::now() + Duration::from_secs(5),
                 &CancellationToken::new(),
+                None,
             )
             .await,
             ArtifactFinalizeOutcome::Finished
@@ -2847,6 +2929,128 @@ mod tests {
                 .is_some_and(|message| message.contains("shutdown"))
         );
         assert_eq!(manager.tasks.len(), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn owner_cancellation_aborts_blocking_artifact_finalizer()
+    -> std::result::Result<(), String> {
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let manager = BackgroundCommandManager::default();
+        let owner_cancel = Arc::new(CancellationToken::new());
+        let (cell_id, _hook) = launch_with_blocking_artifact_finalizer(
+            &manager,
+            root.path(),
+            Some(owner_cancel.clone()),
+            "owner-cancel",
+        )
+        .await?;
+
+        let running = manager
+            .wait(&cell_id, 0, 0)
+            .await
+            .map_err(|error| error.to_string())?;
+        assert_eq!(running.snapshot.phase, CommandCellPhase::Running);
+        owner_cancel.cancel();
+        let terminal = tokio::time::timeout(
+            Duration::from_secs(2),
+            manager.wait(&cell_id, running.next_cursor, 1_000),
+        )
+        .await
+        .map_err(|_| "owner cancellation waited for the blocked artifact finalizer".to_string())?
+        .map_err(|error| error.to_string())?;
+        assert_eq!(terminal.snapshot.phase, CommandCellPhase::Cancelled);
+        assert_eq!(
+            terminal.snapshot.terminal_cause,
+            Some(CommandCellTerminalCause::Cancelled)
+        );
+        assert_eq!(
+            terminal.snapshot.artifact_status,
+            CommandCellArtifactStatus::Failed
+        );
+        assert!(
+            terminal
+                .snapshot
+                .artifact_message
+                .as_deref()
+                .is_some_and(|message| message.contains("command cell"))
+        );
+        assert_eq!(manager.tasks.len(), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stop_aborts_blocking_artifact_finalizer() -> std::result::Result<(), String> {
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let manager = BackgroundCommandManager::default();
+        let (cell_id, _hook) =
+            launch_with_blocking_artifact_finalizer(&manager, root.path(), None, "cell-stop")
+                .await?;
+        let running = manager
+            .wait(&cell_id, 0, 0)
+            .await
+            .map_err(|error| error.to_string())?;
+        assert_eq!(running.snapshot.phase, CommandCellPhase::Running);
+
+        assert!(manager.stop(&cell_id));
+        let terminal = tokio::time::timeout(
+            Duration::from_secs(2),
+            manager.wait(&cell_id, running.next_cursor, 1_000),
+        )
+        .await
+        .map_err(|_| "cell stop waited for the blocked artifact finalizer".to_string())?
+        .map_err(|error| error.to_string())?;
+        assert_eq!(terminal.snapshot.phase, CommandCellPhase::Cancelled);
+        assert_eq!(
+            terminal.snapshot.terminal_cause,
+            Some(CommandCellTerminalCause::Cancelled)
+        );
+        assert_eq!(
+            terminal.snapshot.artifact_status,
+            CommandCellArtifactStatus::Failed
+        );
+        assert!(
+            terminal
+                .snapshot
+                .artifact_message
+                .as_deref()
+                .is_some_and(|message| message.contains("command cell"))
+        );
+        assert_eq!(manager.tasks.len(), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn retention_rechecks_a_new_lease_before_removal() -> std::result::Result<(), String> {
+        let manager = BackgroundCommandManager::new(BackgroundCommandManagerConfig {
+            max_terminal_history: 0,
+            ..Default::default()
+        })?;
+        let handle = test_handle_with_sequence("racing-terminal", 0);
+        *handle.state.write().await = CellState {
+            phase: CommandCellPhase::Succeeded,
+            exit_code: Some(0),
+            terminal_cause: Some(CommandCellTerminalCause::Exited),
+            terminal_message: None,
+        };
+        handle.terminal_flag.store(true, Ordering::Release);
+        manager.cells.insert("racing-terminal".to_string(), handle);
+
+        // Snapshot candidates first, then acquire the lease in the same window
+        // that production prune has between its scan and remove step.
+        let candidates = terminal_retention_candidates(&manager.cells);
+        assert_eq!(
+            candidates.first().map(|(_, id)| id.as_str()),
+            Some("racing-terminal")
+        );
+        let (_, lease) = manager
+            .acquire_waiter_lease("racing-terminal")
+            .map_err(|error| error.to_string())?;
+        remove_terminal_candidate(&manager.cells, "racing-terminal");
+        assert!(manager.cells.contains_key("racing-terminal"));
+
+        drop(lease);
+        assert!(!manager.cells.contains_key("racing-terminal"));
         Ok(())
     }
 

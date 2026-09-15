@@ -3,19 +3,19 @@ schema_version: 1
 id: finding.extension-credential-debug-redaction
 kind: finding
 type: intent_gap
-status: open
+status: resolved
 severity: high
 primary_focus: permission_external
 focus: [data_durability, contract_evidence, result_side_effect]
 boundary_ref: boundary.extension-lifecycle
 behavior_refs: [behavior.extension-publication]
 rule_refs: [rule.extension-generation-authority]
-evidence_refs: [evidence.effects-extensions]
-audit_refs: [audit.extension-lifecycle.permission-external]
+evidence_refs: [evidence.effects-extensions, evidence.extension-credential-debug-redaction-repair, evidence.extension-credential-debug-redaction-verification]
+audit_refs: [audit.extension-lifecycle.permission-external, audit.extension-credential-debug-redaction-rereview]
 decision_refs: []
-repair_evidence_refs: []
-verification_evidence_refs: []
-rereview_audit_refs: []
+repair_evidence_refs: [evidence.extension-credential-debug-redaction-repair]
+verification_evidence_refs: [evidence.extension-credential-debug-redaction-verification]
+rereview_audit_refs: [audit.extension-credential-debug-redaction-rereview]
 discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 ---
 
@@ -40,3 +40,5 @@ MCP server/config/HTTP transport 与 QQ/Feishu channel config 源码展示字段
 ## 处理记录
 
 Permission Audit 确认；密钥不进日志是本地仍成立的保护，后续建立 Secret wrapper/redacted Debug 与测试，不增加扩展连接门控。
+
+当前由 `echo-integration` 的 feature-gated redaction helper 统一处理配置 Debug、exact credential、URL、reqwest error 和 MCP JSON-RPC error；QQ/Feishu/MCP focused tests、all-feature crate tests、Clippy、no-default check 与独立复审闭合本 Finding。未增加连接或权限门控，也未修改共享 Trace/Audit retention。

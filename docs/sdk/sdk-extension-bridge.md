@@ -135,6 +135,13 @@ available-skill fence. SkillLoadPolicy receives every public descriptor field
 through `skill_load_allows`; discovery, prepared-plugin registration and
 reconciliation await that same callback on the live Session Agent.
 
+WorkflowCheckpointStore does not inherit a successful no-op for claim
+settlement. The bridge transports generation-CAS save plus attempt-fenced
+renew, acknowledge and requeue calls. Its descriptor declares a canonical
+`claim_heartbeat_interval_ms` from 1 through 300000, and the Host schedules
+renewal from that negotiated capability. Missing operations, owner mismatch or
+unsupported settlement fail before a continuation can be reported as settled.
+
 Cancel-aware Sandbox callbacks preserve the framework error domain: extension
 cancel and timeout settle as `SandboxError::Cancelled` / `SandboxError::Timeout`,
 and Run cancellation waits for the component cleanup call before publishing

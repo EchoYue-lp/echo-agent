@@ -5,6 +5,7 @@ use echo_core::agent::Agent;
 use echo_core::error::Result;
 use futures::future::BoxFuture;
 use std::time::Instant;
+use tokio::task::JoinSet;
 use tracing::{debug, info};
 
 /// Result merge function
@@ -94,42 +95,41 @@ impl Workflow for ConcurrentWorkflow {
                 agent_count
             );
 
-            let mut handles = Vec::with_capacity(agent_count);
+            let mut handles = JoinSet::new();
 
-            for agent_handle in &self.agents {
+            for (index, agent_handle) in self.agents.iter().enumerate() {
                 let agent_handle = agent_handle.clone();
                 let input = input.to_string();
-                handles.push(tokio::spawn(async move {
+                handles.spawn(async move {
                     let step_start = Instant::now();
                     let agent = agent_handle.as_ref();
                     let agent_name = agent.name().to_string();
                     debug!(workflow = "concurrent", agent = %agent_name, "▶ Starting execution");
                     let result = agent.execute(&input).await;
                     let elapsed = step_start.elapsed();
-                    (agent_name, input, result, elapsed)
-                }));
+                    (index, agent_name, input, result, elapsed)
+                });
             }
 
-            let mut step_outputs = Vec::with_capacity(agent_count);
-            let mut results = Vec::with_capacity(agent_count);
+            let mut completed = Vec::with_capacity(agent_count);
+            completed.resize_with(agent_count, || None);
 
             let mut first_error = None;
-            for handle in &mut handles {
-                let joined = handle.await;
-                let (agent_name, step_input, result, elapsed) = match joined {
+            while let Some(joined) = handles.join_next().await {
+                let (index, agent_name, step_input, result, elapsed) = match joined {
                     Ok(value) => value,
                     Err(error) => {
-                        first_error.get_or_insert_with(|| {
-                            echo_core::error::ReactError::Other(format!("task join error: {error}"))
-                        });
-                        continue;
+                        first_error = Some(echo_core::error::ReactError::Other(format!(
+                            "task join error: {error}"
+                        )));
+                        break;
                     }
                 };
                 let output = match result {
                     Ok(output) => output,
                     Err(error) => {
-                        first_error.get_or_insert(error);
-                        continue;
+                        first_error = Some(error);
+                        break;
                     }
                 };
                 info!(
@@ -139,6 +139,37 @@ impl Workflow for ConcurrentWorkflow {
                     "✓ Agent completed"
                 );
 
+                let Some(slot) = completed.get_mut(index) else {
+                    first_error = Some(echo_core::error::ReactError::Other(format!(
+                        "task completed with invalid registration index {index}"
+                    )));
+                    break;
+                };
+                if slot
+                    .replace((agent_name, step_input, output, elapsed))
+                    .is_some()
+                {
+                    first_error = Some(echo_core::error::ReactError::Other(format!(
+                        "task completed more than once for registration index {index}"
+                    )));
+                    break;
+                }
+            }
+            if let Some(error) = first_error {
+                handles.abort_all();
+                while handles.join_next().await.is_some() {}
+                return Err(error);
+            }
+
+            let mut step_outputs = Vec::with_capacity(agent_count);
+            let mut results = Vec::with_capacity(agent_count);
+            for completed_step in completed {
+                let (agent_name, step_input, output, elapsed) =
+                    completed_step.ok_or_else(|| {
+                        echo_core::error::ReactError::Other(
+                            "concurrent task completed without a registered result".to_string(),
+                        )
+                    })?;
                 step_outputs.push(StepOutput {
                     agent_name,
                     input: step_input,
@@ -146,14 +177,6 @@ impl Workflow for ConcurrentWorkflow {
                     elapsed,
                 });
                 results.push(output);
-            }
-            if let Some(error) = first_error {
-                for handle in &handles {
-                    if !handle.is_finished() {
-                        handle.abort();
-                    }
-                }
-                return Err(error);
             }
 
             let merged = (self.merge)(results);
@@ -197,5 +220,104 @@ impl ConcurrentWorkflowBuilder {
             agents: self.agents,
             merge: self.merge.unwrap_or_else(|| Box::new(default_merge)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use echo_core::agent::AgentEvent;
+    use echo_core::error::ReactError;
+    use futures::stream::{self, BoxStream};
+    use std::time::Duration;
+
+    struct TestAgent {
+        name: &'static str,
+        fail: bool,
+        delay: Duration,
+    }
+
+    impl Agent for TestAgent {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn model_name(&self) -> &str {
+            "test"
+        }
+
+        fn system_prompt(&self) -> &str {
+            "test"
+        }
+
+        fn execute<'a>(&'a self, _task: &'a str) -> BoxFuture<'a, Result<String>> {
+            Box::pin(async move {
+                tokio::time::sleep(self.delay).await;
+                if self.fail {
+                    Err(ReactError::Other(format!("{} failed", self.name)))
+                } else {
+                    Ok(self.name.to_string())
+                }
+            })
+        }
+
+        fn execute_stream<'a>(
+            &'a self,
+            _task: &'a str,
+        ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+            Box::pin(async move {
+                let stream: BoxStream<'a, Result<AgentEvent>> = Box::pin(stream::empty());
+                Ok(stream)
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_concurrent_workflow_aborts_and_drains_siblings() {
+        let mut workflow = ConcurrentWorkflow::builder()
+            .agent(TestAgent {
+                name: "fail",
+                fail: true,
+                delay: Duration::from_millis(1),
+            })
+            .agent(TestAgent {
+                name: "slow",
+                fail: false,
+                delay: Duration::from_secs(60),
+            })
+            .build();
+
+        let result = tokio::time::timeout(Duration::from_secs(1), workflow.run("input"))
+            .await
+            .unwrap();
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn successful_concurrent_workflow_preserves_registration_order() -> Result<()> {
+        let mut workflow = ConcurrentWorkflow::builder()
+            .agent(TestAgent {
+                name: "registered-first",
+                fail: false,
+                delay: Duration::from_millis(30),
+            })
+            .agent(TestAgent {
+                name: "completed-first",
+                fail: false,
+                delay: Duration::from_millis(1),
+            })
+            .build();
+
+        let output = workflow.run("input").await?;
+        assert_eq!(output.result, "registered-first\n---\ncompleted-first");
+        assert_eq!(
+            output
+                .steps
+                .iter()
+                .map(|step| step.agent_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["registered-first", "completed-first"]
+        );
+        Ok(())
     }
 }

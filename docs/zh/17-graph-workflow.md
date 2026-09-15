@@ -196,6 +196,10 @@ while let Some(event) = stream.next().await {
 }
 ```
 
+`NodeError` 是失败终态的诊断事件：流会先发出该事件，随后以同一个错误结束，
+不会再发出 `Completed`。并行分支遇到首个失败时会取消并排空其余 sibling，避免
+挂起节点遮蔽错误或在调用方取消后继续产生副作用。
+
 ---
 
 ## 声明式 YAML 工作流
@@ -308,6 +312,13 @@ let result = graph.run_with_checkpoints(state.clone(), &checkpoint_store).await?
 let checkpoint_id = checkpoint_store.latest()?.id;
 let resumed = graph.resume_from_checkpoint(&checkpoint_store, &checkpoint_id).await?;
 ```
+
+恢复通过 `CheckpointStore` 的 claim lease 完成。成功的 continuation 必须 ack，
+节点失败或恢复异常会 requeue；文件 store 的 claim 在 `load`/`list` 中保持可见，
+长时间 continuation 运行期间由 `Graph` 使用同一 attempt heartbeat 续租，只有停止
+续租的崩溃 claim 才能在 lease 到期后重新发现。对活动 claim 修改标签会因 generation
+冲突失败，不会复活已领取的 continuation。自定义和 SDK-backed store 必须实现 renew、
+ack、requeue 与 generation-CAS；不支持的结算会失败关闭。
 
 ---
 

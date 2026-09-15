@@ -8,11 +8,11 @@ risk: high
 primary_focus: failure_concurrency
 focus: [trigger_input, contract_evidence, time_lifecycle, result_side_effect]
 boundary: boundary.llm-provider-runtime
-observed_at: f1e9027246760661144786e9e35615cd46d580c6
+observed_at: e842d87bb787fb0b1fd39afbc04f834df07aec84
 code_refs: [echo-core/src/llm/mod.rs, echo-core/src/llm/capabilities.rs, echo-core/src/budget.rs, echo-core/src/tokenizer.rs, echo-integration/src/providers/client.rs, echo-integration/src/providers/openai.rs, echo-integration/src/providers/anthropic.rs, echo-integration/src/providers/responses.rs]
 rule_refs: [rule.provider-protocol-boundary]
-evidence_refs: [evidence.provider-protocol-quality]
-finding_refs: [finding.structured-output-main-path, finding.provider-capability-authority, finding.nonstream-cancellation-parity]
+evidence_refs: [evidence.provider-protocol-quality, evidence.sse-eof-framing-acceptance-repair, evidence.sse-eof-framing-acceptance-verification]
+finding_refs: [finding.structured-output-main-path, finding.provider-capability-authority, finding.nonstream-cancellation-parity, finding.sse-eof-framing-acceptance]
 ---
 
 # LLM 与 Provider 执行
@@ -23,7 +23,7 @@ Provider adapter 只负责 wire translation；model profile、token budget、tim
 
 ## 当前行为
 
-LlmClient 接受 ChatRequest 并返回 response/stream；OpenAI Chat, Responses 与 Anthropic adapters 映射各协议，ModelProfileResolver 和 tokenizer/budget 决定 harness 行为。
+LlmClient接受ChatRequest并返回response/stream；OpenAI Chat、Responses与Anthropic adapters映射各协议并共享严格SSE framing，delimiterless EOF残余不会形成事件。ModelProfileResolver和tokenizer/budget决定harness行为。
 
 ## 期望行为
 

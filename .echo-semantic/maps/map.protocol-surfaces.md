@@ -4,12 +4,12 @@ id: map.protocol-surfaces
 kind: capability_map
 title: ACP、A2A、Channels、Headless 与 SDK Surfaces
 risk: high
-observed_at: source:8ff7eb397767728069b01b9098b224a6840a8adb663717e5c4fd7a584eb4063e
+observed_at: source:1bcfbd1131476ae872a2dc89326675abd7c02dd26d56c8d29a058cd91fb308fc
 boundary_refs: [boundary.protocol-surfaces]
 behavior_refs: [behavior.protocol-projection]
 rule_refs: [rule.protocol-role-separation, rule.sdk-rust-authority]
 evidence_refs: [evidence.provider-protocol-quality, evidence.sdk-contracts, evidence.high-risk-audit-frontier, evidence.framework-concept-navigation, evidence.sdk-deferred-backlog-count-repair, evidence.sdk-deferred-backlog-count-verification]
-finding_refs: [finding.a2a-terminal-authority, finding.a2a-stream-cleanup, finding.a2a-task-id-admission-authority, finding.a2a-advertised-capability-binding, finding.channel-attachment-projection, finding.channel-reset-stale-generation-delivery, finding.turn-driver-entry-coverage, finding.agent-adapter-close-settlement, finding.turn-terminal-commit-projection-order, finding.sdk-gap-generation-validation-parity, finding.sdk-deferred-backlog-count-drift]
+finding_refs: [finding.a2a-terminal-authority, finding.a2a-stream-cleanup, finding.a2a-task-id-admission-authority, finding.a2a-advertised-capability-binding, finding.channel-attachment-projection, finding.channel-reset-stale-generation-delivery, finding.turn-driver-entry-coverage, finding.agent-adapter-close-settlement, finding.turn-terminal-commit-projection-order, finding.sdk-gap-generation-validation-parity, finding.sdk-gap-ack-replay-watermark, finding.sdk-deferred-backlog-count-drift]
 audit_refs: [audit.protocol-surfaces.state-authority, audit.protocol-surfaces.time-lifecycle, audit.protocol-surfaces.contract-evidence, audit.semantic-governance-final-rereview]
 related_map_refs: [map.agent-session-turn, map.observation-persistence-delivery, map.extension-lifecycle, map.sdk-facade-parity]
 scenarios:
@@ -38,20 +38,20 @@ scenarios:
     rule_refs: [rule.turn-terminal-authority]
   sdk-host-and-language-clients:
     status: needs_review
-    source_refs: [echo-sdk-protocol/src/lib.rs, echo-sdk-host/src/lib.rs, contracts/sdk/parity-manifest.json]
+    source_refs: [echo-sdk-protocol/src/event.rs, echo-sdk-host/src/core_profile/events.rs, echo-sdk-host/tests/core_profile_e2e.rs, contracts/sdk/parity-manifest.json]
     behavior_refs: [behavior.sdk-facade-routing]
     rule_refs: [rule.sdk-rust-authority]
     evidence_refs: [evidence.sdk-contracts]
-    finding_refs: [finding.sdk-gap-generation-validation-parity]
-    unknown: Host handle generation 正确，但三语言 gap 通知未一致校验完整 WireHandle generation
-    next_step: SDK contract repair 统一 gap generation 反例测试，不扩大到 intrinsic identity 门禁
+    finding_refs: [finding.sdk-gap-generation-validation-parity, finding.sdk-gap-ack-replay-watermark]
+    unknown: Gap generation校验已统一，但Client确认snapshot watermark后，Host resume watermark仍可能回退并重发旧事件
+    next_step: Repair gap ACK后的单调resume watermark，不扩大到intrinsic identity门禁
   sdk-deferred-backlog:
     status: needs_review
     source_refs: [contracts/sdk/parity-manifest.json, docs/adr/0031-sdk-identity-governance-scope.md, docs/adr/0032-sdk-contract-scope-classification.md]
     evidence_refs: [evidence.sdk-deferred-backlog-count-repair, evidence.sdk-deferred-backlog-count-verification]
     finding_refs: [finding.sdk-deferred-backlog-count-drift]
     audit_refs: [audit.semantic-governance-final-rereview]
-    unknown: 1441个deferred identity的capability分组、外部用户价值与逐组产品合同决策尚未闭合
+    unknown: 1443个deferred identity的capability分组、外部用户价值与逐组产品合同决策尚未闭合
     next_step: 按externally useful capability审查deferred；Host/Rust-only、language intrinsic与internal helper不是语言parity backlog
   product-backend-desktop-device:
     status: excluded

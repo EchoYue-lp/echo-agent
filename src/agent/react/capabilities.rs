@@ -875,13 +875,15 @@ impl ReactAgent {
             .into_iter()
             .map(SkillRegistration::Filesystem)
             .collect();
-        self.register_skill_descriptors(registrations, plugin).await
+        self.register_skill_descriptors(registrations, plugin, true)
+            .await
     }
 
     async fn register_skill_descriptors(
         &mut self,
         registrations: Vec<SkillRegistration>,
         plugin: Option<(&str, &crate::plugin::PluginVariables)>,
+        apply_load_policy: bool,
     ) -> Result<Vec<String>> {
         if registrations.is_empty() {
             info!(
@@ -893,14 +895,14 @@ impl ReactAgent {
 
         let mut names = Vec::new();
 
-        // Build a shared registry for the progressive disclosure tools.
-        // This is separate from `self.tools.skill_registry.lock().unwrap()` (which tracks code-based skills).
-        // The shared registry holds descriptors + activation state, accessed by
-        // both ActivateSkillTool and ReadSkillResourceTool during async execution.
+        // Build a concurrent definition view for progressive disclosure tools.
+        // Descriptors/documents remain local to this adapter, while activation
+        // and activation-derived sandbox policy use the primary registry's
+        // shared runtime authority.
         let shared = if let Some(existing) = &self.tools.progressive_skill_registry {
             existing.clone()
         } else {
-            let reg = Arc::new(RwLock::new(crate::skills::SkillRegistry::new()));
+            let reg = Arc::new(RwLock::new(self.tools.skill_registry.activation_view()));
             if let Some(ref manager) = self.tools.sandbox_manager {
                 if let Ok(mut guard) = reg.try_write() {
                     guard.set_sandbox_manager(manager.clone());
@@ -922,7 +924,8 @@ impl ReactAgent {
                     .set_sandbox_manager(manager.clone());
             }
             for mut registration in registrations {
-                if let Some(policy) = &self.skill_load_policy
+                if apply_load_policy
+                    && let Some(policy) = &self.skill_load_policy
                     && !policy.allows(registration.descriptor()).await
                 {
                     info!(
@@ -1069,6 +1072,56 @@ impl ReactAgent {
         Ok(names)
     }
 
+    async fn replace_skill_registration(&mut self, registration: SkillRegistration) -> Result<()> {
+        let name = registration.descriptor().name.clone();
+        if self.tools.skill_registry.has_code_skill(&name) {
+            return Err(crate::error::ReactError::Other(format!(
+                "skill '{name}' conflicts with an installed code skill"
+            )));
+        }
+        if let Some(policy) = &self.skill_load_policy
+            && !policy.allows(registration.descriptor()).await
+        {
+            return Err(crate::error::ReactError::Other(format!(
+                "skill '{name}' was rejected by the active load policy"
+            )));
+        }
+        self.unregister_skill_names(std::slice::from_ref(&name))
+            .await;
+        let registered = self
+            .register_skill_descriptors(vec![registration], None, false)
+            .await?;
+        if registered.iter().any(|registered| registered == &name) {
+            Ok(())
+        } else {
+            Err(crate::error::ReactError::Other(format!(
+                "skill '{name}' was rejected by the active load policy or conflicts with a code skill"
+            )))
+        }
+    }
+
+    /// Register or replace one file-backed descriptor across the catalog and
+    /// progressive tool definition views.
+    pub async fn register_skill_descriptor(&mut self, descriptor: SkillDescriptor) -> Result<()> {
+        self.replace_skill_registration(SkillRegistration::Filesystem(descriptor))
+            .await
+    }
+
+    /// Register or replace one immutable prepared Skill document across every
+    /// runtime definition view.
+    pub async fn register_prepared_skill(
+        &mut self,
+        document: crate::skills::external::SkillDocument,
+    ) -> Result<()> {
+        self.replace_skill_registration(SkillRegistration::Prepared(document))
+            .await
+    }
+
+    /// Record code-skill metadata through the Agent authority.
+    pub fn record_code_skill_info(&mut self, info: SkillInfo) {
+        self.tools.skill_registry.record_code_skill(info);
+    }
+
     /// Register plugin Skills captured by an immutable prepared generation.
     ///
     /// This path performs no discovery or document reads. A target-specific
@@ -1083,7 +1136,7 @@ impl ReactAgent {
             .iter()
             .map(|skill| SkillRegistration::Prepared(skill.document().clone()))
             .collect();
-        self.register_skill_descriptors(registrations, Some((source, variables)))
+        self.register_skill_descriptors(registrations, Some((source, variables)), true)
             .await
     }
 
@@ -1237,6 +1290,25 @@ impl ReactAgent {
         }
     }
 
+    /// Tag Skill definitions with source and plugin variables in every live
+    /// registry view.
+    pub async fn tag_skills_source_with_variables(
+        &mut self,
+        names: &[String],
+        source: &str,
+        variables: Option<&crate::plugin::PluginVariables>,
+    ) {
+        self.tools
+            .skill_registry
+            .tag_source_with_variables(names, source, variables);
+        if let Some(shared) = &self.tools.progressive_skill_registry {
+            shared
+                .write()
+                .await
+                .tag_source_with_variables(names, source, variables);
+        }
+    }
+
     /// Remove every skill owned by `source` and refresh all projections/tools.
     pub async fn unregister_skills_by_source(&mut self, source: &str) -> Vec<String> {
         let removed = self.tools.skill_registry.unregister_names_by_source(source);
@@ -1360,14 +1432,12 @@ impl ReactAgent {
         self.tools.skill_registry.count()
     }
 
-    /// Get the shared skill registry handle (for external tool access).
+    /// Get the canonical Skill registry for read and activation operations.
+    ///
+    /// Agent-owned definition mutations use the reconciliation methods above
+    /// so progressive tools cannot retain a stale descriptor view.
     pub fn skill_registry(&self) -> &crate::skills::SkillRegistry {
         &self.tools.skill_registry
-    }
-
-    /// Get a mutable reference to the skill registry (for registering descriptors).
-    pub fn skill_registry_mut(&mut self) -> &mut crate::skills::SkillRegistry {
-        &mut self.tools.skill_registry
     }
 
     /// Get the shared hook registry handle.

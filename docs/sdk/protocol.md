@@ -48,7 +48,10 @@ capabilities. The returned framework Agent exclusively owns that Session's
 conversation history. The adapter then drives every Prompt through
 `AgentTurnDriver` and turns accepted `EventEnvelope` values into bounded ACP
 message/thought/tool updates. Both cancellation routes cancel the same
-framework token, and only `TurnReceipt` decides the final stop reason or error.
+framework token. `TurnReceipt` separately records execution and event
+delivery; only `Completed + Delivered` becomes a successful final stop reason,
+while delivery failure is a bounded protocol error that does not rewrite the
+execution terminal.
 
 The adapter also owns the negotiation surface: a composable extension profile
 publishes `agentCapabilities._meta.echo_agent`, validates the Client hello
@@ -238,6 +241,13 @@ operation-discriminated unions. Each ConversationStore, RunStore,
 RuntimeStateStore, AuditLogger, ContextProjector and MemoryTrigger operation
 freezes its named input/result fields; the schema does not hide the complete
 payload behind an untyped JSON value.
+
+`WorkflowCheckpointStore` also freezes the complete claim settlement contract:
+`save_if_generation`, `claim`, `renew_claim`, `ack_claim` and `requeue_claim`
+carry canonical generation and attempt identities. Its descriptor must declare
+`claim_heartbeat_interval_ms` from 1 through 300000; the Host uses that value
+for the active resume heartbeat instead of guessing the remote store's lease.
+All three language SDKs validate the same operations, result shapes and bound.
 
 | Method | Direction | Purpose |
 |---|---|---|

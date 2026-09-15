@@ -4291,6 +4291,88 @@ impl echo_agent::workflow::CheckpointStore for ExtensionAgentComponentProxy {
         }
     }
 
+    async fn ack_claim(&self, id: &str, attempt_id: &str) -> echo_agent::error::Result<()> {
+        let result = self
+            .invoke(AgentComponentCallInputWire::WorkflowCheckpointAckClaim {
+                checkpoint_id: id.to_string(),
+                attempt_id: attempt_id.to_string(),
+            })
+            .await?;
+        match result {
+            AgentComponentCallResultWire::WorkflowCheckpointAckClaim => Ok(()),
+            _ => Err(component_mismatch(
+                AgentComponentOperationWire::WorkflowCheckpointAckClaim,
+            )),
+        }
+    }
+
+    async fn requeue_claim(&self, id: &str, attempt_id: &str) -> echo_agent::error::Result<()> {
+        let result = self
+            .invoke(
+                AgentComponentCallInputWire::WorkflowCheckpointRequeueClaim {
+                    checkpoint_id: id.to_string(),
+                    attempt_id: attempt_id.to_string(),
+                },
+            )
+            .await?;
+        match result {
+            AgentComponentCallResultWire::WorkflowCheckpointRequeueClaim => Ok(()),
+            _ => Err(component_mismatch(
+                AgentComponentOperationWire::WorkflowCheckpointRequeueClaim,
+            )),
+        }
+    }
+
+    async fn renew_claim(&self, id: &str, attempt_id: &str) -> echo_agent::error::Result<()> {
+        let result = self
+            .invoke(AgentComponentCallInputWire::WorkflowCheckpointRenewClaim {
+                checkpoint_id: id.to_string(),
+                attempt_id: attempt_id.to_string(),
+            })
+            .await?;
+        match result {
+            AgentComponentCallResultWire::WorkflowCheckpointRenewClaim => Ok(()),
+            _ => Err(component_mismatch(
+                AgentComponentOperationWire::WorkflowCheckpointRenewClaim,
+            )),
+        }
+    }
+
+    fn claim_heartbeat_interval(&self) -> Option<Duration> {
+        self.capabilities
+            .claim_heartbeat_interval_ms
+            .as_ref()
+            .and_then(WireU64::to_u64)
+            .map(Duration::from_millis)
+    }
+
+    fn supports_claim_settlement(&self) -> bool {
+        true
+    }
+
+    async fn save_if_generation(
+        &self,
+        checkpoint: &echo_agent::workflow::Checkpoint,
+        expected_generation: u64,
+    ) -> echo_agent::error::Result<bool> {
+        let result = self
+            .invoke(
+                AgentComponentCallInputWire::WorkflowCheckpointSaveIfGeneration {
+                    checkpoint: component_value(checkpoint)?,
+                    expected_generation: WireU64::from_u64(expected_generation),
+                },
+            )
+            .await?;
+        match result {
+            AgentComponentCallResultWire::WorkflowCheckpointSaveIfGeneration { committed } => {
+                Ok(committed)
+            }
+            _ => Err(component_mismatch(
+                AgentComponentOperationWire::WorkflowCheckpointSaveIfGeneration,
+            )),
+        }
+    }
+
     async fn list(&self) -> echo_agent::error::Result<Vec<echo_agent::workflow::CheckpointInfo>> {
         let result = self
             .invoke(AgentComponentCallInputWire::WorkflowCheckpointList)

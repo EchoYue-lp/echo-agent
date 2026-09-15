@@ -2535,6 +2535,25 @@
         "completion_tokens": {
           "$ref": "#/definitions/WireU64"
         },
+        "delivery": {
+          "description": "Delivery status from the driven event sink. Optional only for legacy persisted receipts created before delivery accounting existed.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 32
+        },
+        "delivery_error": {
+          "description": "Lossless delivery failure details when `delivery` is `failed`.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AgentFailureWire"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "elapsed_ms": {
           "description": "Total wall time of the run in milliseconds.",
           "allOf": [
@@ -2556,7 +2575,7 @@
           ]
         },
         "last_event_sequence": {
-          "description": "Sequence watermark of the last emitted event; aligned with the journal and replay cursors.",
+          "description": "Sequence watermark of the last event observed by the driver. A sink failure may leave the committed Journal/Ledger watermark behind this value; replay APIs continue to report their own committed watermark.",
           "allOf": [
             {
               "$ref": "#/definitions/WireU64"
@@ -3995,6 +4014,17 @@
     "AgentComponentCapabilitiesWire": {
       "type": "object",
       "properties": {
+        "claim_heartbeat_interval_ms": {
+          "description": "Renewal interval requested by a remote workflow checkpoint store.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WireU64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "isolation_level": {
           "type": [
             "string",
@@ -5735,6 +5765,38 @@
             "input": {
               "type": "object",
               "required": [
+                "checkpoint",
+                "expected_generation"
+              ],
+              "properties": {
+                "checkpoint": {
+                  "$ref": "#/definitions/WireValue"
+                },
+                "expected_generation": {
+                  "$ref": "#/definitions/WireU64"
+                }
+              },
+              "additionalProperties": false
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "workflow_checkpoint_save_if_generation"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "type": "object",
+              "required": [
                 "checkpoint_id"
               ],
               "properties": {
@@ -5776,6 +5838,102 @@
               "type": "string",
               "enum": [
                 "workflow_checkpoint_claim"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "type": "object",
+              "required": [
+                "attempt_id",
+                "checkpoint_id"
+              ],
+              "properties": {
+                "attempt_id": {
+                  "type": "string"
+                },
+                "checkpoint_id": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "workflow_checkpoint_ack_claim"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "type": "object",
+              "required": [
+                "attempt_id",
+                "checkpoint_id"
+              ],
+              "properties": {
+                "attempt_id": {
+                  "type": "string"
+                },
+                "checkpoint_id": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "workflow_checkpoint_requeue_claim"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "input",
+            "operation"
+          ],
+          "properties": {
+            "input": {
+              "type": "object",
+              "required": [
+                "attempt_id",
+                "checkpoint_id"
+              ],
+              "properties": {
+                "attempt_id": {
+                  "type": "string"
+                },
+                "checkpoint_id": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "workflow_checkpoint_renew_claim"
               ]
             }
           },
@@ -9271,6 +9429,34 @@
             "operation": {
               "type": "string",
               "enum": [
+                "workflow_checkpoint_save_if_generation"
+              ]
+            },
+            "value": {
+              "type": "object",
+              "required": [
+                "committed"
+              ],
+              "properties": {
+                "committed": {
+                  "type": "boolean"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation",
+            "value"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
                 "workflow_checkpoint_load"
               ]
             },
@@ -9321,6 +9507,51 @@
                 }
               },
               "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "workflow_checkpoint_ack_claim"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "workflow_checkpoint_requeue_claim"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "operation"
+          ],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": [
+                "workflow_checkpoint_renew_claim"
+              ]
             }
           },
           "additionalProperties": false

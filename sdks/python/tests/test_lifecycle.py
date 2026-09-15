@@ -32,9 +32,13 @@ from echo_agent_sdk.client import (
     StoreDescriptor,
     ToolCall,
     ToolDescriptor,
+    WorkflowCheckpointClaimAttemptRequest,
+    WorkflowCheckpointResult,
+    WorkflowCheckpointSaveIfGenerationRequest,
     WorkflowRunRequest,
     _AsyncQueue,
     _Callbacks,
+    _EventFeed,
     _timeout_wire,
     _typed_handler,
 )
@@ -52,6 +56,180 @@ async def test_bounded_subscription_surfaces_event_gap() -> None:
         await queue.get()
     assert raised.value.code == "event_gap"
     assert raised.value.details == {"reason": "client_queue_full", "capacity": 1}
+
+
+def test_event_feed_rejects_stale_generation_and_malformed_gap_without_advancing() -> (
+    None
+):
+    feed = _EventFeed(_AsyncQueue(maxsize=4))
+    stream = WireHandle("stream-1", "1", "stream")
+    event = {
+        "stream": stream.to_dict(),
+        "envelope": {"stream_id": stream.id, "sequence": "1"},
+    }
+    assert feed.accept_event(event)
+    assert feed.last_sequence == 1
+
+    forward_gap = dict(event)
+    forward_gap["envelope"] = {"stream_id": stream.id, "sequence": "3"}
+    with pytest.raises(EchoAgentError) as raised:
+        feed.accept_event(forward_gap)
+    assert raised.value.code == "event_gap"
+    assert feed.last_sequence == 1
+
+    stale = dict(event)
+    stale["stream"] = WireHandle("stream-1", "2", "stream").to_dict()
+    with pytest.raises(EchoAgentError) as raised:
+        feed.accept_event(stale)
+    assert raised.value.code == "handle_mismatch"
+    assert feed.last_sequence == 1
+
+    invalid_gap = {
+        "stream": stream.to_dict(),
+        "gap": {
+            "from_sequence": "2",
+            "to_sequence": "3",
+            "reason": "retention floor",
+            "snapshot_watermark": "2",
+        },
+    }
+    with pytest.raises(EchoAgentError):
+        feed.accept_gap(invalid_gap)
+    assert feed.last_sequence == 1
+
+    wrong_start = {
+        "stream": stream.to_dict(),
+        "gap": {
+            "from_sequence": "3",
+            "to_sequence": "3",
+            "reason": "retention floor",
+            "snapshot_watermark": "3",
+        },
+    }
+    with pytest.raises(EchoAgentError):
+        feed.accept_gap(wrong_start)
+    assert feed.last_sequence == 1
+
+
+def test_event_feed_rejects_stale_and_malformed_gap_handles_without_advancing() -> None:
+    stream = WireHandle("stream-1", "1", "stream")
+    valid_event = {
+        "stream": stream.to_dict(),
+        "envelope": {"stream_id": stream.id, "sequence": "1"},
+    }
+    gap = {
+        "from_sequence": "2",
+        "to_sequence": "2",
+        "reason": "retention floor",
+        "snapshot_watermark": "2",
+    }
+    invalid_streams = [
+        WireHandle("stream-1", "2", "stream").to_dict(),
+        WireHandle("stream-1", "1", "run").to_dict(),
+        {"id": "stream-1", "generation": "01", "kind": "stream"},
+    ]
+
+    for invalid_stream in invalid_streams:
+        feed = _EventFeed(_AsyncQueue(maxsize=4))
+        assert feed.accept_event(valid_event)
+        with pytest.raises(EchoAgentError):
+            feed.accept_gap({"stream": invalid_stream, "gap": gap})
+        assert feed.last_sequence == 1
+
+
+def test_event_feed_accepts_contiguous_gap_and_next_event() -> None:
+    feed = _EventFeed(_AsyncQueue(maxsize=4))
+    stream = WireHandle("stream-1", "1", "stream")
+    assert feed.accept_event(
+        {
+            "stream": stream.to_dict(),
+            "envelope": {"stream_id": stream.id, "sequence": "1"},
+        }
+    )
+    gap = {
+        "stream": stream.to_dict(),
+        "gap": {
+            "from_sequence": "2",
+            "to_sequence": "3",
+            "reason": "retention floor",
+            "snapshot_watermark": "3",
+        },
+    }
+    assert feed.accept_gap(gap)
+    assert not feed.accept_gap(gap)
+    assert feed.accept_event(
+        {
+            "stream": stream.to_dict(),
+            "envelope": {"stream_id": stream.id, "sequence": "4"},
+        }
+    )
+    assert feed.last_sequence == 4
+
+
+@pytest.mark.asyncio
+async def test_current_subscription_discards_buffered_stale_generation_items() -> None:
+    stale = WireHandle("stream-1", "1", "stream")
+    current = WireHandle("stream-1", "2", "stream")
+    feed = _EventFeed(_AsyncQueue(maxsize=4), handle=stale)
+    feed.queue.push(
+        {
+            "stream": stale.to_dict(),
+            "envelope": {"stream_id": stale.id, "sequence": "1"},
+        }
+    )
+    client = object.__new__(EchoAgentClient)
+    client._events = {stale.id: feed}
+    client._event_queue_size = 4
+    client._closed = False
+
+    events = client.events_for(current.id, current)
+    with pytest.raises(EchoAgentError) as raised:
+        await anext(events)
+
+    assert raised.value.code == "handle_mismatch"
+    assert not feed.queue._items
+
+
+@pytest.mark.asyncio
+async def test_current_subscription_discards_stale_items_from_an_already_failed_feed() -> (
+    None
+):
+    stale = WireHandle("stream-1", "1", "stream")
+    current = WireHandle("stream-1", "2", "stream")
+    feed = _EventFeed(_AsyncQueue(maxsize=4), handle=stale)
+    feed.queue.push(
+        {
+            "stream": stale.to_dict(),
+            "envelope": {"stream_id": stale.id, "sequence": "1"},
+        }
+    )
+    feed.queue.fail(EchoAgentError("event_gap", "earlier feed failure"))
+    client = object.__new__(EchoAgentClient)
+    client._events = {stale.id: feed}
+    client._event_queue_size = 4
+    client._closed = False
+
+    events = client.events_for(current.id, current)
+    with pytest.raises(EchoAgentError) as raised:
+        await anext(events)
+
+    assert raised.value.code == "event_gap"
+    assert not feed.queue._items
+
+
+def test_event_feed_rejects_wrong_kind_without_advancing() -> None:
+    feed = _EventFeed(_AsyncQueue(maxsize=4))
+    with pytest.raises(EchoAgentError) as raised:
+        feed.accept_event(
+            {
+                "stream": WireHandle("stream-1", "1", "run").to_dict(),
+                "envelope": {"stream_id": "stream-1", "sequence": "1"},
+            }
+        )
+
+    assert raised.value.code == "serialization_violation"
+    assert feed.handle is None
+    assert feed.last_sequence == 0
 
 
 @pytest.mark.asyncio
@@ -98,7 +276,7 @@ async def test_event_consumption_acknowledges_highest_contiguous_sequence() -> N
 
     class StubClient:
         def __init__(self) -> None:
-            self._event_cursors: dict[str, int] = {}
+            self._event_cursors: dict[WireHandle, int] = {}
 
         async def notify(self, method: str, params: object) -> None:
             sent.append((method, params))
@@ -130,10 +308,55 @@ async def test_event_consumption_acknowledges_highest_contiguous_sequence() -> N
 
 
 @pytest.mark.asyncio
+async def test_event_ack_does_not_advance_for_a_different_generation() -> None:
+    sent: list[tuple[str, object]] = []
+
+    class StubClient:
+        def __init__(self) -> None:
+            self._event_cursors: dict[WireHandle, int] = {}
+
+        async def notify(self, method: str, params: object) -> None:
+            sent.append((method, params))
+
+    client = StubClient()
+    stream = WireHandle("stream-1", "1", "stream")
+    stale = WireHandle("stream-1", "2", "stream")
+    await EchoAgentClient._ack_event(
+        client,  # type: ignore[arg-type]
+        stream,
+        {"stream": stale.to_dict(), "envelope": {"sequence": "9"}},
+    )
+
+    assert sent == []
+    assert client._event_cursors == {}
+
+
+@pytest.mark.asyncio
+async def test_event_ack_advances_cursor_only_after_notification_succeeds() -> None:
+    class StubClient:
+        def __init__(self) -> None:
+            self._event_cursors: dict[WireHandle, int] = {}
+
+        async def notify(self, _method: str, _params: object) -> None:
+            raise EchoAgentError("transport_error", "ack transport failed")
+
+    client = StubClient()
+    stream = WireHandle("stream-1", "1", "stream")
+    with pytest.raises(EchoAgentError):
+        await EchoAgentClient._ack_event(
+            client,  # type: ignore[arg-type]
+            stream,
+            {"stream": stream.to_dict(), "envelope": {"sequence": "2"}},
+        )
+
+    assert client._event_cursors == {}
+
+
+@pytest.mark.asyncio
 async def test_run_close_cancels_once_and_closes_local_events() -> None:
     class StubClient:
         def __init__(self) -> None:
-            self._events = {"stream-1": _AsyncQueue()}
+            self._events = {"stream-1": _EventFeed(_AsyncQueue())}
             self.requests: list[tuple[str, object]] = []
 
         async def request(self, method: str, params: object) -> dict[str, object]:
@@ -154,7 +377,7 @@ async def test_run_close_cancels_once_and_closes_local_events() -> None:
         "echo_agent/run/wait",
     ]
     with pytest.raises(StopAsyncIteration):
-        await client._events["stream-1"].get()
+        await client._events["stream-1"].queue.get()
 
 
 def test_typed_descriptors_render_the_frozen_extension_shapes() -> None:
@@ -558,6 +781,79 @@ def test_agent_component_extended_variants_and_unit_inputs_are_closed() -> None:
                 },
             )()
         ).to_wire()
+
+
+def test_workflow_checkpoint_generation_claim_and_heartbeat_contracts() -> None:
+    descriptor = AgentComponentDescriptor(
+        "workflow_checkpoint_store",
+        "checkpoint-store",
+        claim_heartbeat_interval_ms=1_000,
+    ).to_wire()
+    assert descriptor["capabilities"]["claim_heartbeat_interval_ms"] == "1000"
+    with pytest.raises(ValueError, match="require a claim heartbeat"):
+        AgentComponentDescriptor("workflow_checkpoint_store", "missing")
+    with pytest.raises(ValueError, match="only valid"):
+        AgentComponentDescriptor(
+            "audit_logger", "wrong", claim_heartbeat_interval_ms=1_000
+        )
+    with pytest.raises(ValueError, match="1 to 300000"):
+        AgentComponentDescriptor(
+            "workflow_checkpoint_store",
+            "too-large",
+            claim_heartbeat_interval_ms=300_001,
+        )
+
+    payload = {
+        "extension": {"id": "checkpoint-1", "generation": "1", "kind": "extension"},
+        "invocation_id": "checkpoint-cas",
+        "deadline": {"seconds": "20", "nanos": 0},
+        "invocation": {
+            "operation": "agent_component_call",
+            "input": {
+                "component": "workflow_checkpoint_store",
+                "call": {
+                    "operation": "workflow_checkpoint_save_if_generation",
+                    "input": {
+                        "checkpoint": {"kind": "map", "value": []},
+                        "expected_generation": "7",
+                    },
+                },
+            },
+        },
+    }
+    save = AgentComponentCall.from_payload(payload)
+    assert isinstance(save.request, WorkflowCheckpointSaveIfGenerationRequest)
+    assert save.request.expected_generation == 7
+
+    claim_payload = {
+        **payload,
+        "invocation_id": "checkpoint-ack",
+        "invocation": {
+            "operation": "agent_component_call",
+            "input": {
+                "component": "workflow_checkpoint_store",
+                "call": {
+                    "operation": "workflow_checkpoint_ack_claim",
+                    "input": {
+                        "checkpoint_id": "checkpoint-1",
+                        "attempt_id": "attempt-1",
+                    },
+                },
+            },
+        },
+    }
+    claim = AgentComponentCall.from_payload(claim_payload)
+    assert isinstance(claim.request, WorkflowCheckpointClaimAttemptRequest)
+    assert claim.request.attempt_id == "attempt-1"
+
+    committed = AgentComponentOutcome(
+        WorkflowCheckpointResult.saved_if_generation(True)
+    ).to_wire()
+    assert committed["result"]["value"]["result"]["value"] == {"committed": True}
+    acked = AgentComponentOutcome(WorkflowCheckpointResult.claim_acked()).to_wire()
+    assert acked["result"]["value"]["result"]["operation"] == (
+        "workflow_checkpoint_ack_claim"
+    )
 
 
 def test_agent_component_stream_preserves_outer_and_nested_discriminators() -> None:

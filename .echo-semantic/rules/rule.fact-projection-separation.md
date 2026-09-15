@@ -7,11 +7,11 @@ expectation: human_confirmed
 risk: high
 primary_focus: state_authority
 focus: [data_durability, contract_evidence, failure_concurrency]
-observed_at: 81e2756cee9127fa23a9bb1023bd56aa8f954964
+observed_at: cba8e08f3e3f0ccf1d4df3a22be11589f63b2ecd
 behavior_refs: [behavior.observation-persistence]
-code_refs: [echo-core/src/agent/event_envelope.rs, echo-state/src/journal/mod.rs, echo-state/src/delivery.rs, src/trace/mod.rs, src/eval/runner.rs, docs/en/41-persistence-concepts.md, docs/adr/0038-eval-trace-correlation-identity.md]
-evidence_refs: [evidence.persistence-observation, evidence.eval-trace-correlation-repair, evidence.eval-trace-correlation-verification]
-finding_refs: [finding.trace-effect-event-producers, finding.eval-trace-identity, finding.trace-audit-secret-boundary]
+code_refs: [echo-core/src/agent/event_envelope.rs, echo-state/src/journal/mod.rs, echo-state/src/delivery.rs, src/trace/mod.rs, src/eval/runner.rs, echo-sdk-host/src/core_profile/persistence.rs, docs/en/41-persistence-concepts.md, docs/adr/0038-eval-trace-correlation-identity.md, docs/adr/0046-turn-execution-delivery-settlement.md]
+evidence_refs: [evidence.persistence-observation, evidence.eval-trace-correlation-repair, evidence.eval-trace-correlation-verification, evidence.turn-terminal-delivery-settlement-repair, evidence.turn-terminal-delivery-settlement-verification]
+finding_refs: [finding.trace-effect-event-producers, finding.eval-trace-identity, finding.trace-audit-secret-boundary, finding.turn-terminal-commit-projection-order]
 ---
 
 # Fact、Projection 与 Trace 分离
@@ -26,7 +26,7 @@ finding_refs: [finding.trace-effect-event-producers, finding.eval-trace-identity
 
 ## 当前实现
 
-EventEnvelope提供versioned identity/sequence，CheckpointedReducer从Journal恢复，DeliveryLedger使用Journal+reducer，RunStore独立保存producer-owned trace。Eval correlation只关联Run，不能替代真实trace ID；多个精确候选不形成“任选其一”的投影权威。
+EventEnvelope提供versioned identity/sequence，CheckpointedReducer从Journal恢复，DeliveryLedger使用Journal+reducer，RunStore独立保存producer-owned trace。Turn execution由producer terminal决定，sink projection只决定delivery；SDK恢复用真实Journal反查receipt watermark，不能从索引投影发明已交付事实。
 
 ## 期望行为
 

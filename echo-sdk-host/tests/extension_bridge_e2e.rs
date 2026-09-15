@@ -159,6 +159,13 @@ fn set_profile_limit(
 async fn start_scripted_model(
     scripts: Vec<Vec<serde_json::Value>>,
 ) -> Result<String, Box<dyn std::error::Error>> {
+    start_scripted_model_with_delay(scripts, Duration::ZERO).await
+}
+
+async fn start_scripted_model_with_delay(
+    scripts: Vec<Vec<serde_json::Value>>,
+    response_delay: Duration,
+) -> Result<String, Box<dyn std::error::Error>> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?.to_string();
     let seen = Arc::new(AtomicUsize::new(0));
@@ -173,6 +180,9 @@ async fn start_scripted_model(
             tokio::spawn(async move {
                 if support::read_http_request(&mut socket).await.is_err() {
                     return;
+                }
+                if !response_delay.is_zero() {
+                    tokio::time::sleep(response_delay).await;
                 }
                 let index = seen.fetch_add(1, Ordering::AcqRel);
                 let Some(events) = scripts.get(index.min(total.saturating_sub(1))) else {
@@ -329,6 +339,180 @@ struct SdkDispatch {
     reentrant_mutation: Arc<Mutex<Option<(WireHandle, WireHandle)>>>,
     reentrant_conflicts: Arc<AtomicUsize>,
     tokenizer_counts: Arc<AtomicUsize>,
+    checkpoints: Arc<CheckpointDispatch>,
+}
+
+#[derive(Default)]
+struct CheckpointDispatch {
+    pending: Mutex<Option<WireValue>>,
+    claimed: Mutex<Option<(String, String, WireValue)>>,
+    renewals: AtomicUsize,
+}
+
+type CheckpointDispatchResult<T> = Result<T, Box<EchoSdkError>>;
+
+impl CheckpointDispatch {
+    fn invalid(message: impl Into<String>) -> Box<EchoSdkError> {
+        Box::new(EchoSdkError::new(
+            ExtensionErrorCode::InvalidValue,
+            message.into(),
+            Retryability::Never,
+        ))
+    }
+
+    fn json(value: &WireValue) -> CheckpointDispatchResult<serde_json::Value> {
+        value
+            .clone()
+            .into_json()
+            .map_err(|error| Self::invalid(error.to_string()))
+    }
+
+    fn checkpoint_id(value: &WireValue) -> CheckpointDispatchResult<String> {
+        Self::json(value)?
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .map(ToString::to_string)
+            .ok_or_else(|| Self::invalid("checkpoint has no id"))
+    }
+
+    fn with_attempt(
+        value: &WireValue,
+        attempt_id: Option<&str>,
+    ) -> CheckpointDispatchResult<WireValue> {
+        let mut json = Self::json(value)?;
+        let object = json
+            .as_object_mut()
+            .ok_or_else(|| Self::invalid("checkpoint is not an object"))?;
+        object.insert(
+            "resume_attempt_id".to_string(),
+            attempt_id
+                .map(|value| serde_json::Value::String(value.to_string()))
+                .unwrap_or(serde_json::Value::Null),
+        );
+        WireValue::from_json(json).map_err(|error| Self::invalid(error.to_string()))
+    }
+
+    fn save(&self, checkpoint: WireValue) {
+        *self
+            .pending
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(checkpoint);
+    }
+
+    fn load(&self, id: &str) -> CheckpointDispatchResult<Option<WireValue>> {
+        if let Some(checkpoint) = self
+            .pending
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+            && Self::checkpoint_id(checkpoint)? == id
+        {
+            return Ok(Some(checkpoint.clone()));
+        }
+        let claimed = self
+            .claimed
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        Ok(claimed
+            .as_ref()
+            .filter(|(checkpoint_id, _, _)| checkpoint_id == id)
+            .map(|(_, _, checkpoint)| checkpoint.clone()))
+    }
+
+    fn claim(&self, id: &str) -> CheckpointDispatchResult<Option<WireValue>> {
+        let mut pending = self
+            .pending
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let Some(checkpoint) = pending.as_ref() else {
+            return Ok(None);
+        };
+        if Self::checkpoint_id(checkpoint)? != id {
+            return Ok(None);
+        }
+        let checkpoint = pending
+            .take()
+            .ok_or_else(|| Self::invalid("checkpoint claim disappeared"))?;
+        drop(pending);
+        let attempt_id = "sdk-resume-attempt".to_string();
+        let claimed = Self::with_attempt(&checkpoint, Some(&attempt_id))?;
+        *self
+            .claimed
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) =
+            Some((id.to_string(), attempt_id, claimed.clone()));
+        Ok(Some(claimed))
+    }
+
+    fn settle_claim(
+        &self,
+        id: &str,
+        attempt_id: &str,
+        requeue: bool,
+    ) -> CheckpointDispatchResult<()> {
+        let mut claimed = self
+            .claimed
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let matches = claimed
+            .as_ref()
+            .is_some_and(|(stored_id, stored_attempt, _)| {
+                stored_id == id && stored_attempt == attempt_id
+            });
+        if !matches {
+            return Err(Self::invalid("checkpoint claim owner mismatch"));
+        }
+        let (_, _, checkpoint) = claimed
+            .take()
+            .ok_or_else(|| Self::invalid("checkpoint claim disappeared"))?;
+        drop(claimed);
+        if requeue {
+            self.save(Self::with_attempt(&checkpoint, None)?);
+        }
+        Ok(())
+    }
+
+    fn renew(&self, id: &str, attempt_id: &str) -> CheckpointDispatchResult<()> {
+        let claimed = self
+            .claimed
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if !claimed
+            .as_ref()
+            .is_some_and(|(stored_id, stored_attempt, _)| {
+                stored_id == id && stored_attempt == attempt_id
+            })
+        {
+            return Err(Self::invalid("checkpoint claim owner mismatch"));
+        }
+        self.renewals.fetch_add(1, Ordering::AcqRel);
+        Ok(())
+    }
+
+    fn save_if_generation(
+        &self,
+        checkpoint: WireValue,
+        expected_generation: WireU64,
+    ) -> CheckpointDispatchResult<bool> {
+        let Some(expected_generation) = expected_generation.to_u64() else {
+            return Err(Self::invalid("expected_generation is out of range"));
+        };
+        let mut pending = self
+            .pending
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let Some(current) = pending.as_ref() else {
+            return Ok(false);
+        };
+        let generation = Self::json(current)?
+            .get("generation")
+            .and_then(serde_json::Value::as_u64);
+        if generation != Some(expected_generation) {
+            return Ok(false);
+        }
+        *pending = Some(checkpoint);
+        Ok(true)
+    }
 }
 
 fn tool_descriptor(name: &str) -> ExtensionDescriptor {
@@ -439,6 +623,7 @@ where
     let reentrant_mutation = dispatch.reentrant_mutation.clone();
     let reentrant_conflicts = dispatch.reentrant_conflicts.clone();
     let tokenizer_counts = dispatch.tokenizer_counts.clone();
+    let checkpoints = dispatch.checkpoints.clone();
     let connect = Client
         .builder()
         .on_receive_request(
@@ -459,6 +644,7 @@ where
                 let reentrant_mutation = reentrant_mutation.clone();
                 let reentrant_conflicts = reentrant_conflicts.clone();
                 let tokenizer_counts = tokenizer_counts.clone();
+                let checkpoints = checkpoints.clone();
                 move |call: ExtensionInvokeCall,
                       responder: Responder<ExtensionInvokeOutcome>,
                       connection: ConnectionTo<agent_client_protocol::Agent>| {
@@ -478,6 +664,7 @@ where
                     let reentrant_mutation = reentrant_mutation.clone();
                     let reentrant_conflicts = reentrant_conflicts.clone();
                     let tokenizer_counts = tokenizer_counts.clone();
+                    let checkpoints = checkpoints.clone();
                     async move {
                         let operation = call.invocation.operation();
                         operations
@@ -740,9 +927,49 @@ where
                                             results: Vec::new(),
                                         }
                                     }
-                                    AgentComponentCallInputWire::WorkflowCheckpointSave { .. } => AgentComponentCallResultWire::WorkflowCheckpointSave,
-                                    AgentComponentCallInputWire::WorkflowCheckpointLoad { .. } => AgentComponentCallResultWire::WorkflowCheckpointLoad { checkpoint: None },
-                                    AgentComponentCallInputWire::WorkflowCheckpointClaim { .. } => AgentComponentCallResultWire::WorkflowCheckpointClaim { checkpoint: None },
+                                    AgentComponentCallInputWire::WorkflowCheckpointSave { checkpoint } => {
+                                        checkpoints.save(checkpoint);
+                                        AgentComponentCallResultWire::WorkflowCheckpointSave
+                                    }
+                                    AgentComponentCallInputWire::WorkflowCheckpointSaveIfGeneration { checkpoint, expected_generation } => {
+                                        let committed = match checkpoints.save_if_generation(checkpoint, expected_generation) {
+                                            Ok(committed) => committed,
+                                            Err(error) => return responder.respond(ExtensionInvokeOutcome::Error { error: *error }),
+                                        };
+                                        AgentComponentCallResultWire::WorkflowCheckpointSaveIfGeneration { committed }
+                                    }
+                                    AgentComponentCallInputWire::WorkflowCheckpointLoad { checkpoint_id } => {
+                                        let checkpoint = match checkpoints.load(&checkpoint_id) {
+                                            Ok(checkpoint) => checkpoint,
+                                            Err(error) => return responder.respond(ExtensionInvokeOutcome::Error { error: *error }),
+                                        };
+                                        AgentComponentCallResultWire::WorkflowCheckpointLoad { checkpoint }
+                                    }
+                                    AgentComponentCallInputWire::WorkflowCheckpointClaim { checkpoint_id } => {
+                                        let checkpoint = match checkpoints.claim(&checkpoint_id) {
+                                            Ok(checkpoint) => checkpoint,
+                                            Err(error) => return responder.respond(ExtensionInvokeOutcome::Error { error: *error }),
+                                        };
+                                        AgentComponentCallResultWire::WorkflowCheckpointClaim { checkpoint }
+                                    }
+                                    AgentComponentCallInputWire::WorkflowCheckpointAckClaim { checkpoint_id, attempt_id } => {
+                                        if let Err(error) = checkpoints.settle_claim(&checkpoint_id, &attempt_id, false) {
+                                            return responder.respond(ExtensionInvokeOutcome::Error { error: *error });
+                                        }
+                                        AgentComponentCallResultWire::WorkflowCheckpointAckClaim
+                                    }
+                                    AgentComponentCallInputWire::WorkflowCheckpointRequeueClaim { checkpoint_id, attempt_id } => {
+                                        if let Err(error) = checkpoints.settle_claim(&checkpoint_id, &attempt_id, true) {
+                                            return responder.respond(ExtensionInvokeOutcome::Error { error: *error });
+                                        }
+                                        AgentComponentCallResultWire::WorkflowCheckpointRequeueClaim
+                                    }
+                                    AgentComponentCallInputWire::WorkflowCheckpointRenewClaim { checkpoint_id, attempt_id } => {
+                                        if let Err(error) = checkpoints.renew(&checkpoint_id, &attempt_id) {
+                                            return responder.respond(ExtensionInvokeOutcome::Error { error: *error });
+                                        }
+                                        AgentComponentCallResultWire::WorkflowCheckpointRenewClaim
+                                    }
                                     AgentComponentCallInputWire::WorkflowCheckpointList => AgentComponentCallResultWire::WorkflowCheckpointList { checkpoints: Vec::new() },
                                     AgentComponentCallInputWire::WorkflowCheckpointListByGraph { .. } => AgentComponentCallResultWire::WorkflowCheckpointListByGraph { checkpoints: Vec::new() },
                                     AgentComponentCallInputWire::WorkflowCheckpointListFiltered { .. } => AgentComponentCallResultWire::WorkflowCheckpointListFiltered { checkpoints: Vec::new() },
@@ -2551,12 +2778,17 @@ async fn agent_components_are_consumed_by_new_session_agents()
 -> Result<(), Box<dyn std::error::Error>> {
     let directory = tempfile::tempdir()?;
     let state_root = directory.path().join("state");
-    let model = start_scripted_model(vec![
-        tool_call_script("web_search", r#"{"query":"bridge"}"#),
-        final_script("search component answer"),
-        tool_call_script("shell", r#"{"command":"printf sandbox"}"#),
-        final_script("sandbox component answer"),
-    ])
+    let model = start_scripted_model_with_delay(
+        vec![
+            vec![serde_json::json!({"invalid": true})],
+            final_script("checkpoint resume answer"),
+            tool_call_script("web_search", r#"{"query":"bridge"}"#),
+            final_script("search component answer"),
+            tool_call_script("shell", r#"{"command":"printf sandbox"}"#),
+            final_script("sandbox component answer"),
+        ],
+        Duration::from_millis(10),
+    )
     .await?;
     let config = write_config(
         directory.path(),
@@ -2705,6 +2937,22 @@ async fn agent_components_are_consumed_by_new_session_agents()
                 None,
             )
             .await?;
+            let checkpoint_store = register_extension(
+                &connection,
+                ExtensionKind::AgentComponent,
+                "sdk-workflow-checkpoints",
+                ExtensionDescriptor::AgentComponent {
+                    descriptor_version: 1,
+                    component: AgentComponentKindWire::WorkflowCheckpointStore,
+                    name: "sdk-workflow-checkpoints".to_string(),
+                    capabilities: AgentComponentCapabilitiesWire {
+                        claim_heartbeat_interval_ms: Some(WireU64::from_u64(1)),
+                        ..AgentComponentCapabilitiesWire::default()
+                    },
+                },
+                None,
+            )
+            .await?;
             let agent = connection
                 .send_request(AgentCreateRequest {
                     config: AgentConfigWire::HostDefault,
@@ -2734,6 +2982,129 @@ async fn agent_components_are_consumed_by_new_session_agents()
                 .as_ref()
                 .map(|(agent, _)| agent.clone())
                 .ok_or_else(|| RpcError::internal_error().data("missing Agent handle"))?;
+            let workflow_call = |operation: &str, arguments: Vec<WireValue>| {
+                UntypedMessage::new(
+                    "_echo_agent/workflow/op",
+                    serde_json::to_value(FeatureOperationRequest {
+                        operation: operation.to_string(),
+                        signature_digest:
+                            echo_sdk_protocol::facade::family_operation_signature_digest(
+                                "workflow",
+                                operation,
+                            ),
+                        handle: Some(session.session.clone()),
+                        arguments,
+                    })
+                    .map_err(|error| RpcError::internal_error().data(error.to_string()))?,
+                )
+            };
+            let definition = serde_json::json!({
+                "name": "remote_checkpoint_settlement",
+                "nodes": [{
+                    "name": "work",
+                    "type": "agent",
+                    "system_prompt": "return a short answer",
+                    "input_key": "task",
+                    "output_key": "answer"
+                }],
+                "edges": [],
+                "entry": "work",
+                "finish": ["work"],
+                "interrupt_before": ["work"]
+            })
+            .to_string();
+            let built = connection
+                .send_request(workflow_call(
+                    "workflow.graph.build",
+                    vec![WireValue::String(definition)],
+                )?)
+                .block_task()
+                .await?;
+            let built: FeatureOperationResponse = serde_json::from_value(built)
+                .map_err(|error| RpcError::internal_error().data(error.to_string()))?;
+            let built = built
+                .value
+                .into_json()
+                .map_err(|error| RpcError::internal_error().data(error.to_string()))?;
+            let graph: WireHandle = serde_json::from_value(
+                built
+                    .get("resource")
+                    .cloned()
+                    .ok_or_else(|| RpcError::internal_error().data("missing graph resource"))?,
+            )
+            .map_err(|error| RpcError::internal_error().data(error.to_string()))?;
+            let graph_argument = WireValue::from_json(
+                serde_json::to_value(&graph)
+                    .map_err(|error| RpcError::internal_error().data(error.to_string()))?,
+            )
+            .map_err(|error| RpcError::internal_error().data(error.to_string()))?;
+            let interrupted = connection
+                .send_request(workflow_call(
+                    "workflow.graph.run_until_interrupt",
+                    vec![
+                        graph_argument.clone(),
+                        WireValue::from_json(serde_json::json!({"task": "checkpoint"}))
+                            .map_err(|error| RpcError::internal_error().data(error.to_string()))?,
+                    ],
+                )?)
+                .block_task()
+                .await?;
+            let interrupted: FeatureOperationResponse = serde_json::from_value(interrupted)
+                .map_err(|error| RpcError::internal_error().data(error.to_string()))?;
+            let interrupted = interrupted
+                .value
+                .into_json()
+                .map_err(|error| RpcError::internal_error().data(error.to_string()))?;
+            let checkpoint_id = interrupted
+                .get("checkpoint")
+                .and_then(|checkpoint| checkpoint.get("id"))
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| RpcError::internal_error().data("missing checkpoint id"))?
+                .to_string();
+            connection
+                .send_request(workflow_call(
+                    "workflow.graph.tag_checkpoint",
+                    vec![
+                        graph_argument.clone(),
+                        WireValue::String(checkpoint_id.clone()),
+                        WireValue::String("remote".to_string()),
+                        WireValue::List(vec![WireValue::String("sdk".to_string())]),
+                    ],
+                )?)
+                .block_task()
+                .await?;
+            let first_resume = connection
+                .send_request(workflow_call(
+                    "workflow.graph.resume",
+                    vec![
+                        graph_argument.clone(),
+                        WireValue::String(checkpoint_id.clone()),
+                        WireValue::String("approve".to_string()),
+                    ],
+                )?)
+                .block_task()
+                .await;
+            assert!(
+                first_resume.is_err(),
+                "malformed provider response must fail and requeue the remote claim"
+            );
+            let resumed = connection
+                .send_request(workflow_call(
+                    "workflow.graph.resume",
+                    vec![
+                        graph_argument,
+                        WireValue::String(checkpoint_id),
+                        WireValue::String("approve".to_string()),
+                    ],
+                )?)
+                .block_task()
+                .await?;
+            let resumed: FeatureOperationResponse = serde_json::from_value(resumed)
+                .map_err(|error| RpcError::internal_error().data(error.to_string()))?;
+            assert!(resumed
+                .value
+                .into_json()
+                .is_ok_and(|value| value.get("outcome") == Some(&serde_json::json!("completed"))));
             let tool_names = invoke_source_operation(
                 &connection,
                 agent_handle.clone(),
@@ -2854,6 +3225,7 @@ async fn agent_components_are_consumed_by_new_session_agents()
             assert!(unregister(&connection, &sandbox).await?);
             assert!(unregister(&connection, &intent).await?);
             assert!(unregister(&connection, &skill_policy).await?);
+            assert!(unregister(&connection, &checkpoint_store).await?);
             Ok::<_, RpcError>(())
         })
     })
@@ -2892,6 +3264,12 @@ async fn agent_components_are_consumed_by_new_session_agents()
         "SkillLoadPolicy:SkillLoadAllows",
         "ConversationStore:ConversationEnsure",
         "RunStore:RunAppendEvent",
+        "WorkflowCheckpointStore:WorkflowCheckpointSave",
+        "WorkflowCheckpointStore:WorkflowCheckpointSaveIfGeneration",
+        "WorkflowCheckpointStore:WorkflowCheckpointClaim",
+        "WorkflowCheckpointStore:WorkflowCheckpointRenewClaim",
+        "WorkflowCheckpointStore:WorkflowCheckpointRequeueClaim",
+        "WorkflowCheckpointStore:WorkflowCheckpointAckClaim",
     ] {
         assert!(
             operations
@@ -2900,6 +3278,10 @@ async fn agent_components_are_consumed_by_new_session_agents()
             "{expected} was not consumed: {operations:?}"
         );
     }
+    assert!(
+        dispatch.checkpoints.renewals.load(Ordering::Acquire) > 0,
+        "remote checkpoint claim was not renewed: {operations:?}"
+    );
     host.child.kill().await?;
     Ok(())
 }

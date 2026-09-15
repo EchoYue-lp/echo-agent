@@ -224,6 +224,13 @@ shell 源码，因此安装路径包含空格或 shell 特殊字符时仍可正�
 并发调用。规范值为 `default`、`plan`、`auto-edit`、`full-auto`、`auto`、
 `bubble`、`dont-ask` 和 `strict`；framework 解析时也接受已文档化的旧别名。
 
+Permission action 会对所有匹配来源完整归约。确定性的来源顺序（`UserConfig`、`Plugin`、
+`Skill`）只影响诊断和同级元数据，不影响权限安全；权限优先级为
+`deny > ask > require_approval > allow`。因此较早的 `allow` 或 `ask` 不能短路后续
+`deny`。Command、HTTP 或 programmatic 结果若同时携带 permission decision 与
+`continue: false`，该 stop 不参与权限归约；不含 permission decision 的结果仍按正常语义
+停止传播。
+
 ### 来源、热更新与 Dry Run
 
 User、Skill、Plugin 三种来源统一使用同一套注册期 Action 校验：无效 Action

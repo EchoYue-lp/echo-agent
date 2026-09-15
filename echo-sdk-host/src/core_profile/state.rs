@@ -113,7 +113,11 @@ impl CoreProfileState {
             let journal = persistence
                 .open_run_journal(&recovered.record.run_id)
                 .map_err(|error| HostError::Config(error.to_string()))?;
-            recovered.last_sequence = journal.last_sequence();
+            let journal_sequence = journal.last_sequence();
+            persistence
+                .validate_recovered_journal(&recovered, journal_sequence)
+                .map_err(|error| HostError::Config(error.to_string()))?;
+            recovered.last_sequence = journal_sequence;
             recovered_runs.push(Arc::new(recovered));
         }
         let advertisement = build_advertisement(&limits)?;

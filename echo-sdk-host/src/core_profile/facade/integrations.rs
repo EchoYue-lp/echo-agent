@@ -131,10 +131,11 @@ impl IntegrationResources {
         }
         #[cfg(feature = "framework-lsp")]
         {
-            self.lsp
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .clear();
+            let managers =
+                std::mem::take(&mut *self.lsp.lock().unwrap_or_else(|error| error.into_inner()));
+            for (_, record) in managers {
+                record.manager.lock().await.shutdown_all().await;
+            }
             self.lsp_clients
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())

@@ -4,13 +4,13 @@ id: map.tool-permission-sandbox
 kind: capability_map
 title: Tool、Permission、Sandbox 与外部 Effect
 risk: high
-observed_at: source:8ff7eb397767728069b01b9098b224a6840a8adb663717e5c4fd7a584eb4063e
+observed_at: source:1bcfbd1131476ae872a2dc89326675abd7c02dd26d56c8d29a058cd91fb308fc
 boundary_refs: [boundary.tool-permission-sandbox]
 behavior_refs: [behavior.effect-permission-execution]
 rule_refs: [rule.permission-effect-order]
-evidence_refs: [evidence.effects-extensions, evidence.high-risk-audit-frontier, evidence.streaming-tool-validation-repair, evidence.streaming-tool-validation-verification, evidence.tool-read-cache-authority-repair, evidence.tool-read-cache-authority-verification, evidence.tool-registry-owned-handle-repair, evidence.tool-registry-owned-handle-verification, evidence.framework-concept-navigation]
+evidence_refs: [evidence.effects-extensions, evidence.high-risk-audit-frontier, evidence.streaming-tool-validation-repair, evidence.streaming-tool-validation-verification, evidence.tool-read-cache-authority-repair, evidence.tool-read-cache-authority-verification, evidence.tool-registry-owned-handle-repair, evidence.tool-registry-owned-handle-verification, evidence.framework-concept-navigation, evidence.mcp-tool-local-classification-repair, evidence.mcp-tool-local-classification-verification]
 finding_refs: [finding.tool-read-cache-scope, finding.tool-read-cache-inflight-invalidation-race, finding.tool-registry-mutation-active-call-deadlock, finding.streaming-tool-validation, finding.plan-mode-write-surface, finding.readonly-tools-custom-registration-bypass, finding.approval-authority, finding.hook-protected-path, finding.hook-permission-precedence, finding.sandbox-minimum-isolation, finding.sandbox-manager-stream-failure-typing, finding.guard-direction-contract, finding.trace-effect-event-producers, finding.trace-audit-secret-boundary, finding.effect-cleanup-owner, finding.k8s-sandbox-cleanup-settlement, finding.tool-terminal-observation-divergence, finding.command-cell-retention-lease-prune-race, finding.command-cell-cancel-artifact-settlement, finding.tool-pipeline-example-drift]
-audit_refs: [audit.tool-permission-sandbox.permission-external, audit.tool-permission-sandbox.failure-concurrency, audit.tool-permission-sandbox.result-side-effect, audit.streaming-tool-validation-rereview, audit.tool-read-cache-authority-rereview, audit.tool-registry-owned-handle-rereview]
+audit_refs: [audit.tool-permission-sandbox.permission-external, audit.tool-permission-sandbox.failure-concurrency, audit.tool-permission-sandbox.result-side-effect, audit.streaming-tool-validation-rereview, audit.tool-read-cache-authority-rereview, audit.tool-registry-owned-handle-rereview, audit.mcp-tool-local-classification-rereview]
 related_map_refs: [map.agent-session-turn, map.task-subagent-workflow, map.observation-persistence-delivery, map.extension-lifecycle]
 scenarios:
   agent-automated-policy-pipeline:

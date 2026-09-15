@@ -8,7 +8,8 @@ use echo_agent::agent::{
 use echo_agent::error::{ReactError, Result};
 use echo_agent::llm::types::{ContentPart, ImageUrl, Message};
 use echo_agent::runtime::{
-    AgentTurnDriver, EventSink, SinkControl, TurnMode, TurnOutcome, TurnRequest,
+    AgentTurnDriver, EventSink, SinkControl, TurnDeliveryOutcome, TurnMode, TurnOutcome,
+    TurnRequest,
 };
 use echo_agent::testing::MockLlmClient;
 use echo_agent::tools::{Tool, ToolContext, ToolParameters, ToolResult};
@@ -141,6 +142,7 @@ async fn borrowed_handle_driver_preserves_chat_invocation_and_execute_semantics(
         })
         .await;
     assert_eq!(chat_receipt.outcome, TurnOutcome::Completed);
+    assert_eq!(chat_receipt.delivery, TurnDeliveryOutcome::Delivered);
     assert_eq!(chat_receipt.final_answer.as_deref(), Some("chat-answer"));
     assert!(!invocation_cancel.is_cancelled());
     assert_eq!(
@@ -187,6 +189,7 @@ async fn borrowed_handle_driver_preserves_chat_invocation_and_execute_semantics(
         })
         .await;
     assert_eq!(execute_receipt.outcome, TurnOutcome::Completed);
+    assert_eq!(execute_receipt.delivery, TurnDeliveryOutcome::Delivered);
     assert_eq!(
         execute_receipt.final_answer.as_deref(),
         Some("execute-answer")
@@ -231,6 +234,7 @@ async fn shared_agent_compatibility_forwards_structured_chat_and_execute() -> Re
         .drive(shared.as_ref(), chat_request, &DiscardSink)
         .await;
     assert_eq!(chat_receipt.outcome, TurnOutcome::Completed);
+    assert_eq!(chat_receipt.delivery, TurnDeliveryOutcome::Delivered);
     assert_eq!(chat_receipt.final_answer.as_deref(), Some("shared-chat"));
 
     let execute_request = TurnRequest::from_message(
@@ -246,6 +250,7 @@ async fn shared_agent_compatibility_forwards_structured_chat_and_execute() -> Re
         .drive(shared.as_ref(), execute_request, &DiscardSink)
         .await;
     assert_eq!(execute_receipt.outcome, TurnOutcome::Completed);
+    assert_eq!(execute_receipt.delivery, TurnDeliveryOutcome::Delivered);
     assert_eq!(
         execute_receipt.final_answer.as_deref(),
         Some("shared-execute")

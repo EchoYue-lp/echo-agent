@@ -7,6 +7,7 @@
 //! - Group message: POST `https://api.sgroup.qq.com/v2/groups/{guild_id}/messages`
 
 use super::super::super::types::ChatType;
+use crate::redaction::{json as redact_json, json_with_secrets, request_error, text_with_secrets};
 use echo_core::error::{ChannelError, ReactError, Result};
 use reqwest::Client;
 use serde_json::json;
@@ -88,7 +89,12 @@ impl TokenManager {
             .json(&body)
             .send()
             .await
-            .map_err(|e| ChannelError::NetworkError(format!("QQ token request failed: {}", e)))?;
+            .map_err(|e| {
+                ChannelError::NetworkError(format!(
+                    "QQ token request failed: {}",
+                    request_error(e, [&self.client_secret])
+                ))
+            })?;
 
         if !res.status().is_success() {
             return Err(ReactError::Channel(Box::new(ChannelError::AuthError(
@@ -97,32 +103,15 @@ impl TokenManager {
         }
 
         let json: serde_json::Value = res.json().await.map_err(|e| {
-            ChannelError::NetworkError(format!("QQ token response parse error: {}", e))
+            ChannelError::NetworkError(format!(
+                "QQ token response parse error: {}",
+                request_error(e, [&self.client_secret])
+            ))
         })?;
 
-        // Redact access_token in debug logs
-        let redacted = {
-            let j = json.clone();
-            if let Some(obj) = j.as_object() {
-                let mut redacted_obj = obj.clone();
-                if redacted_obj.contains_key("accessToken") {
-                    redacted_obj.insert(
-                        "accessToken".to_string(),
-                        serde_json::Value::String("***REDACTED***".to_string()),
-                    );
-                }
-                if redacted_obj.contains_key("access_token") {
-                    redacted_obj.insert(
-                        "access_token".to_string(),
-                        serde_json::Value::String("***REDACTED***".to_string()),
-                    );
-                }
-                serde_json::Value::Object(redacted_obj)
-            } else {
-                json.clone()
-            }
-        };
-        debug!("QQ Bot: token response = {:?}", redacted);
+        let redacted_response =
+            text_with_secrets(&redact_json(&json).to_string(), [&self.client_secret]);
+        debug!("QQ Bot: token response = {}", redacted_response);
 
         // QQ API may return the field as access_token (snake_case) or accessToken (camelCase)
         let token = json
@@ -130,24 +119,9 @@ impl TokenManager {
             .or_else(|| json.get("access_token"))
             .and_then(|v| v.as_str())
             .ok_or_else(|| {
-                // Redact token from error message
-                let err_msg = format!("QQ token response missing accessToken, got: {:?}", {
-                    let j = json.clone();
-                    if let Some(obj) = j.as_object() {
-                        let mut redacted_obj = obj.clone();
-                        for key in &[
-                            "accessToken",
-                            "access_token",
-                            "clientSecret",
-                            "client_secret",
-                        ] {
-                            redacted_obj.remove(*key);
-                        }
-                        serde_json::Value::Object(redacted_obj)
-                    } else {
-                        json.clone()
-                    }
-                });
+                let response =
+                    text_with_secrets(&redact_json(&json).to_string(), [&self.client_secret]);
+                let err_msg = format!("QQ token response missing accessToken, got: {response}");
                 ReactError::Channel(Box::new(ChannelError::AuthError(err_msg)))
             })?
             .to_string();
@@ -194,15 +168,23 @@ pub async fn get_gateway_url(client: &reqwest::Client, token: &str) -> Result<St
             .header("Authorization", format!("QQBot {}", token))
             .send()
             .await
-            .map_err(|e| ChannelError::NetworkError(format!("QQ gateway request failed: {}", e)))?;
+            .map_err(|e| {
+                ChannelError::NetworkError(format!(
+                    "QQ gateway request failed: {}",
+                    request_error(e, [token])
+                ))
+            })?;
 
         let status = res.status();
         if status.is_success() {
             let json: serde_json::Value = res.json().await.map_err(|e| {
-                ChannelError::NetworkError(format!("QQ gateway response parse error: {}", e))
+                ChannelError::NetworkError(format!(
+                    "QQ gateway response parse error: {}",
+                    request_error(e, [token])
+                ))
             })?;
 
-            debug!("QQ Bot: gateway response = {:?}", json);
+            debug!("QQ Bot: gateway response received");
 
             let url = json
                 .get("url")
@@ -211,7 +193,7 @@ pub async fn get_gateway_url(client: &reqwest::Client, token: &str) -> Result<St
                 .ok_or_else(|| {
                     ReactError::Channel(Box::new(ChannelError::NetworkError(format!(
                         "QQ gateway response missing url, got: {:?}",
-                        json
+                        json_with_secrets(&json, &[token.to_string()])
                     ))))
                 })?
                 .to_string();
@@ -223,7 +205,9 @@ pub async fn get_gateway_url(client: &reqwest::Client, token: &str) -> Result<St
         let error_body = res.text().await.unwrap_or_default();
         debug!(
             "QQ Gateway: endpoint {} returned status {}, body: {}",
-            endpoint, status, error_body
+            endpoint,
+            status,
+            text_with_secrets(&error_body, [token])
         );
     }
 
@@ -275,11 +259,14 @@ pub async fn send_qq_message(
         .json(&body)
         .send()
         .await
-        .map_err(|e| ChannelError::SendError(format!("QQ send failed: {}", e)))?;
+        .map_err(|e| {
+            ChannelError::SendError(format!("QQ send failed: {}", request_error(e, [token])))
+        })?;
 
     let status = res.status();
     if !status.is_success() {
         let error_text = res.text().await.unwrap_or_default();
+        let error_text = text_with_secrets(&error_text, [token]);
         warn!("QQ message send failed (status {}): {}", status, error_text);
         return Err(ReactError::Channel(Box::new(ChannelError::SendError(
             format!("QQ message send failed (status {}): {}", status, error_text),

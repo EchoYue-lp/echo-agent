@@ -556,6 +556,7 @@ export class EchoAgentClient {
     handler: AgentComponentExtensionHandler,
     timeout?: { readonly seconds: string; readonly nanos: number },
   ): Promise<ExtensionRegistration> {
+    validateAgentComponentDescriptor(descriptor);
     return this.registerExtension(
       "agent_component",
       implementationId,
@@ -1320,8 +1321,12 @@ const AGENT_COMPONENT_INPUT_FIELDS: Readonly<Record<string, readonly string[]>> 
   guard_check: ["content", "direction"],
   search_provider_search: ["query", "max_results"],
   workflow_checkpoint_save: ["checkpoint"],
+  workflow_checkpoint_save_if_generation: ["checkpoint", "expected_generation"],
   workflow_checkpoint_load: ["checkpoint_id"],
   workflow_checkpoint_claim: ["checkpoint_id"],
+  workflow_checkpoint_ack_claim: ["checkpoint_id", "attempt_id"],
+  workflow_checkpoint_requeue_claim: ["checkpoint_id", "attempt_id"],
+  workflow_checkpoint_renew_claim: ["checkpoint_id", "attempt_id"],
   workflow_checkpoint_list: [],
   workflow_checkpoint_list_by_graph: ["graph_name"],
   workflow_checkpoint_list_filtered: ["filter"],
@@ -1362,6 +1367,22 @@ function requiredText(input: Record<string, unknown>, field: string): boolean {
 
 function optionalU64(value: unknown): boolean {
   return value === undefined || value === null || isCanonicalU64Text(value);
+}
+
+function validateAgentComponentDescriptor(descriptor: AgentComponentDescriptor): void {
+  const capabilities = descriptor.capabilities;
+  const heartbeat = capabilities?.claim_heartbeat_interval_ms;
+  if (descriptor.component === "workflow_checkpoint_store") {
+    if (!isCanonicalU64Text(heartbeat)) {
+      throw new EchoAgentError("invalid_value", "workflow checkpoint stores require a canonical claim heartbeat");
+    }
+    const value = BigInt(heartbeat);
+    if (value < 1n || value > 300_000n) {
+      throw new EchoAgentError("invalid_value", "claim heartbeat must be from 1 to 300000 ms");
+    }
+  } else if (heartbeat !== undefined && heartbeat !== null) {
+    throw new EchoAgentError("invalid_value", "claim heartbeat is only valid for workflow checkpoint stores");
+  }
 }
 
 function validateAgentComponentCall(component: string, call: Record<string, unknown>): void {
@@ -1419,8 +1440,13 @@ function validateAgentComponentCall(component: string, call: Record<string, unkn
         return text("content") && ["input", "output", "tool_input", "tool_output"].includes(String(input.direction));
       case "search_provider_search": return text("query") && isCanonicalU64Text(input.max_results);
       case "workflow_checkpoint_save": return wire("checkpoint");
+      case "workflow_checkpoint_save_if_generation":
+        return wire("checkpoint") && isCanonicalU64Text(input.expected_generation);
       case "workflow_checkpoint_load": case "workflow_checkpoint_claim": case "workflow_checkpoint_delete":
         return text("checkpoint_id");
+      case "workflow_checkpoint_ack_claim": case "workflow_checkpoint_requeue_claim":
+      case "workflow_checkpoint_renew_claim":
+        return text("checkpoint_id") && text("attempt_id");
       case "workflow_checkpoint_list": case "workflow_checkpoint_clear":
       case "sandbox_is_available": case "sandbox_cleanup": case "mcp_transport_close":
       case "mcp_transport_try_notification": return Object.keys(input).length === 0;
@@ -1462,6 +1488,7 @@ function validateAgentComponentResult(component: string, expected: string, resul
     "run_append_event",
     "runtime_save_checkpoint", "runtime_save_checkpoint_for_scope", "runtime_clear_conversation", "audit_log",
     "workflow_checkpoint_save", "workflow_checkpoint_delete", "workflow_checkpoint_clear",
+    "workflow_checkpoint_ack_claim", "workflow_checkpoint_requeue_claim", "workflow_checkpoint_renew_claim",
     "sandbox_cleanup", "mcp_transport_notify", "mcp_transport_close",
   ]);
   if (unit.has(expected)) {
@@ -1480,6 +1507,7 @@ function validateAgentComponentResult(component: string, expected: string, resul
     runtime_clear_state: ["receipt"], runtime_clear_scope: ["receipt"],
     audit_query: ["events"], context_project: ["projections"], memory_trigger: ["disposition"],
     guard_check: ["result"], search_provider_search: ["results"],
+    workflow_checkpoint_save_if_generation: ["committed"],
     workflow_checkpoint_load: ["checkpoint"], workflow_checkpoint_claim: ["checkpoint"],
     workflow_checkpoint_list: ["checkpoints"], workflow_checkpoint_list_by_graph: ["checkpoints"],
     workflow_checkpoint_list_filtered: ["checkpoints"], revisioned_task_load: ["graph"],
@@ -1517,6 +1545,7 @@ function validateAgentComponentResult(component: string, expected: string, resul
       case "memory_trigger": return value.disposition === "persist" || value.disposition === "captured";
       case "guard_check": return isWireValue(value.result);
       case "search_provider_search": return values("results");
+      case "workflow_checkpoint_save_if_generation": return typeof value.committed === "boolean";
       case "workflow_checkpoint_load": case "workflow_checkpoint_claim":
         return value.checkpoint === null || value.checkpoint === undefined || isWireValue(value.checkpoint);
       case "workflow_checkpoint_list": case "workflow_checkpoint_list_by_graph": case "workflow_checkpoint_list_filtered":

@@ -13,6 +13,9 @@
 //! Most users should depend on `echo_agent` (the facade crate) instead of
 //! depending on `echo_integration` directly.
 
+#[cfg(any(feature = "mcp", feature = "channels"))]
+pub(crate) mod redaction;
+
 #[cfg(feature = "mcp")]
 #[cfg_attr(docsrs, doc(cfg(feature = "mcp")))]
 pub mod mcp;

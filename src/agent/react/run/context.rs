@@ -155,9 +155,6 @@ impl ReactAgent {
         self.reset_messages().await;
         *self.plan_state.write().await = None;
         self.tools.skill_registry.reset_activation_state();
-        if let Some(registry) = &self.tools.progressive_skill_registry {
-            registry.write().await.reset_activation_state();
-        }
         *self.memory.transcript_projection_cursor.lock().await =
             crate::agent::snapshot::TranscriptProjectionCursor::default();
         self.set_working_dir(self.memory.configured_working_dir.clone());

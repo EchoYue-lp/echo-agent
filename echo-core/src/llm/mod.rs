@@ -515,7 +515,9 @@ pub struct ChatRequest {
     /// (the default) means "use the model's default behavior" — no field sent.
     pub thinking: Option<ThinkingConfig>,
     /// Optional cancellation token for aborting in-flight requests.
-    /// When set and cancelled, streaming responses will stop at the next SSE boundary.
+    /// When set and cancelled, streaming responses stop at the next SSE boundary and
+    /// non-streaming requests abort while waiting for headers, reading the body, or
+    /// decoding the JSON response.
     pub cancel_token: Option<CancellationToken>,
     /// Optional timeout override for this call.
     ///

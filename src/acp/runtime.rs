@@ -76,9 +76,9 @@ impl Default for AcpLedgerLimits {
 
 /// Per-run event ledger: the durable-first, bounded authority of committed
 /// envelopes for one run. The optional journal hook receives every envelope
-/// before the in-memory ring; a journal failure fails the run (the sink
-/// error becomes the driver's `Failed` receipt), so a run can never report
-/// success over an unverified journal.
+/// before the in-memory ring; a journal failure is reported as delivery
+/// failure by the driven receipt. It does not create a second execution
+/// terminal when the producer already emitted one.
 pub struct EventLedger {
     limits: AcpLedgerLimits,
     journal: Option<Arc<dyn EventJournal<EventEnvelope>>>,
@@ -198,10 +198,9 @@ impl EventLedger {
 }
 
 /// Extension-side consumer of committed run events. Observers run after the
-/// ledger commit, in envelope order; an error fails the run through the
-/// driver's exactly-one-terminal contract. Live-delivery bounds (ACK
-/// windows, gaps) are the observer implementation's contract, never the
-/// ledger's.
+/// ledger commit, in envelope order; an error becomes delivery failure on the
+/// driver's receipt. Live-delivery bounds (ACK windows, gaps) are the observer
+/// implementation's contract, never the ledger's execution authority.
 #[async_trait]
 pub trait RunEventObserver: Send + Sync {
     async fn on_committed_event(&self, envelope: &EventEnvelope) -> Result<()>;
@@ -392,8 +391,8 @@ impl RunRegistry {
 
 /// Ledger-first composite sink: commit to the ledger (journal included),
 /// then render the standard projection, then forward to extension
-/// observers. Any failure fails the run — no view silently diverges from a
-/// committed fact.
+/// observers. Any error is surfaced as delivery failure; the driver retains a
+/// producer terminal that was already observed before this sink call.
 struct SharedRunSink {
     ledger: Arc<EventLedger>,
     projector: Option<AcpEventProjector>,
@@ -777,7 +776,9 @@ pub trait AcpConnectionProfile: Send + Sync + 'static {
     fn rollback_run(&self, _run_id: &str, _stream_id: &str) {}
 
     /// Notify the profile that the driver task was accepted by the official
-    /// connection, allowing it to attach durable settlement observation.
+    /// connection. This hook must not persist the terminal receipt;
+    /// [`Self::persist_run_settled`] is the standard Prompt's sole durable
+    /// settlement authority.
     fn run_spawned(&self, _entry: Arc<RunEntry>) {}
 
     /// Flush profile-owned durable state after Run cancellation/wait and
