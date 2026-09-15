@@ -82,6 +82,14 @@ impl LspManager {
             .cloned()
             .ok_or_else(|| format!("No configuration for language: {language}"))?;
 
+        // Replacing a language entry must first close the previous client.
+        // Otherwise a retained derived handle would remain live after the
+        // manager map points at the replacement and could spawn an unowned
+        // child.
+        if self.clients.contains_key(language) {
+            self.stop_server(language).await?;
+        }
+
         let mut client = StdioLspClient::new_bound(
             config,
             Arc::clone(&self.lifecycle),
@@ -252,6 +260,49 @@ mod tests {
         }
         if retained.is_running() {
             return Err("stale client reports a running child".to_string());
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn replacing_language_client_closes_retained_handle() -> Result<(), String> {
+        let mut manager = LspManager::new();
+        let language = "test";
+        let client = StdioLspClient::new_bound(
+            test_config(language),
+            Arc::clone(&manager.lifecycle),
+            manager.lifecycle.generation,
+        );
+        manager
+            .clients
+            .insert(language.to_string(), Arc::new(RwLock::new(client)));
+        let retained = manager
+            .get_client(language)
+            .ok_or_else(|| "test client was not registered".to_string())?;
+
+        let config = LspConfig {
+            servers: [(language.to_string(), test_config(language))]
+                .into_iter()
+                .collect(),
+        };
+        manager.load_config(&config);
+        let error = manager
+            .start_server(language)
+            .await
+            .err()
+            .ok_or_else(|| "test server unexpectedly started".to_string())?;
+        if !error.contains("Failed to initialize") {
+            return Err(format!("unexpected replacement error: {error}"));
+        }
+
+        let mut retained = retained.write().await;
+        let stale_error = retained
+            .initialize("file:///tmp/lsp-test")
+            .await
+            .err()
+            .ok_or_else(|| "replaced client unexpectedly initialized".to_string())?;
+        if !matches!(stale_error, echo_core::lsp::LspError::NotInitialized) {
+            return Err(format!("unexpected stale replacement error: {stale_error}"));
         }
         Ok(())
     }
