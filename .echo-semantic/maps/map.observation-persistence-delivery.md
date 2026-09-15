@@ -8,7 +8,7 @@ observed_at: source:b0dfa235d236bee9185ff26953b982f196556459fd0bf165f7114a232373
 boundary_refs: [boundary.observation-persistence-delivery]
 behavior_refs: [behavior.observation-persistence]
 rule_refs: [rule.fact-projection-separation]
-evidence_refs: [evidence.persistence-observation, evidence.high-risk-audit-frontier, evidence.eval-trace-correlation-repair, evidence.eval-trace-correlation-verification, evidence.framework-concept-navigation]
+evidence_refs: [evidence.persistence-observation, evidence.checkpoint-journal-binding-repair, evidence.high-risk-audit-frontier, evidence.eval-trace-correlation-repair, evidence.eval-trace-correlation-verification, evidence.framework-concept-navigation]
 finding_refs: [finding.trace-effect-event-producers, finding.eval-trace-identity, finding.trace-audit-secret-boundary, finding.turn-terminal-commit-projection-order, finding.checkpoint-journal-binding, finding.diagnostic-persistence-failure-visibility, finding.hook-event-producer-contract, finding.in-memory-audit-successful-drop]
 audit_refs: [audit.observation-persistence-delivery.state-authority, audit.observation-persistence-delivery.data-durability, audit.observation-persistence-delivery.contract-evidence]
 related_map_refs: [map.agent-session-turn, map.context-memory, map.task-subagent-workflow, map.protocol-surfaces, map.eval-evolution]
@@ -22,10 +22,10 @@ scenarios:
     status: needs_review
     source_refs: [echo-state/src/journal/mod.rs, echo-state/src/journal/file.rs, echo-state/src/journal/segmented.rs]
     rule_refs: [rule.fact-projection-separation]
-    evidence_refs: [evidence.persistence-observation]
+    evidence_refs: [evidence.persistence-observation, evidence.checkpoint-journal-binding-repair]
     finding_refs: [finding.checkpoint-journal-binding]
-    unknown: checkpoint 未绑定来源 Journal identity，合法异源 state 可通过序号检查
-    next_step: repair checkpoint source/scope binding 并补异源恢复测试
+    unknown: Journal generation绑定的focused验证与独立复审已通过，integration final gate和交付分支语义归并尚未完成
+    next_step: 在最终delivery分支完成integration gate与全局语义归并后再关闭Finding
   store-role-separation:
     status: mapped
     source_refs: [src/state/mod.rs, echo-core/src/memory/conversation.rs, echo-core/src/memory/store.rs, src/trace/mod.rs]
@@ -67,7 +67,7 @@ scenarios:
 
 ## 状态与数据流
 
-EventEnvelope保持identity/sequence；Journal先commit后reduce；checkpoint绑定applied sequence；DeliveryLedger归约typed lifecycle；RunStore以真实trace ID存储诊断Run，并保留product parent、turn和execution correlation。
+EventEnvelope保持identity/sequence；Journal先commit后reduce；checkpoint绑定Journal generation identity与applied sequence；DeliveryLedger归约typed lifecycle；RunStore以真实trace ID存储诊断Run，并保留product parent、turn和execution correlation。
 
 ## 策略来源与优先级
 

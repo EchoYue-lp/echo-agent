@@ -4,7 +4,7 @@ id: audit.observation-persistence-delivery.data-durability
 kind: audit
 boundary_ref: boundary.observation-persistence-delivery
 lens: data_durability
-freshness: examined
+freshness: stale
 revision: f1e9027246760661144786e9e35615cd46d580c6
 finding_refs: [finding.trace-audit-secret-boundary, finding.checkpoint-journal-binding, finding.diagnostic-persistence-failure-visibility]
 challenges:
@@ -39,6 +39,8 @@ CheckpointFrame 只有 sequence/state，文件摘要不绑定 Journal identity�
 ## 问题记录
 
 新增 checkpoint/journal binding 与 diagnostic failure visibility 两个 Finding；secret retention Finding 保持 open 且与失败可见性分离。
+
+Checkpoint/Journal identity修复候选已改变本Audit检查过的源码与持久格式；focused测试和独立复审完成前，本Audit保持stale，原examined结论不得用于关闭Finding。
 
 ## 残余风险
 

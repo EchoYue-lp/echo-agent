@@ -10,10 +10,10 @@ focus: [state_authority, failure_concurrency, contract_evidence]
 boundary_ref: boundary.observation-persistence-delivery
 behavior_refs: [behavior.observation-persistence]
 rule_refs: [rule.fact-projection-separation]
-evidence_refs: [evidence.persistence-observation]
+evidence_refs: [evidence.persistence-observation, evidence.checkpoint-journal-binding-repair]
 audit_refs: [audit.observation-persistence-delivery.data-durability]
 decision_refs: []
-repair_evidence_refs: []
+repair_evidence_refs: [evidence.checkpoint-journal-binding-repair]
 verification_evidence_refs: []
 rereview_audit_refs: []
 discovered_at: f1e9027246760661144786e9e35615cd46d580c6
@@ -39,4 +39,4 @@ CheckpointFrame 与文件摘要只包含 sequence/state，recover 只检查序�
 
 ## 处理记录
 
-Data-durability Audit 确认；后续 repair 需绑定 Journal/scope identity 并加入合法异源 checkpoint 测试。
+Data-durability Audit 确认。当前源码候选已把 checkpoint 绑定到 Journal generation identity，并加入同序号异源、异源receipt、同路径换代、schema v1、跨segment mix与prefix prune反例；独立源码和增量测试构造复审已pass，116项Journal focused tests、direct checks、两档Clippy与fmt全部通过。本 Finding 仍保持open，等待integration final gate和交付分支全局语义归并。

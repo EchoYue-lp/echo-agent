@@ -9,6 +9,8 @@
 //! callers choose retention and pin policy by passing a keep cursor to prune.
 //! Each batch may select `Flush` or `SyncData` without opening a second
 //! authority; event classification remains a caller policy.
+//! Batch frames and the retained-floor marker preserve one Journal generation
+//! identity, including after the segment containing sequence one is removed.
 //! Product stream identities, retention counts, and UI projections do not live
 //! in this module.
 
@@ -16,8 +18,8 @@ use super::{
     BatchIdentity, EventJournal, JournalAppendError, JournalAppendReceipt, JournalAppendResult,
     JournalBatchAppendError, JournalBatchAppendReceipt, JournalBatchAppendResult,
     JournalBatchCommitStatus, JournalBatchLookup, JournalDurabilityStatus, JournalEvent,
-    JournalRecord, PreparedJournalBatch, WeakRegistry, decode_journal_batch, prepare_journal_frame,
-    verify_journal_batch_sequence,
+    JournalIdentity, JournalRecord, PreparedJournalBatch, WeakRegistry, decode_journal_batch,
+    prepare_journal_frame, verify_journal_batch_sequence,
 };
 use echo_core::error::{ReactError, Result};
 use echo_core::utils::canonical_json::canonical_json_bytes;
@@ -41,7 +43,7 @@ const SEGMENT_SUFFIX: &str = ".jsonl";
 const SEGMENT_DIGITS: usize = 20;
 const LEASE_AUTHORITY: &str = "segmented-event-journal";
 const RETENTION_MARKER: &str = ".retained-floor.json";
-const RETENTION_SCHEMA_VERSION: u16 = 1;
+const RETENTION_SCHEMA_VERSION: u16 = 2;
 
 fn journal_error(message: impl Into<String>) -> ReactError {
     ReactError::Other(message.into())
@@ -52,8 +54,9 @@ fn io_error(context: &str, error: std::io::Error) -> ReactError {
 }
 
 #[derive(Debug, Serialize)]
-struct RetentionIntegrity {
+struct RetentionIntegrity<'a> {
     schema_version: u16,
+    journal_identity: &'a JournalIdentity,
     retained_floor: u64,
     cleanup_pending: bool,
 }
@@ -62,6 +65,7 @@ struct RetentionIntegrity {
 #[serde(deny_unknown_fields)]
 struct RetentionMarker {
     schema_version: u16,
+    journal_identity: JournalIdentity,
     retained_floor: u64,
     cleanup_pending: bool,
     digest: String,
@@ -94,11 +98,13 @@ fn lower_hex_digit(nibble: u8) -> char {
 
 fn retention_digest(
     schema_version: u16,
+    journal_identity: &JournalIdentity,
     retained_floor: u64,
     cleanup_pending: bool,
 ) -> Result<String> {
     integrity_digest(&RetentionIntegrity {
         schema_version,
+        journal_identity,
         retained_floor,
         cleanup_pending,
     })
@@ -130,6 +136,7 @@ fn load_retention_marker(directory: &Path, context: &str) -> Result<Option<Reten
     }
     let expected = retention_digest(
         marker.schema_version,
+        &marker.journal_identity,
         marker.retained_floor,
         marker.cleanup_pending,
     )?;
@@ -186,6 +193,7 @@ fn list_segment_paths(directory: &Path, context: &str) -> Result<Vec<(u64, PathB
 #[derive(Debug, Clone)]
 struct SegmentState {
     path: PathBuf,
+    journal_identity: Option<JournalIdentity>,
     start_sequence: u64,
     end_sequence: u64,
     bytes: u64,
@@ -267,6 +275,7 @@ fn scan_segment<E: JournalEvent>(
     let mut offset = 0_usize;
     let mut record_offsets = Vec::new();
     let mut batches = Vec::<SegmentBatchIndex>::new();
+    let mut journal_identity = None;
     while offset < bytes.len() {
         let Some(newline) = bytes
             .get(offset..)
@@ -286,6 +295,16 @@ fn scan_segment<E: JournalEvent>(
             .get(offset..line_end)
             .ok_or_else(|| journal_error(format!("{context}: invalid segment byte range")))?;
         let frame = decode_journal_batch::<E>(context, line)?;
+        match journal_identity.as_ref() {
+            Some(expected_identity) if expected_identity != frame.journal_identity() => {
+                return Err(journal_error(format!(
+                    "{context}: journal generation changed from {expected_identity} to {}",
+                    frame.journal_identity()
+                )));
+            }
+            Some(_) => {}
+            None => journal_identity = Some(frame.journal_identity().clone()),
+        }
         if batches
             .iter()
             .any(|index| index.batch_id == frame.batch_id())
@@ -339,6 +358,7 @@ fn scan_segment<E: JournalEvent>(
     }
     Ok(SegmentState {
         path: path.to_path_buf(),
+        journal_identity,
         start_sequence,
         end_sequence: expected.saturating_sub(1),
         bytes: valid_len,
@@ -397,6 +417,7 @@ fn create_segment(
         Arc::new(open_existing_regular_guard(&path).map_err(|error| io_error(context, error))?);
     Ok(SegmentState {
         path,
+        journal_identity: None,
         start_sequence,
         end_sequence: start_sequence.saturating_sub(1),
         bytes: 0,
@@ -428,6 +449,7 @@ fn scan_directory<E: JournalEvent>(
         }
         let active = create_segment(directory, directory_guard, 1, context)?;
         return Ok(SegmentedJournalState {
+            journal_identity: JournalIdentity::new(),
             next_sequence: 1,
             segments: vec![active],
             obsolete_segments: Vec::new(),
@@ -487,6 +509,9 @@ fn scan_directory<E: JournalEvent>(
         });
     }
     let mut segments = Vec::with_capacity(logical_paths.len());
+    let mut journal_identity = marker
+        .as_ref()
+        .map(|marker| marker.journal_identity.clone());
     let last_index = logical_paths.len().saturating_sub(1);
     let mut expected_start = None;
     for (index, (start, path)) in logical_paths.into_iter().enumerate() {
@@ -500,6 +525,18 @@ fn scan_directory<E: JournalEvent>(
         let active = index == last_index;
         let segment_context = format!("{context} segment {}", path.display());
         let segment = scan_segment::<E>(&path, start, active, durability, &segment_context)?;
+        if let Some(observed) = segment.journal_identity.as_ref() {
+            match journal_identity.as_ref() {
+                Some(expected) if expected != observed => {
+                    return Err(journal_error(format!(
+                        "{context}: segment {} belongs to journal {observed}, expected {expected}",
+                        path.display()
+                    )));
+                }
+                Some(_) => {}
+                None => journal_identity = Some(observed.clone()),
+            }
+        }
         expected_start = segment.end_sequence.checked_add(1);
         segments.push(segment);
     }
@@ -529,6 +566,7 @@ fn scan_directory<E: JournalEvent>(
         }
     }
     Ok(SegmentedJournalState {
+        journal_identity: journal_identity.unwrap_or_else(JournalIdentity::new),
         next_sequence,
         segments,
         obsolete_segments,
@@ -613,6 +651,7 @@ pub struct JournalPruneReceipt {
 
 #[derive(Debug)]
 struct SegmentedJournalState {
+    journal_identity: JournalIdentity,
     next_sequence: u64,
     segments: Vec<SegmentState>,
     obsolete_segments: Vec<OpaqueSegmentState>,
@@ -625,6 +664,7 @@ struct SegmentedJournalState {
 
 #[derive(Debug)]
 struct SharedSegmentedJournalState {
+    journal_identity: JournalIdentity,
     event_type: TypeId,
     max_active_segment_bytes: u64,
     durability: FileDurability,
@@ -637,6 +677,7 @@ fn segment_layout_matches(left: &[SegmentState], right: &[SegmentState]) -> bool
     left.len() == right.len()
         && left.iter().zip(right).all(|(left, right)| {
             left.path == right.path
+                && left.journal_identity == right.journal_identity
                 && left.start_sequence == right.start_sequence
                 && left.end_sequence == right.end_sequence
                 && left.bytes == right.bytes
@@ -714,6 +755,7 @@ fn segmented_registry() -> &'static Mutex<WeakRegistry<SharedSegmentedJournalSta
 #[derive(Debug)]
 pub struct SegmentedFileEventJournal<E> {
     directory: PathBuf,
+    journal_identity: JournalIdentity,
     shared: Option<Arc<SharedSegmentedJournalState>>,
     #[cfg(test)]
     append_fault: Mutex<Option<AppendFault>>,
@@ -771,6 +813,7 @@ impl<E: JournalEvent> SegmentedFileEventJournal<E> {
     fn from_shared(directory: PathBuf, shared: Arc<SharedSegmentedJournalState>) -> Self {
         Self {
             directory,
+            journal_identity: shared.journal_identity.clone(),
             shared: Some(shared),
             #[cfg(test)]
             append_fault: Mutex::new(None),
@@ -872,11 +915,17 @@ impl<E: JournalEvent> SegmentedFileEventJournal<E> {
                 &context,
                 false,
             )?;
+            if rescanned.next_sequence == 1 && rescanned.retained_floor == 1 {
+                // An empty journal has no persisted batch frame yet. Reuse the
+                // live authority identity until its first commit persists it.
+                rescanned.journal_identity = state.journal_identity.clone();
+            }
             verify_existing_directory(&directory, &shared.directory_guard)
                 .map_err(|error| io_error(&context, error))?;
             rescanned.marker_barrier_pending |= marker_barrier_pending;
             rescanned.cleanup_pending |= marker_barrier_pending;
             if rescanned.next_sequence != state.next_sequence
+                || rescanned.journal_identity != state.journal_identity
                 || rescanned.retained_floor != state.retained_floor
                 || rescanned.cleanup_pending != state.cleanup_pending
                 || rescanned.batches != state.batches
@@ -907,6 +956,7 @@ impl<E: JournalEvent> SegmentedFileEventJournal<E> {
         verify_existing_directory(&directory, &directory_guard)
             .map_err(|error| io_error(&context, error))?;
         let shared = Arc::new(SharedSegmentedJournalState {
+            journal_identity: state.journal_identity.clone(),
             event_type: TypeId::of::<E>(),
             max_active_segment_bytes,
             durability,
@@ -1048,7 +1098,7 @@ impl<E: JournalEvent> SegmentedFileEventJournal<E> {
             .map(|segment| segment.metadata(false))
             .collect::<Vec<_>>();
         let commit = if target_floor > state.retained_floor {
-            match self.write_retention_marker(target_floor, true)? {
+            match self.write_retention_marker(&state.journal_identity, target_floor, true)? {
                 MarkerWriteStatus::Confirmed => {
                     state.retained_floor = target_floor;
                     state.cleanup_pending = true;
@@ -1117,6 +1167,7 @@ impl<E: JournalEvent> SegmentedFileEventJournal<E> {
 
     fn write_retention_marker(
         &self,
+        journal_identity: &JournalIdentity,
         retained_floor: u64,
         cleanup_pending: bool,
     ) -> Result<MarkerWriteStatus> {
@@ -1138,9 +1189,15 @@ impl<E: JournalEvent> SegmentedFileEventJournal<E> {
         }
         let marker = RetentionMarker {
             schema_version: RETENTION_SCHEMA_VERSION,
+            journal_identity: journal_identity.clone(),
             retained_floor,
             cleanup_pending,
-            digest: retention_digest(RETENTION_SCHEMA_VERSION, retained_floor, cleanup_pending)?,
+            digest: retention_digest(
+                RETENTION_SCHEMA_VERSION,
+                journal_identity,
+                retained_floor,
+                cleanup_pending,
+            )?,
         };
         let bytes = serde_json::to_vec(&marker).map_err(|error| {
             journal_error(format!("failed to encode retained-floor marker: {error}"))
@@ -1170,6 +1227,7 @@ impl<E: JournalEvent> SegmentedFileEventJournal<E> {
                 if reconciled.is_ok_and(|marker| {
                     marker.is_some_and(|marker| {
                         marker.schema_version == RETENTION_SCHEMA_VERSION
+                            && marker.journal_identity == *journal_identity
                             && marker.retained_floor == retained_floor
                             && marker.cleanup_pending == cleanup_pending
                     })
@@ -1195,6 +1253,12 @@ impl<E: JournalEvent> SegmentedFileEventJournal<E> {
             "segmented journal retained-floor barrier retry",
         )?
         .ok_or_else(|| journal_error("retained-floor marker disappeared before barrier retry"))?;
+        if marker.journal_identity != state.journal_identity {
+            return Err(journal_error(format!(
+                "retained-floor marker belongs to journal {}, expected {}",
+                marker.journal_identity, state.journal_identity
+            )));
+        }
         state.marker_barrier_pending = false;
         state.cleanup_pending = marker.cleanup_pending;
         Ok(())
@@ -1236,7 +1300,7 @@ impl<E: JournalEvent> SegmentedFileEventJournal<E> {
                 .join("; ");
             return (removed, JournalPhysicalCleanupStatus::Degraded { error });
         }
-        match self.write_retention_marker(state.retained_floor, false) {
+        match self.write_retention_marker(&state.journal_identity, state.retained_floor, false) {
             Ok(MarkerWriteStatus::Confirmed) => {}
             Ok(MarkerWriteStatus::Degraded { error }) => {
                 state.cleanup_pending = true;
@@ -1568,6 +1632,7 @@ impl<E: JournalEvent> SegmentedFileEventJournal<E> {
             JournalDurabilityStatus::Confirmed
         };
         Ok(JournalBatchAppendReceipt {
+            journal_identity: state.journal_identity.clone(),
             batch_id: frame.batch_id().to_string(),
             records: frame.into_records().into(),
             durability,
@@ -1651,15 +1716,16 @@ impl<E: JournalEvent> SegmentedFileEventJournal<E> {
                 }
             };
         }
-        let prepared = match prepare_journal_frame(&batch, state.next_sequence) {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                return Err(JournalBatchAppendError::not_committed(
-                    batch,
-                    error.to_string(),
-                ));
-            }
-        };
+        let prepared =
+            match prepare_journal_frame(&batch, &state.journal_identity, state.next_sequence) {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    return Err(JournalBatchAppendError::not_committed(
+                        batch,
+                        error.to_string(),
+                    ));
+                }
+            };
         let line_len = match u64::try_from(prepared.line.len()) {
             Ok(line_len) => line_len,
             Err(_) => {
@@ -1722,6 +1788,7 @@ impl<E: JournalEvent> SegmentedFileEventJournal<E> {
                 }
             },
         };
+        let journal_identity = state.journal_identity.clone();
         let Some(active) = state.segments.last_mut() else {
             let reason = "segmented journal lost its active segment after commit".to_string();
             state.poison = Some(reason.clone());
@@ -1737,6 +1804,7 @@ impl<E: JournalEvent> SegmentedFileEventJournal<E> {
             identity: prepared.identity.clone(),
             frame_offset,
         });
+        active.journal_identity = Some(journal_identity);
         active.bytes = new_bytes;
         active.end_sequence = prepared.next_sequence.saturating_sub(1);
         let active_path = active.path.clone();
@@ -1750,6 +1818,7 @@ impl<E: JournalEvent> SegmentedFileEventJournal<E> {
             },
         );
         Ok(JournalBatchAppendReceipt {
+            journal_identity: state.journal_identity.clone(),
             batch_id,
             records: prepared.records,
             durability: durability_status,
@@ -1775,6 +1844,7 @@ impl<E: JournalEvent> SegmentedFileEventJournal<E> {
             })
         })?;
         Ok(JournalAppendReceipt {
+            journal_identity: receipt.journal_identity,
             batch_id: receipt.batch_id,
             record,
             durability: receipt.durability,
@@ -1784,6 +1854,10 @@ impl<E: JournalEvent> SegmentedFileEventJournal<E> {
 }
 
 impl<E: JournalEvent> EventJournal<E> for SegmentedFileEventJournal<E> {
+    fn journal_identity(&self) -> &JournalIdentity {
+        &self.journal_identity
+    }
+
     fn append_batch(&self, batch: PreparedJournalBatch<E>) -> JournalBatchAppendResult<E> {
         if let Err(error) = batch.validate_payload_integrity() {
             return Err(JournalBatchAppendError::prepared_mutation(
@@ -2020,6 +2094,7 @@ mod tests {
     #[derive(Clone, Copy)]
     enum FrameTamper {
         Schema,
+        JournalIdentity,
         BatchId,
         FirstSequence,
         RecordBatchId,
@@ -2029,14 +2104,23 @@ mod tests {
     }
 
     fn tampered_frame(tamper: FrameTamper) -> TestResult<Vec<u8>> {
-        let prepared = prepare_journal_frame(&batch(vec!["original".to_string()])?, 1)
-            .test_context("prepare tamper frame")?;
+        let prepared = prepare_journal_frame(
+            &batch(vec!["original".to_string()])?,
+            &JournalIdentity::new(),
+            1,
+        )
+        .test_context("prepare tamper frame")?;
         let mut frame: serde_json::Value =
             serde_json::from_slice(&prepared.line).test_context("decode tamper frame")?;
         match tamper {
             FrameTamper::Schema => {
                 if let Some(value) = frame.get_mut("schema_version") {
                     *value = serde_json::json!(99);
+                }
+            }
+            FrameTamper::JournalIdentity => {
+                if let Some(value) = frame.get_mut("journal_identity") {
+                    *value = serde_json::json!(uuid::Uuid::new_v4().to_string());
                 }
             }
             FrameTamper::BatchId => {
@@ -2139,12 +2223,17 @@ mod tests {
         }
     }
 
-    fn write_checkpoint(path: &Path, sequence: u64, events: &[&str]) {
+    fn write_checkpoint(
+        path: &Path,
+        journal_identity: &JournalIdentity,
+        sequence: u64,
+        events: &[&str],
+    ) {
         let state = RetainedReducer {
             events: events.iter().map(|event| (*event).to_string()).collect(),
         };
         FileCheckpointStore::open(path)
-            .save(&state, sequence)
+            .save(journal_identity, &state, sequence)
             .expect("write checkpoint fixture");
     }
 
@@ -2230,8 +2319,12 @@ mod tests {
 
     #[test]
     fn batch_integrity_digest_is_fixed_width_lowercase_hex() -> TestResult {
-        let prepared = prepare_journal_frame(&batch(vec!["digest-event".to_string()])?, 42)
-            .test_context("prepare batch frame")?;
+        let prepared = prepare_journal_frame(
+            &batch(vec!["digest-event".to_string()])?,
+            &JournalIdentity::new(),
+            42,
+        )
+        .test_context("prepare batch frame")?;
         let frame: serde_json::Value =
             serde_json::from_slice(&prepared.line).test_context("decode batch frame")?;
         let digest = frame
@@ -2332,6 +2425,7 @@ mod tests {
             .find(|segment| segment.active)
             .test_context("active segment")?;
         let good_len = active.bytes;
+        let journal_identity = journal.journal_identity().clone();
         drop(journal);
         let prepared = prepare_journal_frame(
             &batch(vec![
@@ -2339,6 +2433,7 @@ mod tests {
                 "four".to_string(),
                 "five".to_string(),
             ])?,
+            &journal_identity,
             3,
         )
         .test_context("prepare torn batch frame")?;
@@ -2420,6 +2515,7 @@ mod tests {
     fn segmented_batch_frame_rejects_every_integrity_field_tamper() -> TestResult {
         for tamper in [
             FrameTamper::Schema,
+            FrameTamper::JournalIdentity,
             FrameTamper::BatchId,
             FrameTamper::FirstSequence,
             FrameTamper::RecordBatchId,
@@ -2455,8 +2551,9 @@ mod tests {
             .find(|segment| segment.active)
             .test_context("active segment")?;
         drop(journal);
-        let frame = prepare_journal_frame(&batch(vec!["one".to_string()])?, 1)
-            .test_context("prepare duplicate frame")?;
+        let frame =
+            prepare_journal_frame(&batch(vec!["one".to_string()])?, &JournalIdentity::new(), 1)
+                .test_context("prepare duplicate frame")?;
         let mut duplicated = frame.line.clone();
         duplicated.extend_from_slice(&frame.line);
         std::fs::write(&active.path, duplicated).test_context("write duplicated frame")?;
@@ -2473,6 +2570,56 @@ mod tests {
                 .contains("duplicate physical batch identity")
         );
         std::fs::remove_dir_all(root).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn segmented_cold_scan_rejects_mixed_generation_segments() -> TestResult {
+        let root_a = temp_root("mixed-generation-a");
+        let root_b = temp_root("mixed-generation-b");
+        let journal_a =
+            SegmentedFileEventJournal::<String>::open(&root_a, 1, FileDurability::Flush)
+                .test_context("open journal A")?;
+        for value in ["a-one", "a-two"] {
+            journal_a
+                .append(value.to_string())
+                .test_context("append journal A")?;
+        }
+        let segment_a = journal_a
+            .segments()
+            .into_iter()
+            .find(|segment| segment.start_sequence == 2)
+            .map(|segment| segment.path)
+            .test_context("journal A second segment")?;
+        drop(journal_a);
+
+        let journal_b =
+            SegmentedFileEventJournal::<String>::open(&root_b, 1, FileDurability::Flush)
+                .test_context("open journal B")?;
+        for value in ["b-one", "b-two"] {
+            journal_b
+                .append(value.to_string())
+                .test_context("append journal B")?;
+        }
+        let segment_b = journal_b
+            .segments()
+            .into_iter()
+            .find(|segment| segment.start_sequence == 2)
+            .map(|segment| segment.path)
+            .test_context("journal B second segment")?;
+        drop(journal_b);
+
+        std::fs::copy(segment_b, segment_a).test_context("mix foreign segment")?;
+        let Err(error) =
+            SegmentedFileEventJournal::<String>::open(&root_a, 1, FileDurability::Flush)
+        else {
+            return Err(test_failure(
+                "mixed generation segments unexpectedly opened",
+            ));
+        };
+        assert!(error.to_string().contains("belongs to journal"));
+        std::fs::remove_dir_all(root_a).ok();
+        std::fs::remove_dir_all(root_b).ok();
         Ok(())
     }
 
@@ -3054,6 +3201,7 @@ mod tests {
         for value in ["one", "two", "three"] {
             journal.append(value.to_string()).expect("append");
         }
+        let journal_identity = journal.journal_identity().clone();
         let active_path = journal
             .segments()
             .into_iter()
@@ -3080,6 +3228,7 @@ mod tests {
         assert!(remaining.first().is_some_and(|segment| segment.active));
         drop(journal);
         let reopened = open_strings(&root, 1, FileDurability::Flush);
+        assert_eq!(reopened.journal_identity(), &journal_identity);
         assert_eq!(reopened.last_sequence(), 3);
         assert_eq!(
             reopened.retention_metadata(),
@@ -3163,6 +3312,35 @@ mod tests {
             .expect_err("corrupt marker must fail");
         assert!(error.to_string().contains("marker digest mismatch"));
         std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn retained_floor_marker_identity_tamper_fails_open() -> TestResult {
+        let root = temp_root("retention-identity-tamper");
+        let journal = open_strings(&root, 1, FileDurability::Flush);
+        for value in ["one", "two", "three"] {
+            journal
+                .append(value.to_string())
+                .test_context("append retention event")?;
+        }
+        journal
+            .prune_closed_segments_before(3)
+            .test_context("prune prefix")?;
+        drop(journal);
+        let marker = root.join(RETENTION_MARKER);
+        mutate_json_line(&marker, |record| {
+            record.insert(
+                "journal_identity".to_string(),
+                serde_json::Value::String(uuid::Uuid::new_v4().to_string()),
+            );
+        });
+        let Err(error) = SegmentedFileEventJournal::<String>::open(&root, 1, FileDurability::Flush)
+        else {
+            return Err(test_failure("foreign marker identity unexpectedly opened"));
+        };
+        assert!(error.to_string().contains("marker digest mismatch"));
+        std::fs::remove_dir_all(root).ok();
+        Ok(())
     }
 
     #[test]
@@ -3441,7 +3619,7 @@ mod tests {
     }
 
     #[test]
-    fn pruned_recovery_rejects_missing_corrupt_behind_and_ahead_checkpoints() {
+    fn pruned_recovery_rejects_unusable_and_foreign_checkpoints() {
         let root = temp_root("pruned-checkpoints");
         let journal = Arc::new(open_strings(&root, 1, FileDurability::Flush));
         for value in ["one", "two", "three"] {
@@ -3456,14 +3634,23 @@ mod tests {
             ("corrupt", "checkpoint load failed"),
             ("behind", "behind retained journal floor"),
             ("ahead", "ahead of journal sequence"),
+            ("wrong-journal", "does not match source journal"),
         ] {
             match label {
                 "corrupt" => {
                     std::fs::write(&checkpoint_path, b"{partial")
                         .expect("write corrupt checkpoint");
                 }
-                "behind" => write_checkpoint(&checkpoint_path, 1, &["one"]),
-                "ahead" => write_checkpoint(&checkpoint_path, 99, &[]),
+                "behind" => {
+                    write_checkpoint(&checkpoint_path, journal.journal_identity(), 1, &["one"])
+                }
+                "ahead" => write_checkpoint(&checkpoint_path, journal.journal_identity(), 99, &[]),
+                "wrong-journal" => write_checkpoint(
+                    &checkpoint_path,
+                    &JournalIdentity::new(),
+                    2,
+                    &["one", "two"],
+                ),
                 _ => {}
             }
             let reducer = CheckpointedReducer::<_, RetainedReducer>::new(
@@ -3485,7 +3672,12 @@ mod tests {
         );
         assert!(missing.recover().is_err());
 
-        write_checkpoint(&checkpoint_path, 2, &["one", "two"]);
+        write_checkpoint(
+            &checkpoint_path,
+            journal.journal_identity(),
+            2,
+            &["one", "two"],
+        );
         let valid = CheckpointedReducer::<_, RetainedReducer>::new(
             Arc::clone(&journal),
             Arc::new(FileCheckpointStore::open(&checkpoint_path)),

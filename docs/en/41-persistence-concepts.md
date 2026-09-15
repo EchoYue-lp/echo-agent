@@ -8,7 +8,7 @@ These concepts are not peers at one abstraction level. A `Store` is a read/write
 | ------------ | ----------------------------------------------------------- | ----------------------------- | ---------------------------------- |
 | `Store`      | Where is a kind of data kept and how is it accessed?        | trait, file or memory backend | Persistence and queries            |
 | `Journal`    | What happened, in deterministic order?                      | append-only event stream      | Replay, recovery, projections      |
-| `Checkpoint` | What was the state at a stable boundary?                    | state + applied sequence      | Fast recovery without full replay  |
+| `Checkpoint` | What was the state at a stable boundary?                    | Journal identity + state + sequence | Fast recovery without full replay  |
 | `Trace`      | How did an execution behave and why did it succeed or fail? | `Run` + `RunEvent`            | Debugging, diagnostics, evaluation |
 
 ```text
@@ -32,7 +32,7 @@ The framework does not define one universal Store trait for every persisted arti
 | `Store`              | namespaced key/value long-term memory | Cross-session knowledge   |
 | `ConversationStore`  | user-visible transcript projection    | Conversation browsing     |
 | `RuntimeStateStore`  | `AgentCheckpoint`                     | ReAct session recovery    |
-| `CheckpointStore<S>` | reducer state + applied sequence      | Event projection recovery |
+| `CheckpointStore<S>` | Journal generation + reducer state + applied sequence | Event projection recovery |
 | `RunStore`           | trace `Run`/`RunEvent`                | Execution observability   |
 
 The long-term-memory `Store` supports namespace isolation, key/value operations, search, and deletion. It is one Store in the framework, not a parent interface for the other stores.
@@ -43,8 +43,10 @@ The long-term-memory `Store` supports namespace isolation, key/value operations,
 
 - append-only records;
 - contiguous sequences starting at 1;
+- one stable `JournalIdentity` per fact-history generation;
 - ordered suffix replay;
 - commit before reducer projection;
+- append receipts carry the committing Journal identity, including across typed adapters;
 - recovery of a torn trailing record, while mid-history corruption is an error;
 - unknown batch-commit outcomes require reopen/reconciliation rather than blind retry.
 
@@ -54,15 +56,19 @@ A Journal is suitable for facts that have happened. Current state, lists, and UI
 
 ### Reducer checkpoints
 
-`CheckpointedReducer` folds Journal events into state and uses `CheckpointStore<S>` to persist the applied sequence and the corresponding reducer state.
+`CheckpointedReducer` folds Journal events into state and uses `CheckpointStore<S>` to persist the exact `JournalIdentity`, applied sequence, and corresponding reducer state. A sequence has meaning only inside its Journal generation; equality of sequence numbers does not make two Journals interchangeable.
 
 ```text
 Journal:      1 2 3 4 5 6 7 8 9 10
-Checkpoint:              state@7
-Recovery:                 load@7 + replay 8..10
+Checkpoint:   journal=A, state@7
+Recovery:     require journal=A, then load@7 + replay 8..10
 ```
 
-`FileCheckpointStore` uses atomic replacement, a schema version, and a SHA-256 digest so partial or modified data is not accepted as a trusted replay prefix. For an event-sourced projection, this checkpoint is a rebuildable accelerator and does not replace the Journal.
+`FileCheckpointStore` uses atomic replacement, a schema version, and a SHA-256 digest over Journal identity, sequence, and state, so partial, modified, or cross-Journal data is not accepted as a trusted replay prefix. If the identity differs while the complete Journal is retained, recovery discards the checkpoint, replays from the authoritative facts, and repairs it. If the Journal prefix has been pruned, identity mismatch fails closed because the missing facts cannot be rebuilt.
+
+`apply_committed` validates the identity on an externally obtained append receipt before folding any record. Adapters may map payload types, but they must preserve the physical Journal identity together with batch identity and sequence.
+
+File Journal batches, checkpoints, and segmented retention markers use identity-bearing schema version 2. Version 1 did not carry enough information to prove the binding and is therefore rejected rather than guessed. See [ADR 0055](../adr/0055-checkpoint-journal-identity.md).
 
 ### AgentCheckpoint
 
@@ -127,7 +133,7 @@ Before adding or changing these components, answer:
 
 1. Is this a new persistence backend or a new data semantic? Only the former is primarily a Store problem.
 2. Which data is the non-lossy fact source? Prefer extending an existing Journal when ordered recovery is required.
-3. Is a Checkpoint a derived Journal accelerator or an independent runtime snapshot? Document its authority and rebuild source.
+3. Is a Checkpoint a derived Journal accelerator or an independent runtime snapshot? Document its authority, generation identity, and rebuild source.
 4. May execution continue after a Trace write failure? If so, Trace cannot decide whether business work committed.
 5. Does the same scope already have a Journal, Checkpoint, Store, or projection? Do not create parallel semantic owners.
 
