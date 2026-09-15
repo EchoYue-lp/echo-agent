@@ -5,16 +5,20 @@ kind: audit
 boundary_ref: boundary.tool-permission-sandbox
 lens: result_side_effect
 freshness: examined
-revision: source:ebb9b2db3cc55a1e63eeea959d10359c8da2d72c9e0e6e2ea27026186bc87c48
+revision: source:66a74859cd586d80d2ad791b3a2369b31e7bcff60f6afb6a4edf3575a29a7778
 finding_refs: [finding.k8s-sandbox-cleanup-settlement]
 challenges:
   pod-owner-and-drain-settlement:
-    revision: source:ebb9b2db3cc55a1e63eeea959d10359c8da2d72c9e0e6e2ea27026186bc87c48
+    revision: source:66a74859cd586d80d2ad791b3a2369b31e7bcff60f6afb6a4edf3575a29a7778
     source_refs: [echo-execution/src/sandbox/k8s.rs, docs/adr/0002-sandbox-cancellation-cleanup.md]
     evidence_refs: [evidence.k8s-sandbox-cleanup-settlement-repair, evidence.k8s-sandbox-cleanup-settlement-verification]
   cleanup-debt-and-join-recovery:
-    revision: source:ebb9b2db3cc55a1e63eeea959d10359c8da2d72c9e0e6e2ea27026186bc87c48
+    revision: source:66a74859cd586d80d2ad791b3a2369b31e7bcff60f6afb6a4edf3575a29a7778
     source_refs: [echo-execution/src/sandbox/k8s.rs]
+    evidence_refs: [evidence.k8s-sandbox-cleanup-settlement-repair, evidence.k8s-sandbox-cleanup-settlement-verification]
+  ambiguous-create-delete-commit:
+    revision: source:66a74859cd586d80d2ad791b3a2369b31e7bcff60f6afb6a4edf3575a29a7778
+    source_refs: [echo-execution/src/sandbox/k8s.rs, docs/adr/0002-sandbox-cancellation-cleanup.md]
     evidence_refs: [evidence.k8s-sandbox-cleanup-settlement-repair, evidence.k8s-sandbox-cleanup-settlement-verification]
 ---
 
@@ -30,7 +34,7 @@ deterministic fake-kubectl测试；SandboxManager owner与其它Sandbox Finding�
 
 检查caller drop跳过delete、leader退出但helper持有pipe导致owner永久阻塞、stdin写入阻塞或
 失败、delete spawn/nonzero/timeout伪装成功、cleanup error在owner-result/caller-ack间丢失，
-以及JoinError补偿再次被caller drop中断。
+JoinError补偿再次被caller drop中断，以及create延迟提交是否会越过首次NotFound删除。
 
 ## 实际实现路径与证据
 
@@ -38,11 +42,14 @@ Pod身份与全部执行资源由单一detached owner持有；Completed路径先
 deadline/caller-abandonment有界drain。所有primary terminal进入同一删除路径，删除等待API对象
 与finalizer消失。Cleanup debt在owner交付结果前记录，JoinError补偿由第二个detached cleanup
 task持有。修复后定向测试16项通过，两档Clippy、crate check与fmt均通过。
+Pod删除还必须产生具名receipt并确认缺失；空NotFound在共享deadline内继续probe，延迟出现会重删，
+持续歧义成为typed debt。最终定向测试18项、两档Clippy、crate check与fmt均通过。
 
 ## 问题记录
 
-首轮复审的Important 2项与Minor 1项均已修复；第二轮Critical、Important、Minor均为0，
-实现复审结论PASS。Finding在integration统一刷新共享snapshot并执行final gate前保持open。
+候选首轮复审的Important 2项与Minor 1项均已修复；集成复审又发现1项Important ambiguous
+create/delete竞态。红测和单点修复完成后第二轮集成复审Critical、Important、Minor均为0，
+实现复审结论PASS。Finding在final gate前保持open。
 
 ## 残余风险
 

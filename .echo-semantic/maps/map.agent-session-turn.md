@@ -4,7 +4,7 @@ id: map.agent-session-turn
 kind: capability_map
 title: Agent、Session、Invocation 与 Turn
 risk: high
-observed_at: source:b69e5e4f1ed0f4f44d80ff658771701f5ce167ff7f200ec4e28a5e84fca61100
+observed_at: source:66a74859cd586d80d2ad791b3a2369b31e7bcff60f6afb6a4edf3575a29a7778
 boundary_refs: [boundary.agent-session-turn]
 behavior_refs: [behavior.agent-turn-lifecycle]
 rule_refs: [rule.turn-terminal-authority, rule.context-persistence-separation]

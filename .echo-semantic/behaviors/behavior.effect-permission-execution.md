@@ -8,7 +8,7 @@ risk: high
 primary_focus: permission_external
 focus: [result_side_effect, failure_concurrency, time_lifecycle, state_authority]
 boundary: boundary.tool-permission-sandbox
-observed_at: e59fe773d92bca409fe0606b608c4812f87f7ac2
+observed_at: source:66a74859cd586d80d2ad791b3a2369b31e7bcff60f6afb6a4edf3575a29a7778
 code_refs: [echo-core/src/tools/mod.rs, echo-core/src/tools/permission.rs, echo-core/src/tools/cell.rs, echo-execution/src/tools.rs, echo-orchestration/src/human_loop/service.rs, echo-orchestration/src/tasks/command_cell.rs, echo-execution/src/sandbox/local.rs, echo-execution/src/sandbox/k8s.rs, echo-execution/src/skills/hooks.rs, src/agent/react/run/pipeline.rs]
 rule_refs: [rule.permission-effect-order]
 evidence_refs: [evidence.effects-extensions, evidence.streaming-tool-validation-repair, evidence.streaming-tool-validation-verification, evidence.tool-read-cache-authority-repair, evidence.tool-read-cache-authority-verification, evidence.tool-registry-owned-handle-repair, evidence.tool-registry-owned-handle-verification, evidence.mcp-tool-local-classification-repair, evidence.mcp-tool-local-classification-verification, evidence.k8s-sandbox-cleanup-settlement-repair, evidence.k8s-sandbox-cleanup-settlement-verification]
@@ -24,6 +24,7 @@ ReactAgent 自动工具调用的 schema/validation、可见性、permission、re
 ## 当前行为
 
 ToolManager管Arc Tool generation注册、owned lookup、统一validation、context-scoped read cache/epoch与执行并发；stream/non-stream共用输入及cache freshness机制，registry guard不进入异步Tool lifetime。ReactAgent的PermissionPolicy/PermissionService、Hook/Guard与tool pipeline影响自动工具调用；trusted Hook command/http可在PermissionStage前执行；Sandbox和具体工具产生文件、进程、网络、数据库或Git effect。K8s Pod执行由detached backend owner持有，terminal在有界进程组、输出与Pod删除结算之后产生。
+具名delete receipt与confirmed absence共同处理create延迟提交，空NotFound不会成为成功terminal。
 
 ## 期望行为
 

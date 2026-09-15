@@ -39,6 +39,6 @@ Stream receiver 关闭、kubectl future drop 或 delete 失败时，Pod 可遗�
 
 ## 处理记录
 
-Result-side-effect Audit 确认 owner gap；当前 repair 已建立 detached cleanup owner/receipt/debt
-并通过 deterministic fake-kubectl focused tests。独立复审第二轮PASS；Finding等待integration
-统一刷新共享snapshot并执行final gate后再关闭。
+Result-side-effect Audit 确认 owner gap；当前 repair 已建立 detached cleanup owner/receipt/debt，
+并闭合首次NotFound后create延迟提交的竞态。Deterministic fake-kubectl 18项focused tests与两轮
+独立集成复审已通过；Finding等待final gate后再关闭。

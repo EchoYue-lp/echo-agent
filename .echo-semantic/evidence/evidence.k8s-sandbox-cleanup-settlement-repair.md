@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.k8s-sandbox-cleanup-settlement-repair
 kind: evidence
-observed_at: source:ebb9b2db3cc55a1e63eeea959d10359c8da2d72c9e0e6e2ea27026186bc87c48
+observed_at: source:66a74859cd586d80d2ad791b3a2369b31e7bcff60f6afb6a4edf3575a29a7778
 source_refs:
   - echo-execution/src/sandbox/k8s.rs
   - docs/adr/0002-sandbox-cancellation-cleanup.md
@@ -30,6 +30,11 @@ cleanup task持有，丢弃等待它的future不会再次中断删除。
 非零退出不再丢弃。等待中的caller收到保留primary terminal facts与cleanup debt的typed
 sandbox I/O错误；detached owner在把结果交给caller前无条件记录cleanup debt，不存在
 owner result已完成而caller随后drop导致debt同时丢失的窗口。
+
+创建请求还可能在本地kubectl终止后延迟提交。Pod delete/get/poll现在共用一个绝对cleanup
+deadline；`delete --output=name`提供真实删除receipt，空成功只表示当前NotFound而不是terminal。
+owner会继续确认，延迟出现则重删；始终没有receipt时到期返回typed cleanup debt，不能猜测
+远端create从未提交。
 
 ## 来源与范围
 
