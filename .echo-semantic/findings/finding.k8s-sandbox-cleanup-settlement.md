@@ -10,12 +10,12 @@ focus: [time_lifecycle, failure_concurrency, state_authority]
 boundary_ref: boundary.tool-permission-sandbox
 behavior_refs: [behavior.effect-permission-execution]
 rule_refs: [rule.permission-effect-order]
-evidence_refs: [evidence.effects-extensions]
-audit_refs: [audit.tool-permission-sandbox.result-side-effect]
+evidence_refs: [evidence.effects-extensions, evidence.k8s-sandbox-cleanup-settlement-repair, evidence.k8s-sandbox-cleanup-settlement-verification]
+audit_refs: [audit.tool-permission-sandbox.result-side-effect, audit.k8s-sandbox-cleanup-settlement-rereview]
 decision_refs: []
-repair_evidence_refs: []
-verification_evidence_refs: []
-rereview_audit_refs: []
+repair_evidence_refs: [evidence.k8s-sandbox-cleanup-settlement-repair]
+verification_evidence_refs: [evidence.k8s-sandbox-cleanup-settlement-verification]
+rereview_audit_refs: [audit.k8s-sandbox-cleanup-settlement-rereview]
 discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 ---
 
@@ -39,4 +39,6 @@ Stream receiver 关闭、kubectl future drop 或 delete 失败时，Pod 可遗�
 
 ## 处理记录
 
-Result-side-effect Audit 确认 owner gap；后续 repair 需 detached cleanup owner/receipt/debt 与 deterministic kubectl fault tests。
+Result-side-effect Audit 确认 owner gap；当前 repair 已建立 detached cleanup owner/receipt/debt
+并通过 deterministic fake-kubectl focused tests。独立复审第二轮PASS；Finding等待integration
+统一刷新共享snapshot并执行final gate后再关闭。

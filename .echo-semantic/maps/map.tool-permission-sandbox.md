@@ -8,9 +8,9 @@ observed_at: source:b69e5e4f1ed0f4f44d80ff658771701f5ce167ff7f200ec4e28a5e84fca6
 boundary_refs: [boundary.tool-permission-sandbox]
 behavior_refs: [behavior.effect-permission-execution]
 rule_refs: [rule.permission-effect-order]
-evidence_refs: [evidence.effects-extensions, evidence.high-risk-audit-frontier, evidence.streaming-tool-validation-repair, evidence.streaming-tool-validation-verification, evidence.tool-read-cache-authority-repair, evidence.tool-read-cache-authority-verification, evidence.tool-registry-owned-handle-repair, evidence.tool-registry-owned-handle-verification, evidence.framework-concept-navigation, evidence.mcp-tool-local-classification-repair, evidence.mcp-tool-local-classification-verification]
+evidence_refs: [evidence.effects-extensions, evidence.high-risk-audit-frontier, evidence.streaming-tool-validation-repair, evidence.streaming-tool-validation-verification, evidence.tool-read-cache-authority-repair, evidence.tool-read-cache-authority-verification, evidence.tool-registry-owned-handle-repair, evidence.tool-registry-owned-handle-verification, evidence.framework-concept-navigation, evidence.mcp-tool-local-classification-repair, evidence.mcp-tool-local-classification-verification, evidence.k8s-sandbox-cleanup-settlement-repair, evidence.k8s-sandbox-cleanup-settlement-verification]
 finding_refs: [finding.tool-read-cache-scope, finding.tool-read-cache-inflight-invalidation-race, finding.tool-registry-mutation-active-call-deadlock, finding.streaming-tool-validation, finding.plan-mode-write-surface, finding.readonly-tools-custom-registration-bypass, finding.approval-authority, finding.hook-protected-path, finding.hook-permission-precedence, finding.sandbox-minimum-isolation, finding.sandbox-manager-stream-failure-typing, finding.guard-direction-contract, finding.trace-effect-event-producers, finding.trace-audit-secret-boundary, finding.effect-cleanup-owner, finding.k8s-sandbox-cleanup-settlement, finding.tool-terminal-observation-divergence, finding.command-cell-retention-lease-prune-race, finding.command-cell-cancel-artifact-settlement, finding.tool-pipeline-example-drift]
-audit_refs: [audit.tool-permission-sandbox.permission-external, audit.tool-permission-sandbox.failure-concurrency, audit.tool-permission-sandbox.result-side-effect, audit.streaming-tool-validation-rereview, audit.tool-read-cache-authority-rereview, audit.tool-registry-owned-handle-rereview, audit.mcp-tool-local-classification-rereview]
+audit_refs: [audit.tool-permission-sandbox.permission-external, audit.tool-permission-sandbox.failure-concurrency, audit.tool-permission-sandbox.result-side-effect, audit.streaming-tool-validation-rereview, audit.tool-read-cache-authority-rereview, audit.tool-registry-owned-handle-rereview, audit.mcp-tool-local-classification-rereview, audit.k8s-sandbox-cleanup-settlement-rereview]
 related_map_refs: [map.agent-session-turn, map.task-subagent-workflow, map.observation-persistence-delivery, map.extension-lifecycle]
 scenarios:
   agent-automated-policy-pipeline:
@@ -49,7 +49,8 @@ scenarios:
     status: mapped
     source_refs: [echo-core/src/sandbox.rs, echo-execution/src/sandbox/manager.rs, echo-execution/src/sandbox/local.rs, echo-core/src/tools/artifact.rs, echo-tools/src/git_worktree.rs]
     finding_refs: [finding.sandbox-minimum-isolation, finding.sandbox-manager-stream-failure-typing, finding.effect-cleanup-owner, finding.k8s-sandbox-cleanup-settlement]
-    evidence_refs: [evidence.effects-extensions]
+    evidence_refs: [evidence.effects-extensions, evidence.k8s-sandbox-cleanup-settlement-repair, evidence.k8s-sandbox-cleanup-settlement-verification]
+    audit_refs: [audit.k8s-sandbox-cleanup-settlement-rereview]
   guard-and-trace-projection:
     status: needs_review
     source_refs: [echo-core/src/guard/mod.rs, src/agent/snapshot.rs, src/trace/mod.rs, echo-state/src/audit/memory.rs]
@@ -65,11 +66,13 @@ scenarios:
     unknown: retention lease prune 与普通 cancel artifact settlement 存在确认的生命周期缺口
     next_step: task runtime repair 分别闭合 lease-aware prune 与 cancellation-bounded finalization
   k8s-caller-drop:
-    status: needs_review
+    status: mapped
     source_refs: [echo-execution/src/sandbox/manager.rs, echo-execution/src/sandbox/k8s.rs]
-    unknown: stream consumer drop 是否可中断 Pod 创建并跳过 delete 尚无故障注入证据
     finding_refs: [finding.k8s-sandbox-cleanup-settlement]
-    next_step: owner gap 已由源码确认；在 deterministic K8s fake backend 上验证 caller-drop 与 delete failure settlement
+    behavior_refs: [behavior.effect-permission-execution]
+    rule_refs: [rule.permission-effect-order]
+    evidence_refs: [evidence.k8s-sandbox-cleanup-settlement-repair, evidence.k8s-sandbox-cleanup-settlement-verification]
+    audit_refs: [audit.k8s-sandbox-cleanup-settlement-rereview]
   direct-user-surface:
     status: excluded
     source_refs: [docs/en/39-framework-application-boundary.md]
@@ -114,7 +117,7 @@ Permission prompt、Tool progress/result、CommandCell snapshot 与 artifact ref
 
 ## 场景处置清单
 
-Agent pipeline、programmatic primitive、trusted Hook effect 与 CommandCell 已拆分；已知缺口进入 Findings，K8s caller-drop 保持 needs_review，direct-user surface 明确 excluded。
+Agent pipeline、programmatic primitive、trusted Hook effect 与 CommandCell 已拆分；已知缺口进入 Findings，K8s caller-drop已由detached owner、typed cleanup debt和故障注入映射，direct-user surface明确excluded。
 
 ## 未展开项
 
