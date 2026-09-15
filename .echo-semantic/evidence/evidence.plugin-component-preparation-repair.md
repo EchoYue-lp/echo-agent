@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.plugin-component-preparation-repair
 kind: evidence
-observed_at: source:298b7209a1d4a5151d191db785daa2e394ab43f75a3bc321d8275f6cdf56c757
+observed_at: 7e74d1443567981f318b302845d31a5673c76462
 source_refs:
   - src/plugin/prepared.rs
   - echo-execution/src/skills/external/loader.rs

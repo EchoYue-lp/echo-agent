@@ -199,6 +199,12 @@ while let Some(event) = stream.next().await {
 `NodeError` 是失败终态的诊断事件：流会先发出该事件，随后以同一个错误结束，
 不会再发出 `Completed`。并行分支遇到首个失败时会取消并排空其余 sibling，避免
 挂起节点遮蔽错误或在调用方取消后继续产生副作用。
+Agent 节点会把 `AgentEvent::Token` 转发为 `WorkflowEvent::Token`，并在发出
+`NodeEnd` 前把最终答案提交到 `SharedState`。
+
+`run`、`run_until_interrupt`、checkpoint resume 和 `run_stream` 的节点路由、
+path/step 计数、fan-out、错误和完成结算全部委托给同一条内部执行循环。流式入口只是
+该循环的事件投影，不是第二个执行器。
 
 ---
 
@@ -319,6 +325,10 @@ let resumed = graph.resume_from_checkpoint(&checkpoint_store, &checkpoint_id).aw
 续租的崩溃 claim 才能在 lease 到期后重新发现。对活动 claim 修改标签会因 generation
 冲突失败，不会复活已领取的 continuation。自定义和 SDK-backed store 必须实现 renew、
 ack、requeue 与 generation-CAS；不支持的结算会失败关闭。
+
+批准 `BeforeNode` checkpoint 只会跳过它所代表的那一次中断，后续节点自己的中断仍会
+正常检查。finish 节点与其它可执行节点使用相同的 before/after 中断语义；从 finish 后的
+checkpoint 恢复时会沿保留路径完成，不会重复执行 finish 节点。
 
 ---
 

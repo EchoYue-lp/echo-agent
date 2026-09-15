@@ -4,7 +4,7 @@ id: audit.tool-permission-sandbox.result-side-effect
 kind: audit
 boundary_ref: boundary.tool-permission-sandbox
 lens: result_side_effect
-freshness: examined
+freshness: stale
 revision: f1e9027246760661144786e9e35615cd46d580c6
 finding_refs: [finding.effect-cleanup-owner, finding.k8s-sandbox-cleanup-settlement, finding.tool-terminal-observation-divergence, finding.trace-effect-event-producers, finding.tool-pipeline-example-drift]
 challenges:

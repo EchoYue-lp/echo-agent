@@ -12,7 +12,7 @@ This page explains package and ownership boundaries. It does not replace the
 
 ## Package Topology
 
-The workspace contains the root `echo_agent` package plus nine members. Cargo
+The workspace contains the root `echo_agent` package plus eight members. Cargo
 manifests are authoritative for this graph.
 
 ```text

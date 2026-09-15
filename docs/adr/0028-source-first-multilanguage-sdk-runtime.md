@@ -8,7 +8,7 @@
 
 The runtime decisions in the original ADR remain historical context. Repository
 placement and current SDK ownership are superseded by
-[ADR 0049](./0049-extract-sdk-repository.md) and the independent SDK
+[ADR 0051](./0051-extract-sdk-repository.md) and the independent SDK
 [ADR 0001](https://github.com/EchoYue-lp/echo-agent-sdk/blob/b80cf068b2fb69b62913f23260980b4ce2ebf941/docs/adr/0001-sdk-repository-boundary.md).
 
 ## Current Boundary

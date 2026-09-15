@@ -1,4 +1,4 @@
-# ADR 0049: Extract echo-agent SDK into an Independent Repository
+# ADR 0051: Extract echo-agent SDK into an Independent Repository
 
 - Status: Accepted
 - Date: 2026-09-15
@@ -65,6 +65,26 @@ workspace members.
   checkpoint. It retains the initial-import commit as an ancestor; reverting
   the extraction commit restores framework paths without rewriting either
   repository's history.
+
+## Cross-Repository Cutover
+
+The initial extraction commit `1754877996778afac4e4db77ce37c330496760ea`
+remains the rollback point and the first exact Host pin. It predates framework
+PR #124 and PR #125, so the final cutover uses a two-phase handshake:
+
+1. integrate the extraction with framework `main@0e09324a`, retaining the
+   Journal/Workflow and Kubernetes runtime changes while keeping SDK-owned
+   paths deleted, then push that candidate revision without merging it;
+2. update `echo-agent-sdk` from source continuity so it includes the 9,724-item
+   Wave 2 inventory, pins the pushed extraction candidate, and passes its own
+   contract, Host, language, dependency, semantic, and remote CI gates;
+3. merge the framework extraction, then replace the SDK candidate pin with the
+   final framework main commit and revalidate before merging the SDK PR.
+
+Issue #122 stays open across the handshake. A framework Finding may be resolved
+once its deletion, equivalence, verification, and rereview evidence is closed,
+but neither repository may treat that as proof that the other repository has
+completed delivery.
 
 ## Verification
 

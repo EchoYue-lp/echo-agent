@@ -56,6 +56,8 @@
 //! - One [`CheckpointedReducer`] is the single projection owner for its journal.
 //!   It serializes append, fold, checkpoint, and recovery as one transaction so
 //!   concurrent callers cannot reorder committed sequences.
+//! - Every checkpoint carries the exact [`JournalIdentity`] whose facts
+//!   produced it. A sequence is never trusted outside that Journal generation.
 //!
 //! # Example
 //!
@@ -160,7 +162,7 @@ impl<T> TestContext<T> for Option<T> {
     }
 }
 
-const JOURNAL_BATCH_SCHEMA_VERSION: u16 = 1;
+const JOURNAL_BATCH_SCHEMA_VERSION: u16 = 2;
 
 // File-backed runtime caches normally keep far fewer authorities live. The
 // soft range scans at a fixed cadence; the hard limit scans immediately to
@@ -270,6 +272,57 @@ pub trait JournalEvent:
 {
 }
 
+/// Stable identity of one journal generation.
+///
+/// Sequences are meaningful only inside this identity. File-backed journals
+/// persist it in every physical batch frame so replacing or mixing journal
+/// generations cannot make an unrelated checkpoint look current.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[serde(transparent)]
+pub struct JournalIdentity(String);
+
+impl JournalIdentity {
+    /// Allocate a new opaque journal-generation identity.
+    pub fn new() -> Self {
+        Self(uuid::Uuid::new_v4().to_string())
+    }
+
+    /// Validate and normalize a persisted journal-generation identity.
+    pub fn parse(value: impl AsRef<str>) -> Result<Self> {
+        let parsed = uuid::Uuid::parse_str(value.as_ref()).map_err(|error| {
+            ReactError::Other(format!("journal identity is not a UUID: {error}"))
+        })?;
+        Ok(Self(parsed.to_string()))
+    }
+
+    /// Canonical textual representation of this identity.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Default for JournalIdentity {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<'de> Deserialize<'de> for JournalIdentity {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(&value).map_err(serde::de::Error::custom)
+    }
+}
+
+impl fmt::Display for JournalIdentity {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
 impl<T> JournalEvent for T where
     T: Serialize + DeserializeOwned + Send + Sync + std::fmt::Debug + 'static
 {
@@ -317,6 +370,7 @@ impl<E> JournalRecord<E> {
 #[derive(Debug, Serialize)]
 struct BatchIntegrity<'a, E> {
     schema_version: u16,
+    journal_identity: &'a JournalIdentity,
     batch_id: &'a str,
     first_sequence: u64,
     records: &'a [JournalRecord<E>],
@@ -325,6 +379,7 @@ struct BatchIntegrity<'a, E> {
 #[derive(Debug, Serialize)]
 struct StoredBatchFrameRef<'a, E> {
     schema_version: u16,
+    journal_identity: &'a JournalIdentity,
     batch_id: &'a str,
     first_sequence: u64,
     records: &'a [JournalRecord<E>],
@@ -335,6 +390,7 @@ struct StoredBatchFrameRef<'a, E> {
 #[serde(deny_unknown_fields)]
 pub(super) struct StoredBatchFrame<E> {
     schema_version: u16,
+    journal_identity: JournalIdentity,
     batch_id: String,
     first_sequence: u64,
     records: Vec<JournalRecord<E>>,
@@ -399,12 +455,14 @@ fn lower_hex_digit(nibble: u8) -> char {
 }
 
 fn batch_digest<E: Serialize>(
+    journal_identity: &JournalIdentity,
     batch_id: &str,
     first_sequence: u64,
     records: &[JournalRecord<E>],
 ) -> Result<String> {
     let bytes = canonical_json_bytes(&BatchIntegrity {
         schema_version: JOURNAL_BATCH_SCHEMA_VERSION,
+        journal_identity,
         batch_id,
         first_sequence,
         records,
@@ -585,6 +643,7 @@ impl<E: JournalEvent> PreparedJournalBatch<E> {
 
 pub(super) fn prepare_journal_frame<E: JournalEvent>(
     prepared: &PreparedJournalBatch<E>,
+    journal_identity: &JournalIdentity,
     first_sequence: u64,
 ) -> Result<PreparedJournalFrame<E>> {
     prepared.validate_payload_integrity()?;
@@ -609,9 +668,15 @@ pub(super) fn prepare_journal_frame<E: JournalEvent>(
         });
     }
     let records: Arc<[JournalRecord<E>]> = records.into();
-    let digest = batch_digest(&prepared.batch_id, first_sequence, records.as_ref())?;
+    let digest = batch_digest(
+        journal_identity,
+        &prepared.batch_id,
+        first_sequence,
+        records.as_ref(),
+    )?;
     let stored = StoredBatchFrameRef {
         schema_version: JOURNAL_BATCH_SCHEMA_VERSION,
+        journal_identity,
         batch_id: &prepared.batch_id,
         first_sequence,
         records: records.as_ref(),
@@ -679,7 +744,12 @@ pub(super) fn decode_journal_batch<E: JournalEvent>(
             )));
         }
     }
-    let expected_digest = batch_digest(&frame.batch_id, frame.first_sequence, &frame.records)?;
+    let expected_digest = batch_digest(
+        &frame.journal_identity,
+        &frame.batch_id,
+        frame.first_sequence,
+        &frame.records,
+    )?;
     if frame.digest != expected_digest {
         return Err(ReactError::Other(format!(
             "{context}: journal batch digest mismatch at sequence {}",
@@ -699,6 +769,10 @@ pub(super) fn decode_journal_batch<E: JournalEvent>(
 }
 
 impl<E> StoredBatchFrame<E> {
+    pub(super) fn journal_identity(&self) -> &JournalIdentity {
+        &self.journal_identity
+    }
+
     pub(super) fn batch_id(&self) -> &str {
         &self.batch_id
     }
@@ -943,6 +1017,7 @@ pub enum JournalBatchCommitStatus {
 /// Receipt for one committed journal append.
 #[derive(Debug)]
 pub struct JournalAppendReceipt<E> {
+    journal_identity: JournalIdentity,
     batch_id: String,
     pub record: JournalRecord<E>,
     pub durability: JournalDurabilityStatus,
@@ -952,6 +1027,7 @@ pub struct JournalAppendReceipt<E> {
 impl<E> Clone for JournalAppendReceipt<E> {
     fn clone(&self) -> Self {
         Self {
+            journal_identity: self.journal_identity.clone(),
             batch_id: self.batch_id.clone(),
             record: self.record.clone(),
             durability: self.durability.clone(),
@@ -961,6 +1037,11 @@ impl<E> Clone for JournalAppendReceipt<E> {
 }
 
 impl<E> JournalAppendReceipt<E> {
+    /// Journal generation that committed this record.
+    pub fn journal_identity(&self) -> &JournalIdentity {
+        &self.journal_identity
+    }
+
     /// Stable batch identity for this single-record receipt.
     pub fn batch_id(&self) -> &str {
         &self.batch_id
@@ -970,6 +1051,8 @@ impl<E> JournalAppendReceipt<E> {
 /// Receipt for one atomically committed journal batch.
 #[derive(Debug)]
 pub struct JournalBatchAppendReceipt<E> {
+    /// Journal generation that committed this frame.
+    journal_identity: JournalIdentity,
     /// Stable identity of the physical commit frame.
     batch_id: String,
     /// Ordered records committed by the frame. Payloads remain shared through
@@ -983,6 +1066,7 @@ pub struct JournalBatchAppendReceipt<E> {
 impl<E> Clone for JournalBatchAppendReceipt<E> {
     fn clone(&self) -> Self {
         Self {
+            journal_identity: self.journal_identity.clone(),
             batch_id: self.batch_id.clone(),
             records: Arc::clone(&self.records),
             durability: self.durability.clone(),
@@ -994,6 +1078,7 @@ impl<E> Clone for JournalBatchAppendReceipt<E> {
 impl<E> JournalBatchAppendReceipt<E> {
     /// Rebuild a receipt after mapping records across a typed adapter boundary.
     pub fn from_parts(
+        journal_identity: JournalIdentity,
         batch_id: impl Into<String>,
         records: Vec<JournalRecord<E>>,
         durability: JournalDurabilityStatus,
@@ -1003,6 +1088,7 @@ impl<E> JournalBatchAppendReceipt<E> {
             return Err("journal receipt must contain at least one record".to_string());
         }
         Ok(Self {
+            journal_identity,
             batch_id: batch_id.into(),
             records: records.into(),
             durability,
@@ -1013,6 +1099,11 @@ impl<E> JournalBatchAppendReceipt<E> {
     /// Stable committed or idempotently resolved batch identity.
     pub fn batch_id(&self) -> &str {
         &self.batch_id
+    }
+
+    /// Journal generation that committed or resolved this frame.
+    pub fn journal_identity(&self) -> &JournalIdentity {
+        &self.journal_identity
     }
 
     /// Ordered committed records as a read-only shared slice.
@@ -1147,8 +1238,13 @@ impl<E: fmt::Debug> std::error::Error for CheckpointedApplyError<E> {}
 /// Append-only sequenced journal with atomic batch commits.
 ///
 /// Implementations assign contiguous 1-based sequences at append time and can
-/// replay any suffix of the journal in order.
+/// replay any suffix of the journal in order. Persistent implementations must
+/// preserve one [`JournalIdentity`] for the complete generation and replace it
+/// when the underlying fact history is replaced.
 pub trait EventJournal<E: JournalEvent>: Send + Sync {
+    /// Stable identity of this journal generation.
+    fn journal_identity(&self) -> &JournalIdentity;
+
     /// Commit a non-empty ordered event batch as one physical frame.
     ///
     /// [`JournalBatchAppendError::NotCommitted`] permits retrying the complete
@@ -1179,6 +1275,7 @@ pub trait EventJournal<E: JournalEvent>: Send + Sync {
             })
         })?;
         Ok(JournalAppendReceipt {
+            journal_identity: appended.journal_identity,
             batch_id: appended.batch_id,
             record,
             durability: appended.durability,
@@ -1208,6 +1305,7 @@ pub trait EventJournal<E: JournalEvent>: Send + Sync {
 /// In-memory [`EventJournal`] for tests and ephemeral consumers.
 #[derive(Debug)]
 pub struct MemoryEventJournal<E> {
+    identity: JournalIdentity,
     inner: Mutex<MemoryInner<E>>,
 }
 
@@ -1234,6 +1332,7 @@ impl<E: JournalEvent> Default for MemoryEventJournal<E> {
 impl<E: JournalEvent> MemoryEventJournal<E> {
     pub fn new() -> Self {
         Self {
+            identity: JournalIdentity::new(),
             inner: Mutex::new(MemoryInner {
                 next_sequence: 1,
                 records: Vec::new(),
@@ -1245,6 +1344,10 @@ impl<E: JournalEvent> MemoryEventJournal<E> {
 }
 
 impl<E: JournalEvent> EventJournal<E> for MemoryEventJournal<E> {
+    fn journal_identity(&self) -> &JournalIdentity {
+        &self.identity
+    }
+
     fn append_batch(&self, batch: PreparedJournalBatch<E>) -> JournalBatchAppendResult<E> {
         if let Err(error) = batch.validate_payload_integrity() {
             return Err(JournalBatchAppendError::prepared_mutation(
@@ -1287,7 +1390,7 @@ impl<E: JournalEvent> EventJournal<E> for MemoryEventJournal<E> {
                 reason,
             ));
         }
-        let prepared = match prepare_journal_frame(&batch, inner.next_sequence) {
+        let prepared = match prepare_journal_frame(&batch, &self.identity, inner.next_sequence) {
             Ok(prepared) => prepared,
             Err(error) => {
                 return Err(JournalBatchAppendError::not_committed(
@@ -1299,6 +1402,7 @@ impl<E: JournalEvent> EventJournal<E> for MemoryEventJournal<E> {
         inner.next_sequence = prepared.next_sequence;
         inner.records.extend(prepared.records.iter().cloned());
         let receipt = JournalBatchAppendReceipt {
+            journal_identity: self.identity.clone(),
             batch_id: batch.batch_id,
             records: prepared.records,
             durability: JournalDurabilityStatus::Confirmed,
@@ -1445,24 +1549,32 @@ pub struct RecoveryReceipt {
     pub checkpoint: CheckpointRecoveryStatus,
 }
 
-/// Persisted checkpoint pairing a reducer state with its applied sequence.
+/// Persisted checkpoint pairing reducer state and sequence with their Journal generation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckpointFrame<S> {
+    /// Exact journal generation from which this projection was derived.
+    pub journal_identity: JournalIdentity,
     /// Journal sequence covered by this state snapshot.
     pub sequence: u64,
     /// Reducer state at that sequence.
     pub state: S,
 }
 
-/// Storage for [`CheckpointFrame`]s written by [`CheckpointedReducer`].
+/// Storage for Journal-bound [`CheckpointFrame`]s written by [`CheckpointedReducer`].
 pub trait CheckpointStore<S>: Send + Sync {
-    fn save(&self, state: &S, through_sequence: u64) -> Result<()>;
+    fn save(
+        &self,
+        journal_identity: &JournalIdentity,
+        state: &S,
+        through_sequence: u64,
+    ) -> Result<()>;
 
     fn load(&self) -> Result<Option<CheckpointFrame<S>>>;
 }
 
 #[derive(Debug)]
 struct StoredCheckpoint {
+    journal_identity: JournalIdentity,
     sequence: u64,
     state: serde_json::Value,
 }
@@ -1495,7 +1607,12 @@ impl<S> MemoryCheckpointStore<S> {
 impl<S: Serialize + DeserializeOwned + Send + Sync + 'static> CheckpointStore<S>
     for MemoryCheckpointStore<S>
 {
-    fn save(&self, state: &S, through_sequence: u64) -> Result<()> {
+    fn save(
+        &self,
+        journal_identity: &JournalIdentity,
+        state: &S,
+        through_sequence: u64,
+    ) -> Result<()> {
         let encoded = serde_json::to_value(state).map_err(|error| {
             ReactError::Other(format!("failed to encode checkpoint state: {error}"))
         })?;
@@ -1503,6 +1620,7 @@ impl<S: Serialize + DeserializeOwned + Send + Sync + 'static> CheckpointStore<S>
             .latest
             .lock()
             .unwrap_or_else(|error| error.into_inner()) = Some(StoredCheckpoint {
+            journal_identity: journal_identity.clone(),
             sequence: through_sequence,
             state: encoded,
         });
@@ -1521,6 +1639,7 @@ impl<S: Serialize + DeserializeOwned + Send + Sync + 'static> CheckpointStore<S>
                     ReactError::Other(format!("failed to decode checkpoint state: {error}"))
                 })?;
                 Ok(Some(CheckpointFrame {
+                    journal_identity: stored.journal_identity.clone(),
                     sequence: stored.sequence,
                     state,
                 }))
@@ -1617,6 +1736,16 @@ where
         appended: JournalBatchAppendReceipt<R::Event>,
     ) -> std::result::Result<ApplyBatchReceipt, CheckpointedApplyError<R::Event>> {
         let batch_id = appended.batch_id().to_string();
+        if appended.journal_identity() != self.journal.journal_identity() {
+            return Err(CheckpointedApplyError::CommittedInvariant {
+                batch_id,
+                error: format!(
+                    "journal receipt belongs to generation {}, expected {}",
+                    appended.journal_identity(),
+                    self.journal.journal_identity()
+                ),
+            });
+        }
         let receipt_matches = expected.matches_receipt(&appended).map_err(|error| {
             CheckpointedApplyError::CommittedInvariant {
                 batch_id: batch_id.clone(),
@@ -1730,7 +1859,11 @@ where
             && self.checkpoint_every != 0
             && inner.since_checkpoint >= self.checkpoint_every
         {
-            match self.checkpoints.save(&inner.state, inner.last_applied) {
+            match self.checkpoints.save(
+                self.journal.journal_identity(),
+                &inner.state,
+                inner.last_applied,
+            ) {
                 Ok(()) => {
                     inner.since_checkpoint = 0;
                     CheckpointApplyStatus::Saved
@@ -1774,22 +1907,45 @@ where
     /// Persist the current state as a checkpoint through the applied sequence.
     pub fn checkpoint(&self) -> Result<()> {
         let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
-        self.checkpoints.save(&inner.state, inner.last_applied)?;
+        self.checkpoints.save(
+            self.journal.journal_identity(),
+            &inner.state,
+            inner.last_applied,
+        )?;
         inner.since_checkpoint = 0;
         Ok(())
     }
 
-    /// Load the latest checkpoint (or a default state) and replay the tail.
+    /// Load a checkpoint for this exact Journal generation and replay the tail.
     ///
-    /// Returns the last applied sequence and checkpoint repair status.
+    /// A foreign checkpoint is rebuilt only while the complete Journal remains
+    /// replayable. Once a prefix is pruned, identity mismatch fails closed.
     pub fn recover(&self) -> Result<RecoveryReceipt> {
         let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
         let journal_last = self.journal.last_sequence();
         let retained_floor = self.journal.retained_floor();
         let required_checkpoint = retained_floor.saturating_sub(1);
         let loaded = self.checkpoints.load();
+        let journal_identity = self.journal.journal_identity();
         let (mut state, mut last_applied, mut checkpoint_sequence, mut repair_reason) = match loaded
         {
+            Ok(Some(frame))
+                if frame.journal_identity != *journal_identity && retained_floor > 1 =>
+            {
+                return Err(ReactError::Other(format!(
+                    "checkpoint journal identity {} does not match source journal {journal_identity}, and retained journal floor {retained_floor} prevents rebuilding the missing prefix",
+                    frame.journal_identity
+                )));
+            }
+            Ok(Some(frame)) if frame.journal_identity != *journal_identity => (
+                R::default(),
+                0,
+                0,
+                Some(format!(
+                    "checkpoint journal identity {} does not match source journal {journal_identity}",
+                    frame.journal_identity
+                )),
+            ),
             Ok(Some(frame)) if frame.sequence < required_checkpoint => {
                 return Err(ReactError::Other(format!(
                     "checkpoint sequence {} is behind retained journal floor {retained_floor}; expected at least {required_checkpoint}",
@@ -1851,7 +2007,10 @@ where
                     "replayed {replayed_since_checkpoint} events after checkpoint sequence {checkpoint_sequence}"
                 )
             });
-            match self.checkpoints.save(&state, last_applied) {
+            match self
+                .checkpoints
+                .save(journal_identity, &state, last_applied)
+            {
                 Ok(()) => {
                     checkpoint_sequence = last_applied;
                     CheckpointRecoveryStatus::Rebuilt { reason }
@@ -2019,6 +2178,10 @@ mod tests {
     }
 
     impl EventJournal<i32> for TrackingJournal {
+        fn journal_identity(&self) -> &JournalIdentity {
+            self.inner.journal_identity()
+        }
+
         fn append_batch(&self, batch: PreparedJournalBatch<i32>) -> JournalBatchAppendResult<i32> {
             self.inner.append_batch(batch)
         }
@@ -2417,6 +2580,71 @@ mod tests {
     }
 
     #[test]
+    fn recover_rebuilds_same_sequence_checkpoint_from_another_journal() -> TestResult {
+        let source = Arc::new(MemoryEventJournal::new());
+        let foreign = Arc::new(MemoryEventJournal::new());
+        let checkpoints = Arc::new(MemoryCheckpointStore::new());
+        let foreign_reducer = CheckpointedReducer::new(
+            Arc::clone(&foreign),
+            Arc::clone(&checkpoints) as Arc<dyn CheckpointStore<SumReducer>>,
+            1,
+        );
+        foreign_reducer
+            .apply(99)
+            .test_context("checkpoint foreign journal")?;
+        source.append(7).test_context("append source journal")?;
+
+        let recovered = CheckpointedReducer::new(
+            Arc::clone(&source),
+            Arc::clone(&checkpoints) as Arc<dyn CheckpointStore<SumReducer>>,
+            1,
+        );
+        let receipt = recovered.recover().test_context("recover source journal")?;
+        let CheckpointRecoveryStatus::Rebuilt { reason } = receipt.checkpoint else {
+            return Err(test_failure("foreign checkpoint was accepted as loaded"));
+        };
+        assert!(reason.contains("does not match source journal"));
+        recovered.with_state(|state| {
+            assert_eq!(state.total, 7);
+            assert_eq!(state.events, vec![7]);
+        });
+        let repaired = checkpoints
+            .load()
+            .test_context("load repaired checkpoint")?
+            .test_context("repaired checkpoint exists")?;
+        assert_eq!(repaired.journal_identity, *source.journal_identity());
+        assert_eq!(repaired.sequence, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn apply_committed_rejects_receipt_from_another_journal() -> TestResult {
+        let source = Arc::new(MemoryEventJournal::new());
+        let foreign = MemoryEventJournal::new();
+        let prepared = batch(vec![11])?;
+        let receipt = foreign
+            .append_batch(prepared.clone())
+            .test_context("commit foreign receipt")?;
+        let reducer = CheckpointedReducer::<_, SumReducer>::new(
+            Arc::clone(&source),
+            Arc::new(MemoryCheckpointStore::new()),
+            1,
+        );
+
+        let Err(error) = reducer.apply_committed(&prepared, receipt) else {
+            return Err(test_failure("foreign receipt was folded"));
+        };
+        assert!(error.to_string().contains("receipt belongs to generation"));
+        assert_eq!(source.last_sequence(), 0);
+        assert_eq!(reducer.last_applied_sequence(), 0);
+        reducer.with_state(|state| {
+            assert_eq!(state.total, 0);
+            assert!(state.events.is_empty());
+        });
+        Ok(())
+    }
+
+    #[test]
     fn recovery_replays_large_missing_checkpoint_tail_in_fixed_batches() {
         const EVENTS: i32 = 1_537;
         let journal = Arc::new(TrackingJournal::new());
@@ -2473,7 +2701,12 @@ mod tests {
     }
 
     impl CheckpointStore<SumReducer> for FailOnceCheckpointStore {
-        fn save(&self, state: &SumReducer, through_sequence: u64) -> Result<()> {
+        fn save(
+            &self,
+            journal_identity: &JournalIdentity,
+            state: &SumReducer,
+            through_sequence: u64,
+        ) -> Result<()> {
             if self
                 .remaining_failures
                 .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
@@ -2483,7 +2716,7 @@ mod tests {
             {
                 return Err(ReactError::Other("injected checkpoint failure".to_string()));
             }
-            self.inner.save(state, through_sequence)
+            self.inner.save(journal_identity, state, through_sequence)
         }
 
         fn load(&self) -> Result<Option<CheckpointFrame<SumReducer>>> {
@@ -2550,7 +2783,7 @@ mod tests {
         for handle in handles {
             let joined = handle.join();
             let ok = matches!(&joined, Ok(Ok(_)));
-            assert!(ok, "worker failed: {joined:?}");
+            assert!(ok, "subagent failed: {joined:?}");
         }
 
         let journal_events = journal
@@ -2624,6 +2857,7 @@ mod tests {
         let checkpoints = Arc::new(MemoryCheckpointStore::new());
         checkpoints
             .save(
+                journal.journal_identity(),
                 &SumReducer {
                     total: 999,
                     events: vec![999],

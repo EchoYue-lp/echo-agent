@@ -16,7 +16,7 @@ use futures::future::BoxFuture;
 use futures::stream::{self, BoxStream, StreamExt};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tokio::sync::Notify;
 
@@ -1175,7 +1175,7 @@ use echo_agent::acp::{
 use echo_agent::runtime::{TurnDeliveryOutcome, TurnMode, TurnOutcome, TurnRequest};
 use echo_agent::state::journal::{
     EventJournal, JournalBatchAppendError, JournalBatchAppendResult, JournalBatchLookup,
-    PreparedJournalBatch,
+    JournalIdentity, PreparedJournalBatch,
 };
 
 #[derive(Default)]
@@ -1222,6 +1222,11 @@ impl RunEventObserver for RecordingObserver {
 struct FailingJournal;
 
 impl EventJournal<echo_agent::agent::EventEnvelope> for FailingJournal {
+    fn journal_identity(&self) -> &JournalIdentity {
+        static IDENTITY: OnceLock<JournalIdentity> = OnceLock::new();
+        IDENTITY.get_or_init(JournalIdentity::new)
+    }
+
     fn append_batch(
         &self,
         batch: PreparedJournalBatch<echo_agent::agent::EventEnvelope>,

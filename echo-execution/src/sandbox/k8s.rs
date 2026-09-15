@@ -2,7 +2,7 @@
 //!
 //! 通过 `kubectl` CLI 在 K8s 集群中创建临时 Pod 执行代码：
 //! - Pod 级隔离（SecurityContext + ResourceQuota）
-//! - 显式删除临时 Pod（success / error / timeout 都会走清理）
+//! - Detached owner 显式结算临时 Pod（success / error / timeout / cancel / caller drop）
 //! - 支持 Pod SecurityPolicy / SecurityStandards
 //!
 //! 适用于大规模并发和企业级部署。需要 `kubectl` 已配置集群访问。
@@ -17,11 +17,16 @@ use echo_core::error::Result;
 use echo_core::error::SandboxError;
 use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
-use tokio::io::AsyncWriteExt;
+use std::time::{Duration, Instant};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
+
+const DEFAULT_K8S_CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
+const K8S_CLEANUP_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const MAX_K8S_TERMINAL_FACT_CHARS: usize = 1_024;
 
 /// K8s 沙箱配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -81,23 +86,93 @@ impl Default for K8sConfig {
 #[derive(Debug, Clone)]
 pub struct K8sSandbox {
     config: K8sConfig,
+    kubectl_program: PathBuf,
+    control_timeout: Duration,
 }
+
+struct K8sOwnerRequest {
+    command: SandboxCommand,
+    limits: Option<ResourceLimits>,
+    cancel: Option<Arc<CancellationToken>>,
+    timeout: Duration,
+    pod_name: String,
+    run_args: Vec<String>,
+    caller_abandoned: CancellationToken,
+}
+
+struct K8sCallerAbandonmentGuard {
+    token: CancellationToken,
+    armed: bool,
+}
+
+impl K8sCallerAbandonmentGuard {
+    fn new(token: CancellationToken) -> Self {
+        Self { token, armed: true }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for K8sCallerAbandonmentGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.token.cancel();
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum K8sInterruption {
+    TimedOut,
+    Cancelled,
+}
+
+enum K8sStdinOutcome {
+    Written(std::io::Result<()>),
+    TimedOut,
+    Cancelled,
+}
+
+enum K8sWaitOutcome {
+    Completed(std::io::Result<std::process::ExitStatus>),
+    TimedOut,
+    Cancelled,
+}
+
+enum K8sPipeOutcome {
+    Completed(std::result::Result<std::io::Result<Vec<u8>>, tokio::task::JoinError>),
+    TimedOut,
+    CallerAbandoned,
+}
+
+type K8sPipeReader = Option<tokio::task::JoinHandle<std::io::Result<Vec<u8>>>>;
+type K8sPipeOutput = std::result::Result<(Vec<u8>, Vec<u8>), String>;
 
 impl K8sSandbox {
     pub fn new(config: K8sConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            kubectl_program: PathBuf::from("kubectl"),
+            control_timeout: DEFAULT_K8S_CONTROL_TIMEOUT,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_program(config: K8sConfig, kubectl_program: PathBuf) -> Self {
+        Self {
+            config,
+            kubectl_program,
+            control_timeout: Duration::from_millis(250),
+        }
     }
 
     /// 检测 kubectl 是否可用
-    async fn check_kubectl() -> bool {
-        Command::new("kubectl")
-            .args(["version", "--client"])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
+    async fn check_kubectl(&self) -> bool {
+        self.run_kubectl_control(&["version".to_string(), "--client".to_string()], "version")
             .await
-            .map(|s| s.success())
-            .unwrap_or(false)
+            .is_ok_and(|output| output.status.success())
     }
 
     /// 为命令选择合适的镜像
@@ -132,22 +207,179 @@ impl K8sSandbox {
         }
     }
 
-    async fn delete_pod(&self, pod_name: &str) {
-        let _ = Command::new("kubectl")
-            .args([
-                "delete",
-                "pod",
-                pod_name,
-                "-n",
-                &self.config.namespace,
-                "--grace-period=0",
-                "--force",
-                "--ignore-not-found=true",
-            ])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .await;
+    fn deletion_timeout_arg(&self) -> String {
+        let milliseconds = self
+            .control_timeout
+            .as_millis()
+            .saturating_mul(3)
+            .checked_div(4)
+            .unwrap_or(1)
+            .max(1);
+        format!("--timeout={milliseconds}ms")
+    }
+
+    fn pod_delete_args(&self, pod_name: &str) -> Vec<String> {
+        vec![
+            "delete".to_string(),
+            "pod".to_string(),
+            pod_name.to_string(),
+            "-n".to_string(),
+            self.config.namespace.clone(),
+            "--grace-period=1".to_string(),
+            "--ignore-not-found=true".to_string(),
+            "--wait=true".to_string(),
+            "--output=name".to_string(),
+            self.deletion_timeout_arg(),
+        ]
+    }
+
+    fn pod_get_args(&self, pod_name: &str) -> Vec<String> {
+        vec![
+            "get".to_string(),
+            "pod".to_string(),
+            pod_name.to_string(),
+            "-n".to_string(),
+            self.config.namespace.clone(),
+            "--ignore-not-found=true".to_string(),
+            "--output=name".to_string(),
+        ]
+    }
+
+    fn control_deadline(&self) -> tokio::time::Instant {
+        tokio::time::sleep(self.control_timeout).deadline()
+    }
+
+    async fn run_kubectl_control(
+        &self,
+        args: &[String],
+        stage: &str,
+    ) -> Result<std::process::Output> {
+        self.run_kubectl_control_until(args, stage, self.control_deadline())
+            .await
+    }
+
+    async fn run_kubectl_control_until(
+        &self,
+        args: &[String],
+        stage: &str,
+        deadline: tokio::time::Instant,
+    ) -> Result<std::process::Output> {
+        let mut command = Command::new(&self.kubectl_program);
+        command
+            .args(args)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(k8s_control_deadline_error(stage, self.control_timeout));
+        }
+        match tokio::time::timeout(remaining, command.output()).await {
+            Ok(Ok(output)) => Ok(output),
+            Ok(Err(error)) => Err(echo_core::error::ReactError::Sandbox(Box::new(
+                SandboxError::IoError(format!("Failed to run kubectl {stage}: {error}")),
+            ))),
+            Err(_) => Err(k8s_control_deadline_error(stage, self.control_timeout)),
+        }
+    }
+
+    async fn delete_pod(&self, pod_name: &str) -> Result<()> {
+        let deadline = self.control_deadline();
+        loop {
+            let output = self
+                .run_kubectl_control_until(
+                    &self.pod_delete_args(pod_name),
+                    "pod deletion",
+                    deadline,
+                )
+                .await?;
+            if !output.status.success() {
+                return Err(echo_core::error::ReactError::Sandbox(Box::new(
+                    SandboxError::IoError(format!(
+                        "kubectl failed to delete Pod {pod_name} ({}): {}",
+                        format_exit_status(&output.status),
+                        bounded_k8s_fact(String::from_utf8_lossy(&output.stderr).trim())
+                    )),
+                )));
+            }
+
+            let deletion_receipt = !String::from_utf8_lossy(&output.stdout).trim().is_empty();
+            if self.pod_is_present_until(pod_name, deadline).await? {
+                continue;
+            }
+            if deletion_receipt {
+                return Ok(());
+            }
+
+            loop {
+                self.wait_for_cleanup_observation(pod_name, deadline)
+                    .await?;
+                if self.pod_is_present_until(pod_name, deadline).await? {
+                    break;
+                }
+            }
+        }
+    }
+
+    async fn pod_is_present_until(
+        &self,
+        pod_name: &str,
+        deadline: tokio::time::Instant,
+    ) -> Result<bool> {
+        let output = self
+            .run_kubectl_control_until(
+                &self.pod_get_args(pod_name),
+                "pod absence confirmation",
+                deadline,
+            )
+            .await?;
+        if !output.status.success() {
+            return Err(echo_core::error::ReactError::Sandbox(Box::new(
+                SandboxError::IoError(format!(
+                    "kubectl failed to confirm Pod {pod_name} absence ({}): {}",
+                    format_exit_status(&output.status),
+                    bounded_k8s_fact(String::from_utf8_lossy(&output.stderr).trim())
+                )),
+            )));
+        }
+        Ok(!String::from_utf8_lossy(&output.stdout).trim().is_empty())
+    }
+
+    async fn wait_for_cleanup_observation(
+        &self,
+        pod_name: &str,
+        deadline: tokio::time::Instant,
+    ) -> Result<()> {
+        let now = tokio::time::Instant::now();
+        let remaining = deadline.saturating_duration_since(now);
+        if remaining.is_zero() {
+            return Err(k8s_ambiguous_absence_error(pod_name, self.control_timeout));
+        }
+        tokio::time::sleep(K8S_CLEANUP_POLL_INTERVAL.min(remaining)).await;
+        if tokio::time::Instant::now() >= deadline {
+            return Err(k8s_ambiguous_absence_error(pod_name, self.control_timeout));
+        }
+        Ok(())
+    }
+
+    fn spawn_pod_cleanup(
+        &self,
+        pod_name: String,
+        reason: &'static str,
+    ) -> tokio::task::JoinHandle<Result<()>> {
+        let owner = self.clone();
+        tokio::spawn(async move {
+            let cleanup = owner.delete_pod(&pod_name).await;
+            if let Err(error) = cleanup.as_ref() {
+                tracing::error!(
+                    pod = %pod_name,
+                    error = %error,
+                    reason,
+                    "K8s sandbox detached Pod cleanup debt"
+                );
+            }
+            cleanup
+        })
     }
 
     /// 生成 Pod JSON spec 并通过 kubectl run 执行
@@ -157,6 +389,20 @@ impl K8sSandbox {
         limits: Option<&ResourceLimits>,
         cancel: Option<Arc<CancellationToken>>,
     ) -> Result<ExecutionResult> {
+        if limits.is_some_and(|limits| !limits.network) {
+            return Err(echo_core::error::ReactError::Sandbox(Box::new(
+                SandboxError::PermissionDenied(
+                    "K8sSandbox cannot enforce network=false for an individual pod".to_string(),
+                ),
+            )));
+        }
+        if cancel.as_ref().is_some_and(|token| token.is_cancelled()) {
+            return Ok(empty_k8s_interrupted_result(
+                K8sInterruption::Cancelled,
+                Duration::ZERO,
+            ));
+        }
+
         let pod_name = format!("echo-sandbox-{}", uuid::Uuid::new_v4().simple());
         let image = self.select_image(command);
         let inner_cmd = Self::build_inner_command(command);
@@ -189,14 +435,6 @@ impl K8sSandbox {
                 self.config.memory_limit.clone(),
             )
         };
-
-        if limits.is_some_and(|limits| !limits.network) {
-            return Err(echo_core::error::ReactError::Sandbox(Box::new(
-                SandboxError::PermissionDenied(
-                    "K8sSandbox cannot enforce network=false for an individual pod".to_string(),
-                ),
-            )));
-        }
 
         // 构建 kubectl run 命令
         let mut args = vec![
@@ -264,8 +502,75 @@ impl K8sSandbox {
         args.push("--".to_string());
         args.extend(inner_cmd);
 
-        let mut cmd = Command::new("kubectl");
-        cmd.args(&args);
+        let caller_abandoned = CancellationToken::new();
+        let mut caller_guard = K8sCallerAbandonmentGuard::new(caller_abandoned.clone());
+        let owner = self.clone();
+        let owned_command = command.clone();
+        let owned_limits = limits.cloned();
+        let recovery_name = pod_name.clone();
+        let owner_task = tokio::spawn(async move {
+            owner
+                .run_pod_owner(K8sOwnerRequest {
+                    command: owned_command,
+                    limits: owned_limits,
+                    cancel,
+                    timeout,
+                    pod_name,
+                    run_args: args,
+                    caller_abandoned,
+                })
+                .await
+        });
+        let joined = owner_task.await;
+        match joined {
+            Ok(terminal) => {
+                caller_guard.disarm();
+                terminal
+            }
+            Err(join_error) => {
+                let primary =
+                    echo_core::error::ReactError::Sandbox(Box::new(SandboxError::IoError(
+                        format!("K8s sandbox lifecycle owner failed to join: {join_error}"),
+                    )));
+                let recovery = self
+                    .spawn_pod_cleanup(recovery_name, "lifecycle owner join failure")
+                    .await;
+                caller_guard.disarm();
+                match recovery {
+                    Ok(Ok(())) => Err(primary),
+                    Ok(Err(cleanup)) => Err(combined_k8s_cleanup_failure(
+                        &primary.to_string(),
+                        &cleanup.to_string(),
+                    )),
+                    Err(recovery_join_error) => Err(combined_k8s_cleanup_failure(
+                        &primary.to_string(),
+                        &format!("detached recovery cleanup failed to join: {recovery_join_error}"),
+                    )),
+                }
+            }
+        }
+    }
+
+    async fn run_pod_owner(&self, request: K8sOwnerRequest) -> Result<ExecutionResult> {
+        let K8sOwnerRequest {
+            command,
+            limits,
+            cancel,
+            timeout,
+            pod_name,
+            run_args,
+            caller_abandoned,
+        } = request;
+
+        if caller_abandoned.is_cancelled() {
+            return Ok(empty_k8s_interrupted_result(
+                K8sInterruption::Cancelled,
+                Duration::ZERO,
+            ));
+        }
+
+        let mut cmd = Command::new(&self.kubectl_program);
+        cmd.args(&run_args);
         cmd.stdin(if command.stdin.is_some() {
             std::process::Stdio::piped()
         } else {
@@ -274,6 +579,8 @@ impl K8sSandbox {
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
         cmd.kill_on_drop(true);
+        #[cfg(unix)]
+        cmd.process_group(0);
 
         let start = Instant::now();
 
@@ -282,143 +589,478 @@ impl K8sSandbox {
                 "Failed to run kubectl: {e}"
             ))))
         })?;
+        let process_group_id = child.id();
+        let stdout = spawn_k8s_pipe_reader(child.stdout.take());
+        let stderr = spawn_k8s_pipe_reader(child.stderr.take());
+        let deadline = tokio::time::sleep(timeout);
+        let execution_deadline = deadline.deadline();
+        tokio::pin!(deadline);
 
-        if let Some(input) = command.stdin.as_deref()
-            && let Some(mut stdin) = child.stdin.take()
-            && let Err(error) = stdin.write_all(input.as_bytes()).await
-        {
-            let _ = child.kill().await;
-            self.delete_pod(&pod_name).await;
-            return Err(echo_core::error::ReactError::Sandbox(Box::new(
-                SandboxError::IoError(format!("Failed to write kubectl stdin: {error}")),
-            )));
-        }
-
-        enum WaitOutcome {
-            Completed(std::io::Result<std::process::Output>),
-            TimedOut,
-            Cancelled,
-        }
-
-        let mut wait = Box::pin(tokio::time::timeout(timeout, child.wait_with_output()));
-        let outcome = if let Some(cancel) = cancel {
-            tokio::select! {
-                _ = cancel.cancelled() => WaitOutcome::Cancelled,
-                result = &mut wait => match result {
-                    Ok(output) => WaitOutcome::Completed(output),
-                    Err(_) => WaitOutcome::TimedOut,
-                },
-            }
-        } else {
-            match wait.as_mut().await {
-                Ok(output) => WaitOutcome::Completed(output),
-                Err(_) => WaitOutcome::TimedOut,
-            }
-        };
-        drop(wait);
-
-        match outcome {
-            WaitOutcome::Completed(Ok(output)) => {
-                self.delete_pod(&pod_name).await;
-                let mut result = ExecutionResult {
-                    exit_code: output.status.code().unwrap_or(-1),
-                    stdout_bytes: u64::try_from(output.stdout.len()).unwrap_or(u64::MAX),
-                    stderr_bytes: u64::try_from(output.stderr.len()).unwrap_or(u64::MAX),
-                    stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-                    stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-                    duration: start.elapsed(),
-                    sandbox_type: "k8s".to_string(),
-                    timed_out: false,
-                    cancelled: false,
-                    output_truncated: false,
-                };
-                if let Some(max_output_bytes) = limits.and_then(|value| value.max_output_bytes) {
-                    result.enforce_output_limit(max_output_bytes);
+        if let Some(input) = command.stdin.as_deref() {
+            match child.stdin.take() {
+                Some(mut stdin) => {
+                    let write = stdin.write_all(input.as_bytes());
+                    tokio::pin!(write);
+                    match tokio::select! {
+                        _ = wait_for_k8s_cancel(cancel.as_ref(), Some(&caller_abandoned)) => K8sStdinOutcome::Cancelled,
+                        _ = &mut deadline => K8sStdinOutcome::TimedOut,
+                        result = &mut write => K8sStdinOutcome::Written(result),
+                    } {
+                        K8sStdinOutcome::Written(Ok(())) => {}
+                        K8sStdinOutcome::Written(Err(error)) => {
+                            let terminal = k8s_client_failure(
+                                &format!("Failed to write kubectl stdin: {error}"),
+                                super::local::cleanup_child_process(&mut child, process_group_id)
+                                    .await,
+                                self.collect_cleanup_pipes(stdout, stderr, &caller_abandoned)
+                                    .await,
+                            );
+                            return self.finish_with_cleanup(&pod_name, terminal).await;
+                        }
+                        K8sStdinOutcome::TimedOut => {
+                            let terminal = k8s_interrupted_terminal(
+                                K8sInterruption::TimedOut,
+                                start.elapsed(),
+                                super::local::cleanup_child_process(&mut child, process_group_id)
+                                    .await,
+                                self.collect_cleanup_pipes(stdout, stderr, &caller_abandoned)
+                                    .await,
+                                limits.as_ref(),
+                            );
+                            return self.finish_with_cleanup(&pod_name, terminal).await;
+                        }
+                        K8sStdinOutcome::Cancelled => {
+                            let terminal = k8s_interrupted_terminal(
+                                K8sInterruption::Cancelled,
+                                start.elapsed(),
+                                super::local::cleanup_child_process(&mut child, process_group_id)
+                                    .await,
+                                self.collect_cleanup_pipes(stdout, stderr, &caller_abandoned)
+                                    .await,
+                                limits.as_ref(),
+                            );
+                            return self.finish_with_cleanup(&pod_name, terminal).await;
+                        }
+                    }
                 }
-                Ok(result)
+                None => {
+                    let terminal = k8s_client_failure(
+                        "kubectl stdin pipe was not available",
+                        super::local::cleanup_child_process(&mut child, process_group_id).await,
+                        self.collect_cleanup_pipes(stdout, stderr, &caller_abandoned)
+                            .await,
+                    );
+                    return self.finish_with_cleanup(&pod_name, terminal).await;
+                }
             }
-            WaitOutcome::Completed(Err(error)) => {
-                self.delete_pod(&pod_name).await;
-                Err(echo_core::error::ReactError::Sandbox(Box::new(
-                    SandboxError::IoError(format!("kubectl IO error: {error}")),
-                )))
-            }
-            WaitOutcome::TimedOut => {
-                // 超时时删除 Pod 并等待确认
-                self.delete_pod(&pod_name).await;
+        }
 
-                Ok(ExecutionResult {
-                    exit_code: -1,
-                    stdout: String::new(),
-                    stderr: format!("K8s Pod execution timed out after {}s", timeout.as_secs()),
-                    duration: start.elapsed(),
-                    sandbox_type: "k8s".to_string(),
-                    timed_out: true,
-                    cancelled: false,
-                    output_truncated: false,
-                    stdout_bytes: 0,
-                    stderr_bytes: 0,
-                })
+        let outcome = tokio::select! {
+            _ = wait_for_k8s_cancel(cancel.as_ref(), Some(&caller_abandoned)) => K8sWaitOutcome::Cancelled,
+            _ = &mut deadline => K8sWaitOutcome::TimedOut,
+            result = child.wait() => K8sWaitOutcome::Completed(result),
+        };
+        let terminal = match outcome {
+            K8sWaitOutcome::Completed(Ok(status)) => {
+                let client_cleanup =
+                    super::local::cleanup_child_process(&mut child, process_group_id).await;
+                let output =
+                    collect_k8s_pipes_until(stdout, stderr, execution_deadline, &caller_abandoned)
+                        .await;
+                if client_cleanup.is_ok() {
+                    k8s_completed_terminal(status, output, start.elapsed(), limits.as_ref())
+                } else {
+                    k8s_client_failure(
+                        &format!(
+                            "kubectl completed with {} but descendant cleanup failed",
+                            format_exit_status(&status)
+                        ),
+                        client_cleanup,
+                        output,
+                    )
+                }
             }
-            WaitOutcome::Cancelled => {
-                self.delete_pod(&pod_name).await;
-                Ok(ExecutionResult {
-                    exit_code: -1,
-                    stdout: String::new(),
-                    stderr: "K8s Pod execution cancelled by owning run".to_string(),
-                    duration: start.elapsed(),
-                    sandbox_type: "k8s".to_string(),
-                    timed_out: false,
-                    cancelled: true,
-                    output_truncated: false,
-                    stdout_bytes: 0,
-                    stderr_bytes: 0,
-                })
+            K8sWaitOutcome::Completed(Err(error)) => k8s_client_failure(
+                &format!("kubectl IO error: {error}"),
+                super::local::cleanup_child_process(&mut child, process_group_id).await,
+                self.collect_cleanup_pipes(stdout, stderr, &caller_abandoned)
+                    .await,
+            ),
+            K8sWaitOutcome::TimedOut => k8s_interrupted_terminal(
+                K8sInterruption::TimedOut,
+                start.elapsed(),
+                super::local::cleanup_child_process(&mut child, process_group_id).await,
+                self.collect_cleanup_pipes(stdout, stderr, &caller_abandoned)
+                    .await,
+                limits.as_ref(),
+            ),
+            K8sWaitOutcome::Cancelled => k8s_interrupted_terminal(
+                K8sInterruption::Cancelled,
+                start.elapsed(),
+                super::local::cleanup_child_process(&mut child, process_group_id).await,
+                self.collect_cleanup_pipes(stdout, stderr, &caller_abandoned)
+                    .await,
+                limits.as_ref(),
+            ),
+        };
+        self.finish_with_cleanup(&pod_name, terminal).await
+    }
+
+    async fn collect_cleanup_pipes(
+        &self,
+        stdout: K8sPipeReader,
+        stderr: K8sPipeReader,
+        caller_abandoned: &CancellationToken,
+    ) -> K8sPipeOutput {
+        collect_k8s_pipes_until(
+            stdout,
+            stderr,
+            tokio::time::Instant::now() + self.control_timeout,
+            caller_abandoned,
+        )
+        .await
+    }
+
+    async fn finish_with_cleanup(
+        &self,
+        pod_name: &str,
+        terminal: Result<ExecutionResult>,
+    ) -> Result<ExecutionResult> {
+        match (terminal, self.delete_pod(pod_name).await) {
+            (terminal, Ok(())) => terminal,
+            (Ok(primary), Err(cleanup)) => {
+                let primary_fact = format!("K8s terminal [{}]", k8s_result_facts(&primary));
+                log_k8s_cleanup_debt(pod_name, &primary_fact, &cleanup.to_string());
+                Err(combined_k8s_cleanup_failure(
+                    &primary_fact,
+                    &cleanup.to_string(),
+                ))
+            }
+            (Err(primary), Err(cleanup)) => {
+                let primary_fact = format!(
+                    "K8s execution failed: {}",
+                    bounded_k8s_fact(&primary.to_string())
+                );
+                log_k8s_cleanup_debt(pod_name, &primary_fact, &cleanup.to_string());
+                Err(combined_k8s_cleanup_failure(
+                    &primary_fact,
+                    &cleanup.to_string(),
+                ))
             }
         }
     }
 
     /// 清理所有带有 echo-sandbox 标签的 Pod
     pub async fn cleanup_sandbox_pods(&self) -> Result<()> {
-        let output = Command::new("kubectl")
-            .args([
-                "get",
-                "pods",
-                "-n",
-                &self.config.namespace,
-                "-l",
-                "echo-sandbox=true",
-                "-o",
-                "name",
-            ])
-            .output()
-            .await
-            .map_err(|e| {
-                echo_core::error::ReactError::Sandbox(Box::new(SandboxError::IoError(format!(
-                    "Failed to list sandbox pods: {e}"
-                ))))
-            })?;
+        let list_args = vec![
+            "get".to_string(),
+            "pods".to_string(),
+            "-n".to_string(),
+            self.config.namespace.clone(),
+            "-l".to_string(),
+            "echo-sandbox=true".to_string(),
+            "-o".to_string(),
+            "name".to_string(),
+        ];
+        let output = self
+            .run_kubectl_control(&list_args, "sandbox Pod listing")
+            .await?;
+        if !output.status.success() {
+            return Err(echo_core::error::ReactError::Sandbox(Box::new(
+                SandboxError::IoError(format!(
+                    "Failed to list sandbox Pods ({}): {}",
+                    format_exit_status(&output.status),
+                    bounded_k8s_fact(String::from_utf8_lossy(&output.stderr).trim())
+                )),
+            )));
+        }
 
         let pods = String::from_utf8_lossy(&output.stdout);
         if !pods.trim().is_empty() {
-            let _ = Command::new("kubectl")
-                .args([
-                    "delete",
-                    "pods",
-                    "-n",
-                    &self.config.namespace,
-                    "-l",
-                    "echo-sandbox=true",
-                    "--grace-period=0",
-                    "--force",
-                ])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .output()
-                .await;
+            let delete_args = vec![
+                "delete".to_string(),
+                "pods".to_string(),
+                "-n".to_string(),
+                self.config.namespace.clone(),
+                "-l".to_string(),
+                "echo-sandbox=true".to_string(),
+                "--grace-period=1".to_string(),
+                "--ignore-not-found=true".to_string(),
+                "--wait=true".to_string(),
+                self.deletion_timeout_arg(),
+            ];
+            let deleted = self
+                .run_kubectl_control(&delete_args, "sandbox Pod cleanup")
+                .await?;
+            if !deleted.status.success() {
+                return Err(echo_core::error::ReactError::Sandbox(Box::new(
+                    SandboxError::IoError(format!(
+                        "Failed to clean sandbox Pods ({}): {}",
+                        format_exit_status(&deleted.status),
+                        bounded_k8s_fact(String::from_utf8_lossy(&deleted.stderr).trim())
+                    )),
+                )));
+            }
         }
         Ok(())
     }
+}
+
+fn spawn_k8s_pipe_reader<R>(pipe: Option<R>) -> K8sPipeReader
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
+    pipe.map(|mut pipe| {
+        tokio::spawn(async move {
+            let mut bytes = Vec::new();
+            pipe.read_to_end(&mut bytes).await?;
+            Ok(bytes)
+        })
+    })
+}
+
+async fn collect_k8s_pipes_until(
+    stdout: K8sPipeReader,
+    stderr: K8sPipeReader,
+    deadline: tokio::time::Instant,
+    caller_abandoned: &CancellationToken,
+) -> K8sPipeOutput {
+    let stdout = collect_k8s_pipe_until("stdout", stdout, deadline, caller_abandoned).await;
+    let stderr = collect_k8s_pipe_until("stderr", stderr, deadline, caller_abandoned).await;
+    match (stdout, stderr) {
+        (Ok(stdout), Ok(stderr)) => Ok((stdout, stderr)),
+        (stdout, stderr) => {
+            let failures = [stdout.err(), stderr.err()]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>();
+            Err(failures.join("; "))
+        }
+    }
+}
+
+async fn collect_k8s_pipe_until(
+    name: &str,
+    reader: K8sPipeReader,
+    deadline: tokio::time::Instant,
+    caller_abandoned: &CancellationToken,
+) -> std::result::Result<Vec<u8>, String> {
+    let Some(mut reader) = reader else {
+        return Ok(Vec::new());
+    };
+    let outcome = tokio::select! {
+        result = &mut reader => K8sPipeOutcome::Completed(result),
+        _ = tokio::time::sleep_until(deadline) => K8sPipeOutcome::TimedOut,
+        _ = caller_abandoned.cancelled() => K8sPipeOutcome::CallerAbandoned,
+    };
+    match outcome {
+        K8sPipeOutcome::Completed(result) => result
+            .map_err(|error| format!("kubectl {name} reader failed to join: {error}"))?
+            .map_err(|error| format!("failed to read kubectl {name}: {error}")),
+        K8sPipeOutcome::TimedOut => {
+            reader.abort();
+            let _ = reader.await;
+            Err(format!("kubectl {name} drain timed out before cleanup"))
+        }
+        K8sPipeOutcome::CallerAbandoned => {
+            reader.abort();
+            let _ = reader.await;
+            Err(format!(
+                "kubectl {name} drain was abandoned by the caller before cleanup"
+            ))
+        }
+    }
+}
+
+fn k8s_completed_terminal(
+    status: std::process::ExitStatus,
+    output: K8sPipeOutput,
+    duration: Duration,
+    limits: Option<&ResourceLimits>,
+) -> Result<ExecutionResult> {
+    let (stdout, stderr) = output.map_err(|error| {
+        echo_core::error::ReactError::Sandbox(Box::new(SandboxError::IoError(error)))
+    })?;
+    let mut result = ExecutionResult {
+        exit_code: status.code().unwrap_or(-1),
+        stdout_bytes: u64::try_from(stdout.len()).unwrap_or(u64::MAX),
+        stderr_bytes: u64::try_from(stderr.len()).unwrap_or(u64::MAX),
+        stdout: String::from_utf8_lossy(&stdout).to_string(),
+        stderr: String::from_utf8_lossy(&stderr).to_string(),
+        duration,
+        sandbox_type: "k8s".to_string(),
+        timed_out: false,
+        cancelled: false,
+        output_truncated: false,
+    };
+    if let Some(max_output_bytes) = limits.and_then(|value| value.max_output_bytes) {
+        result.enforce_output_limit(max_output_bytes);
+    }
+    Ok(result)
+}
+
+fn k8s_interrupted_terminal(
+    interruption: K8sInterruption,
+    duration: Duration,
+    client_cleanup: std::result::Result<(), String>,
+    output: K8sPipeOutput,
+    limits: Option<&ResourceLimits>,
+) -> Result<ExecutionResult> {
+    if client_cleanup.is_err() || output.is_err() {
+        return k8s_client_failure(
+            match interruption {
+                K8sInterruption::TimedOut => "K8s Pod execution timed out",
+                K8sInterruption::Cancelled => "K8s Pod execution was cancelled",
+            },
+            client_cleanup,
+            output,
+        );
+    }
+    let (stdout, stderr) = output.unwrap_or_else(|_| (Vec::new(), Vec::new()));
+    let mut result = ExecutionResult {
+        exit_code: -1,
+        stdout_bytes: u64::try_from(stdout.len()).unwrap_or(u64::MAX),
+        stderr_bytes: u64::try_from(stderr.len()).unwrap_or(u64::MAX),
+        stdout: String::from_utf8_lossy(&stdout).to_string(),
+        stderr: String::from_utf8_lossy(&stderr).to_string(),
+        duration,
+        sandbox_type: "k8s".to_string(),
+        timed_out: matches!(interruption, K8sInterruption::TimedOut),
+        cancelled: matches!(interruption, K8sInterruption::Cancelled),
+        output_truncated: false,
+    };
+    if let Some(max_output_bytes) = limits.and_then(|value| value.max_output_bytes) {
+        result.enforce_output_limit(max_output_bytes);
+    }
+    Ok(result)
+}
+
+fn k8s_client_failure(
+    primary: &str,
+    client_cleanup: std::result::Result<(), String>,
+    output: K8sPipeOutput,
+) -> Result<ExecutionResult> {
+    let mut facts = vec![bounded_k8s_fact(primary)];
+    if let Err(error) = client_cleanup {
+        facts.push(format!(
+            "kubectl client cleanup failed: {}",
+            bounded_k8s_fact(&error)
+        ));
+    }
+    match output {
+        Ok((stdout, stderr)) => facts.push(format!(
+            "stdout_bytes={}, stderr_bytes={}, stderr={}",
+            stdout.len(),
+            stderr.len(),
+            bounded_k8s_fact(&String::from_utf8_lossy(&stderr))
+        )),
+        Err(error) => facts.push(format!(
+            "kubectl output drain failed: {}",
+            bounded_k8s_fact(&error)
+        )),
+    }
+    Err(echo_core::error::ReactError::Sandbox(Box::new(
+        SandboxError::IoError(facts.join("; ")),
+    )))
+}
+
+fn empty_k8s_interrupted_result(
+    interruption: K8sInterruption,
+    duration: Duration,
+) -> ExecutionResult {
+    ExecutionResult {
+        exit_code: -1,
+        stdout: String::new(),
+        stderr: match interruption {
+            K8sInterruption::TimedOut => "K8s Pod execution timed out".to_string(),
+            K8sInterruption::Cancelled => "K8s Pod execution cancelled by owning run".to_string(),
+        },
+        duration,
+        sandbox_type: "k8s".to_string(),
+        timed_out: matches!(interruption, K8sInterruption::TimedOut),
+        cancelled: matches!(interruption, K8sInterruption::Cancelled),
+        output_truncated: false,
+        stdout_bytes: 0,
+        stderr_bytes: 0,
+    }
+}
+
+async fn wait_for_k8s_cancel(
+    cancel: Option<&Arc<CancellationToken>>,
+    caller_abandoned: Option<&CancellationToken>,
+) {
+    match (cancel, caller_abandoned) {
+        (Some(cancel), Some(caller_abandoned)) => {
+            tokio::select! {
+                _ = cancel.cancelled() => {}
+                _ = caller_abandoned.cancelled() => {}
+            }
+        }
+        (Some(cancel), None) => cancel.cancelled().await,
+        (None, Some(caller_abandoned)) => caller_abandoned.cancelled().await,
+        (None, None) => std::future::pending().await,
+    }
+}
+
+fn k8s_control_deadline_error(stage: &str, timeout: Duration) -> echo_core::error::ReactError {
+    echo_core::error::ReactError::Sandbox(Box::new(SandboxError::IoError(format!(
+        "kubectl {stage} did not settle within the shared {}ms control deadline",
+        timeout.as_millis()
+    ))))
+}
+
+fn k8s_ambiguous_absence_error(pod_name: &str, timeout: Duration) -> echo_core::error::ReactError {
+    echo_core::error::ReactError::Sandbox(Box::new(SandboxError::IoError(format!(
+        "K8s Pod cleanup could not confirm {pod_name} absence within {}ms after an ambiguous delete; the create request may still commit",
+        timeout.as_millis()
+    ))))
+}
+
+fn combined_k8s_cleanup_failure(primary: &str, cleanup: &str) -> echo_core::error::ReactError {
+    echo_core::error::ReactError::Sandbox(Box::new(SandboxError::IoError(format!(
+        "{}; Pod cleanup also failed: {}",
+        bounded_k8s_fact(primary),
+        bounded_k8s_fact(cleanup)
+    ))))
+}
+
+fn log_k8s_cleanup_debt(pod_name: &str, primary: &str, cleanup: &str) {
+    tracing::error!(
+        pod = pod_name,
+        primary = %bounded_k8s_fact(primary),
+        cleanup = %bounded_k8s_fact(cleanup),
+        "K8s sandbox Pod cleanup debt"
+    );
+}
+
+fn k8s_result_facts(result: &ExecutionResult) -> String {
+    format!(
+        "exit_code={}, timed_out={}, cancelled={}, stdout_bytes={}, stderr_bytes={}, output_truncated={}",
+        result.exit_code,
+        result.timed_out,
+        result.cancelled,
+        result.stdout_bytes,
+        result.stderr_bytes,
+        result.output_truncated
+    )
+}
+
+fn bounded_k8s_fact(value: &str) -> String {
+    let mut fact = value
+        .chars()
+        .take(MAX_K8S_TERMINAL_FACT_CHARS)
+        .collect::<String>();
+    if value.chars().count() > MAX_K8S_TERMINAL_FACT_CHARS {
+        fact.push_str("...");
+    }
+    fact
+}
+
+fn format_exit_status(status: &std::process::ExitStatus) -> String {
+    status
+        .code()
+        .map(|code| format!("exit code {code}"))
+        .unwrap_or_else(|| "terminated by signal".to_string())
 }
 
 impl SandboxExecutor for K8sSandbox {
@@ -431,7 +1073,7 @@ impl SandboxExecutor for K8sSandbox {
     }
 
     fn is_available(&self) -> BoxFuture<'_, bool> {
-        Box::pin(Self::check_kubectl())
+        Box::pin(self.check_kubectl())
     }
 
     fn cleanup(&self) -> BoxFuture<'_, Result<()>> {
@@ -466,6 +1108,156 @@ impl SandboxExecutor for K8sSandbox {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    struct FakeKubectl {
+        directory: PathBuf,
+        program: PathBuf,
+        log: PathBuf,
+    }
+
+    #[cfg(unix)]
+    impl FakeKubectl {
+        fn new(mode: &str) -> std::result::Result<Self, Box<dyn std::error::Error>> {
+            use std::os::unix::fs::PermissionsExt;
+
+            let directory = std::env::temp_dir().join(format!(
+                "echo-fake-kubectl-{}",
+                uuid::Uuid::new_v4().simple()
+            ));
+            std::fs::create_dir_all(&directory)?;
+            let program = directory.join("kubectl");
+            let log = directory.join("kubectl.log");
+            let script = format!(
+                r#"#!/bin/sh
+LOG="$0.log"
+printf '%s\n' "$1" >> "$LOG"
+case "$1" in
+  version) exit 0 ;;
+  run)
+    case "{mode}" in
+      delayed-visible|never-visible)
+        touch "$0.submitted"
+        printf 'completed\n'
+        exit 0
+        ;;
+      success|success-cleanup-fail|delete-timeout) printf 'completed\n'; exit 0 ;;
+      delete-spawn-fail) rm "$0"; printf 'completed\n'; exit 0 ;;
+      command-fail|command-cleanup-fail) printf 'command failed\n' >&2; exit 17 ;;
+      stdin-fail) exit 19 ;;
+      leader-pipe)
+        (sleep 10) &
+        printf 'leader-exit\n' >> "$LOG"
+        exit 0
+        ;;
+      timeout|timeout-cleanup-fail|cancel|cancel-cleanup-fail|abort|abort-cleanup-fail|blocked-stdin) exec sleep 10 ;;
+    esac
+    ;;
+  delete)
+    case "{mode}" in
+      delayed-visible)
+        if [ ! -f "$0.first-delete" ]; then
+          touch "$0.first-delete"
+          exit 0
+        fi
+        if [ ! -f "$0.visible" ]; then
+          printf 'delete retried before delayed Pod became visible\n' >&2
+          exit 25
+        fi
+        rm -f "$0.visible"
+        touch "$0.deleted"
+        printf 'pod/echo-sandbox-delayed\n'
+        exit 0
+        ;;
+      never-visible) exit 0 ;;
+      abort-cleanup-fail)
+        sleep 0.05
+        printf 'delete-failed\n' >> "$LOG"
+        printf 'forced cleanup failure\n' >&2
+        exit 23
+        ;;
+      *-cleanup-fail) printf 'forced cleanup failure\n' >&2; exit 23 ;;
+      delete-timeout) exec sleep 10 ;;
+      abort|blocked-stdin|leader-pipe|join-recovery)
+        sleep 0.05
+        printf 'delete-complete\n' >> "$LOG"
+        printf 'pod/echo-sandbox-test\n'
+        exit 0
+        ;;
+      *) printf 'pod/echo-sandbox-test\n'; exit 0 ;;
+    esac
+    ;;
+  get)
+    if [ "{mode}" = "delayed-visible" ] && [ ! -f "$0.deleted" ]; then
+      if [ ! -f "$0.first-get" ]; then
+        touch "$0.first-get"
+        exit 0
+      fi
+      touch "$0.visible"
+      printf 'pod/echo-sandbox-delayed\n'
+    fi
+    exit 0
+    ;;
+esac
+exit 64
+"#
+            );
+            let script_path = directory.join("kubectl.script");
+            std::fs::write(&script_path, script)?;
+            let mut permissions = std::fs::metadata(&script_path)?.permissions();
+            permissions.set_mode(0o700);
+            std::fs::set_permissions(&script_path, permissions)?;
+            std::fs::rename(&script_path, &program)?;
+            Ok(Self {
+                directory,
+                program,
+                log,
+            })
+        }
+
+        fn sandbox(&self) -> K8sSandbox {
+            K8sSandbox::with_program(K8sConfig::default(), self.program.clone())
+        }
+
+        fn operations(&self) -> std::result::Result<Vec<String>, std::io::Error> {
+            std::fs::read_to_string(&self.log).map(|contents| {
+                contents
+                    .lines()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+            })
+        }
+
+        async fn probe_pod(&self) -> std::result::Result<String, std::io::Error> {
+            let output = Command::new(&self.program)
+                .args(["get", "pod", "echo-sandbox-delayed", "-o", "name"])
+                .output()
+                .await?;
+            Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for FakeKubectl {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.directory);
+        }
+    }
+
+    #[cfg(unix)]
+    async fn wait_for_operation(log: &std::path::Path, operation: &str) -> Result<()> {
+        for _ in 0..100 {
+            if let Ok(contents) = tokio::fs::read_to_string(log).await
+                && contents.lines().any(|line| line == operation)
+            {
+                return Ok(());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        Err(echo_core::error::ReactError::Sandbox(Box::new(
+            SandboxError::IoError(format!("fake kubectl never observed operation {operation}")),
+        )))
+    }
+
     #[test]
     fn k8s_streaming_is_explicitly_buffered_fallback() {
         let sandbox = K8sSandbox::new(K8sConfig::default());
@@ -478,6 +1270,310 @@ mod tests {
         assert_eq!(config.namespace, "echo-sandbox");
         assert_eq!(config.cpu_limit, "500m");
         assert_eq!(config.memory_limit, "256Mi");
+    }
+
+    #[test]
+    fn pod_cleanup_waits_for_graceful_api_removal() {
+        let sandbox = K8sSandbox::new(K8sConfig::default());
+        let args = sandbox.pod_delete_args("echo-sandbox-test");
+        assert!(args.iter().any(|arg| arg == "--grace-period=1"));
+        assert!(args.iter().any(|arg| arg == "--wait=true"));
+        assert!(args.iter().any(|arg| arg == "--output=name"));
+        assert!(args.iter().any(|arg| arg.starts_with("--timeout=")));
+        assert!(!args.iter().any(|arg| arg == "--force"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn delayed_api_commit_is_deleted_before_cleanup_returns()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let fake = FakeKubectl::new("delayed-visible")?;
+        let result = fake
+            .sandbox()
+            .execute(SandboxCommand::shell("complete after API submission"))
+            .await?;
+        assert!(result.success());
+        assert_eq!(
+            fake.operations()?,
+            ["run", "delete", "get", "get", "delete", "get"]
+        );
+
+        assert!(fake.probe_pod().await?.is_empty());
+        let delayed = fake.probe_pod().await?;
+        assert!(
+            delayed.is_empty(),
+            "delayed Pod escaped cleanup after an ambiguous NotFound: {delayed}"
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ambiguous_absence_exhaustion_is_typed_cleanup_debt()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let fake = FakeKubectl::new("never-visible")?;
+        let error = fake
+            .sandbox()
+            .execute(SandboxCommand::shell("create outcome stays ambiguous"))
+            .await
+            .err()
+            .ok_or("ambiguous Pod absence was reported as successful cleanup")?;
+        let message = error.to_string();
+        assert!(message.contains("exit_code=0"));
+        assert!(message.contains("could not confirm"));
+        assert!(message.contains("create request may still commit"));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn success_and_nonzero_completion_remove_pod_before_return()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        for (mode, expected_exit, expected_success) in
+            [("success", 0, true), ("command-fail", 17, false)]
+        {
+            let fake = FakeKubectl::new(mode)?;
+            let result = fake
+                .sandbox()
+                .execute(SandboxCommand::shell("run command"))
+                .await?;
+            assert_eq!(result.exit_code, expected_exit);
+            assert_eq!(result.success(), expected_success);
+            assert_eq!(fake.operations()?, ["run", "delete", "get"]);
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn timeout_and_cancellation_remove_pod_before_return()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let timed_out = FakeKubectl::new("timeout")?;
+        let timeout_result = timed_out
+            .sandbox()
+            .execute(
+                SandboxCommand::shell("sleep forever")
+                    .with_timeout(std::time::Duration::from_millis(30)),
+            )
+            .await?;
+        assert!(timeout_result.timed_out);
+        assert_eq!(timed_out.operations()?, ["run", "delete", "get"]);
+
+        let cancelled = FakeKubectl::new("cancel")?;
+        let cancel = Arc::new(CancellationToken::new());
+        let cancellation = cancel.clone();
+        let sandbox = cancelled.sandbox();
+        let execution = tokio::spawn(async move {
+            sandbox
+                .execute_with_limits_and_cancel(
+                    SandboxCommand::shell("sleep forever"),
+                    ResourceLimits {
+                        cpu_time_secs: Some(30),
+                        network: true,
+                        ..ResourceLimits::default()
+                    },
+                    Some(cancellation),
+                )
+                .await
+        });
+        wait_for_operation(&cancelled.log, "run").await?;
+        cancel.cancel();
+        let cancel_result = execution.await??;
+        assert!(cancel_result.cancelled);
+        assert_eq!(cancelled.operations()?, ["run", "delete", "get"]);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cleanup_failure_preserves_primary_terminal_facts()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        for (mode, command, fact) in [
+            (
+                "success-cleanup-fail",
+                SandboxCommand::shell("complete"),
+                "exit_code=0",
+            ),
+            (
+                "command-cleanup-fail",
+                SandboxCommand::shell("fail"),
+                "exit_code=17",
+            ),
+            (
+                "timeout-cleanup-fail",
+                SandboxCommand::shell("timeout").with_timeout(std::time::Duration::from_millis(30)),
+                "timed_out=true",
+            ),
+        ] {
+            let fake = FakeKubectl::new(mode)?;
+            let error = fake
+                .sandbox()
+                .execute(command)
+                .await
+                .err()
+                .ok_or("cleanup failure unexpectedly returned a terminal result")?;
+            let message = error.to_string();
+            assert!(message.contains(fact), "missing {fact} in {message}");
+            assert!(message.contains("forced cleanup failure"));
+            assert_eq!(fake.operations()?, ["run", "delete"]);
+        }
+
+        let cancelled = FakeKubectl::new("cancel-cleanup-fail")?;
+        let cancel = Arc::new(CancellationToken::new());
+        let cancellation = cancel.clone();
+        let sandbox = cancelled.sandbox();
+        let execution = tokio::spawn(async move {
+            sandbox
+                .execute_with_limits_and_cancel(
+                    SandboxCommand::shell("cancel"),
+                    ResourceLimits {
+                        cpu_time_secs: Some(30),
+                        network: true,
+                        ..ResourceLimits::default()
+                    },
+                    Some(cancellation),
+                )
+                .await
+        });
+        wait_for_operation(&cancelled.log, "run").await?;
+        cancel.cancel();
+        let error = execution
+            .await?
+            .err()
+            .ok_or("cancel cleanup failure unexpectedly returned a terminal result")?;
+        let message = error.to_string();
+        assert!(message.contains("cancelled=true"));
+        assert!(message.contains("forced cleanup failure"));
+        assert_eq!(cancelled.operations()?, ["run", "delete"]);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cleanup_spawn_and_timeout_failures_are_visible()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        for (mode, fact) in [
+            ("delete-spawn-fail", "Failed to run kubectl pod deletion"),
+            (
+                "delete-timeout",
+                "kubectl pod deletion did not settle within the shared",
+            ),
+        ] {
+            let fake = FakeKubectl::new(mode)?;
+            let error = fake
+                .sandbox()
+                .execute(SandboxCommand::shell("complete"))
+                .await
+                .err()
+                .ok_or("cleanup control failure unexpectedly returned success")?;
+            let message = error.to_string();
+            assert!(message.contains("exit_code=0"));
+            assert!(message.contains(fact), "missing {fact} in {message}");
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn caller_abort_after_pod_submission_keeps_cleanup_owner()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let fake = FakeKubectl::new("abort")?;
+        let sandbox = fake.sandbox();
+        let execution = tokio::spawn(async move {
+            sandbox
+                .execute(
+                    SandboxCommand::shell("sleep forever")
+                        .with_timeout(std::time::Duration::from_secs(30)),
+                )
+                .await
+        });
+        wait_for_operation(&fake.log, "run").await?;
+        execution.abort();
+        let join = execution.await;
+        assert!(matches!(join, Err(error) if error.is_cancelled()));
+        wait_for_operation(&fake.log, "delete-complete").await?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn caller_abort_after_leader_exit_cleans_pipe_holder_and_pod()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let fake = FakeKubectl::new("leader-pipe")?;
+        let sandbox = fake.sandbox();
+        let execution = tokio::spawn(async move {
+            sandbox
+                .execute(SandboxCommand::shell("helper inherits output"))
+                .await
+        });
+        wait_for_operation(&fake.log, "leader-exit").await?;
+        execution.abort();
+        let join = execution.await;
+        assert!(matches!(join, Err(error) if error.is_cancelled()));
+        wait_for_operation(&fake.log, "delete-complete").await?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stdin_failure_and_blocked_stdin_caller_drop_reach_settled_cleanup()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let failed = FakeKubectl::new("stdin-fail")?;
+        let error = failed
+            .sandbox()
+            .execute(SandboxCommand::shell("close stdin").with_stdin("x".repeat(8 * 1024 * 1024)))
+            .await
+            .err()
+            .ok_or("closed kubectl stdin unexpectedly accepted the entire payload")?;
+        assert!(error.to_string().contains("Failed to write kubectl stdin"));
+        assert_eq!(failed.operations()?, ["run", "delete", "get"]);
+
+        let blocked = FakeKubectl::new("blocked-stdin")?;
+        let sandbox = blocked.sandbox();
+        let execution = tokio::spawn(async move {
+            sandbox
+                .execute(
+                    SandboxCommand::shell("never reads stdin")
+                        .with_stdin("x".repeat(8 * 1024 * 1024)),
+                )
+                .await
+        });
+        wait_for_operation(&blocked.log, "run").await?;
+        execution.abort();
+        let join = execution.await;
+        assert!(matches!(join, Err(error) if error.is_cancelled()));
+        wait_for_operation(&blocked.log, "delete-complete").await?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn caller_drop_cannot_hide_cleanup_failure_or_interrupt_join_recovery()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let failed = FakeKubectl::new("abort-cleanup-fail")?;
+        let sandbox = failed.sandbox();
+        let execution = tokio::spawn(async move {
+            sandbox
+                .execute(SandboxCommand::shell("sleep forever"))
+                .await
+        });
+        wait_for_operation(&failed.log, "run").await?;
+        execution.abort();
+        let join = execution.await;
+        assert!(matches!(join, Err(error) if error.is_cancelled()));
+        wait_for_operation(&failed.log, "delete-failed").await?;
+
+        let recovered = FakeKubectl::new("join-recovery")?;
+        let cleanup = recovered
+            .sandbox()
+            .spawn_pod_cleanup("echo-sandbox-recovery".to_string(), "test join recovery");
+        let waiter = tokio::spawn(cleanup);
+        wait_for_operation(&recovered.log, "delete").await?;
+        waiter.abort();
+        let join = waiter.await;
+        assert!(matches!(join, Err(error) if error.is_cancelled()));
+        wait_for_operation(&recovered.log, "delete-complete").await?;
+        Ok(())
     }
 
     #[test]

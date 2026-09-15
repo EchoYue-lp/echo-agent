@@ -4,12 +4,12 @@ id: audit.sdk-repository-extraction-rereview
 kind: audit
 boundary_ref: boundary.workspace-architecture
 lens: contract_evidence
-freshness: examined
-revision: source:298b7209a1d4a5151d191db785daa2e394ab43f75a3bc321d8275f6cdf56c757
+freshness: stale
+revision: source:5270c224062b032f301970c2ea51e5f335a72a7e3d2a4581baf38b53cbffc23d
 finding_refs: [finding.sdk-repository-extraction]
 challenges:
   source-ownership:
-    revision: source:298b7209a1d4a5151d191db785daa2e394ab43f75a3bc321d8275f6cdf56c757
+    revision: source:5270c224062b032f301970c2ea51e5f335a72a7e3d2a4581baf38b53cbffc23d
     source_refs: [Cargo.toml, README.md, README.zh.md, .github/workflows/rust-ci.yml]
     evidence_refs: [evidence.sdk-repository-extraction-equivalence, evidence.sdk-repository-extraction-verification]
     finding_refs: [finding.sdk-repository-extraction]
@@ -32,12 +32,12 @@ challenges:
 
 ## 问题记录
 
-当前未发现 extraction 范围内新增问题；SDK 后续合同和独立 Host 仍保留为下一阶段。
+初始候选复审未发现 extraction 范围内新增问题；合流 `0e09324a` 后该结论失效。最终复审必须重新检查 PR #124/#125 行为保留、ADR 0051、SDK Wave 2 payload 握手和当前语义快照。
 
 ## 残余风险
 
-独立 SDK 尚未切换到 framework extraction revision，且 SDK semantic baseline 与 language gates 需要后续集中重建。
+独立 SDK PR #1 当前 pin 初始 extraction revision，但尚未吸收 Wave 2 Journal identity payload，semantic baseline无效且dependency-policy失败。Framework候选只能作为下一次精确pin输入，不能提前合入main。
 
 ## 未检查项
 
-未在本审查中运行 SDK full contract、Host E2E、三语言 quickstart、远端 CI 或 release。
+未对合流结果运行framework full gate、17-feature matrix、semantic continuity或最终独立复审；SDK full contract、Host E2E、三语言quickstart与远端CI由独立SDK结果负责。

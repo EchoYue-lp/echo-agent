@@ -10,7 +10,7 @@ echo-agent 是可复用的 Rust Agent framework。它拥有产品无关的 Agent
 
 ## Package 拓扑
 
-Workspace 包含 root `echo_agent` package 和九个 member。Cargo manifest 是该图的权威。
+Workspace 包含 root `echo_agent` package 和八个 member。Cargo manifest 是该图的权威。
 
 ```text
 Embedding application / protocol surface

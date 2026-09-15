@@ -3,12 +3,12 @@ schema_version: 1
 id: evidence.sdk-repository-extraction-equivalence
 kind: evidence
 evidence_type: behavior_equivalence
-observed_at: source:298b7209a1d4a5151d191db785daa2e394ab43f75a3bc321d8275f6cdf56c757
+observed_at: source:5270c224062b032f301970c2ea51e5f335a72a7e3d2a4581baf38b53cbffc23d
 source_refs: [Cargo.toml, README.md, README.zh.md, .github/workflows/rust-ci.yml, echo-agent-learning/tests/documentation_contract.rs, scripts/verify.sh, src/acp/adapter.rs, src/acp/runtime.rs, src/acp/projection.rs, tests/acp_agent_adapter.rs, tests/fixtures/acp/v1/prompt-resource-link-valid.json, tests/fixtures/acp/v1/session-relative-cwd-invalid.json, docs/en/architecture.md, docs/zh/architecture.md, docs/en/lifecycles.md, docs/zh/lifecycles.md]
 supports: [finding.sdk-repository-extraction, asset.framework-acp-adapter, asset.sdk-source-product]
 limitations: ["本 Evidence 证明 framework 删除只改变 repository ownership；SDK protocol coupling、accepted external contract 和三语言 gate 在独立 SDK 仓库的后续 outcome 中验证。", "全量 semantic change-evidence 的其它历史 needs_review/unresolved backlog 不属于本删除切片。"]
-before_revision: 7e74d1443567981f318b302845d31a5673c76462
-after_revision: source:298b7209a1d4a5151d191db785daa2e394ab43f75a3bc321d8275f6cdf56c757
+before_revision: 0e09324a977851cee5db8ff55d8c8497e852a4ad
+after_revision: source:5270c224062b032f301970c2ea51e5f335a72a7e3d2a4581baf38b53cbffc23d
 scenario_results:
   framework-workspace-members:
     status: matched
@@ -52,8 +52,8 @@ deleted_paths: [contracts/sdk/acp-baseline.json, contracts/sdk/facade-operation-
 
 ## 来源与范围
 
-Before revision 为 `7e74d1443567981f318b302845d31a5673c76462`，after snapshot 为当前源码摘要。场景覆盖 workspace members、通用 ACP runtime、learning consumer、framework CI 和 SDK source traceability。
+Before revision 为 `0e09324a977851cee5db8ff55d8c8497e852a4ad`，after snapshot 为当前源码摘要。场景覆盖 workspace members、通用 ACP runtime、learning consumer、framework CI 和 SDK source traceability，并要求 PR #124/#125 的 framework 行为保持不变。
 
 ## 已知缺口
 
-本证据不宣称 SDK 在当前 framework 删除提交中已完成 protocol 纯化、external contract 收敛、独立 Host 构建或三语言 parity；这些属于后续 SDK outcome。
+本证据不宣称 SDK 已吸收 Wave 2 payload、完成 protocol 纯化、external contract 收敛、独立 Host 构建或三语言 parity；这些属于后续 SDK outcome。Framework 候选在 SDK 完成精确 pin 与门禁前只允许推送，不允许合入 main。

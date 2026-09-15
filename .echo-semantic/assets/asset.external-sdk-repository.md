@@ -6,9 +6,9 @@ title: External echo-agent SDK repository owner
 asset_type: protocol
 status: active
 risk: high
-observed_at: source:298b7209a1d4a5151d191db785daa2e394ab43f75a3bc321d8275f6cdf56c757
+observed_at: source:5270c224062b032f301970c2ea51e5f335a72a7e3d2a4581baf38b53cbffc23d
 boundary_refs: [boundary.workspace-architecture]
-code_refs: [README.md, README.zh.md, docs/adr/0049-extract-sdk-repository.md]
+code_refs: [README.md, README.zh.md, docs/adr/0051-extract-sdk-repository.md]
 consumer_refs: [https://github.com/EchoYue-lp/echo-agent-sdk/tree/refactor/Echoyue/sdk-source-continuity]
 behavior_refs: [behavior.workspace-composition]
 rule_refs: [rule.framework-layer-ownership]
@@ -27,7 +27,7 @@ candidate_refs: []
 ## 来源与消费者
 
 当前 source-continuity commit `b80cf068b2fb69b62913f23260980b4ce2ebf941` 已推送，保留
-initial import 与 filtered framework SDK history；README、ADR0049 和 superproject 后续消费该边界。
+initial import 与 filtered framework SDK history；README、ADR0051 和 superproject 后续消费该边界。
 
 ## 生命周期
 

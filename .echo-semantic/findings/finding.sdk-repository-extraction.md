@@ -3,18 +3,18 @@ schema_version: 1
 id: finding.sdk-repository-extraction
 kind: finding
 type: consolidation_candidate
-status: resolved
+status: open
 severity: high
 primary_focus: contract_evidence
 focus: [state_authority, data_durability, time_lifecycle, failure_concurrency]
 boundary_ref: boundary.workspace-architecture
 behavior_refs: [behavior.workspace-composition, behavior.protocol-projection, behavior.sdk-facade-routing]
 rule_refs: [rule.framework-layer-ownership, rule.protocol-role-separation, rule.sdk-rust-authority]
-evidence_refs: [evidence.workspace-structure, evidence.sdk-contracts]
-audit_refs: []
+evidence_refs: [evidence.workspace-structure, evidence.sdk-contracts, evidence.checkpoint-journal-sdk-inventory, evidence.sdk-repository-extraction-equivalence, evidence.sdk-repository-extraction-verification]
+audit_refs: [audit.sdk-repository-extraction-rereview]
 decision_refs: []
 repair_evidence_refs: [evidence.sdk-repository-extraction-equivalence]
-verification_evidence_refs: [evidence.sdk-repository-extraction-equivalence]
+verification_evidence_refs: [evidence.sdk-repository-extraction-verification]
 rereview_audit_refs: [audit.sdk-repository-extraction-rereview]
 discovered_at: c5f7688212d45d5bdcdbf60342605e8bfb176cae
 candidate_asset_refs: [asset.sdk-source-product, asset.framework-acp-adapter, asset.external-sdk-repository]
@@ -50,5 +50,7 @@ SDK source-continuity commit `b80cf068b2fb69b62913f23260980b4ce2ebf941` 已推�
 ## 处理记录
 
 用户已确认完整 SDK 产品迁入独立 `echo-agent-sdk`，并确认 SDK 先原样迁移、framework
-语义治理完成后再集中修复。当前 Finding 记录迁移决策和删除范围；SDK source continuity
-已完成，framework 删除仍需本分支的行为等价验证、独立复审和最终 semantic-verify。
+语义治理完成后再集中修复。初始 extraction `17548779` 已吸收当前 `main@0e09324a` 的
+Journal/Workflow 与 Kubernetes 行为并保留 SDK 路径删除；本 Finding 在新的源码摘要、
+focused/full 门禁和独立复审完成前保持 open。候选只允许先推送供 SDK 精确 pin；外部 SDK
+补齐 Wave 2 payload 前不得把 framework PR 合入 main，Issue #122 在两仓最终交付前保持 open。
