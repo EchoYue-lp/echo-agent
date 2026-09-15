@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.semantic-governance-b21-continuity
 kind: evidence
-observed_at: source:9292679f8fdc376a08aaf80755281bc316908ec9915dfb190014676318de8abb
+observed_at: source:1bcfbd1131476ae872a2dc89326675abd7c02dd26d56c8d29a058cd91fb308fc
 source_refs:
   - docs/adr/0031-sdk-identity-governance-scope.md
   - docs/adr/0032-sdk-contract-scope-classification.md
@@ -16,13 +16,13 @@ source_refs:
   - scripts/check-language-sdks.sh
 supports: [behavior.sdk-facade-routing, rule.sdk-rust-authority, behavior.workspace-composition]
 limitations:
-  - 只处置从b21aba01到当前候选结果的20个非保全SDK治理义务，不替代各repair slice自己的Finding和change-evidence
-  - 71个open Finding、远程CI、PR/merge、发布和docs.rs渲染仍未闭合
+  - 只处置b21aba01基线中的20个非保全SDK治理义务，不替代其后各repair slice自己的Finding和change-evidence
+  - 当前54个open Finding仍未修复；远程CI、PR/merge、发布和docs.rs渲染由独立交付证据负责
 evidence_type: semantic_continuity
 merge_base_revision: b21aba01b34e74c93d783a89db895282ba831c3c
 predecessor_revisions:
   - b21aba01b34e74c93d783a89db895282ba831c3c
-result_snapshot: source:9292679f8fdc376a08aaf80755281bc316908ec9915dfb190014676318de8abb
+result_snapshot: source:1bcfbd1131476ae872a2dc89326675abd7c02dd26d56c8d29a058cd91fb308fc
 resolutions:
   "behavior.sdk-facade-routing":
     disposition: resolved_conflict
@@ -69,7 +69,7 @@ resolutions:
       b21aba01b34e74c93d783a89db895282ba831c3c: d641f3626411e08dd87f0a134d50784f1238337a14f600856aed37a5bd1f18f1
     evidence_refs: []
     decision_authorities: *continuity_authority
-    compatibility_impact: 旧逐identity未知项退役，未确认能力继续作为1441个deferred identity的capability backlog
+    compatibility_impact: 旧逐identity未知项退役，未确认能力继续作为1443个deferred identity的capability backlog
     rollback_ref: 按ADR 0041恢复b21aba01 discovery unknown后，移除此resolution并重跑continuity
   "discovery.sdk-facade-baseline#unresolved:三语言整体 Parity complete 状态与最终发布检出证据":
     disposition: retired
@@ -207,4 +207,4 @@ resolutions:
 
 ## 已知缺口
 
-本Evidence不关闭71个open Finding，不代表远程CI、PR/merge、发布或docs.rs完成，也不把1441个deferred identity解释为已交付或逐项待办。
+本Evidence不关闭当前54个open Finding，不代表远程CI、PR/merge、发布或docs.rs完成，也不把1443个deferred identity解释为已交付或逐项待办。

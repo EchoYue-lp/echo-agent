@@ -463,3 +463,11 @@ single-feature, contract, source-language and real Host ExtensionBridge gates.
 The resulting change is intentionally folded into the facade parity, Java,
 Python, TypeScript and shared SDK commits; no binary, runtime or registry
 artifact is published.
+
+## Maintenance Note: 2026-09-15 TLS Dependency Refresh
+
+`rustls` was upgraded from 0.23.43 to 0.23.45 in `Cargo.lock` to address
+RUSTSEC-2026-0285. The canonical generator refreshed only the lockfile hash and
+aggregate digest in `contracts/sdk/source-contract.json`; the public API,
+operation catalog, wire schema, fixtures, and source-language routes remain
+unchanged.

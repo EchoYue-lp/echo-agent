@@ -5,23 +5,23 @@ kind: audit
 boundary_ref: boundary.workspace-architecture
 lens: contract_evidence
 freshness: examined
-revision: source:9292679f8fdc376a08aaf80755281bc316908ec9915dfb190014676318de8abb
+revision: 0878a676c9128619fdfb2faa15868a1388689822
 finding_refs: [finding.semantic-baseline-squash-ancestry]
 challenges:
   target-main-not-feature-head:
-    revision: source:9292679f8fdc376a08aaf80755281bc316908ec9915dfb190014676318de8abb
+    revision: 0878a676c9128619fdfb2faa15868a1388689822
     source_refs: [.echo-semantic/baseline.md, echo-agent-learning/tests/semantic_baseline_contract.rs]
     evidence_refs: [evidence.semantic-baseline-squash-ancestry-repair, evidence.semantic-baseline-squash-ancestry-verification]
   squash-removes-feature-ancestry:
-    revision: source:9292679f8fdc376a08aaf80755281bc316908ec9915dfb190014676318de8abb
+    revision: 0878a676c9128619fdfb2faa15868a1388689822
     source_refs: [echo-agent-learning/tests/semantic_baseline_contract.rs, AGENTS.md]
     evidence_refs: [evidence.semantic-baseline-squash-ancestry-verification]
   ci-supplies-recoverable-target:
-    revision: source:9292679f8fdc376a08aaf80755281bc316908ec9915dfb190014676318de8abb
+    revision: 0878a676c9128619fdfb2faa15868a1388689822
     source_refs: [.github/workflows/rust-ci.yml, echo-agent-learning/tests/semantic_baseline_contract.rs]
     evidence_refs: [evidence.semantic-baseline-squash-ancestry-verification]
   source-and-runtime-scope:
-    revision: source:9292679f8fdc376a08aaf80755281bc316908ec9915dfb190014676318de8abb
+    revision: 0878a676c9128619fdfb2faa15868a1388689822
     source_refs: [Cargo.toml, contracts/sdk/parity-manifest.json, .github/workflows/rust-ci.yml]
     evidence_refs: [evidence.semantic-baseline-squash-ancestry-repair, evidence.semantic-governance-b21-continuity]
 ---
@@ -38,9 +38,9 @@ challenges:
 
 ## 实际实现路径与证据
 
-Baseline绑定当前canonical main`d492c676`。Learning contract结构化解析baseline，本地解析`origin/main`/`main`，CI显式注入PR base或push before。临时Git仓库证明feature-only SHA是feature HEAD祖先，但不是target main或squash result祖先；target main保持为squash result祖先。Linux learning job checkout完整历史并运行该test target。
+在该历史审查快照中，Baseline绑定当时的canonical main`d492c676`。Learning contract结构化解析baseline，本地解析`origin/main`/`main`，CI显式注入PR base或push before。临时Git仓库证明feature-only SHA是feature HEAD祖先，但不是target main或squash result祖先；target main保持为squash result祖先。Linux learning job checkout完整历史并运行该test target。
 
-测试在workflow未提供target revision时稳定2 passed/1 failed，补齐CI后3/3通过。Focused Clippy、完整`verify.sh`、strict、change-evidence、94/94 Issue对账和continuity均通过。Source digest刷新只来自test/workflow/AGENTS，runtime/API/SDK未修改。独立复审结论为PASS，Critical、Important、Minor均为0。
+测试在workflow未提供target revision时稳定2 passed/1 failed，补齐CI后3/3通过。Focused Clippy、完整`verify.sh`、strict、change-evidence、94/94 Issue对账和continuity均通过。该历史Source digest刷新只来自test/workflow/AGENTS，runtime/API/SDK未修改。独立复审结论为PASS，Critical、Important、Minor均为0。
 
 ## 问题记录
 
@@ -48,7 +48,7 @@ Baseline绑定当前canonical main`d492c676`。Learning contract结构化解析b
 
 ## 残余风险
 
-Follow-up PR尚未进入远端main，Issue #118和原22个resolved Finding Issue继续保持OPEN。71个其它open Finding不受本修复影响。
+该审查记录形成时，Follow-up PR尚未进入远端main，Issue #118和原22个resolved Finding Issue继续保持OPEN；当时的71个其它open Finding不受该修复影响。当前交付状态由后续Finding和GitHub证据负责。
 
 ## 未检查项
 

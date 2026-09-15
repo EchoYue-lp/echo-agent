@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.sdk-governance-scope-equivalence
 kind: evidence
-observed_at: source:9292679f8fdc376a08aaf80755281bc316908ec9915dfb190014676318de8abb
+observed_at: source:1bcfbd1131476ae872a2dc89326675abd7c02dd26d56c8d29a058cd91fb308fc
 source_refs:
   - docs/adr/0028-source-first-multilanguage-sdk-runtime.md
   - docs/adr/0031-sdk-identity-governance-scope.md
@@ -24,11 +24,11 @@ supports:
   - map.sdk-facade-parity#scenario:sdk-contract-scope
 limitations:
   - 只证明SDK治理从逐identity完成度转为capability和contract scope后，Rust权威、route闭包和external contract行为保持一致
-  - 不证明1441个deferred identity已经进入外部合同，也不替代其后续capability决策
-  - 远程CI、PR/merge、发布和docs.rs渲染未执行
+  - 不证明1443个deferred identity已经进入外部合同，也不替代其后续capability决策
+  - 远程CI、PR/merge、发布和docs.rs渲染由独立交付证据负责
 evidence_type: behavior_equivalence
 before_revision: b21aba01b34e74c93d783a89db895282ba831c3c
-after_revision: source:9292679f8fdc376a08aaf80755281bc316908ec9915dfb190014676318de8abb
+after_revision: source:1bcfbd1131476ae872a2dc89326675abd7c02dd26d56c8d29a058cd91fb308fc
 scenario_results:
   rust-runtime-authority:
     status: matched

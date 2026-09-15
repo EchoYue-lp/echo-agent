@@ -4,7 +4,7 @@
     {
       "path": "Cargo.lock",
       "bytes": 178404,
-      "sha256": "sha256:c040f3d5ce3ed728fe641fe52fe6213d0d35c827d9022a0d7aedea5693967414"
+      "sha256": "sha256:2ab7b53fe723f69c9cedea207bb7bad0c30c41d0b6809e7f263a2a37c2d26ea2"
     },
     {
       "path": "contracts/sdk/public-api.txt",
@@ -22,5 +22,5 @@
       "sha256": "sha256:ed3cd6cba471665bf903e7c452ba2df68ef6ced4ac15b8afe80567c03da8df99"
     }
   ],
-  "aggregate_digest": "sha256:ff84377f315334cadea663bf42e5fe27c99faa6936e8f04ca35ec7c4ccbb2cb3"
+  "aggregate_digest": "sha256:8efc6a98b44478b0a21366f961e4684bd46676e5b5e3f70a314737de3ec70b22"
 }
