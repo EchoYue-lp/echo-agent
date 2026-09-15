@@ -1,8 +1,0 @@
-{
-  "name": "extension-outcome-empty-invalid",
-  "kind": "invalid",
-  "target": "ExtensionInvokeOutcome",
-  "description": "A callback outcome must choose exactly one tagged variant.",
-  "payload": {},
-  "expect_error": "invalid_value"
-}

@@ -14,9 +14,7 @@ inspected_paths:
   - sdks
   - src/acp
 candidate_refs: [map.sdk-facade-parity, map.protocol-surfaces]
-unresolved:
-  - 1441个deferred identity的capability分组、外部用户价值与逐组产品合同决策
-  - registry/binary publication明确不在source-first合同范围
+unresolved: []
 ---
 
 # SDK facade 首次基线发现
@@ -35,4 +33,5 @@ SDK 子边界保留一张高风险能力图、一条路由行为、一条 Rust �
 
 ## 未决项
 
-Plan 8机械闭合与三语言route baseline已完成；schema v2把当前外部合同与Host/Rust-only、language intrinsic、helper、deferred分开。Deferred只按capability审查，不阻塞全仓baseline或制造1441个独立任务。
+该历史发现中的 SDK identity 与 binary publication 未决项已随 SDK 产品迁移到
+`echo-agent-sdk`；framework 当前只保留通用 ACP、A2A、Channels 和 Headless 边界。

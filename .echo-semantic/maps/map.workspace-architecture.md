@@ -4,7 +4,7 @@ id: map.workspace-architecture
 kind: capability_map
 title: Workspace 架构与公共组合
 risk: high
-observed_at: source:b0dfa235d236bee9185ff26953b982f196556459fd0bf165f7114a232373b224
+observed_at: source:298b7209a1d4a5151d191db785daa2e394ab43f75a3bc321d8275f6cdf56c757
 boundary_refs: [boundary.workspace-architecture]
 behavior_refs: [behavior.workspace-composition]
 rule_refs: [rule.framework-layer-ownership]
@@ -30,14 +30,14 @@ scenarios:
     audit_refs: [audit.workspace-topology-doc-rereview]
   feature-topology:
     status: mapped
-    source_refs: [Cargo.toml, echo-core/Cargo.toml, echo-execution/Cargo.toml, echo-integration/Cargo.toml, echo-macros/Cargo.toml, echo-orchestration/Cargo.toml, echo-state/Cargo.toml, echo-tools/Cargo.toml, echo-sdk-protocol/Cargo.toml, echo-sdk-host/Cargo.toml, echo-agent-learning/Cargo.toml]
+    source_refs: [Cargo.toml, echo-core/Cargo.toml, echo-execution/Cargo.toml, echo-integration/Cargo.toml, echo-macros/Cargo.toml, echo-orchestration/Cargo.toml, echo-state/Cargo.toml, echo-tools/Cargo.toml, echo-agent-learning/Cargo.toml]
     rule_refs: [rule.framework-layer-ownership]
     evidence_refs: [evidence.workspace-structure, evidence.feature-table-doc-repair, evidence.feature-table-doc-verification]
     finding_refs: [finding.public-feature-table-drift]
     audit_refs: [audit.feature-table-doc-rereview]
   public-and-background-entrypoints:
     status: mapped
-    source_refs: [src/lib.rs, echo-sdk-host/src/main.rs, echo-orchestration/src/scheduler/runner.rs, echo-orchestration/src/tasks/background_task.rs]
+    source_refs: [src/lib.rs, echo-orchestration/src/scheduler/runner.rs, echo-orchestration/src/tasks/background_task.rs]
     behavior_refs: [behavior.workspace-composition]
     evidence_refs: [evidence.workspace-structure, evidence.readme-example-target-repair, evidence.readme-example-target-verification]
     finding_refs: [finding.readme-example-target-drift]
@@ -67,7 +67,8 @@ scenarios:
 
 ## 能力范围
 
-覆盖 11-package Cargo workspace、crate DAG、feature topology、root facade、binary/background entry 与 framework/application 边界。
+覆盖 9-package framework workspace、crate DAG、feature topology、root facade、
+binary/background entry、独立 SDK consumer 与 framework/application 边界。
 
 ## 入口与输出
 
@@ -75,7 +76,7 @@ scenarios:
 
 ## 行为关系
 
-Root facade 组合 split crates，SDK Host/learning/tests 消费公共 surface；具体运行语义由相关 Capability Map 拥有。
+Root facade 组合 split crates，learning/tests 和独立 SDK consumer 消费公共 surface；具体运行语义由相关 Capability Map 拥有。
 
 ## 状态与数据流
 
@@ -95,11 +96,12 @@ Feature 缺失、依赖环、public path drift 和 example/contract drift 由 co
 
 ## 用户侧投影
 
-Rust facade、SDK Host、docs 与 examples 展示同一 capability；采用量不决定 public API 是否合理。
+Rust facade、外部 SDK Host、docs 与 examples 展示同一 capability；采用量不决定 public API 是否合理。
 
 ## 场景处置清单
 
-全部 11 个 package manifest、crate、entry 与 product boundary 已映射；动态注册闭集显式保留 needs_review。
+9 个 framework package manifest、crate、entry 与 product boundary 已映射；独立 SDK 仓库
+作为外部 consumer，动态注册闭集显式保留 needs_review。
 
 ## 未展开项
 

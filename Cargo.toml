@@ -8,8 +8,6 @@ members = [
     "echo-tools",
     "echo-state",
     "echo-orchestration",
-    "echo-sdk-protocol",
-    "echo-sdk-host",
 ]
 default-members = [
     ".",
@@ -21,8 +19,6 @@ default-members = [
     "echo-tools",
     "echo-state",
     "echo-orchestration",
-    "echo-sdk-protocol",
-    "echo-sdk-host",
 ]
 resolver = "3"
 
@@ -64,9 +60,8 @@ rustdoc-args = ["--cfg", "docsrs"]
 # broke nightly builds by unconditionally enabling its `nightly` cfg and then
 # using `core::unicode::{Case_Ignorable, Cased}` (removed in Rust 1.97);
 # polars 0.55 vendors those tables (upstream fix polars#67422be6) and compiles
-# on nightly again — contracts/sdk/toolchain.json pins a nightly toolchain for
-# the SDK facade inventory, which covers `data`. Re-enabling `data` on docs.rs
-# still needs its own verification against the docs.rs builder before shipping.
+# on nightly again; the framework's data feature remains excluded from docs.rs
+# until its upstream toolchain compatibility is independently verified.
 
 [features]
 default = []

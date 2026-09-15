@@ -288,9 +288,9 @@ fn contract_filter_defined(learning_root: &Path, filter: &str) -> Result<bool, s
 #[test]
 fn root_readmes_match_workspace_package_topology() -> Result<(), Box<dyn std::error::Error>> {
     let (workspace_root, packages) = workspace_packages()?;
-    if packages.len() != 11 {
+    if packages.len() != 9 {
         return Err(std::io::Error::other(format!(
-            "expected the root package plus ten workspace members, found {} packages",
+            "expected the root package plus eight framework members and one learning package, found {} packages",
             packages.len()
         ))
         .into());
@@ -310,7 +310,7 @@ fn root_readmes_match_workspace_package_topology() -> Result<(), Box<dyn std::er
         .iter()
         .filter(|package| package.name == "echo-agent-learning")
         .count();
-    if (framework_count, sdk_count, learning_count) != (8, 2, 1) {
+    if (framework_count, sdk_count, learning_count) != (8, 0, 1) {
         return Err(std::io::Error::other(format!(
             "unexpected package groups: framework/runtime={framework_count}, sdk={sdk_count}, learning={learning_count}"
         ))
@@ -341,14 +341,14 @@ fn root_readmes_match_workspace_package_topology() -> Result<(), Box<dyn std::er
             "README.md",
             "## Workspace Structure",
             format!(
-                "**{framework_count} framework/runtime packages + {sdk_count} SDK packages + {learning_count} learning package**"
+                "**{framework_count} framework/runtime packages + {learning_count} learning package**"
             ),
         ),
         (
             "README.zh.md",
             "## Workspace 结构",
             format!(
-                "**{framework_count} 个框架/运行时 package + {sdk_count} 个 SDK package + {learning_count} 个学习 package**"
+                "**{framework_count} 个框架/运行时 package + {learning_count} 个学习 package**"
             ),
         ),
     ];
@@ -558,13 +558,12 @@ fn foundational_framework_docs_are_routed_and_structurally_paired()
             [
                 "echo_agent",
                 "echo-core",
-                "echo-sdk-protocol",
-                "echo-sdk-host",
                 "echo-agent-learning",
+                "echo-agent-sdk",
             ]
             .as_slice(),
             [1, 2, 2, 2, 2, 2, 2, 2, 2].as_slice(),
-            (33, 2),
+            (31, 2),
         ),
         (
             "docs/en/concepts.md",
@@ -607,7 +606,7 @@ fn foundational_framework_docs_are_routed_and_structurally_paired()
             ]
             .as_slice(),
             [1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2].as_slice(),
-            (79, 14),
+            (70, 12),
         ),
     ];
     let mut violations = Vec::new();

@@ -5,19 +5,19 @@ kind: audit
 boundary_ref: boundary.extension-lifecycle
 lens: failure_concurrency
 freshness: examined
-revision: source:b0dfa235d236bee9185ff26953b982f196556459fd0bf165f7114a232373b224
+revision: source:298b7209a1d4a5151d191db785daa2e394ab43f75a3bc321d8275f6cdf56c757
 finding_refs: [finding.plugin-failure-isolation-contract]
 challenges:
   whole-plugin-dependency-closure:
-    revision: source:b0dfa235d236bee9185ff26953b982f196556459fd0bf165f7114a232373b224
+    revision: source:298b7209a1d4a5151d191db785daa2e394ab43f75a3bc321d8275f6cdf56c757
     source_refs: [src/plugin/prepared.rs, docs/adr/0012-immutable-plugin-preparation.md]
     evidence_refs: [evidence.plugin-component-preparation-repair, evidence.plugin-component-preparation-verification]
   component-parse-isolation:
-    revision: source:b0dfa235d236bee9185ff26953b982f196556459fd0bf165f7114a232373b224
+    revision: source:298b7209a1d4a5151d191db785daa2e394ab43f75a3bc321d8275f6cdf56c757
     source_refs: [src/plugin/prepared.rs, echo-execution/src/skills/external/loader.rs, docs/en/32-plugin-system.md, docs/zh/32-plugin-system.md]
     evidence_refs: [evidence.plugin-component-preparation-repair, evidence.plugin-component-preparation-verification]
   immutable-input-versus-active-publication:
-    revision: source:b0dfa235d236bee9185ff26953b982f196556459fd0bf165f7114a232373b224
+    revision: source:298b7209a1d4a5151d191db785daa2e394ab43f75a3bc321d8275f6cdf56c757
     source_refs: [src/plugin/prepared.rs, docs/adr/0012-immutable-plugin-preparation.md]
     evidence_refs: [evidence.plugin-component-preparation-repair]
 ---

@@ -26,7 +26,7 @@ resolutions:
     decision_authorities: &decision_authority
       - kind: adr
         path: docs/adr/0031-sdk-identity-governance-scope.md
-        content_digest: c63f1ee371f1ff639f00743719509bd3a42129383c80828fc91c6379497c3324
+        content_digest: 40cb3f1917e3fb585d88d74e98ec21355903d9bf0e22b50c9f2ca3dc400eb2ad
     compatibility_impact: 仅退役旧 TypeScript index blob 指纹，不改变公共 API、wire 或运行时行为
     rollback_ref: 恢复目标 main 的旧 source ref，移除此 resolution 并重跑双前置连续性检查
   "evidence.sdk-contracts#source:22d1578ba412e215fd4debfd0a28a4989e2248db7482688db26e021712935e9d":

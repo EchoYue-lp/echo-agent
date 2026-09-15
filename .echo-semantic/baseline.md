@@ -3,8 +3,8 @@ schema_version: 1
 id: baseline.repository
 kind: baseline
 source_snapshot:
-  base_revision: d492c676d1bf0744452d96a6960124546ed3fff9
-  content_digest: b0dfa235d236bee9185ff26953b982f196556459fd0bf165f7114a232373b224
+  base_revision: 7e74d1443567981f318b302845d31a5673c76462
+  content_digest: 298b7209a1d4a5151d191db785daa2e394ab43f75a3bc321d8275f6cdf56c757
 inventory_closure: closed
 behavior_model_closure: closed
 map_refs:
@@ -35,7 +35,6 @@ regions:
   - { path: README.md, status: supporting }
   - { path: README.zh.md, status: supporting }
   - { path: benches, status: supporting }
-  - { path: contracts, status: in_scope }
   - { path: deny.toml, status: supporting }
   - { path: docs, status: supporting }
   - { path: echo-agent-learning, status: supporting }
@@ -44,14 +43,11 @@ regions:
   - { path: echo-integration, status: in_scope }
   - { path: echo-macros, status: in_scope }
   - { path: echo-orchestration, status: in_scope }
-  - { path: echo-sdk-host, status: in_scope }
-  - { path: echo-sdk-protocol, status: in_scope }
   - { path: echo-state, status: in_scope }
   - { path: echo-tools, status: in_scope }
   - { path: mcp.json.example, status: supporting }
   - { path: rust-toolchain.toml, status: supporting }
   - { path: scripts, status: supporting }
-  - { path: sdks, status: in_scope }
   - { path: src, status: in_scope }
   - { path: tests, status: supporting }
 boundaries:
@@ -77,14 +73,6 @@ coverage:
   - { region: Cargo.toml, lens: failure_concurrency, status: covered, refs: *cargo_refs }
   - { region: Cargo.toml, lens: permission_external, status: covered, refs: *cargo_refs }
   - { region: Cargo.toml, lens: contract_evidence, status: covered, refs: *cargo_refs }
-  - { region: contracts, lens: trigger_input, status: covered, refs: &contract_refs [map.protocol-surfaces, map.sdk-facade-parity] }
-  - { region: contracts, lens: result_side_effect, status: covered, refs: *contract_refs }
-  - { region: contracts, lens: state_authority, status: covered, refs: *contract_refs }
-  - { region: contracts, lens: data_durability, status: covered, refs: *contract_refs }
-  - { region: contracts, lens: time_lifecycle, status: covered, refs: *contract_refs }
-  - { region: contracts, lens: failure_concurrency, status: covered, refs: *contract_refs }
-  - { region: contracts, lens: permission_external, status: covered, refs: *contract_refs }
-  - { region: contracts, lens: contract_evidence, status: covered, refs: *contract_refs }
   - { region: echo-core, lens: trigger_input, status: covered, refs: &core_refs [map.workspace-architecture, map.agent-session-turn, map.context-memory, map.observation-persistence-delivery, map.tool-permission-sandbox, map.extension-lifecycle, map.llm-provider-runtime] }
   - { region: echo-core, lens: result_side_effect, status: covered, refs: *core_refs }
   - { region: echo-core, lens: state_authority, status: covered, refs: *core_refs }
@@ -125,22 +113,6 @@ coverage:
   - { region: echo-orchestration, lens: failure_concurrency, status: covered, refs: *orchestration_refs }
   - { region: echo-orchestration, lens: permission_external, status: covered, refs: *orchestration_refs }
   - { region: echo-orchestration, lens: contract_evidence, status: covered, refs: *orchestration_refs }
-  - { region: echo-sdk-host, lens: trigger_input, status: covered, refs: &sdk_host_refs [map.protocol-surfaces, map.sdk-facade-parity] }
-  - { region: echo-sdk-host, lens: result_side_effect, status: covered, refs: *sdk_host_refs }
-  - { region: echo-sdk-host, lens: state_authority, status: covered, refs: *sdk_host_refs }
-  - { region: echo-sdk-host, lens: data_durability, status: covered, refs: *sdk_host_refs }
-  - { region: echo-sdk-host, lens: time_lifecycle, status: covered, refs: *sdk_host_refs }
-  - { region: echo-sdk-host, lens: failure_concurrency, status: covered, refs: *sdk_host_refs }
-  - { region: echo-sdk-host, lens: permission_external, status: covered, refs: *sdk_host_refs }
-  - { region: echo-sdk-host, lens: contract_evidence, status: covered, refs: *sdk_host_refs }
-  - { region: echo-sdk-protocol, lens: trigger_input, status: covered, refs: &sdk_protocol_refs [map.protocol-surfaces, map.sdk-facade-parity] }
-  - { region: echo-sdk-protocol, lens: result_side_effect, status: covered, refs: *sdk_protocol_refs }
-  - { region: echo-sdk-protocol, lens: state_authority, status: covered, refs: *sdk_protocol_refs }
-  - { region: echo-sdk-protocol, lens: data_durability, status: covered, refs: *sdk_protocol_refs }
-  - { region: echo-sdk-protocol, lens: time_lifecycle, status: covered, refs: *sdk_protocol_refs }
-  - { region: echo-sdk-protocol, lens: failure_concurrency, status: covered, refs: *sdk_protocol_refs }
-  - { region: echo-sdk-protocol, lens: permission_external, status: covered, refs: *sdk_protocol_refs }
-  - { region: echo-sdk-protocol, lens: contract_evidence, status: covered, refs: *sdk_protocol_refs }
   - { region: echo-state, lens: trigger_input, status: covered, refs: &state_refs [map.context-memory, map.observation-persistence-delivery, map.eval-evolution] }
   - { region: echo-state, lens: result_side_effect, status: covered, refs: *state_refs }
   - { region: echo-state, lens: state_authority, status: covered, refs: *state_refs }
@@ -157,14 +129,6 @@ coverage:
   - { region: echo-tools, lens: failure_concurrency, status: covered, refs: *tool_refs }
   - { region: echo-tools, lens: permission_external, status: covered, refs: *tool_refs }
   - { region: echo-tools, lens: contract_evidence, status: covered, refs: *tool_refs }
-  - { region: sdks, lens: trigger_input, status: covered, refs: &sdk_refs [map.protocol-surfaces, map.sdk-facade-parity] }
-  - { region: sdks, lens: result_side_effect, status: covered, refs: *sdk_refs }
-  - { region: sdks, lens: state_authority, status: covered, refs: *sdk_refs }
-  - { region: sdks, lens: data_durability, status: covered, refs: *sdk_refs }
-  - { region: sdks, lens: time_lifecycle, status: covered, refs: *sdk_refs }
-  - { region: sdks, lens: failure_concurrency, status: covered, refs: *sdk_refs }
-  - { region: sdks, lens: permission_external, status: covered, refs: *sdk_refs }
-  - { region: sdks, lens: contract_evidence, status: covered, refs: *sdk_refs }
   - { region: src, lens: trigger_input, status: covered, refs: &root_refs [map.agent-session-turn, map.context-memory, map.task-subagent-workflow, map.observation-persistence-delivery, map.tool-permission-sandbox, map.extension-lifecycle, map.llm-provider-runtime, map.protocol-surfaces, map.eval-evolution] }
   - { region: src, lens: result_side_effect, status: covered, refs: *root_refs }
   - { region: src, lens: state_authority, status: covered, refs: *root_refs }
@@ -183,7 +147,9 @@ coverage:
 
 ## 仓库区域
 
-13 个 production/contract 顶层区域进入 `in_scope`；tests、examples、docs、CI、scripts 与 repository metadata 是 supporting consumers。所有当前 Git 路径唯一命中一个区域。
+9 个 framework production 顶层区域进入 `in_scope`；tests、examples、docs、CI、scripts、
+learning 和 repository metadata 是 supporting consumers。已迁出的 SDK 产品由独立仓库
+承接，不再属于当前 framework workspace 区域。
 
 ## 能力图与边界
 
