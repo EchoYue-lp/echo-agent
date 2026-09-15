@@ -253,6 +253,16 @@ share the configured output cap. Extra Docker arguments use a narrow allowlist a
 container identity, labels, restart, network, namespace, mount, security, or
 capability settings.
 
+`K8sSandbox` likewise transfers kubectl execution and the preallocated Pod name
+to a detached backend owner. Successful and non-zero exits, timeout,
+cancellation, stdin or kubectl failure, and caller drop all converge on bounded
+graceful Pod deletion. It settles the kubectl process group and bounds output
+drain even after the leader exits. The terminal waits for the Pod API object and
+its finalizers to disappear; deletion spawn, timeout, or non-zero failures are
+logged by the owner and become a typed sandbox I/O error with the primary
+terminal facts. Force deletion is not used because Kubernetes does not confirm
+node process termination before removing a force-deleted Pod from the API.
+
 ---
 
 ## 6. Secret Management
