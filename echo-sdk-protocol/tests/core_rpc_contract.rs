@@ -587,7 +587,7 @@ fn terminal_and_receipt_project_the_framework_authority() {
 }
 
 #[test]
-fn receipt_delivery_failure_is_lossless_and_legacy_is_unknown() {
+fn receipt_delivery_failure_is_lossless_and_legacy_is_unknown() -> Result<(), serde_json::Error> {
     let failure = AgentFailureWire {
         category: "io".to_string(),
         terminal_kind: "failed".to_string(),
@@ -616,19 +616,14 @@ fn receipt_delivery_failure_is_lossless_and_legacy_is_unknown() {
     assert_eq!(encoded["delivery_error"]["code"], "delivery");
 
     let mut legacy = encoded;
-    legacy.as_object_mut().map(|fields| {
+    if let Some(fields) = legacy.as_object_mut() {
         fields.remove("delivery");
         fields.remove("delivery_error");
-    });
-    let recovered = match serde_json::from_value::<RunReceiptWire>(legacy) {
-        Ok(receipt) => receipt,
-        Err(error) => {
-            assert!(false, "legacy receipt must remain decodable: {error}");
-            return;
-        }
-    };
+    }
+    let recovered = serde_json::from_value::<RunReceiptWire>(legacy)?;
     assert!(recovered.delivery.is_none());
     assert!(recovered.delivery_error.is_none());
+    Ok(())
 }
 
 #[test]
