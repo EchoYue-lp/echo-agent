@@ -349,23 +349,25 @@ struct CheckpointDispatch {
     renewals: AtomicUsize,
 }
 
+type CheckpointDispatchResult<T> = Result<T, Box<EchoSdkError>>;
+
 impl CheckpointDispatch {
-    fn invalid(message: impl Into<String>) -> EchoSdkError {
-        EchoSdkError::new(
+    fn invalid(message: impl Into<String>) -> Box<EchoSdkError> {
+        Box::new(EchoSdkError::new(
             ExtensionErrorCode::InvalidValue,
             message.into(),
             Retryability::Never,
-        )
+        ))
     }
 
-    fn json(value: &WireValue) -> Result<serde_json::Value, EchoSdkError> {
+    fn json(value: &WireValue) -> CheckpointDispatchResult<serde_json::Value> {
         value
             .clone()
             .into_json()
             .map_err(|error| Self::invalid(error.to_string()))
     }
 
-    fn checkpoint_id(value: &WireValue) -> Result<String, EchoSdkError> {
+    fn checkpoint_id(value: &WireValue) -> CheckpointDispatchResult<String> {
         Self::json(value)?
             .get("id")
             .and_then(serde_json::Value::as_str)
@@ -376,7 +378,7 @@ impl CheckpointDispatch {
     fn with_attempt(
         value: &WireValue,
         attempt_id: Option<&str>,
-    ) -> Result<WireValue, EchoSdkError> {
+    ) -> CheckpointDispatchResult<WireValue> {
         let mut json = Self::json(value)?;
         let object = json
             .as_object_mut()
@@ -397,7 +399,7 @@ impl CheckpointDispatch {
             .unwrap_or_else(|error| error.into_inner()) = Some(checkpoint);
     }
 
-    fn load(&self, id: &str) -> Result<Option<WireValue>, EchoSdkError> {
+    fn load(&self, id: &str) -> CheckpointDispatchResult<Option<WireValue>> {
         if let Some(checkpoint) = self
             .pending
             .lock()
@@ -417,7 +419,7 @@ impl CheckpointDispatch {
             .map(|(_, _, checkpoint)| checkpoint.clone()))
     }
 
-    fn claim(&self, id: &str) -> Result<Option<WireValue>, EchoSdkError> {
+    fn claim(&self, id: &str) -> CheckpointDispatchResult<Option<WireValue>> {
         let mut pending = self
             .pending
             .lock()
@@ -442,7 +444,12 @@ impl CheckpointDispatch {
         Ok(Some(claimed))
     }
 
-    fn settle_claim(&self, id: &str, attempt_id: &str, requeue: bool) -> Result<(), EchoSdkError> {
+    fn settle_claim(
+        &self,
+        id: &str,
+        attempt_id: &str,
+        requeue: bool,
+    ) -> CheckpointDispatchResult<()> {
         let mut claimed = self
             .claimed
             .lock()
@@ -465,7 +472,7 @@ impl CheckpointDispatch {
         Ok(())
     }
 
-    fn renew(&self, id: &str, attempt_id: &str) -> Result<(), EchoSdkError> {
+    fn renew(&self, id: &str, attempt_id: &str) -> CheckpointDispatchResult<()> {
         let claimed = self
             .claimed
             .lock()
@@ -486,7 +493,7 @@ impl CheckpointDispatch {
         &self,
         checkpoint: WireValue,
         expected_generation: WireU64,
-    ) -> Result<bool, EchoSdkError> {
+    ) -> CheckpointDispatchResult<bool> {
         let Some(expected_generation) = expected_generation.to_u64() else {
             return Err(Self::invalid("expected_generation is out of range"));
         };
@@ -927,39 +934,39 @@ where
                                     AgentComponentCallInputWire::WorkflowCheckpointSaveIfGeneration { checkpoint, expected_generation } => {
                                         let committed = match checkpoints.save_if_generation(checkpoint, expected_generation) {
                                             Ok(committed) => committed,
-                                            Err(error) => return responder.respond(ExtensionInvokeOutcome::Error { error }),
+                                            Err(error) => return responder.respond(ExtensionInvokeOutcome::Error { error: *error }),
                                         };
                                         AgentComponentCallResultWire::WorkflowCheckpointSaveIfGeneration { committed }
                                     }
                                     AgentComponentCallInputWire::WorkflowCheckpointLoad { checkpoint_id } => {
                                         let checkpoint = match checkpoints.load(&checkpoint_id) {
                                             Ok(checkpoint) => checkpoint,
-                                            Err(error) => return responder.respond(ExtensionInvokeOutcome::Error { error }),
+                                            Err(error) => return responder.respond(ExtensionInvokeOutcome::Error { error: *error }),
                                         };
                                         AgentComponentCallResultWire::WorkflowCheckpointLoad { checkpoint }
                                     }
                                     AgentComponentCallInputWire::WorkflowCheckpointClaim { checkpoint_id } => {
                                         let checkpoint = match checkpoints.claim(&checkpoint_id) {
                                             Ok(checkpoint) => checkpoint,
-                                            Err(error) => return responder.respond(ExtensionInvokeOutcome::Error { error }),
+                                            Err(error) => return responder.respond(ExtensionInvokeOutcome::Error { error: *error }),
                                         };
                                         AgentComponentCallResultWire::WorkflowCheckpointClaim { checkpoint }
                                     }
                                     AgentComponentCallInputWire::WorkflowCheckpointAckClaim { checkpoint_id, attempt_id } => {
                                         if let Err(error) = checkpoints.settle_claim(&checkpoint_id, &attempt_id, false) {
-                                            return responder.respond(ExtensionInvokeOutcome::Error { error });
+                                            return responder.respond(ExtensionInvokeOutcome::Error { error: *error });
                                         }
                                         AgentComponentCallResultWire::WorkflowCheckpointAckClaim
                                     }
                                     AgentComponentCallInputWire::WorkflowCheckpointRequeueClaim { checkpoint_id, attempt_id } => {
                                         if let Err(error) = checkpoints.settle_claim(&checkpoint_id, &attempt_id, true) {
-                                            return responder.respond(ExtensionInvokeOutcome::Error { error });
+                                            return responder.respond(ExtensionInvokeOutcome::Error { error: *error });
                                         }
                                         AgentComponentCallResultWire::WorkflowCheckpointRequeueClaim
                                     }
                                     AgentComponentCallInputWire::WorkflowCheckpointRenewClaim { checkpoint_id, attempt_id } => {
                                         if let Err(error) = checkpoints.renew(&checkpoint_id, &attempt_id) {
-                                            return responder.respond(ExtensionInvokeOutcome::Error { error });
+                                            return responder.respond(ExtensionInvokeOutcome::Error { error: *error });
                                         }
                                         AgentComponentCallResultWire::WorkflowCheckpointRenewClaim
                                     }
