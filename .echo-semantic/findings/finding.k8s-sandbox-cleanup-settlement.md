@@ -3,7 +3,7 @@ schema_version: 1
 id: finding.k8s-sandbox-cleanup-settlement
 kind: finding
 type: implementation_bug
-status: open
+status: resolved
 severity: high
 primary_focus: result_side_effect
 focus: [time_lifecycle, failure_concurrency, state_authority]
@@ -41,4 +41,6 @@ Stream receiver 关闭、kubectl future drop 或 delete 失败时，Pod 可遗�
 
 Result-side-effect Audit 确认 owner gap；当前 repair 已建立 detached cleanup owner/receipt/debt，
 并闭合首次NotFound后create延迟提交的竞态。Deterministic fake-kubectl 18项focused tests与两轮
-独立集成复审已通过；Finding等待final gate后再关闭。
+独立集成复审已通过；SDK合同、两档workspace Clippy、完整workspace/all-target/all-feature测试、
+no-default-features检查、17-feature矩阵与语义strict/change-evidence门禁全部通过，本Finding已闭合。
+GitHub Issue #62继续保持open，直到本提交经MR进入远端main后关闭。

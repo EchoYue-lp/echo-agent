@@ -49,7 +49,9 @@ Pod删除还必须产生具名receipt并确认缺失；空NotFound在共享deadl
 
 候选首轮复审的Important 2项与Minor 1项均已修复；集成复审又发现1项Important ambiguous
 create/delete竞态。红测和单点修复完成后第二轮集成复审Critical、Important、Minor均为0，
-实现复审结论PASS。Finding在final gate前保持open。
+实现复审结论PASS。SDK合同、两档workspace Clippy、完整workspace/all-target/all-feature测试、
+no-default-features检查、17-feature矩阵与语义strict/change-evidence均通过，Finding可标记resolved；
+Issue #62等待MR进入远端main后关闭。
 
 ## 残余风险
 
@@ -58,5 +60,4 @@ create/delete竞态。红测和单点修复完成后第二轮集成复审Critica
 
 ## 未检查项
 
-未连接真实Kubernetes集群，未运行full workspace门禁、远端CI、不可达node或自定义finalizer
-controller故障注入。
+未连接真实Kubernetes集群，未运行远端CI、不可达node或自定义finalizer controller故障注入。

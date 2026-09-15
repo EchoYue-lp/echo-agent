@@ -9,7 +9,7 @@ source_refs:
 supports: [behavior.effect-permission-execution, rule.permission-effect-order]
 limitations:
   - 未连接真实Kubernetes集群，finalizer与不可达node行为依据官方合同和fake-kubectl故障注入
-  - 按并发磁盘约束只运行echo_execution focused门禁，未运行全workspace门禁或远端CI
+  - 远端CI尚未执行，等待MR创建后提供独立Linux、Windows与依赖审计信号
 ---
 
 # K8s Sandbox cleanup settlement验证证据
@@ -39,10 +39,24 @@ CARGO_BUILD_JOBS=2`执行并返回0：
 - `cargo check -p echo_execution --all-features --locked`；
 - `cargo clippy -p echo_execution --all-targets --all-features --locked -- -D warnings`；
 - `cargo clippy -p echo_execution --lib --all-features --locked -- -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic -D clippy::unreachable`；
-- `cargo fmt -p echo_execution`与`cargo fmt -p echo_execution -- --check`。
+- `cargo fmt -p echo_execution`与`cargo fmt -p echo_execution -- --check`；
+- `./scripts/check-sdk-contracts.sh`及其26个Rustdoc profile、91项生成合同和三语言SDK合同；
+- `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`；
+- `cargo clippy --workspace --lib --bins --all-features --locked -- -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic -D clippy::unreachable`；
+- `cargo test --workspace --all-targets --all-features --locked`；
+- `cargo check --workspace --lib --no-default-features --locked`；
+- `cargo check -p echo_agent --no-default-features --features <feature> --locked`：
+  `acp/a2a/mcp/lsp/sqlite/telemetry/topology/subagent/web/media/data/statistics/channels/git/database/rag/chart`
+  17个feature逐项通过；
+- semantic strict snapshot与`--require-change-evidence`校验通过。
+
+第一次聚合执行`./scripts/verify.sh`时，已通过SDK合同与两档workspace Clippy，随后在根crate测试
+二进制链接时因并发SDK迁移占用磁盘而收到`No space left on device`。清理当前worktree中可重建的
+12.1 GiB门禁缓存后，上述精确测试命令从干净target重新执行并返回0；该失败不来自源码、测试或
+lint结果。
 
 ## 已知缺口
 
 fake-kubectl提供确定性的client/process/delete故障，不证明特定集群CNI、admission controller、
 finalizer controller或失联node的运行时延迟；真实集群验收继续作为部署环境证据，而不是本地
-单元门禁的替代品。
+单元门禁的替代品。远端Linux、Windows与依赖审计结果在MR创建后补充。
