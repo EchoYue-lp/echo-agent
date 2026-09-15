@@ -1,6 +1,9 @@
 # ADR 0046: Separate Turn Execution and Delivery Settlement
 
-- Status: Accepted
+## Status
+
+Accepted
+
 - Date: 2026-09-14
 - Owners: `echo-orchestration::runtime`, `src/acp`, `echo-sdk-host`
 

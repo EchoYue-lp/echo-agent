@@ -1,6 +1,9 @@
 # ADR 0045: Confirmed Semantic Governance Decisions
 
-- Status: Accepted
+## Status
+
+Accepted
+
 - Date: 2026-09-15
 - Owners: Framework runtime, extension lifecycle, provider contract maintainers
 
