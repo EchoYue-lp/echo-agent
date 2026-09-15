@@ -327,6 +327,17 @@ new() ─> initialize(root_uri) ─> [requests / notifications]* ─> shutdown()
                                     └─ ...
 ```
 
+### Derived client handles and shutdown
+
+`get_client` and `get_client_for_file` return handles derived from the
+manager's current lifecycle. The manager owns the child process and publishes
+a shared generation fence to those handles. `shutdown_all()` closes that fence
+before awaiting child teardown, so a handle retained by a caller becomes stale
+immediately. A stale handle returns the typed `NotInitialized` lifecycle error
+from `initialize` or another I/O operation and cannot spawn a replacement
+process. Open a new `LspManager` to start a new lifecycle; a retained client
+handle is never an independent process owner.
+
 ---
 
 ## Example: Setting Up rust-analyzer for a Rust Project
