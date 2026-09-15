@@ -26,6 +26,9 @@ limitations:
 caller drop进入同一cleanup、delete完成/失败可被观察，以及JoinError补偿cleanup在waiter drop后继续。
 新增两项还证明延迟可见Pod会被重删并确认缺失，持续无删除receipt会在共享deadline到期后
 返回typed cleanup debt。
+kubectl 控制命令启动还对 Linux `ETXTBSY` 瞬态错误执行共享 deadline 内的有界重试；其它启动
+错误仍立即进入 typed failure，避免 runner 或滚动替换期间的瞬态可执行文件占用破坏 terminal
+结算。
 独立review首轮发现并阻断无界pipe drain、cleanup debt交接窗口和stdin/settlement测试缺口；修复后
 第二轮复审PASS，Critical、Important、Minor均为0。
 
