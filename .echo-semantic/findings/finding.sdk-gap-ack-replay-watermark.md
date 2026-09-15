@@ -11,7 +11,7 @@ boundary_ref: boundary.protocol-surfaces
 behavior_refs: [behavior.protocol-projection]
 rule_refs: [rule.protocol-role-separation, rule.fact-projection-separation]
 evidence_refs: [evidence.provider-protocol-quality, evidence.sdk-contracts]
-audit_refs: [audit.protocol-surfaces.state-authority, audit.protocol-surfaces.failure-concurrency]
+audit_refs: [audit.protocol-surfaces.state-authority, audit.protocol-surfaces.time-lifecycle]
 decision_refs: []
 repair_evidence_refs: []
 verification_evidence_refs: []

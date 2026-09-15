@@ -8,11 +8,11 @@ risk: high
 primary_focus: time_lifecycle
 focus: [state_authority, failure_concurrency, result_side_effect, contract_evidence]
 boundary: boundary.agent-session-turn
-observed_at: 81e2756cee9127fa23a9bb1023bd56aa8f954964
-code_refs: [echo-core/src/agent/mod.rs, echo-core/src/agent/event_envelope.rs, echo-core/src/tools/mod.rs, src/agent/react/mod.rs, src/agent/react/run/stream_channel.rs, src/agent/handle.rs, echo-orchestration/src/runtime/turn_driver.rs, src/acp/session.rs, src/acp/runtime.rs, src/headless.rs, src/eval/runner.rs, src/channels.rs, echo-integration/src/channels/session.rs, docs/adr/0037-eval-timeout-turn-settlement.md, docs/adr/0038-eval-trace-correlation-identity.md]
+observed_at: cba8e08f3e3f0ccf1d4df3a22be11589f63b2ecd
+code_refs: [echo-core/src/agent/mod.rs, echo-core/src/agent/event_envelope.rs, echo-core/src/tools/mod.rs, src/agent/react/mod.rs, src/agent/react/run/stream_channel.rs, src/agent/handle.rs, echo-orchestration/src/runtime/turn_driver.rs, src/acp/session.rs, src/acp/runtime.rs, src/headless.rs, src/eval/runner.rs, src/channels.rs, echo-integration/src/channels/session.rs, echo-sdk-host/src/core_profile/persistence.rs, docs/adr/0037-eval-timeout-turn-settlement.md, docs/adr/0038-eval-trace-correlation-identity.md, docs/adr/0046-turn-execution-delivery-settlement.md]
 rule_refs: [rule.turn-terminal-authority, rule.context-persistence-separation]
-evidence_refs: [evidence.agent-context-execution, evidence.eval-timeout-turn-settlement-repair, evidence.eval-timeout-turn-settlement-verification, evidence.eval-trace-correlation-repair, evidence.eval-trace-correlation-verification]
-finding_refs: [finding.turn-driver-entry-coverage, finding.eval-timeout-settlement, finding.eval-trace-identity]
+evidence_refs: [evidence.agent-context-execution, evidence.eval-timeout-turn-settlement-repair, evidence.eval-timeout-turn-settlement-verification, evidence.eval-trace-correlation-repair, evidence.eval-trace-correlation-verification, evidence.turn-terminal-delivery-settlement-repair, evidence.turn-terminal-delivery-settlement-verification]
+finding_refs: [finding.turn-driver-entry-coverage, finding.eval-timeout-settlement, finding.eval-trace-identity, finding.turn-terminal-commit-projection-order]
 ---
 
 # Agent、Session 与 Turn 生命周期
@@ -23,11 +23,11 @@ finding_refs: [finding.turn-driver-entry-coverage, finding.eval-timeout-settleme
 
 ## 当前行为
 
-`ReactAgent`实现原始Agent调用、生成真实trace Run，并在managed stream中等待自有producer settled后才释放terminal；`AgentTurnDriver`接纳输入、提交envelope、归约usage/final output并生成Completed/Cancelled/Failed receipt。ACP、Headless、经ACP的SDK与Eval使用driver；Eval使用value-scoped run/turn/execution correlation，不读取Agent共享product run来猜trace，并在deadline后对同一个drive future等待共享bounded grace。Channel和直接Rust execute/chat当前绕过driver。
+`ReactAgent`实现原始Agent调用、生成真实trace Run，并在managed stream中等待自有producer settled后才释放terminal；`AgentTurnDriver`接纳输入、提交envelope、归约usage/final output，并把producer execution outcome与sink delivery outcome写入同一receipt。ACP、Headless、经ACP的SDK与Eval使用driver；SDK持久化在恢复时校验Journal/index/receipt一致性。Channel和直接Rust execute/chat当前绕过driver。
 
 ## 期望行为
 
-EOF、sink 失败、取消和 close 不得被投影为成功；应用可持久化或渲染 receipt，但不能重新判断通用终态。
+EOF、取消和close不得被投影为成功；sink失败必须作为delivery failure可见，但已观察到的producer terminal不得被它覆盖。应用可持久化或渲染receipt，但不能重新判断通用执行终态。
 
 ## 触发、结果与副作用
 

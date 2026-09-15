@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.nonstream-cancellation-parity-repair
 kind: evidence
-observed_at: 13a6a742a4eec2dcc971945d9887662310c3ce43
+observed_at: 13a6a74222249dfd370a15f7d8b23c9f9a4a9553
 source_refs:
   - echo-core/src/llm/mod.rs
   - echo-integration/src/providers/client.rs
@@ -29,7 +29,7 @@ JSON decode使用8 KiB cooperative reader；取消时未启动的blocking task�
 
 ## 来源与范围
 
-最终实现由汇总分支commit `13a6a742a4eec2dcc971945d9887662310c3ce43`承载，复用
+最终实现由汇总分支commit `13a6a74222249dfd370a15f7d8b23c9f9a4a9553`承载，复用
 既有ChatRequest cancellation token和provider client helper，不创建第二状态机。
 
 ## 已知缺口

@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.nonstream-cancellation-parity-verification
 kind: evidence
-observed_at: 13a6a742a4eec2dcc971945d9887662310c3ce43
+observed_at: 13a6a74222249dfd370a15f7d8b23c9f9a4a9553
 source_refs:
   - echo-integration/src/providers/client.rs
   - echo-integration/src/providers/openai.rs

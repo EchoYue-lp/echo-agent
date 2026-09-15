@@ -5,15 +5,15 @@ kind: audit
 boundary_ref: boundary.llm-provider-runtime
 lens: failure_concurrency
 freshness: examined
-revision: 13a6a742a4eec2dcc971945d9887662310c3ce43
+revision: 13a6a74222249dfd370a15f7d8b23c9f9a4a9553
 finding_refs: [finding.nonstream-cancellation-parity]
 challenges:
   full-request-cancellation-boundary:
-    revision: 13a6a742a4eec2dcc971945d9887662310c3ce43
+    revision: 13a6a74222249dfd370a15f7d8b23c9f9a4a9553
     source_refs: [echo-integration/src/providers/client.rs, echo-integration/src/providers/openai.rs, echo-integration/src/providers/responses.rs, echo-integration/src/providers/anthropic.rs]
     evidence_refs: [evidence.nonstream-cancellation-parity-repair, evidence.nonstream-cancellation-parity-verification]
   strict-decode-and-task-settlement:
-    revision: 13a6a742a4eec2dcc971945d9887662310c3ce43
+    revision: 13a6a74222249dfd370a15f7d8b23c9f9a4a9553
     source_refs: [echo-integration/src/providers/client.rs]
     evidence_refs: [evidence.nonstream-cancellation-parity-verification]
 ---
@@ -38,7 +38,7 @@ shared helper，decode cooperative stop并await，三provider在projection后复
 
 ## 问题记录
 
-首次review的两个Important均已由commit `13a6a742a4eec2dcc971945d9887662310c3ce43`
+首次review的两个Important均已由commit `13a6a74222249dfd370a15f7d8b23c9f9a4a9553`
 修复并加入确定性反例。
 
 ## 残余风险
