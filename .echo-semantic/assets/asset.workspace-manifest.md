@@ -6,9 +6,9 @@ title: Workspace 与 Feature 编译权威
 asset_type: state_authority
 status: active
 risk: high
-observed_at: source:66a74859cd586d80d2ad791b3a2369b31e7bcff60f6afb6a4edf3575a29a7778
+observed_at: source:552140ec57df7b7bfc4d7ebf0e9e9c8a9c777a78ce249fc8e8cb89635e9e23cc
 boundary_refs: [boundary.workspace-architecture]
-code_refs: [Cargo.toml, echo-core/Cargo.toml, echo-execution/Cargo.toml, echo-integration/Cargo.toml, echo-macros/Cargo.toml, echo-orchestration/Cargo.toml, echo-state/Cargo.toml, echo-tools/Cargo.toml, echo-sdk-protocol/Cargo.toml, echo-sdk-host/Cargo.toml, echo-agent-learning/Cargo.toml]
+code_refs: [Cargo.toml, echo-core/Cargo.toml, echo-execution/Cargo.toml, echo-integration/Cargo.toml, echo-macros/Cargo.toml, echo-orchestration/Cargo.toml, echo-state/Cargo.toml, echo-tools/Cargo.toml, echo-agent-learning/Cargo.toml]
 consumer_refs: [.github/workflows/rust-ci.yml, scripts/verify.sh, README.md, README.zh.md, echo-agent-learning/tests/documentation_contract.rs]
 behavior_refs: [behavior.workspace-composition]
 rule_refs: [rule.framework-layer-ownership]
@@ -25,7 +25,8 @@ Cargo workspace members、依赖 DAG 与 feature 声明的编译期权威。
 
 ## 来源与消费者
 
-全部 11 个 package manifests 被 Cargo、CI、learning passthrough 和 SDK Host feature advertisement 消费。
+9 个 framework/runtime package manifests 被 Cargo、CI、learning passthrough 和外部 SDK
+consumer 消费；SDK Host 自身的 manifest 位于独立 `echo-agent-sdk` 仓库。
 
 ## 生命周期
 

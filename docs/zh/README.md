@@ -111,11 +111,11 @@
 | [0025 - 确定性 CommandCell watcher](../adr/0025-deterministic-command-cell-watcher.md) | retained typed watcher 取代模型驱动的命令轮询 |
 | [0026 - 仅使用官方 Skill Frontmatter](../adr/0026-official-skill-frontmatter-only.md) | 文件 Skill 使用官方字段，Hook 配置保持独立 |
 | [0027 - Subagent 通信原语](../adr/0027-subagent-communication-primitives.md) | attempt-scoped 消息与 lineage 复用同一 Subagent 控制面 |
-| [0028 - 源码优先的多语言 SDK Runtime](../adr/0028-source-first-multilanguage-sdk-runtime.md) | ACP 与 namespaced extension 向源码 SDK 暴露同一个 Rust runtime |
+| [0028 - 源码优先的多语言 SDK Runtime](../adr/0028-source-first-multilanguage-sdk-runtime.md) | 历史 ACP/runtime 决策；当前 SDK ownership 在独立仓库 |
 | [0029 - 共享 Subagent 执行准入](../adr/0029-shared-subagent-execution-admission.md) | Proposed 的共享准入组合 Task 与直接 Subagent 执行 |
 | [0030 - 版本化 Subagent 事件信封](../adr/0030-versioned-subagent-event-envelope.md) | 一个版本化信封拥有 Subagent 事件 identity、顺序与 replay |
-| [0031 - SDK Identity 治理范围](../adr/0031-sdk-identity-governance-scope.md) | SDK identity inventory 监控漂移，不衡量项目语义完成度 |
-| [0032 - SDK 合同范围分类](../adr/0032-sdk-contract-scope-classification.md) | identity 级 scope 区分当前外部合同、Host/Rust-only、语言固有、内部 helper 与 deferred surface |
+| [0031 - SDK Identity 治理范围](../adr/0031-sdk-identity-governance-scope.md) | ownership 指引；独立 SDK 将 inventory 作为非阻断漂移遥测 |
+| [0032 - SDK 合同范围分类](../adr/0032-sdk-contract-scope-classification.md) | ownership 指引；只有独立 SDK accepted external contract 阻断语言兼容 |
 | [0041 - 语义治理连续性](../adr/0041-semantic-governance-continuity.md) | 用结果特定的连续性裁决衔接 SDK 基线与全 workspace 治理 |
 
 ---

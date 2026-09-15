@@ -27,6 +27,9 @@ use tokio_util::sync::CancellationToken;
 const DEFAULT_K8S_CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
 const K8S_CLEANUP_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const MAX_K8S_TERMINAL_FACT_CHARS: usize = 1_024;
+const K8S_CONTROL_START_RETRY_LIMIT: usize = 2;
+const K8S_CONTROL_START_RETRY_DELAY: Duration = Duration::from_millis(5);
+const ETXTBSY_OS_ERROR: i32 = 26;
 
 /// K8s 沙箱配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -264,22 +267,45 @@ impl K8sSandbox {
         stage: &str,
         deadline: tokio::time::Instant,
     ) -> Result<std::process::Output> {
-        let mut command = Command::new(&self.kubectl_program);
-        command
-            .args(args)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true);
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero() {
-            return Err(k8s_control_deadline_error(stage, self.control_timeout));
-        }
-        match tokio::time::timeout(remaining, command.output()).await {
-            Ok(Ok(output)) => Ok(output),
-            Ok(Err(error)) => Err(echo_core::error::ReactError::Sandbox(Box::new(
-                SandboxError::IoError(format!("Failed to run kubectl {stage}: {error}")),
-            ))),
-            Err(_) => Err(k8s_control_deadline_error(stage, self.control_timeout)),
+        let mut retries = 0;
+        loop {
+            let mut command = Command::new(&self.kubectl_program);
+            command
+                .args(args)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .kill_on_drop(true);
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(k8s_control_deadline_error(stage, self.control_timeout));
+            }
+            match tokio::time::timeout(remaining, command.output()).await {
+                Ok(Ok(output)) => return Ok(output),
+                Ok(Err(error)) if is_retryable_kubectl_start_error(&error) => {
+                    if retries >= K8S_CONTROL_START_RETRY_LIMIT {
+                        return Err(echo_core::error::ReactError::Sandbox(Box::new(
+                            SandboxError::IoError(format!(
+                                "Failed to run kubectl {stage}: {error}"
+                            )),
+                        )));
+                    }
+                    retries += 1;
+                    let delay = std::cmp::min(
+                        K8S_CONTROL_START_RETRY_DELAY,
+                        deadline.saturating_duration_since(tokio::time::Instant::now()),
+                    );
+                    if delay.is_zero() {
+                        return Err(k8s_control_deadline_error(stage, self.control_timeout));
+                    }
+                    tokio::time::sleep(delay).await;
+                }
+                Ok(Err(error)) => {
+                    return Err(echo_core::error::ReactError::Sandbox(Box::new(
+                        SandboxError::IoError(format!("Failed to run kubectl {stage}: {error}")),
+                    )));
+                }
+                Err(_) => return Err(k8s_control_deadline_error(stage, self.control_timeout)),
+            }
         }
     }
 
@@ -1009,6 +1035,10 @@ fn k8s_control_deadline_error(stage: &str, timeout: Duration) -> echo_core::erro
     ))))
 }
 
+fn is_retryable_kubectl_start_error(error: &std::io::Error) -> bool {
+    error.raw_os_error() == Some(ETXTBSY_OS_ERROR)
+}
+
 fn k8s_ambiguous_absence_error(pod_name: &str, timeout: Duration) -> echo_core::error::ReactError {
     echo_core::error::ReactError::Sandbox(Box::new(SandboxError::IoError(format!(
         "K8s Pod cleanup could not confirm {pod_name} absence within {}ms after an ambiguous delete; the create request may still commit",
@@ -1107,6 +1137,16 @@ impl SandboxExecutor for K8sSandbox {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_etxtbsy_is_retryable_when_starting_kubectl() {
+        assert!(is_retryable_kubectl_start_error(
+            &std::io::Error::from_raw_os_error(ETXTBSY_OS_ERROR)
+        ));
+        assert!(!is_retryable_kubectl_start_error(
+            &std::io::Error::from_raw_os_error(2)
+        ));
+    }
 
     #[cfg(unix)]
     struct FakeKubectl {

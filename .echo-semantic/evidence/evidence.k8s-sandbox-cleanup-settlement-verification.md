@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.k8s-sandbox-cleanup-settlement-verification
 kind: evidence
-observed_at: source:66a74859cd586d80d2ad791b3a2369b31e7bcff60f6afb6a4edf3575a29a7778
+observed_at: source:552140ec57df7b7bfc4d7ebf0e9e9c8a9c777a78ce249fc8e8cb89635e9e23cc
 source_refs:
   - echo-execution/src/sandbox/k8s.rs
   - docs/adr/0002-sandbox-cancellation-cleanup.md
@@ -26,12 +26,15 @@ limitations:
 caller drop进入同一cleanup、delete完成/失败可被观察，以及JoinError补偿cleanup在waiter drop后继续。
 新增两项还证明延迟可见Pod会被重删并确认缺失，持续无删除receipt会在共享deadline到期后
 返回typed cleanup debt。
+kubectl 控制命令启动还对 Linux `ETXTBSY` 瞬态错误执行共享 deadline 内的有界重试；其它启动
+错误仍立即进入 typed failure，避免 runner 或滚动替换期间的瞬态可执行文件占用破坏 terminal
+结算。
 独立review首轮发现并阻断无界pipe drain、cleanup debt交接窗口和stdin/settlement测试缺口；修复后
 第二轮复审PASS，Critical、Important、Minor均为0。
 
 ## 来源与范围
 
-以下命令均在最终源码摘要`66a74859cd586d80d2ad791b3a2369b31e7bcff60f6afb6a4edf3575a29a7778`
+以下命令均在最终源码摘要`552140ec57df7b7bfc4d7ebf0e9e9c8a9c777a78ce249fc8e8cb89635e9e23cc`
 上以`CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
 CARGO_BUILD_JOBS=2`执行并返回0：
 

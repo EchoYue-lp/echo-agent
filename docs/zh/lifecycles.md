@@ -174,29 +174,12 @@ Plugin publication 可组合component，但不消除child cleanup责任。当前
 [Hook](./23-hooks.md)、[Skill](./07-skills.md)、[Plugin](./32-plugin-system.md) 和 [LSP](./31-lsp-integration.md)
 读取；本概览不承诺atomic hot reload。
 
-## SDK
+## SDK Consumer
 
-```text
-Rust public facade
-  -> deterministic inventory and scope classification
-  -> protocol schema and Host operations
-  -> TypeScript / Python / Java source SDK
-  -> contract, connection, and lifecycle tests
-```
-
-| 边界 | 契约 |
-| --- | --- |
-| Trigger | Public Rust API变化或显式contract generation |
-| Admission | Inventory校验canonical identity、alias、feature、signature和scope |
-| Authority | Rust source/facade拥有行为；parity manifest拥有language scope；Host拥有runtime dispatch |
-| Event 与 Effect | ACP和namespaced operation传输typed request、stream、handle和resource |
-| Cancellation 与 failure | Client/Host protocol保留typed failure、cancellation和close boundary |
-| Terminal | Operation或stream terminal遵循protocol；connection EOF不发明success |
-| Recovery 与 Projection | Reconnect/resume遵循protocol capability；generated catalog仍是可重算projection |
-
-Inventory 分开external contract、Host/Rust-only、language intrinsic、internal helper和deferred backlog。
-Inventory size衡量drift coverage，不表示项目语义完成度。详见 [Source-first SDK ADR](../adr/0028-source-first-multilanguage-sdk-runtime.md)
-和 [SDK Scope ADR](../adr/0032-sdk-contract-scope-classification.md)。
+多语言 SDK 和源码构建的 ACP Host 由独立的
+[echo-agent-sdk](https://github.com/EchoYue-lp/echo-agent-sdk) 仓库维护。
+它消费本 framework 的 Rust facade 和运行时权威；framework 不拥有 SDK 的语言合同、
+生成 catalog 或客户端生命周期实现。
 
 ## Failure 与 Terminal 矩阵
 

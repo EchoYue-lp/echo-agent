@@ -6,7 +6,7 @@ title: Tests、Examples 与 CI 消费者
 asset_type: test_consumer
 status: active
 risk: high
-observed_at: source:66a74859cd586d80d2ad791b3a2369b31e7bcff60f6afb6a4edf3575a29a7778
+observed_at: source:552140ec57df7b7bfc4d7ebf0e9e9c8a9c777a78ce249fc8e8cb89635e9e23cc
 boundary_refs: [boundary.workspace-architecture, boundary.agent-session-turn, boundary.context-memory, boundary.task-subagent-workflow, boundary.observation-persistence-delivery, boundary.tool-permission-sandbox, boundary.extension-lifecycle, boundary.llm-provider-runtime, boundary.protocol-surfaces, boundary.eval-evolution]
 code_refs: [tests/facade_smoke.rs, echo-agent-learning/tests/documentation_contract.rs, echo-agent-learning/tests/example_contracts.rs, echo-agent-learning/tests/semantic_baseline_contract.rs, echo-agent-learning/examples/README.md, .github/workflows/rust-ci.yml, scripts/verify.sh]
 consumer_refs: [Cargo.toml, echo-agent-learning/Cargo.toml]
@@ -25,7 +25,8 @@ Framework public API、行为、失败路径、feature 与跨平台合同的 exe
 
 ## 来源与消费者
 
-Cargo/CI 运行 tests/examples/benches 和 SDK checks；正式文档引用 learning contracts。
+Cargo/CI 运行 framework tests/examples/benches；正式文档引用 learning contracts，SDK
+合同和语言 gate 由独立 `echo-agent-sdk` 仓库运行。
 
 ## 生命周期
 

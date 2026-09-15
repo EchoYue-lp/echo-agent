@@ -5,7 +5,7 @@
 Accepted
 
 - Date: 2026-09-14
-- Owners: `echo-orchestration::runtime`, `src/acp`, `echo-sdk-host`
+- Owners: `echo-orchestration::runtime`, `src/acp`, and the external SDK Host consumer
 
 ## Context
 
@@ -70,7 +70,8 @@ by that ledger; Journal or projection failure may make these watermarks differ.
 ## Verification
 
 Focused driver tests cover all terminal kinds, terminal and pre-terminal sink
-failures, Closed, missing terminal, and stream-start error delivery. ACP and
-SDK host tests cover Journal/observer failure, wire validation, persistence,
-and legacy receipt decoding. Full workspace and SDK contract gates remain
-required before closing Finding #108.
+failures, Closed, missing terminal, and stream-start error delivery. ACP adapter
+tests in this repository and external SDK Host tests cover Journal/observer
+failure, wire validation, persistence, and legacy receipt decoding. Full
+framework and independent SDK gates remain required before closing Finding
+#108.

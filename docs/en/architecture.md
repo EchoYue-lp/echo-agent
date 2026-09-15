@@ -3,7 +3,7 @@
 ## Scope
 
 echo-agent is a reusable Rust Agent framework. It owns product-neutral Agent,
-execution, state, orchestration, integration, Tool, protocol, and SDK mechanisms.
+execution, state, orchestration, integration, Tool, and protocol-adapter mechanisms.
 An embedding application owns its product Workspace, user experience, deployment,
 and Device policy. See [Framework and Application Boundary](./39-framework-application-boundary.md).
 
@@ -12,7 +12,7 @@ This page explains package and ownership boundaries. It does not replace the
 
 ## Package Topology
 
-The workspace contains the root `echo_agent` package plus ten members. Cargo
+The workspace contains the root `echo_agent` package plus eight members. Cargo
 manifests are authoritative for this graph.
 
 ```text
@@ -25,9 +25,7 @@ Embedding application / protocol surface
                     |
        +------------+-------------+
        |                          |
-echo-sdk-protocol             echo-agent-learning
-       |
-echo-sdk-host --------------> echo_agent
+echo-agent-learning       external SDK consumers
 ```
 
 The exact member set and feature graph come from the root
@@ -46,8 +44,6 @@ metadata rather than maintained as a second package registry.
 | `echo-integration` | Provider, MCP, LSP, channel, and external protocol implementations | Depends on `echo_core` |
 | `echo-tools` | Reusable file, shell, web, data, media, database, and research Tools | Depends on core contracts and macros |
 | `echo-macros` | Compile-time Tool, callback, guard, and handler adapters | Depends on core contracts and orchestration types |
-| `echo-sdk-protocol` | Deterministic facade inventory, schemas, wire contracts, and generation | Depends on `echo_core` |
-| `echo-sdk-host` | Runtime Host exposing `echo_agent` through ACP and namespaced operations | Consumes the root facade and SDK protocol |
 | `echo-agent-learning` | Non-published executable consumer, examples, and documentation contracts | Consumes only the root facade |
 
 The root [`src/lib.rs`](../../src/lib.rs) is the public composition authority.
@@ -59,12 +55,12 @@ boundary, not a runtime registry or state authority.
 
 Framework users should enter through `echo_agent` and its documented modules.
 Split crates keep implementation responsibilities testable, while the facade
-keeps downstream paths stable. The SDK protocol and Host are consumers and
-adapters; they do not move protocol state into `echo_core` or make a language
-SDK the Rust API authority.
+keeps downstream paths stable. The independent SDK repository is a consumer and
+adapter; it does not move protocol state into `echo_core` or make a language SDK
+the Rust API authority.
 
 Raw Agent APIs remain valid low-level contracts. Driven surfaces such as
-[Headless](./33-headless-mode.md), ACP, Eval, and SDK Host can compose the shared
+[Headless](./33-headless-mode.md), ACP, Eval, and the external SDK Host can compose the shared
 Turn driver and receipt lifecycle. A surface may translate identity, events,
 and errors, but it must not invent a second terminal or Task graph authority.
 
@@ -93,7 +89,7 @@ Framework Trace, Metrics, and Telemetry primitives provide diagnostics; startup,
 exporter, deployment, and retention policy remain explicit consumer choices.
 
 Protocol adapters also remain boundaries rather than owners. ACP, A2A,
-Channels, Headless, and SDK Host project framework behavior into different
+Channels, Headless, and the external SDK Host project framework behavior into different
 surfaces. Their current guarantees are defined by their detailed chapters and
 tests; this overview does not broaden them.
 
@@ -106,7 +102,7 @@ tests; this overview does not broaden them.
 | Runtime behavior | Source, tests, and accepted ADRs | Focused and integration tests |
 | Persistent meaning | The named Store, Journal, checkpoint, or ledger | Recovery and contract tests |
 | Runnable example | Cargo target metadata | `echo-agent-learning` contracts |
-| SDK language scope | Parity manifest and source contract | Rust and language SDK gates |
+| SDK language scope | The independent `echo-agent-sdk` repository | SDK repository contract and language gates |
 
 The documentation authority and its tradeoffs are recorded in
 [ADR 0040](../adr/0040-framework-concept-documentation-authority.md).

@@ -4,7 +4,7 @@ id: map.extension-lifecycle
 kind: capability_map
 title: MCP、Hook、Skill、Plugin 与 LSP 生命周期
 risk: high
-observed_at: source:66a74859cd586d80d2ad791b3a2369b31e7bcff60f6afb6a4edf3575a29a7778
+observed_at: source:552140ec57df7b7bfc4d7ebf0e9e9c8a9c777a78ce249fc8e8cb89635e9e23cc
 boundary_refs: [boundary.extension-lifecycle]
 behavior_refs: [behavior.extension-publication]
 rule_refs: [rule.extension-generation-authority, rule.permission-effect-order]
@@ -43,7 +43,7 @@ scenarios:
     audit_refs: [audit.lsp-derived-handle-lifecycle-rereview]
   host-production-coordination:
     status: needs_review
-    source_refs: [src/plugin/prepared.rs, echo-core/src/plugin/lifecycle.rs, echo-sdk-host/src/core_profile/facade/integrations.rs]
+    source_refs: [src/plugin/prepared.rs, echo-core/src/plugin/lifecycle.rs]
     unknown: Plugin registry/wiring/callback 与 LSP/MCP close 的统一生产编排者在 framework consumers 中不完整
     next_step: high-risk lifecycle audit 追踪 Host 与 embedding application 的实际调用顺序和 cleanup debt
   credential-debug-redaction:

@@ -2,26 +2,17 @@
 schema_version: 1
 id: evidence.checkpoint-journal-sdk-inventory
 kind: evidence
-observed_at: 29cea08cd3b487d59fef1a769e5d6fe9dbf3e36e
+observed_at: source:552140ec57df7b7bfc4d7ebf0e9e9c8a9c777a78ce249fc8e8cb89635e9e23cc
 source_refs:
   - echo-state/src/journal/mod.rs
-  - echo-sdk-protocol/src/facade.rs
-  - echo-sdk-protocol/tests/facade_inventory.rs
-  - contracts/sdk/public-api.txt
-  - contracts/sdk/parity-manifest.json
-  - contracts/sdk/facade-operation-catalog.json
-  - contracts/sdk/source-contract.json
-  - sdks/shared/facade-operation-catalog.json
-  - sdks/shared/contract-digests.json
-  - scripts/check-language-sdks.sh
-  - sdks/typescript/test/catalog.test.js
-  - sdks/python/tests/test_catalog.py
-  - sdks/java/src/test/java/com/echoagent/sdk/FacadeParityTest.java
+  - docs/adr/0055-checkpoint-journal-identity.md
+  - docs/adr/0051-extract-sdk-repository.md
+  - README.md
 supports: [behavior.observation-persistence, behavior.sdk-facade-routing, rule.fact-projection-separation, rule.sdk-rust-authority]
 limitations:
   - 本Evidence只证明Journal identity公共面已进入现有inventory分类和生成链，不证明其它deferred SDK能力已经完成
   - 本切片没有增加TypeScript、Python或Java源码，也没有改变extension wire schema或fixture
-  - echo-sdk-host与echo-sdk-protocol独立仓库迁移继续由Issue 122跟踪，远端平台CI等待PR执行
+  - 原SDK生成物已经从framework删除；外部echo-agent-sdk PR必须吸收本Evidence记录的9724项最终payload后才能完成Issue 122
 ---
 
 # Checkpoint 与 Journal identity SDK inventory 证据
@@ -40,8 +31,11 @@ intrinsic 790、internal helper 90、deferred 1448。extension schema和全部fi
 ## 来源与范围
 
 该变化由Issue #43的Journal generation身份合同触发，沿用ADR 0031/0032的scope分类和现有生成器；
-不建立第二个SDK contract authority，也不与Issue #122的仓库拆分并行修改Host/Protocol实现。
+不建立第二个SDK contract authority。原生成物在`29cea08c`完成验证后随Issue #122迁往独立仓库；
+framework只保留该历史交付证据和外部owner边界，不再生成或维护SDK合同。
 
 ## 已知缺口
 
-本地完整SDK合同、三语言合同和workspace门禁已通过；远端平台CI等待PR执行。
+`29cea08c`上的完整SDK合同、三语言合同和workspace门禁已通过。当前独立SDK PR #1仍缺少
+这11个canonical identity与2个签名变化，且framework extraction在该payload进入外部仓库前
+不得合入main；本Evidence不把尚未完成的跨仓迁移描述为已交付。
