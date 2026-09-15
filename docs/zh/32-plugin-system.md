@@ -126,12 +126,15 @@ EchoAgent 向 stdio 子进程提供 `PLUGIN_ROOT` 和 `PLUGIN_DATA`。`${PLUGIN_
 
 应用可以覆盖插件数据根目录，embedding application 会将其设为 `<application-data>`。
 
-插件按依赖顺序加载。清单致命错误会跳过整个包；组件错误按最小可行边界隔离。运行时记录每个插件的组件所有权，因此 disable、uninstall 和 reload 能精确卸载对应组件。
+插件按依赖顺序加载。清单致命错误会跳过整个包；framework解析的Skill、Hook、MCP错误按组件边界隔离并记录error diagnostic，无法读取的冻结Subagent/LSP文档也按相同方式排除。二者的产品级语法由embedding application的第二阶段prepare校验。同一插件中健康的兄弟组件仍保留在prepared plugin中。运行时记录每个插件的组件所有权，因此disable、uninstall和reload能精确卸载对应组件。
 
 `PluginIntegrator::prepare` 捕获唯一不可变的 `PreparedPluginSet`，包括单调 generation、确定性
 内容 identity、结构化诊断、已解析的 Skills/Hooks/MCP，以及保留 owner 的 Subagent/LSP 文档。
 `wire_prepared` 与 rollback 不读取组件文件；磁盘变化只在 registry mutation 或显式 invalidation
 后可见。见 [ADR 0012](../adr/0012-immutable-plugin-preparation.md)。
+
+存在组件诊断时，整个 set 仍然可应用；只有依赖排序或 generation 分配等代次级不变量无法
+构造完整不可变快照时，set 才会被拒绝。
 
 ## API
 
