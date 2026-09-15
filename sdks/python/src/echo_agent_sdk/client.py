@@ -2402,7 +2402,9 @@ class _AsyncQueue:
             return
         self._items.append(value)
 
-    def fail(self, error: BaseException) -> None:
+    def fail(self, error: BaseException, *, discard_pending: bool = False) -> None:
+        if discard_pending:
+            self._items.clear()
         if self._closed:
             return
         self._closed = True
@@ -2451,6 +2453,116 @@ class _AsyncQueue:
                 yield await self.get()
             except StopAsyncIteration:
                 return
+
+
+@dataclass(slots=True)
+class _EventFeed:
+    """One generation-fenced event feed owned by a stream id."""
+
+    queue: _AsyncQueue
+    handle: WireHandle | None = None
+    last_sequence: int = 0
+
+    def bind(self, handle: WireHandle) -> None:
+        if handle.kind != "stream":
+            raise EchoAgentError(
+                "serialization_violation", "event stream handle kind is invalid"
+            )
+        if self.handle is not None and self.handle != handle:
+            raise EchoAgentError(
+                "handle_mismatch", "event stream handle changed generation"
+            )
+        self.handle = handle
+
+    def accept_event(self, value: Mapping[str, Any]) -> bool:
+        stream = _parse_event_stream(value)
+        self.bind(stream)
+        envelope = value.get("envelope")
+        if not isinstance(envelope, Mapping):
+            raise EchoAgentError(
+                "serialization_violation", "event notification is missing its envelope"
+            )
+        if envelope.get("stream_id") != stream.id:
+            raise EchoAgentError(
+                "serialization_violation",
+                "event envelope stream_id does not match its handle",
+            )
+        sequence = _parse_positive_sequence(envelope.get("sequence"), "event sequence")
+        if sequence == self.last_sequence:
+            return False
+        if self.last_sequence > 0 and sequence != self.last_sequence + 1:
+            raise EchoAgentError(
+                "event_gap", "event sequence is not contiguous; replay is required"
+            )
+        self.last_sequence = sequence
+        return True
+
+    def accept_gap(self, value: Mapping[str, Any]) -> bool:
+        stream = _parse_event_stream(value)
+        self.bind(stream)
+        gap = value.get("gap")
+        if not isinstance(gap, Mapping):
+            raise EchoAgentError(
+                "serialization_violation", "gap notification is missing its gap"
+            )
+        from_sequence = _parse_positive_sequence(
+            gap.get("from_sequence"), "gap from_sequence"
+        )
+        to_sequence = _parse_positive_sequence(
+            gap.get("to_sequence"), "gap to_sequence"
+        )
+        watermark = _parse_positive_sequence(
+            gap.get("snapshot_watermark"), "gap snapshot_watermark"
+        )
+        reason = gap.get("reason")
+        if (
+            not isinstance(reason, str)
+            or not reason.strip()
+            or to_sequence < from_sequence
+            or watermark < to_sequence
+            or watermark < self.last_sequence
+            or (
+                watermark > self.last_sequence
+                and self.last_sequence > 0
+                and from_sequence != self.last_sequence + 1
+            )
+        ):
+            raise EchoAgentError(
+                "serialization_violation", "gap sequence range is malformed"
+            )
+        if watermark == self.last_sequence:
+            return False
+        self.last_sequence = watermark
+        return True
+
+
+def _parse_positive_sequence(value: Any, name: str) -> int:
+    if not isinstance(value, str):
+        raise EchoAgentError("serialization_violation", f"{name} must be decimal text")
+    try:
+        text = _canonical_u64_text(value, name)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise EchoAgentError(
+            "serialization_violation", f"{name} must be canonical u64 text"
+        ) from error
+    parsed = int(text)
+    if parsed < 1:
+        raise EchoAgentError("serialization_violation", f"{name} must be positive")
+    return parsed
+
+
+def _parse_event_stream(value: Mapping[str, Any]) -> WireHandle:
+    try:
+        stream = WireHandle.from_dict(value.get("stream"))
+    except (TypeError, ValueError, OverflowError) as error:
+        raise EchoAgentError(
+            "serialization_violation", "event notification has an invalid stream handle"
+        ) from error
+    if stream.kind != "stream":
+        raise EchoAgentError(
+            "serialization_violation", "event notification has an invalid stream handle"
+        )
+    return stream
 
 
 class _Callbacks:
@@ -2560,7 +2672,7 @@ class EchoAgentClient:
         catalog: FacadeCatalog,
         capability: Mapping[str, Any],
         updates: dict[str, _AsyncQueue],
-        events: dict[str, _AsyncQueue],
+        events: dict[str, _EventFeed],
         callbacks: _Callbacks,
         event_queue_size: int,
         update_queue_size: int,
@@ -2572,13 +2684,13 @@ class EchoAgentClient:
         self.catalog = catalog
         self.capability = dict(capability)
         self._updates = updates
-        self._events = events
+        self._events: dict[str, _EventFeed] = events
         self._callbacks = callbacks
         self._event_queue_size = event_queue_size
         self._update_queue_size = update_queue_size
         self._process_watch = process_watch
         self._close_lock = asyncio.Lock()
-        self._event_cursors: dict[str, int] = {}
+        self._event_cursors: dict[WireHandle, int] = {}
         self._closed = False
 
     @classmethod
@@ -2598,7 +2710,7 @@ class EchoAgentClient:
         _validate_queue_size(max_buffered_updates, "max_buffered_updates")
         catalog = FacadeCatalog(catalog_path)
         updates: dict[str, _AsyncQueue] = {}
-        events: dict[str, _AsyncQueue] = {}
+        events: dict[str, _EventFeed] = {}
 
         async def observe(event: StreamEvent) -> None:
             if event.direction is not StreamDirection.INCOMING:
@@ -2608,12 +2720,26 @@ class EchoAgentClient:
                 return
             params = message.get("params")
             if not isinstance(params, dict):
-                return
-            stream = params.get("stream")
-            if isinstance(stream, dict) and isinstance(stream.get("id"), str):
-                events.setdefault(stream["id"], _AsyncQueue(max_buffered_events)).push(
-                    params
+                error = EchoAgentError(
+                    "serialization_violation", "event notification must be an object"
                 )
+                for feed in events.values():
+                    feed.queue.fail(error)
+                return
+            try:
+                stream = _parse_event_stream(params)
+            except EchoAgentError as error:
+                for feed in events.values():
+                    feed.queue.fail(error)
+                return
+            feed = events.setdefault(
+                stream.id, _EventFeed(_AsyncQueue(max_buffered_events))
+            )
+            try:
+                if feed.accept_event(params):
+                    feed.queue.push(params)
+            except EchoAgentError as error:
+                feed.queue.fail(error)
 
         async def observe_gap(event: StreamEvent) -> None:
             if event.direction is not StreamDirection.INCOMING:
@@ -2623,12 +2749,26 @@ class EchoAgentClient:
                 return
             params = message.get("params")
             if not isinstance(params, dict):
-                return
-            stream = params.get("stream")
-            if isinstance(stream, dict) and isinstance(stream.get("id"), str):
-                events.setdefault(stream["id"], _AsyncQueue(max_buffered_events)).push(
-                    params
+                error = EchoAgentError(
+                    "serialization_violation", "gap notification must be an object"
                 )
+                for feed in events.values():
+                    feed.queue.fail(error)
+                return
+            try:
+                stream = _parse_event_stream(params)
+            except EchoAgentError as error:
+                for feed in events.values():
+                    feed.queue.fail(error)
+                return
+            feed = events.setdefault(
+                stream.id, _EventFeed(_AsyncQueue(max_buffered_events))
+            )
+            try:
+                if feed.accept_gap(params):
+                    feed.queue.push(params)
+            except EchoAgentError as error:
+                feed.queue.fail(error)
 
         callback_client = _Callbacks(updates, max_buffered_updates)
         merged_env = dict(os.environ)
@@ -2759,7 +2899,9 @@ class EchoAgentClient:
                 details={"returncode": self.process.returncode},
             )
         self._callbacks.cancel_all()
-        for queue in (*self._updates.values(), *self._events.values()):
+        for feed in self._events.values():
+            feed.queue.fail(failure)
+        for queue in self._updates.values():
             queue.fail(failure)
 
     async def notify(self, method: str, params: Any = None) -> None:
@@ -2847,8 +2989,20 @@ class EchoAgentClient:
     def events_for(
         self, stream_id: str, stream: WireHandle | None = None
     ) -> AsyncIterator[Any]:
-        queue = self._events.setdefault(stream_id, _AsyncQueue(self._event_queue_size))
-        return self._iterate_events(queue, stream)
+        feed = self._events.setdefault(
+            stream_id, _EventFeed(_AsyncQueue(self._event_queue_size))
+        )
+        if stream is not None:
+            try:
+                if stream.id != stream_id:
+                    raise EchoAgentError(
+                        "handle_mismatch",
+                        "event stream id does not match the requested feed",
+                    )
+                feed.bind(stream)
+            except EchoAgentError as error:
+                feed.queue.fail(error, discard_pending=True)
+        return self._iterate_events(feed.queue, stream)
 
     async def _iterate_events(
         self, queue: _AsyncQueue, stream: WireHandle | None
@@ -2877,6 +3031,12 @@ class EchoAgentClient:
             if isinstance(gap, dict)
             else None
         )
+        try:
+            event_stream = _parse_event_stream(value)
+        except EchoAgentError:
+            return
+        if event_stream != stream:
+            return
         if (
             not isinstance(sequence, str)
             or not sequence.isascii()
@@ -2886,9 +3046,8 @@ class EchoAgentClient:
         if sequence.startswith("0") and sequence != "0":
             return
         parsed = int(sequence)
-        if parsed < 1 or parsed <= self._event_cursors.get(stream.id, 0):
+        if parsed < 1 or parsed <= self._event_cursors.get(stream, 0):
             return
-        self._event_cursors[stream.id] = parsed
         await self.notify(
             "echo_agent/event/ack",
             {
@@ -2898,6 +3057,7 @@ class EchoAgentClient:
                 }
             },
         )
+        self._event_cursors[stream] = parsed
 
     def stream_writer(self, stream: WireHandle) -> ExtensionStreamWriter:
         return ExtensionStreamWriter(self, stream)
@@ -3130,7 +3290,9 @@ class EchoAgentClient:
                 return
             self._closed = True
             self._callbacks.cancel_all()
-            for queue in (*self._updates.values(), *self._events.values()):
+            for feed in self._events.values():
+                feed.queue.close()
+            for queue in self._updates.values():
                 queue.close()
             process_watch = self._process_watch
             self._process_watch = None
@@ -3558,9 +3720,9 @@ class RunHandle:
         if self._closed:
             return
         self._closed = True
-        queue = self.client._events.get(self.stream.id)
-        if queue is not None:
-            queue.close()
+        feed = self.client._events.get(self.stream.id)
+        if feed is not None:
+            feed.queue.close()
 
     def _ensure_open(self, operation: str) -> None:
         if self._closed:
