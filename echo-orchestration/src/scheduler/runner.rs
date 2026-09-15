@@ -295,7 +295,6 @@ impl SchedulerRunner {
         let removed = self.store.remove_exact(id).await?;
         if removed {
             self.bump_control_epoch(id).await;
-            self.last_fired.write().await.remove(id);
             self.refresh_cache().await?;
         }
         Ok(removed)
@@ -563,6 +562,42 @@ mod tests {
             .set_status(&task_id, CronTaskStatus::Disabled)
             .await?;
         runner.set_status(&task_id, CronTaskStatus::Enabled).await?;
+        runner.fire_task(occurrence).await;
+        assert_eq!(fired.load(Ordering::SeqCst), 0);
+        let _ = std::fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn remove_then_readd_does_not_admit_stale_occurrence() -> echo_core::error::Result<()> {
+        let root =
+            std::env::temp_dir().join(format!("echo-scheduler-readd-{}", uuid::Uuid::new_v4()));
+        let store = CronTaskStore::new().with_path(root.join("tasks.json"));
+        let fired = Arc::new(AtomicUsize::new(0));
+        let fired_for_fn = Arc::clone(&fired);
+        let fire_fn: FireFn = Arc::new(move |_task| {
+            let fired = Arc::clone(&fired_for_fn);
+            Box::pin(async move {
+                fired.fetch_add(1, Ordering::SeqCst);
+                Ok("stale".to_string())
+            })
+        });
+        let runner = SchedulerRunner::new(store, CancellationToken::new(), fire_fn).await?;
+        let task = CronTask::new("readd", "*/5 * * * *", "run");
+        let task_id = task.id.clone();
+        let occurrence = ScheduledOccurrence {
+            task: task.clone(),
+            scheduled_at: Utc
+                .with_ymd_and_hms(2026, 8, 13, 0, 1, 0)
+                .single()
+                .ok_or_else(|| echo_core::error::ReactError::Other("invalid test time".into()))?,
+            control_epoch: 0,
+        };
+        runner.add_task(task).await?;
+        runner.remove_task_exact(&task_id).await?;
+        let mut replacement = CronTask::new("replacement", "*/5 * * * *", "run");
+        replacement.id = task_id;
+        runner.add_task(replacement).await?;
         runner.fire_task(occurrence).await;
         assert_eq!(fired.load(Ordering::SeqCst), 0);
         let _ = std::fs::remove_dir_all(root);
