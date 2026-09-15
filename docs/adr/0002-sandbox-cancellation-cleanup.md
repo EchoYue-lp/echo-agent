@@ -1,7 +1,11 @@
 # ADR 0002: Sandbox Cancellation Cleanup
 
-- Status: Accepted
+## Status
+
+Accepted
+
 - Date: 2026-08-25
+- Updated: 2026-09-15
 - Owners: `echo-core/sandbox`, `echo-execution/sandbox`
 
 ## Context
@@ -26,6 +30,13 @@ the spawn result and exit status of `docker rm -f`. Normal completion, timeout,
 cancellation, or an execution error could be returned while the container still
 existed, with no typed indication that cleanup failed.
 
+`K8sSandbox` had the same ownership gap around `kubectl run --attach`. Dropping
+the caller only dropped the local kubectl future; a Pod already accepted by the
+API server had no remaining owner that would issue and settle deletion. Every
+terminal path also ignored the spawn and exit result of `kubectl delete`, so a
+successful-looking execution result did not prove that the Pod API object had
+gone or that finalizers had settled.
+
 ## Options Considered
 
 1. Keep best-effort cleanup after returning the primary terminal. This minimizes
@@ -37,6 +48,12 @@ existed, with no typed indication that cleanup failed.
 3. Transfer each spawned resource immediately to one detached backend owner and
    make that owner await cleanup before choosing a terminal. This keeps lifecycle
    authority beside resource creation and survives caller task abort.
+4. Replace direct Pods with Kubernetes Jobs and rely on
+   `ttlSecondsAfterFinished`. This adds a useful cluster-side crash fallback, but
+   changes the execution protocol to a Job/Pod controller lifecycle. Deleting a
+   running child Pod alone can also prompt its active Job to create a replacement,
+   so cancellation would have to settle foreground Job deletion rather than the
+   existing direct-Pod contract.
 
 ## Decision
 
@@ -83,6 +100,33 @@ Resource cleanup is part of controlled sandbox execution's terminal contract.
   no Job Object implementation, so every Local execution entry point reports
   unavailable before spawn instead of claiming that killing `cmd.exe` cleaned
   its process tree. Windows consumers must use Docker/K8s.
+- `K8sSandbox` preallocates the Pod name and transfers kubectl, stdin, output,
+  execution deadline, cancellation, Pod identity, and deletion to one detached
+  backend owner. A caller-abandonment guard wakes that owner, which kills and
+  reaps the kubectl process group before it deletes the named Pod. A normally
+  exited kubectl leader also triggers process-group settlement so a helper that
+  inherited stdout/stderr cannot hold output drain open. Pipe drain observes the
+  remaining execution deadline and caller-abandonment token. Normal exit,
+  non-zero exit, stdin or kubectl failure, timeout, cancellation, and caller drop
+  therefore converge on the same cleanup path.
+- Pod deletion uses a one-second graceful period and an explicit bounded
+  `--wait=true`. This waits for the API object to disappear, including finalizer
+  settlement. It deliberately does not use `--force --grace-period=0`, because
+  Kubernetes documents that force deletion removes the API object without
+  confirmation that the process on the node has terminated.
+- A kubectl deletion spawn failure, timeout, or non-zero exit is cleanup debt.
+  An awaiting caller receives a typed sandbox I/O error containing bounded
+  primary terminal facts plus the cleanup failure. The detached owner records
+  cleanup debt before it hands the terminal to the caller, removing the
+  owner-result/caller-ack loss window. Join-failure compensation is itself a
+  detached cleanup task, so dropping its waiter cannot interrupt Pod deletion.
+- Label-wide K8s cleanup checks both listing and deletion status and uses the
+  same bounded graceful wait. The kubectl executable remains a private backend
+  indirection so deterministic fault tests do not mutate process-global `PATH`.
+- Job/TTL cleanup remains a possible cluster-crash fallback, not the terminal
+  authority for this direct-Pod repair. Adopting it requires a separate protocol
+  decision that atomically changes creation, attachment, cancellation, owner
+  references, foreground propagation, and TTL behavior.
 - The default trait implementation remains available only for executors whose
   resources are fully released by dropping their execution future.
 
@@ -106,6 +150,12 @@ The Docker executable indirection is private and exists so backend command
 status can be tested deterministically without requiring a live Docker daemon or
 mutating process-global `PATH`.
 
+The K8s terminal can now take up to its bounded cleanup control interval after
+the primary command settles. A finalizer, unreachable node, or API failure is
+reported instead of hidden. Caller drop survives while the Tokio runtime remains
+alive; a full process or runtime crash still needs cluster-side reconciliation,
+which is outside this direct-Pod settlement.
+
 ## Verification
 
 Regression coverage starts a real local leader and descendant, waits until the
@@ -121,3 +171,18 @@ uses named cleanup; and non-zero/timeout/cancel facts survive a simultaneous
 non-zero cleanup failure. Additional faults cover hung info/create/rm stages,
 cleanup retry, first-failure global cleanup continuation, reserved extra args,
 and bounded high-volume output for normal/timeout/cancel terminals.
+
+A fake kubectl executable verifies successful and non-zero completion, timeout,
+cancellation, blocked/failed stdin, leader-exit with an inherited output pipe,
+and caller abort all reach settled Pod deletion; deletion is graceful, bounded,
+and waits for API disappearance. Cleanup failure preserves success, non-zero,
+timeout, and cancellation facts instead of returning a false terminal, and
+detached join-failure recovery survives loss of its waiter.
+
+## References
+
+- Kubernetes, [Pod lifecycle and termination](https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/#pod-termination-flow)
+- Kubernetes, [Finalizers](https://kubernetes.io/docs/concepts/overview/working-with-objects/finalizers/)
+- Kubernetes, [Cascading deletion](https://kubernetes.io/docs/concepts/architecture/garbage-collection/#cascading-deletion)
+- Kubernetes, [Jobs and TTL cleanup](https://kubernetes.io/docs/concepts/workloads/controllers/job/#clean-up-finished-jobs-automatically)
+- Kubernetes, [`kubectl delete`](https://kubernetes.io/docs/reference/kubectl/generated/kubectl_delete/)
