@@ -10,6 +10,7 @@ source_refs:
   - echo-sdk-protocol/tests/extension_contract.rs
   - sdks/typescript/test/typed-bridge.test.js
   - sdks/python/tests/test_lifecycle.py
+  - sdks/java/src/main/java/com/echoagent/sdk/AgentComponentDescriptor.java
   - sdks/java/src/test/java/com/echoagent/sdk/TypedExtensionTest.java
 supports: [behavior.task-subagent-execution, rule.task-subagent-authority]
 limitations:

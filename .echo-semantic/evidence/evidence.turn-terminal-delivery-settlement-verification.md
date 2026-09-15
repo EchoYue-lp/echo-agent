@@ -4,10 +4,17 @@ id: evidence.turn-terminal-delivery-settlement-verification
 kind: evidence
 observed_at: cba8e08f3e3f0ccf1d4df3a22be11589f63b2ecd
 source_refs:
+  - contracts/sdk/facade-operation-catalog.json
+  - contracts/sdk/fixtures/extension/v1/run-receipt-completed-valid.json
+  - contracts/sdk/fixtures/extension/v1/run-receipt-delivery-failed.json
+  - contracts/sdk/public-api.txt
+  - contracts/sdk/schema/echo-agent-extension-v1.schema.json
+  - contracts/sdk/source-contract.json
   - echo-orchestration/src/runtime/turn_driver.rs
   - tests/acp_agent_adapter.rs
   - tests/agent_handle_turn_driver.rs
   - echo-sdk-host/tests/core_profile_e2e.rs
+  - echo-sdk-protocol/src/schema.rs
   - echo-sdk-protocol/tests/core_rpc_contract.rs
   - src/headless.rs
   - src/eval/runner.rs
