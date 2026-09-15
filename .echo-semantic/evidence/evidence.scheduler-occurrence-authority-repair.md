@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.scheduler-occurrence-authority-repair
 kind: evidence
-observed_at: 406d7ce43cd4493271e401f938ddcbc8e6d330ec
+observed_at: 2da2fe9b8a42739c0843874d3806c0b27e27722b
 source_refs:
   - echo-orchestration/src/scheduler/cron_task.rs
   - echo-orchestration/src/scheduler/runner.rs
@@ -42,9 +42,10 @@ disable/remove 不撤回已接纳 invocation。callback settlement
 
 ## 来源与范围
 
-本 Evidence 绑定 Git commit `812fca0261039d7dd686b2b5edf1a00465b54275`，只覆盖
-SchedulerRunner/CronTaskStore 的本地 authority、cache freshness、definition
-identity 与 control/admission 顺序；不把 callback effect 本身伪装成可回滚事务。
+本Evidence绑定汇总分支最终代码commit
+`2da2fe9b8a42739c0843874d3806c0b27e27722b`，只覆盖SchedulerRunner/CronTaskStore的
+本地authority、cache freshness、definition identity与control/admission顺序；不把
+callback effect本身伪装成可回滚事务。
 
 ## 已知缺口
 

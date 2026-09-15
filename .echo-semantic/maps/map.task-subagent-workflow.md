@@ -8,9 +8,9 @@ observed_at: source:8ff7eb397767728069b01b9098b224a6840a8adb663717e5c4fd7a584eb4
 boundary_refs: [boundary.task-subagent-workflow]
 behavior_refs: [behavior.task-subagent-execution]
 rule_refs: [rule.task-subagent-authority]
-evidence_refs: [evidence.task-subagent-workflow, evidence.high-risk-audit-frontier, evidence.task-patch-claim-cas-repair, evidence.task-patch-claim-cas-verification, evidence.subagent-factory-singleflight-repair, evidence.subagent-factory-singleflight-verification, evidence.background-task-terminal-authority-repair, evidence.background-task-terminal-authority-verification, evidence.command-cell-cancel-artifact-settlement-repair, evidence.command-cell-cancel-artifact-settlement-verification, evidence.workflow-parallel-failure-settlement-repair, evidence.workflow-parallel-failure-settlement-verification, evidence.framework-concept-navigation]
+evidence_refs: [evidence.task-subagent-workflow, evidence.high-risk-audit-frontier, evidence.task-patch-claim-cas-repair, evidence.task-patch-claim-cas-verification, evidence.subagent-factory-singleflight-repair, evidence.subagent-factory-singleflight-verification, evidence.background-task-terminal-authority-repair, evidence.background-task-terminal-authority-verification, evidence.command-cell-cancel-artifact-settlement-repair, evidence.command-cell-cancel-artifact-settlement-verification, evidence.workflow-parallel-failure-settlement-repair, evidence.workflow-parallel-failure-settlement-verification, evidence.scheduler-occurrence-authority-repair, evidence.scheduler-occurrence-authority-verification, evidence.framework-concept-navigation]
 finding_refs: [finding.task-patch-claim-race, finding.task-subagent-attempt-link, finding.subagent-factory-cancellation, finding.subagent-factory-publication-race, finding.workflow-dag-authority, finding.workflow-entry-loop-drift, finding.workflow-checkpoint-claim-recovery, finding.workflow-checkpoint-resurrection-race, finding.workflow-parallel-failure-settlement, finding.scheduler-cache-delivery, finding.scheduler-task-id-uniqueness, finding.scheduler-control-fire-race, finding.background-task-wait, finding.command-cell-retention-lease-prune-race, finding.command-cell-cancel-artifact-settlement, finding.subagent-definition-catalog]
-audit_refs: [audit.task-subagent-workflow.state-authority, audit.task-subagent-workflow.failure-concurrency, audit.task-subagent-workflow.data-durability, audit.task-subagent-workflow.time-lifecycle, audit.task-patch-claim-cas-rereview, audit.subagent-factory-singleflight-rereview, audit.background-task-terminal-authority-rereview, audit.workflow-parallel-failure-settlement-rereview]
+audit_refs: [audit.task-subagent-workflow.state-authority, audit.task-subagent-workflow.failure-concurrency, audit.task-subagent-workflow.data-durability, audit.task-subagent-workflow.time-lifecycle, audit.task-patch-claim-cas-rereview, audit.subagent-factory-singleflight-rereview, audit.background-task-terminal-authority-rereview, audit.workflow-parallel-failure-settlement-rereview, audit.scheduler-occurrence-authority-rereview]
 related_map_refs: [map.agent-session-turn, map.observation-persistence-delivery, map.tool-permission-sandbox]
 scenarios:
   revisioned-task-graph:
@@ -44,9 +44,10 @@ scenarios:
     status: needs_review
     source_refs: [echo-orchestration/src/scheduler/runner.rs, echo-orchestration/src/scheduler/cron_task.rs]
     finding_refs: [finding.scheduler-cache-delivery, finding.scheduler-task-id-uniqueness, finding.scheduler-control-fire-race]
-    evidence_refs: [evidence.task-subagent-workflow]
-    unknown: store/cache 可见状态、migration overwrite 与 callback delivery guarantee 未闭合
-    next_step: audit cache refresh、持久 claim/ledger 与 migration target collision
+    evidence_refs: [evidence.task-subagent-workflow, evidence.scheduler-occurrence-authority-repair, evidence.scheduler-occurrence-authority-verification]
+    audit_refs: [audit.scheduler-occurrence-authority-rereview]
+    unknown: store/cache、唯一ID、migration collision与control/admission已闭合；callback durable occurrence claim与crash replay仍未定义
+    next_step: 为#84裁决并实现持久claim/ledger及崩溃恢复语义
   process-local-background-task:
     status: mapped
     source_refs: [echo-orchestration/src/tasks/background_task.rs, docs/en/29-long-running-tasks.md, docs/zh/29-long-running-tasks.md, docs/adr/0039-background-task-terminal-authority.md]
