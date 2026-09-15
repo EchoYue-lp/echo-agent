@@ -8,16 +8,16 @@ observed_at: 98a2e11cfb6e88e2f310ae2c2b40cd9e009534a4
 boundary_refs: [boundary.extension-lifecycle]
 behavior_refs: [behavior.extension-publication]
 rule_refs: [rule.extension-generation-authority, rule.permission-effect-order]
-evidence_refs: [evidence.effects-extensions, evidence.high-risk-audit-frontier, evidence.framework-concept-navigation, evidence.extension-credential-debug-redaction-repair, evidence.extension-credential-debug-redaction-verification]
+evidence_refs: [evidence.effects-extensions, evidence.high-risk-audit-frontier, evidence.framework-concept-navigation, evidence.extension-credential-debug-redaction-repair, evidence.extension-credential-debug-redaction-verification, evidence.skill-activation-authority-repair, evidence.skill-activation-authority-verification]
 finding_refs: [finding.skill-activation-authority, finding.hook-permission-precedence, finding.hook-protected-path, finding.hook-event-producer-contract, finding.mcp-client-capability-advertisement, finding.mcp-tool-permission-classification, finding.plugin-mcp-owner-isolation, finding.plugin-failure-isolation-contract, finding.plugin-lifecycle-coordination, finding.plugin-generation-publication-authority, finding.plugin-lifecycle-reconcile-overlap, finding.lsp-runtime-state, finding.lsp-manager-derived-handle-resurrection, finding.extension-cleanup-settlement, finding.extension-credential-debug-redaction, finding.mcp-version-doc-drift]
-audit_refs: [audit.extension-lifecycle.state-authority, audit.extension-lifecycle.time-lifecycle, audit.extension-lifecycle.permission-external, audit.extension-lifecycle.contract-evidence]
+audit_refs: [audit.extension-lifecycle.state-authority, audit.extension-lifecycle.time-lifecycle, audit.extension-lifecycle.permission-external, audit.extension-lifecycle.contract-evidence, audit.skill-activation-authority-rereview]
 related_map_refs: [map.workspace-architecture, map.context-memory, map.tool-permission-sandbox, map.protocol-surfaces]
 scenarios:
   mcp-connect-discover-close:
     status: mapped
     source_refs: [echo-integration/src/mcp/client.rs, echo-integration/src/mcp/mod.rs, echo-integration/src/mcp/transport/sse.rs]
     finding_refs: [finding.mcp-client-capability-advertisement, finding.mcp-tool-permission-classification, finding.extension-cleanup-settlement, finding.extension-credential-debug-redaction, finding.mcp-version-doc-drift]
-    evidence_refs: [evidence.effects-extensions]
+    evidence_refs: [evidence.effects-extensions, evidence.skill-activation-authority-repair, evidence.skill-activation-authority-verification]
   hook-source-and-reduction:
     status: mapped
     source_refs: [echo-core/src/hooks/types.rs, echo-execution/src/skills/hooks.rs]
@@ -65,7 +65,7 @@ scenarios:
 
 ## 状态与数据流
 
-MCP client/topology、Hook sources/result、Skill descriptors/activation、Plugin registry/prepared/lifecycle、LSP config/client maps 分别演进。
+MCP client/topology、Hook sources/result、Plugin registry/prepared/lifecycle、LSP config/client maps 分别演进。Skill descriptor/prepared document保留定义视图，主registry与progressive tool adapter共享唯一activation state。
 
 ## 策略来源与优先级
 
@@ -85,7 +85,7 @@ Catalog/status/tool list 是 registry projection；仅可执行且当前 generat
 
 ## 场景处置清单
 
-五类生命周期和十六个 Finding 已映射；跨 Host 统一编排与需裁决合同保持 needs_review。
+五类生命周期和十六个 Finding 已映射；Skill activation authority已修复并通过独立复审，其余跨 Host 统一编排与需裁决合同保持 needs_review。
 
 ## 未展开项
 

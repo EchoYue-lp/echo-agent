@@ -11,7 +11,7 @@ boundary: boundary.extension-lifecycle
 observed_at: f1e9027246760661144786e9e35615cd46d580c6
 code_refs: [echo-integration/src/mcp/mod.rs, echo-execution/src/skills/hooks.rs, echo-execution/src/skills/registry.rs, echo-core/src/plugin/registry.rs, src/plugin/prepared.rs, echo-integration/src/lsp/manager.rs]
 rule_refs: [rule.extension-generation-authority]
-evidence_refs: [evidence.effects-extensions]
+evidence_refs: [evidence.effects-extensions, evidence.skill-activation-authority-repair, evidence.skill-activation-authority-verification]
 finding_refs: [finding.skill-activation-authority, finding.hook-permission-precedence, finding.mcp-client-capability-advertisement, finding.plugin-mcp-owner-isolation, finding.plugin-failure-isolation-contract, finding.plugin-lifecycle-coordination, finding.lsp-runtime-state, finding.extension-cleanup-settlement, finding.mcp-version-doc-drift]
 ---
 
@@ -23,7 +23,7 @@ finding_refs: [finding.skill-activation-authority, finding.hook-permission-prece
 
 ## 当前行为
 
-McpManager 管命名连接，HookRegistry 管 source/order/action reduction，SkillLoader/Registry 管文件与 activation，PluginRegistry/Integrator/Lifecycle 管持久状态、不可变 generation 与 callback，LspManager 管 server 路由。
+McpManager 管命名连接，HookRegistry 管 source/order/action reduction，SkillLoader/Registry 管文件与 activation；Skill definition view可为异步tool适配而复制，但Agent reconciliation同步其变更，主registry、tool adapter、run snapshot与checkpoint共享epoch-fenced activation handle。PluginRegistry/Integrator/Lifecycle 管持久状态、不可变 generation 与 callback，LspManager 管 server 路由。
 
 ## 期望行为
 
@@ -43,4 +43,4 @@ Prepare/apply/rollback、transport close、pending call、LSP EOF/restart、Plug
 
 ## 裁决记录
 
-双 Skill activation、Hook precedence、Plugin/MCP owner、Plugin failure isolation、LSP recovery 与异步 cleanup 已形成待审 Finding。
+Skill activation双权威已由canonical handle、Agent reconciliation和独立复审关闭；Hook precedence、Plugin/MCP owner、Plugin failure isolation、LSP recovery 与异步 cleanup 仍为待审 Finding。

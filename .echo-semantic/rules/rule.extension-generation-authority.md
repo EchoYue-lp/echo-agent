@@ -10,7 +10,7 @@ focus: [state_authority, time_lifecycle, data_durability, permission_external]
 observed_at: f1e9027246760661144786e9e35615cd46d580c6
 behavior_refs: [behavior.extension-publication]
 code_refs: [echo-integration/src/mcp/mod.rs, echo-execution/src/skills/hooks.rs, echo-execution/src/skills/registry.rs, echo-core/src/plugin/registry.rs, src/plugin/prepared.rs, echo-core/src/plugin/lifecycle.rs, echo-integration/src/lsp/manager.rs]
-evidence_refs: [evidence.effects-extensions]
+evidence_refs: [evidence.effects-extensions, evidence.skill-activation-authority-repair, evidence.skill-activation-authority-verification]
 finding_refs: [finding.skill-activation-authority, finding.hook-permission-precedence, finding.mcp-client-capability-advertisement, finding.plugin-mcp-owner-isolation, finding.plugin-failure-isolation-contract, finding.plugin-lifecycle-coordination, finding.lsp-runtime-state, finding.extension-cleanup-settlement, finding.mcp-version-doc-drift]
 ---
 
@@ -26,7 +26,7 @@ MCP、Hook、Skill、Plugin 和 LSP 各自使用明确 owner/registry；Plugin p
 
 ## 当前实现
 
-各 manager/registry 持有部分状态；PluginRegistry、PluginIntegrator 与 PluginLifecycleManager 分别负责持久状态、wiring generation 和 callbacks。
+各 manager/registry 持有部分状态；SkillRegistry主视图、progressive definition adapter、run snapshot与checkpoint共享唯一epoch/generation-fenced activation handle，definition mutation经ReactAgent reconciliation同步；PluginRegistry、PluginIntegrator 与 PluginLifecycleManager 分别负责持久状态、wiring generation 和 callbacks。
 
 ## 期望行为
 
@@ -38,4 +38,4 @@ MCP/Hook/Skill/Plugin/LSP 源码、ADR 0012/0023/0026 和 focused tests 提供�
 
 ## 裁决记录
 
-双 Skill state、Plugin/MCP owner、Plugin lifecycle 与 LSP recovery 已进入 open Finding，故本 Rule 尚待审计。
+双 Skill state已完成修复与独立复审；Plugin/MCP owner、Plugin lifecycle 与 LSP recovery 仍为 open Finding，故本 Rule 继续待审计。
