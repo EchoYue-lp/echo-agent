@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.semantic-baseline-squash-ancestry-verification
 kind: evidence
-observed_at: source:e374d9768f57c3371b4ef9482428bd260f28911c5cd25e760987909be840b718
+observed_at: source:9292679f8fdc376a08aaf80755281bc316908ec9915dfb190014676318de8abb
 source_refs:
   - .echo-semantic/baseline.md
   - .github/workflows/rust-ci.yml
@@ -25,7 +25,7 @@ PR #117合并后的原始main稳定复现strict失败：baseline `base_revision=
 
 持久合同用`serde_yaml_ng`解析真实baseline；本地默认解析`origin/main`/`main`，CI显式提供target revision。临时Git反例证明feature-only SHA是feature HEAD祖先，却不是target main或squash result祖先；target main继续是squash result祖先。完整`./scripts/verify.sh`于2026-09-14T05:45:32Z至05:54:50Z运行，exit 0；以`d492c676`为base的task-scoped change-evidence、strict和94/94 Issue对账均通过。
 
-格式稳定后的`content_digest=e374d9768f57c3371b4ef9482428bd260f28911c5cd25e760987909be840b718`；inventory/behavior closure、Capability Map集合和runtime/SDK源码未变化。包含全部source与语义更新的临时候选tree`31fccf619a84bfdf91794d7161c526a0f72470d6`对`b21aba01b34e74c93d783a89db895282ba831c3c`运行continuity，428个义务为408 preserved、4 replaced、16 retired，0 unresolved，`passed=true`且errors为空。
+格式稳定后的`content_digest=9292679f8fdc376a08aaf80755281bc316908ec9915dfb190014676318de8abb`；inventory/behavior closure、Capability Map集合和runtime/SDK源码未变化。包含全部source与语义更新的临时候选tree`31fccf619a84bfdf91794d7161c526a0f72470d6`对`b21aba01b34e74c93d783a89db895282ba831c3c`运行continuity，428个义务为408 preserved、4 replaced、16 retired，0 unresolved，`passed=true`且errors为空。
 
 ## 来源与范围
 

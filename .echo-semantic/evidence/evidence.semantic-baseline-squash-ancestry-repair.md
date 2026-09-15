@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.semantic-baseline-squash-ancestry-repair
 kind: evidence
-observed_at: source:e374d9768f57c3371b4ef9482428bd260f28911c5cd25e760987909be840b718
+observed_at: source:9292679f8fdc376a08aaf80755281bc316908ec9915dfb190014676318de8abb
 source_refs:
   - .echo-semantic/baseline.md
   - .github/workflows/rust-ci.yml
@@ -21,7 +21,7 @@ limitations:
 
 Repository baseline的`base_revision`和正文现共同绑定PR #117的squash merge结果`d492c676d1bf0744452d96a6960124546ed3fff9`。该revision是当前main自身及后续follow-up commit的祖先，且包含本轮全workspace治理的完整非语义源码结果。
 
-`content_digest`因新增learning contract、CI输入和AGENTS职责而刷新为`e374d9768f57c3371b4ef9482428bd260f28911c5cd25e760987909be840b718`；inventory/behavior model closure、11张Capability Map、93个既有Finding和全部runtime/SDK文件均未改变。修复保留strict的ancestor门禁，并增加target-main ancestry合同，没有用放宽validator掩盖squash历史变化。
+`content_digest`因新增learning contract、CI输入和AGENTS职责而刷新为`9292679f8fdc376a08aaf80755281bc316908ec9915dfb190014676318de8abb`；inventory/behavior model closure、11张Capability Map、93个既有Finding和全部runtime/SDK文件均未改变。修复保留strict的ancestor门禁，并增加target-main ancestry合同，没有用放宽validator掩盖squash历史变化。
 
 ## 来源与范围
 

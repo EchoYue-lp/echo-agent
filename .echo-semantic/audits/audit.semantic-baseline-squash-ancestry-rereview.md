@@ -5,23 +5,23 @@ kind: audit
 boundary_ref: boundary.workspace-architecture
 lens: contract_evidence
 freshness: examined
-revision: source:e374d9768f57c3371b4ef9482428bd260f28911c5cd25e760987909be840b718
+revision: source:9292679f8fdc376a08aaf80755281bc316908ec9915dfb190014676318de8abb
 finding_refs: [finding.semantic-baseline-squash-ancestry]
 challenges:
   target-main-not-feature-head:
-    revision: source:e374d9768f57c3371b4ef9482428bd260f28911c5cd25e760987909be840b718
+    revision: source:9292679f8fdc376a08aaf80755281bc316908ec9915dfb190014676318de8abb
     source_refs: [.echo-semantic/baseline.md, echo-agent-learning/tests/semantic_baseline_contract.rs]
     evidence_refs: [evidence.semantic-baseline-squash-ancestry-repair, evidence.semantic-baseline-squash-ancestry-verification]
   squash-removes-feature-ancestry:
-    revision: source:e374d9768f57c3371b4ef9482428bd260f28911c5cd25e760987909be840b718
+    revision: source:9292679f8fdc376a08aaf80755281bc316908ec9915dfb190014676318de8abb
     source_refs: [echo-agent-learning/tests/semantic_baseline_contract.rs, AGENTS.md]
     evidence_refs: [evidence.semantic-baseline-squash-ancestry-verification]
   ci-supplies-recoverable-target:
-    revision: source:e374d9768f57c3371b4ef9482428bd260f28911c5cd25e760987909be840b718
+    revision: source:9292679f8fdc376a08aaf80755281bc316908ec9915dfb190014676318de8abb
     source_refs: [.github/workflows/rust-ci.yml, echo-agent-learning/tests/semantic_baseline_contract.rs]
     evidence_refs: [evidence.semantic-baseline-squash-ancestry-verification]
   source-and-runtime-scope:
-    revision: source:e374d9768f57c3371b4ef9482428bd260f28911c5cd25e760987909be840b718
+    revision: source:9292679f8fdc376a08aaf80755281bc316908ec9915dfb190014676318de8abb
     source_refs: [Cargo.toml, contracts/sdk/parity-manifest.json, .github/workflows/rust-ci.yml]
     evidence_refs: [evidence.semantic-baseline-squash-ancestry-repair, evidence.semantic-governance-b21-continuity]
 ---

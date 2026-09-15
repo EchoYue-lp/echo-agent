@@ -100,7 +100,7 @@ todos:
         host的真实normal/failed/legacy场景以及driver通用Closed场景均通过；所有
         TurnReceipt/RunReceiptWire literal都提供新字段或使用安全构造器。
 artifact_id: plan:0e050978-89ae-42b1-954e-26c62b1220b9
-lifecycle: ready
+lifecycle: completed
 ---
 ## Notes
 
