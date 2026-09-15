@@ -4,11 +4,11 @@ id: map.observation-persistence-delivery
 kind: capability_map
 title: Observation、Persistence、Projection 与 Delivery
 risk: high
-observed_at: source:1bcfbd1131476ae872a2dc89326675abd7c02dd26d56c8d29a058cd91fb308fc
+observed_at: source:96384cfb5e0bbc3384493805d026d65c6b096b3d0c3a26fde0cc1c007378e2c5
 boundary_refs: [boundary.observation-persistence-delivery]
 behavior_refs: [behavior.observation-persistence]
 rule_refs: [rule.fact-projection-separation]
-evidence_refs: [evidence.persistence-observation, evidence.high-risk-audit-frontier, evidence.eval-trace-correlation-repair, evidence.eval-trace-correlation-verification, evidence.framework-concept-navigation]
+evidence_refs: [evidence.persistence-observation, evidence.high-risk-audit-frontier, evidence.eval-trace-correlation-repair, evidence.eval-trace-correlation-verification, evidence.framework-concept-navigation, evidence.diagnostic-persistence-failure-visibility-repair]
 finding_refs: [finding.trace-effect-event-producers, finding.eval-trace-identity, finding.trace-audit-secret-boundary, finding.turn-terminal-commit-projection-order, finding.checkpoint-journal-binding, finding.diagnostic-persistence-failure-visibility, finding.hook-event-producer-contract, finding.in-memory-audit-successful-drop]
 audit_refs: [audit.observation-persistence-delivery.state-authority, audit.observation-persistence-delivery.data-durability, audit.observation-persistence-delivery.contract-evidence]
 related_map_refs: [map.agent-session-turn, map.context-memory, map.task-subagent-workflow, map.protocol-surfaces, map.eval-evolution]
@@ -38,11 +38,11 @@ scenarios:
     evidence_refs: [evidence.persistence-observation]
   trace-event-and-identity-coverage:
     status: needs_review
-    source_refs: [src/trace/mod.rs, src/eval/runner.rs, src/agent/react/mod.rs, src/agent/react/run/pipeline.rs, echo-state/src/audit/memory.rs, docs/adr/0038-eval-trace-correlation-identity.md]
+    source_refs: [src/trace/mod.rs, src/eval/runner.rs, src/agent/react/mod.rs, src/agent/react/run/pipeline.rs, echo-state/src/audit/mod.rs, echo-state/src/audit/file.rs, echo-state/src/audit/memory.rs, docs/adr/0038-eval-trace-correlation-identity.md, docs/adr/0053-trace-audit-persistence-visibility.md]
     finding_refs: [finding.trace-effect-event-producers, finding.eval-trace-identity, finding.trace-audit-secret-boundary, finding.turn-terminal-commit-projection-order, finding.diagnostic-persistence-failure-visibility, finding.in-memory-audit-successful-drop]
-    evidence_refs: [evidence.persistence-observation, evidence.eval-trace-correlation-repair, evidence.eval-trace-correlation-verification]
-    unknown: Eval trace correlation已闭合；其它trace producer、terminal commit order与各audit backend的retention/redaction/failure visibility未闭合
-    next_step: 分别repair其它producer/commit order，并裁决诊断backend failure policy
+    evidence_refs: [evidence.persistence-observation, evidence.eval-trace-correlation-repair, evidence.eval-trace-correlation-verification, evidence.diagnostic-persistence-failure-visibility-repair]
+    unknown: Eval trace correlation已闭合；diagnostic failure policy已有repair候选但未完成工程验证；其它trace producer、terminal commit order、InMemory audit成功丢写与backend retention/redaction仍未闭合
+    next_step: 运行#46 focused验证并完成verification/rereview；其它缺口按各自Finding分别repair
   complete-event-family-classification:
     status: needs_review
     source_refs: [echo-core/src/hooks/types.rs, echo-orchestration/src/tasks/events.rs, echo-orchestration/src/workflow/mod.rs, src/trace/mod.rs]
@@ -67,7 +67,7 @@ scenarios:
 
 ## 状态与数据流
 
-EventEnvelope保持identity/sequence；Journal先commit后reduce；checkpoint绑定applied sequence；DeliveryLedger归约typed lifecycle；RunStore以真实trace ID存储诊断Run，并保留product parent、turn和execution correlation。
+EventEnvelope保持identity/sequence；Journal先commit后reduce；checkpoint绑定applied sequence；DeliveryLedger归约typed lifecycle；RunStore以真实trace ID存储诊断Run，并保留product parent、turn和execution correlation。有界diagnostic dispatcher仅投递Trace/Audit failure fact与drop counter，不拥有业务或Agent终态。
 
 ## 策略来源与优先级
 
@@ -87,7 +87,7 @@ Conversation history、Task progress、ACP updates 和 diagnostics 是从事实�
 
 ## 场景处置清单
 
-核心authority已映射，Eval trace correlation已闭合；其它trace producer/identity Finding与完整event family分类保持needs_review。
+核心authority已映射，Eval trace correlation已闭合，diagnostic persistence visibility等待工程验证；其它trace producer/identity Finding与完整event family分类保持needs_review。
 
 ## 未展开项
 

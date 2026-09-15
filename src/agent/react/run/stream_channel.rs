@@ -163,7 +163,7 @@ impl ReactAgent {
                 crate::guard::GuardResult::Block { reason } => {
                     let agent = self.config.agent_name.clone();
                     debug!(agent = %agent, reason = %reason, "🛡️ Stream input blocked by guard");
-                    if let Some(al) = &self.guard.audit_logger {
+                    if self.guard.audit_logger.is_some() {
                         let event = crate::audit::AuditEvent::now(
                             self.config.session_id.clone(),
                             agent,
@@ -173,9 +173,7 @@ impl ReactAgent {
                                 reason: reason.clone(),
                             },
                         );
-                        if let Err(error) = al.log(event).await {
-                            tracing::warn!(%error, "Failed to log guard audit event");
-                        }
+                        self.record_audit_event(event).await;
                     }
                     let trace_run_id = if let Some(runtime) = invocation
                         .as_ref()
@@ -1555,6 +1553,125 @@ mod tests {
             .expect("agent builds")
     }
 
+    struct RejectingRunStore;
+
+    #[async_trait::async_trait]
+    impl crate::trace::RunStore for RejectingRunStore {
+        async fn save(&self, _run: crate::trace::Run) -> Result<()> {
+            Err(ReactError::Other(
+                "injected trace persistence failure".to_string(),
+            ))
+        }
+
+        async fn load(&self, _run_id: &str) -> Result<Option<crate::trace::Run>> {
+            Ok(None)
+        }
+
+        async fn list_by_session(
+            &self,
+            _session_id: &str,
+        ) -> Result<Vec<crate::trace::RunSummary>> {
+            Ok(Vec::new())
+        }
+
+        async fn list_all(&self, _limit: usize) -> Result<Vec<crate::trace::RunSummary>> {
+            Ok(Vec::new())
+        }
+    }
+
+    struct RejectingAuditLogger;
+
+    impl crate::audit::AuditLogger for RejectingAuditLogger {
+        fn log<'a>(&'a self, _event: crate::audit::AuditEvent) -> BoxFuture<'a, Result<()>> {
+            Box::pin(async {
+                Err(ReactError::Other(
+                    "injected audit persistence failure".to_string(),
+                ))
+            })
+        }
+
+        fn query<'a>(
+            &'a self,
+            _filter: crate::audit::AuditFilter,
+        ) -> BoxFuture<'a, Result<Vec<crate::audit::AuditEvent>>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingDiagnosticObserver {
+        failures: std::sync::Mutex<Vec<crate::audit::DiagnosticDeliveryFailure>>,
+        changed: std::sync::Condvar,
+    }
+
+    impl crate::audit::DiagnosticDeliveryObserver for RecordingDiagnosticObserver {
+        fn on_failure(&self, failure: crate::audit::DiagnosticDeliveryFailure) {
+            self.failures
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .push(failure);
+            self.changed.notify_all();
+        }
+    }
+
+    impl RecordingDiagnosticObserver {
+        fn wait_for_count(
+            &self,
+            count: usize,
+        ) -> Result<Vec<crate::audit::DiagnosticDeliveryFailure>> {
+            let failures = self
+                .failures
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let (failures, wait) = self
+                .changed
+                .wait_timeout_while(failures, std::time::Duration::from_secs(5), |failures| {
+                    failures.len() < count
+                })
+                .map_err(|error| ReactError::Other(format!("observer wait failed: {error}")))?;
+            if wait.timed_out() && failures.len() < count {
+                return Err(ReactError::Other(format!(
+                    "timed out waiting for {count} diagnostic failures"
+                )));
+            }
+            Ok(failures.clone())
+        }
+    }
+
+    struct BlockingDiagnosticObserver {
+        entered: std::sync::mpsc::Sender<()>,
+        release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    impl crate::audit::DiagnosticDeliveryObserver for BlockingDiagnosticObserver {
+        fn on_failure(&self, _failure: crate::audit::DiagnosticDeliveryFailure) {
+            let _ = self.entered.send(());
+            let _ = self
+                .release
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .recv();
+        }
+    }
+
+    struct DiagnosticObserverRelease(Option<std::sync::mpsc::Sender<()>>);
+
+    impl DiagnosticObserverRelease {
+        fn release(mut self) {
+            if let Some(sender) = self.0.take() {
+                let _ = sender.send(());
+            }
+        }
+    }
+
+    impl Drop for DiagnosticObserverRelease {
+        fn drop(&mut self) {
+            if let Some(sender) = self.0.take() {
+                let _ = sender.send(());
+            }
+        }
+    }
+
     fn agent_with_direct_router_and_projection(llm: Arc<MockLlmClient>) -> Result<ReactAgent> {
         let router = IntentRouter::new(
             Box::new(AlwaysDirectClassifier),
@@ -2314,6 +2431,71 @@ mod tests {
             }
             other => panic!("expected FinalAnswer as last event, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn diagnostic_persistence_failures_do_not_replace_producer_final_answer() -> Result<()> {
+        let observer = Arc::new(RecordingDiagnosticObserver::default());
+        let agent = ReactAgentBuilder::new()
+            .llm_client(Arc::new(
+                MockLlmClient::new().with_response("producer answer"),
+            ))
+            .system_prompt("You are a test assistant.")
+            .with_run_store(Arc::new(RejectingRunStore))
+            .audit_logger(Arc::new(RejectingAuditLogger))
+            .diagnostic_delivery_observer(observer.clone())
+            .build()?;
+
+        let events = collect_events_result(&agent, "input").await?;
+
+        assert!(events.iter().any(
+            |event| matches!(event, AgentEvent::FinalAnswer(answer) if answer == "producer answer")
+        ));
+        let failures = observer.wait_for_count(2)?;
+        assert!(failures.iter().any(|failure| {
+            failure.record_kind == crate::audit::DiagnosticRecordKind::Trace
+                && failure.operation == crate::audit::DiagnosticDeliveryOperation::Start
+        }));
+        assert!(failures.iter().any(|failure| {
+            failure.record_kind == crate::audit::DiagnosticRecordKind::Audit
+                && failure.operation == crate::audit::DiagnosticDeliveryOperation::Record
+        }));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn blocking_diagnostic_observer_does_not_delay_final_answer() -> Result<()> {
+        let (entered, observer_entered) = std::sync::mpsc::channel();
+        let (release, observer_release) = std::sync::mpsc::channel();
+        let release_guard = DiagnosticObserverRelease(Some(release));
+        let agent = ReactAgentBuilder::new()
+            .llm_client(Arc::new(
+                MockLlmClient::new().with_response("producer answer"),
+            ))
+            .system_prompt("You are a test assistant.")
+            .with_run_store(Arc::new(RejectingRunStore))
+            .diagnostic_delivery_observer(Arc::new(BlockingDiagnosticObserver {
+                entered,
+                release: std::sync::Mutex::new(observer_release),
+            }))
+            .build()?;
+
+        let events = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            collect_events_result(&agent, "input"),
+        )
+        .await
+        .map_err(|_| {
+            ReactError::Other("producer was blocked by diagnostic observer".to_string())
+        })??;
+        observer_entered
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .map_err(|error| ReactError::Other(format!("observer did not start: {error}")))?;
+        assert!(events.iter().any(
+            |event| matches!(event, AgentEvent::FinalAnswer(answer) if answer == "producer answer")
+        ));
+        release_guard.release();
+        Ok(())
     }
 
     /// A full ReAct cycle: the mock LLM first requests a tool call, the tool

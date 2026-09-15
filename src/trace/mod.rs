@@ -579,11 +579,12 @@ pub trait RunStore: Send + Sync {
     /// The default implementation loads, modifies, and saves. Implementations
     /// that support efficient append (e.g. JSONL) should override this.
     async fn append_event(&self, run_id: &str, event: RunEvent) -> Result<()> {
-        if let Some(mut run) = self.load(run_id).await? {
-            run.push_event(event);
-            self.save(run).await?;
-        }
-        Ok(())
+        let mut run = self
+            .load(run_id)
+            .await?
+            .ok_or_else(|| crate::error::ReactError::Other(format!("run '{run_id}' not found")))?;
+        run.push_event(event);
+        self.save(run).await
     }
 }
 
@@ -1020,6 +1021,93 @@ fn is_terminal(status: RunStatus) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audit::{
+        DiagnosticDeliveryFailure, DiagnosticDeliveryObserver, DiagnosticDeliveryOperation,
+        DiagnosticRecordKind,
+    };
+    use crate::error::ReactError;
+    use std::sync::Mutex as StdMutex;
+
+    struct MissingRunStore;
+
+    #[async_trait::async_trait]
+    impl RunStore for MissingRunStore {
+        async fn save(&self, _run: Run) -> Result<()> {
+            Ok(())
+        }
+
+        async fn load(&self, _run_id: &str) -> Result<Option<Run>> {
+            Ok(None)
+        }
+
+        async fn list_by_session(&self, _session_id: &str) -> Result<Vec<RunSummary>> {
+            Ok(Vec::new())
+        }
+
+        async fn list_all(&self, _limit: usize) -> Result<Vec<RunSummary>> {
+            Ok(Vec::new())
+        }
+    }
+
+    struct SaveFailingRunStore;
+
+    #[async_trait::async_trait]
+    impl RunStore for SaveFailingRunStore {
+        async fn save(&self, _run: Run) -> Result<()> {
+            Err(ReactError::Other(
+                "injected trace start failure".to_string(),
+            ))
+        }
+
+        async fn load(&self, _run_id: &str) -> Result<Option<Run>> {
+            Ok(None)
+        }
+
+        async fn list_by_session(&self, _session_id: &str) -> Result<Vec<RunSummary>> {
+            Ok(Vec::new())
+        }
+
+        async fn list_all(&self, _limit: usize) -> Result<Vec<RunSummary>> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingObserver {
+        failures: StdMutex<Vec<DiagnosticDeliveryFailure>>,
+        changed: std::sync::Condvar,
+    }
+
+    impl DiagnosticDeliveryObserver for RecordingObserver {
+        fn on_failure(&self, failure: DiagnosticDeliveryFailure) {
+            self.failures
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .push(failure);
+            self.changed.notify_all();
+        }
+    }
+
+    impl RecordingObserver {
+        fn wait_for_count(&self, count: usize) -> Result<Vec<DiagnosticDeliveryFailure>> {
+            let failures = self
+                .failures
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let (failures, wait) = self
+                .changed
+                .wait_timeout_while(failures, std::time::Duration::from_secs(5), |failures| {
+                    failures.len() < count
+                })
+                .map_err(|error| ReactError::Other(format!("observer wait failed: {error}")))?;
+            if wait.timed_out() && failures.len() < count {
+                return Err(ReactError::Other(format!(
+                    "timed out waiting for {count} diagnostic failures"
+                )));
+            }
+            Ok(failures.clone())
+        }
+    }
 
     fn make_run(id: &str, session: &str) -> Run {
         Run {
@@ -1047,6 +1135,95 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("echo_trace_test_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[tokio::test]
+    async fn default_append_rejects_a_missing_run() -> Result<()> {
+        let result = MissingRunStore
+            .append_event("missing", RunEvent::Checkpoint { id: "one".into() })
+            .await;
+        let error = match result {
+            Ok(()) => {
+                return Err(ReactError::Other(
+                    "missing run append unexpectedly succeeded".to_string(),
+                ));
+            }
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("run 'missing' not found"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn failed_trace_start_reports_delivery_and_does_not_publish_run_id() -> Result<()> {
+        let observer = Arc::new(RecordingObserver::default());
+        let mut agent = crate::agent::ReactAgent::new(crate::agent::AgentConfig::new(
+            "model", "agent", "system",
+        ));
+        agent.run_store = Some(Arc::new(InMemoryRunStore::new()));
+        let legacy = agent.capture_legacy_external_context();
+        let previous = agent
+            .start_legacy_trace_run("previous", &legacy)
+            .await
+            .ok_or_else(|| ReactError::Other("previous trace did not start".to_string()))?;
+        assert_eq!(agent.capture_current_trace_run_id(), Some(previous));
+
+        agent.run_store = Some(Arc::new(SaveFailingRunStore));
+        agent.set_diagnostic_delivery_observer(observer.clone());
+
+        let run_id = agent.start_legacy_trace_run("input", &legacy).await;
+
+        assert!(run_id.is_none());
+        assert!(agent.capture_current_trace_run_id().is_none());
+        let failures = observer.wait_for_count(1)?;
+        let failure = failures
+            .first()
+            .ok_or_else(|| ReactError::Other("missing trace delivery failure".to_string()))?;
+        assert_eq!(failure.record_kind, DiagnosticRecordKind::Trace);
+        assert_eq!(failure.operation, DiagnosticDeliveryOperation::Start);
+        assert!(
+            failure
+                .record_id
+                .as_deref()
+                .is_some_and(|id| id.starts_with("run_"))
+        );
+        assert!(failure.error.contains("injected trace start failure"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_and_finalize_failures_are_observed_without_trace_terminal_authority()
+    -> Result<()> {
+        let observer = Arc::new(RecordingObserver::default());
+        let mut agent = crate::agent::ReactAgent::new(crate::agent::AgentConfig::new(
+            "model", "agent", "system",
+        ));
+        agent.run_store = Some(Arc::new(MissingRunStore));
+        agent.set_diagnostic_delivery_observer(observer.clone());
+        let legacy = agent.capture_legacy_external_context();
+        let run_id = agent
+            .start_legacy_trace_run("input", &legacy)
+            .await
+            .ok_or_else(|| ReactError::Other("trace start did not return an id".to_string()))?;
+
+        agent
+            .record_trace_event(RunEvent::Checkpoint { id: "one".into() })
+            .await;
+        agent
+            .finalize_scoped_trace_run(Some(&run_id), RunStatus::Completed, Some("answer"), None)
+            .await;
+
+        let failures = observer.wait_for_count(2)?;
+        assert_eq!(failures.len(), 2);
+        assert_eq!(
+            failures.first().map(|failure| failure.operation),
+            Some(DiagnosticDeliveryOperation::Append)
+        );
+        assert_eq!(
+            failures.get(1).map(|failure| failure.operation),
+            Some(DiagnosticDeliveryOperation::Load)
+        );
+        Ok(())
     }
 
     #[tokio::test]

@@ -7,11 +7,11 @@ expectation: human_confirmed
 risk: high
 primary_focus: state_authority
 focus: [data_durability, contract_evidence, failure_concurrency]
-observed_at: cba8e08f3e3f0ccf1d4df3a22be11589f63b2ecd
+observed_at: source:96384cfb5e0bbc3384493805d026d65c6b096b3d0c3a26fde0cc1c007378e2c5
 behavior_refs: [behavior.observation-persistence]
-code_refs: [echo-core/src/agent/event_envelope.rs, echo-state/src/journal/mod.rs, echo-state/src/delivery.rs, src/trace/mod.rs, src/eval/runner.rs, echo-sdk-host/src/core_profile/persistence.rs, docs/en/41-persistence-concepts.md, docs/adr/0038-eval-trace-correlation-identity.md, docs/adr/0046-turn-execution-delivery-settlement.md]
-evidence_refs: [evidence.persistence-observation, evidence.eval-trace-correlation-repair, evidence.eval-trace-correlation-verification, evidence.turn-terminal-delivery-settlement-repair, evidence.turn-terminal-delivery-settlement-verification]
-finding_refs: [finding.trace-effect-event-producers, finding.eval-trace-identity, finding.trace-audit-secret-boundary, finding.turn-terminal-commit-projection-order]
+code_refs: [echo-core/src/agent/event_envelope.rs, echo-state/src/journal/mod.rs, echo-state/src/delivery.rs, echo-state/src/audit/mod.rs, echo-state/src/audit/file.rs, src/trace/mod.rs, src/eval/runner.rs, echo-sdk-host/src/core_profile/persistence.rs, docs/en/41-persistence-concepts.md, docs/adr/0038-eval-trace-correlation-identity.md, docs/adr/0046-turn-execution-delivery-settlement.md, docs/adr/0053-trace-audit-persistence-visibility.md]
+evidence_refs: [evidence.persistence-observation, evidence.eval-trace-correlation-repair, evidence.eval-trace-correlation-verification, evidence.turn-terminal-delivery-settlement-repair, evidence.turn-terminal-delivery-settlement-verification, evidence.diagnostic-persistence-failure-visibility-repair]
+finding_refs: [finding.trace-effect-event-producers, finding.eval-trace-identity, finding.trace-audit-secret-boundary, finding.turn-terminal-commit-projection-order, finding.diagnostic-persistence-failure-visibility, finding.in-memory-audit-successful-drop]
 ---
 
 # Fact、Projection 与 Trace 分离
@@ -26,7 +26,7 @@ finding_refs: [finding.trace-effect-event-producers, finding.eval-trace-identity
 
 ## 当前实现
 
-EventEnvelope提供versioned identity/sequence，CheckpointedReducer从Journal恢复，DeliveryLedger使用Journal+reducer，RunStore独立保存producer-owned trace。Turn execution由producer terminal决定，sink projection只决定delivery；SDK恢复用真实Journal反查receipt watermark，不能从索引投影发明已交付事实。
+EventEnvelope提供versioned identity/sequence，CheckpointedReducer从Journal恢复，DeliveryLedger使用Journal+reducer，RunStore独立保存producer-owned trace。Turn execution由producer terminal决定，sink projection只决定delivery；SDK恢复用真实Journal反查receipt watermark，不能从索引投影发明已交付事实。Trace/Audit persistence failure通过独立有界observer delivery报告，不改变producer terminal。
 
 ## 期望行为
 
@@ -34,8 +34,8 @@ EventEnvelope提供versioned identity/sequence，CheckpointedReducer从Journal�
 
 ## 证据
 
-Persistence 文档、ADR 0007/0019/0030 与 journal/delivery/event tests 提供证据。
+Persistence 文档、ADR 0007/0019/0030/0053 与 journal/delivery/event tests 提供证据。
 
 ## 裁决记录
 
-用户要求明确 Journal、Projection、Trace、Delivery Ledger 谁是事实源；完整 event family 分类尚未完成，故本规则保持 needs_review。
+用户要求明确 Journal、Projection、Trace、Delivery Ledger 谁是事实源；diagnostic persistence repair仍待工程验证，完整event family分类尚未完成，故本规则保持needs_review。

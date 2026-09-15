@@ -82,7 +82,7 @@ pub(crate) async fn finalize_completed_run(
     }
 
     info!(agent = %agent, "Streaming execution completed{label}");
-    if let Some(al) = &snap.guard.audit_logger {
+    if snap.guard.audit_logger.is_some() {
         let ev = crate::audit::AuditEvent::now(
             snap.config.session_id.clone(),
             snap.config.agent_name.clone(),
@@ -90,9 +90,7 @@ pub(crate) async fn finalize_completed_run(
                 content: output.to_string(),
             },
         );
-        if let Err(e) = al.log(ev).await {
-            tracing::error!(error = %e, "audit log write failed — event dropped");
-        }
+        snap.record_audit_event(ev).await;
     }
     // Rich runtime checkpoint
     snap.save_runtime_checkpoint(context, None).await?;
@@ -176,7 +174,7 @@ pub(crate) async fn emit_final_text(
         cb.on_final_answer(agent, &answer).await;
     }
     snap.auto_snapshot(context, iteration).await;
-    if let Some(al) = &snap.guard.audit_logger {
+    if snap.guard.audit_logger.is_some() {
         let ev = crate::audit::AuditEvent::now(
             snap.config.session_id.clone(),
             snap.config.agent_name.clone(),
@@ -184,9 +182,7 @@ pub(crate) async fn emit_final_text(
                 content: answer.clone(),
             },
         );
-        if let Err(e) = al.log(ev).await {
-            tracing::error!(error = %e, "audit log write failed — event dropped");
-        }
+        snap.record_audit_event(ev).await;
     }
     // Rich runtime checkpoint (messages + plan + skills + blocked reason)
     snap.save_runtime_checkpoint(context, None).await?;

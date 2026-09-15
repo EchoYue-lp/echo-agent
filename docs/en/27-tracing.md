@@ -202,17 +202,65 @@ let agent = ReactAgentBuilder::new()
 ```
 1. start_trace_run(input)
    → Creates Run { status: Running, run_id: "run_<uuid>" }
-   → Saves to store
+   → Saves to store; a rejected save publishes no trace run ID
 
 2. record_trace_event(event)   (called multiple times)
    → Appends event to Run via store.append_event()
-   → Fire-and-forget (errors silently discarded)
+   → Reports rejected delivery without changing Agent execution
 
 3. finalize_trace_run(status, output, error)
    → Sets status, final_output, finished_at
    → Saves final state to store
-   → Clears current_run_id
+   → Does not alter the product/business current_run_id
 ```
+
+### Diagnostic Delivery Failures
+
+Trace and Audit persistence are observations of an Agent execution, not a
+second execution terminal. Their direct Store/Logger methods return `Result`
+and callers that require persistence must handle that result. The Agent
+integration continues the producer execution when an optional diagnostic write
+fails and sends a structured `DiagnosticDeliveryFailure` to its observer.
+
+The Agent producer submits each failure with a bounded, non-blocking `try_send`.
+A process-local diagnostic dispatcher emits the tracing target
+`echo_agent::diagnostic_delivery` with stable `record_kind`, `operation`,
+`record_id`, `occurred_at`, and `error` fields. Applications can also install a
+structured observer; it receives the same fact from that dispatcher:
+
+```rust
+use echo_agent::audit::{DiagnosticDeliveryFailure, DiagnosticDeliveryObserver};
+use echo_agent::prelude::*;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+#[derive(Default)]
+struct DiagnosticCounter(AtomicUsize);
+
+impl DiagnosticDeliveryObserver for DiagnosticCounter {
+    fn on_failure(&self, _failure: DiagnosticDeliveryFailure) {
+        self.0.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+let diagnostic_failures = Arc::new(DiagnosticCounter::default());
+let agent = ReactAgentBuilder::new()
+    .model("qwen3-max")
+    .system_prompt("You are helpful")
+    .diagnostic_delivery_observer(diagnostic_failures.clone())
+    .build()?;
+# Ok::<(), echo_agent::error::ReactError>(())
+```
+
+The observer has no control return and never runs on the Agent producer.
+Queue saturation, disconnect, initialization failure, reentrant reporting, and
+observer unwind increment `diagnostic_delivery_dropped_count()`. A blocking
+observer can delay later diagnostic notifications, but not Completed, Failed,
+or Cancelled producer settlement. Process abort and termination remain outside
+in-process recovery. Skill-usage metrics remain separate best-effort telemetry
+and are not promoted to diagnostic delivery authority.
+See [ADR 0053](../adr/0053-trace-audit-persistence-visibility.md) for the
+failure-policy decision and industry references.
 
 ### Where Events Are Emitted
 

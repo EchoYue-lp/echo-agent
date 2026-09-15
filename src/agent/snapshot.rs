@@ -7,7 +7,10 @@
 
 use crate::agent::AgentCallback;
 use crate::agent::InterventionCallback;
-use crate::audit::AuditLogger;
+use crate::audit::{
+    AuditLogger, DiagnosticDeliveryFailure, DiagnosticDeliveryObserver,
+    DiagnosticDeliveryOperation, DiagnosticRecordKind,
+};
 use crate::memory::snapshot::SnapshotManager;
 use crate::skills::hooks::HookRegistry;
 use crate::tools::{ToolExecutionConfig, ToolFailure, ToolManager, ToolResult};
@@ -651,6 +654,8 @@ pub struct AgentRunSnapshot {
         Arc<std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>>,
     /// Run store for trace persistence.
     pub run_store: Option<Arc<dyn RunStore>>,
+    /// Observer for Trace and Audit persistence delivery failures.
+    pub(crate) diagnostic_delivery_observer: Option<Arc<dyn DiagnosticDeliveryObserver>>,
     /// Current run ID.
     pub current_run_id: Option<String>,
     /// Unique trace invocation ID. This is intentionally distinct from the
@@ -798,6 +803,7 @@ impl AgentRunSnapshot {
             turn_steer_mailbox: Arc::clone(&agent.turn_steer_mailbox),
             recently_read_files: Arc::clone(&agent.recently_read_files),
             run_store: agent.run_store.clone(),
+            diagnostic_delivery_observer: agent.diagnostic_delivery_observer.clone(),
             current_run_id: if invocation.is_some() {
                 runtime.and_then(|context| context.run_id.clone())
             } else {
@@ -951,12 +957,42 @@ impl AgentRunSnapshot {
 
     // ── Trace helpers ──────────────────────────────────────────────
 
+    fn report_diagnostic_delivery_failure(&self, failure: DiagnosticDeliveryFailure) {
+        crate::audit::report_diagnostic_delivery_failure(
+            self.diagnostic_delivery_observer.clone(),
+            failure,
+        );
+    }
+
+    /// Persist one audit event through the optional Agent callback backend.
+    pub(crate) async fn record_audit_event(&self, event: crate::audit::AuditEvent) {
+        let Some(logger) = self.guard.audit_logger.as_ref() else {
+            return;
+        };
+        let record_id = event.trace_id.clone().or_else(|| event.session_id.clone());
+        if let Err(error) = logger.log(event).await {
+            self.report_diagnostic_delivery_failure(DiagnosticDeliveryFailure::new(
+                DiagnosticRecordKind::Audit,
+                DiagnosticDeliveryOperation::Record,
+                record_id,
+                error.to_string(),
+            ));
+        }
+    }
+
     /// Record a trace event if a run store is attached.
     pub async fn record_event(&self, event: RunEvent) {
         if let Some(ref store) = self.run_store
             && let Some(ref run_id) = self.trace_run_id
         {
-            let _ = store.append_event(run_id, event).await;
+            if let Err(error) = store.append_event(run_id, event).await {
+                self.report_diagnostic_delivery_failure(DiagnosticDeliveryFailure::new(
+                    DiagnosticRecordKind::Trace,
+                    DiagnosticDeliveryOperation::Append,
+                    Some(run_id.clone()),
+                    error.to_string(),
+                ));
+            }
         }
     }
 
@@ -964,13 +1000,39 @@ impl AgentRunSnapshot {
     pub async fn finalize_run(&self, status: RunStatus, output: Option<&str>, error: Option<&str>) {
         if let Some(ref store) = self.run_store
             && let Some(ref run_id) = self.trace_run_id
-            && let Ok(Some(mut run)) = store.load(run_id).await
         {
-            run.status = status;
-            run.final_output = output.map(|s| s.to_string());
-            run.error = error.map(|s| s.to_string());
-            run.finished_at = Some(chrono::Utc::now());
-            let _ = store.save(run).await;
+            match store.load(run_id).await {
+                Ok(Some(mut run)) => {
+                    run.status = status;
+                    run.final_output = output.map(str::to_string);
+                    run.error = error.map(str::to_string);
+                    run.finished_at = Some(chrono::Utc::now());
+                    if let Err(save_error) = store.save(run).await {
+                        self.report_diagnostic_delivery_failure(DiagnosticDeliveryFailure::new(
+                            DiagnosticRecordKind::Trace,
+                            DiagnosticDeliveryOperation::Finalize,
+                            Some(run_id.clone()),
+                            save_error.to_string(),
+                        ));
+                    }
+                }
+                Ok(None) => {
+                    self.report_diagnostic_delivery_failure(DiagnosticDeliveryFailure::new(
+                        DiagnosticRecordKind::Trace,
+                        DiagnosticDeliveryOperation::Load,
+                        Some(run_id.clone()),
+                        "trace run not found during finalization",
+                    ))
+                }
+                Err(load_error) => {
+                    self.report_diagnostic_delivery_failure(DiagnosticDeliveryFailure::new(
+                        DiagnosticRecordKind::Trace,
+                        DiagnosticDeliveryOperation::Load,
+                        Some(run_id.clone()),
+                        load_error.to_string(),
+                    ))
+                }
+            }
         }
     }
 
@@ -1455,7 +1517,7 @@ impl AgentRunSnapshot {
         match result {
             crate::guard::GuardResult::Block { reason } => {
                 tracing::info!(agent = %self.config.agent_name, reason = %reason, "🛡️ Tool output blocked by guard");
-                if let Some(al) = &self.guard.audit_logger {
+                if self.guard.audit_logger.is_some() {
                     let event = crate::audit::AuditEvent::now(
                         self.config.session_id.clone(),
                         self.config.agent_name.clone(),
@@ -1465,9 +1527,7 @@ impl AgentRunSnapshot {
                             reason: reason.clone(),
                         },
                     );
-                    if let Err(e) = al.log(event).await {
-                        tracing::error!(error = %e, "audit log write failed — event dropped");
-                    }
+                    self.record_audit_event(event).await;
                 }
                 Some(format!("Output content filtered by safety guard: {reason}"))
             }

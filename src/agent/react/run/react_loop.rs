@@ -33,7 +33,7 @@ impl ReactAgent {
             match result {
                 crate::guard::GuardResult::Block { reason } => {
                     info!(agent = %agent, reason = %reason, "🛡️ Input blocked by guard");
-                    if let Some(al) = &self.guard.audit_logger {
+                    if self.guard.audit_logger.is_some() {
                         let event = crate::audit::AuditEvent::now(
                             self.config.session_id.clone(),
                             agent.clone(),
@@ -43,9 +43,7 @@ impl ReactAgent {
                                 reason: reason.clone(),
                             },
                         );
-                        if let Err(e) = al.log(event).await {
-                            tracing::warn!(error = %e, "Failed to log guard audit event");
-                        }
+                        self.record_audit_event(event).await;
                     }
                     return Err(ReactError::Other(format!(
                         "Request blocked by safety guard: {reason}"

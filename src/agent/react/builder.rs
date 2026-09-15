@@ -3,7 +3,7 @@
 use crate::agent::config::DEFAULT_TOKEN_LIMIT;
 use crate::agent::react::run::pipeline::ToolExecutionPipeline;
 use crate::agent::{Agent, AgentCallback, AgentConfig, InterventionCallback};
-use crate::audit::AuditLogger;
+use crate::audit::{AuditLogger, DiagnosticDeliveryObserver};
 use crate::error::Result;
 use crate::guard::{Guard, GuardManager};
 #[cfg(feature = "human-loop")]
@@ -75,6 +75,7 @@ pub struct ReactAgentBuilder {
     permission_service: Option<Arc<PermissionService>>,
     guards: Vec<Arc<dyn Guard>>,
     audit_logger: Option<Arc<dyn AuditLogger>>,
+    diagnostic_delivery_observer: Option<Arc<dyn DiagnosticDeliveryObserver>>,
     snapshot_policy: Option<SnapshotPolicy>,
     max_snapshots: usize,
     response_format: Option<ResponseFormat>,
@@ -151,6 +152,7 @@ impl ReactAgentBuilder {
             permission_service: None,
             guards: Vec::new(),
             audit_logger: None,
+            diagnostic_delivery_observer: None,
             snapshot_policy: None,
             max_snapshots: 10,
             response_format: None,
@@ -729,6 +731,16 @@ impl ReactAgentBuilder {
         self
     }
 
+    /// Observe Trace and Audit persistence failures without changing the Agent
+    /// execution result.
+    pub fn diagnostic_delivery_observer(
+        mut self,
+        observer: Arc<dyn DiagnosticDeliveryObserver>,
+    ) -> Self {
+        self.diagnostic_delivery_observer = Some(observer);
+        self
+    }
+
     // ── Snapshot Configuration ──────────────────────────────────────────────────
 
     /// Set snapshot policy, enabling state snapshot functionality
@@ -938,6 +950,9 @@ impl ReactAgentBuilder {
         // Set audit logger
         if let Some(logger) = self.audit_logger {
             agent.set_audit_logger(logger);
+        }
+        if let Some(observer) = self.diagnostic_delivery_observer {
+            agent.set_diagnostic_delivery_observer(observer);
         }
 
         // Set snapshot manager

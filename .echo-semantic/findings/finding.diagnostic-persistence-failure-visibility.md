@@ -10,10 +10,10 @@ focus: [contract_evidence, failure_concurrency, state_authority]
 boundary_ref: boundary.observation-persistence-delivery
 behavior_refs: [behavior.observation-persistence, behavior.effect-permission-execution]
 rule_refs: [rule.fact-projection-separation]
-evidence_refs: [evidence.persistence-observation, evidence.effects-extensions]
+evidence_refs: [evidence.persistence-observation, evidence.effects-extensions, evidence.diagnostic-persistence-failure-visibility-repair]
 audit_refs: [audit.observation-persistence-delivery.data-durability]
 decision_refs: []
-repair_evidence_refs: []
+repair_evidence_refs: [evidence.diagnostic-persistence-failure-visibility-repair]
 verification_evidence_refs: []
 rereview_audit_refs: []
 discovered_at: f1e9027246760661144786e9e35615cd46d580c6
@@ -39,4 +39,4 @@ RunStore 默认 append 对缺失 run 返回成功，trace 初始 save 失败仍�
 
 ## 处理记录
 
-Data-durability Audit 确认；本 Finding 与 secret retention 分离，后续需明确 best-effort/required policy 和 failure telemetry。
+Data-durability Audit 确认；本 Finding 与secret retention、InMemory audit成功丢写和tool terminal authority分离。当前repair候选已明确direct Store/Logger Result、diagnostic delivery与best-effort telemetry三层，并通过独立静态复审；工程focused验证、verification Evidence和最终revision rereview尚未完成，因此保持open。

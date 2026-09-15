@@ -469,7 +469,7 @@ impl PipelineStage for AuditStage {
         snapshot: &crate::agent::snapshot::AgentRunSnapshot,
     ) -> Result<()> {
         // Log tool execution start to audit logger
-        if let Some(al) = &snapshot.guard.audit_logger {
+        if snapshot.guard.audit_logger.is_some() {
             let ev = crate::audit::AuditEvent::now(
                 snapshot.config.session_id.clone(),
                 snapshot.config.agent_name.clone(),
@@ -481,9 +481,7 @@ impl PipelineStage for AuditStage {
                     duration_ms: 0,
                 },
             );
-            if let Err(e) = al.log(ev).await {
-                tracing::error!(error = %e, "audit log write failed — event dropped");
-            }
+            snapshot.record_audit_event(ev).await;
         }
         Ok(())
     }
@@ -651,7 +649,7 @@ impl PipelineStage for ExecuteStage {
             Err(e) => {
                 let err_msg = e.to_string();
                 // Log failure to audit logger
-                if let Some(al) = &snapshot.guard.audit_logger {
+                if snapshot.guard.audit_logger.is_some() {
                     let ev = crate::audit::AuditEvent::now(
                         snapshot.config.session_id.clone(),
                         snapshot.config.agent_name.clone(),
@@ -663,9 +661,7 @@ impl PipelineStage for ExecuteStage {
                             duration_ms: 0,
                         },
                     );
-                    if let Err(e) = al.log(ev).await {
-                        tracing::error!(error = %e, "audit log write failed — event dropped");
-                    }
+                    snapshot.record_audit_event(ev).await;
                 }
 
                 ToolResult {

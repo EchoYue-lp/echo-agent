@@ -40,7 +40,7 @@ pub(crate) async fn prepare_turn(
     }
 
     // Audit: user input
-    if let Some(al) = &snap.guard.audit_logger {
+    if snap.guard.audit_logger.is_some() {
         let event = crate::audit::AuditEvent::now(
             snap.config.session_id.clone(),
             snap.config.agent_name.clone(),
@@ -48,9 +48,7 @@ pub(crate) async fn prepare_turn(
                 content: text.to_string(),
             },
         );
-        if let Err(e) = al.log(event).await {
-            tracing::error!(error = %e, "audit log write failed — event dropped");
-        }
+        snap.record_audit_event(event).await;
     }
 
     // Streaming preparation runs this hook before routing; the core receives
