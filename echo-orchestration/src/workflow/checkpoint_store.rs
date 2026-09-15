@@ -642,11 +642,16 @@ impl CheckpointStore for FileCheckpointStore {
                 "Cannot requeue checkpoint '{id}': pending checkpoint already exists"
             )));
         }
-        tokio::fs::rename(claim_path, path).await.map_err(|error| {
-            echo_core::error::ReactError::Other(format!(
-                "Failed to requeue checkpoint claim: {error}"
-            ))
-        })
+        tokio::fs::rename(claim_path, &path)
+            .await
+            .map_err(|error| {
+                echo_core::error::ReactError::Other(format!(
+                    "Failed to requeue checkpoint claim: {error}"
+                ))
+            })?;
+        let mut checkpoint = Self::read_checkpoint(&path).await?;
+        checkpoint.resume_attempt_id = None;
+        self.save_unlocked(&checkpoint).await
     }
 
     async fn save_if_generation(
@@ -1147,7 +1152,13 @@ mod tests {
         );
         let attempt_id = claimed.resume_attempt_id.clone().unwrap();
         second.requeue_claim(&id, &attempt_id).await.unwrap();
-        assert!(first.load(&id).await.unwrap().is_some());
+        assert!(
+            first
+                .load(&id)
+                .await
+                .unwrap()
+                .is_some_and(|checkpoint| checkpoint.resume_attempt_id.is_none())
+        );
         let _ = std::fs::remove_dir_all(&temp_path);
     }
 }
