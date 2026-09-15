@@ -10,11 +10,11 @@ focus: [failure_concurrency, time_lifecycle]
 boundary_ref: boundary.task-subagent-workflow
 behavior_refs: [behavior.task-subagent-execution]
 rule_refs: [rule.task-subagent-authority]
-evidence_refs: [evidence.task-subagent-workflow]
+evidence_refs: [evidence.task-subagent-workflow, evidence.workflow-entry-loop-authority-repair, evidence.workflow-entry-loop-authority-verification]
 audit_refs: [audit.task-subagent-workflow.failure-concurrency, audit.observation-persistence-delivery.contract-evidence]
 decision_refs: []
-repair_evidence_refs: []
-verification_evidence_refs: []
+repair_evidence_refs: [evidence.workflow-entry-loop-authority-repair]
+verification_evidence_refs: [evidence.workflow-entry-loop-authority-verification]
 rereview_audit_refs: []
 discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 ---
@@ -39,4 +39,5 @@ Graph 的 run、run-until-interrupt、resume 和 stream 分别实现循环；`Wo
 
 ## 处理记录
 
-Discovery 记录；下一阶段先补入口行为矩阵，再决定抽取共享 loop 或修正文档/事件。
+ADR 0052裁决四个公开入口投影同一`Graph::execute_loop`；候选实现、行为等价与focused验证已完成，
+等待最终独立复审后关闭。
