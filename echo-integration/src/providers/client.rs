@@ -8,6 +8,7 @@ use reqwest::RequestBuilder;
 use reqwest::header::HeaderMap;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 use tracing::{info, trace};
 
 fn timeout_error(kind: &str, duration: Duration) -> LlmError {
@@ -167,13 +168,14 @@ fn parse_sse_chunk(data: &str) -> Result<Option<ParsedSseChunk>> {
     Ok(Some(ParsedSseChunk::Chunk(chunk)))
 }
 
-#[tracing::instrument(skip(client, request_body, header_map), fields(model = %request_body.model))]
+#[tracing::instrument(skip(client, request_body, header_map, cancel_token), fields(model = %request_body.model))]
 pub(crate) async fn post(
     client: Arc<Client>,
     request_body: &ChatCompletionRequest,
     header_map: HeaderMap,
     url: &str,
     timeouts: LlmTimeouts,
+    cancel_token: Option<CancellationToken>,
 ) -> Result<ChatCompletionResponse> {
     trace!(
         model = %request_body.model,
@@ -188,6 +190,7 @@ pub(crate) async fn post(
         header_map,
         url,
         timeouts,
+        cancel_token,
     )
     .await?;
     let completion_response: ChatCompletionResponse = serde_json::from_value(value)
@@ -208,38 +211,66 @@ pub(crate) async fn post_json(
     header_map: HeaderMap,
     url: &str,
     timeouts: LlmTimeouts,
+    cancel_token: Option<CancellationToken>,
 ) -> Result<serde_json::Value> {
     let request = client.post(url).headers(header_map).json(&request_body);
     let request = match timeouts.request_timeout() {
         Some(timeout) => request.timeout(timeout),
         None => request,
     };
-    let response = request
-        .send()
-        .await
-        .map_err(|e| LlmError::NetworkError(e.to_string()))?;
-    if !response.status().is_success() {
-        let status = response.status().as_u16();
-        let error_text = response
+    post_json_request(request, cancel_token).await
+}
+
+/// Send a request and decode its complete JSON response while honoring the
+/// owning request cancellation token across the entire transport lifecycle.
+///
+/// The same boundary covers waiting for response headers, reading an error or
+/// success body, and decoding JSON. Dropping the in-flight reqwest future on
+/// cancellation closes the response body and releases the connection.
+pub(crate) async fn post_json_request(
+    request: RequestBuilder,
+    cancel_token: Option<CancellationToken>,
+) -> Result<serde_json::Value> {
+    let request_future = async {
+        let response = request
+            .send()
+            .await
+            .map_err(|error| LlmError::NetworkError(error.to_string()))?;
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            return Err(LlmError::ApiError {
+                status,
+                message: error_text,
+            }
+            .into());
+        }
+
+        let raw_text = response
             .text()
             .await
-            .unwrap_or_else(|_| "Unknown error".to_string());
-        return Err(LlmError::ApiError {
-            status,
-            message: error_text,
-        }
-        .into());
+            .map_err(|error| LlmError::InvalidResponse(error.to_string()))?;
+
+        tracing::debug!(raw_len = raw_text.len(), raw = %raw_text.chars().take(2000).collect::<String>(), "Raw API response");
+
+        serde_json::from_str(&raw_text)
+            .map_err(|error| LlmError::InvalidResponse(error.to_string()).into())
+    };
+    tokio::pin!(request_future);
+
+    tokio::select! {
+        biased;
+        _ = async {
+            match cancel_token.as_ref() {
+                Some(token) => token.cancelled().await,
+                None => std::future::pending().await,
+            }
+        } => Err(LlmError::NetworkError("LLM request cancelled".to_string()).into()),
+        result = &mut request_future => result,
     }
-
-    let raw_text = response
-        .text()
-        .await
-        .map_err(|e| LlmError::InvalidResponse(e.to_string()))?;
-
-    tracing::debug!(raw_len = raw_text.len(), raw = %raw_text.chars().take(2000).collect::<String>(), "Raw API response");
-
-    serde_json::from_str(&raw_text)
-        .map_err(|error| LlmError::InvalidResponse(error.to_string()).into())
 }
 
 /// Send a request with `stream: true`, returning a parsed SSE chunk stream.
@@ -418,6 +449,11 @@ pub(crate) async fn stream_json_sse(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::providers::{AnthropicClient, LlmConfig, OpenAiClient, ResponsesClient};
+    use echo_core::llm::{
+        ChatRequest, LlmApiProtocol, LlmClient, Message, ModelInputModality, ThinkingProtocol,
+    };
+    use std::fmt::Debug;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
     use tokio::sync::Notify;
@@ -656,6 +692,156 @@ mod tests {
                 if matches!(error.as_ref(), LlmError::NetworkError(message) if message.contains("cancelled"))
         ));
         server.abort();
+        Ok(())
+    }
+
+    fn assert_request_cancellation<T: Debug>(result: Result<T>) -> Result<()> {
+        match result {
+            Err(echo_core::error::ReactError::Llm(error)) if matches!(error.as_ref(), LlmError::NetworkError(message) if message.contains("cancelled")) => {
+                Ok(())
+            }
+            Err(error) => Err(LlmError::InvalidResponse(format!(
+                "expected typed network cancellation, got {error}"
+            ))
+            .into()),
+            Ok(value) => Err(LlmError::InvalidResponse(format!(
+                "request unexpectedly succeeded with {value:?}"
+            ))
+            .into()),
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum TestProvider {
+        OpenAi,
+        Responses,
+        Anthropic,
+    }
+
+    impl TestProvider {
+        const ALL: [Self; 3] = [Self::OpenAi, Self::Responses, Self::Anthropic];
+
+        fn name(self) -> &'static str {
+            match self {
+                Self::OpenAi => "openai",
+                Self::Responses => "responses",
+                Self::Anthropic => "anthropic",
+            }
+        }
+    }
+
+    fn test_provider_client(
+        provider: TestProvider,
+        base_url: String,
+    ) -> Result<Box<dyn LlmClient>> {
+        let timeouts = LlmTimeouts::default().without_request_timeout();
+        match provider {
+            TestProvider::OpenAi => {
+                let config = LlmConfig {
+                    provider_name: Some(provider.name().to_string()),
+                    api_protocol: LlmApiProtocol::ChatCompletions,
+                    base_url,
+                    api_key: "test-key".to_string(),
+                    model: "test-model".to_string(),
+                    input_modalities: ModelInputModality::text_only(),
+                    thinking_protocol: ThinkingProtocol::None,
+                    timeouts,
+                };
+                Ok(Box::new(OpenAiClient::new(config)?))
+            }
+            TestProvider::Responses => {
+                let config = LlmConfig {
+                    provider_name: Some(provider.name().to_string()),
+                    api_protocol: LlmApiProtocol::Responses,
+                    base_url,
+                    api_key: "test-key".to_string(),
+                    model: "test-model".to_string(),
+                    input_modalities: ModelInputModality::text_only(),
+                    thinking_protocol: ThinkingProtocol::None,
+                    timeouts,
+                };
+                Ok(Box::new(ResponsesClient::new(config)?))
+            }
+            TestProvider::Anthropic => Ok(Box::new(
+                AnthropicClient::with_base_url(base_url, "test-key", "test-model")
+                    .with_timeouts(timeouts),
+            )),
+        }
+    }
+
+    async fn assert_provider_cancels_while_stalled(
+        provider: TestProvider,
+        after_headers: bool,
+    ) -> Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let stalled = Arc::new(Notify::new());
+        let server_stalled = stalled.clone();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await?;
+            let mut request = vec![0_u8; 4096];
+            let _request_bytes = socket.read(&mut request).await?;
+            if after_headers {
+                socket
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 64\r\nConnection: keep-alive\r\n\r\n",
+                    )
+                    .await?;
+                socket.flush().await?;
+            }
+            server_stalled.notify_one();
+            std::future::pending::<std::io::Result<()>>().await
+        });
+
+        let client = test_provider_client(provider, format!("http://{address}"))?;
+        let cancel_token = CancellationToken::new();
+        let cancel_after_stall = cancel_token.clone();
+        let cancel_task = tokio::spawn(async move {
+            tokio::time::timeout(Duration::from_secs(2), stalled.notified())
+                .await
+                .map_err(|_| {
+                    LlmError::NetworkError("provider request did not stall".to_string())
+                })?;
+            cancel_after_stall.cancel();
+            Result::<()>::Ok(())
+        });
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            client.chat(ChatRequest {
+                messages: vec![Message::user("hello".to_string())],
+                cancel_token: Some(cancel_token),
+                timeouts: Some(LlmTimeouts::default().without_request_timeout()),
+                ..Default::default()
+            }),
+        )
+        .await
+        .map_err(|_| {
+            LlmError::NetworkError(format!(
+                "{} non-stream cancellation timed out",
+                provider.name()
+            ))
+        })?;
+        cancel_task
+            .await
+            .map_err(|error| LlmError::NetworkError(format!("cancel task failed: {error}")))??;
+        assert_request_cancellation(result)?;
+        server.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn all_nonstream_providers_cancel_before_response_headers() -> Result<()> {
+        for provider in TestProvider::ALL {
+            assert_provider_cancels_while_stalled(provider, false).await?;
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn all_nonstream_providers_cancel_after_response_headers() -> Result<()> {
+        for provider in TestProvider::ALL {
+            assert_provider_cancels_while_stalled(provider, true).await?;
+        }
         Ok(())
     }
 }

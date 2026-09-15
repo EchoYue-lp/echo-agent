@@ -69,6 +69,7 @@ impl ResponsesClient {
             self.header_map.clone(),
             &self.config.base_url,
             self.config.timeouts,
+            None,
         )
         .await
     }
@@ -165,6 +166,7 @@ impl LlmClient for ResponsesClient {
                     self.header_map.clone(),
                     &self.config.base_url,
                     timeouts,
+                    request.cancel_token.clone(),
                 )
                 .await?;
                 response_to_chat(raw)

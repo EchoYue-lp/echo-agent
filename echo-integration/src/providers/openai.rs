@@ -227,6 +227,7 @@ impl LlmClient for OpenAiClient {
                     self.header_map.clone(),
                     &self.config.base_url,
                     timeouts,
+                    request.cancel_token.clone(),
                 )
                 .await?;
 
