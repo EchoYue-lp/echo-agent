@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.sdk-governance-scope-equivalence
 kind: evidence
-observed_at: source:1bcfbd1131476ae872a2dc89326675abd7c02dd26d56c8d29a058cd91fb308fc
+observed_at: c5f7688212d45d5bdcdbf60342605e8bfb176cae
 source_refs:
   - docs/adr/0028-source-first-multilanguage-sdk-runtime.md
   - docs/adr/0031-sdk-identity-governance-scope.md
