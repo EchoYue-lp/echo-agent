@@ -7,11 +7,11 @@ expectation: human_confirmed
 risk: high
 primary_focus: state_authority
 focus: [time_lifecycle, failure_concurrency, contract_evidence]
-observed_at: 9d1f3f2b5fdc204c08ecdec32ed22e8df95870e9
+observed_at: eb8744566dcd5a734531869ebde9f3506b132163
 behavior_refs: [behavior.task-subagent-execution]
 code_refs: [echo-orchestration/src/tasks/revisioned.rs, echo-orchestration/src/tasks/runtime_service.rs, echo-orchestration/src/tasks/runtime_executor.rs, echo-orchestration/src/tasks/background_task.rs, echo-orchestration/src/tasks/background_state.rs, src/agent/subagent/registry.rs, src/agent/subagent/executor.rs, docs/adr/0008-canonical-runtime-task-authority.md, docs/adr/0033-subagent-factory-singleflight-publication.md, docs/adr/0039-background-task-terminal-authority.md]
-evidence_refs: [evidence.task-subagent-workflow, evidence.subagent-factory-singleflight-repair, evidence.subagent-factory-singleflight-verification, evidence.background-task-terminal-authority-repair, evidence.background-task-terminal-authority-verification]
-finding_refs: [finding.task-patch-claim-race, finding.task-subagent-attempt-link, finding.subagent-factory-cancellation, finding.subagent-factory-publication-race, finding.background-task-wait, finding.subagent-definition-catalog]
+evidence_refs: [evidence.task-subagent-workflow, evidence.subagent-factory-singleflight-repair, evidence.subagent-factory-singleflight-verification, evidence.background-task-terminal-authority-repair, evidence.background-task-terminal-authority-verification, evidence.workflow-checkpoint-claim-settlement-repair, evidence.workflow-checkpoint-claim-settlement-verification]
+finding_refs: [finding.task-patch-claim-race, finding.task-subagent-attempt-link, finding.subagent-factory-cancellation, finding.subagent-factory-publication-race, finding.workflow-checkpoint-claim-recovery, finding.workflow-checkpoint-resurrection-race, finding.background-task-wait, finding.subagent-definition-catalog]
 ---
 
 # Task 与 Subagent 单一权威

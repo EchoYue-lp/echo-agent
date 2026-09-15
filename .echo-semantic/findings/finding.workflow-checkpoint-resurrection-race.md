@@ -3,19 +3,19 @@ schema_version: 1
 id: finding.workflow-checkpoint-resurrection-race
 kind: finding
 type: implementation_bug
-status: open
+status: resolved
 severity: high
 primary_focus: failure_concurrency
 focus: [data_durability, time_lifecycle, state_authority]
 boundary_ref: boundary.task-subagent-workflow
 behavior_refs: [behavior.task-subagent-execution]
 rule_refs: []
-evidence_refs: [evidence.task-subagent-workflow]
-audit_refs: [audit.task-subagent-workflow.failure-concurrency]
+evidence_refs: [evidence.task-subagent-workflow, evidence.workflow-checkpoint-claim-settlement-repair, evidence.workflow-checkpoint-claim-settlement-verification]
+audit_refs: [audit.task-subagent-workflow.failure-concurrency, audit.workflow-checkpoint-claim-settlement-rereview]
 decision_refs: []
-repair_evidence_refs: []
-verification_evidence_refs: []
-rereview_audit_refs: []
+repair_evidence_refs: [evidence.workflow-checkpoint-claim-settlement-repair]
+verification_evidence_refs: [evidence.workflow-checkpoint-claim-settlement-verification]
+rereview_audit_refs: [audit.workflow-checkpoint-claim-settlement-rereview]
 discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 ---
 
@@ -39,4 +39,5 @@ GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/110
 
 ## 处理记录
 
-Failure-concurrency Audit 确认；后续 repair 需 CAS/lease identity 与确定性交错测试。
+Tag只对pending checkpoint执行generation CAS；active或stale claim使用attempt与file lock隔离，
+不能被load-modify-save复活。跨实例交错、crash cut和远程E2E通过独立复审。
