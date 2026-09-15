@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.sdk-repository-extraction-verification
 kind: evidence
-observed_at: source:6c19670f1c60cd514abba3d30f6293cd385a7df18f8c355fe6fced3e4e6ab8d9
+observed_at: source:552140ec57df7b7bfc4d7ebf0e9e9c8a9c777a78ce249fc8e8cb89635e9e23cc
 source_refs: [Cargo.toml, Cargo.lock, README.md, README.zh.md, .github/workflows/rust-ci.yml, scripts/verify.sh, echo-agent-learning/tests/documentation_contract.rs, tests/acp_agent_adapter.rs, tests/fixtures/acp/v1/prompt-resource-link-valid.json, tests/fixtures/acp/v1/session-relative-cwd-invalid.json]
 supports: [finding.sdk-repository-extraction, behavior.workspace-composition, rule.framework-layer-ownership]
 limitations: ["合流0e09324a后的focused门禁已刷新；full workspace gate、17-feature matrix、continuity和最终独立复审等待SDK完成candidate pin后执行。", "SDK protocol、Host、Wave 2 inventory和三语言 parity由独立echo-agent-sdk仓库的后续outcome验证。", "本证据未声称所有历史semantic Finding已关闭。"]
