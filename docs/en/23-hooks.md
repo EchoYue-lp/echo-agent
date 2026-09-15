@@ -178,8 +178,10 @@ aliases when parsing.
 Permission actions are reduced across the complete matching source set. The deterministic
 source order (`UserConfig`, then `Plugin`, then `Skill`) affects diagnostics and equal-level
 metadata, but not permission safety: `deny > ask > require_approval > allow`. An early
-`allow` or `ask` therefore cannot short-circuit a later `deny`; only an explicit
-`continue: false` stops propagation.
+`allow` or `ask` therefore cannot short-circuit a later `deny`. A
+`continue: false` attached to a permission-bearing command, HTTP, or programmatic
+result is ignored for permission reduction; non-permission results retain normal
+stop-propagation semantics.
 
 ### Sources, Reloading, and Dry Run
 

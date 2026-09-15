@@ -13,6 +13,10 @@ echo-agent 实现了完整的 MCP 客户端，支持 MCP `2025-11-25`，并兼�
 对应处理链路后才会增加这些能力。服务端支持上面列出的四个协议版本，并在握手
 时回显客户端请求的受支持版本。
 
+客户端也会在发送 `notifications/initialized` 和发现能力前，用同一四版本集合校验
+服务端返回的 `initialize.protocolVersion`。未知版本会以
+`McpError::InitializationFailed` 失败并关闭 transport，不会发布部分初始化的 client。
+
 ---
 
 ## 解决什么问题

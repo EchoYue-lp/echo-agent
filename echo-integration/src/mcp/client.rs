@@ -13,7 +13,7 @@ use super::types::{
     McpPromptGetResult, McpPromptsListResult, McpResource, McpResourceReadParams,
     McpResourceReadResult, McpResourceTemplate, McpResourceTemplatesListResult,
     McpResourcesListResult, McpTool, McpToolCallParams, McpToolCallResult, McpToolsListResult,
-    ServerCapabilities,
+    SUPPORTED_PROTOCOL_VERSIONS, ServerCapabilities,
 };
 use crate::redaction::{text as redact_text, url as redact_url};
 use echo_core::error::{McpError, ReactError, Result};
@@ -116,6 +116,14 @@ impl McpClient {
             })?)?;
 
         let negotiated_version = init_result.protocol_version.clone();
+        if !SUPPORTED_PROTOCOL_VERSIONS.contains(&negotiated_version.as_str()) {
+            return Err(ReactError::Mcp(Box::new(McpError::InitializationFailed(
+                format!(
+                    "server selected unsupported MCP protocol version '{negotiated_version}'; supported versions: {}",
+                    SUPPORTED_PROTOCOL_VERSIONS.join(", ")
+                ),
+            ))));
+        }
         tracing::info!(
             "MCP: 已连接 '{}' (协议版本: {}, 请求版本: {})",
             server_name,
@@ -679,6 +687,96 @@ mod tests {
 
     struct RecordingInitializeTransport {
         initialize: Arc<Mutex<Option<JsonRpcRequest>>>,
+    }
+
+    struct VersionInitializeTransport {
+        protocol_version: String,
+        initialized: Arc<AtomicBool>,
+        closed: Arc<AtomicBool>,
+    }
+
+    impl McpTransport for VersionInitializeTransport {
+        fn send(
+            &self,
+            request: JsonRpcRequest,
+        ) -> BoxFuture<'_, Result<super::super::types::JsonRpcResponse>> {
+            let protocol_version = self.protocol_version.clone();
+            Box::pin(async move {
+                Ok(super::super::types::JsonRpcResponse {
+                    jsonrpc: "2.0".to_string(),
+                    id: request.id,
+                    result: Some(serde_json::json!({
+                        "protocolVersion": protocol_version,
+                        "capabilities": {},
+                        "serverInfo": {"name": "version-fixture", "version": "1.0"}
+                    })),
+                    error: None,
+                })
+            })
+        }
+
+        fn notify(&self, notification: JsonRpcNotification) -> BoxFuture<'_, Result<()>> {
+            if notification.method == "notifications/initialized" {
+                self.initialized.store(true, Ordering::Release);
+            }
+            Box::pin(async { Ok(()) })
+        }
+
+        fn close(&self) -> BoxFuture<'_, ()> {
+            self.closed.store(true, Ordering::Release);
+            Box::pin(async {})
+        }
+
+        fn notification_rx(
+            &self,
+        ) -> Option<Arc<dyn super::super::types::JsonRpcNotificationReceiver>> {
+            None
+        }
+    }
+
+    #[tokio::test]
+    async fn client_accepts_supported_versions_and_rejects_unknown_selection()
+    -> std::result::Result<(), String> {
+        for version in SUPPORTED_PROTOCOL_VERSIONS {
+            let initialized = Arc::new(AtomicBool::new(false));
+            let closed = Arc::new(AtomicBool::new(false));
+            let transport: Arc<dyn McpTransport> = Arc::new(VersionInitializeTransport {
+                protocol_version: (*version).to_string(),
+                initialized: initialized.clone(),
+                closed: closed.clone(),
+            });
+            let client = McpClient::from_transport("supported", transport)
+                .await
+                .map_err(|error| error.to_string())?;
+            assert_eq!(client.protocol_version(), *version);
+            assert!(initialized.load(Ordering::Acquire));
+            assert!(!closed.load(Ordering::Acquire));
+        }
+
+        let initialized = Arc::new(AtomicBool::new(false));
+        let closed = Arc::new(AtomicBool::new(false));
+        let transport: Arc<dyn McpTransport> = Arc::new(VersionInitializeTransport {
+            protocol_version: "2099-01-01".to_string(),
+            initialized: initialized.clone(),
+            closed: closed.clone(),
+        });
+        let error = McpClient::from_transport("unsupported", transport)
+            .await
+            .err()
+            .ok_or_else(|| "unknown protocol version was accepted".to_string())?;
+        match error {
+            ReactError::Mcp(error) => match *error {
+                McpError::InitializationFailed(message) => {
+                    assert!(message.contains("2099-01-01"));
+                    assert!(message.contains(MCP_PROTOCOL_VERSION));
+                }
+                other => return Err(format!("unexpected MCP error: {other}")),
+            },
+            other => return Err(format!("unexpected error: {other}")),
+        }
+        assert!(!initialized.load(Ordering::Acquire));
+        assert!(closed.load(Ordering::Acquire));
+        Ok(())
     }
 
     impl McpTransport for RecordingInitializeTransport {

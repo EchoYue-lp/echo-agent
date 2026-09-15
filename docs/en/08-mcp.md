@@ -15,6 +15,12 @@ server-to-client request/notification handlers are implemented. The server
 side supports the four protocol versions listed above and echoes a supported
 client version during initialization.
 
+The client validates the server-selected `initialize.protocolVersion` against
+that same four-version set before sending `notifications/initialized` or
+discovering capabilities. An unknown selection fails as
+`McpError::InitializationFailed`, and the transport is closed instead of
+publishing a partially initialized client.
+
 ---
 
 ## Problem It Solves
