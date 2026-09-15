@@ -1685,6 +1685,165 @@ async fn discover_skills_refreshes_activate_skill_registry() {
 }
 
 #[tokio::test]
+async fn registry_reconciliation_keeps_progressive_tools_visible_and_non_resurrecting()
+-> Result<(), String> {
+    struct RejectDeniedReplacement;
+    impl crate::skills::external::SkillLoadPolicy for RejectDeniedReplacement {
+        fn allows<'a>(
+            &'a self,
+            descriptor: &'a crate::skills::external::SkillDescriptor,
+        ) -> futures::future::BoxFuture<'a, bool> {
+            Box::pin(async move { !descriptor.description.contains("denied") })
+        }
+    }
+
+    let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let skill_dir = temp.path().join("facade-skill");
+    tokio::fs::create_dir_all(skill_dir.join("references"))
+        .await
+        .map_err(|error| error.to_string())?;
+    let markdown = "---\nname: facade-skill\ndescription: Facade mutation skill\nallowed-tools: read_skill_resource\n---\n\nUse facade skill.\n";
+    let skill_path = skill_dir.join("SKILL.md");
+    tokio::fs::write(&skill_path, markdown)
+        .await
+        .map_err(|error| error.to_string())?;
+    tokio::fs::write(skill_dir.join("references/guide.md"), "facade resource")
+        .await
+        .map_err(|error| error.to_string())?;
+    let document = crate::skills::external::SkillDocument::parse_at(markdown, &skill_path)
+        .map_err(|error| error.to_string())?;
+    let mut descriptor = document.descriptor().clone();
+    descriptor.sandbox = Some(crate::skills::external::SkillSandboxPolicy {
+        isolation: Some(echo_core::sandbox::IsolationLevel::Process),
+        network: Some(false),
+        timeout_secs: Some(9),
+        allowed_paths: Vec::new(),
+        denied_paths: Vec::new(),
+    });
+
+    let mut agent = ReactAgent::new(AgentConfig::minimal("model", "agent"));
+    agent
+        .register_skill_descriptor(descriptor.clone())
+        .await
+        .map_err(|error| error.to_string())?;
+    let stale_activate = agent
+        .tools
+        .tool_manager
+        .get_tool("activate_skill")
+        .ok_or_else(|| "activate_skill tool missing after registration".to_string())?;
+
+    let activation = agent
+        .tools
+        .tool_manager
+        .execute_tool(
+            "activate_skill",
+            [("name".to_string(), json!("facade-skill"))].into(),
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    assert!(activation.success);
+    let resource = agent
+        .tools
+        .tool_manager
+        .execute_tool(
+            "read_skill_resource",
+            [
+                ("skill_name".to_string(), json!("facade-skill")),
+                ("path".to_string(), json!("references/guide.md")),
+            ]
+            .into(),
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    assert!(resource.success);
+
+    agent.set_skill_load_policy(Some(Arc::new(RejectDeniedReplacement)));
+    let mut denied_replacement = descriptor;
+    denied_replacement.description = "denied replacement".to_string();
+    let denied = agent.register_skill_descriptor(denied_replacement).await;
+    assert!(denied.is_err());
+    assert_eq!(
+        agent
+            .skill_registry()
+            .get_descriptor("facade-skill")
+            .map(|descriptor| descriptor.description.as_str()),
+        Some("Facade mutation skill")
+    );
+    assert!(agent.skill_registry().is_activated("facade-skill"));
+    let retained_policy = agent
+        .skill_registry()
+        .get_active_sandbox_policy("facade-skill")
+        .ok_or_else(|| "denied replacement removed active sandbox policy".to_string())?;
+    assert_eq!(
+        retained_policy.isolation,
+        Some(echo_core::sandbox::IsolationLevel::Process)
+    );
+    assert_eq!(retained_policy.timeout_secs, Some(9));
+    assert!(
+        agent
+            .skill_registry()
+            .catalog_prompt()
+            .is_some_and(|catalog| catalog.contains("Facade mutation skill")
+                && !catalog.contains("denied replacement"))
+    );
+    let progressive_description = agent
+        .tools
+        .progressive_skill_registry
+        .as_ref()
+        .ok_or_else(|| "progressive registry missing".to_string())?
+        .read()
+        .await
+        .get_descriptor("facade-skill")
+        .map(|descriptor| descriptor.description.clone());
+    assert_eq!(
+        progressive_description.as_deref(),
+        Some("Facade mutation skill")
+    );
+    let retained_resource = agent
+        .tools
+        .tool_manager
+        .execute_tool(
+            "read_skill_resource",
+            [
+                ("skill_name".to_string(), json!("facade-skill")),
+                ("path".to_string(), json!("references/guide.md")),
+            ]
+            .into(),
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    assert!(retained_resource.success);
+
+    assert_eq!(
+        agent
+            .unregister_skill_names(&["facade-skill".to_string()])
+            .await,
+        vec!["facade-skill".to_string()]
+    );
+    assert!(!agent.has_skill("facade-skill"));
+    let stale_result = stale_activate
+        .execute([("name".to_string(), json!("facade-skill"))].into())
+        .await
+        .map_err(|error| error.to_string())?;
+    assert!(!stale_result.success);
+    let resource_after_remove = agent
+        .tools
+        .tool_manager
+        .execute_tool(
+            "read_skill_resource",
+            [
+                ("skill_name".to_string(), json!("facade-skill")),
+                ("path".to_string(), json!("references/guide.md")),
+            ]
+            .into(),
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    assert!(!resource_after_remove.success);
+    Ok(())
+}
+
+#[tokio::test]
 async fn intent_router_skill_activation_survives_compression_markers() -> Result<(), String> {
     let base =
         std::env::temp_dir().join(format!("echo-agent-skill-protected-{}", std::process::id()));
@@ -1916,20 +2075,19 @@ async fn activate_skill_enforces_context_path_for_conditional_skills() {
         .unwrap();
 
     // The standard frontmatter has no `paths` source; conditional activation
-    // is a programmatic descriptor field, so patch it on both registries the
-    // activate_skill tool can resolve through.
+    // is a programmatic descriptor field, so replace it through the Agent
+    // reconciliation API used by every registry mutation surface.
     let mut conditional = agent
         .skill_registry()
         .get_descriptor("python-linter")
         .cloned()
         .expect("discovered descriptor");
     conditional.paths = vec!["*.py".to_string()];
-    agent
-        .skill_registry_mut()
-        .register_descriptor(conditional.clone());
-    if let Some(shared) = agent.tools.progressive_skill_registry.clone() {
-        shared.write().await.register_descriptor(conditional);
-    }
+    let registered = agent.register_skill_descriptor(conditional).await;
+    assert!(
+        registered.is_ok(),
+        "conditional descriptor replacement failed"
+    );
 
     let missing = agent
         .tools
@@ -2440,6 +2598,22 @@ async fn checkpoint_skill_activation_restores_resource_tool_authority() -> Resul
         .discover_skills(&[DiscoveryScope::Custom(skill_root)])
         .await
         .map_err(|error| error.to_string())?;
+    let mut descriptor = agent
+        .skill_registry()
+        .get_descriptor("resume-skill")
+        .cloned()
+        .ok_or_else(|| "resume-skill descriptor missing".to_string())?;
+    descriptor.sandbox = Some(crate::skills::external::SkillSandboxPolicy {
+        isolation: Some(echo_core::sandbox::IsolationLevel::Process),
+        network: Some(false),
+        timeout_secs: Some(5),
+        allowed_paths: Vec::new(),
+        denied_paths: Vec::new(),
+    });
+    agent
+        .register_skill_descriptor(descriptor)
+        .await
+        .map_err(|error| error.to_string())?;
     agent.set_state_store(store);
 
     let restored = agent
@@ -2456,6 +2630,16 @@ async fn checkpoint_skill_activation_restores_resource_tool_authority() -> Resul
             .and_then(|registry| registry.try_read().ok())
             .is_some_and(|registry| registry.is_activated("resume-skill"))
     );
+    let policy = agent
+        .skill_registry()
+        .get_active_sandbox_policy("resume-skill")
+        .ok_or_else(|| "restored sandbox policy missing".to_string())?;
+    assert_eq!(
+        policy.isolation,
+        Some(echo_core::sandbox::IsolationLevel::Process)
+    );
+    assert_eq!(policy.network, Some(false));
+    assert_eq!(policy.timeout_secs, Some(5));
 
     let resource = agent
         .tools

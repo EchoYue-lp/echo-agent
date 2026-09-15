@@ -293,6 +293,18 @@ Agent 的主 `SkillRegistry` 与 `activate_skill`、`read_skill_resource`、
 resource/script 访问读取同一组 active names。Catalog descriptor 仍是定义数据，
 不构成第二份 activation 状态。
 
+Activation 以 `(name, arguments, source)` 为 single-flight identity。同一 identity
+重复调用会返回已提交内容，不会再次执行 inline command；不同 arguments 或 source 会在
+上一代完成后创建新 generation。reset、descriptor replacement 和 remove 会 fence 旧的
+in-flight completion。Checkpoint 保存直接读取这一实时权威，恢复则从当前 descriptor
+原子派生 sandbox policy。如果取消时 inline command 的结算结果不确定，该 activation
+identity 会保持 poisoned，直到显式 reset 或 remove，避免自动重放外部 effect。
+
+应用修改 Agent 持有的文件型 Skill 时，使用 `register_skill_descriptor`、
+`register_prepared_skill`、`tag_skills_source{_with_variables}`、
+`unregister_skill_names` 或 `unregister_skills_by_source`。这些 API 会同时归并 catalog
+与 progressive tool definition view；`ReactAgent` 不再暴露原始可变 registry accessor。
+
 ### triggers 来自哪里
 
 标准 frontmatter 没有 trigger 字段，因此文件型 skill 的

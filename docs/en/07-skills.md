@@ -316,6 +316,23 @@ checkpoint save/restore, allowed-tool filtering, and resource/script access
 therefore observe the same active names. Catalog descriptors remain definition
 data and do not form another activation state.
 
+Activation is single-flight by `(name, arguments, source)`. Repeating the same
+identity returns the committed content without executing inline commands
+again. A later activation with different arguments or source creates a new
+generation after the prior one completes. Reset, descriptor replacement, and
+removal fence any older in-flight completion. Checkpoint save reads this live
+authority, while restore atomically derives sandbox policy from the current
+descriptor. Cancellation with uncertain inline-command settlement poisons that
+activation identity until explicit reset or removal, preventing an automatic
+effect replay.
+
+Applications that mutate Agent-owned file Skills use
+`register_skill_descriptor`, `register_prepared_skill`,
+`tag_skills_source{_with_variables}`, `unregister_skill_names`, or
+`unregister_skills_by_source`. These APIs reconcile the catalog and progressive
+tool definition views together; the former raw mutable registry accessor is no
+longer available on `ReactAgent`.
+
 ### Where triggers come from
 
 The standard frontmatter has no trigger field, so file-based skills arrive

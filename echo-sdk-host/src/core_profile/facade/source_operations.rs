@@ -6481,7 +6481,7 @@ pub(crate) async fn dispatch(
             };
             authorities
                 .agent_handle
-                .write(|agent| agent.skill_registry_mut().record_code_skill(info))
+                .write(|agent| agent.record_code_skill_info(info))
                 .await;
             Ok(WireValue::Null)
         }
@@ -6534,8 +6534,9 @@ pub(crate) async fn dispatch(
                 .map_err(|error| invalid(format!("skill hooks are malformed: {error}")))?;
             authorities
                 .agent_handle
-                .write(|agent| agent.skill_registry_mut().register_descriptor(descriptor))
-                .await;
+                .write_async(move |agent| Box::pin(agent.register_skill_descriptor(descriptor)))
+                .await
+                .map_err(|error| framework(&request.operation, error.to_string()))?;
             Ok(WireValue::Null)
         }
         "echo_execution::skills::registry::SkillRegistry::register_prepared"
@@ -6561,8 +6562,9 @@ pub(crate) async fn dispatch(
             }
             authorities
                 .agent_handle
-                .write(|agent| agent.skill_registry_mut().register_prepared(document))
-                .await;
+                .write_async(move |agent| Box::pin(agent.register_prepared_skill(document)))
+                .await
+                .map_err(|error| framework(&request.operation, error.to_string()))?;
             Ok(WireValue::Null)
         }
         "echo_execution::skills::registry::SkillRegistry::tag_source_with_variables"
@@ -6579,12 +6581,12 @@ pub(crate) async fn dispatch(
             let variables = plugin_variables_argument(request, 3)?;
             authorities
                 .agent_handle
-                .write(|agent| {
-                    agent.skill_registry_mut().tag_source_with_variables(
-                        &names,
-                        &source,
-                        variables.as_ref(),
-                    )
+                .write_async(move |agent| {
+                    Box::pin(async move {
+                        agent
+                            .tag_skills_source_with_variables(&names, &source, variables.as_ref())
+                            .await
+                    })
                 })
                 .await;
             Ok(WireValue::Null)
@@ -6923,7 +6925,14 @@ pub(crate) async fn dispatch(
             }
             let removed = authorities
                 .agent_handle
-                .write(|agent| agent.skill_registry_mut().remove_descriptor(&name))
+                .write_async(move |agent| {
+                    Box::pin(async move {
+                        !agent
+                            .unregister_skill_names(std::slice::from_ref(&name))
+                            .await
+                            .is_empty()
+                    })
+                })
                 .await;
             snapshot_value(request, serde_json::Value::Bool(removed))
         }
@@ -6952,7 +6961,9 @@ pub(crate) async fn dispatch(
             }
             authorities
                 .agent_handle
-                .write(|agent| agent.skill_registry_mut().tag_source(&names, &source))
+                .write_async(move |agent| {
+                    Box::pin(async move { agent.tag_skills_source(&names, &source).await })
+                })
                 .await;
             snapshot_value(request, serde_json::Value::Null)
         }
@@ -6975,7 +6986,9 @@ pub(crate) async fn dispatch(
             }
             let removed = authorities
                 .agent_handle
-                .write(|agent| agent.skill_registry_mut().unregister_by_source(&source))
+                .write_async(move |agent| {
+                    Box::pin(async move { agent.unregister_skills_by_source(&source).await.len() })
+                })
                 .await;
             let removed = u64::try_from(removed)
                 .map_err(|_| framework(&request.operation, "removed count exceeds WireU64"))?;
@@ -7000,10 +7013,8 @@ pub(crate) async fn dispatch(
             }
             let removed = authorities
                 .agent_handle
-                .write(|agent| {
-                    agent
-                        .skill_registry_mut()
-                        .unregister_names_by_source(&source)
+                .write_async(move |agent| {
+                    Box::pin(async move { agent.unregister_skills_by_source(&source).await })
                 })
                 .await;
             snapshot_value(

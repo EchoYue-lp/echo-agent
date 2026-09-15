@@ -438,8 +438,6 @@ pub struct ToolRuntime {
     /// Allowed tool patterns from activated skills (captured at snapshot time).
     /// `None` = unrestricted (no skill restricts tools).
     pub skill_allowed_tools: Option<std::collections::HashSet<String>>,
-    /// Names of all activated skills (captured at snapshot time).
-    pub active_skill_names: Vec<String>,
     /// Current plan state (shared with ReactAgent).
     pub plan_state: Arc<tokio::sync::RwLock<Option<String>>>,
     /// Effective disabled tools captured for this invocation.
@@ -468,7 +466,6 @@ impl ToolRuntime {
             disabled_tools.extend(tool_manager.incompatible_tool_names(&config.input_modalities));
         }
         let skill_allowed_tools = agent.tools.skill_registry.active_skill_allowed_tools();
-        let active_skill_names = agent.tools.skill_registry.activated_names();
         let plan_mode = agent.config.plan_mode;
         let visibility = invocation_visible_tools.map(|initial| {
             let available = tool_manager
@@ -506,7 +503,6 @@ impl ToolRuntime {
             hook_registry: agent.tools.hook_registry.clone(),
             intervention_callbacks: agent.tools.intervention_callbacks.clone(),
             skill_allowed_tools,
-            active_skill_names,
             plan_state: Arc::clone(&agent.plan_state),
             disabled_tools,
             visibility,
@@ -582,9 +578,8 @@ pub struct AgentRunSnapshot {
     pub context: Arc<tokio::sync::Mutex<crate::compression::ContextManager>>,
     /// Tool execution state (tools, hooks).
     pub tools: Arc<ToolRuntime>,
-    /// Invocation-scoped activation names, updated when a skill is activated
-    /// through a tool during the turn.
-    skill_telemetry_active_skills: Arc<std::sync::Mutex<Vec<String>>>,
+    /// Canonical activation authority shared with the owning agent and Skill tools.
+    skill_activation: crate::skills::SkillActivationHandle,
     /// Guard / safety state.
     pub guard: Arc<GuardRuntime>,
     /// Snapshot manager (from memory subsystem).
@@ -736,8 +731,7 @@ impl AgentRunSnapshot {
             invocation.and_then(|context| context.disabled_tools.as_ref()),
             invocation.and_then(|context| context.visible_tools.as_ref()),
         );
-        let skill_telemetry_active_skills =
-            Arc::new(std::sync::Mutex::new(tools.active_skill_names.clone()));
+        let skill_activation = agent.tools.skill_registry.activation_handle();
         Self {
             config: Arc::new(config),
             context: agent.memory.context.clone(),
@@ -850,25 +844,12 @@ impl AgentRunSnapshot {
                 .unwrap_or_else(|error| error.into_inner())
                 .clone(),
             skill_curator: agent.skill_curator.clone(),
-            skill_telemetry_active_skills,
+            skill_activation,
         }
     }
 
-    fn active_skill_names_for_telemetry(&self) -> Vec<String> {
-        self.skill_telemetry_active_skills
-            .lock()
-            .map(|names| names.clone())
-            .unwrap_or_else(|_| self.tools.active_skill_names.clone())
-    }
-
-    fn note_skill_activation(&self, skill_name: &str) {
-        let Ok(mut names) = self.skill_telemetry_active_skills.lock() else {
-            return;
-        };
-        if !names.iter().any(|name| name == skill_name) {
-            names.push(skill_name.to_string());
-            names.sort();
-        }
+    fn active_skill_names(&self) -> Vec<String> {
+        self.skill_activation.activated_names()
     }
 
     /// Persist one best-effort observation for every skill active in this
@@ -884,7 +865,7 @@ impl AgentRunSnapshot {
         let Some(store) = self.memory_store.clone() else {
             return;
         };
-        let skill_names = self.active_skill_names_for_telemetry();
+        let skill_names = self.active_skill_names();
         if skill_names.is_empty() {
             return;
         }
@@ -1013,7 +994,7 @@ impl AgentRunSnapshot {
             conversation_id: conv_id.clone(),
             messages_json,
             current_plan,
-            active_skills: self.active_skill_names_for_telemetry(),
+            active_skills: self.active_skill_names(),
             blocked_reason,
             working_dir: self.config.working_dir.clone(),
             timestamp: chrono::Utc::now(),
@@ -1786,12 +1767,6 @@ impl AgentRunSnapshot {
                 }
             }
 
-            if let Some(result) = ctx.result.as_ref()
-                && let crate::tools::ToolResultKind::SkillActivation { name } = &result.kind
-            {
-                self.note_skill_activation(name);
-            }
-
             match pipeline_result {
                 Ok(()) => {
                     // Check if execution was blocked
@@ -1918,7 +1893,7 @@ mod transcript_filter_tests {
         merge_generation_projection,
     };
     use crate::compression::{ContextManager, ContextProjection};
-    use crate::error::Result;
+    use crate::error::{ReactError, Result};
     use echo_core::llm::types::Message;
     use echo_core::tools::{Tool, ToolParameters, ToolResult};
     use std::collections::HashSet;
@@ -2081,6 +2056,42 @@ mod transcript_filter_tests {
                 .await?
                 .is_empty()
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn checkpoint_reads_live_canonical_skill_activation_after_snapshot() -> Result<()> {
+        use crate::state::RuntimeStateStore;
+
+        let temp = tempfile::tempdir()?;
+        let store = Arc::new(crate::state::FileRuntimeStateStore::new(temp.path())?);
+        let config = crate::agent::AgentConfig::new("test-model", "agent", "system")
+            .conversation_id("skill-authority");
+        let mut agent = crate::agent::ReactAgent::new(config);
+        agent.set_state_store(store.clone());
+        assert!(agent.tools.skill_registry.mark_activated("before-snapshot"));
+        let snapshot = AgentRunSnapshot::from_agent(&agent);
+
+        agent.tools.skill_registry.reset_activation_state();
+        assert!(agent.tools.skill_registry.mark_activated("after-snapshot"));
+        snapshot
+            .save_runtime_checkpoint(&agent.memory.context, None)
+            .await?;
+        let checkpoint = store
+            .get_checkpoint("skill-authority")
+            .await?
+            .ok_or_else(|| ReactError::Other("skill checkpoint missing".to_string()))?;
+        assert_eq!(checkpoint.active_skills, vec!["after-snapshot".to_string()]);
+
+        agent.tools.skill_registry.reset_activation_state();
+        snapshot
+            .save_runtime_checkpoint(&agent.memory.context, None)
+            .await?;
+        let reset_checkpoint = store
+            .get_checkpoint("skill-authority")
+            .await?
+            .ok_or_else(|| ReactError::Other("reset checkpoint missing".to_string()))?;
+        assert!(reset_checkpoint.active_skills.is_empty());
         Ok(())
     }
 
@@ -2512,7 +2523,6 @@ mod transcript_filter_tests {
                 "shell".to_string(),
                 "final_answer".to_string(),
             ])),
-            active_skill_names: Vec::new(),
             plan_state: Arc::new(tokio::sync::RwLock::new(None)),
             disabled_tools: HashSet::from(["final_answer".to_string()]),
             visibility: None,

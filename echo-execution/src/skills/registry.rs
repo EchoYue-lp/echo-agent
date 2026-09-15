@@ -23,16 +23,89 @@ use crate::skills::external::types::{
 };
 use echo_core::sandbox::SandboxExecutor;
 
-/// Runtime state shared by all views of one agent's Skill registry.
+/// Runtime activation authority shared by all views of one agent's Skill registry.
 ///
 /// Catalog and prepared-document data may be copied into a concurrent tool
 /// adapter, but activation is an agent-runtime fact and must have one owner.
-/// Keeping both pieces behind one handle also keeps activation-derived sandbox
-/// policy decisions consistent across direct API and resource/script tools.
+/// The handle is deliberately public because `echo_agent` and `echo_execution`
+/// are separate crates; it is a process-local Rust/Host boundary, not an SDK
+/// lifecycle object.
+#[derive(Clone)]
+pub struct SkillActivationHandle {
+    shared: Arc<SkillActivationShared>,
+}
+
+struct SkillActivationShared {
+    state: std::sync::Mutex<SkillActivationState>,
+}
+
 struct SkillActivationState {
     session_id: String,
-    activated: std::sync::Mutex<HashSet<String>>,
-    active_sandbox_policies: std::sync::Mutex<HashMap<String, SkillSandboxPolicy>>,
+    epoch: u64,
+    generations: HashMap<String, u64>,
+    activated: HashMap<String, ActivatedSkill>,
+    in_flight: HashMap<String, Arc<ActivationFlight>>,
+}
+
+#[derive(Clone)]
+struct ActivatedSkill {
+    key: Option<ActivationKey>,
+    content: Option<SkillContent>,
+    sandbox_policy: Option<SkillSandboxPolicy>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct ActivationKey {
+    arguments: Vec<String>,
+    source: SkillSource,
+}
+
+struct ActivationFlight {
+    epoch: u64,
+    generation: u64,
+    key: ActivationKey,
+    abandoned: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    waiters: std::sync::atomic::AtomicUsize,
+    result: tokio::sync::OnceCell<std::result::Result<SkillContent, String>>,
+}
+
+enum ActivationClaim {
+    Cached(Box<SkillContent>),
+    Restored,
+    Abandoned,
+    Conflict,
+    Flight(Arc<ActivationFlight>),
+}
+
+struct ActivationAttemptGuard {
+    activation: SkillActivationHandle,
+    name: String,
+    flight: Arc<ActivationFlight>,
+    completed: bool,
+}
+
+impl ActivationAttemptGuard {
+    fn new(activation: SkillActivationHandle, name: &str, flight: Arc<ActivationFlight>) -> Self {
+        Self {
+            activation,
+            name: name.to_string(),
+            flight,
+            completed: false,
+        }
+    }
+
+    fn complete(&mut self) {
+        self.completed = true;
+    }
+}
+
+impl Drop for ActivationAttemptGuard {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.activation.poison(&self.name, &self.flight);
+        }
+    }
 }
 
 impl SkillActivationState {
@@ -46,13 +119,261 @@ impl SkillActivationState {
                     .take(8)
                     .collect::<String>()
             ),
-            activated: std::sync::Mutex::new(HashSet::new()),
-            active_sandbox_policies: std::sync::Mutex::new(HashMap::new()),
+            epoch: 0,
+            generations: HashMap::new(),
+            activated: HashMap::new(),
+            in_flight: HashMap::new(),
         }
     }
 }
 
-type SharedActivationState = Arc<SkillActivationState>;
+impl SkillActivationHandle {
+    fn new() -> Self {
+        Self {
+            shared: Arc::new(SkillActivationShared {
+                state: std::sync::Mutex::new(SkillActivationState::new()),
+            }),
+        }
+    }
+
+    /// Return the current active Skill names in deterministic order.
+    pub fn activated_names(&self) -> Vec<String> {
+        let state = self
+            .shared
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let mut names = state.activated.keys().cloned().collect::<Vec<_>>();
+        names.sort();
+        names
+    }
+
+    fn session_id(&self) -> String {
+        self.shared
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .session_id
+            .clone()
+    }
+
+    fn is_activated(&self, name: &str) -> bool {
+        self.shared
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .activated
+            .contains_key(name)
+    }
+
+    fn activated_count(&self) -> usize {
+        self.shared
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .activated
+            .len()
+    }
+
+    fn active_sandbox_policy(&self, name: &str) -> Option<SkillSandboxPolicy> {
+        self.shared
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .activated
+            .get(name)
+            .and_then(|activation| activation.sandbox_policy.clone())
+    }
+
+    fn mark_activated(&self, name: &str, sandbox_policy: Option<SkillSandboxPolicy>) -> bool {
+        let mut state = self
+            .shared
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if state.activated.contains_key(name) || state.in_flight.contains_key(name) {
+            return false;
+        }
+        state.activated.insert(
+            name.to_string(),
+            ActivatedSkill {
+                key: None,
+                content: None,
+                sandbox_policy,
+            },
+        );
+        true
+    }
+
+    fn reset(&self) {
+        let mut state = self
+            .shared
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        state.epoch = state.epoch.wrapping_add(1);
+        state.generations.clear();
+        state.activated.clear();
+        state.in_flight.clear();
+    }
+
+    fn retire(&self, name: &str) {
+        let mut state = self
+            .shared
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        Self::retire_name(&mut state, name);
+    }
+
+    fn retire_name(state: &mut SkillActivationState, name: &str) {
+        Self::advance_generation(state, name);
+        state.activated.remove(name);
+        state.in_flight.remove(name);
+    }
+
+    fn advance_generation(state: &mut SkillActivationState, name: &str) {
+        let generation = state.generations.entry(name.to_string()).or_default();
+        *generation = generation.wrapping_add(1);
+    }
+
+    fn restore(&self, skills: Vec<(String, Option<SkillSandboxPolicy>)>) -> Vec<String> {
+        let mut state = self
+            .shared
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        state.epoch = state.epoch.wrapping_add(1);
+        state.generations.clear();
+        state.activated.clear();
+        state.in_flight.clear();
+        let mut restored = Vec::with_capacity(skills.len());
+        for (name, sandbox_policy) in skills {
+            state.activated.insert(
+                name.clone(),
+                ActivatedSkill {
+                    key: None,
+                    content: None,
+                    sandbox_policy,
+                },
+            );
+            restored.push(name);
+        }
+        restored.sort();
+        restored.dedup();
+        restored
+    }
+
+    fn claim(&self, name: &str, key: ActivationKey) -> ActivationClaim {
+        let mut state = self
+            .shared
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(flight) = state.in_flight.get(name) {
+            if flight.abandoned.load(std::sync::atomic::Ordering::SeqCst) {
+                return ActivationClaim::Abandoned;
+            }
+            return if flight.key == key {
+                #[cfg(test)]
+                flight
+                    .waiters
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                ActivationClaim::Flight(Arc::clone(flight))
+            } else {
+                ActivationClaim::Conflict
+            };
+        }
+        if let Some(active) = state.activated.get(name) {
+            match (&active.key, &active.content) {
+                (Some(active_key), Some(content)) if active_key == &key => {
+                    return ActivationClaim::Cached(Box::new(content.clone()));
+                }
+                (None, None) => return ActivationClaim::Restored,
+                _ => Self::advance_generation(&mut state, name),
+            }
+        }
+        let flight = Arc::new(ActivationFlight {
+            epoch: state.epoch,
+            generation: state.generations.get(name).copied().unwrap_or_default(),
+            key,
+            abandoned: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            waiters: std::sync::atomic::AtomicUsize::new(0),
+            result: tokio::sync::OnceCell::new(),
+        });
+        state
+            .in_flight
+            .insert(name.to_string(), Arc::clone(&flight));
+        ActivationClaim::Flight(flight)
+    }
+
+    fn publish(
+        &self,
+        name: &str,
+        flight: &Arc<ActivationFlight>,
+        content: SkillContent,
+        sandbox_policy: Option<SkillSandboxPolicy>,
+    ) -> std::result::Result<(), String> {
+        let mut state = self
+            .shared
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let current_generation = state.generations.get(name).copied().unwrap_or_default();
+        let owns_flight = state
+            .in_flight
+            .get(name)
+            .is_some_and(|current| Arc::ptr_eq(current, flight));
+        if state.epoch != flight.epoch || current_generation != flight.generation || !owns_flight {
+            return Err(format!(
+                "Skill '{name}' activation was retired before publication"
+            ));
+        }
+        state.in_flight.remove(name);
+        state.activated.insert(
+            name.to_string(),
+            ActivatedSkill {
+                key: Some(flight.key.clone()),
+                content: Some(content),
+                sandbox_policy,
+            },
+        );
+        Ok(())
+    }
+
+    fn abandon(&self, name: &str, flight: &Arc<ActivationFlight>) {
+        let mut state = self
+            .shared
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if state
+            .in_flight
+            .get(name)
+            .is_some_and(|current| Arc::ptr_eq(current, flight))
+        {
+            state.in_flight.remove(name);
+        }
+    }
+
+    fn poison(&self, name: &str, flight: &Arc<ActivationFlight>) {
+        let state = self
+            .shared
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if state
+            .in_flight
+            .get(name)
+            .is_some_and(|current| Arc::ptr_eq(current, flight))
+        {
+            flight
+                .abandoned
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+}
 
 // -- SkillRegistry --
 
@@ -73,7 +394,7 @@ pub struct SkillRegistry {
     prepared_documents: HashMap<String, SkillDocument>,
 
     /// Shared runtime activation authority.
-    activation_state: SharedActivationState,
+    activation: SkillActivationHandle,
 
     /// Code-based skills: name -> info (registered via `add_skill`)
     code_skills: HashMap<String, SkillInfo>,
@@ -96,12 +417,17 @@ impl SkillRegistry {
         Self {
             descriptors: HashMap::new(),
             prepared_documents: HashMap::new(),
-            activation_state: Arc::new(SkillActivationState::new()),
+            activation: SkillActivationHandle::new(),
             code_skills: HashMap::new(),
             sandbox: None,
             by_source: HashMap::new(),
             plugin_variables: HashMap::new(),
         }
+    }
+
+    /// Return the canonical process-local activation authority.
+    pub fn activation_handle(&self) -> SkillActivationHandle {
+        self.activation.clone()
     }
 
     /// Construct an empty definition view that shares this registry's runtime
@@ -110,10 +436,9 @@ impl SkillRegistry {
     /// Callers may populate descriptors and prepared documents for concurrent
     /// resource tools without creating another activation set or sandbox-policy
     /// authority.
-    #[doc(hidden)]
     pub fn activation_view(&self) -> Self {
         let mut registry = Self::new();
-        registry.activation_state = Arc::clone(&self.activation_state);
+        registry.activation = self.activation.clone();
         registry
     }
 
@@ -126,6 +451,7 @@ impl SkillRegistry {
     }
 
     fn insert_descriptor(&mut self, descriptor: SkillDescriptor) {
+        let replacing = self.descriptors.contains_key(&descriptor.name);
         // Validate paths during registration
         for warning in descriptor.validate_paths() {
             warn!("Skill '{}': {}", descriptor.name, warning);
@@ -153,7 +479,11 @@ impl SkillRegistry {
                 .or_default()
                 .insert(descriptor.name.clone());
         }
-        self.descriptors.insert(descriptor.name.clone(), descriptor);
+        let name = descriptor.name.clone();
+        self.descriptors.insert(name.clone(), descriptor);
+        if replacing {
+            self.activation.retire(&name);
+        }
     }
 
     /// Remove all skills registered under a given source tag (e.g.
@@ -203,6 +533,7 @@ impl SkillRegistry {
         variables: Option<&echo_core::plugin::PluginVariables>,
     ) {
         for name in names {
+            let mut activation_input_changed = false;
             if let Some(desc) = self.descriptors.get_mut(name) {
                 // Only tag if not already owned by another source.
                 if desc.source.is_none() {
@@ -217,7 +548,11 @@ impl SkillRegistry {
                 {
                     self.plugin_variables
                         .insert(name.clone(), variables.clone());
+                    activation_input_changed = true;
                 }
+            }
+            if activation_input_changed {
+                self.activation.retire(name);
             }
         }
     }
@@ -246,16 +581,9 @@ impl SkillRegistry {
         }
         self.prepared_documents.remove(name);
         self.plugin_variables.remove(name);
-        self.activation_state
-            .activated
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .remove(name);
-        self.activation_state
-            .active_sandbox_policies
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .remove(name);
+        if removed_descriptor.is_some() {
+            self.activation.retire(name);
+        }
         removed_descriptor.is_some()
     }
 
@@ -321,12 +649,12 @@ impl SkillRegistry {
 
     /// Mark a skill as activated. Returns `false` if already activated (dedup).
     pub fn mark_activated(&self, name: &str) -> bool {
-        let mut guard = self
-            .activation_state
-            .activated
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        guard.insert(name.to_string())
+        let sandbox_policy = self
+            .descriptors
+            .get(name)
+            .and_then(|descriptor| descriptor.sandbox.clone())
+            .filter(SkillSandboxPolicy::is_constraining);
+        self.activation.mark_activated(name, sandbox_policy)
     }
 
     /// Clear session-local activation and sandbox policy state without
@@ -336,26 +664,12 @@ impl SkillRegistry {
     /// retaining independent model contexts. Switching identities must not
     /// carry activated skills or their sandbox policy into the next context.
     pub fn reset_activation_state(&self) {
-        self.activation_state
-            .activated
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .clear();
-        self.activation_state
-            .active_sandbox_policies
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .clear();
+        self.activation.reset();
     }
 
     /// Check whether a skill has been activated in this session.
     pub fn is_activated(&self, name: &str) -> bool {
-        let guard = self
-            .activation_state
-            .activated
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        guard.contains(name)
+        self.activation.is_activated(name)
     }
 
     /// Collect the union of `allowed_tools` from all currently activated skills.
@@ -365,15 +679,11 @@ impl SkillRegistry {
     /// activated skill declares an `allowed-tools` whitelist — in that case,
     /// only tools matching an entry in the returned set are permitted.
     pub fn active_skill_allowed_tools(&self) -> Option<HashSet<String>> {
-        let activated = self
-            .activation_state
-            .activated
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let activated = self.activation.activated_names();
         let mut allowed = HashSet::new();
         let mut any_restricted = false;
 
-        for name in activated.iter() {
+        for name in &activated {
             if let Some(desc) = self.descriptors.get(name)
                 && !desc.allowed_tools.is_empty()
             {
@@ -393,24 +703,33 @@ impl SkillRegistry {
 
     /// Number of activated skills.
     pub fn activated_count(&self) -> usize {
-        let guard = self
-            .activation_state
-            .activated
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        guard.len()
+        self.activation.activated_count()
     }
 
     /// Return all activated skill names as a sorted Vec.
     pub fn activated_names(&self) -> Vec<String> {
-        let guard = self
-            .activation_state
-            .activated
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let mut names: Vec<String> = guard.iter().cloned().collect();
-        names.sort();
-        names
+        self.activation.activated_names()
+    }
+
+    /// Replace activation state from a durable checkpoint in one atomic step.
+    ///
+    /// Unknown names are ignored because a checkpoint cannot recreate missing
+    /// definitions. Sandbox policies are rebuilt from the currently installed
+    /// descriptors rather than trusted as a second persisted authority.
+    pub fn restore_activation_state(&self, names: &[String]) -> Vec<String> {
+        let skills = names
+            .iter()
+            .filter_map(|name| {
+                self.descriptors.get(name).map(|descriptor| {
+                    let policy = descriptor
+                        .sandbox
+                        .clone()
+                        .filter(SkillSandboxPolicy::is_constraining);
+                    (name.clone(), policy)
+                })
+            })
+            .collect();
+        self.activation.restore(skills)
     }
 
     /// Activate a skill: read its full content from disk, execute inline
@@ -440,90 +759,137 @@ impl SkillRegistry {
         source: SkillSource,
     ) -> echo_core::error::Result<SkillContent> {
         self.validate_activation_dependencies(name)?;
-        // 1. Recursively activate dependencies first
+        if !self.descriptors.contains_key(name) {
+            return Err(echo_core::error::ReactError::Other(format!(
+                "Skill '{name}' not found in catalog"
+            )));
+        }
+        let key = ActivationKey {
+            arguments: args.to_vec(),
+            source,
+        };
+        let flight = match self.activation.claim(name, key) {
+            ActivationClaim::Cached(content) => return Ok(*content),
+            ActivationClaim::Restored => {
+                return Err(echo_core::error::ReactError::Other(format!(
+                    "Skill '{name}' was restored as active; reset activation state before re-activating it"
+                )));
+            }
+            ActivationClaim::Abandoned => {
+                return Err(echo_core::error::ReactError::Other(format!(
+                    "Skill '{name}' activation was cancelled with unknown side-effect settlement; reset activation state before retrying"
+                )));
+            }
+            ActivationClaim::Conflict => {
+                return Err(echo_core::error::ReactError::Other(format!(
+                    "Skill '{name}' is already activating or active with different arguments"
+                )));
+            }
+            ActivationClaim::Flight(flight) => flight,
+        };
+
+        let outcome = flight
+            .result
+            .get_or_init(|| async {
+                if flight
+                    .abandoned
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                {
+                    return Err(format!(
+                        "Skill '{name}' activation was cancelled with unknown side-effect settlement; reset activation state before retrying"
+                    ));
+                }
+                let mut guard = ActivationAttemptGuard::new(
+                    self.activation.clone(),
+                    name,
+                    Arc::clone(&flight),
+                );
+                let result = self
+                    .compute_activation(name, args, source, &flight)
+                    .await
+                    .map_err(|error| error.to_string());
+                guard.complete();
+                result
+            })
+            .await
+            .clone();
+        if outcome.is_err() && !flight.abandoned.load(std::sync::atomic::Ordering::SeqCst) {
+            self.activation.abandon(name, &flight);
+        }
+        outcome.map_err(echo_core::error::ReactError::Other)
+    }
+
+    async fn compute_activation(
+        &self,
+        name: &str,
+        args: &[String],
+        source: SkillSource,
+        flight: &Arc<ActivationFlight>,
+    ) -> echo_core::error::Result<SkillContent> {
         let deps_activated = self.activate_dependencies(name, source).await?;
-
-        let descriptor = self.descriptors.get(name).ok_or_else(|| {
-            echo_core::error::ReactError::Other(format!("Skill '{}' not found in catalog", name))
+        let descriptor = self.descriptors.get(name).cloned().ok_or_else(|| {
+            echo_core::error::ReactError::Other(format!("Skill '{name}' not found in catalog"))
         })?;
-
-        let location = &descriptor.location;
-        let skill_dir = location.parent().ok_or_else(|| {
-            echo_core::error::ReactError::Other(format!(
-                "Cannot determine skill directory from '{}'",
-                location.display()
-            ))
-        })?;
-
+        let location = descriptor.location.clone();
+        let skill_dir = location
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .ok_or_else(|| {
+                echo_core::error::ReactError::Other(format!(
+                    "Cannot determine skill directory from '{}'",
+                    location.display()
+                ))
+            })?;
         let document = match self.prepared_documents.get(name) {
             Some(document) => document.clone(),
             None => {
-                let raw_content = tokio::fs::read_to_string(location).await.map_err(|e| {
-                    echo_core::error::ReactError::Other(format!(
-                        "Failed to read SKILL.md at '{}': {}",
-                        location.display(),
-                        e
-                    ))
-                })?;
-                SkillDocument::parse_at(&raw_content, location.clone())?
+                let raw_content = tokio::fs::read_to_string(&location)
+                    .await
+                    .map_err(|error| {
+                        echo_core::error::ReactError::Other(format!(
+                            "Failed to read SKILL.md at '{}': {error}",
+                            location.display()
+                        ))
+                    })?;
+                SkillDocument::parse_at(&raw_content, location)?
             }
         };
         let mut raw_instructions = document.instructions().to_string();
         if let Some(variables) = self.plugin_variables.get(name) {
             raw_instructions = variables.substitute(&raw_instructions);
         }
-
-        // Process inline commands and variable substitution
-        let ctx = PromptContext {
+        let context = PromptContext {
             skill_dir: skill_dir.display().to_string(),
-            session_id: self.activation_state.session_id.clone(),
+            session_id: self.activation.session_id(),
             arguments: args.to_vec(),
             shell: descriptor.shell.clone(),
             source,
             sandbox: self.sandbox.clone(),
             ..Default::default()
         };
-        let instructions = process_skill_content(&raw_instructions, &ctx).await;
-
-        let resources = enumerate_resources(skill_dir).await;
-
-        // Store sandbox policy if declared
-        if let Some(ref policy) = descriptor.sandbox
-            && policy.is_constraining()
-        {
-            let mut guard = self
-                .activation_state
-                .active_sandbox_policies
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            guard.insert(name.to_string(), policy.clone());
-        }
-
-        {
-            let mut guard = self
-                .activation_state
-                .activated
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            guard.insert(name.to_string());
-        }
-
-        // Augment instructions with dependency info if any were activated
-        let instructions = if !deps_activated.is_empty() {
+        let instructions = process_skill_content(&raw_instructions, &context).await;
+        let resources = enumerate_resources(&skill_dir).await;
+        let instructions = if deps_activated.is_empty() {
+            instructions
+        } else {
             format!(
                 "<skill-dependencies>\nActivated dependencies: {}\n</skill-dependencies>\n\n{}",
                 deps_activated.join(", "),
                 instructions
             )
-        } else {
-            instructions
         };
-
-        Ok(SkillContent {
+        let content = SkillContent {
             descriptor: descriptor.clone(),
             instructions,
             resources,
-        })
+        };
+        let sandbox_policy = descriptor
+            .sandbox
+            .filter(SkillSandboxPolicy::is_constraining);
+        self.activation
+            .publish(name, flight, content.clone(), sandbox_policy)
+            .map_err(echo_core::error::ReactError::Other)?;
+        Ok(content)
     }
 
     fn validate_activation_dependencies(&self, name: &str) -> echo_core::error::Result<()> {
@@ -585,15 +951,8 @@ impl SkillRegistry {
 
         let mut activated = Vec::new();
         for dep in &deps {
-            {
-                let guard = self
-                    .activation_state
-                    .activated
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
-                if guard.contains(dep) {
-                    continue;
-                }
+            if self.activation.is_activated(dep) {
+                continue;
             }
             if !self.descriptors.contains_key(dep) {
                 warn!(
@@ -618,12 +977,7 @@ impl SkillRegistry {
 
     /// Get the active sandbox policy for an activated skill.
     pub fn get_active_sandbox_policy(&self, skill_name: &str) -> Option<SkillSandboxPolicy> {
-        let guard = self
-            .activation_state
-            .active_sandbox_policies
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        guard.get(skill_name).cloned()
+        self.activation.active_sandbox_policy(skill_name)
     }
 
     /// Get the full dependency tree for a skill (recursive, depth-first).
@@ -841,7 +1195,63 @@ async fn enumerate_resources(skill_dir: &std::path::Path) -> Vec<SkillResourceEn
 #[cfg(test)]
 mod tests {
     use super::*;
+    use echo_core::sandbox::{ExecutionResult, IsolationLevel, SandboxCommand};
+    use futures::future::BoxFuture;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct BlockingSandbox {
+        calls: AtomicUsize,
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+    }
+
+    impl BlockingSandbox {
+        fn new() -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+                entered: tokio::sync::Notify::new(),
+                release: tokio::sync::Notify::new(),
+            }
+        }
+    }
+
+    impl SandboxExecutor for BlockingSandbox {
+        fn name(&self) -> &str {
+            "blocking-skill-test"
+        }
+
+        fn isolation_level(&self) -> IsolationLevel {
+            IsolationLevel::Process
+        }
+
+        fn is_available(&self) -> BoxFuture<'_, bool> {
+            Box::pin(async { true })
+        }
+
+        fn execute(
+            &self,
+            _command: SandboxCommand,
+        ) -> BoxFuture<'_, echo_core::error::Result<ExecutionResult>> {
+            Box::pin(async move {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                self.entered.notify_one();
+                self.release.notified().await;
+                Ok(ExecutionResult {
+                    exit_code: 0,
+                    stdout: "once".to_string(),
+                    stderr: String::new(),
+                    duration: std::time::Duration::from_millis(1),
+                    sandbox_type: self.name().to_string(),
+                    timed_out: false,
+                    cancelled: false,
+                    output_truncated: false,
+                    stdout_bytes: 4,
+                    stderr_bytes: 0,
+                })
+            })
+        }
+    }
 
     fn make_descriptor(name: &str, desc: &str) -> SkillDescriptor {
         SkillDescriptor {
@@ -860,6 +1270,33 @@ mod tests {
             sandbox: None,
             depends_on: vec![],
         }
+    }
+
+    fn inline_descriptor(root: &std::path::Path, name: &str) -> SkillDescriptor {
+        SkillDescriptor {
+            location: root.join(name).join("SKILL.md"),
+            ..make_descriptor(name, "Inline activation test")
+        }
+    }
+
+    fn write_inline_skill(root: &std::path::Path, name: &str) -> echo_core::error::Result<()> {
+        let directory = root.join(name);
+        std::fs::create_dir_all(&directory)?;
+        std::fs::write(
+            directory.join("SKILL.md"),
+            format!(
+                "---\nname: {name}\ndescription: Inline activation test\n---\n\nResult ${{ARGUMENTS}}: !`count-once`\n"
+            ),
+        )?;
+        Ok(())
+    }
+
+    fn skill_test_root(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "echo-skill-{label}-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ))
     }
 
     #[test]
@@ -1010,6 +1447,244 @@ mod tests {
         assert!(progressive.remove_descriptor("shared"));
         assert!(!primary.is_activated("shared"));
         assert!(primary.activated_names().is_empty());
+    }
+
+    #[tokio::test]
+    async fn concurrent_repeated_activation_executes_inline_command_once()
+    -> echo_core::error::Result<()> {
+        let root = skill_test_root("single-flight");
+        write_inline_skill(&root, "shared")?;
+        let sandbox = Arc::new(BlockingSandbox::new());
+        let descriptor = inline_descriptor(&root, "shared");
+        let mut primary = SkillRegistry::new();
+        primary.register_descriptor(descriptor.clone());
+        primary.set_sandbox_manager(sandbox.clone());
+        let mut progressive = primary.activation_view();
+        progressive.register_descriptor(descriptor);
+        progressive.set_sandbox_manager(sandbox.clone());
+        let primary = Arc::new(primary);
+        let progressive = Arc::new(progressive);
+
+        let entered = sandbox.entered.notified();
+        let first_registry = Arc::clone(&primary);
+        let first = tokio::spawn(async move { first_registry.activate("shared").await });
+        entered.await;
+        let second_registry = Arc::clone(&progressive);
+        let second = tokio::spawn(async move { second_registry.activate("shared").await });
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                let joined = {
+                    let state = primary
+                        .activation
+                        .shared
+                        .state
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner());
+                    state
+                        .in_flight
+                        .get("shared")
+                        .is_some_and(|flight| flight.waiters.load(Ordering::SeqCst) >= 1)
+                };
+                if joined {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .map_err(|error| echo_core::error::ReactError::Other(error.to_string()))?;
+        sandbox.release.notify_one();
+
+        let first_content = first
+            .await
+            .map_err(|error| echo_core::error::ReactError::Other(error.to_string()))??;
+        let second_content = second
+            .await
+            .map_err(|error| echo_core::error::ReactError::Other(error.to_string()))??;
+        let repeated_content = progressive.activate("shared").await?;
+        assert_eq!(sandbox.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(first_content.instructions, second_content.instructions);
+        assert_eq!(second_content.instructions, repeated_content.instructions);
+        assert!(primary.is_activated("shared"));
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn parameterized_activation_executes_once_per_distinct_key()
+    -> echo_core::error::Result<()> {
+        let root = skill_test_root("parameterized-key");
+        write_inline_skill(&root, "parameterized")?;
+        let sandbox = Arc::new(BlockingSandbox::new());
+        let mut registry = SkillRegistry::new();
+        registry.register_descriptor(inline_descriptor(&root, "parameterized"));
+        registry.set_sandbox_manager(sandbox.clone());
+
+        sandbox.release.notify_one();
+        let first = registry
+            .activate_with_args("parameterized", &["first".to_string()], SkillSource::Local)
+            .await?;
+        sandbox.release.notify_one();
+        let second = registry
+            .activate_with_args("parameterized", &["second".to_string()], SkillSource::Local)
+            .await?;
+        let repeated = registry
+            .activate_with_args("parameterized", &["second".to_string()], SkillSource::Local)
+            .await?;
+
+        assert_eq!(sandbox.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(second.instructions, repeated.instructions);
+        assert_ne!(first.instructions, second.instructions);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn different_activation_key_cannot_overlap_in_flight_effect()
+    -> echo_core::error::Result<()> {
+        let root = skill_test_root("parameterized-conflict");
+        write_inline_skill(&root, "parameterized")?;
+        let sandbox = Arc::new(BlockingSandbox::new());
+        let mut registry = SkillRegistry::new();
+        registry.register_descriptor(inline_descriptor(&root, "parameterized"));
+        registry.set_sandbox_manager(sandbox.clone());
+        let registry = Arc::new(registry);
+
+        let entered = sandbox.entered.notified();
+        let first_registry = Arc::clone(&registry);
+        let first = tokio::spawn(async move {
+            first_registry
+                .activate_with_args("parameterized", &["first".to_string()], SkillSource::Local)
+                .await
+        });
+        entered.await;
+        let conflict = registry
+            .activate_with_args("parameterized", &["second".to_string()], SkillSource::Local)
+            .await
+            .err()
+            .ok_or_else(|| {
+                echo_core::error::ReactError::Other(
+                    "different activation key overlapped in-flight effect".to_string(),
+                )
+            })?;
+        assert!(conflict.to_string().contains("different arguments"));
+        assert_eq!(sandbox.calls.load(Ordering::SeqCst), 1);
+        sandbox.release.notify_one();
+        first
+            .await
+            .map_err(|error| echo_core::error::ReactError::Other(error.to_string()))??;
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancelled_activation_requires_reset_before_effect_retry()
+    -> echo_core::error::Result<()> {
+        let root = skill_test_root("cancelled-flight");
+        write_inline_skill(&root, "cancelled-skill")?;
+        let sandbox = Arc::new(BlockingSandbox::new());
+        let mut registry = SkillRegistry::new();
+        registry.register_descriptor(inline_descriptor(&root, "cancelled-skill"));
+        registry.set_sandbox_manager(sandbox.clone());
+        let registry = Arc::new(registry);
+
+        let entered = sandbox.entered.notified();
+        let activating_registry = Arc::clone(&registry);
+        let activation =
+            tokio::spawn(async move { activating_registry.activate("cancelled-skill").await });
+        entered.await;
+        activation.abort();
+        assert!(activation.await.is_err());
+
+        let retry = registry
+            .activate("cancelled-skill")
+            .await
+            .err()
+            .ok_or_else(|| {
+                echo_core::error::ReactError::Other(
+                    "cancelled activation replayed without reset".to_string(),
+                )
+            })?;
+        assert!(retry.to_string().contains("unknown side-effect settlement"));
+        assert_eq!(sandbox.calls.load(Ordering::SeqCst), 1);
+
+        registry.reset_activation_state();
+        sandbox.release.notify_one();
+        registry.activate("cancelled-skill").await?;
+        assert_eq!(sandbox.calls.load(Ordering::SeqCst), 2);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reset_fences_in_flight_activation_publication() -> echo_core::error::Result<()> {
+        let root = skill_test_root("reset-fence");
+        write_inline_skill(&root, "reset-skill")?;
+        let sandbox = Arc::new(BlockingSandbox::new());
+        let mut registry = SkillRegistry::new();
+        registry.register_descriptor(inline_descriptor(&root, "reset-skill"));
+        registry.set_sandbox_manager(sandbox.clone());
+        let registry = Arc::new(registry);
+
+        let entered = sandbox.entered.notified();
+        let activating_registry = Arc::clone(&registry);
+        let activation =
+            tokio::spawn(async move { activating_registry.activate("reset-skill").await });
+        entered.await;
+        registry.reset_activation_state();
+        sandbox.release.notify_one();
+
+        let error = activation
+            .await
+            .map_err(|error| echo_core::error::ReactError::Other(error.to_string()))?
+            .err()
+            .ok_or_else(|| {
+                echo_core::error::ReactError::Other(
+                    "retired activation unexpectedly succeeded".to_string(),
+                )
+            })?;
+        assert!(error.to_string().contains("retired before publication"));
+        assert!(!registry.is_activated("reset-skill"));
+        assert!(registry.get_active_sandbox_policy("reset-skill").is_none());
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn remove_fences_in_flight_activation_from_another_view() -> echo_core::error::Result<()>
+    {
+        let root = skill_test_root("remove-fence");
+        write_inline_skill(&root, "removed-skill")?;
+        let descriptor = inline_descriptor(&root, "removed-skill");
+        let sandbox = Arc::new(BlockingSandbox::new());
+        let mut primary = SkillRegistry::new();
+        primary.register_descriptor(descriptor.clone());
+        let mut progressive = primary.activation_view();
+        progressive.register_descriptor(descriptor);
+        progressive.set_sandbox_manager(sandbox.clone());
+        let progressive = Arc::new(progressive);
+
+        let entered = sandbox.entered.notified();
+        let activating_registry = Arc::clone(&progressive);
+        let activation =
+            tokio::spawn(async move { activating_registry.activate("removed-skill").await });
+        entered.await;
+        assert!(primary.remove_descriptor("removed-skill"));
+        sandbox.release.notify_one();
+
+        let error = activation
+            .await
+            .map_err(|error| echo_core::error::ReactError::Other(error.to_string()))?
+            .err()
+            .ok_or_else(|| {
+                echo_core::error::ReactError::Other(
+                    "removed activation unexpectedly succeeded".to_string(),
+                )
+            })?;
+        assert!(error.to_string().contains("retired before publication"));
+        assert!(!progressive.is_activated("removed-skill"));
+        std::fs::remove_dir_all(root)?;
+        Ok(())
     }
 
     #[test]

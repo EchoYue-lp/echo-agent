@@ -1940,15 +1940,15 @@ impl ReactAgent {
                 tracing::debug!(plan_len = plan.len(), "Restored plan state from checkpoint");
             }
 
-            // Re-activate only skills from this checkpoint. The catalog is
-            // shared, but activation and sandbox policy are runtime-local.
-            self.tools.skill_registry.reset_activation_state();
-            for skill_name in &cp.active_skills {
-                self.tools.skill_registry.mark_activated(skill_name);
-            }
-            if !cp.active_skills.is_empty() {
+            // Restore one atomic activation snapshot. Missing definitions are
+            // ignored, and policies are rebuilt from the current descriptors.
+            let restored_skills = self
+                .tools
+                .skill_registry
+                .restore_activation_state(&cp.active_skills);
+            if !restored_skills.is_empty() {
                 tracing::debug!(
-                    skills = ?cp.active_skills,
+                    skills = ?restored_skills,
                     "Re-activated skills from checkpoint"
                 );
             }

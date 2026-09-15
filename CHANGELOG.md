@@ -508,6 +508,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- Removed `ReactAgent::skill_registry_mut`, whose direct descriptor mutations
+  could leave progressive Skill tools on stale definitions, and removed the
+  unused `ToolRuntime::active_skill_names` snapshot copy. Agent-owned Skill
+  registration, tagging, removal, checkpointing, and telemetry now use one
+  epoch-fenced activation authority.
+
 - Removed the safe `PluginVariables::export_to_env` API, whose process-global
   environment mutation required an unenforceable single-threaded precondition.
   Plugin consumers should use `PluginVariables::substitute` or pass explicit

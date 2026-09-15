@@ -25,22 +25,35 @@ lock; that copy must not become a second activation authority.
 
 1. `SkillRegistry` remains the canonical owner of activation state for an
    agent runtime.
-2. `SkillRegistry::activation_view` constructs an empty definition view backed
-   by the same private activation-state handle. The handle contains the
-   activated-name set and activation-derived sandbox policies. It is shared by
-   the primary registry and the progressive tool adapter; it is not a second
-   state machine or a public domain concept.
+2. `SkillActivationHandle` is the single process-local runtime authority. One
+   mutex atomically stores the runtime epoch, per-Skill generation, active
+   records (content plus sandbox policy), and in-flight activation claims.
+   `SkillRegistry::activation_view` constructs an empty definition view backed
+   by that handle for progressive tools.
 3. Catalog descriptors, prepared documents, code-skill definitions, source
    indexes, and filesystem lookup remain registry-local definition data. The
-   existing registration/reconciliation paths keep both registry views in
-   sync where resource lookup requires a descriptor.
+   ReactAgent registration/reconciliation paths keep both registry views in
+   sync where resource lookup requires a descriptor. The authority-splitting
+   mutable Agent accessor is removed; SDK register/tag/remove/unregister
+   operations call the ReactAgent reconciliation APIs.
 4. API activation, `ActivateSkillTool`, resource/script checks, visibility
    snapshots, and checkpoint save/restore all read or mutate the shared
-   activation state. Repeated activation remains idempotent, and reset/remove
-   clears the shared state.
-5. No new public protocol or serialized field is introduced. Checkpoints keep
-   their existing `active_skills` field; restoring it populates the shared
-   runtime state once.
+   activation state. Run snapshots retain a clone of the canonical handle;
+   telemetry is only an observer and never checkpoint authority. Restore
+   atomically rebuilds names and policies from currently installed descriptors.
+5. Activation identity is `(skill name, arguments, source)`. Concurrent or
+   repeated activation of the same identity shares one in-flight result and
+   executes inline commands once. A later, different argument/source identity
+   retires the prior completed generation; two different identities cannot run
+   concurrently. Reset, descriptor replacement, and remove advance an epoch or
+   generation so stale async completion cannot republish. If the owning
+   activation future is cancelled or panics after an external command may have
+   started, the claim remains poisoned and cannot replay until an explicit
+   reset or removal establishes a new generation.
+6. No new serialized field is introduced. Checkpoints keep their existing
+   `active_skills` field. `SkillActivationHandle` and its construction methods
+   are explicit Rust/Host-only inventory entries; they are not hidden from the
+   public-contract drift gate and are not mapped as language SDK lifecycle APIs.
 
 ## Alternatives Considered
 
@@ -53,6 +66,9 @@ lock; that copy must not become a second activation authority.
    primary registry. Rejected because tools execute asynchronously and need a
    concurrent handle while the public agent API retains synchronous access to
    code-skill definitions.
+4. Cache only a telemetry list or synchronize independent activation sets at
+   checkpoint time. Rejected because reset/remove and SDK mutations can occur
+   after a run snapshot, recreating stale resurrection and policy loss.
 
 ## Consequences
 
@@ -60,8 +76,13 @@ lock; that copy must not become a second activation authority.
   active names and sandbox policies.
 - Definition copies remain an implementation adapter, not an independent
   lifecycle authority.
-- Checkpoint round trips and repeated activation can be tested at the shared
-  state boundary without changing the wire contract.
+- Checkpoint save reads the live handle; restore never trusts telemetry or a
+  separately persisted policy.
+- Inline command execution is exactly once per activation identity while a
+  completed identity remains active. Parameter changes intentionally create a
+  new generation.
+- Registry mutation through a Session remains source-compatible at the SDK
+  operation identity while the Host routes it through ReactAgent reconciliation.
 - Future registry adapters must derive from the primary registry's
   `activation_view`; creating a fresh runtime activation authority is a
   semantic regression.

@@ -23,4 +23,4 @@ pub use echo_core::tools::skill::{
 
 // -- Re-exports --
 
-pub use registry::SkillRegistry;
+pub use registry::{SkillActivationHandle, SkillRegistry};
