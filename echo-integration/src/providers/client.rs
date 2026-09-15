@@ -104,14 +104,17 @@ impl SseDecoder {
         split_sse_event(&mut self.buffer)
     }
 
-    pub(crate) fn finish(mut self) -> Result<Option<String>> {
+    pub(crate) fn finish(self) -> Result<Option<String>> {
         if !self.pending_bytes.is_empty() {
             return Err(LlmError::InvalidResponse("truncated UTF-8 at SSE EOF".to_string()).into());
         }
-        if self.buffer.trim().is_empty() {
+        // An SSE event is complete only after a blank-line delimiter.  A
+        // delimiterless payload must never be reinterpreted as a valid event
+        // merely because its JSON happens to be complete.
+        if self.buffer.is_empty() {
             Ok(None)
         } else {
-            Ok(Some(std::mem::take(&mut self.buffer)))
+            Err(LlmError::InvalidResponse("truncated SSE event at EOF".to_string()).into())
         }
     }
 }
@@ -514,6 +517,34 @@ mod tests {
         let mut decoder = SseDecoder::new();
         decoder.push(&[0xe4])?;
         assert!(decoder.finish().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn decoder_rejects_delimiterless_event_at_eof() -> Result<()> {
+        let mut decoder = SseDecoder::new();
+        decoder.push(br#"data: {"text":"complete JSON but no SSE delimiter"}"#)?;
+
+        let error = decoder.finish().err().ok_or_else(|| {
+            LlmError::InvalidResponse("delimiterless SSE event was accepted".to_string())
+        })?;
+        assert!(matches!(
+            error,
+            echo_core::error::ReactError::Llm(inner)
+                if matches!(inner.as_ref(), LlmError::InvalidResponse(message) if message == "truncated SSE event at EOF")
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn decoder_rejects_whitespace_residue_at_eof() -> Result<()> {
+        let mut decoder = SseDecoder::new();
+        decoder.push(b" \n")?;
+        assert!(matches!(
+            decoder.finish(),
+            Err(echo_core::error::ReactError::Llm(inner))
+                if matches!(inner.as_ref(), LlmError::InvalidResponse(message) if message == "truncated SSE event at EOF")
+        ));
         Ok(())
     }
 
