@@ -362,7 +362,7 @@ Skill 与用户和插件 Hook 文件使用同一套 31 事件系统，覆盖工�
 
 这些规范 wire 字段名区分大小写；`modified_input`、`message` 和 `permission_mode` 不是别名。
 
-若多个匹配 hook 都返回 `permission_mode_override`，运行时仅保留最后一个非空覆盖值。权限决策本身仍按更严格的优先级处理：`deny > ask > allow`。
+若多个匹配 hook 都返回 `permission_mode_override`，运行时仅保留最后一个非空覆盖值。权限决策本身按更严格的优先级归约：`deny > ask > require_approval > allow`。返回结果前会归约所有匹配的 permission decision；较早的 `allow` 或 `ask` 不会阻止后续来源贡献 `deny`。只有显式 `continue: false` 才会停止 Hook 传播；`deny` 还会阻止 Agent 自动工具调用。
 
 插件拥有的 Skill 会在解析 frontmatter 前，对完整 `SKILL.md` 应用 `PluginVariables`
 替换。因此 `${ECHO_PLUGIN_ROOT}`、`${ECHO_PLUGIN_DATA}`、`${ECHO_PROJECT_DIR}`、

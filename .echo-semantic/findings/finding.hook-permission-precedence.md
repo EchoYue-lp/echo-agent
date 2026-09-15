@@ -13,8 +13,8 @@ rule_refs: [rule.extension-generation-authority, rule.permission-effect-order]
 evidence_refs: [evidence.effects-extensions]
 audit_refs: [audit.tool-permission-sandbox.permission-external, audit.extension-lifecycle.permission-external]
 decision_refs: []
-repair_evidence_refs: []
-verification_evidence_refs: []
+repair_evidence_refs: [evidence.hook-permission-precedence-repair]
+verification_evidence_refs: [evidence.hook-permission-precedence-verification]
 rereview_audit_refs: []
 discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 ---
@@ -39,4 +39,6 @@ Hook reducer 声称 deny > ask > allow，但每个 declarative permission action
 
 ## 处理记录
 
-Discovery 记录；下一阶段需要人在 source precedence 与 global deny-wins 中裁决并补组合测试。
+产品裁决确认 Agent 自动 Tool 权限采用全局 deny-wins。`HookAction::Permission` 已移除
+隐式 propagation stop，并补 UserConfig allow、Plugin ask、Skill deny 的跨来源组合测试；
+独立复审和主线语义门禁仍待完成。

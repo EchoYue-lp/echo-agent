@@ -390,7 +390,10 @@ These canonical wire names are case-sensitive. `modified_input`, `message`, and
 
 If multiple matching hooks emit a `permission_mode_override`, the runtime keeps the
 last non-empty override. Permission decisions themselves still follow the stricter
-priority order (`deny > ask > allow`).
+priority order (`deny > ask > require_approval > allow`). Every matching permission
+decision is reduced before returning: an earlier `allow` or `ask` never prevents a
+later source from contributing a `deny`. An explicit `continue: false` remains the
+only hook-level propagation stop; a `deny` also blocks the Agent automatic tool call.
 
 For a plugin-owned Skill, `PluginVariables` substitution is applied to the
 complete `SKILL.md` before parsing. Plugin Hooks belong to the plugin's Hook

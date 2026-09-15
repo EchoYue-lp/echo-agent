@@ -1067,7 +1067,11 @@ async fn execute_action(
                     );
                 }
             }
-            result.stop_propagation = true;
+            // Permission decisions are reduced across every matching source.
+            // In particular, an early allow/ask must not hide a later deny.
+            // A deny still sets `block` above and therefore stops execution
+            // after the highest-priority decision has been observed; callers
+            // can still request an explicit propagation stop with `continue`.
             result
         }
         HookAction::Http {
@@ -2491,6 +2495,43 @@ Notification:
             combined.permission_decision.clone().unwrap(),
             PermissionDecision::Deny { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn permission_hooks_reduce_across_sources_before_allow_or_ask_short_circuit() {
+        let mut registry = HookRegistry::new();
+
+        let permission_rule = |decision: &str| HookRule {
+            matcher: "Bash".to_string(),
+            hooks: vec![HookAction::Permission {
+                decision: decision.to_string(),
+                reason: Some(format!("{decision} decision")),
+                suggestions: vec!["allow".to_string()],
+            }],
+        };
+
+        let mut user = HooksDefinition::default();
+        user.add_rules(HookEvent::PreToolUse, vec![permission_rule("allow")]);
+        registry.register_user_hooks(user);
+
+        let mut plugin = HooksDefinition::default();
+        plugin.add_rules(HookEvent::PreToolUse, vec![permission_rule("ask")]);
+        assert!(registry.register_plugin_hooks("policy", "/tmp/policy", "/tmp/data", plugin));
+
+        let mut skill = HooksDefinition::default();
+        skill.add_rules(HookEvent::PreToolUse, vec![permission_rule("deny")]);
+        registry.register("guard", "/tmp/guard", skill);
+
+        let result = registry
+            .run_pre_tool_use("Bash", &json!({"command": "git status"}), "session")
+            .await;
+
+        assert!(matches!(
+            result.permission_decision,
+            Some(PermissionDecision::Deny { ref reason }) if reason == "deny decision"
+        ));
+        assert!(result.block);
+        assert_eq!(result.block_reason.as_deref(), Some("deny decision"));
     }
 
     #[test]
