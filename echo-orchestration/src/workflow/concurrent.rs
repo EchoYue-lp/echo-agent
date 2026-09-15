@@ -97,7 +97,7 @@ impl Workflow for ConcurrentWorkflow {
 
             let mut handles = JoinSet::new();
 
-            for agent_handle in &self.agents {
+            for (index, agent_handle) in self.agents.iter().enumerate() {
                 let agent_handle = agent_handle.clone();
                 let input = input.to_string();
                 handles.spawn(async move {
@@ -107,16 +107,16 @@ impl Workflow for ConcurrentWorkflow {
                     debug!(workflow = "concurrent", agent = %agent_name, "▶ Starting execution");
                     let result = agent.execute(&input).await;
                     let elapsed = step_start.elapsed();
-                    (agent_name, input, result, elapsed)
+                    (index, agent_name, input, result, elapsed)
                 });
             }
 
-            let mut step_outputs = Vec::with_capacity(agent_count);
-            let mut results = Vec::with_capacity(agent_count);
+            let mut completed = Vec::with_capacity(agent_count);
+            completed.resize_with(agent_count, || None);
 
             let mut first_error = None;
             while let Some(joined) = handles.join_next().await {
-                let (agent_name, step_input, result, elapsed) = match joined {
+                let (index, agent_name, step_input, result, elapsed) = match joined {
                     Ok(value) => value,
                     Err(error) => {
                         first_error = Some(echo_core::error::ReactError::Other(format!(
@@ -139,6 +139,37 @@ impl Workflow for ConcurrentWorkflow {
                     "✓ Agent completed"
                 );
 
+                let Some(slot) = completed.get_mut(index) else {
+                    first_error = Some(echo_core::error::ReactError::Other(format!(
+                        "task completed with invalid registration index {index}"
+                    )));
+                    break;
+                };
+                if slot
+                    .replace((agent_name, step_input, output, elapsed))
+                    .is_some()
+                {
+                    first_error = Some(echo_core::error::ReactError::Other(format!(
+                        "task completed more than once for registration index {index}"
+                    )));
+                    break;
+                }
+            }
+            if let Some(error) = first_error {
+                handles.abort_all();
+                while handles.join_next().await.is_some() {}
+                return Err(error);
+            }
+
+            let mut step_outputs = Vec::with_capacity(agent_count);
+            let mut results = Vec::with_capacity(agent_count);
+            for completed_step in completed {
+                let (agent_name, step_input, output, elapsed) =
+                    completed_step.ok_or_else(|| {
+                        echo_core::error::ReactError::Other(
+                            "concurrent task completed without a registered result".to_string(),
+                        )
+                    })?;
                 step_outputs.push(StepOutput {
                     agent_name,
                     input: step_input,
@@ -146,11 +177,6 @@ impl Workflow for ConcurrentWorkflow {
                     elapsed,
                 });
                 results.push(output);
-            }
-            if let Some(error) = first_error {
-                handles.abort_all();
-                while handles.join_next().await.is_some() {}
-                return Err(error);
             }
 
             let merged = (self.merge)(results);
@@ -265,5 +291,33 @@ mod tests {
             .await
             .unwrap();
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn successful_concurrent_workflow_preserves_registration_order() -> Result<()> {
+        let mut workflow = ConcurrentWorkflow::builder()
+            .agent(TestAgent {
+                name: "registered-first",
+                fail: false,
+                delay: Duration::from_millis(30),
+            })
+            .agent(TestAgent {
+                name: "completed-first",
+                fail: false,
+                delay: Duration::from_millis(1),
+            })
+            .build();
+
+        let output = workflow.run("input").await?;
+        assert_eq!(output.result, "registered-first\n---\ncompleted-first");
+        assert_eq!(
+            output
+                .steps
+                .iter()
+                .map(|step| step.agent_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["registered-first", "completed-first"]
+        );
+        Ok(())
     }
 }

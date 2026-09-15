@@ -31,7 +31,10 @@ the first completed failure, cancel all siblings, and drain their handles
 before returning. Dropping a `JoinSet` also aborts its child tasks when the
 caller cancels the outer operation. The streaming graph entry emits
 `WorkflowEvent::NodeError` before the terminal stream error and never emits
-`Completed` for a failed node.
+`Completed` for a failed node. Successful `ConcurrentWorkflow` and
+`DagWorkflow` executions buffer completion-order results by their registration
+or topological batch index before producing merge inputs and `steps`, so
+fail-fast observation does not make successful output order nondeterministic.
 
 ## Alternatives considered
 
@@ -52,7 +55,8 @@ caller cancels the outer operation. The streaming graph entry emits
 Resume failures remain retryable and observable, while successful resumes are
 settled exactly once per lease. Tagging a claimed checkpoint returns a conflict
 instead of reviving it. Parallel failures now have bounded cleanup and a
-deterministic terminal error. Remote checkpoint adapters must implement the
+deterministic terminal error, while successful merge and step projections retain
+their prior registration or topological order. Remote checkpoint adapters must implement the
 new atomic settlement methods to support tagging and failure recovery; the
 compatibility defaults fail closed where atomicity is unavailable.
 
