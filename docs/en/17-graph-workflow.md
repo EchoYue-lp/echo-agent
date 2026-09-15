@@ -316,9 +316,12 @@ let resumed = graph.resume_from_checkpoint(&checkpoint_store, &checkpoint_id).aw
 
 Resume uses the `CheckpointStore` claim lease. A successful continuation is
 acknowledged; a node or restore failure requeues the claim. File-store claims
-remain visible to `load` and `list`, and stale claims left by a crashed process
-can be discovered again. Tagging a claimed checkpoint fails its generation
-compare-and-save instead of resurrecting the continuation.
+remain visible to `load` and `list`; `Graph` renews the exact attempt while a
+long continuation is active, and only a missed heartbeat can make a crashed
+claim discoverable again. Tagging an active claim fails its generation
+compare-and-save instead of resurrecting the continuation. Custom and
+SDK-backed stores must implement renew, acknowledge, requeue, and
+generation-CAS; unsupported settlement fails closed.
 
 ---
 

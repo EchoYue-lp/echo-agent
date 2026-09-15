@@ -38,8 +38,12 @@ public sealed interface AgentComponentResult permits
         AgentComponentResult.GuardChecked,
         AgentComponentResult.SearchCompleted,
         AgentComponentResult.WorkflowCheckpointSaved,
+        AgentComponentResult.WorkflowCheckpointSavedIfGeneration,
         AgentComponentResult.WorkflowCheckpointLoaded,
         AgentComponentResult.WorkflowCheckpointClaimed,
+        AgentComponentResult.WorkflowCheckpointClaimAcked,
+        AgentComponentResult.WorkflowCheckpointClaimRequeued,
+        AgentComponentResult.WorkflowCheckpointClaimRenewed,
         AgentComponentResult.WorkflowCheckpointsListed,
         AgentComponentResult.WorkflowCheckpointDeleted,
         AgentComponentResult.WorkflowCheckpointsCleared,
@@ -198,6 +202,12 @@ public sealed interface AgentComponentResult permits
         @Override public String operation() { return "workflow_checkpoint_save"; }
         @Override public JsonNode value() { return null; }
     }
+    record WorkflowCheckpointSavedIfGeneration(boolean committed) implements AgentComponentResult {
+        @Override public String operation() { return "workflow_checkpoint_save_if_generation"; }
+        @Override public JsonNode value() {
+            return JsonSupport.MAPPER.createObjectNode().put("committed", committed);
+        }
+    }
     record WorkflowCheckpointLoaded(JsonNode checkpoint) implements AgentComponentResult {
         @Override public String operation() { return "workflow_checkpoint_load"; }
         @Override public JsonNode value() { return nullableObject("checkpoint", checkpoint); }
@@ -205,6 +215,18 @@ public sealed interface AgentComponentResult permits
     record WorkflowCheckpointClaimed(JsonNode checkpoint) implements AgentComponentResult {
         @Override public String operation() { return "workflow_checkpoint_claim"; }
         @Override public JsonNode value() { return nullableObject("checkpoint", checkpoint); }
+    }
+    record WorkflowCheckpointClaimAcked() implements AgentComponentResult {
+        @Override public String operation() { return "workflow_checkpoint_ack_claim"; }
+        @Override public JsonNode value() { return null; }
+    }
+    record WorkflowCheckpointClaimRequeued() implements AgentComponentResult {
+        @Override public String operation() { return "workflow_checkpoint_requeue_claim"; }
+        @Override public JsonNode value() { return null; }
+    }
+    record WorkflowCheckpointClaimRenewed() implements AgentComponentResult {
+        @Override public String operation() { return "workflow_checkpoint_renew_claim"; }
+        @Override public JsonNode value() { return null; }
     }
     record WorkflowCheckpointsListed(String operation, List<JsonNode> checkpoints)
             implements AgentComponentResult {

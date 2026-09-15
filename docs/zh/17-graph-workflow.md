@@ -315,8 +315,10 @@ let resumed = graph.resume_from_checkpoint(&checkpoint_store, &checkpoint_id).aw
 
 恢复通过 `CheckpointStore` 的 claim lease 完成。成功的 continuation 必须 ack，
 节点失败或恢复异常会 requeue；文件 store 的 claim 在 `load`/`list` 中保持可见，
-进程崩溃后的 stale claim 可被重新发现。对已 claim 的 checkpoint 修改标签会因
-generation 冲突失败，不会复活已领取的 continuation。
+长时间 continuation 运行期间由 `Graph` 使用同一 attempt heartbeat 续租，只有停止
+续租的崩溃 claim 才能在 lease 到期后重新发现。对活动 claim 修改标签会因 generation
+冲突失败，不会复活已领取的 continuation。自定义和 SDK-backed store 必须实现 renew、
+ack、requeue 与 generation-CAS；不支持的结算会失败关闭。
 
 ---
 

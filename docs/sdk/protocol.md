@@ -242,6 +242,13 @@ RuntimeStateStore, AuditLogger, ContextProjector and MemoryTrigger operation
 freezes its named input/result fields; the schema does not hide the complete
 payload behind an untyped JSON value.
 
+`WorkflowCheckpointStore` also freezes the complete claim settlement contract:
+`save_if_generation`, `claim`, `renew_claim`, `ack_claim` and `requeue_claim`
+carry canonical generation and attempt identities. Its descriptor must declare
+`claim_heartbeat_interval_ms` from 1 through 300000; the Host uses that value
+for the active resume heartbeat instead of guessing the remote store's lease.
+All three language SDKs validate the same operations, result shapes and bound.
+
 | Method | Direction | Purpose |
 |---|---|---|
 | `_echo_agent/extension/register` | Client → Host | Register a host-language implementation (typed per-kind descriptor). |

@@ -91,8 +91,12 @@ AGENT_COMPONENT_OPERATIONS = frozenset(
         "guard_check",
         "search_provider_search",
         "workflow_checkpoint_save",
+        "workflow_checkpoint_save_if_generation",
         "workflow_checkpoint_load",
         "workflow_checkpoint_claim",
+        "workflow_checkpoint_ack_claim",
+        "workflow_checkpoint_requeue_claim",
+        "workflow_checkpoint_renew_claim",
         "workflow_checkpoint_list",
         "workflow_checkpoint_list_by_graph",
         "workflow_checkpoint_list_filtered",
@@ -183,8 +187,16 @@ _AGENT_COMPONENT_INPUT_FIELDS: dict[str, frozenset[str]] = {
     "guard_check": frozenset({"content", "direction"}),
     "search_provider_search": frozenset({"query", "max_results"}),
     "workflow_checkpoint_save": frozenset({"checkpoint"}),
+    "workflow_checkpoint_save_if_generation": frozenset(
+        {"checkpoint", "expected_generation"}
+    ),
     "workflow_checkpoint_load": frozenset({"checkpoint_id"}),
     "workflow_checkpoint_claim": frozenset({"checkpoint_id"}),
+    "workflow_checkpoint_ack_claim": frozenset({"checkpoint_id", "attempt_id"}),
+    "workflow_checkpoint_requeue_claim": frozenset(
+        {"checkpoint_id", "attempt_id"}
+    ),
+    "workflow_checkpoint_renew_claim": frozenset({"checkpoint_id", "attempt_id"}),
     "workflow_checkpoint_list": frozenset(),
     "workflow_checkpoint_list_by_graph": frozenset({"graph_name"}),
     "workflow_checkpoint_list_filtered": frozenset({"filter"}),
@@ -458,6 +470,7 @@ class AgentComponentDescriptor:
     isolation_level: str | None = None
     supports_streaming: bool = False
     supports_notifications: bool = False
+    claim_heartbeat_interval_ms: int | None = None
 
     def __post_init__(self) -> None:
         if self.component not in _AGENT_COMPONENTS:
@@ -482,18 +495,36 @@ class AgentComponentDescriptor:
             raise ValueError("unknown sandbox isolation level")
         if self.supports_notifications and self.component != "mcp_transport":
             raise ValueError("notifications are only valid for mcp_transport")
+        if self.component == "workflow_checkpoint_store":
+            if (
+                isinstance(self.claim_heartbeat_interval_ms, bool)
+                or not isinstance(self.claim_heartbeat_interval_ms, int)
+                or not 1 <= self.claim_heartbeat_interval_ms <= 300_000
+            ):
+                raise ValueError(
+                    "workflow checkpoint stores require a claim heartbeat from 1 to 300000 ms"
+                )
+        elif self.claim_heartbeat_interval_ms is not None:
+            raise ValueError(
+                "claim_heartbeat_interval_ms is only valid for workflow_checkpoint_store"
+            )
 
     def to_wire(self) -> dict[str, Any]:
+        capabilities: dict[str, Any] = {
+            "isolation_level": self.isolation_level,
+            "supports_streaming": self.supports_streaming,
+            "supports_notifications": self.supports_notifications,
+        }
+        if self.claim_heartbeat_interval_ms is not None:
+            capabilities["claim_heartbeat_interval_ms"] = _canonical_u64_text(
+                self.claim_heartbeat_interval_ms, "claim_heartbeat_interval_ms"
+            )
         return {
             "kind": "agent_component",
             "descriptor_version": 1,
             "component": self.component,
             "name": self.name,
-            "capabilities": {
-                "isolation_level": self.isolation_level,
-                "supports_streaming": self.supports_streaming,
-                "supports_notifications": self.supports_notifications,
-            },
+            "capabilities": capabilities,
         }
 
 
@@ -915,6 +946,34 @@ class WorkflowCheckpointSaveRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class WorkflowCheckpointSaveIfGenerationRequest:
+    checkpoint: Mapping[str, Any]
+    expected_generation: int
+    operation: Literal["workflow_checkpoint_save_if_generation"] = (
+        "workflow_checkpoint_save_if_generation"
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class WorkflowCheckpointClaimAttemptRequest:
+    checkpoint_id: str
+    attempt_id: str
+    operation: Literal[
+        "workflow_checkpoint_ack_claim",
+        "workflow_checkpoint_requeue_claim",
+        "workflow_checkpoint_renew_claim",
+    ] = "workflow_checkpoint_ack_claim"
+
+    def __post_init__(self) -> None:
+        if self.operation not in {
+            "workflow_checkpoint_ack_claim",
+            "workflow_checkpoint_requeue_claim",
+            "workflow_checkpoint_renew_claim",
+        }:
+            raise ValueError("invalid workflow checkpoint claim-attempt operation")
+
+
+@dataclass(frozen=True, slots=True)
 class WorkflowCheckpointIdRequest:
     checkpoint_id: str
     operation: Literal[
@@ -1217,6 +1276,15 @@ def _component_request(
         )
     if operation == "workflow_checkpoint_save":
         return WorkflowCheckpointSaveRequest(wire("checkpoint"))
+    if operation == "workflow_checkpoint_save_if_generation":
+        return WorkflowCheckpointSaveIfGenerationRequest(
+            wire("checkpoint"),
+            int(
+                _canonical_u64_text(
+                    arguments.get("expected_generation"), "expected_generation"
+                )
+            ),
+        )
     if operation in {
         "workflow_checkpoint_load",
         "workflow_checkpoint_claim",
@@ -1229,6 +1297,23 @@ def _component_request(
                     "workflow_checkpoint_load",
                     "workflow_checkpoint_claim",
                     "workflow_checkpoint_delete",
+                ],
+                operation,
+            ),
+        )
+    if operation in {
+        "workflow_checkpoint_ack_claim",
+        "workflow_checkpoint_requeue_claim",
+        "workflow_checkpoint_renew_claim",
+    }:
+        return WorkflowCheckpointClaimAttemptRequest(
+            text("checkpoint_id"),
+            text("attempt_id"),
+            cast(
+                Literal[
+                    "workflow_checkpoint_ack_claim",
+                    "workflow_checkpoint_requeue_claim",
+                    "workflow_checkpoint_renew_claim",
                 ],
                 operation,
             ),
@@ -1743,6 +1828,34 @@ class WorkflowCheckpointResult:
         )
 
     @staticmethod
+    def saved_if_generation(committed: bool) -> AgentComponentResult:
+        if not isinstance(committed, bool):
+            raise TypeError("committed must be a bool")
+        return _TypedAgentComponentResult(
+            "workflow_checkpoint_store",
+            "workflow_checkpoint_save_if_generation",
+            {"committed": committed},
+        )
+
+    @staticmethod
+    def claim_acked() -> AgentComponentResult:
+        return _TypedAgentComponentResult(
+            "workflow_checkpoint_store", "workflow_checkpoint_ack_claim"
+        )
+
+    @staticmethod
+    def claim_requeued() -> AgentComponentResult:
+        return _TypedAgentComponentResult(
+            "workflow_checkpoint_store", "workflow_checkpoint_requeue_claim"
+        )
+
+    @staticmethod
+    def claim_renewed() -> AgentComponentResult:
+        return _TypedAgentComponentResult(
+            "workflow_checkpoint_store", "workflow_checkpoint_renew_claim"
+        )
+
+    @staticmethod
     def loaded(checkpoint: Mapping[str, Any] | None) -> AgentComponentResult:
         return _TypedAgentComponentResult(
             "workflow_checkpoint_store",
@@ -1928,6 +2041,9 @@ def _validate_component_result(operation: str, value: Mapping[str, Any] | None) 
         "runtime_clear_conversation",
         "audit_log",
         "workflow_checkpoint_save",
+        "workflow_checkpoint_ack_claim",
+        "workflow_checkpoint_requeue_claim",
+        "workflow_checkpoint_renew_claim",
         "workflow_checkpoint_delete",
         "workflow_checkpoint_clear",
         "sandbox_cleanup",
@@ -1962,6 +2078,7 @@ def _validate_component_result(operation: str, value: Mapping[str, Any] | None) 
         "memory_trigger": {"disposition"},
         "guard_check": {"result"},
         "search_provider_search": {"results"},
+        "workflow_checkpoint_save_if_generation": {"committed"},
         "workflow_checkpoint_load": {"checkpoint"},
         "workflow_checkpoint_claim": {"checkpoint"},
         "workflow_checkpoint_list": {"checkpoints"},
@@ -1984,6 +2101,11 @@ def _validate_component_result(operation: str, value: Mapping[str, Any] | None) 
     expected_fields = fields_by_operation.get(operation)
     if expected_fields is None or set(value) != expected_fields:
         raise ValueError(f"{operation} result fields do not match its typed contract")
+
+    if operation == "workflow_checkpoint_save_if_generation":
+        if not isinstance(value.get("committed"), bool):
+            raise TypeError("committed must be a bool")
+        return
 
     def wire(field: str, nullable: bool = False) -> None:
         candidate = value.get(field)

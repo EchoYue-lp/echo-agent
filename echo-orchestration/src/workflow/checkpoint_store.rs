@@ -347,15 +347,40 @@ pub trait CheckpointStore: Send + Sync {
 
     /// Acknowledge a successfully completed resume attempt.
     ///
-    /// Stores that remove claims eagerly may use the default no-op. Durable
-    /// stores keep a leased claim until this acknowledgement is persisted.
+    /// Stores must override this operation. The default fails closed so a
+    /// remote or custom store cannot report settlement without committing it.
     async fn ack_claim(&self, _id: &str, _attempt_id: &str) -> Result<()> {
-        Ok(())
+        Err(echo_core::error::ReactError::Other(
+            "Checkpoint store does not support claim acknowledgement".to_string(),
+        ))
     }
 
     /// Return a leased claim to the pending checkpoint set after a failure.
     async fn requeue_claim(&self, _id: &str, _attempt_id: &str) -> Result<()> {
-        Ok(())
+        Err(echo_core::error::ReactError::Other(
+            "Checkpoint store does not support claim requeue".to_string(),
+        ))
+    }
+
+    /// Renew an active claim for the exact resume attempt.
+    async fn renew_claim(&self, _id: &str, _attempt_id: &str) -> Result<()> {
+        Err(echo_core::error::ReactError::Other(
+            "Checkpoint store does not support claim renewal".to_string(),
+        ))
+    }
+
+    /// Interval at which the execution owner should renew an active claim.
+    ///
+    /// `None` means the store's claims do not expire. Stores that return an
+    /// interval must implement [`Self::renew_claim`].
+    fn claim_heartbeat_interval(&self) -> Option<Duration> {
+        None
+    }
+
+    /// Whether claim, renew/requeue and acknowledgement form one complete
+    /// settlement contract. `Graph` checks this before acquiring a claim.
+    fn supports_claim_settlement(&self) -> bool {
+        false
     }
 
     /// Save metadata only when the checkpoint generation is unchanged.
@@ -489,18 +514,27 @@ impl CheckpointStore for MemoryCheckpointStore {
 
     async fn ack_claim(&self, id: &str, attempt_id: &str) -> Result<()> {
         let _guard = self.operation_lock.lock().await;
-        self.claims
+        let removed = self
+            .claims
             .write()
             .await
             .remove(&(id.to_string(), attempt_id.to_string()));
-        Ok(())
+        if removed.is_some() {
+            Ok(())
+        } else {
+            Err(echo_core::error::ReactError::Other(format!(
+                "Checkpoint claim '{id}' for attempt '{attempt_id}' is not active"
+            )))
+        }
     }
 
     async fn requeue_claim(&self, id: &str, attempt_id: &str) -> Result<()> {
         let _guard = self.operation_lock.lock().await;
         let key = (id.to_string(), attempt_id.to_string());
         let Some(mut checkpoint) = self.claims.write().await.remove(&key) else {
-            return Ok(());
+            return Err(echo_core::error::ReactError::Other(format!(
+                "Checkpoint claim '{id}' for attempt '{attempt_id}' is not active"
+            )));
         };
         checkpoint.resume_attempt_id = None;
         self.checkpoints
@@ -508,6 +542,25 @@ impl CheckpointStore for MemoryCheckpointStore {
             .await
             .insert(id.to_string(), checkpoint);
         Ok(())
+    }
+
+    async fn renew_claim(&self, id: &str, attempt_id: &str) -> Result<()> {
+        let _guard = self.operation_lock.lock().await;
+        if !self
+            .claims
+            .read()
+            .await
+            .contains_key(&(id.to_string(), attempt_id.to_string()))
+        {
+            return Err(echo_core::error::ReactError::Other(format!(
+                "Checkpoint claim '{id}' for attempt '{attempt_id}' is not active"
+            )));
+        }
+        Ok(())
+    }
+
+    fn supports_claim_settlement(&self) -> bool {
+        true
     }
 
     async fn save_if_generation(
@@ -558,10 +611,19 @@ impl CheckpointStore for MemoryCheckpointStore {
 
 // ── File Checkpoint Store ──────────────────────────────────────────────────────
 
+#[derive(Serialize, Deserialize)]
+struct StoredCheckpointClaim {
+    checkpoint: Checkpoint,
+    #[serde(with = "echo_core::utils::time::local_rfc3339")]
+    renewed_at: DateTime<Utc>,
+}
+
 /// File storage implementation (supports persistence)
 pub struct FileCheckpointStore {
     base_path: PathBuf,
     operation_lock: Arc<Mutex<()>>,
+    claim_lease: Duration,
+    claim_heartbeat_interval: Duration,
 }
 
 impl FileCheckpointStore {
@@ -569,7 +631,28 @@ impl FileCheckpointStore {
         Self {
             base_path: base_path.into(),
             operation_lock: Arc::new(Mutex::new(())),
+            claim_lease: Duration::from_secs(300),
+            claim_heartbeat_interval: Duration::from_secs(60),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_claim_timing(
+        mut self,
+        claim_lease: Duration,
+        claim_heartbeat_interval: Duration,
+    ) -> Result<Self> {
+        if claim_lease.is_zero()
+            || claim_heartbeat_interval.is_zero()
+            || claim_heartbeat_interval >= claim_lease
+        {
+            return Err(echo_core::error::ReactError::Other(
+                "Checkpoint claim timing requires 0 < heartbeat < lease".to_string(),
+            ));
+        }
+        self.claim_lease = claim_lease;
+        self.claim_heartbeat_interval = claim_heartbeat_interval;
+        Ok(self)
     }
 
     fn checkpoint_path(&self, id: &str) -> Result<PathBuf> {
@@ -606,6 +689,7 @@ impl CheckpointStore for FileCheckpointStore {
 
     async fn load(&self, id: &str) -> Result<Option<Checkpoint>> {
         let _guard = self.operation_lock.lock().await;
+        let _file_lock = self.acquire_file_lock().await?;
         self.load_unlocked(id).await
     }
 
@@ -620,9 +704,21 @@ impl CheckpointStore for FileCheckpointStore {
         let _guard = self.operation_lock.lock().await;
         let _file_lock = self.acquire_file_lock().await?;
         let path = self.claim_path(id, attempt_id)?;
+        if path.exists() {
+            let (checkpoint, _) = Self::read_claim(&path).await?;
+            if checkpoint.resume_attempt_id.as_deref() != Some(attempt_id) {
+                return Err(echo_core::error::ReactError::Other(format!(
+                    "Checkpoint claim '{id}' is owned by a different resume attempt"
+                )));
+            }
+        }
         match tokio::fs::remove_file(path).await {
             Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                Err(echo_core::error::ReactError::Other(format!(
+                    "Checkpoint claim '{id}' for attempt '{attempt_id}' is not active"
+                )))
+            }
             Err(error) => Err(echo_core::error::ReactError::Other(format!(
                 "Failed to acknowledge checkpoint claim: {error}"
             ))),
@@ -635,13 +731,23 @@ impl CheckpointStore for FileCheckpointStore {
         let claim_path = self.claim_path(id, attempt_id)?;
         let path = self.checkpoint_path(id)?;
         if !claim_path.exists() {
-            return Ok(());
+            return Err(echo_core::error::ReactError::Other(format!(
+                "Checkpoint claim '{id}' for attempt '{attempt_id}' is not active"
+            )));
         }
         if path.exists() {
             return Err(echo_core::error::ReactError::Other(format!(
                 "Cannot requeue checkpoint '{id}': pending checkpoint already exists"
             )));
         }
+        let (mut checkpoint, _) = Self::read_claim(&claim_path).await?;
+        if checkpoint.resume_attempt_id.as_deref() != Some(attempt_id) {
+            return Err(echo_core::error::ReactError::Other(format!(
+                "Checkpoint claim '{id}' is owned by a different resume attempt"
+            )));
+        }
+        checkpoint.resume_attempt_id = None;
+        Self::write_checkpoint(&claim_path, &checkpoint).await?;
         tokio::fs::rename(claim_path, &path)
             .await
             .map_err(|error| {
@@ -649,9 +755,33 @@ impl CheckpointStore for FileCheckpointStore {
                     "Failed to requeue checkpoint claim: {error}"
                 ))
             })?;
-        let mut checkpoint = Self::read_checkpoint(&path).await?;
-        checkpoint.resume_attempt_id = None;
-        self.save_unlocked(&checkpoint).await
+        Ok(())
+    }
+
+    async fn renew_claim(&self, id: &str, attempt_id: &str) -> Result<()> {
+        let _guard = self.operation_lock.lock().await;
+        let _file_lock = self.acquire_file_lock().await?;
+        let claim_path = self.claim_path(id, attempt_id)?;
+        if !claim_path.exists() {
+            return Err(echo_core::error::ReactError::Other(format!(
+                "Checkpoint claim '{id}' for attempt '{attempt_id}' is not active"
+            )));
+        }
+        let (checkpoint, _) = Self::read_claim(&claim_path).await?;
+        if checkpoint.resume_attempt_id.as_deref() != Some(attempt_id) {
+            return Err(echo_core::error::ReactError::Other(format!(
+                "Checkpoint claim '{id}' is owned by a different resume attempt"
+            )));
+        }
+        Self::write_claim(&claim_path, &checkpoint, Utc::now()).await
+    }
+
+    fn claim_heartbeat_interval(&self) -> Option<Duration> {
+        Some(self.claim_heartbeat_interval)
+    }
+
+    fn supports_claim_settlement(&self) -> bool {
+        true
     }
 
     async fn save_if_generation(
@@ -743,8 +873,6 @@ impl CheckpointStore for FileCheckpointStore {
 }
 
 impl FileCheckpointStore {
-    const CLAIM_LEASE: Duration = Duration::from_secs(300);
-
     fn claim_path(&self, id: &str, attempt_id: &str) -> Result<PathBuf> {
         let claim_name = format!("{id}.claimed-{attempt_id}.claim");
         echo_core::utils::fs::join_path_segment(&self.base_path, &claim_name).map_err(Into::into)
@@ -785,15 +913,47 @@ impl FileCheckpointStore {
     async fn save_unlocked(&self, checkpoint: &Checkpoint) -> Result<()> {
         self.ensure_dir_exists()?;
         let path = self.checkpoint_path(&checkpoint.id)?;
+        Self::write_checkpoint(&path, checkpoint).await
+    }
+
+    async fn write_checkpoint(path: &std::path::Path, checkpoint: &Checkpoint) -> Result<()> {
         let json = serde_json::to_string_pretty(checkpoint).map_err(|e| {
             echo_core::error::ReactError::Other(format!("Failed to serialize checkpoint: {}", e))
         })?;
+        let path = path.to_path_buf();
         tokio::task::spawn_blocking(move || {
             echo_core::utils::fs::atomic_write(&path, json.as_bytes())
         })
         .await
         .map_err(|error| {
             echo_core::error::ReactError::Other(format!("checkpoint writer task failed: {error}"))
+        })??;
+        Ok(())
+    }
+
+    async fn write_claim(
+        path: &std::path::Path,
+        checkpoint: &Checkpoint,
+        renewed_at: DateTime<Utc>,
+    ) -> Result<()> {
+        let claim = StoredCheckpointClaim {
+            checkpoint: checkpoint.clone(),
+            renewed_at,
+        };
+        let json = serde_json::to_string_pretty(&claim).map_err(|error| {
+            echo_core::error::ReactError::Other(format!(
+                "Failed to serialize checkpoint claim: {error}"
+            ))
+        })?;
+        let path = path.to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            echo_core::utils::fs::atomic_write(&path, json.as_bytes())
+        })
+        .await
+        .map_err(|error| {
+            echo_core::error::ReactError::Other(format!(
+                "checkpoint claim writer task failed: {error}"
+            ))
         })??;
         Ok(())
     }
@@ -810,7 +970,9 @@ impl FileCheckpointStore {
             // A leased checkpoint remains visible to recovery and diagnostics;
             // it is not silently converted into "not found" while a resume is
             // still in flight.
-            return Self::read_checkpoint(&claim_path).await.map(Some);
+            return Self::read_claim(&claim_path)
+                .await
+                .map(|(checkpoint, _)| Some(checkpoint));
         }
         Ok(None)
     }
@@ -834,16 +996,7 @@ impl FileCheckpointStore {
         }
         let mut checkpoint = Self::read_checkpoint(&claim_path).await?;
         checkpoint.resume_attempt_id = Some(attempt_id);
-        let json = serde_json::to_string_pretty(&checkpoint).map_err(|error| {
-            echo_core::error::ReactError::Other(format!(
-                "Failed to serialize claimed checkpoint: {error}"
-            ))
-        })?;
-        tokio::fs::write(&claim_path, json).await.map_err(|error| {
-            echo_core::error::ReactError::Other(format!(
-                "Failed to persist checkpoint claim lease: {error}"
-            ))
-        })?;
+        Self::write_claim(&claim_path, &checkpoint, Utc::now()).await?;
         Ok(Some(checkpoint))
     }
 
@@ -877,20 +1030,31 @@ impl FileCheckpointStore {
         let Some((claim_path, _attempt_id)) = self.find_claim(id).await? else {
             return Ok(false);
         };
-        let metadata = tokio::fs::metadata(&claim_path).await.map_err(|error| {
-            echo_core::error::ReactError::Other(format!(
-                "Failed to inspect claimed checkpoint: {error}"
-            ))
-        })?;
-        let stale = metadata
-            .modified()
-            .ok()
-            .and_then(|modified| modified.elapsed().ok())
-            .is_some_and(|age| age >= Self::CLAIM_LEASE);
+        let (checkpoint, renewed_at) = Self::read_claim(&claim_path).await?;
+        let stale = if let Some(renewed_at) = renewed_at {
+            Utc::now()
+                .signed_duration_since(renewed_at)
+                .to_std()
+                .is_ok_and(|age| age >= self.claim_lease)
+        } else {
+            let metadata = tokio::fs::metadata(&claim_path).await.map_err(|error| {
+                echo_core::error::ReactError::Other(format!(
+                    "Failed to inspect claimed checkpoint: {error}"
+                ))
+            })?;
+            metadata
+                .modified()
+                .ok()
+                .and_then(|modified| modified.elapsed().ok())
+                .is_some_and(|age| age >= self.claim_lease)
+        };
         if !stale {
             return Ok(false);
         }
-        match tokio::fs::rename(claim_path, path).await {
+        let mut checkpoint = checkpoint;
+        checkpoint.resume_attempt_id = None;
+        Self::write_checkpoint(&claim_path, &checkpoint).await?;
+        match tokio::fs::rename(claim_path, &path).await {
             Ok(()) => Ok(true),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
             Err(error) => Err(echo_core::error::ReactError::Other(format!(
@@ -908,6 +1072,22 @@ impl FileCheckpointStore {
         })
     }
 
+    async fn read_claim(path: &std::path::Path) -> Result<(Checkpoint, Option<DateTime<Utc>>)> {
+        let json = tokio::fs::read_to_string(path).await.map_err(|error| {
+            echo_core::error::ReactError::Other(format!("Failed to read checkpoint claim: {error}"))
+        })?;
+        if let Ok(claim) = serde_json::from_str::<StoredCheckpointClaim>(&json) {
+            return Ok((claim.checkpoint, Some(claim.renewed_at)));
+        }
+        serde_json::from_str::<Checkpoint>(&json)
+            .map(|checkpoint| (checkpoint, None))
+            .map_err(|error| {
+                echo_core::error::ReactError::Other(format!(
+                    "Failed to parse checkpoint claim: {error}"
+                ))
+            })
+    }
+
     async fn list_unlocked(&self) -> Result<Vec<CheckpointInfo>> {
         self.ensure_dir_exists()?;
         let mut entries = tokio::fs::read_dir(&self.base_path).await.map_err(|e| {
@@ -923,7 +1103,17 @@ impl FileCheckpointStore {
                 .extension()
                 .is_some_and(|extension| extension == "json" || extension == "claim")
             {
-                let checkpoint = Self::read_checkpoint(&path).await.map_err(|error| {
+                let checkpoint = if path
+                    .extension()
+                    .is_some_and(|extension| extension == "claim")
+                {
+                    Self::read_claim(&path)
+                        .await
+                        .map(|(checkpoint, _)| checkpoint)
+                } else {
+                    Self::read_checkpoint(&path).await
+                }
+                .map_err(|error| {
                     echo_core::error::ReactError::Other(format!(
                         "corrupt checkpoint {}: {error}",
                         path.display()
@@ -944,6 +1134,44 @@ impl FileCheckpointStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct UnsupportedSettlementStore;
+
+    #[async_trait::async_trait]
+    impl CheckpointStore for UnsupportedSettlementStore {
+        async fn save(&self, _checkpoint: &Checkpoint) -> Result<()> {
+            Ok(())
+        }
+
+        async fn load(&self, _id: &str) -> Result<Option<Checkpoint>> {
+            Ok(None)
+        }
+
+        async fn claim(&self, _id: &str) -> Result<Option<Checkpoint>> {
+            Ok(None)
+        }
+
+        async fn list(&self) -> Result<Vec<CheckpointInfo>> {
+            Ok(Vec::new())
+        }
+
+        async fn delete(&self, _id: &str) -> Result<()> {
+            Ok(())
+        }
+
+        async fn clear(&self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn default_claim_settlement_fails_closed() {
+        let store = UnsupportedSettlementStore;
+        assert!(!store.supports_claim_settlement());
+        assert!(store.ack_claim("checkpoint", "attempt").await.is_err());
+        assert!(store.requeue_claim("checkpoint", "attempt").await.is_err());
+        assert!(store.renew_claim("checkpoint", "attempt").await.is_err());
+    }
 
     #[test]
     fn test_checkpoint_create() {
@@ -1040,6 +1268,9 @@ mod tests {
         let attempt_id = claimed.resume_attempt_id.clone().unwrap();
         assert_eq!(store.list().await.unwrap().len(), 1);
         assert!(store.save(&checkpoint).await.is_err());
+        assert!(store.renew_claim(&id, "stale-attempt").await.is_err());
+        assert!(store.ack_claim(&id, "stale-attempt").await.is_err());
+        assert!(store.renew_claim(&id, &attempt_id).await.is_ok());
 
         store.requeue_claim(&id, &attempt_id).await.unwrap();
         let requeued = store.load(&id).await.unwrap().unwrap();
@@ -1115,6 +1346,9 @@ mod tests {
         assert!(store.load(&id).await.unwrap().is_some());
         assert_eq!(store.list().await.unwrap().len(), 1);
         assert!(store.save(&checkpoint).await.is_err());
+        assert!(store.requeue_claim(&id, "stale-attempt").await.is_err());
+        assert!(store.renew_claim(&id, "stale-attempt").await.is_err());
+        assert!(store.renew_claim(&id, &attempt_id).await.is_ok());
 
         store.requeue_claim(&id, &attempt_id).await.unwrap();
         assert!(store.load(&id).await.unwrap().is_some());
@@ -1123,6 +1357,93 @@ mod tests {
         store.ack_claim(&id, &attempt_again).await.unwrap();
         assert!(store.load(&id).await.unwrap().is_none());
         let _ = std::fs::remove_dir_all(&temp_path);
+    }
+
+    #[tokio::test]
+    async fn renewed_file_claim_is_not_recovered_after_original_lease_age() -> Result<()> {
+        let temp_path =
+            std::env::temp_dir().join(format!("echo_claim_renew_{}", uuid::Uuid::new_v4()));
+        let store = FileCheckpointStore::new(&temp_path)
+            .with_claim_timing(Duration::from_millis(120), Duration::from_millis(30))?;
+        let checkpoint = Checkpoint::new(
+            "claim-renew".to_string(),
+            "node".to_string(),
+            &SharedState::new(),
+            Vec::new(),
+            0,
+            InterruptType::BeforeNode,
+        );
+        let id = checkpoint.id.clone();
+        store.save(&checkpoint).await?;
+        let claimed = store.claim(&id).await?.ok_or_else(|| {
+            echo_core::error::ReactError::Other("checkpoint was not claimed".to_string())
+        })?;
+        let attempt_id = claimed.resume_attempt_id.clone().ok_or_else(|| {
+            echo_core::error::ReactError::Other("claim has no attempt identity".to_string())
+        })?;
+
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        store.renew_claim(&id, &attempt_id).await?;
+        tokio::time::sleep(Duration::from_millis(80)).await;
+
+        assert!(store.claim(&id).await?.is_none());
+        assert!(store.load(&id).await?.is_some_and(|checkpoint| {
+            checkpoint.resume_attempt_id.as_deref() == Some(attempt_id.as_str())
+        }));
+        assert!(store.ack_claim(&id, "stale-attempt").await.is_err());
+        store.requeue_claim(&id, &attempt_id).await?;
+        let _ = std::fs::remove_dir_all(&temp_path);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn owner_cleared_claim_recovers_without_accepting_stale_attempt() -> Result<()> {
+        let temp_path =
+            std::env::temp_dir().join(format!("echo_claim_cut_{}", uuid::Uuid::new_v4()));
+        let store = FileCheckpointStore::new(&temp_path)
+            .with_claim_timing(Duration::from_millis(80), Duration::from_millis(20))?;
+        let checkpoint = Checkpoint::new(
+            "claim-cut".to_string(),
+            "node".to_string(),
+            &SharedState::new(),
+            Vec::new(),
+            0,
+            InterruptType::BeforeNode,
+        );
+        let id = checkpoint.id.clone();
+        store.save(&checkpoint).await?;
+        let claimed = store.claim(&id).await?.ok_or_else(|| {
+            echo_core::error::ReactError::Other("checkpoint was not claimed".to_string())
+        })?;
+        let attempt_id = claimed.resume_attempt_id.clone().ok_or_else(|| {
+            echo_core::error::ReactError::Other("claim has no attempt identity".to_string())
+        })?;
+        let claim_path = store.claim_path(&id, &attempt_id)?;
+
+        let (mut owner_cleared, _) = FileCheckpointStore::read_claim(&claim_path).await?;
+        owner_cleared.resume_attempt_id = None;
+        FileCheckpointStore::write_checkpoint(&claim_path, &owner_cleared).await?;
+        assert!(store.renew_claim(&id, &attempt_id).await.is_err());
+        assert!(store.ack_claim(&id, &attempt_id).await.is_err());
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let recovered = store.load(&id).await?.ok_or_else(|| {
+            echo_core::error::ReactError::Other("checkpoint was not recovered".to_string())
+        })?;
+        assert!(recovered.resume_attempt_id.is_none());
+        let replacement = store.claim(&id).await?.ok_or_else(|| {
+            echo_core::error::ReactError::Other("checkpoint was not reclaimable".to_string())
+        })?;
+        assert_ne!(
+            replacement.resume_attempt_id.as_deref(),
+            Some(attempt_id.as_str())
+        );
+        let replacement_attempt = replacement.resume_attempt_id.as_deref().ok_or_else(|| {
+            echo_core::error::ReactError::Other("replacement claim has no attempt".to_string())
+        })?;
+        store.ack_claim(&id, replacement_attempt).await?;
+        let _ = std::fs::remove_dir_all(&temp_path);
+        Ok(())
     }
 
     #[tokio::test]

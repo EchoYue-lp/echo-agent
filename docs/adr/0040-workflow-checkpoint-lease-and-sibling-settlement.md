@@ -2,7 +2,9 @@
 
 ## Status
 
-Accepted for the workflow checkpoint and pipeline execution paths.
+Accepted
+
+This decision applies to the workflow checkpoint and pipeline execution paths.
 
 ## Context
 
@@ -20,11 +22,16 @@ outlive a cancelled caller.
 The existing `CheckpointStore` remains the sole checkpoint authority. A
 successful `claim` creates a lease identified by `resume_attempt_id`; the
 resume path acknowledges the lease only after the continuation reaches a
-terminal result and requeues it on any failure. Claimed files remain visible
-to `load` and `list`, and stale file claims are returned to the pending set
-under the store's lease policy. Metadata updates use an atomic generation
+terminal result and requeues it on any failure. Stores with expiring claims
+publish a heartbeat interval; `Graph` renews the exact attempt while its resume
+future is active, and a missed or rejected renewal cancels that attempt before
+settlement. Claimed files remain visible to `load` and `list`; only claims whose
+heartbeat is older than the store lease may return to the pending set. Metadata
+updates use an atomic generation
 compare-and-save; adapters without that primitive reject the update rather
-than using a racy load-then-save fallback.
+than using a racy load-then-save fallback. Default settlement methods return an
+unsupported error, and SDK component stores transport renew, acknowledge,
+requeue, and generation-CAS explicitly instead of reporting a successful no-op.
 
 Parallel workflow paths use the existing node futures or `JoinSet`, observe
 the first completed failure, cancel all siblings, and drain their handles
@@ -49,11 +56,18 @@ fail-fast observation does not make successful output order nondeterministic.
 4. Extract a new workflow scheduler/state machine. Rejected for this slice;
    the existing `CheckpointStore`, `Graph`, `JoinSet`, and node execution
    paths remain the authorities.
+5. Recover every claim after one fixed age without renewal. Rejected because a
+   valid long-running continuation can cross that age and be executed twice.
+   Renewable visibility leases are the common pattern used by Temporal
+   Activity heartbeats, Amazon SQS visibility extension, and Kubernetes Lease
+   `renewTime`.
 
 ## Consequences
 
 Resume failures remain retryable and observable, while successful resumes are
-settled exactly once per lease. Tagging a claimed checkpoint returns a conflict
+settled exactly once per attempt token. This prevents concurrent duplicate
+execution but does not claim global exactly-once effects after process or
+network failure. Tagging a claimed checkpoint returns a conflict
 instead of reviving it. Parallel failures now have bounded cleanup and a
 deterministic terminal error, while successful merge and step projections retain
 their prior registration or topological order. Remote checkpoint adapters must implement the
@@ -66,3 +80,8 @@ compatibility defaults fail closed where atomicity is unavailable.
 - `echo-orchestration/src/workflow/checkpoint_store.rs`.
 - `echo-orchestration/src/workflow/graph.rs`.
 - `echo-orchestration/src/workflow/dag.rs` and `concurrent.rs`.
+- Temporal, "Detecting Activity failures":
+  <https://docs.temporal.io/encyclopedia/detecting-activity-failures>.
+- Amazon SQS, "Visibility timeout":
+  <https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/sqs-visibility-timeout.html>.
+- Kubernetes, "Leases": <https://kubernetes.io/docs/concepts/architecture/leases/>.

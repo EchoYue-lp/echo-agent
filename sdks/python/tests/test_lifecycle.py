@@ -2,6 +2,7 @@ import asyncio
 from datetime import timedelta
 
 import pytest
+
 from echo_agent_sdk import WireHandle
 from echo_agent_sdk.client import (
     AgentComponentCall,
@@ -31,6 +32,9 @@ from echo_agent_sdk.client import (
     StoreDescriptor,
     ToolCall,
     ToolDescriptor,
+    WorkflowCheckpointClaimAttemptRequest,
+    WorkflowCheckpointResult,
+    WorkflowCheckpointSaveIfGenerationRequest,
     WorkflowRunRequest,
     _AsyncQueue,
     _Callbacks,
@@ -777,6 +781,77 @@ def test_agent_component_extended_variants_and_unit_inputs_are_closed() -> None:
                 },
             )()
         ).to_wire()
+
+
+def test_workflow_checkpoint_generation_claim_and_heartbeat_contracts() -> None:
+    descriptor = AgentComponentDescriptor(
+        "workflow_checkpoint_store",
+        "checkpoint-store",
+        claim_heartbeat_interval_ms=1_000,
+    ).to_wire()
+    assert descriptor["capabilities"]["claim_heartbeat_interval_ms"] == "1000"
+    with pytest.raises(ValueError, match="require a claim heartbeat"):
+        AgentComponentDescriptor("workflow_checkpoint_store", "missing")
+    with pytest.raises(ValueError, match="only valid"):
+        AgentComponentDescriptor(
+            "audit_logger", "wrong", claim_heartbeat_interval_ms=1_000
+        )
+    with pytest.raises(ValueError, match="1 to 300000"):
+        AgentComponentDescriptor(
+            "workflow_checkpoint_store", "too-large", claim_heartbeat_interval_ms=300_001
+        )
+
+    payload = {
+        "extension": {"id": "checkpoint-1", "generation": "1", "kind": "extension"},
+        "invocation_id": "checkpoint-cas",
+        "deadline": {"seconds": "20", "nanos": 0},
+        "invocation": {
+            "operation": "agent_component_call",
+            "input": {
+                "component": "workflow_checkpoint_store",
+                "call": {
+                    "operation": "workflow_checkpoint_save_if_generation",
+                    "input": {
+                        "checkpoint": {"kind": "map", "value": []},
+                        "expected_generation": "7",
+                    },
+                },
+            },
+        },
+    }
+    save = AgentComponentCall.from_payload(payload)
+    assert isinstance(save.request, WorkflowCheckpointSaveIfGenerationRequest)
+    assert save.request.expected_generation == 7
+
+    claim_payload = {
+        **payload,
+        "invocation_id": "checkpoint-ack",
+        "invocation": {
+            "operation": "agent_component_call",
+            "input": {
+                "component": "workflow_checkpoint_store",
+                "call": {
+                    "operation": "workflow_checkpoint_ack_claim",
+                    "input": {
+                        "checkpoint_id": "checkpoint-1",
+                        "attempt_id": "attempt-1",
+                    },
+                },
+            },
+        },
+    }
+    claim = AgentComponentCall.from_payload(claim_payload)
+    assert isinstance(claim.request, WorkflowCheckpointClaimAttemptRequest)
+    assert claim.request.attempt_id == "attempt-1"
+
+    committed = AgentComponentOutcome(
+        WorkflowCheckpointResult.saved_if_generation(True)
+    ).to_wire()
+    assert committed["result"]["value"]["result"]["value"] == {"committed": True}
+    acked = AgentComponentOutcome(WorkflowCheckpointResult.claim_acked()).to_wire()
+    assert acked["result"]["value"]["result"]["operation"] == (
+        "workflow_checkpoint_ack_claim"
+    )
 
 
 def test_agent_component_stream_preserves_outer_and_nested_discriminators() -> None:

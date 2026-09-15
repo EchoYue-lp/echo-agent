@@ -36,8 +36,12 @@ public sealed interface AgentComponentRequest permits
         AgentComponentRequest.GuardCheck,
         AgentComponentRequest.SearchProviderSearch,
         AgentComponentRequest.WorkflowCheckpointSave,
+        AgentComponentRequest.WorkflowCheckpointSaveIfGeneration,
         AgentComponentRequest.WorkflowCheckpointLoad,
         AgentComponentRequest.WorkflowCheckpointClaim,
+        AgentComponentRequest.WorkflowCheckpointAckClaim,
+        AgentComponentRequest.WorkflowCheckpointRequeueClaim,
+        AgentComponentRequest.WorkflowCheckpointRenewClaim,
         AgentComponentRequest.WorkflowCheckpointList,
         AgentComponentRequest.WorkflowCheckpointListByGraph,
         AgentComponentRequest.WorkflowCheckpointListFiltered,
@@ -164,11 +168,24 @@ public sealed interface AgentComponentRequest permits
     record WorkflowCheckpointSave(JsonNode checkpoint) implements AgentComponentRequest {
         @Override public String operation() { return "workflow_checkpoint_save"; }
     }
+    record WorkflowCheckpointSaveIfGeneration(JsonNode checkpoint, BigInteger expectedGeneration)
+            implements AgentComponentRequest {
+        @Override public String operation() { return "workflow_checkpoint_save_if_generation"; }
+    }
     record WorkflowCheckpointLoad(String checkpointId) implements AgentComponentRequest {
         @Override public String operation() { return "workflow_checkpoint_load"; }
     }
     record WorkflowCheckpointClaim(String checkpointId) implements AgentComponentRequest {
         @Override public String operation() { return "workflow_checkpoint_claim"; }
+    }
+    record WorkflowCheckpointAckClaim(String checkpointId, String attemptId) implements AgentComponentRequest {
+        @Override public String operation() { return "workflow_checkpoint_ack_claim"; }
+    }
+    record WorkflowCheckpointRequeueClaim(String checkpointId, String attemptId) implements AgentComponentRequest {
+        @Override public String operation() { return "workflow_checkpoint_requeue_claim"; }
+    }
+    record WorkflowCheckpointRenewClaim(String checkpointId, String attemptId) implements AgentComponentRequest {
+        @Override public String operation() { return "workflow_checkpoint_renew_claim"; }
     }
     record WorkflowCheckpointList() implements AgentComponentRequest {
         @Override public String operation() { return "workflow_checkpoint_list"; }
@@ -302,8 +319,16 @@ public sealed interface AgentComponentRequest permits
             case "search_provider_search" -> new SearchProviderSearch(
                     text(input, "query"), u64(input, "max_results"));
             case "workflow_checkpoint_save" -> new WorkflowCheckpointSave(required(input, "checkpoint"));
+            case "workflow_checkpoint_save_if_generation" -> new WorkflowCheckpointSaveIfGeneration(
+                    required(input, "checkpoint"), u64(input, "expected_generation"));
             case "workflow_checkpoint_load" -> new WorkflowCheckpointLoad(text(input, "checkpoint_id"));
             case "workflow_checkpoint_claim" -> new WorkflowCheckpointClaim(text(input, "checkpoint_id"));
+            case "workflow_checkpoint_ack_claim" -> new WorkflowCheckpointAckClaim(
+                    text(input, "checkpoint_id"), text(input, "attempt_id"));
+            case "workflow_checkpoint_requeue_claim" -> new WorkflowCheckpointRequeueClaim(
+                    text(input, "checkpoint_id"), text(input, "attempt_id"));
+            case "workflow_checkpoint_renew_claim" -> new WorkflowCheckpointRenewClaim(
+                    text(input, "checkpoint_id"), text(input, "attempt_id"));
             case "workflow_checkpoint_list" -> new WorkflowCheckpointList();
             case "workflow_checkpoint_list_by_graph" -> new WorkflowCheckpointListByGraph(text(input, "graph_name"));
             case "workflow_checkpoint_list_filtered" -> new WorkflowCheckpointListFiltered(required(input, "filter"));
@@ -364,8 +389,12 @@ public sealed interface AgentComponentRequest permits
             case "guard_check" -> java.util.Set.of("content", "direction");
             case "search_provider_search" -> java.util.Set.of("query", "max_results");
             case "workflow_checkpoint_save" -> java.util.Set.of("checkpoint");
+            case "workflow_checkpoint_save_if_generation" -> java.util.Set.of(
+                    "checkpoint", "expected_generation");
             case "workflow_checkpoint_load", "workflow_checkpoint_claim",
                     "workflow_checkpoint_delete" -> java.util.Set.of("checkpoint_id");
+            case "workflow_checkpoint_ack_claim", "workflow_checkpoint_requeue_claim",
+                    "workflow_checkpoint_renew_claim" -> java.util.Set.of("checkpoint_id", "attempt_id");
             case "workflow_checkpoint_list", "workflow_checkpoint_clear",
                     "sandbox_is_available", "sandbox_cleanup", "mcp_transport_close",
                     "mcp_transport_try_notification" -> java.util.Set.of();

@@ -1189,6 +1189,12 @@ impl Graph {
             )));
         }
 
+        if !self.checkpoint_store.supports_claim_settlement() {
+            return Err(ReactError::Other(
+                "Checkpoint store does not provide atomic claim settlement".to_string(),
+            ));
+        }
+
         let persisted = self
             .checkpoint_store
             .load(&checkpoint_reference.id)
@@ -1202,20 +1208,26 @@ impl Graph {
             .ok_or_else(|| {
                 ReactError::Other("Checkpoint is missing or already claimed".to_string())
             })?;
-        let attempt_id = checkpoint
-            .resume_attempt_id
-            .clone()
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let attempt_id = checkpoint.resume_attempt_id.clone().ok_or_else(|| {
+            ReactError::Other(
+                "Checkpoint store returned a claim without a resume attempt identity".to_string(),
+            )
+        })?;
         if let Err(error) = self.validate_checkpoint(&checkpoint) {
-            let _ = self
+            if let Err(requeue_error) = self
                 .checkpoint_store
                 .requeue_claim(&checkpoint.id, &attempt_id)
-                .await;
+                .await
+            {
+                return Err(ReactError::Other(format!(
+                    "Checkpoint validation failed: {error}; checkpoint requeue failed: {requeue_error}"
+                )));
+            }
             return Err(error);
         }
 
         let result = self
-            .resume_claimed(checkpoint.clone(), decision, state_updates)
+            .resume_claimed_with_heartbeat(checkpoint.clone(), decision, state_updates, &attempt_id)
             .await;
         match result {
             Ok(result) => {
@@ -1235,6 +1247,52 @@ impl Graph {
                     )));
                 }
                 Err(error)
+            }
+        }
+    }
+
+    async fn resume_claimed_with_heartbeat(
+        &self,
+        checkpoint: Checkpoint,
+        decision: ApprovalDecision,
+        state_updates: Option<std::collections::HashMap<String, Value>>,
+        attempt_id: &str,
+    ) -> Result<RunUntilInterruptResult> {
+        let Some(interval) = self.checkpoint_store.claim_heartbeat_interval() else {
+            return self
+                .resume_claimed(checkpoint, decision, state_updates)
+                .await;
+        };
+        if interval.is_zero() {
+            return Err(ReactError::Other(
+                "Checkpoint claim heartbeat interval must be greater than zero".to_string(),
+            ));
+        }
+
+        let checkpoint_id = checkpoint.id.clone();
+        let resume = self.resume_claimed(checkpoint, decision, state_updates);
+        tokio::pin!(resume);
+        let first_tick = tokio::time::Instant::now()
+            .checked_add(interval)
+            .ok_or_else(|| ReactError::Other("Checkpoint heartbeat deadline overflow".into()))?;
+        let mut heartbeat = tokio::time::interval_at(first_tick, interval);
+        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        loop {
+            tokio::select! {
+                biased;
+                result = &mut resume => break result,
+                _ = heartbeat.tick() => {
+                    if let Err(error) = self
+                        .checkpoint_store
+                        .renew_claim(&checkpoint_id, attempt_id)
+                        .await
+                    {
+                        break Err(ReactError::Other(format!(
+                            "Checkpoint claim heartbeat failed: {error}"
+                        )));
+                    }
+                }
             }
         }
     }
@@ -1753,6 +1811,7 @@ enum NextStep {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::workflow::checkpoint_store::FileCheckpointStore;
 
     #[tokio::test]
     async fn test_linear_graph() {
@@ -2540,6 +2599,71 @@ mod tests {
         let pending = store.list().await.unwrap();
         assert_eq!(pending.len(), 1);
         assert!(store.load(&pending[0].id).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn long_resume_renews_file_claim_and_blocks_tag_resurrection() -> Result<()> {
+        let temp_path =
+            std::env::temp_dir().join(format!("echo_graph_renew_{}", uuid::Uuid::new_v4()));
+        let store = Arc::new(
+            FileCheckpointStore::new(&temp_path)
+                .with_claim_timing(Duration::from_millis(120), Duration::from_millis(30))?,
+        );
+        let observer = FileCheckpointStore::new(&temp_path)
+            .with_claim_timing(Duration::from_millis(120), Duration::from_millis(30))?;
+        let graph = Arc::new(
+            GraphBuilder::new("renew-active-claim")
+                .add_function_node("work", |_state: &SharedState| {
+                    Box::pin(async {
+                        tokio::time::sleep(Duration::from_millis(260)).await;
+                        Ok(())
+                    })
+                })
+                .set_entry("work")
+                .set_finish("work")
+                .interrupt_before(vec!["work"])
+                .revision("v1")
+                .build()?
+                .with_checkpoint_store(store.clone()),
+        );
+        let checkpoint = match graph.run_until_interrupt(SharedState::new()).await? {
+            RunUntilInterruptResult::Interrupted(interrupt) => interrupt.checkpoint,
+            other => {
+                return Err(ReactError::Other(format!(
+                    "expected interrupt before long resume, got {other:?}"
+                )));
+            }
+        };
+        let checkpoint_id = checkpoint.id.clone();
+        let resume_graph = graph.clone();
+        let resume = tokio::spawn(async move {
+            resume_graph
+                .resume(checkpoint, ApprovalDecision::Approved)
+                .await
+        });
+
+        tokio::time::sleep(Duration::from_millis(170)).await;
+        assert!(observer.claim(&checkpoint_id).await?.is_none());
+        assert!(
+            observer
+                .load(&checkpoint_id)
+                .await?
+                .is_some_and(|checkpoint| { checkpoint.resume_attempt_id.is_some() })
+        );
+        assert!(
+            graph
+                .tag_checkpoint(&checkpoint_id, Some("late"), vec!["stale"])
+                .await
+                .is_err()
+        );
+
+        let result = resume
+            .await
+            .map_err(|error| ReactError::Other(format!("resume task failed: {error}")))??;
+        assert!(matches!(result, RunUntilInterruptResult::Completed(_)));
+        assert!(store.load(&checkpoint_id).await?.is_none());
+        let _ = std::fs::remove_dir_all(&temp_path);
+        Ok(())
     }
 
     #[tokio::test]

@@ -1874,8 +1874,12 @@ pub enum AgentComponentOperationWire {
     GuardCheck,
     SearchProviderSearch,
     WorkflowCheckpointSave,
+    WorkflowCheckpointSaveIfGeneration,
     WorkflowCheckpointLoad,
     WorkflowCheckpointClaim,
+    WorkflowCheckpointAckClaim,
+    WorkflowCheckpointRequeueClaim,
+    WorkflowCheckpointRenewClaim,
     WorkflowCheckpointList,
     WorkflowCheckpointListByGraph,
     WorkflowCheckpointListFiltered,
@@ -1933,8 +1937,12 @@ impl AgentComponentOperationWire {
             Self::GuardCheck => AgentComponentKindWire::Guard,
             Self::SearchProviderSearch => AgentComponentKindWire::SearchProvider,
             Self::WorkflowCheckpointSave
+            | Self::WorkflowCheckpointSaveIfGeneration
             | Self::WorkflowCheckpointLoad
             | Self::WorkflowCheckpointClaim
+            | Self::WorkflowCheckpointAckClaim
+            | Self::WorkflowCheckpointRequeueClaim
+            | Self::WorkflowCheckpointRenewClaim
             | Self::WorkflowCheckpointList
             | Self::WorkflowCheckpointListByGraph
             | Self::WorkflowCheckpointListFiltered
@@ -2104,11 +2112,27 @@ pub enum AgentComponentCallInputWire {
     WorkflowCheckpointSave {
         checkpoint: WireValue,
     },
+    WorkflowCheckpointSaveIfGeneration {
+        checkpoint: WireValue,
+        expected_generation: WireU64,
+    },
     WorkflowCheckpointLoad {
         checkpoint_id: String,
     },
     WorkflowCheckpointClaim {
         checkpoint_id: String,
+    },
+    WorkflowCheckpointAckClaim {
+        checkpoint_id: String,
+        attempt_id: String,
+    },
+    WorkflowCheckpointRequeueClaim {
+        checkpoint_id: String,
+        attempt_id: String,
+    },
+    WorkflowCheckpointRenewClaim {
+        checkpoint_id: String,
+        attempt_id: String,
     },
     WorkflowCheckpointList,
     WorkflowCheckpointListByGraph {
@@ -2220,11 +2244,23 @@ impl AgentComponentCallInputWire {
             Self::WorkflowCheckpointSave { .. } => {
                 AgentComponentOperationWire::WorkflowCheckpointSave
             }
+            Self::WorkflowCheckpointSaveIfGeneration { .. } => {
+                AgentComponentOperationWire::WorkflowCheckpointSaveIfGeneration
+            }
             Self::WorkflowCheckpointLoad { .. } => {
                 AgentComponentOperationWire::WorkflowCheckpointLoad
             }
             Self::WorkflowCheckpointClaim { .. } => {
                 AgentComponentOperationWire::WorkflowCheckpointClaim
+            }
+            Self::WorkflowCheckpointAckClaim { .. } => {
+                AgentComponentOperationWire::WorkflowCheckpointAckClaim
+            }
+            Self::WorkflowCheckpointRequeueClaim { .. } => {
+                AgentComponentOperationWire::WorkflowCheckpointRequeueClaim
+            }
+            Self::WorkflowCheckpointRenewClaim { .. } => {
+                AgentComponentOperationWire::WorkflowCheckpointRenewClaim
             }
             Self::WorkflowCheckpointList => AgentComponentOperationWire::WorkflowCheckpointList,
             Self::WorkflowCheckpointListByGraph { .. } => {
@@ -2347,12 +2383,18 @@ pub enum AgentComponentCallResultWire {
         results: Vec<WireValue>,
     },
     WorkflowCheckpointSave,
+    WorkflowCheckpointSaveIfGeneration {
+        committed: bool,
+    },
     WorkflowCheckpointLoad {
         checkpoint: Option<WireValue>,
     },
     WorkflowCheckpointClaim {
         checkpoint: Option<WireValue>,
     },
+    WorkflowCheckpointAckClaim,
+    WorkflowCheckpointRequeueClaim,
+    WorkflowCheckpointRenewClaim,
     WorkflowCheckpointList {
         checkpoints: Vec<WireValue>,
     },
@@ -2449,11 +2491,23 @@ impl AgentComponentCallResultWire {
             Self::GuardCheck { .. } => AgentComponentOperationWire::GuardCheck,
             Self::SearchProviderSearch { .. } => AgentComponentOperationWire::SearchProviderSearch,
             Self::WorkflowCheckpointSave => AgentComponentOperationWire::WorkflowCheckpointSave,
+            Self::WorkflowCheckpointSaveIfGeneration { .. } => {
+                AgentComponentOperationWire::WorkflowCheckpointSaveIfGeneration
+            }
             Self::WorkflowCheckpointLoad { .. } => {
                 AgentComponentOperationWire::WorkflowCheckpointLoad
             }
             Self::WorkflowCheckpointClaim { .. } => {
                 AgentComponentOperationWire::WorkflowCheckpointClaim
+            }
+            Self::WorkflowCheckpointAckClaim => {
+                AgentComponentOperationWire::WorkflowCheckpointAckClaim
+            }
+            Self::WorkflowCheckpointRequeueClaim => {
+                AgentComponentOperationWire::WorkflowCheckpointRequeueClaim
+            }
+            Self::WorkflowCheckpointRenewClaim => {
+                AgentComponentOperationWire::WorkflowCheckpointRenewClaim
             }
             Self::WorkflowCheckpointList { .. } => {
                 AgentComponentOperationWire::WorkflowCheckpointList
@@ -2519,6 +2573,9 @@ pub struct AgentComponentCapabilitiesWire {
     pub supports_streaming: bool,
     #[serde(default)]
     pub supports_notifications: bool,
+    /// Renewal interval requested by a remote workflow checkpoint store.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim_heartbeat_interval_ms: Option<WireU64>,
 }
 
 /// Versioned per-kind registration descriptor. Exactly one variant matches
@@ -2796,6 +2853,21 @@ impl ExtensionDescriptor {
                 && capabilities.supports_notifications
             {
                 return Err("notifications are only valid for MCP transport components");
+            }
+            let claim_heartbeat_ms = capabilities
+                .claim_heartbeat_interval_ms
+                .as_ref()
+                .and_then(WireU64::to_u64);
+            if *component == AgentComponentKindWire::WorkflowCheckpointStore {
+                if !claim_heartbeat_ms.is_some_and(|value| (1..=300_000).contains(&value)) {
+                    return Err(
+                        "workflow checkpoint stores require a claim heartbeat from 1 to 300000 ms",
+                    );
+                }
+            } else if capabilities.claim_heartbeat_interval_ms.is_some() {
+                return Err(
+                    "claim_heartbeat_interval_ms is only valid for workflow checkpoint stores",
+                );
             }
         }
         if let ExtensionDescriptor::ChannelPlugin(value) = self {
