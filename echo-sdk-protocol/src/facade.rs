@@ -2890,7 +2890,7 @@ fn family_operation_for_source(
                 .starts_with("echo_orchestration::human_loop::service::PermissionService::") =>
         {
             match method {
-                "mode" => Some("permission.mode"),
+                "mode" | "current_mode" => Some("permission.mode"),
                 "set_mode" => Some("permission.set_mode"),
                 "check" => Some("permission.check"),
                 "apply_update" => Some("permission.apply_update"),

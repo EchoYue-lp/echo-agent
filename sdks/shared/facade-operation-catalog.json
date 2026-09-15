@@ -1362,6 +1362,22 @@
     {
       "family": "permission",
       "method": "_echo_agent/facade/invoke",
+      "operation": "echo_orchestration::human_loop::service::PermissionService::current_mode",
+      "handler_operation": "permission.mode",
+      "route": "family-operation:permission:permission.mode:echo_orchestration::human_loop::service::PermissionService::current_mode",
+      "signature_digests": [
+        "sha256:e660b12e3a1abad063a6245838b21f1fca639ec2207d70cadc459e6d1d0c878a"
+      ],
+      "operation_signatures": [],
+      "required_feature": "human-loop",
+      "required_features": [
+        "human-loop"
+      ],
+      "feature_semantics": "any_of"
+    },
+    {
+      "family": "permission",
+      "method": "_echo_agent/facade/invoke",
       "operation": "echo_orchestration::human_loop::service::PermissionService::mode",
       "handler_operation": "permission.mode",
       "route": "family-operation:permission:permission.mode:echo_orchestration::human_loop::service::PermissionService::mode",
@@ -11703,22 +11719,6 @@
       "required_feature": null,
       "required_features": [
         "mcp"
-      ],
-      "feature_semantics": "any_of"
-    },
-    {
-      "family": "source_operation",
-      "method": "_echo_agent/facade/invoke",
-      "operation": "echo_orchestration::human_loop::service::PermissionService::current_mode",
-      "handler_operation": null,
-      "route": "source:echo_orchestration::human_loop::service::PermissionService::current_mode",
-      "signature_digests": [
-        "sha256:e660b12e3a1abad063a6245838b21f1fca639ec2207d70cadc459e6d1d0c878a"
-      ],
-      "operation_signatures": [],
-      "required_feature": null,
-      "required_features": [
-        "human-loop"
       ],
       "feature_semantics": "any_of"
     },
