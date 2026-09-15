@@ -12,7 +12,7 @@ code_refs: [echo-state/src/journal/mod.rs, echo-state/src/journal/file.rs, echo-
 consumer_refs: [src/state/mod.rs, echo-sdk-host/src/core_profile/persistence.rs]
 behavior_refs: [behavior.observation-persistence]
 rule_refs: [rule.fact-projection-separation]
-evidence_refs: [evidence.persistence-observation, evidence.checkpoint-journal-binding-repair]
+evidence_refs: [evidence.persistence-observation, evidence.checkpoint-journal-binding-repair, evidence.checkpoint-journal-binding-verification]
 finding_refs: [finding.checkpoint-journal-binding]
 candidate_refs: []
 ---

@@ -15,7 +15,7 @@ source_refs:
 supports: [behavior.observation-persistence, rule.fact-projection-separation]
 limitations:
   - full workspace all-feature integration gate and remote CI remain pending for the final delivery branch
-  - independent source and incremental test reviews passed; a revision-bound rereview Audit is recorded only after the implementation candidate commit exists
+  - independent source and incremental test reviews passed; the revision-bound rereview Audit covers the implementation candidate but not the final cross-task delivery branch
   - schema version 1 Journal and checkpoint files are rejected rather than migrated during the current pre-stable development phase
 ---
 

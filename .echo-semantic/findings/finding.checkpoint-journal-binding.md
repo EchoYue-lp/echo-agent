@@ -10,12 +10,12 @@ focus: [state_authority, failure_concurrency, contract_evidence]
 boundary_ref: boundary.observation-persistence-delivery
 behavior_refs: [behavior.observation-persistence]
 rule_refs: [rule.fact-projection-separation]
-evidence_refs: [evidence.persistence-observation, evidence.checkpoint-journal-binding-repair]
-audit_refs: [audit.observation-persistence-delivery.data-durability]
+evidence_refs: [evidence.persistence-observation, evidence.checkpoint-journal-binding-repair, evidence.checkpoint-journal-binding-verification]
+audit_refs: [audit.observation-persistence-delivery.data-durability, audit.checkpoint-journal-binding-rereview]
 decision_refs: []
 repair_evidence_refs: [evidence.checkpoint-journal-binding-repair]
-verification_evidence_refs: []
-rereview_audit_refs: []
+verification_evidence_refs: [evidence.checkpoint-journal-binding-verification]
+rereview_audit_refs: [audit.checkpoint-journal-binding-rereview]
 discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 ---
 

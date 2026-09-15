@@ -10,7 +10,7 @@ focus: [data_durability, contract_evidence, failure_concurrency]
 observed_at: source:f53372ae92a88027ba3de7c1b6551d80c9cfa2e9f06668076cb206bb80eb0fbd
 behavior_refs: [behavior.observation-persistence]
 code_refs: [echo-core/src/agent/event_envelope.rs, echo-state/src/journal/mod.rs, echo-state/src/journal/file.rs, echo-state/src/journal/segmented.rs, echo-state/src/delivery.rs, src/trace/mod.rs, src/eval/runner.rs, echo-sdk-host/src/core_profile/persistence.rs, docs/en/41-persistence-concepts.md, docs/zh/41-persistence-concepts.md, docs/adr/0038-eval-trace-correlation-identity.md, docs/adr/0046-turn-execution-delivery-settlement.md, docs/adr/0055-checkpoint-journal-identity.md]
-evidence_refs: [evidence.persistence-observation, evidence.checkpoint-journal-binding-repair, evidence.eval-trace-correlation-repair, evidence.eval-trace-correlation-verification, evidence.turn-terminal-delivery-settlement-repair, evidence.turn-terminal-delivery-settlement-verification]
+evidence_refs: [evidence.persistence-observation, evidence.checkpoint-journal-binding-repair, evidence.checkpoint-journal-binding-verification, evidence.eval-trace-correlation-repair, evidence.eval-trace-correlation-verification, evidence.turn-terminal-delivery-settlement-repair, evidence.turn-terminal-delivery-settlement-verification]
 finding_refs: [finding.trace-effect-event-producers, finding.eval-trace-identity, finding.trace-audit-secret-boundary, finding.turn-terminal-commit-projection-order, finding.checkpoint-journal-binding]
 ---
 
@@ -34,7 +34,7 @@ EventEnvelope提供versioned identity/sequence；Journal generation identity与s
 
 ## 证据
 
-Persistence 文档、ADR 0007/0019/0030/0055 与 journal/delivery/event tests 提供证据；本次identity反例待focused验证和独立复审。
+Persistence 文档、ADR 0007/0019/0030/0055 与 journal/delivery/event tests 提供证据；本次identity反例的focused验证和独立复审均已通过，最终integration gate待delivery分支完成。
 
 ## 裁决记录
 
