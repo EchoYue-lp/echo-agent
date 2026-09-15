@@ -17,7 +17,9 @@ use futures::StreamExt;
 use futures::future::BoxFuture;
 
 use super::anthropic_cache::AnthropicCachePlan;
-use super::client::{JsonSseEvent, post_json_request, stream_json_sse};
+use super::client::{
+    JsonSseEvent, ensure_request_not_cancelled, post_json_request, stream_json_sse,
+};
 use super::config::validate_model_input_modalities;
 use futures::stream::BoxStream;
 use reqwest::Client;
@@ -486,13 +488,12 @@ impl LlmClient for AnthropicClient {
                     Some(timeout) => request_builder.timeout(timeout),
                     None => request_builder,
                 };
-                let raw = post_json_request(request_builder, request.cancel_token.clone()).await?;
                 let anthropic_resp: AnthropicResponse =
-                    serde_json::from_value(raw).map_err(|error| {
-                        LlmError::InvalidResponse(format!("Response parse error: {error}"))
-                    })?;
+                    post_json_request(request_builder, request.cancel_token.clone()).await?;
 
-                Ok(self.convert_response(anthropic_resp))
+                let response = self.convert_response(anthropic_resp);
+                ensure_request_not_cancelled(request.cancel_token.as_ref())?;
+                Ok(response)
             }
             .instrument(info_span!("anthropic_chat", model = %model)),
         )

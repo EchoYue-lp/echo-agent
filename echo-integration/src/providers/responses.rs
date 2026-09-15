@@ -24,7 +24,7 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, info_span};
 
-use super::client::{JsonSseEvent, post_json, stream_json_sse};
+use super::client::{JsonSseEvent, ensure_request_not_cancelled, post_json, stream_json_sse};
 use super::config::LlmConfig;
 use super::openai::assemble_req_header;
 use super::thinking_translate::translate_thinking_openai_compat;
@@ -169,7 +169,9 @@ impl LlmClient for ResponsesClient {
                     request.cancel_token.clone(),
                 )
                 .await?;
-                response_to_chat(raw)
+                let response = response_to_chat(raw)?;
+                ensure_request_not_cancelled(request.cancel_token.as_ref())?;
+                Ok(response)
             }
             .instrument(info_span!("openai_responses", model = %model)),
         )
