@@ -1597,6 +1597,15 @@ async fn discover_skills_refreshes_activate_skill_registry() {
             .output
             .contains(&String::from("Use skill one."))
     );
+    assert!(agent.skill_registry().is_activated("skill-one"));
+    assert!(
+        agent
+            .tools
+            .progressive_skill_registry
+            .as_ref()
+            .and_then(|registry| registry.try_read().ok())
+            .is_some_and(|registry| registry.is_activated("skill-one"))
+    );
 
     agent
         .discover_skills(&[DiscoveryScope::Custom(base.join("skills-b"))])
@@ -1650,6 +1659,7 @@ async fn discover_skills_refreshes_activate_skill_registry() {
             .output
             .contains(&String::from("Use skill one."))
     );
+    assert_eq!(agent.skill_registry().activated_count(), 1);
 
     let second_activation = agent
         .tools
@@ -1665,6 +1675,10 @@ async fn discover_skills_refreshes_activate_skill_registry() {
         second_activation
             .output
             .contains(&String::from("Use skill two."))
+    );
+    assert_eq!(
+        agent.skill_registry().activated_names(),
+        vec!["skill-one".to_string(), "skill-two".to_string()]
     );
 
     let _ = tokio::fs::remove_dir_all(base).await;
@@ -2382,6 +2396,82 @@ async fn cold_chat_restores_persisted_checkpoint() -> Result<(), String> {
             .text_content()
             .is_some_and(|content| content == "persisted turn")
     }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn checkpoint_skill_activation_restores_resource_tool_authority() -> Result<(), String> {
+    use crate::state::RuntimeStateStore;
+
+    let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let skill_root = temp.path().join("skills");
+    let skill_dir = skill_root.join("resume-skill");
+    tokio::fs::create_dir_all(skill_dir.join("references"))
+        .await
+        .map_err(|error| error.to_string())?;
+    tokio::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: resume-skill\ndescription: checkpoint skill\nallowed-tools: read_skill_resource\n---\n\nUse the saved reference.\n",
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    tokio::fs::write(skill_dir.join("references/guide.md"), "restored resource")
+        .await
+        .map_err(|error| error.to_string())?;
+
+    let store = Arc::new(
+        crate::state::FileRuntimeStateStore::new(temp.path().join("state"))
+            .map_err(|error| error.to_string())?,
+    );
+    let mut checkpoint = crate::state::AgentCheckpoint::new("skill-roundtrip");
+    checkpoint.messages_json =
+        serde_json::to_string(&vec![Message::system("system prompt".to_string())])
+            .map_err(|error| error.to_string())?;
+    checkpoint.active_skills = vec!["resume-skill".to_string()];
+    store
+        .save_checkpoint(&checkpoint)
+        .await
+        .map_err(|error| error.to_string())?;
+
+    let config = AgentConfig::new("test-model", "skill-resume-agent", "system prompt")
+        .conversation_id("skill-roundtrip");
+    let mut agent = ReactAgent::new(config);
+    agent
+        .discover_skills(&[DiscoveryScope::Custom(skill_root)])
+        .await
+        .map_err(|error| error.to_string())?;
+    agent.set_state_store(store);
+
+    let restored = agent
+        .resume_from_state_store()
+        .await
+        .map_err(|error| error.to_string())?;
+    assert!(restored.is_some());
+    assert!(agent.skill_registry().is_activated("resume-skill"));
+    assert!(
+        agent
+            .tools
+            .progressive_skill_registry
+            .as_ref()
+            .and_then(|registry| registry.try_read().ok())
+            .is_some_and(|registry| registry.is_activated("resume-skill"))
+    );
+
+    let resource = agent
+        .tools
+        .tool_manager
+        .execute_tool(
+            "read_skill_resource",
+            [
+                ("skill_name".to_string(), json!("resume-skill")),
+                ("path".to_string(), json!("references/guide.md")),
+            ]
+            .into(),
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    assert!(resource.success);
+    assert!(resource.output.contains("restored resource"));
     Ok(())
 }
 

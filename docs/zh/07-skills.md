@@ -287,6 +287,12 @@ Skill directory: ...
 
 `ReactAgent::activate_skill` 用 `ContextManager::replace_projection` 把该块写到精确 marker `echo-agent:skill:<name>`。`activate_skill` 工具返回 typed activation fact，ReAct 工具阶段再把其内容投影到同一 marker。重复激活会替换旧投影，不会累积第二份权威。上下文压缩会跳过 projection，并在压缩后重新插回。
 
+Agent 的主 `SkillRegistry` 与 `activate_skill`、`read_skill_resource`、
+`run_skill_script` 使用的并发 descriptor view 共享同一个运行时 activation
+权威。因此直接 API 激活、工具激活、checkpoint 保存/恢复、allowed-tool 过滤和
+resource/script 访问读取同一组 active names。Catalog descriptor 仍是定义数据，
+不构成第二份 activation 状态。
+
 ### triggers 来自哪里
 
 标准 frontmatter 没有 trigger 字段，因此文件型 skill 的

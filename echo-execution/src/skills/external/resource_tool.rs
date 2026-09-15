@@ -238,7 +238,24 @@ mod tests {
             .await
             .unwrap();
 
-        let mut registry = SkillRegistry::new();
+        let mut primary = SkillRegistry::new();
+        primary.register_descriptor(SkillDescriptor {
+            source: None,
+            name: "locked-skill".into(),
+            description: "desc".into(),
+            location: skill_dir.join("SKILL.md"),
+            license: None,
+            compatibility: None,
+            metadata: HashMap::new(),
+            allowed_tools: vec!["run_skill_script".into()],
+            shell: None,
+            paths: vec![],
+            triggers: vec![],
+            hooks: None,
+            sandbox: None,
+            depends_on: vec![],
+        });
+        let mut registry = primary.activation_view();
         registry.register_descriptor(SkillDescriptor {
             source: None,
             name: "locked-skill".into(),
@@ -255,7 +272,7 @@ mod tests {
             sandbox: None,
             depends_on: vec![],
         });
-        registry.mark_activated("locked-skill");
+        primary.mark_activated("locked-skill");
 
         let tool = ReadSkillResourceTool::new(Arc::new(RwLock::new(registry)));
         let result = tool

@@ -309,6 +309,13 @@ Skill directory: ...
 
 `ReactAgent::activate_skill` writes the block with `ContextManager::replace_projection` under the exact marker `echo-agent:skill:<name>`. The `activate_skill` tool returns a typed activation fact; the ReAct tool phase projects its block under the same marker. Re-activation replaces that projection instead of accumulating another authority. Context projections are excluded from compression and reinserted after compaction.
 
+The agent's primary `SkillRegistry` and the concurrent descriptor view used by
+`activate_skill`, `read_skill_resource`, and `run_skill_script` share one
+runtime activation authority. Direct API activation, tool activation,
+checkpoint save/restore, allowed-tool filtering, and resource/script access
+therefore observe the same active names. Catalog descriptors remain definition
+data and do not form another activation state.
+
 ### Where triggers come from
 
 The standard frontmatter has no trigger field, so file-based skills arrive

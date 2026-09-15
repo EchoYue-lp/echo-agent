@@ -893,14 +893,14 @@ impl ReactAgent {
 
         let mut names = Vec::new();
 
-        // Build a shared registry for the progressive disclosure tools.
-        // This is separate from `self.tools.skill_registry.lock().unwrap()` (which tracks code-based skills).
-        // The shared registry holds descriptors + activation state, accessed by
-        // both ActivateSkillTool and ReadSkillResourceTool during async execution.
+        // Build a concurrent definition view for progressive disclosure tools.
+        // Descriptors/documents remain local to this adapter, while activation
+        // and activation-derived sandbox policy use the primary registry's
+        // shared runtime authority.
         let shared = if let Some(existing) = &self.tools.progressive_skill_registry {
             existing.clone()
         } else {
-            let reg = Arc::new(RwLock::new(crate::skills::SkillRegistry::new()));
+            let reg = Arc::new(RwLock::new(self.tools.skill_registry.activation_view()));
             if let Some(ref manager) = self.tools.sandbox_manager {
                 if let Ok(mut guard) = reg.try_write() {
                     guard.set_sandbox_manager(manager.clone());

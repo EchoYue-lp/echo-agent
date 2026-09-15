@@ -1943,9 +1943,6 @@ impl ReactAgent {
             // Re-activate only skills from this checkpoint. The catalog is
             // shared, but activation and sandbox policy are runtime-local.
             self.tools.skill_registry.reset_activation_state();
-            if let Some(registry) = &self.tools.progressive_skill_registry {
-                registry.write().await.reset_activation_state();
-            }
             for skill_name in &cp.active_skills {
                 self.tools.skill_registry.mark_activated(skill_name);
             }

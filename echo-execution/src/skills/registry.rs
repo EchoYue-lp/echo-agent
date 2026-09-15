@@ -23,6 +23,37 @@ use crate::skills::external::types::{
 };
 use echo_core::sandbox::SandboxExecutor;
 
+/// Runtime state shared by all views of one agent's Skill registry.
+///
+/// Catalog and prepared-document data may be copied into a concurrent tool
+/// adapter, but activation is an agent-runtime fact and must have one owner.
+/// Keeping both pieces behind one handle also keeps activation-derived sandbox
+/// policy decisions consistent across direct API and resource/script tools.
+struct SkillActivationState {
+    session_id: String,
+    activated: std::sync::Mutex<HashSet<String>>,
+    active_sandbox_policies: std::sync::Mutex<HashMap<String, SkillSandboxPolicy>>,
+}
+
+impl SkillActivationState {
+    fn new() -> Self {
+        Self {
+            session_id: format!(
+                "session-{}",
+                uuid::Uuid::new_v4()
+                    .to_string()
+                    .chars()
+                    .take(8)
+                    .collect::<String>()
+            ),
+            activated: std::sync::Mutex::new(HashSet::new()),
+            active_sandbox_policies: std::sync::Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+type SharedActivationState = Arc<SkillActivationState>;
+
 // -- SkillRegistry --
 
 /// Central skill lifecycle manager.
@@ -41,21 +72,14 @@ pub struct SkillRegistry {
     /// Non-plugin discovery intentionally remains lazy and filesystem-backed.
     prepared_documents: HashMap<String, SkillDocument>,
 
-    /// Skills activated in the current session (dedup set)
-    activated: std::sync::Mutex<HashSet<String>>,
+    /// Shared runtime activation authority.
+    activation_state: SharedActivationState,
 
     /// Code-based skills: name -> info (registered via `add_skill`)
     code_skills: HashMap<String, SkillInfo>,
 
-    /// Session identifier for variable substitution in skill content.
-    session_id: String,
-
     /// Optional sandbox manager used when activating local skills with inline commands.
     sandbox: Option<Arc<dyn SandboxExecutor>>,
-
-    /// Active sandbox policies for activated skills: name -> policy.
-    /// Populated during activation when a skill declares a sandbox policy.
-    active_sandbox_policies: std::sync::Mutex<HashMap<String, SkillSandboxPolicy>>,
 
     /// Reverse index: source tag (e.g. `"plugin:my-plugin"`) -> skill names
     /// registered under that source. Lets `unregister_by_source` remove
@@ -69,25 +93,28 @@ pub struct SkillRegistry {
 
 impl SkillRegistry {
     pub fn new() -> Self {
-        let session_id = format!(
-            "session-{}",
-            uuid::Uuid::new_v4()
-                .to_string()
-                .chars()
-                .take(8)
-                .collect::<String>()
-        );
         Self {
-            session_id,
             descriptors: HashMap::new(),
             prepared_documents: HashMap::new(),
-            activated: std::sync::Mutex::new(HashSet::new()),
+            activation_state: Arc::new(SkillActivationState::new()),
             code_skills: HashMap::new(),
             sandbox: None,
-            active_sandbox_policies: std::sync::Mutex::new(HashMap::new()),
             by_source: HashMap::new(),
             plugin_variables: HashMap::new(),
         }
+    }
+
+    /// Construct an empty definition view that shares this registry's runtime
+    /// activation authority.
+    ///
+    /// Callers may populate descriptors and prepared documents for concurrent
+    /// resource tools without creating another activation set or sandbox-policy
+    /// authority.
+    #[doc(hidden)]
+    pub fn activation_view(&self) -> Self {
+        let mut registry = Self::new();
+        registry.activation_state = Arc::clone(&self.activation_state);
+        registry
     }
 
     // -- File-based skills (progressive disclosure) --
@@ -219,11 +246,13 @@ impl SkillRegistry {
         }
         self.prepared_documents.remove(name);
         self.plugin_variables.remove(name);
-        self.activated
+        self.activation_state
+            .activated
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .remove(name);
-        self.active_sandbox_policies
+        self.activation_state
+            .active_sandbox_policies
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .remove(name);
@@ -292,7 +321,11 @@ impl SkillRegistry {
 
     /// Mark a skill as activated. Returns `false` if already activated (dedup).
     pub fn mark_activated(&self, name: &str) -> bool {
-        let mut guard = self.activated.lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = self
+            .activation_state
+            .activated
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         guard.insert(name.to_string())
     }
 
@@ -303,11 +336,13 @@ impl SkillRegistry {
     /// retaining independent model contexts. Switching identities must not
     /// carry activated skills or their sandbox policy into the next context.
     pub fn reset_activation_state(&self) {
-        self.activated
+        self.activation_state
+            .activated
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .clear();
-        self.active_sandbox_policies
+        self.activation_state
+            .active_sandbox_policies
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .clear();
@@ -315,7 +350,11 @@ impl SkillRegistry {
 
     /// Check whether a skill has been activated in this session.
     pub fn is_activated(&self, name: &str) -> bool {
-        let guard = self.activated.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = self
+            .activation_state
+            .activated
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         guard.contains(name)
     }
 
@@ -326,7 +365,11 @@ impl SkillRegistry {
     /// activated skill declares an `allowed-tools` whitelist — in that case,
     /// only tools matching an entry in the returned set are permitted.
     pub fn active_skill_allowed_tools(&self) -> Option<HashSet<String>> {
-        let activated = self.activated.lock().unwrap_or_else(|e| e.into_inner());
+        let activated = self
+            .activation_state
+            .activated
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let mut allowed = HashSet::new();
         let mut any_restricted = false;
 
@@ -350,13 +393,21 @@ impl SkillRegistry {
 
     /// Number of activated skills.
     pub fn activated_count(&self) -> usize {
-        let guard = self.activated.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = self
+            .activation_state
+            .activated
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         guard.len()
     }
 
     /// Return all activated skill names as a sorted Vec.
     pub fn activated_names(&self) -> Vec<String> {
-        let guard = self.activated.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = self
+            .activation_state
+            .activated
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let mut names: Vec<String> = guard.iter().cloned().collect();
         names.sort();
         names
@@ -425,7 +476,7 @@ impl SkillRegistry {
         // Process inline commands and variable substitution
         let ctx = PromptContext {
             skill_dir: skill_dir.display().to_string(),
-            session_id: self.session_id.clone(),
+            session_id: self.activation_state.session_id.clone(),
             arguments: args.to_vec(),
             shell: descriptor.shell.clone(),
             source,
@@ -441,6 +492,7 @@ impl SkillRegistry {
             && policy.is_constraining()
         {
             let mut guard = self
+                .activation_state
                 .active_sandbox_policies
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
@@ -448,7 +500,11 @@ impl SkillRegistry {
         }
 
         {
-            let mut guard = self.activated.lock().unwrap_or_else(|e| e.into_inner());
+            let mut guard = self
+                .activation_state
+                .activated
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             guard.insert(name.to_string());
         }
 
@@ -530,7 +586,11 @@ impl SkillRegistry {
         let mut activated = Vec::new();
         for dep in &deps {
             {
-                let guard = self.activated.lock().unwrap_or_else(|e| e.into_inner());
+                let guard = self
+                    .activation_state
+                    .activated
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
                 if guard.contains(dep) {
                     continue;
                 }
@@ -559,6 +619,7 @@ impl SkillRegistry {
     /// Get the active sandbox policy for an activated skill.
     pub fn get_active_sandbox_policy(&self, skill_name: &str) -> Option<SkillSandboxPolicy> {
         let guard = self
+            .activation_state
             .active_sandbox_policies
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -918,6 +979,37 @@ mod tests {
         assert!(reg.is_activated("test"));
         assert!(!reg.mark_activated("test")); // dedup
         assert_eq!(reg.activated_count(), 1);
+    }
+
+    #[test]
+    fn activation_state_is_shared_across_registry_views_and_reset_is_idempotent() {
+        let mut primary = SkillRegistry::new();
+        primary.register_descriptor(make_descriptor("shared", "Shared skill"));
+
+        let mut progressive = primary.activation_view();
+        progressive.register_descriptor(make_descriptor("shared", "Shared skill"));
+
+        assert!(primary.mark_activated("shared"));
+        assert!(progressive.is_activated("shared"));
+        assert!(!progressive.mark_activated("shared"));
+
+        progressive.reset_activation_state();
+        assert!(!primary.is_activated("shared"));
+        primary.reset_activation_state();
+        assert!(primary.activated_names().is_empty());
+    }
+
+    #[test]
+    fn removing_a_definition_clears_shared_activation_state() {
+        let mut primary = SkillRegistry::new();
+        primary.register_descriptor(make_descriptor("shared", "Shared skill"));
+        let mut progressive = primary.activation_view();
+        progressive.register_descriptor(make_descriptor("shared", "Shared skill"));
+        assert!(primary.mark_activated("shared"));
+
+        assert!(progressive.remove_descriptor("shared"));
+        assert!(!primary.is_activated("shared"));
+        assert!(primary.activated_names().is_empty());
     }
 
     #[test]

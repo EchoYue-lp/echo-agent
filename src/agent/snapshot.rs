@@ -467,23 +467,8 @@ impl ToolRuntime {
         if let Some(config) = agent.llm_config() {
             disabled_tools.extend(tool_manager.incompatible_tool_names(&config.input_modalities));
         }
-        let mut skill_allowed_tools = agent.tools.skill_registry.active_skill_allowed_tools();
-        let mut active_skill_names = agent.tools.skill_registry.activated_names();
-        if let Some(progressive) = agent
-            .tools
-            .progressive_skill_registry
-            .as_ref()
-            .and_then(|registry| registry.try_read().ok())
-        {
-            if let Some(progressive_allowed) = progressive.active_skill_allowed_tools() {
-                skill_allowed_tools
-                    .get_or_insert_with(std::collections::HashSet::new)
-                    .extend(progressive_allowed);
-            }
-            active_skill_names.extend(progressive.activated_names());
-        }
-        active_skill_names.sort();
-        active_skill_names.dedup();
+        let skill_allowed_tools = agent.tools.skill_registry.active_skill_allowed_tools();
+        let active_skill_names = agent.tools.skill_registry.activated_names();
         let plan_mode = agent.config.plan_mode;
         let visibility = invocation_visible_tools.map(|initial| {
             let available = tool_manager
