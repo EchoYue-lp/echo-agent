@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.scheduler-occurrence-authority-repair
 kind: evidence
-observed_at: 729a80f2748808197b8578f7770bd361fd084d60
+observed_at: 406d7ce4c77872daaa75d7c315706b7cf5f4f63f
 source_refs:
   - echo-orchestration/src/scheduler/cron_task.rs
   - echo-orchestration/src/scheduler/runner.rs
@@ -36,6 +36,7 @@ disable/remove 不撤回已接纳 invocation。callback settlement
 
 - `cargo test -p echo_orchestration scheduler::cron_task::tests`：7 passed
 - `cargo test -p echo_orchestration scheduler::runner::tests`：8 passed
+- `cargo test -p echo_orchestration --all-targets --all-features --locked`：344 passed
 - `cargo clippy -p echo_orchestration --all-targets --all-features --locked -- -D warnings`：passed
 - `cargo fmt --all -- --check`：passed
 
