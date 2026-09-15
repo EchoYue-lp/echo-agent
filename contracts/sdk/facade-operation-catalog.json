@@ -8633,7 +8633,7 @@
       "input": null,
       "result": null,
       "operation_signatures": [],
-      "items": 609
+      "items": 610
     },
     {
       "route": "intrinsic:language-local-cancellation",
@@ -8783,7 +8783,7 @@
       "input": null,
       "result": null,
       "operation_signatures": [],
-      "items": 87
+      "items": 89
     },
     {
       "route": "intrinsic:language-local-security-policy-value",
@@ -17363,78 +17363,6 @@
       },
       "operation_signatures": [],
       "items": 2
-    },
-    {
-      "route": "source:echo_state::journal::JournalIdentity::as_str",
-      "surface": "invoke",
-      "family": "source_operation",
-      "method": "_echo_agent/facade/invoke",
-      "operation": "echo_state::journal::JournalIdentity::as_str",
-      "handler_operation": null,
-      "required_feature": null,
-      "required_features": [],
-      "feature_semantics": "default",
-      "signature_digests": [
-        "sha256:5b03dcea06e5b2ec1439442d857ebda66b7c730358c7d5a87c5aa5835c920297"
-      ],
-      "input": {
-        "encoding": "wire_value_array",
-        "description": "FeatureOperationRequest.arguments"
-      },
-      "result": {
-        "encoding": "wire_value",
-        "description": "FeatureOperationResponse.value"
-      },
-      "operation_signatures": [],
-      "items": 1
-    },
-    {
-      "route": "source:echo_state::journal::JournalIdentity::new",
-      "surface": "invoke",
-      "family": "source_operation",
-      "method": "_echo_agent/facade/invoke",
-      "operation": "echo_state::journal::JournalIdentity::new",
-      "handler_operation": null,
-      "required_feature": null,
-      "required_features": [],
-      "feature_semantics": "default",
-      "signature_digests": [
-        "sha256:2f5eebc1ff134da6b6459e78f9782a92256ca70bd65dbd89d443791bc5dc4720"
-      ],
-      "input": {
-        "encoding": "wire_value_array",
-        "description": "FeatureOperationRequest.arguments"
-      },
-      "result": {
-        "encoding": "wire_value",
-        "description": "FeatureOperationResponse.value"
-      },
-      "operation_signatures": [],
-      "items": 1
-    },
-    {
-      "route": "source:echo_state::journal::JournalIdentity::parse",
-      "surface": "invoke",
-      "family": "source_operation",
-      "method": "_echo_agent/facade/invoke",
-      "operation": "echo_state::journal::JournalIdentity::parse",
-      "handler_operation": null,
-      "required_feature": null,
-      "required_features": [],
-      "feature_semantics": "default",
-      "signature_digests": [
-        "sha256:8da62a7f1e12e0d9a0a837c1355d9cce4a38122b51a321c8b7b9e9e82fccf3c8"
-      ],
-      "input": {
-        "encoding": "wire_value_array",
-        "description": "FeatureOperationRequest.arguments"
-      },
-      "result": {
-        "encoding": "wire_value",
-        "description": "FeatureOperationResponse.value"
-      },
-      "operation_signatures": [],
-      "items": 1
     },
     {
       "route": "source:echo_state::memory::sqlite_store::SqliteStore::new",

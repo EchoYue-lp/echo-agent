@@ -4,7 +4,7 @@ id: map.sdk-facade-parity
 kind: capability_map
 title: 多语言 SDK facade 对等边界
 risk: high
-observed_at: source:eb4df1b5299a110a1a1ec4b0f6019a95193b8141389dea650cefe247990fc54c
+observed_at: source:30afe69aad7929c1209c14a6296bde079aec0cfdb45b8b8bd04601fe0d73220b
 boundary_refs: [boundary.sdk-facade-parity]
 behavior_refs: [behavior.sdk-facade-routing]
 rule_refs: [rule.sdk-rust-authority]
@@ -85,7 +85,7 @@ permission operation复用Session Agent的`PermissionService`。Host不得引入
 
 ## 场景处置清单
 
-ACP、core与extension已有真实Host证据；Plan 8 focused测试证明source operation逐项命中adapter。Manifest schema v2以identity级`sdk_scope`区分5625个当前external contract、1774个Host/Rust-only、790个language intrinsic、90个internal helper与1445个deferred，总量9724；本轮只刷新Journal identity相关生成物，不新增语言SDK源码。Gap generation校验已闭合，gap ACK后的replay watermark仍保持needs_review。
+ACP、core与extension已有真实Host证据；Plan 8 focused测试证明source operation逐项命中adapter。Manifest schema v2以identity级`sdk_scope`区分5622个当前external contract、1774个Host/Rust-only、790个language intrinsic、90个internal helper与1448个deferred，总量9724；本轮只刷新Journal identity相关生成物，不新增语言SDK源码。Gap generation校验已闭合，gap ACK后的replay watermark仍保持needs_review。
 
 ## 未展开项
 

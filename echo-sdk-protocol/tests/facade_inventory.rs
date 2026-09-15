@@ -127,11 +127,11 @@ fn sdk_scope_is_complete_deterministic_and_alias_safe() -> TestResult {
     }
 
     let expected = BTreeMap::from([
-        (SdkScope::ExternalContract, 5_625usize),
+        (SdkScope::ExternalContract, 5_622usize),
         (SdkScope::HostOrRustOnly, 1_774usize),
         (SdkScope::LanguageIntrinsic, 790usize),
         (SdkScope::InternalHelper, 90usize),
-        (SdkScope::Deferred, 1_445usize),
+        (SdkScope::Deferred, 1_448usize),
     ]);
     assert_eq!(counts, expected);
 
@@ -2248,7 +2248,7 @@ fn facade_route_table_is_mechanically_closed() -> TestResult {
 
 #[test]
 fn intrinsic_routes_are_an_explicit_frozen_snapshot() -> TestResult {
-    const EXPECTED: &str = "e3fed298bdc856c2a55db5860beec02cc56a11a055a83c375264388f50c42b6e";
+    const EXPECTED: &str = "3a2823efa10e454fe4616bfe8467c30481a9d7c2c71cf7d5fed4288a7d4a322e";
     let mut routes = manifest()?
         .entries
         .into_iter()

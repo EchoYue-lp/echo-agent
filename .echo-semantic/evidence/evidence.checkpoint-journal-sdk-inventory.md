@@ -2,9 +2,11 @@
 schema_version: 1
 id: evidence.checkpoint-journal-sdk-inventory
 kind: evidence
-observed_at: source:eb4df1b5299a110a1a1ec4b0f6019a95193b8141389dea650cefe247990fc54c
+observed_at: source:30afe69aad7929c1209c14a6296bde079aec0cfdb45b8b8bd04601fe0d73220b
 source_refs:
   - echo-state/src/journal/mod.rs
+  - echo-sdk-protocol/src/facade.rs
+  - echo-sdk-protocol/tests/facade_inventory.rs
   - contracts/sdk/public-api.txt
   - contracts/sdk/parity-manifest.json
   - contracts/sdk/facade-operation-catalog.json
@@ -23,12 +25,12 @@ limitations:
 ## 支持的结论
 
 `JournalIdentity`、checkpoint字段、Journal trait方法和receipt访问器已经进入锁定Rustdoc清单。
-生成器把可序列化值及现有通用source-operation路由归入external contract，把process-local generic
-Journal trait归入Host/Rust-only，把Rust trait impl归入language intrinsic，其余本地value方法保持
-deferred；没有据此新增逐identity语言包装。
+生成器把可序列化值归入external contract，把process-local generic Journal trait归入Host/Rust-only，
+把Rust trait impl归入language intrinsic，并把`JournalIdentity`构造、解析和访问器保留为本地value
+方法；没有为这些语言本地方法新增Host adapter或逐identity语言包装。
 
-canonical inventory由9713项变为9724项：external contract 5625、Host/Rust-only 1774、language
-intrinsic 790、internal helper 90、deferred 1445。extension schema和全部fixture内容未变化，刷新仅
+canonical inventory由9713项变为9724项：external contract 5622、Host/Rust-only 1774、language
+intrinsic 790、internal helper 90、deferred 1448。extension schema和全部fixture内容未变化，刷新仅
 涉及Rust public API、parity manifest、operation catalog、source contract及语言SDK共享catalog/digest。
 
 ## 来源与范围

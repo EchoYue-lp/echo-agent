@@ -7,7 +7,7 @@ expectation: human_confirmed
 risk: high
 primary_focus: state_authority
 focus: [contract_evidence, permission_external]
-observed_at: source:eb4df1b5299a110a1a1ec4b0f6019a95193b8141389dea650cefe247990fc54c
+observed_at: source:30afe69aad7929c1209c14a6296bde079aec0cfdb45b8b8bd04601fe0d73220b
 behavior_refs: [behavior.workspace-composition]
 code_refs: [Cargo.toml, src/lib.rs, README.md, README.zh.md, docs/en/architecture.md, docs/zh/architecture.md, docs/en/concepts.md, docs/zh/concepts.md, docs/en/lifecycles.md, docs/zh/lifecycles.md, echo-agent-learning/tests/documentation_contract.rs, docs/adr/0014-framework-capability-placement.md, docs/adr/0040-framework-concept-documentation-authority.md, docs/en/39-framework-application-boundary.md]
 evidence_refs: [evidence.workspace-structure, evidence.workspace-topology-doc-repair, evidence.workspace-topology-doc-verification, evidence.feature-table-doc-repair, evidence.feature-table-doc-verification, evidence.readme-example-target-repair, evidence.readme-example-target-verification, evidence.framework-concept-navigation]

@@ -2010,6 +2010,7 @@ const PROVEN_LANGUAGE_LOCAL_CONSTRUCTION_IDENTITIES: &[&str] = &[
     "echo_core::guard::content::ContentGuard::new",
     "echo_integration::mcp::resource_tool::build_mcp_resource_tools",
     "echo_integration::mcp::client::McpClient::new",
+    "echo_state::journal::JournalIdentity::new",
 ];
 
 const PROVEN_LANGUAGE_LOCAL_PURE_OPERATIONS: &[&str] = &[
@@ -2032,6 +2033,8 @@ const PROVEN_LANGUAGE_LOCAL_PURE_OPERATIONS: &[&str] = &[
     "echo_execution::skills::external::validate::validate_skill_dir",
     "echo_execution::skills::external::validate::validate_skill_markdown",
     "echo_integration::providers::config::resolve_protocol_endpoint",
+    "echo_state::journal::JournalIdentity::as_str",
+    "echo_state::journal::JournalIdentity::parse",
     "echo_tools::files::apply_patch::existing_file_paths",
     "echo_agent::agent::subagent::types::parse_json_objects",
     "echo_agent::agent::subagent::types::parse_subagent_outcome",
