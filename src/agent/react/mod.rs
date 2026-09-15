@@ -2202,7 +2202,8 @@ impl ReactAgent {
 
     /// Set the permission mode at runtime.
     ///
-    /// Read-only planning is controlled separately via `set_plan_mode`.
+    /// `PermissionMode::Plan` and `set_plan_mode(true)` both activate the same
+    /// capability-based read-only surface and execution hard gate.
     /// Also propagates to `PermissionService` if wired (sync, non-blocking).
     pub fn set_permission_mode(&mut self, mode: crate::tools::permission::PermissionMode) {
         self.config.permission_mode = mode;

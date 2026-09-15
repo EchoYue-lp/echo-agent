@@ -447,6 +447,9 @@ pub struct ToolRuntime {
     pub visibility: Option<std::sync::Arc<echo_core::tools::ToolVisibilityState>>,
     /// Whether the invocation uses plan mode's read-only tool surface.
     pub plan_mode: bool,
+    /// Live permission-mode authority for mode changes made through SDK/host APIs.
+    #[cfg(feature = "human-loop")]
+    permission_service: Option<Arc<crate::human_loop::PermissionService>>,
 }
 
 impl ToolRuntime {
@@ -467,8 +470,22 @@ impl ToolRuntime {
             disabled_tools.extend(tool_manager.incompatible_tool_names(&config.input_modalities));
         }
         let skill_allowed_tools = agent.tools.skill_registry.active_skill_allowed_tools();
+        #[cfg(feature = "human-loop")]
+        let permission_service = agent.approval.permission_service.clone();
         let plan_mode = agent.config.plan_mode
-            || agent.config.permission_mode == echo_core::tools::permission::PermissionMode::Plan;
+            || agent.config.permission_mode == echo_core::tools::permission::PermissionMode::Plan
+            || {
+                #[cfg(feature = "human-loop")]
+                {
+                    permission_service.as_ref().is_some_and(|service| {
+                        service.current_mode() == echo_core::tools::permission::PermissionMode::Plan
+                    })
+                }
+                #[cfg(not(feature = "human-loop"))]
+                {
+                    false
+                }
+            };
         let visibility = invocation_visible_tools.map(|initial| {
             let available = tool_manager
                 .get_openai_tools()
@@ -509,6 +526,8 @@ impl ToolRuntime {
             disabled_tools,
             visibility,
             plan_mode,
+            #[cfg(feature = "human-loop")]
+            permission_service,
         }
     }
 
@@ -526,7 +545,7 @@ impl ToolRuntime {
             })
             .filter(|tool| self.is_skill_tool_allowed(&tool.function.name))
             .filter(|tool| {
-                !self.plan_mode
+                !self.is_plan_mode()
                     || self
                         .tool_manager
                         .get_tool(&tool.function.name)
@@ -539,6 +558,21 @@ impl ToolRuntime {
         self.tool_manager
             .get_tool(tool_name)
             .is_some_and(|tool| tool.capabilities().is_read_only())
+    }
+
+    pub(crate) fn is_plan_mode(&self) -> bool {
+        self.plan_mode || {
+            #[cfg(feature = "human-loop")]
+            {
+                self.permission_service.as_ref().is_some_and(|service| {
+                    service.current_mode() == echo_core::tools::permission::PermissionMode::Plan
+                })
+            }
+            #[cfg(not(feature = "human-loop"))]
+            {
+                false
+            }
+        }
     }
 
     pub(crate) fn is_skill_tool_allowed(&self, tool_name: &str) -> bool {
@@ -741,6 +775,7 @@ impl AgentRunSnapshot {
             invocation.and_then(|context| context.visible_tools.as_ref()),
         );
         let skill_activation = agent.tools.skill_registry.activation_handle();
+        config.plan_mode = tools.is_plan_mode();
         Self {
             config: Arc::new(config),
             context: agent.memory.context.clone(),
@@ -2609,6 +2644,8 @@ mod transcript_filter_tests {
             disabled_tools: HashSet::from(["final_answer".to_string()]),
             visibility: None,
             plan_mode: true,
+            #[cfg(feature = "human-loop")]
+            permission_service: None,
         };
 
         let visible: Vec<String> = runtime
@@ -2651,6 +2688,77 @@ mod transcript_filter_tests {
         let Err(failure) = result else {
             return Err(echo_core::error::ReactError::Other(
                 "mutating MCP tool executed in permission plan mode".to_string(),
+            ));
+        };
+        assert!(
+            failure
+                .result
+                .error
+                .as_deref()
+                .is_some_and(|reason| reason.contains("Plan mode"))
+        );
+        assert_eq!(executions.load(std::sync::atomic::Ordering::SeqCst), 0);
+        Ok(())
+    }
+
+    #[cfg(all(feature = "mcp", feature = "human-loop"))]
+    #[tokio::test]
+    async fn live_permission_plan_precedes_hook_allow_for_mutating_mcp_tool() -> Result<()> {
+        use crate::skills::hooks::{HookAction, HookEvent, HookRule, HooksDefinition};
+
+        let tool_name = crate::mcp::McpToolAdapter::exposed_name_for("malicious", "write");
+        let executions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let service = Arc::new(
+            crate::human_loop::PermissionService::new()
+                .with_mode(echo_core::tools::permission::PermissionMode::Default),
+        );
+        let agent = crate::agent::ReactAgentBuilder::new()
+            .model("test-model")
+            .permission_service(Arc::clone(&service))
+            .tool(Box::new(McpPlanProbe {
+                name: tool_name.clone(),
+                executions: Arc::clone(&executions),
+            }))
+            .build()?;
+        let mut hooks = HooksDefinition::default();
+        hooks.add_rules(
+            HookEvent::PermissionRequest,
+            vec![HookRule {
+                matcher: "*".to_string(),
+                hooks: vec![HookAction::Permission {
+                    decision: "allow".to_string(),
+                    reason: None,
+                    suggestions: Vec::new(),
+                }],
+            }],
+        );
+        agent
+            .hook_registry()
+            .write()
+            .await
+            .register_user_hooks(hooks);
+
+        let snapshot = AgentRunSnapshot::from_agent(&agent);
+        assert!(!snapshot.config.plan_mode);
+        service
+            .set_mode(echo_core::tools::permission::PermissionMode::Plan)
+            .await;
+        assert!(snapshot.tools.is_plan_mode());
+        assert!(!tool_names(&snapshot).contains(&tool_name));
+
+        let input = serde_json::json!({});
+        let result = snapshot
+            .execute_tool_with_policy(
+                "call-mcp-live-plan".to_string(),
+                &tool_name,
+                &ToolParameters::new(),
+                &input,
+                None,
+            )
+            .await;
+        let Err(failure) = result else {
+            return Err(echo_core::error::ReactError::Other(
+                "hook allow bypassed live permission Plan mode".to_string(),
             ));
         };
         assert!(

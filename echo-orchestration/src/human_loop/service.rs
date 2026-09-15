@@ -62,6 +62,7 @@ use echo_core::tools::permission::{
 };
 use serde_json::Value;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 use tokio::sync::RwLock;
 
@@ -117,6 +118,8 @@ impl Default for PermissionServiceConfig {
 pub struct PermissionService {
     /// 配置
     config: RwLock<PermissionServiceConfig>,
+    /// Synchronously readable mode authority used by invocation hard gates.
+    mode: AtomicU8,
     /// 规则注册表
     rules: RwLock<RuleRegistry>,
     /// 会话级审批缓存
@@ -162,6 +165,32 @@ impl PermissionCheck {
 }
 
 impl PermissionService {
+    const fn mode_code(mode: PermissionMode) -> u8 {
+        match mode {
+            PermissionMode::Default => 0,
+            PermissionMode::Plan => 1,
+            PermissionMode::AcceptEdits => 2,
+            PermissionMode::BypassPermissions => 3,
+            PermissionMode::Auto => 4,
+            PermissionMode::Bubble => 5,
+            PermissionMode::DontAsk => 6,
+            PermissionMode::StrictConfirm => 7,
+        }
+    }
+
+    fn mode_from_code(code: u8) -> PermissionMode {
+        match code {
+            1 => PermissionMode::Plan,
+            2 => PermissionMode::AcceptEdits,
+            3 => PermissionMode::BypassPermissions,
+            4 => PermissionMode::Auto,
+            5 => PermissionMode::Bubble,
+            6 => PermissionMode::DontAsk,
+            7 => PermissionMode::StrictConfirm,
+            _ => PermissionMode::Default,
+        }
+    }
+
     fn default_confirmation_required(permissions: &[ToolPermission]) -> bool {
         permissions.contains(&ToolPermission::Write)
             || permissions.contains(&ToolPermission::Execute)
@@ -192,6 +221,7 @@ impl PermissionService {
         };
         Self {
             config: RwLock::new(config),
+            mode: AtomicU8::new(Self::mode_code(PermissionMode::Default)),
             rules: RwLock::new(RuleRegistry::new()),
             cache,
             denial_tracker: tokio::sync::Mutex::new(DenialTracker::with_max_consecutive(
@@ -216,6 +246,7 @@ impl PermissionService {
 
     /// 设置权限模式
     pub fn with_mode(self, mode: PermissionMode) -> Self {
+        self.mode.store(Self::mode_code(mode), Ordering::Release);
         if let Ok(mut config) = self.config.try_write() {
             config.mode = mode;
         }
@@ -324,7 +355,7 @@ impl PermissionService {
                 rules.remove_by_matcher(&matcher);
             }
             PermissionUpdate::SetMode { mode } => {
-                self.config.write().await.mode = mode;
+                self.set_mode(mode).await;
             }
         }
     }
@@ -338,6 +369,7 @@ impl PermissionService {
 
     /// 设置权限模式
     pub async fn set_mode(&self, mode: PermissionMode) {
+        self.mode.store(Self::mode_code(mode), Ordering::Release);
         self.config.write().await.mode = mode;
     }
 
@@ -346,6 +378,7 @@ impl PermissionService {
     /// 使用 `try_write()` 避免阻塞 — 在 agent 锁内调用时 PermissionService
     /// 不会有并发写入竞争，因此 `try_write` 几乎不会失败。
     pub fn set_mode_sync(&self, mode: PermissionMode) {
+        self.mode.store(Self::mode_code(mode), Ordering::Release);
         if let Ok(mut cfg) = self.config.try_write() {
             cfg.mode = mode;
         }
@@ -353,7 +386,12 @@ impl PermissionService {
 
     /// 获取当前权限模式
     pub async fn mode(&self) -> PermissionMode {
-        self.config.read().await.mode
+        self.current_mode()
+    }
+
+    /// Return the current mode without awaiting the mutable config projection.
+    pub fn current_mode(&self) -> PermissionMode {
+        Self::mode_from_code(self.mode.load(Ordering::Acquire))
     }
 
     /// Pure, side-effect-free prediction used only to split tool batches into
@@ -368,10 +406,10 @@ impl PermissionService {
         tool_name: &str,
         permissions: &[ToolPermission],
     ) -> bool {
-        let config = self.config.read().await;
+        let mode = self.current_mode();
 
         if matches!(
-            config.mode,
+            mode,
             PermissionMode::BypassPermissions
                 | PermissionMode::Auto
                 | PermissionMode::DontAsk
@@ -390,7 +428,7 @@ impl PermissionService {
             }
         }
 
-        match config.mode {
+        match mode {
             PermissionMode::Default => Self::default_confirmation_required(permissions),
             PermissionMode::AcceptEdits => Self::accept_edits_confirmation_required(permissions),
             PermissionMode::StrictConfirm => Self::strict_confirmation_required(permissions),
@@ -548,7 +586,7 @@ impl PermissionService {
         // would deadlock a concurrent `apply_update(SetMode)` (rules -> config)
         // or a re-entrant permission update from a HumanLoopProvider callback.
         let config = self.config.read().await.clone();
-        let effective_mode = mode_override.unwrap_or(config.mode);
+        let effective_mode = mode_override.unwrap_or_else(|| self.current_mode());
         let scope_id = invocation.and_then(|context| context.scope_id.as_deref());
 
         // 辅助闭包：审计 + 返回
@@ -1081,8 +1119,10 @@ impl PermissionServiceBuilder {
 
     pub fn build(self) -> PermissionService {
         let max_denials = self.config.max_consecutive_denials;
+        let mode = self.config.mode;
         PermissionService {
             config: RwLock::new(self.config),
+            mode: AtomicU8::new(PermissionService::mode_code(mode)),
             rules: RwLock::new(self.rules),
             cache: SessionApprovalCache::new(),
             denial_tracker: tokio::sync::Mutex::new(DenialTracker::with_max_consecutive(

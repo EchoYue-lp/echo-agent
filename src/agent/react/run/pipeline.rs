@@ -1063,7 +1063,7 @@ impl PipelineStage for PlanModeStage {
         ctx: &mut ToolExecutionContext,
         snapshot: &crate::agent::snapshot::AgentRunSnapshot,
     ) -> Result<()> {
-        if !ctx.plan_mode {
+        if !ctx.plan_mode && !snapshot.tools.is_plan_mode() {
             return Ok(());
         }
         if !snapshot.tools.is_tool_read_only(&ctx.tool_name) {

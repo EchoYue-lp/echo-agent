@@ -39,7 +39,10 @@ all read from that snapshot.
 Plan tool visibility and the execution-time Plan gate consume
 `ToolCapabilities.access`, not tool-name allow/deny lists. Both the explicit Agent
 plan flag and `PermissionMode::Plan` produce the same snapshot-level read-only
-constraint, so hook approval cannot make a locally mutating MCP tool executable.
+constraint. `PermissionService` keeps a synchronously readable mode authority so
+SDK/host mode changes are visible to an existing run snapshot and the execution gate
+rechecks that live fact before any hook, so hook approval cannot make a locally
+mutating MCP tool executable.
 Invocation-local `tool_search` and terminal `final_answer` explicitly declare their
 non-external access classification and remain available without name exceptions.
 
