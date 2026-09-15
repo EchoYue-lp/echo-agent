@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.plugin-component-preparation-verification
 kind: evidence
-observed_at: source:b0dfa235d236bee9185ff26953b982f196556459fd0bf165f7114a232373b224
+observed_at: 7e74d1443567981f318b302845d31a5673c76462
 source_refs:
   - src/plugin/prepared.rs
   - docs/adr/0012-immutable-plugin-preparation.md
@@ -29,7 +29,7 @@ diagnostic，但整代仍被`is_applicable=false`阻断。恢复组件隔离判�
 变化及zero-read apply/rollback。Framework `mcp` focused lib Clippy以`-D warnings`通过。
 
 合流framework main `c5f7688212d45d5bdcdbf60342605e8bfb176cae`后，在统一
-`source:b0dfa235d236bee9185ff26953b982f196556459fd0bf165f7114a232373b224`快照重新运行
+`7e74d1443567981f318b302845d31a5673c76462`合并提交重新运行
 `mcp`单feature prepared测试，11/11通过；同feature root-lib Clippy在`-D warnings`及
 `unwrap/expect/panic/unreachable`禁用lint下通过，`cargo fmt --all -- --check`通过。
 

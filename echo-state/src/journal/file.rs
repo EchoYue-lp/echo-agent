@@ -4,13 +4,15 @@
 //! it scans the file, validates 1-based contiguous sequences, tolerates one
 //! torn trailing frame by truncating the entire batch, and rejects gaps or
 //! mid-file corruption loudly. [`FileCheckpointStore`] writes one atomic
-//! snapshot file that pairs the reducer state with its applied sequence.
+//! snapshot file that pairs the reducer state and applied sequence with the
+//! exact Journal generation identity.
 
 use super::{
     BatchIdentity, CheckpointFrame, CheckpointStore, EventJournal, JournalBatchAppendError,
     JournalBatchAppendReceipt, JournalBatchAppendResult, JournalBatchCommitStatus,
-    JournalBatchLookup, JournalDurabilityStatus, JournalEvent, JournalRecord, PreparedJournalBatch,
-    WeakRegistry, decode_journal_batch, prepare_journal_frame, verify_journal_batch_sequence,
+    JournalBatchLookup, JournalDurabilityStatus, JournalEvent, JournalIdentity, JournalRecord,
+    PreparedJournalBatch, WeakRegistry, decode_journal_batch, prepare_journal_frame,
+    verify_journal_batch_sequence,
 };
 use echo_core::error::{ReactError, Result};
 use echo_core::utils::canonical_json::canonical_json_bytes;
@@ -62,6 +64,7 @@ struct ScannedJournal {
     /// Byte offset of every record's batch frame, indexed by `sequence - 1`.
     record_offsets: Vec<u64>,
     batches: HashMap<String, FileBatchIndex>,
+    journal_identity: Option<JournalIdentity>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,6 +85,7 @@ fn scan_journal<E: JournalEvent>(context: &str, bytes: &[u8]) -> Result<ScannedJ
     let mut offset: usize = 0;
     let mut record_offsets = Vec::new();
     let mut batches = HashMap::new();
+    let mut journal_identity = None;
     while offset < bytes.len() {
         let suffix = bytes
             .get(offset..)
@@ -97,6 +101,15 @@ fn scan_journal<E: JournalEvent>(context: &str, bytes: &[u8]) -> Result<ScannedJ
             ReactError::Other(format!("{context}: invalid journal batch byte range"))
         })?;
         let frame = decode_journal_batch::<E>(context, line)?;
+        match journal_identity.as_ref() {
+            Some(expected) if expected != frame.journal_identity() => {
+                return Err(ReactError::Other(format!(
+                    "{context}: journal generation changed at sequence {next_sequence}"
+                )));
+            }
+            Some(_) => {}
+            None => journal_identity = Some(frame.journal_identity().clone()),
+        }
         if batches.contains_key(frame.batch_id()) {
             return Err(ReactError::Other(format!(
                 "{context}: duplicate physical batch identity {}",
@@ -134,11 +147,13 @@ fn scan_journal<E: JournalEvent>(context: &str, bytes: &[u8]) -> Result<ScannedJ
         next_sequence,
         record_offsets,
         batches,
+        journal_identity,
     })
 }
 
 #[derive(Debug)]
 struct FileJournalState {
+    journal_identity: JournalIdentity,
     next_sequence: u64,
     valid_len: u64,
     record_offsets: Vec<u64>,
@@ -218,6 +233,7 @@ fn ensure_journal_file(path: &Path, parent: &Path, context: &str) -> Result<()> 
 #[derive(Debug)]
 pub struct FileEventJournal<E> {
     path: PathBuf,
+    journal_identity: JournalIdentity,
     durability: FileDurability,
     shared: Option<Arc<SharedFileJournalState>>,
     #[cfg(test)]
@@ -328,6 +344,10 @@ impl<E: JournalEvent> FileEventJournal<E> {
                 || scanned.valid_len != state.valid_len
                 || scanned.record_offsets != state.record_offsets
                 || scanned.batches != state.batches
+                || scanned
+                    .journal_identity
+                    .as_ref()
+                    .is_some_and(|identity| identity != &state.journal_identity)
             {
                 return Err(ReactError::Other(format!(
                     "{context}: disk prefix diverged from the live authority; close it before verified reopen"
@@ -339,9 +359,11 @@ impl<E: JournalEvent> FileEventJournal<E> {
                 )));
             }
             state.poison = None;
+            let journal_identity = state.journal_identity.clone();
             drop(state);
             return Ok(Self {
                 path,
+                journal_identity,
                 durability,
                 shared: Some(shared),
                 #[cfg(test)]
@@ -362,10 +384,15 @@ impl<E: JournalEvent> FileEventJournal<E> {
         let file_guard =
             open_existing_regular_guard(&path).map_err(|error| io_error(&context, error))?;
         let scanned = scan_and_repair_journal::<E>(&path, &file_guard, &context, durability)?;
+        let journal_identity = scanned
+            .journal_identity
+            .clone()
+            .unwrap_or_else(JournalIdentity::new);
         let shared = Arc::new(SharedFileJournalState {
             event_type: TypeId::of::<E>(),
             durability,
             state: Mutex::new(FileJournalState {
+                journal_identity: journal_identity.clone(),
                 next_sequence: scanned.next_sequence,
                 valid_len: scanned.valid_len,
                 record_offsets: scanned.record_offsets,
@@ -378,6 +405,7 @@ impl<E: JournalEvent> FileEventJournal<E> {
         registry.insert(path.clone(), &shared);
         Ok(Self {
             path,
+            journal_identity,
             durability,
             shared: Some(shared),
             #[cfg(test)]
@@ -638,6 +666,7 @@ impl<E: JournalEvent> FileEventJournal<E> {
             JournalDurabilityStatus::Unconfirmed
         };
         Ok(JournalBatchAppendReceipt {
+            journal_identity: state.journal_identity.clone(),
             batch_id: frame.batch_id().to_string(),
             records: frame.into_records().into(),
             durability,
@@ -647,6 +676,10 @@ impl<E: JournalEvent> FileEventJournal<E> {
 }
 
 impl<E: JournalEvent> EventJournal<E> for FileEventJournal<E> {
+    fn journal_identity(&self) -> &JournalIdentity {
+        &self.journal_identity
+    }
+
     fn append_batch(&self, batch: PreparedJournalBatch<E>) -> JournalBatchAppendResult<E> {
         if let Err(error) = batch.validate_payload_integrity() {
             return Err(JournalBatchAppendError::prepared_mutation(
@@ -708,15 +741,16 @@ impl<E: JournalEvent> EventJournal<E> for FileEventJournal<E> {
                 }
             };
         }
-        let prepared = match prepare_journal_frame(&batch, state.next_sequence) {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                return Err(JournalBatchAppendError::not_committed(
-                    batch,
-                    error.to_string(),
-                ));
-            }
-        };
+        let prepared =
+            match prepare_journal_frame(&batch, &state.journal_identity, state.next_sequence) {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    return Err(JournalBatchAppendError::not_committed(
+                        batch,
+                        error.to_string(),
+                    ));
+                }
+            };
         let line_len = match u64::try_from(prepared.line.len()) {
             Ok(line_len) => line_len,
             Err(_) => {
@@ -774,6 +808,7 @@ impl<E: JournalEvent> EventJournal<E> for FileEventJournal<E> {
             },
         );
         Ok(JournalBatchAppendReceipt {
+            journal_identity: state.journal_identity.clone(),
             batch_id,
             records: prepared.records,
             durability,
@@ -926,11 +961,12 @@ impl<E: JournalEvent> EventJournal<E> for FileEventJournal<E> {
     }
 }
 
-const CHECKPOINT_SCHEMA_VERSION: u16 = 1;
+const CHECKPOINT_SCHEMA_VERSION: u16 = 2;
 
 #[derive(Debug, Serialize)]
 struct CheckpointIntegrity<'a> {
     schema_version: u16,
+    journal_identity: &'a JournalIdentity,
     sequence: u64,
     state: &'a serde_json::Value,
 }
@@ -938,6 +974,7 @@ struct CheckpointIntegrity<'a> {
 #[derive(Debug, Serialize)]
 struct StoredCheckpointRef<'a> {
     schema_version: u16,
+    journal_identity: &'a JournalIdentity,
     sequence: u64,
     state: &'a serde_json::Value,
     digest: &'a str,
@@ -947,6 +984,7 @@ struct StoredCheckpointRef<'a> {
 #[serde(deny_unknown_fields)]
 struct StoredCheckpoint {
     schema_version: u16,
+    journal_identity: JournalIdentity,
     sequence: u64,
     state: serde_json::Value,
     digest: String,
@@ -954,11 +992,13 @@ struct StoredCheckpoint {
 
 fn checkpoint_digest(
     schema_version: u16,
+    journal_identity: &JournalIdentity,
     sequence: u64,
     state: &serde_json::Value,
 ) -> Result<String> {
     let bytes = canonical_json_bytes(&CheckpointIntegrity {
         schema_version,
+        journal_identity,
         sequence,
         state,
     })
@@ -985,6 +1025,7 @@ fn lower_hex_digit(nibble: u8) -> char {
 
 fn save_checkpoint_with<S: Serialize>(
     path: &Path,
+    journal_identity: &JournalIdentity,
     state: &S,
     through_sequence: u64,
     create_parent: impl FnOnce(&Path) -> std::io::Result<()>,
@@ -993,9 +1034,15 @@ fn save_checkpoint_with<S: Serialize>(
     let state = serde_json::to_value(state).map_err(|error| {
         ReactError::Other(format!("failed to encode checkpoint state: {error}"))
     })?;
-    let digest = checkpoint_digest(CHECKPOINT_SCHEMA_VERSION, through_sequence, &state)?;
+    let digest = checkpoint_digest(
+        CHECKPOINT_SCHEMA_VERSION,
+        journal_identity,
+        through_sequence,
+        &state,
+    )?;
     let frame = StoredCheckpointRef {
         schema_version: CHECKPOINT_SCHEMA_VERSION,
+        journal_identity,
         sequence: through_sequence,
         state: &state,
         digest: &digest,
@@ -1016,9 +1063,10 @@ fn save_checkpoint_with<S: Serialize>(
 /// The snapshot is written to a temporary sibling and renamed, so readers
 /// observe either the previous or the new checkpoint, never a partial file. A
 /// missing file loads as `None`; a corrupt file is an error. The private disk
-/// frame is schema-versioned and protected by a SHA-256 checksum so valid JSON
-/// mutations cannot be mistaken for a trustworthy replay prefix. Sequence `0`
-/// is valid and represents a snapshot taken before the first journal event.
+/// frame is schema-versioned and protects Journal identity, sequence, and state
+/// with a SHA-256 checksum so valid JSON mutations cannot be mistaken for a
+/// trustworthy replay prefix. Sequence `0` is valid and represents a snapshot
+/// taken before the first journal event.
 #[derive(Debug)]
 pub struct FileCheckpointStore<S> {
     path: PathBuf,
@@ -1041,9 +1089,15 @@ impl<S> FileCheckpointStore<S> {
 impl<S: Serialize + DeserializeOwned + Send + Sync + 'static> CheckpointStore<S>
     for FileCheckpointStore<S>
 {
-    fn save(&self, state: &S, through_sequence: u64) -> Result<()> {
+    fn save(
+        &self,
+        journal_identity: &JournalIdentity,
+        state: &S,
+        through_sequence: u64,
+    ) -> Result<()> {
         save_checkpoint_with(
             &self.path,
+            journal_identity,
             state,
             through_sequence,
             create_dir_all_durable,
@@ -1067,8 +1121,12 @@ impl<S: Serialize + DeserializeOwned + Send + Sync + 'static> CheckpointStore<S>
                 frame.schema_version
             )));
         }
-        let expected_digest =
-            checkpoint_digest(frame.schema_version, frame.sequence, &frame.state)?;
+        let expected_digest = checkpoint_digest(
+            frame.schema_version,
+            &frame.journal_identity,
+            frame.sequence,
+            &frame.state,
+        )?;
         if frame.digest != expected_digest {
             return Err(ReactError::Other(format!(
                 "{context}: checkpoint integrity digest mismatch"
@@ -1078,6 +1136,7 @@ impl<S: Serialize + DeserializeOwned + Send + Sync + 'static> CheckpointStore<S>
             ReactError::Other(format!("{context}: corrupt checkpoint state: {error}"))
         })?;
         Ok(Some(CheckpointFrame {
+            journal_identity: frame.journal_identity,
             sequence: frame.sequence,
             state,
         }))
@@ -1149,6 +1208,7 @@ mod tests {
     #[derive(Clone, Copy)]
     enum FrameTamper {
         Schema,
+        JournalIdentity,
         BatchId,
         FirstSequence,
         RecordBatchId,
@@ -1158,14 +1218,23 @@ mod tests {
     }
 
     fn tampered_frame(tamper: FrameTamper) -> TestResult<Vec<u8>> {
-        let prepared = prepare_journal_frame(&batch(vec!["original".to_string()])?, 1)
-            .test_context("prepare tamper frame")?;
+        let prepared = prepare_journal_frame(
+            &batch(vec!["original".to_string()])?,
+            &JournalIdentity::new(),
+            1,
+        )
+        .test_context("prepare tamper frame")?;
         let mut frame: serde_json::Value =
             serde_json::from_slice(&prepared.line).test_context("decode tamper frame")?;
         match tamper {
             FrameTamper::Schema => {
                 if let Some(value) = frame.get_mut("schema_version") {
                     *value = serde_json::json!(99);
+                }
+            }
+            FrameTamper::JournalIdentity => {
+                if let Some(value) = frame.get_mut("journal_identity") {
+                    *value = serde_json::json!(uuid::Uuid::new_v4().to_string());
                 }
             }
             FrameTamper::BatchId => {
@@ -1239,9 +1308,14 @@ mod tests {
     }
 
     impl CheckpointStore<LensReducer> for CountingCheckpointStore {
-        fn save(&self, state: &LensReducer, through_sequence: u64) -> Result<()> {
+        fn save(
+            &self,
+            journal_identity: &JournalIdentity,
+            state: &LensReducer,
+            through_sequence: u64,
+        ) -> Result<()> {
             self.saves.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            self.inner.save(state, through_sequence)
+            self.inner.save(journal_identity, state, through_sequence)
         }
 
         fn load(&self) -> Result<Option<CheckpointFrame<LensReducer>>> {
@@ -1259,13 +1333,19 @@ mod tests {
     }
 
     impl CheckpointStore<LensReducer> for VisibleFailureCheckpointStore {
-        fn save(&self, state: &LensReducer, through_sequence: u64) -> Result<()> {
+        fn save(
+            &self,
+            journal_identity: &JournalIdentity,
+            state: &LensReducer,
+            through_sequence: u64,
+        ) -> Result<()> {
             if self
                 .fail_once
                 .swap(false, std::sync::atomic::Ordering::SeqCst)
             {
                 save_checkpoint_with(
                     self.inner.path(),
+                    journal_identity,
                     state,
                     through_sequence,
                     create_dir_all_durable,
@@ -1277,7 +1357,7 @@ mod tests {
                     },
                 )
             } else {
-                self.inner.save(state, through_sequence)
+                self.inner.save(journal_identity, state, through_sequence)
             }
         }
 
@@ -2152,9 +2232,13 @@ mod tests {
             .append("one".to_string())
             .test_context("append original")?;
         let original = read_existing(&path).test_context("read original record")?;
-        let replacement = prepare_journal_frame(&batch(vec!["two".to_string()])?, 1)
-            .test_context("encode replacement batch frame")?
-            .line;
+        let replacement = prepare_journal_frame(
+            &batch(vec!["two".to_string()])?,
+            journal.journal_identity(),
+            1,
+        )
+        .test_context("encode replacement batch frame")?
+        .line;
         assert_eq!(replacement.len(), original.len());
         std::fs::remove_file(&path).test_context("remove journal fixture")?;
         let Err(missing_open) = FileEventJournal::<String>::open(&path, FileDurability::Flush)
@@ -2302,12 +2386,15 @@ mod tests {
         journal.append("one".to_string()).expect("append");
         // Simulate a torn append: a partial line without the newline.
         let good = read_existing(&path).expect("read");
+        let journal_identity = journal.journal_identity().clone();
+        drop(journal);
         let mut torn = good.clone();
         torn.extend_from_slice(b"{\"sequence\":2,\"event\":\"par");
         std::fs::write(&path, &torn).expect("write torn");
 
         let reopened =
             FileEventJournal::<String>::open(&path, FileDurability::Flush).expect("reopen journal");
+        assert_eq!(reopened.journal_identity(), &journal_identity);
         assert_eq!(reopened.next_sequence(), 2);
         assert_eq!(read_existing(&path).expect("read").len(), good.len());
         std::fs::remove_dir_all(root).ok();
@@ -2326,6 +2413,7 @@ mod tests {
                 "two".to_string(),
                 "three".to_string(),
             ])?,
+            &JournalIdentity::new(),
             1,
         )
         .test_context("prepare batch frame")?;
@@ -2392,6 +2480,7 @@ mod tests {
     fn file_batch_frame_rejects_every_integrity_field_tamper() -> TestResult {
         for tamper in [
             FrameTamper::Schema,
+            FrameTamper::JournalIdentity,
             FrameTamper::BatchId,
             FrameTamper::FirstSequence,
             FrameTamper::RecordBatchId,
@@ -2410,11 +2499,56 @@ mod tests {
     }
 
     #[test]
+    fn identity_free_v1_journal_and_checkpoint_frames_are_rejected() -> TestResult {
+        let root = temp_root();
+        let journal_path = root.join("legacy-events.jsonl");
+        let prepared = prepare_journal_frame(
+            &batch(vec!["legacy".to_string()])?,
+            &JournalIdentity::new(),
+            1,
+        )
+        .test_context("prepare current journal frame")?;
+        let mut legacy_journal: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_slice(&prepared.line).test_context("decode journal frame")?;
+        legacy_journal.insert("schema_version".to_string(), serde_json::Value::from(1));
+        legacy_journal.remove("journal_identity");
+        let mut journal_bytes =
+            serde_json::to_vec(&legacy_journal).test_context("encode legacy journal frame")?;
+        journal_bytes.push(b'\n');
+        std::fs::write(&journal_path, journal_bytes).test_context("write legacy journal")?;
+        let Err(journal_error) =
+            FileEventJournal::<String>::open(&journal_path, FileDurability::Flush)
+        else {
+            return Err(test_failure("identity-free v1 journal unexpectedly opened"));
+        };
+        assert!(journal_error.to_string().contains("journal_identity"));
+
+        let checkpoint_path = root.join("legacy-checkpoint.json");
+        let checkpoint_store = FileCheckpointStore::<LensReducer>::open(&checkpoint_path);
+        checkpoint_store
+            .save(&JournalIdentity::new(), &LensReducer { applied: 1 }, 1)
+            .test_context("save current checkpoint")?;
+        mutate_checkpoint(&checkpoint_path, |frame| {
+            frame.insert("schema_version".to_string(), serde_json::Value::from(1));
+            frame.remove("journal_identity");
+        });
+        let Err(checkpoint_error) = checkpoint_store.load() else {
+            return Err(test_failure(
+                "identity-free v1 checkpoint unexpectedly loaded",
+            ));
+        };
+        assert!(checkpoint_error.to_string().contains("journal_identity"));
+        std::fs::remove_dir_all(root).ok();
+        Ok(())
+    }
+
+    #[test]
     fn file_cold_scan_rejects_a_duplicated_complete_batch_frame() -> TestResult {
         let root = temp_root();
         let path = root.join("events.jsonl");
-        let frame = prepare_journal_frame(&batch(vec!["one".to_string()])?, 1)
-            .test_context("prepare duplicate frame")?;
+        let frame =
+            prepare_journal_frame(&batch(vec!["one".to_string()])?, &JournalIdentity::new(), 1)
+                .test_context("prepare duplicate frame")?;
         let mut duplicated = frame.line.clone();
         duplicated.extend_from_slice(&frame.line);
         std::fs::write(&path, duplicated).test_context("write duplicated frame")?;
@@ -2436,9 +2570,10 @@ mod tests {
     fn sequence_gap_is_an_error() -> TestResult {
         let root = temp_root();
         let path = root.join("events.jsonl");
-        let first = prepare_journal_frame(&batch(vec!["a".to_string()])?, 1)
+        let journal_identity = JournalIdentity::new();
+        let first = prepare_journal_frame(&batch(vec!["a".to_string()])?, &journal_identity, 1)
             .test_context("first batch frame")?;
-        let third = prepare_journal_frame(&batch(vec!["c".to_string()])?, 3)
+        let third = prepare_journal_frame(&batch(vec!["c".to_string()])?, &journal_identity, 3)
             .test_context("third batch frame")?;
         let mut gap = first.line;
         gap.extend_from_slice(&third.line);
@@ -2447,6 +2582,30 @@ mod tests {
             return Err(test_failure("sequence gap unexpectedly opened"));
         };
         assert!(error.to_string().contains("sequence gap"));
+        std::fs::remove_dir_all(root).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn cold_scan_rejects_mixed_journal_generations() -> TestResult {
+        let root = temp_root();
+        let path = root.join("events.jsonl");
+        let first =
+            prepare_journal_frame(&batch(vec!["a".to_string()])?, &JournalIdentity::new(), 1)
+                .test_context("first generation frame")?;
+        let second =
+            prepare_journal_frame(&batch(vec!["b".to_string()])?, &JournalIdentity::new(), 2)
+                .test_context("second generation frame")?;
+        let mut mixed = first.line;
+        mixed.extend_from_slice(&second.line);
+        std::fs::write(&path, mixed).test_context("write mixed journal")?;
+
+        let Err(error) = FileEventJournal::<String>::open(&path, FileDurability::Flush) else {
+            return Err(test_failure(
+                "mixed journal generations unexpectedly opened",
+            ));
+        };
+        assert!(error.to_string().contains("journal generation changed"));
         std::fs::remove_dir_all(root).ok();
         Ok(())
     }
@@ -2482,23 +2641,81 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint_integrity_round_trips_state_and_empty_sequence() {
+    fn replaced_file_journal_rebuilds_old_generation_checkpoint() -> TestResult {
+        let root = temp_root();
+        let journal_path = root.join("events.jsonl");
+        let checkpoint_path = root.join("checkpoint.json");
+        let old_journal = std::sync::Arc::new(FileEventJournal::<String>::open(
+            &journal_path,
+            FileDurability::Flush,
+        )?);
+        old_journal
+            .append("old".to_string())
+            .test_context("append old generation")?;
+        let old_identity = old_journal.journal_identity().clone();
+        let checkpoints =
+            std::sync::Arc::new(FileCheckpointStore::<LensReducer>::open(&checkpoint_path));
+        checkpoints
+            .save(&old_identity, &LensReducer { applied: 99 }, 1)
+            .test_context("save old generation checkpoint")?;
+        drop(old_journal);
+        std::fs::remove_file(&journal_path).test_context("remove old journal generation")?;
+
+        let new_journal = std::sync::Arc::new(FileEventJournal::<String>::open(
+            &journal_path,
+            FileDurability::Flush,
+        )?);
+        new_journal
+            .append("new".to_string())
+            .test_context("append new generation")?;
+        assert_ne!(new_journal.journal_identity(), &old_identity);
+        let reducer = CheckpointedReducer::new(
+            std::sync::Arc::clone(&new_journal),
+            std::sync::Arc::clone(&checkpoints) as std::sync::Arc<dyn CheckpointStore<LensReducer>>,
+            1,
+        );
+        let receipt = reducer.recover().test_context("recover new generation")?;
+        let super::super::CheckpointRecoveryStatus::Rebuilt { reason } = receipt.checkpoint else {
+            return Err(test_failure(
+                "old journal generation checkpoint was accepted as loaded",
+            ));
+        };
+        assert!(reason.contains("does not match source journal"));
+        reducer.with_state(|state| assert_eq!(state.applied, 1));
+        let repaired = checkpoints
+            .load()
+            .test_context("load repaired generation checkpoint")?
+            .test_context("repaired generation checkpoint exists")?;
+        assert_eq!(repaired.journal_identity, *new_journal.journal_identity());
+        assert_eq!(repaired.state, LensReducer { applied: 1 });
+        drop(reducer);
+        drop(new_journal);
+        std::fs::remove_dir_all(root).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn checkpoint_integrity_round_trips_state_and_empty_sequence() -> TestResult {
         let root = temp_root();
         let checkpoint_path = root.join("checkpoint.json");
         let store = FileCheckpointStore::<LensReducer>::open(&checkpoint_path);
         let expected = LensReducer { applied: 7 };
-        store.save(&expected, 0).expect("save checkpoint");
+        let journal_identity = JournalIdentity::new();
+        store
+            .save(&journal_identity, &expected, 0)
+            .test_context("save checkpoint")?;
 
         let loaded = store
             .load()
-            .expect("load checkpoint")
-            .expect("checkpoint exists");
+            .test_context("load checkpoint")?
+            .test_context("checkpoint exists")?;
         assert_eq!(loaded.sequence, 0);
+        assert_eq!(loaded.journal_identity, journal_identity);
         assert_eq!(loaded.state, expected);
 
-        let bytes = std::fs::read(&checkpoint_path).expect("read checkpoint");
+        let bytes = std::fs::read(&checkpoint_path).test_context("read checkpoint")?;
         let stored: serde_json::Value =
-            serde_json::from_slice(&bytes).expect("decode stored checkpoint");
+            serde_json::from_slice(&bytes).test_context("decode stored checkpoint")?;
         assert_eq!(
             stored
                 .get("schema_version")
@@ -2513,10 +2730,11 @@ mod tests {
             Some(64)
         );
         std::fs::remove_dir_all(root).ok();
+        Ok(())
     }
 
     #[test]
-    fn checkpoint_round_trips_wide_integers_with_fixed_canonical_digest() {
+    fn checkpoint_round_trips_wide_integers_with_fixed_canonical_digest() -> TestResult {
         let root = temp_root();
         let checkpoint_path = root.join("checkpoint.json");
         let store = FileCheckpointStore::<WideIntegerState>::open(&checkpoint_path);
@@ -2524,37 +2742,47 @@ mod tests {
             min: i128::MIN,
             max: u128::MAX,
         };
+        let journal_identity = JournalIdentity::parse("00000000-0000-4000-8000-000000000001")
+            .test_context("fixed journal identity")?;
         store
-            .save(&expected, u64::MAX)
-            .expect("save wide integer checkpoint");
+            .save(&journal_identity, &expected, u64::MAX)
+            .test_context("save wide integer checkpoint")?;
 
         let loaded = store
             .load()
-            .expect("load wide integer checkpoint")
-            .expect("wide integer checkpoint exists");
+            .test_context("load wide integer checkpoint")?
+            .test_context("wide integer checkpoint exists")?;
         assert_eq!(loaded.sequence, u64::MAX);
         assert_eq!(loaded.state, expected);
 
-        let state = serde_json::to_value(&expected).expect("encode wide integer state");
+        let state = serde_json::to_value(&expected).test_context("encode wide integer state")?;
         assert_eq!(
-            checkpoint_digest(CHECKPOINT_SCHEMA_VERSION, u64::MAX, &state)
-                .expect("compute checkpoint digest"),
-            "e4ef5435fac64f6da1c37dc31e4118b3927ccd0cd8ca1d2512e3225e436bf447"
+            checkpoint_digest(
+                CHECKPOINT_SCHEMA_VERSION,
+                &journal_identity,
+                u64::MAX,
+                &state,
+            )
+            .test_context("compute checkpoint digest")?,
+            "30abd2295903ef9a3f141963974511c1ce679cbda1af753f58e5af0ef582974d"
         );
         std::fs::remove_dir_all(root).ok();
+        Ok(())
     }
 
     #[test]
-    fn checkpoint_nested_parent_failure_is_retryable() {
+    fn checkpoint_nested_parent_failure_is_retryable() -> TestResult {
         let root = temp_root();
         let checkpoint_path = root
             .join("missing-a")
             .join("missing-b")
             .join("checkpoint.json");
-        let parent = checkpoint_path.parent().expect("checkpoint parent");
+        let parent = checkpoint_path.parent().test_context("checkpoint parent")?;
         let state = LensReducer { applied: 4 };
-        let error = save_checkpoint_with(
+        let journal_identity = JournalIdentity::new();
+        let Err(error) = save_checkpoint_with(
             &checkpoint_path,
+            &journal_identity,
             &state,
             4,
             |directory| {
@@ -2564,8 +2792,9 @@ mod tests {
                 ))
             },
             atomic_write,
-        )
-        .expect_err("parent durability failure must surface");
+        ) else {
+            return Err(test_failure("parent durability failure was hidden"));
+        };
         assert!(
             error
                 .to_string()
@@ -2575,14 +2804,17 @@ mod tests {
         assert!(!checkpoint_path.exists());
 
         let store = FileCheckpointStore::<LensReducer>::open(&checkpoint_path);
-        store.save(&state, 4).expect("retry checkpoint save");
+        store
+            .save(&journal_identity, &state, 4)
+            .test_context("retry checkpoint save")?;
         let loaded = store
             .load()
-            .expect("load retried checkpoint")
-            .expect("retried checkpoint exists");
+            .test_context("load retried checkpoint")?
+            .test_context("retried checkpoint exists")?;
         assert_eq!(loaded.sequence, 4);
         assert_eq!(loaded.state, state);
         std::fs::remove_dir_all(root).ok();
+        Ok(())
     }
 
     #[test]
@@ -2623,10 +2855,11 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint_rejects_state_sequence_digest_unknown_field_and_schema_tamper() {
+    fn checkpoint_rejects_identity_state_sequence_digest_unknown_field_and_schema_tamper() {
         enum Tamper {
             State,
             Sequence,
+            JournalIdentity,
             Digest,
             UnknownField,
             Schema,
@@ -2635,6 +2868,11 @@ mod tests {
         for (label, tamper, expected_error) in [
             ("state", Tamper::State, "digest mismatch"),
             ("sequence", Tamper::Sequence, "digest mismatch"),
+            (
+                "journal-identity",
+                Tamper::JournalIdentity,
+                "digest mismatch",
+            ),
             ("digest", Tamper::Digest, "digest mismatch"),
             ("unknown", Tamper::UnknownField, "unknown field"),
             ("schema", Tamper::Schema, "unsupported checkpoint schema"),
@@ -2643,7 +2881,7 @@ mod tests {
             let checkpoint_path = root.join(format!("{label}.json"));
             let store = FileCheckpointStore::<LensReducer>::open(&checkpoint_path);
             store
-                .save(&LensReducer { applied: 2 }, 2)
+                .save(&JournalIdentity::new(), &LensReducer { applied: 2 }, 2)
                 .expect("seed valid checkpoint");
             mutate_checkpoint(&checkpoint_path, |frame| match tamper {
                 Tamper::State => {
@@ -2656,6 +2894,12 @@ mod tests {
                 }
                 Tamper::Sequence => {
                     frame.insert("sequence".to_string(), serde_json::Value::from(99));
+                }
+                Tamper::JournalIdentity => {
+                    frame.insert(
+                        "journal_identity".to_string(),
+                        serde_json::Value::String(uuid::Uuid::new_v4().to_string()),
+                    );
                 }
                 Tamper::Digest => {
                     frame.insert(
@@ -2736,7 +2980,7 @@ mod tests {
         let checkpoint_path = root.join("checkpoint.json");
         let store = FileCheckpointStore::<LensReducer>::open(&checkpoint_path);
         store
-            .save(&LensReducer { applied: 2 }, 2)
+            .save(journal.journal_identity(), &LensReducer { applied: 2 }, 2)
             .expect("save prefix checkpoint");
         mutate_checkpoint(&checkpoint_path, |frame| {
             if let Some(state) = frame

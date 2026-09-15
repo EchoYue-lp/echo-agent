@@ -53,9 +53,9 @@ def test_every_external_sdk_contract_has_a_completed_python_mapping() -> None:
             assert mapping["status"] == "done", entry["path"]
         assert mapping["contract_test"].startswith("sdk-parity/"), entry["path"]
     assert counts == {
-        "external_contract": 5620,
-        "host_or_rust_only": 1773,
-        "language_intrinsic": 787,
+        "external_contract": 5622,
+        "host_or_rust_only": 1774,
+        "language_intrinsic": 790,
         "internal_helper": 90,
-        "deferred": 1443,
+        "deferred": 1448,
     }

@@ -41,11 +41,11 @@ class FacadeParityTest {
             assertTrue(mapping.path("contract_test").asText().startsWith("sdk-parity/"));
         }
         assertEquals(Map.of(
-                "external_contract", 5620,
-                "host_or_rust_only", 1773,
-                "language_intrinsic", 787,
+                "external_contract", 5622,
+                "host_or_rust_only", 1774,
+                "language_intrinsic", 790,
                 "internal_helper", 90,
-                "deferred", 1443), counts);
+                "deferred", 1448), counts);
     }
 
     @Test

@@ -8633,7 +8633,7 @@
       "input": null,
       "result": null,
       "operation_signatures": [],
-      "items": 609
+      "items": 610
     },
     {
       "route": "intrinsic:language-local-cancellation",
@@ -8783,7 +8783,7 @@
       "input": null,
       "result": null,
       "operation_signatures": [],
-      "items": 87
+      "items": 89
     },
     {
       "route": "intrinsic:language-local-security-policy-value",
@@ -8875,7 +8875,7 @@
       "input": null,
       "result": null,
       "operation_signatures": [],
-      "items": 2855
+      "items": 2857
     },
     {
       "route": "intrinsic:language-local-wire-helper",
@@ -9709,7 +9709,7 @@
       "required_features": [],
       "feature_semantics": "default",
       "signature_digests": [
-        "sha256:d2672aae3fba18a0c0f4b2d9eaffa08fd7f250732715932a037ad932cde7e84f"
+        "sha256:0f6be98fe84033a728438eaf9e7c661bf2b9be949530772a2b2fdc9b9af870a4"
       ],
       "input": null,
       "result": null,
@@ -9732,7 +9732,7 @@
       "input": null,
       "result": null,
       "operation_signatures": [],
-      "items": 8
+      "items": 9
     },
     {
       "route": "intrinsic:process-local-generic-journal-reducer",
@@ -11046,7 +11046,7 @@
       "input": null,
       "result": null,
       "operation_signatures": [],
-      "items": 1180
+      "items": 1183
     },
     {
       "route": "source:echo_agent::agent::react::ReactAgent::activate_skill",
@@ -18141,7 +18141,7 @@
       "input": null,
       "result": null,
       "operation_signatures": [],
-      "items": 154
+      "items": 156
     },
     {
       "route": "value:statistics",
@@ -18318,5 +18318,5 @@
       "items": 432
     }
   ],
-  "total_items": 23661
+  "total_items": 23672
 }

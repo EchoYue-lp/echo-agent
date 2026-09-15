@@ -407,10 +407,14 @@ mod tests {
 
         fn execute_stream<'a>(
             &'a self,
-            _task: &'a str,
+            task: &'a str,
         ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
             Box::pin(async move {
-                let stream: BoxStream<'a, Result<AgentEvent>> = Box::pin(futures::stream::empty());
+                self.record(task);
+                let stream: BoxStream<'a, Result<AgentEvent>> =
+                    Box::pin(futures::stream::iter([Ok(AgentEvent::FinalAnswer(
+                        "Analysis artifacts written and verified.".to_string(),
+                    ))]));
                 Ok(stream)
             })
         }

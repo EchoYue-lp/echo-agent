@@ -8,7 +8,7 @@
 | ------------ | ---------------------------------- | ------------------------ | ---------------------- |
 | `Store`      | 数据存在哪里、如何读写？           | trait、文件或内存后端    | 持久化和查询某类数据   |
 | `Journal`    | 按确定顺序发生了什么？             | append-only event stream | 重放、恢复、生成投影   |
-| `Checkpoint` | 执行到某个边界时状态是什么？       | state + applied sequence | 快速恢复、避免全量重放 |
+| `Checkpoint` | 执行到某个边界时状态是什么？       | Journal identity + state + sequence | 快速恢复、避免全量重放 |
 | `Trace`      | 一次执行如何运行、为何成功或失败？ | `Run` + `RunEvent`       | 调试、诊断、评估和统计 |
 
 ```text
@@ -32,7 +32,7 @@
 | `Store`              | namespace/key/value 长期记忆     | 跨会话知识     |
 | `ConversationStore`  | 用户可见的消息历史投影           | 对话浏览       |
 | `RuntimeStateStore`  | `AgentCheckpoint`                | ReAct 会话恢复 |
-| `CheckpointStore<S>` | reducer state + applied sequence | 事件投影恢复   |
+| `CheckpointStore<S>` | Journal generation + reducer state + applied sequence | 事件投影恢复   |
 | `RunStore`           | Trace `Run`/`RunEvent`           | 执行观测       |
 
 长期记忆 `Store` 提供 namespace 隔离、KV 读写、搜索和删除。它只是框架中的一种 Store，不是 `ConversationStore`、`RuntimeStateStore` 或 `RunStore` 的父接口。
@@ -43,8 +43,10 @@
 
 - 事件只追加；
 - sequence 从 1 开始连续递增；
+- 每一代事实历史拥有一个稳定的 `JournalIdentity`；
 - 可以从指定 sequence 后顺序重放；
 - 事件先提交，再由 reducer 折叠为状态；
+- append receipt 携带实际提交方的 Journal identity，typed adapter 也必须保留；
 - 文件实现可修复撕裂的尾部记录，但历史中段损坏必须报错；
 - 不确定的 batch commit 结果必须先 reopen/reconcile，不能盲目重试副作用。
 
@@ -56,18 +58,25 @@ Journal 通常适合承担“已经发生的领域事实”。当前状态、列
 
 `CheckpointedReducer` 将 Journal 事件 fold 为状态，并通过 `CheckpointStore<S>` 保存：
 
+- 精确的 Journal generation identity；
 - 已应用到的 sequence；
 - 该 sequence 对应的 reducer state。
+
+sequence 只在所属 Journal generation 内有意义；序号相同不代表两个 Journal 可以交换 checkpoint。
 
 恢复时先加载 checkpoint，再只重放 Journal 尾部：
 
 ```text
-Journal:     1 2 3 4 5 6 7 8 9 10
-Checkpoint:             state@7
-恢复:                    load@7 + replay 8..10
+Journal:      identity=A, 1 2 3 4 5 6 7 8 9 10
+Checkpoint:   journal=A, state@7
+恢复:          要求 journal=A，再 load@7 + replay 8..10
 ```
 
-`FileCheckpointStore` 使用原子替换、schema version 和 SHA-256 digest，避免把部分写入或被篡改的合法 JSON 当成可信状态。对于 event-sourced projection，这类 checkpoint 是可重建的加速结构，不替代 Journal。
+`FileCheckpointStore` 使用原子替换、schema version，以及覆盖 Journal identity、sequence、state 的 SHA-256 digest，避免把部分写入、被篡改或来自其它 Journal 的合法 JSON 当成可信状态。完整 Journal 仍在时，identity 不匹配会丢弃 checkpoint、从事实全量重放并修复；Journal prefix 已裁剪时则失败关闭，因为缺失事实无法重建。
+
+`apply_committed` 会在 fold 任何 record 前校验外部 append receipt 的 Journal identity。adapter 可以转换 payload 类型，但必须与 batch identity、sequence 一起无损保留物理 Journal identity。
+
+文件 Journal batch、checkpoint 与 segmented retention marker 使用带 identity 的 schema version 2。version 1 无法证明来源绑定，因此直接拒绝，不猜测 identity。详见 [ADR 0055](../adr/0055-checkpoint-journal-identity.md)。
 
 ### AgentCheckpoint
 
@@ -138,7 +147,7 @@ Trace 与 Journal 都可能包含按时间排列的事件，但职责不同：
 
 1. 这是新的持久化后端，还是新的数据语义？只有前者主要是 Store 问题。
 2. 哪份数据是不可丢失的事实？需要顺序恢复时优先扩展现有 Journal。
-3. Checkpoint 是 Journal 派生缓存，还是独立 runtime snapshot？必须写清权威范围和重建来源。
+3. Checkpoint 是 Journal 派生缓存，还是独立 runtime snapshot？必须写清权威范围、generation identity 和重建来源。
 4. Trace 写入失败是否允许主流程继续？如果允许，就不能用 Trace 判断业务是否已提交。
 5. 是否已存在同作用域的 Journal、Checkpoint、Store 或 projection？不得平行实现同一语义。
 

@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "extension_protocol_version": 1,
-  "total_items": 23661,
+  "total_items": 23672,
   "routes": [
     {
       "family": "bridge",
@@ -7019,7 +7019,7 @@
       "handler_operation": null,
       "route": "intrinsic:process-local-generic-journal-checkpoint",
       "signature_digests": [
-        "sha256:d2672aae3fba18a0c0f4b2d9eaffa08fd7f250732715932a037ad932cde7e84f"
+        "sha256:0f6be98fe84033a728438eaf9e7c661bf2b9be949530772a2b2fdc9b9af870a4"
       ],
       "operation_signatures": [],
       "required_feature": null,

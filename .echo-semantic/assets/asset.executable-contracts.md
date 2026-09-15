@@ -6,13 +6,13 @@ title: Tests、Examples 与 CI 消费者
 asset_type: test_consumer
 status: active
 risk: high
-observed_at: source:b0dfa235d236bee9185ff26953b982f196556459fd0bf165f7114a232373b224
+observed_at: source:b69e5e4f1ed0f4f44d80ff658771701f5ce167ff7f200ec4e28a5e84fca61100
 boundary_refs: [boundary.workspace-architecture, boundary.agent-session-turn, boundary.context-memory, boundary.task-subagent-workflow, boundary.observation-persistence-delivery, boundary.tool-permission-sandbox, boundary.extension-lifecycle, boundary.llm-provider-runtime, boundary.protocol-surfaces, boundary.eval-evolution]
 code_refs: [tests/facade_smoke.rs, echo-agent-learning/tests/documentation_contract.rs, echo-agent-learning/tests/example_contracts.rs, echo-agent-learning/tests/semantic_baseline_contract.rs, echo-agent-learning/examples/README.md, .github/workflows/rust-ci.yml, scripts/verify.sh]
 consumer_refs: [Cargo.toml, echo-agent-learning/Cargo.toml]
 behavior_refs: [behavior.workspace-composition]
 rule_refs: [rule.framework-layer-ownership]
-evidence_refs: [evidence.workspace-structure, evidence.agent-context-execution, evidence.task-subagent-workflow, evidence.persistence-observation, evidence.effects-extensions, evidence.provider-protocol-quality, evidence.semantic-baseline-squash-ancestry-repair, evidence.semantic-baseline-squash-ancestry-verification]
+evidence_refs: [evidence.workspace-structure, evidence.agent-context-execution, evidence.task-subagent-workflow, evidence.persistence-observation, evidence.effects-extensions, evidence.provider-protocol-quality, evidence.checkpoint-journal-sdk-inventory, evidence.semantic-baseline-squash-ancestry-repair, evidence.semantic-baseline-squash-ancestry-verification]
 finding_refs: [finding.tool-pipeline-example-drift, finding.semantic-baseline-squash-ancestry]
 candidate_refs: []
 ---

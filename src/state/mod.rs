@@ -21,6 +21,9 @@ use serde::{Deserialize, Serialize};
 
 /// Sequenced event journal and checkpoint-reducer primitives.
 ///
+/// Checkpoints include a [`JournalIdentity`](crate::state::journal::JournalIdentity);
+/// recovery accepts state only from the exact Journal generation that produced it.
+///
 /// Unknown outcomes retain the original [`PreparedJournalBatch`](crate::state::journal::PreparedJournalBatch). After
 /// reopening a file-backed authority, first perform a read-only lookup, then
 /// pass the same prepared value to `apply_batch`: an existing identity returns

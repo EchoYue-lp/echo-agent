@@ -200,6 +200,13 @@ while let Some(event) = stream.next().await {
 with the same error and never emits `Completed` after a failed node. When a
 parallel branch fails, the workflow cancels and drains its remaining siblings
 so a hung branch cannot mask the failure or outlive caller cancellation.
+Agent nodes forward `AgentEvent::Token` as `WorkflowEvent::Token`; their final
+answer is committed to `SharedState` before `NodeEnd` is emitted.
+
+`run`, `run_until_interrupt`, checkpoint resume, and `run_stream` all delegate
+node routing, path/step accounting, fan-out, errors, and completion to one
+internal execution loop. Streaming is an event projection of that loop, not a
+second executor.
 
 ---
 
@@ -322,6 +329,12 @@ claim discoverable again. Tagging an active claim fails its generation
 compare-and-save instead of resurrecting the continuation. Custom and
 SDK-backed stores must implement renew, acknowledge, requeue, and
 generation-CAS; unsupported settlement fails closed.
+
+Approval of a `BeforeNode` checkpoint skips only that exact interrupt once.
+Any configured interrupt on a subsequent node is still evaluated. Finish nodes
+use the same before/after interrupt semantics as every other executable node;
+resuming an after-finish checkpoint completes the preserved path without
+executing the finish node twice.
 
 ---
 
