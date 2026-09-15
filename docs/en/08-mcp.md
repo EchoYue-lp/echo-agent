@@ -4,7 +4,16 @@
 
 MCP (Model Context Protocol) is an open standard proposed by Anthropic in 2024 that unifies communication between LLM applications and external tool services. An MCP server exposes tools, resources, and prompts; an MCP client (i.e., an Agent) connects and automatically discovers and invokes those capabilities.
 
-echo-agent implements a complete MCP client supporting the latest protocol version (2025-03-26), capable of connecting to any spec-compliant server and seamlessly adapting its tools to the framework's `Tool` trait.
+echo-agent implements a complete MCP client supporting MCP `2025-11-25` and the
+compatibility versions `2025-06-18`, `2025-03-26`, and `2024-11-05`. It can
+connect to spec-compliant servers and seamlessly adapt their tools to the
+framework's `Tool` trait.
+
+The framework's client currently advertises an empty `initialize.capabilities`
+object. Roots, sampling, and elicitation are not advertised until their
+server-to-client request/notification handlers are implemented. The server
+side supports the four protocol versions listed above and echoes a supported
+client version during initialization.
 
 ---
 
@@ -139,7 +148,7 @@ McpServerConfig::stdio(
 
 ### 2. HTTP (Streamable HTTP, recommended for remote services)
 
-Modern HTTP transport compliant with MCP 2025-03-26 specification:
+Modern HTTP transport compliant with MCP 2025-11-25 specification:
 
 ```
 ┌───────────────────┐                    ┌───────────────────┐

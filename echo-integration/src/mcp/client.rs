@@ -8,12 +8,12 @@ use super::transport::http::HttpTransport;
 use super::transport::sse::SseTransport;
 use super::transport::stdio::StdioTransport;
 use super::types::{
-    ClientCapabilities, ClientInfo, ElicitationCapability, InitializeParams, InitializeResult,
-    JsonRpcNotification, JsonRpcRequest, MCP_PROTOCOL_VERSION, McpContent, McpPrompt,
-    McpPromptGetParams, McpPromptGetResult, McpPromptsListResult, McpResource,
-    McpResourceReadParams, McpResourceReadResult, McpResourceTemplate,
-    McpResourceTemplatesListResult, McpResourcesListResult, McpTool, McpToolCallParams,
-    McpToolCallResult, McpToolsListResult, RootsCapability, SamplingCapability, ServerCapabilities,
+    ClientCapabilities, ClientInfo, InitializeParams, InitializeResult, JsonRpcNotification,
+    JsonRpcRequest, MCP_PROTOCOL_VERSION, McpContent, McpPrompt, McpPromptGetParams,
+    McpPromptGetResult, McpPromptsListResult, McpResource, McpResourceReadParams,
+    McpResourceReadResult, McpResourceTemplate, McpResourceTemplatesListResult,
+    McpResourcesListResult, McpTool, McpToolCallParams, McpToolCallResult, McpToolsListResult,
+    ServerCapabilities,
 };
 use echo_core::error::{McpError, ReactError, Result};
 
@@ -173,14 +173,11 @@ impl McpClient {
 
     /// 构建客户端能力声明
     fn build_client_capabilities() -> ClientCapabilities {
-        ClientCapabilities {
-            roots: Some(RootsCapability {
-                list_changed: Some(true),
-            }),
-            sampling: Some(SamplingCapability::default()),
-            elicitation: Some(ElicitationCapability::default()),
-            experimental: None,
-        }
+        // Do not advertise server-to-client callbacks until the transport has
+        // a real request/notification dispatcher and typed handlers for them.
+        // An empty capability object is truthful: this client currently only
+        // sends requests and notifications to the MCP server.
+        ClientCapabilities::default()
     }
 
     // ── 工具相关方法 ──────────────────────────────────────────────────────────
@@ -617,6 +614,7 @@ mod tests {
     use super::*;
     use futures::future::BoxFuture;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use tokio::sync::Mutex;
 
     struct FailingInitializeTransport {
         closed: Arc<AtomicBool>,
@@ -669,5 +667,90 @@ mod tests {
                 .is_err()
         );
         assert!(closed.load(Ordering::Acquire));
+    }
+
+    struct RecordingInitializeTransport {
+        initialize: Arc<Mutex<Option<JsonRpcRequest>>>,
+    }
+
+    impl McpTransport for RecordingInitializeTransport {
+        fn send(
+            &self,
+            request: JsonRpcRequest,
+        ) -> BoxFuture<'_, Result<super::super::types::JsonRpcResponse>> {
+            let initialize = self.initialize.clone();
+            Box::pin(async move {
+                {
+                    let mut recorded = initialize.lock().await;
+                    if request.method == "initialize" {
+                        *recorded = Some(request.clone());
+                    }
+                }
+
+                let result = if request.method == "initialize" {
+                    serde_json::json!({
+                        "protocolVersion": MCP_PROTOCOL_VERSION,
+                        "capabilities": {},
+                        "serverInfo": {"name": "fixture", "version": "1.0"}
+                    })
+                } else {
+                    serde_json::json!({"tools": []})
+                };
+
+                Ok(super::super::types::JsonRpcResponse {
+                    jsonrpc: "2.0".to_string(),
+                    id: request.id,
+                    result: Some(result),
+                    error: None,
+                })
+            })
+        }
+
+        fn notify(&self, _notification: JsonRpcNotification) -> BoxFuture<'_, Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn close(&self) -> BoxFuture<'_, ()> {
+            Box::pin(async {})
+        }
+
+        fn notification_rx(
+            &self,
+        ) -> Option<Arc<dyn super::super::types::JsonRpcNotificationReceiver>> {
+            None
+        }
+    }
+
+    #[tokio::test]
+    async fn initialize_wire_does_not_advertise_unimplemented_callbacks()
+    -> std::result::Result<(), String> {
+        let initialize = Arc::new(Mutex::new(None));
+        let transport: Arc<dyn McpTransport> = Arc::new(RecordingInitializeTransport {
+            initialize: initialize.clone(),
+        });
+
+        let client = McpClient::from_transport("fixture", transport)
+            .await
+            .map_err(|error| error.to_string())?;
+        let request = initialize
+            .lock()
+            .await
+            .clone()
+            .ok_or_else(|| "initialize request was not recorded".to_string())?;
+        let params = request
+            .params
+            .ok_or_else(|| "initialize params were missing".to_string())?;
+        let capabilities = params
+            .get("capabilities")
+            .ok_or_else(|| "capabilities were missing".to_string())?;
+
+        assert_eq!(request.method, "initialize");
+        assert_eq!(
+            params.get("protocolVersion"),
+            Some(&serde_json::json!(MCP_PROTOCOL_VERSION))
+        );
+        assert_eq!(capabilities, &serde_json::json!({}));
+        assert!(client.server_capabilities().tools.is_none());
+        Ok(())
     }
 }

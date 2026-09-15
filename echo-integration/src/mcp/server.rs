@@ -84,7 +84,7 @@ const ERR_INTERNAL: i32 = -32603;
 
 /// MCP 服务端：将 echo-agent 的 Tool 暴露为标准 MCP 服务
 ///
-/// 支持 MCP 2025-11-25（最新）及向下兼容 2025-03-26 / 2024-11-05，处理：
+/// 支持 MCP 2025-11-25（最新）及向下兼容 2025-06-18 / 2025-03-26 / 2024-11-05，处理：
 /// - `initialize` 握手与**版本协商**
 /// - `tools/list` 工具发现
 /// - `tools/call` 工具执行
@@ -823,6 +823,15 @@ mod tests {
     #[test]
     fn test_version_negotiation_echo_supported() -> std::result::Result<(), String> {
         let server = McpServer::builder().build();
+
+        // 客户端请求 2025-06-18 → 服务端回复相同版本
+        let params = make_init_params("2025-06-18")?;
+        let result = server
+            .handle_initialize(Some(params))
+            .map_err(|error| error.message)?;
+        let init: InitializeResult =
+            serde_json::from_value(result).map_err(|error| error.to_string())?;
+        assert_eq!(init.protocol_version, "2025-06-18");
 
         // 客户端请求旧版本 2025-03-26 → 服务端回复相同版本
         let params = make_init_params("2025-03-26")?;
