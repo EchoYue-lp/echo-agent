@@ -1738,7 +1738,7 @@ fn merge_result(combined: &mut HookResult, incoming: HookResult) {
         combined.stop_propagation = true;
     }
 
-    // Permission decision with priority: deny > ask > allow
+    // Permission decision with priority: deny > ask > require_approval > allow
     if let Some(new_decision) = incoming.permission_decision {
         let should_replace = match (&combined.permission_decision, &new_decision) {
             // If we already have deny, keep it

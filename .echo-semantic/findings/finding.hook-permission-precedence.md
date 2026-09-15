@@ -27,7 +27,7 @@ GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/59
 
 ## 问题
 
-Hook reducer 声称 deny > ask > allow，但每个 declarative permission action 都 stop propagation；较早 UserConfig allow 可阻止后续 Plugin/Skill deny 被看到。
+Hook reducer 声称 `deny > ask > require_approval > allow`，但每个 declarative permission action 都 stop propagation；较早 UserConfig allow 可阻止后续 Plugin/Skill deny 被看到。
 
 ## 触发条件与影响
 
