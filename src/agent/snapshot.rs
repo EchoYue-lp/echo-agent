@@ -416,7 +416,8 @@ impl RuntimeConfig {
             verifier_enabled: config.verifier_enabled,
             verifier_min_score: config.verifier_min_score,
             verifier_max_retries: config.verifier_max_retries,
-            plan_mode: config.plan_mode,
+            plan_mode: config.plan_mode
+                || config.permission_mode == echo_core::tools::permission::PermissionMode::Plan,
             cache_user_id: config.cache_user_id.clone(),
         }
     }
@@ -466,7 +467,8 @@ impl ToolRuntime {
             disabled_tools.extend(tool_manager.incompatible_tool_names(&config.input_modalities));
         }
         let skill_allowed_tools = agent.tools.skill_registry.active_skill_allowed_tools();
-        let plan_mode = agent.config.plan_mode;
+        let plan_mode = agent.config.plan_mode
+            || agent.config.permission_mode == echo_core::tools::permission::PermissionMode::Plan;
         let visibility = invocation_visible_tools.map(|initial| {
             let available = tool_manager
                 .get_openai_tools()
@@ -474,9 +476,9 @@ impl ToolRuntime {
                 .filter(|tool| !disabled_tools.contains(&tool.function.name))
                 .filter(|tool| {
                     !plan_mode
-                        || (!crate::tools::is_write_tool(&tool.function.name)
-                            && tool.function.name != "shell"
-                            && tool.function.name != "delete_file")
+                        || tool_manager
+                            .get_tool(&tool.function.name)
+                            .is_some_and(|tool| tool.capabilities().is_read_only())
                 })
                 .map(|tool| tool.function.name)
                 .collect::<std::collections::HashSet<_>>();
@@ -525,11 +527,18 @@ impl ToolRuntime {
             .filter(|tool| self.is_skill_tool_allowed(&tool.function.name))
             .filter(|tool| {
                 !self.plan_mode
-                    || (!crate::tools::is_write_tool(&tool.function.name)
-                        && tool.function.name != "shell"
-                        && tool.function.name != "delete_file")
+                    || self
+                        .tool_manager
+                        .get_tool(&tool.function.name)
+                        .is_some_and(|tool| tool.capabilities().is_read_only())
             })
             .collect()
+    }
+
+    pub(crate) fn is_tool_read_only(&self, tool_name: &str) -> bool {
+        self.tool_manager
+            .get_tool(tool_name)
+            .is_some_and(|tool| tool.capabilities().is_read_only())
     }
 
     pub(crate) fn is_skill_tool_allowed(&self, tool_name: &str) -> bool {
@@ -1901,6 +1910,14 @@ mod transcript_filter_tests {
 
     struct NamedTool(&'static str);
 
+    struct ReadOnlyNamedTool(&'static str);
+
+    #[cfg(feature = "mcp")]
+    struct McpPlanProbe {
+        name: String,
+        executions: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
     #[cfg(feature = "human-loop")]
     struct ApprovalTool;
 
@@ -1961,6 +1978,63 @@ mod transcript_filter_tests {
             _parameters: ToolParameters,
         ) -> futures::future::BoxFuture<'a, echo_core::error::Result<ToolResult>> {
             Box::pin(async { Ok(ToolResult::success("ok")) })
+        }
+    }
+
+    impl Tool for ReadOnlyNamedTool {
+        fn name(&self) -> &str {
+            self.0
+        }
+
+        fn description(&self) -> &str {
+            "locally classified read-only snapshot policy test tool"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        fn risk_level(&self) -> echo_core::tools::ToolRiskLevel {
+            echo_core::tools::ToolRiskLevel::ReadOnly
+        }
+
+        fn execute<'a>(
+            &'a self,
+            _parameters: ToolParameters,
+        ) -> futures::future::BoxFuture<'a, echo_core::error::Result<ToolResult>> {
+            Box::pin(async { Ok(ToolResult::success("ok")) })
+        }
+    }
+
+    #[cfg(feature = "mcp")]
+    impl Tool for McpPlanProbe {
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        fn description(&self) -> &str {
+            "MCP plan-mode capability probe"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        fn permissions(&self) -> Vec<echo_core::tools::permission::ToolPermission> {
+            vec![echo_core::tools::permission::ToolPermission::Write]
+        }
+
+        fn risk_level(&self) -> echo_core::tools::ToolRiskLevel {
+            echo_core::tools::ToolRiskLevel::Standard
+        }
+
+        fn execute<'a>(
+            &'a self,
+            _parameters: ToolParameters,
+        ) -> futures::future::BoxFuture<'a, echo_core::error::Result<ToolResult>> {
+            self.executions
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async { Ok(ToolResult::success("mutated")) })
         }
     }
 
@@ -2510,7 +2584,14 @@ mod transcript_filter_tests {
     #[test]
     fn tool_visibility_combines_skill_plan_and_disabled_policies() {
         let manager = Arc::new(crate::tools::ToolManager::new());
-        for name in ["read_file", "write_file", "shell", "final_answer", "custom"] {
+        manager.register(Box::new(ReadOnlyNamedTool("read_file")));
+        for name in [
+            "write_file",
+            "shell",
+            "final_answer",
+            "custom",
+            "mcp__malicious__write",
+        ] {
             manager.register(Box::new(NamedTool(name)));
         }
         let runtime = ToolRuntime {
@@ -2522,6 +2603,7 @@ mod transcript_filter_tests {
                 "write_file".to_string(),
                 "shell".to_string(),
                 "final_answer".to_string(),
+                "mcp__malicious__write".to_string(),
             ])),
             plan_state: Arc::new(tokio::sync::RwLock::new(None)),
             disabled_tools: HashSet::from(["final_answer".to_string()]),
@@ -2536,6 +2618,50 @@ mod transcript_filter_tests {
             .collect();
 
         assert_eq!(visible, vec!["read_file"]);
+    }
+
+    #[cfg(feature = "mcp")]
+    #[tokio::test]
+    async fn permission_plan_hides_and_blocks_locally_mutating_mcp_tool() -> Result<()> {
+        let tool_name = crate::mcp::McpToolAdapter::exposed_name_for("malicious", "write");
+        let executions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut agent = crate::agent::ReactAgent::new(
+            crate::agent::AgentConfig::new("test-model", "agent", "system")
+                .permission_mode(echo_core::tools::permission::PermissionMode::Plan),
+        );
+        agent.add_tool(Box::new(McpPlanProbe {
+            name: tool_name.clone(),
+            executions: Arc::clone(&executions),
+        }));
+
+        let snapshot = AgentRunSnapshot::from_agent(&agent);
+        assert!(snapshot.config.plan_mode);
+        assert!(!tool_names(&snapshot).contains(&tool_name));
+
+        let input = serde_json::json!({});
+        let result = snapshot
+            .execute_tool_with_policy(
+                "call-mcp-plan".to_string(),
+                &tool_name,
+                &ToolParameters::new(),
+                &input,
+                None,
+            )
+            .await;
+        let Err(failure) = result else {
+            return Err(echo_core::error::ReactError::Other(
+                "mutating MCP tool executed in permission plan mode".to_string(),
+            ));
+        };
+        assert!(
+            failure
+                .result
+                .error
+                .as_deref()
+                .is_some_and(|reason| reason.contains("Plan mode"))
+        );
+        assert_eq!(executions.load(std::sync::atomic::Ordering::SeqCst), 0);
+        Ok(())
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use futures::future::BoxFuture;
 
 use crate::error::ToolError;
-use crate::tools::{Tool, ToolParameters, ToolResult};
+use crate::tools::{Tool, ToolParameters, ToolResult, ToolRiskLevel};
 
 pub struct FinalAnswerTool;
 
@@ -25,6 +25,10 @@ impl Tool for FinalAnswerTool {
             },
             "required": ["answer"]
         })
+    }
+
+    fn risk_level(&self) -> ToolRiskLevel {
+        ToolRiskLevel::ReadOnly
     }
 
     fn execute(

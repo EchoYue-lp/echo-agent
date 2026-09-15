@@ -36,6 +36,13 @@ configured server has the same trust level or import an EKO-specific policy.
 `Tool::risk_level`, `Tool::permissions`, and protocol-failure side-effect settlement
 all read from that snapshot.
 
+Plan tool visibility and the execution-time Plan gate consume
+`ToolCapabilities.access`, not tool-name allow/deny lists. Both the explicit Agent
+plan flag and `PermissionMode::Plan` produce the same snapshot-level read-only
+constraint, so hook approval cannot make a locally mutating MCP tool executable.
+Invocation-local `tool_search` and terminal `final_answer` explicitly declare their
+non-external access classification and remain available without name exceptions.
+
 Embedding applications may call `with_local_capabilities` after validating a tool
 through local configuration or another trusted policy source. MCP annotations remain
 available on the protocol `McpTool` value for display, audit, and policy input, but the
@@ -47,7 +54,8 @@ MCP connect, reconcile, disconnect, or close operations.
 - A forged `readOnlyHint` cannot make a default MCP tool read-only or suppress a
   possible-side-effect failure receipt.
 - Default MCP tools are excluded from read-only Agent execution by the existing
-  permission path because they declare `ToolPermission::Write`.
+  capability gate; their `ToolPermission::Write` also remains visible to the
+  permission service outside Plan mode.
 - Trusted deployments can still expose verified read-only MCP tools without adding a
   second permission model.
 - Existing callers compile unchanged; callers that relied on annotations for automatic

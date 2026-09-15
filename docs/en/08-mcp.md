@@ -418,11 +418,11 @@ tool against local configuration or another trusted policy source:
 
 ```rust,no_run
 use echo_agent::tools::{ToolCapabilities, permission::ToolPermission};
-use echo_integration::mcp::McpToolAdapter;
+use echo_agent::mcp::{McpClient, McpTool, McpToolAdapter};
 
 # fn classify(
-#     client: std::sync::Arc<echo_integration::mcp::McpClient>,
-#     tool: echo_integration::mcp::McpTool,
+#     client: std::sync::Arc<McpClient>,
+#     tool: McpTool,
 # ) {
 let adapter = McpToolAdapter::new(client, tool).with_local_capabilities(
     ToolCapabilities::read_only(vec![ToolPermission::Read]),
