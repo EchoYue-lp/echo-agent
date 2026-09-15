@@ -4,7 +4,9 @@ use agent_client_protocol::schema::{ProtocolVersion, v1};
 use agent_client_protocol::{
     Agent as AcpRole, Channel, Client, ConnectTo as _, ConnectionTo, Error, ErrorCode,
 };
-use echo_agent::acp::{AcpAdapterConfig, AcpAgentAdapter, AcpSessionContext, AcpSessionFactory};
+use echo_agent::acp::{
+    AcpAdapterConfig, AcpAgentAdapter, AcpConnectionProfile, AcpSessionContext, AcpSessionFactory,
+};
 use echo_agent::agent::{Agent, AgentEvent, CancellationToken, ToolInvocation};
 use echo_agent::error::AgentFailure;
 use echo_agent::error::{ReactError, Result};
@@ -278,6 +280,35 @@ impl Agent for TextOnlyAgent {
     }
 }
 
+struct FailingSettlementProfile;
+
+impl AcpConnectionProfile for FailingSettlementProfile {
+    fn negotiate_hello(&self, _hello: &serde_json::Value) -> std::result::Result<(), String> {
+        Err("no extension negotiation".to_string())
+    }
+
+    fn persist_run_settled(
+        &self,
+        _entry: &echo_agent::acp::RunEntry,
+        _receipt: &echo_agent::runtime::TurnReceipt,
+    ) -> std::result::Result<(), String> {
+        Err("injected receipt persistence failure".to_string())
+    }
+
+    fn attach(
+        &self,
+        _services: Arc<echo_agent::acp::AcpConnectionServices>,
+    ) -> agent_client_protocol::Builder<
+        AcpRole,
+        impl agent_client_protocol::HandleDispatchFrom<Client>,
+        impl agent_client_protocol::RunWithConnectionTo<Client>,
+        impl agent_client_protocol::HandleConnectionClose<Client>,
+        agent_client_protocol::RawConnectionContext,
+    > {
+        AcpRole.builder()
+    }
+}
+
 #[derive(Clone)]
 struct TestFactory {
     next_id: Arc<AtomicUsize>,
@@ -421,6 +452,89 @@ async fn oversized_projected_update_fails_the_prompt_without_closing_the_connect
             assert_eq!(
                 unsupported.err().map(|error| error.code),
                 Some(ErrorCode::InvalidParams)
+            );
+            Ok(())
+        })
+        .await
+}
+
+#[tokio::test]
+async fn terminal_projection_failure_never_returns_end_turn() -> agent_client_protocol::Result<()> {
+    let adapter = AcpAgentAdapter::with_config(
+        |_context: AcpSessionContext| async { Ok(Box::new(TextOnlyAgent) as Box<dyn Agent>) },
+        AcpAdapterConfig {
+            max_update_chars: 4,
+            ..AcpAdapterConfig::default()
+        },
+    )
+    .map_err(Error::into_internal_error)?;
+    Client
+        .builder()
+        .connect_with(adapter, async move |connection| {
+            connection
+                .send_request(v1::InitializeRequest::new(ProtocolVersion::V1))
+                .block_task()
+                .await?;
+            let session = connection
+                .send_request(v1::NewSessionRequest::new(
+                    absolute_test_path("acp-terminal-projection")
+                        .map_err(Error::into_internal_error)?,
+                ))
+                .block_task()
+                .await?
+                .session_id;
+            let response = connection
+                .send_request(v1::PromptRequest::new(
+                    session,
+                    vec![v1::ContentBlock::Text(v1::TextContent::new("large"))],
+                ))
+                .block_task()
+                .await;
+            assert_eq!(
+                response.err().map(|error| error.code),
+                Some(ErrorCode::InternalError)
+            );
+            Ok(())
+        })
+        .await
+}
+
+#[tokio::test]
+async fn receipt_persistence_failure_never_returns_end_turn() -> agent_client_protocol::Result<()> {
+    let adapter = AcpAgentAdapter::new(|_context: AcpSessionContext| async {
+        Ok(Box::new(TextOnlyAgent) as Box<dyn Agent>)
+    })
+    .with_profile(FailingSettlementProfile);
+    Client
+        .builder()
+        .on_receive_notification(
+            async move |_notification: v1::SessionNotification,
+                        _connection: ConnectionTo<AcpRole>| { Ok(()) },
+            agent_client_protocol::on_receive_notification!(),
+        )
+        .connect_with(adapter, async move |connection| {
+            connection
+                .send_request(v1::InitializeRequest::new(ProtocolVersion::V1))
+                .block_task()
+                .await?;
+            let session = connection
+                .send_request(v1::NewSessionRequest::new(
+                    absolute_test_path("acp-receipt-persistence")
+                        .map_err(Error::into_internal_error)?,
+                ))
+                .block_task()
+                .await?
+                .session_id;
+            let response = connection
+                .send_request(v1::PromptRequest::new(
+                    session,
+                    vec![v1::ContentBlock::Text(v1::TextContent::new("done"))],
+                ))
+                .block_task()
+                .await;
+            assert_eq!(
+                response.err().map(|error| error.code),
+                Some(ErrorCode::InternalError)
             );
             Ok(())
         })
@@ -1058,7 +1172,7 @@ use echo_agent::acp::{
     AcpConnectionServices, AcpLedgerLimits, AcpSession, RunEventObserver, RunStartSpec,
     SessionRegistry,
 };
-use echo_agent::runtime::{TurnMode, TurnOutcome, TurnRequest};
+use echo_agent::runtime::{TurnDeliveryOutcome, TurnMode, TurnOutcome, TurnRequest};
 use echo_agent::state::journal::{
     EventJournal, JournalBatchAppendError, JournalBatchAppendResult, JournalBatchLookup,
     PreparedJournalBatch,
@@ -1068,6 +1182,7 @@ use echo_agent::state::journal::{
 struct RecordingObserver {
     events: Arc<Mutex<Vec<(u64, String)>>>,
     fail_on_stream: Arc<Mutex<Option<String>>>,
+    fail_on_terminal: Arc<Mutex<bool>>,
 }
 
 #[async_trait::async_trait]
@@ -1084,6 +1199,16 @@ impl RunEventObserver for RecordingObserver {
                 "observer rejected the stream".to_string(),
             ));
         }
+        if *self
+            .fail_on_terminal
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            && TurnOutcome::classify(&envelope.payload).is_some()
+        {
+            return Err(ReactError::Other(
+                "observer rejected the terminal".to_string(),
+            ));
+        }
         self.events
             .lock()
             .unwrap_or_else(|error| error.into_inner())
@@ -1092,7 +1217,7 @@ impl RunEventObserver for RecordingObserver {
     }
 }
 
-/// Journal hook that always fails: the run must end `Failed`, never success.
+/// Journal hook that always fails: delivery fails without rewriting a producer terminal.
 #[derive(Default)]
 struct FailingJournal;
 
@@ -1194,6 +1319,7 @@ async fn shared_authority_settles_extension_runs_with_exactly_one_terminal() -> 
     tokio::spawn(task);
     let receipt = entry.wait_receipt().await;
     assert_eq!(receipt.outcome, TurnOutcome::Completed);
+    assert_eq!(receipt.delivery, TurnDeliveryOutcome::Delivered);
     assert!(services.run(&run_id).await.is_some());
     let events = observer
         .events
@@ -1231,7 +1357,7 @@ async fn one_active_run_slot_is_shared_across_entry_points() -> Result<()> {
 }
 
 #[tokio::test]
-async fn journal_failure_fails_the_run_without_a_success_terminal() -> Result<()> {
+async fn journal_failure_before_terminal_fails_execution_and_delivery() -> Result<()> {
     let test = TestFactory::new();
     let (services, session_id) = shared_services(test.session_factory()).await?;
     let acp_session_id = agent_client_protocol::schema::v1::SessionId::new(session_id.clone());
@@ -1245,11 +1371,37 @@ async fn journal_failure_fails_the_run_without_a_success_terminal() -> Result<()
     let (entry, task) = services.prepare_run(spec).await?;
     tokio::spawn(task);
     let receipt = entry.wait_receipt().await;
-    assert!(
-        matches!(receipt.outcome, TurnOutcome::Failed(_)),
-        "a failing journal must fail the run: {:?}",
-        receipt.outcome
-    );
+    assert!(matches!(receipt.outcome, TurnOutcome::Failed(_)));
+    assert!(matches!(receipt.delivery, TurnDeliveryOutcome::Failed(_)));
+    Ok(())
+}
+
+#[tokio::test]
+async fn observer_failure_is_delivery_failure_without_rewriting_execution() -> Result<()> {
+    let test = TestFactory::new();
+    let (services, session_id) = shared_services(test.session_factory()).await?;
+    let session = services
+        .sessions()
+        .get(&agent_client_protocol::schema::v1::SessionId::new(
+            session_id,
+        ))
+        .await
+        .ok_or_else(|| ReactError::Other("session missing".to_string()))?;
+    let observer = Arc::new(RecordingObserver::default());
+    let spec = extension_spec(
+        &session,
+        Some(observer.clone() as Arc<dyn RunEventObserver>),
+    )?;
+
+    *observer
+        .fail_on_terminal
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()) = true;
+    let (entry, task) = services.prepare_run(spec).await?;
+    tokio::spawn(task);
+    let receipt = entry.wait_receipt().await;
+    assert_eq!(receipt.outcome, TurnOutcome::Completed);
+    assert!(matches!(receipt.delivery, TurnDeliveryOutcome::Failed(_)));
     Ok(())
 }
 

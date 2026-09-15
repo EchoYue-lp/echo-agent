@@ -27,7 +27,10 @@
 
 use crate::agent::Agent;
 use crate::agent::react::builder::ReactAgentBuilder;
-use crate::runtime::{AgentTurnDriver, EventSink, SinkControl, TurnMode, TurnOutcome, TurnRequest};
+use crate::runtime::{
+    AgentTurnDriver, EventSink, SinkControl, TurnDeliveryOutcome, TurnMode, TurnOutcome,
+    TurnReceipt, TurnRequest,
+};
 use tokio_util::sync::CancellationToken;
 
 struct HeadlessEventSink;
@@ -190,18 +193,7 @@ where
     let receipt = AgentTurnDriver
         .drive(&agent, request, &HeadlessEventSink)
         .await;
-    let (output, success) = match (receipt.outcome, receipt.final_answer) {
-        (TurnOutcome::Completed, Some(output)) => (output, true),
-        (TurnOutcome::Completed, None) => (
-            "Error: completed turn did not include a final answer".to_string(),
-            false,
-        ),
-        (TurnOutcome::Cancelled, _) => ("Cancelled".to_string(), false),
-        (TurnOutcome::Failed(failure), _) => (
-            format!("Error ({}): {}", failure.code, failure.message),
-            false,
-        ),
-    };
+    let (output, success) = headless_result_from_receipt(receipt);
     HeadlessResult {
         output,
         success,
@@ -211,11 +203,42 @@ where
     }
 }
 
+fn headless_result_from_receipt(receipt: TurnReceipt) -> (String, bool) {
+    let delivery_failure = match &receipt.delivery {
+        TurnDeliveryOutcome::Failed(failure) => Some(failure.message.clone()),
+        _ => None,
+    };
+    let delivery_ok = matches!(receipt.delivery, TurnDeliveryOutcome::Delivered);
+    let (output, success) = match (receipt.outcome, receipt.final_answer, delivery_failure) {
+        (TurnOutcome::Completed, Some(output), None) if delivery_ok => (output, true),
+        (TurnOutcome::Completed, Some(_), Some(error)) => {
+            (format!("Error: turn delivery failed: {error}"), false)
+        }
+        (TurnOutcome::Completed, Some(_), None) => (
+            "Error: completed turn was not fully delivered".to_string(),
+            false,
+        ),
+        (TurnOutcome::Completed, None, _) => (
+            "Error: completed turn did not include a final answer".to_string(),
+            false,
+        ),
+        (TurnOutcome::Cancelled, _, _) => ("Cancelled".to_string(), false),
+        (TurnOutcome::Failed(failure), _, _) => (
+            format!("Error ({}): {}", failure.code, failure.message),
+            false,
+        ),
+    };
+    (output, success)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::{AgentFailure, ReactError};
     use crate::testing::MockLlmClient;
+    use echo_core::agent::TurnId;
     use std::sync::Arc;
+    use std::time::Duration;
 
     #[test]
     fn test_headless_config_default() {
@@ -270,6 +293,30 @@ mod tests {
         assert!(formatted.contains("\"success\": true"));
         assert!(formatted.contains("\"model\": \"test-model\""));
         assert!(formatted.contains("hello world"));
+    }
+
+    #[test]
+    fn completed_execution_with_failed_delivery_is_not_headless_success() -> crate::error::Result<()>
+    {
+        let receipt = TurnReceipt {
+            turn_id: TurnId::new("headless-delivery-failed")?,
+            outcome: TurnOutcome::Completed,
+            delivery: TurnDeliveryOutcome::Failed(AgentFailure::from(&ReactError::Other(
+                "stdout unavailable".to_string(),
+            ))),
+            final_answer: Some("done".to_string()),
+            final_message_id: None,
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            llm_calls: 0,
+            compaction_count: 0,
+            last_event_sequence: 1,
+            elapsed: Duration::ZERO,
+        };
+        let (output, success) = headless_result_from_receipt(receipt);
+        assert!(!success);
+        assert!(output.contains("turn delivery failed"));
+        Ok(())
     }
 
     #[test]

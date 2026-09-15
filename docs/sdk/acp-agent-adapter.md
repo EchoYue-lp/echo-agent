@@ -61,10 +61,13 @@ The adapter accepts the following stable ACP v1 methods and notifications:
 
 The Prompt handler runs in an official connection task so the dispatch loop can
 process cancellation while the Agent is working. A Session rejects a second
-concurrent Prompt; separate Sessions may run concurrently. Completed and
-cancelled framework receipts become `end_turn` and `cancelled`. Other framework
-failures return a bounded standard ACP internal error, and the connection stays
-available for later requests.
+concurrent Prompt; separate Sessions may run concurrently. Only a `Completed`
+receipt whose delivery result is `Delivered` becomes `end_turn`. A cancelled
+execution remains `cancelled` unless its delivery failed; producer/framework
+failures and delivery failures return a bounded standard ACP internal error,
+and the connection stays available for later requests. Run status and terminal
+remain execution projections, so a completed run with failed delivery is
+retained for diagnosis rather than rewritten as an execution failure.
 
 ## Shared connection runtime and extension profiles
 
@@ -74,9 +77,10 @@ one `echo_agent::acp::AcpConnectionServices` per connection — a single
 `steer` over framework `RunEntry` values), and a ledger-first event path that
 commits every accepted `EventEnvelope` to a bounded per-run ledger (optionally
 through a durable `EventJournal` hook) before rendering the standard
-`session/update` projection and forwarding to extension observers. Exactly
-one framework terminal per run is preserved; a journal or projection failure
-fails the run instead of reporting success.
+`session/update` projection and forwarding to extension observers. Exactly one
+framework execution terminal per run is preserved; a journal, projection, or
+observer failure is recorded as delivery failure and never creates a second
+execution terminal.
 
 Extension profiles plug in through the `AcpConnectionProfile` trait:
 `with_profile` wraps the adapter, the profile publishes its capability

@@ -768,31 +768,6 @@ impl AcpConnectionProfile for SdkCoreProfile {
         }
     }
 
-    fn run_spawned(&self, entry: Arc<echo_agent::acp::RunEntry>) {
-        self.state.begin_settlement();
-        let settlement_state = self.state.clone();
-        tokio::spawn(async move {
-            let receipt = entry.wait_receipt().await;
-            let result = wire::terminal_of(&receipt)
-                .and_then(|terminal| {
-                    wire::receipt_wire(&receipt).map(|receipt| (terminal, receipt))
-                })
-                .and_then(|(terminal, receipt)| {
-                    settlement_state
-                        .persistence
-                        .record_run_settled(
-                            &entry.run_id,
-                            terminal,
-                            receipt,
-                            entry.ledger.last_sequence(),
-                        )
-                        .map_err(|error| error.to_string())
-                });
-            settlement_state.cleanup_settled_run(&entry.run_id);
-            settlement_state.finish_settlement(result);
-        });
-    }
-
     fn flush_before_agents(&self) -> std::result::Result<(), String> {
         self.state.flush_journals()
     }

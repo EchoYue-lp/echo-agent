@@ -8068,6 +8068,8 @@ mod tests {
         let receipt = RunReceiptWire {
             turn_id: "turn-1".to_string(),
             outcome: "completed".to_string(),
+            delivery: Some("delivered".to_string()),
+            delivery_error: None,
             final_answer: Some("done".to_string()),
             final_message_id: None,
             prompt_tokens: WireU64::from_u64(9_007_199_254_740_993),

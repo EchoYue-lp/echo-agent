@@ -48,7 +48,10 @@ capabilities. The returned framework Agent exclusively owns that Session's
 conversation history. The adapter then drives every Prompt through
 `AgentTurnDriver` and turns accepted `EventEnvelope` values into bounded ACP
 message/thought/tool updates. Both cancellation routes cancel the same
-framework token, and only `TurnReceipt` decides the final stop reason or error.
+framework token. `TurnReceipt` separately records execution and event
+delivery; only `Completed + Delivered` becomes a successful final stop reason,
+while delivery failure is a bounded protocol error that does not rewrite the
+execution terminal.
 
 The adapter also owns the negotiation surface: a composable extension profile
 publishes `agentCapabilities._meta.echo_agent`, validates the Client hello

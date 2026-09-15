@@ -2535,6 +2535,25 @@
         "completion_tokens": {
           "$ref": "#/definitions/WireU64"
         },
+        "delivery": {
+          "description": "Delivery status from the driven event sink. Optional only for legacy persisted receipts created before delivery accounting existed.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 32
+        },
+        "delivery_error": {
+          "description": "Lossless delivery failure details when `delivery` is `failed`.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AgentFailureWire"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "elapsed_ms": {
           "description": "Total wall time of the run in milliseconds.",
           "allOf": [

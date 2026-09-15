@@ -1103,6 +1103,11 @@ async fn restart_recovers_history_and_marks_killed_runs_interrupted()
                 .block_task()
                 .await?;
             assert!(wait.settled);
+            let receipt = wait.receipt.as_ref().ok_or_else(|| {
+                agent_client_protocol::Error::internal_error()
+                    .data("settled run is missing its receipt")
+            })?;
+            assert_eq!(receipt.delivery.as_deref(), Some("delivered"));
 
             Ok(FirstRun {
                 session_id: session.acp_session_id.clone(),
@@ -1184,6 +1189,17 @@ async fn restart_recovers_history_and_marks_killed_runs_interrupted()
                 .ok_or_else(|| {
                     agent_client_protocol::Error::internal_error().data("no recovered settled run")
                 })?;
+            let snapshot = connection
+                .send_request(RunGetRequest {
+                    run: recovered.run.clone(),
+                })
+                .block_task()
+                .await?;
+            let receipt = snapshot.receipt.as_ref().ok_or_else(|| {
+                agent_client_protocol::Error::internal_error()
+                    .data("recovered run is missing its receipt")
+            })?;
+            assert_eq!(receipt.delivery.as_deref(), Some("delivered"));
             assert!(recovered.terminal.is_some());
             assert!(recovered.last_sequence.to_u64().unwrap_or(0) >= 1);
 

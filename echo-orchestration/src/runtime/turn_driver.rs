@@ -8,7 +8,8 @@
 //! Agent invocation: wrap the raw event stream with the versioned
 //! [`EventEnvelope`] transport, forward every envelope to one [`EventSink`],
 //! enforce the exactly-one-terminal contract, and return a typed
-//! [`TurnOutcome`] receipt. Chat, execute/headless, and task-driven callers
+//! [`TurnReceipt`] with separate execution and delivery results. Chat,
+//! execute/headless, and task-driven callers
 //! differ only in the request fields and the sink; the loop, terminal
 //! mapping, and accounting are shared.
 //!
@@ -34,7 +35,7 @@
 //! ```
 //! use echo_core::agent::{Agent, EventIdentity};
 //! use echo_orchestration::runtime::turn_driver::{
-//!     AgentTurnDriver, EventSink, SinkControl, TurnMode, TurnRequest,
+//!     AgentTurnDriver, EventSink, SinkControl, TurnDeliveryOutcome, TurnMode, TurnRequest,
 //! };
 //!
 //! # struct MyAgent;
@@ -75,6 +76,7 @@
 //! let request = TurnRequest::new(identity, "hello").mode(TurnMode::Execute);
 //! let receipt = AgentTurnDriver.drive(&agent, request, &PrintSink).await;
 //! assert_eq!(receipt.outcome.status(), "completed");
+//! assert_eq!(receipt.delivery, TurnDeliveryOutcome::Delivered);
 //! assert_eq!(receipt.final_answer.as_deref(), Some("done"));
 //! # Ok(())
 //! # }
@@ -384,6 +386,23 @@ pub enum TurnOutcome {
     Failed(AgentFailure),
 }
 
+/// Delivery result for envelopes emitted by one driven turn.
+///
+/// This is deliberately orthogonal to [`TurnOutcome`]. The Agent producer
+/// owns execution settlement, while the sink owns whether the observed
+/// envelopes were accepted by a journal, projection, or observer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TurnDeliveryOutcome {
+    /// No envelope reached the sink.
+    NotAttempted,
+    /// Every envelope observed so far was accepted by the sink.
+    Delivered,
+    /// The sink explicitly stopped accepting envelopes.
+    Closed,
+    /// The sink rejected or failed while delivering an envelope.
+    Failed(AgentFailure),
+}
+
 impl TurnOutcome {
     pub fn status(&self) -> &'static str {
         match self {
@@ -422,9 +441,11 @@ pub struct TurnReceipt {
     pub turn_id: TurnId,
     /// Typed terminal outcome; always set by the driver.
     pub outcome: TurnOutcome,
+    /// Whether the observed envelopes were accepted by the event sink.
+    pub delivery: TurnDeliveryOutcome,
     /// Final answer text when the turn completed with one.
     pub final_answer: Option<String>,
-    /// Message identity carried by the accepted final-answer envelope.
+    /// Message identity carried by the final-answer envelope observed by the driver.
     pub final_message_id: Option<MessageId>,
     /// Provider-reported prompt tokens accumulated over the turn.
     pub prompt_tokens: u64,
@@ -434,7 +455,8 @@ pub struct TurnReceipt {
     pub llm_calls: u64,
     /// Number of explicit context-compaction boundaries emitted by the Agent.
     pub compaction_count: u64,
-    /// Last envelope sequence emitted for the turn.
+    /// Last envelope sequence observed by the driver. This does not imply a
+    /// failing sink committed the same sequence.
     pub last_event_sequence: u64,
     /// Wall-clock turn duration.
     pub elapsed: Duration,
@@ -465,6 +487,7 @@ impl TurnReceipt {
         Ok(Self {
             turn_id: TurnId::new(turn_id)?,
             outcome: TurnOutcome::Failed(failure),
+            delivery: TurnDeliveryOutcome::NotAttempted,
             final_answer: None,
             final_message_id: None,
             prompt_tokens: 0,
@@ -482,6 +505,7 @@ impl TurnReceipt {
         Ok(Self {
             turn_id: TurnId::new(turn_id)?,
             outcome: TurnOutcome::Cancelled,
+            delivery: TurnDeliveryOutcome::NotAttempted,
             final_answer: None,
             final_message_id: None,
             prompt_tokens: 0,
@@ -496,12 +520,14 @@ impl TurnReceipt {
     fn failure_receipt(
         turn_id: TurnId,
         failure: AgentFailure,
+        delivery: TurnDeliveryOutcome,
         last_event_sequence: u64,
         started: Instant,
     ) -> Self {
         Self {
             turn_id,
             outcome: TurnOutcome::Failed(failure),
+            delivery,
             final_answer: None,
             final_message_id: None,
             prompt_tokens: 0,
@@ -518,7 +544,8 @@ impl TurnReceipt {
 ///
 /// `on_event` receives every envelope in order, including the terminal one.
 /// `Closed` is an intentional consumer disconnect; `Err` is a delivery or
-/// persistence failure and produces a failed receipt rather than a cancellation.
+/// persistence failure recorded separately from a producer terminal already
+/// observed by the driver.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SinkControl {
     Continue,
@@ -566,6 +593,7 @@ impl AgentTurnDriver {
             return TurnReceipt::failure_receipt(
                 turn_id,
                 AgentFailure::from(&error),
+                TurnDeliveryOutcome::NotAttempted,
                 request.last_persisted_sequence,
                 started,
             );
@@ -654,6 +682,7 @@ impl AgentTurnDriver {
                     lifecycle.settle(AgentSteerTurnOutcome::Failed);
                 }
                 let failure = AgentFailure::from(&error);
+                let mut delivery = TurnDeliveryOutcome::NotAttempted;
                 let next_sequence = request.last_persisted_sequence.checked_add(1);
                 let mut last_event_sequence = request.last_persisted_sequence;
                 if let Some(sequence) = next_sequence
@@ -665,24 +694,29 @@ impl AgentTurnDriver {
                     )
                 {
                     last_event_sequence = envelope.sequence;
-                    if let Err(sink_error) = sink.on_event(envelope).await {
-                        return TurnReceipt::failure_receipt(
-                            turn_id,
-                            AgentFailure::from(&sink_error),
-                            last_event_sequence,
-                            started,
-                        );
+                    match sink.on_event(envelope).await {
+                        Ok(SinkControl::Continue) => {
+                            delivery = TurnDeliveryOutcome::Delivered;
+                        }
+                        Ok(SinkControl::Closed) => {
+                            delivery = TurnDeliveryOutcome::Closed;
+                        }
+                        Err(sink_error) => {
+                            delivery = TurnDeliveryOutcome::Failed(AgentFailure::from(&sink_error));
+                        }
                     }
                 }
                 return TurnReceipt::failure_receipt(
                     turn_id,
                     failure,
+                    delivery,
                     last_event_sequence,
                     started,
                 );
             }
         };
         let mut outcome: Option<TurnOutcome> = None;
+        let mut delivery = TurnDeliveryOutcome::NotAttempted;
         let mut final_answer: Option<String> = None;
         let mut final_message_id: Option<MessageId> = None;
         let mut prompt_tokens: u64 = 0;
@@ -741,8 +775,11 @@ impl AgentTurnDriver {
                 _ => {}
             }
             match sink.on_event(envelope).await {
-                Ok(SinkControl::Continue) => {}
+                Ok(SinkControl::Continue) => {
+                    delivery = TurnDeliveryOutcome::Delivered;
+                }
                 Ok(SinkControl::Closed) => {
+                    delivery = TurnDeliveryOutcome::Closed;
                     token.cancel();
                     if outcome.is_none() {
                         outcome = Some(TurnOutcome::Cancelled);
@@ -750,10 +787,13 @@ impl AgentTurnDriver {
                     break;
                 }
                 Err(error) => {
+                    delivery = TurnDeliveryOutcome::Failed(AgentFailure::from(&error));
                     token.cancel();
-                    outcome = Some(TurnOutcome::Failed(AgentFailure::from(&error)));
-                    final_answer = None;
-                    final_message_id = None;
+                    if outcome.is_none() {
+                        outcome = Some(TurnOutcome::Failed(AgentFailure::from(&error)));
+                        final_answer = None;
+                        final_message_id = None;
+                    }
                     break;
                 }
             }
@@ -774,6 +814,7 @@ impl AgentTurnDriver {
         TurnReceipt {
             turn_id,
             outcome,
+            delivery,
             final_answer,
             final_message_id,
             prompt_tokens,
@@ -1108,7 +1149,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tracked_initial_input_sink_failure_is_typed_without_drain() {
+    async fn tracked_initial_input_terminal_sink_failure_keeps_execution_terminal() {
         let (request, mut input) = TurnRequest::new(identity("initial-sink-failed"), "hello")
             .mode(TurnMode::Execute)
             .with_input_receipt();
@@ -1119,11 +1160,12 @@ mod tests {
                 &FailingSink,
             )
             .await;
-        assert!(matches!(receipt.outcome, TurnOutcome::Failed(_)));
+        assert_eq!(receipt.outcome, TurnOutcome::Completed);
+        assert!(matches!(receipt.delivery, TurnDeliveryOutcome::Failed(_)));
         assert_eq!(
             input.wait_for_turn_settled().await,
             TurnInputState::TurnSettled {
-                outcome: AgentSteerTurnOutcome::Failed,
+                outcome: AgentSteerTurnOutcome::Completed,
                 drained: false,
             }
         );
@@ -1141,6 +1183,7 @@ mod tests {
         let request = TurnRequest::new(identity("ok"), "hello");
         let receipt = AgentTurnDriver.drive(agent.as_ref(), request, &sink).await;
         assert_eq!(receipt.outcome, TurnOutcome::Completed);
+        assert_eq!(receipt.delivery, TurnDeliveryOutcome::Delivered);
         assert_eq!(receipt.final_answer.as_deref(), Some("done"));
         assert_eq!(receipt.prompt_tokens, 10);
         assert_eq!(receipt.completion_tokens, 5);
@@ -1160,6 +1203,7 @@ mod tests {
         let request = TurnRequest::new(identity("cancel"), "task").mode(TurnMode::Execute);
         let receipt = AgentTurnDriver.drive(agent.as_ref(), request, &sink).await;
         assert_eq!(receipt.outcome, TurnOutcome::Cancelled);
+        assert_eq!(receipt.delivery, TurnDeliveryOutcome::Delivered);
         assert_eq!(receipt.status(), "cancelled");
         assert!(receipt.final_answer.is_none());
     }
@@ -1179,6 +1223,7 @@ mod tests {
             .drive(agent.as_ref(), request, &RecordingSink::default())
             .await;
         assert_eq!(receipt.outcome, TurnOutcome::Failed(failure));
+        assert_eq!(receipt.delivery, TurnDeliveryOutcome::Delivered);
         assert_eq!(receipt.status(), "failed");
     }
 
@@ -1247,7 +1292,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failed_terminal_delivery_clears_final_completion_facts() -> Result<(), String> {
+    async fn failed_terminal_delivery_keeps_final_completion_facts() -> Result<(), String> {
         let agent: Arc<dyn Agent> = Arc::new(ScriptedAgent::new(|| {
             vec![AgentEvent::FinalAnswer("undelivered".to_string())]
         }));
@@ -1266,10 +1311,52 @@ mod tests {
             )
             .await;
 
-        assert!(matches!(receipt.outcome, TurnOutcome::Failed(_)));
-        assert!(receipt.final_answer.is_none());
-        assert!(receipt.final_message_id.is_none());
+        assert_eq!(receipt.outcome, TurnOutcome::Completed);
+        assert!(matches!(receipt.delivery, TurnDeliveryOutcome::Failed(_)));
+        assert_eq!(receipt.final_answer.as_deref(), Some("undelivered"));
+        assert_eq!(
+            receipt
+                .final_message_id
+                .as_ref()
+                .map(echo_core::agent::MessageId::as_str),
+            Some("message-delivery-failure")
+        );
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancelled_terminal_delivery_keeps_execution_terminal() {
+        let agent: Arc<dyn Agent> = Arc::new(ScriptedAgent::new(|| vec![AgentEvent::Cancelled]));
+        let receipt = AgentTurnDriver
+            .drive(
+                agent.as_ref(),
+                TurnRequest::new(identity("cancel-delivery-failure"), "hello"),
+                &FailingSink,
+            )
+            .await;
+        assert_eq!(receipt.outcome, TurnOutcome::Cancelled);
+        assert!(matches!(receipt.delivery, TurnDeliveryOutcome::Failed(_)));
+    }
+
+    #[tokio::test]
+    async fn producer_error_delivery_failure_keeps_original_failure() {
+        let producer_failure = AgentFailure::from(&ReactError::Other("producer boom".to_string()));
+        let agent: Arc<dyn Agent> = Arc::new(ScriptedAgent::new(|| {
+            vec![AgentEvent::Error {
+                source: "producer".to_string(),
+                message: "producer boom".to_string(),
+                failure: AgentFailure::from(&ReactError::Other("producer boom".to_string())),
+            }]
+        }));
+        let receipt = AgentTurnDriver
+            .drive(
+                agent.as_ref(),
+                TurnRequest::new(identity("error-delivery-failure"), "hello"),
+                &FailingSink,
+            )
+            .await;
+        assert_eq!(receipt.outcome, TurnOutcome::Failed(producer_failure));
+        assert!(matches!(receipt.delivery, TurnDeliveryOutcome::Failed(_)));
     }
 
     #[tokio::test]
@@ -1306,6 +1393,28 @@ mod tests {
         // The default cancellation wrapper yields Cancelled once the token
         // fires and the stream stops delivering later events.
         assert_eq!(receipt.outcome, TurnOutcome::Cancelled);
+        assert_eq!(receipt.delivery, TurnDeliveryOutcome::Closed);
+    }
+
+    #[tokio::test]
+    async fn terminal_closed_sink_keeps_completed_execution() {
+        let agent: Arc<dyn Agent> = Arc::new(ScriptedAgent::new(|| {
+            vec![AgentEvent::FinalAnswer("done".to_string())]
+        }));
+        let sink = RecordingSink {
+            close_after: Some(1),
+            ..RecordingSink::default()
+        };
+        let receipt = AgentTurnDriver
+            .drive(
+                agent.as_ref(),
+                TurnRequest::new(identity("terminal-closed"), "hello"),
+                &sink,
+            )
+            .await;
+        assert_eq!(receipt.outcome, TurnOutcome::Completed);
+        assert_eq!(receipt.delivery, TurnDeliveryOutcome::Closed);
+        assert_eq!(receipt.final_answer.as_deref(), Some("done"));
     }
 
     struct FailingAgent;
@@ -1352,6 +1461,7 @@ mod tests {
         let sink = RecordingSink::default();
         let receipt = AgentTurnDriver.drive(agent.as_ref(), request, &sink).await;
         assert_eq!(receipt.outcome.status(), "failed");
+        assert_eq!(receipt.delivery, TurnDeliveryOutcome::Delivered);
         assert_eq!(receipt.last_event_sequence, 1);
         assert_eq!(
             *sink
@@ -1360,6 +1470,20 @@ mod tests {
                 .unwrap_or_else(|error| error.into_inner()),
             vec![1]
         );
+    }
+
+    #[tokio::test]
+    async fn stream_start_delivery_failure_keeps_original_failure() {
+        let receipt = AgentTurnDriver
+            .drive(
+                &FailingAgent,
+                TurnRequest::new(identity("start-delivery-failure"), "hello"),
+                &FailingSink,
+            )
+            .await;
+        assert!(matches!(receipt.outcome, TurnOutcome::Failed(_)));
+        assert!(matches!(receipt.delivery, TurnDeliveryOutcome::Failed(_)));
+        assert_eq!(receipt.last_event_sequence, 1);
     }
 
     struct FailingSink;
@@ -1392,6 +1516,7 @@ mod tests {
             )
             .await;
         assert!(matches!(receipt.outcome, TurnOutcome::Failed(_)));
+        assert!(matches!(receipt.delivery, TurnDeliveryOutcome::Failed(_)));
         assert!(receipt.final_answer.is_none());
         assert_eq!(receipt.last_event_sequence, 1);
     }
@@ -1627,6 +1752,7 @@ mod tests {
             .drive(agent.as_ref(), request, &RecordingSink::default())
             .await;
         assert_eq!(receipt.outcome.status(), "failed");
+        assert_eq!(receipt.delivery, TurnDeliveryOutcome::Delivered);
     }
 
     #[tokio::test]

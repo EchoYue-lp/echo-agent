@@ -252,30 +252,95 @@ impl CorePersistence {
         }
         let mut runs = Vec::with_capacity(records.len());
         for record in records {
-            // `running` (or any unknown class) after a process restart means
-            // the previous Host died mid-run: the run is Interrupted with no
-            // terminal and no receipt — never completed, never resumed.
-            let (status, terminal) = if record.status == "running" {
-                (RunStatus::Interrupted, None)
-            } else {
-                let status = match record.terminal.as_ref() {
-                    Some(RunTerminal::Completed { .. }) => RunStatus::Completed,
-                    Some(RunTerminal::Cancelled) => RunStatus::Cancelled,
-                    Some(RunTerminal::Failed { .. }) => RunStatus::Failed,
-                    None => RunStatus::Interrupted,
-                };
-                (status, record.terminal.clone())
+            // `running` after a process restart means the previous Host died
+            // mid-run: the run is Interrupted with no terminal and no receipt.
+            // Unknown durable states fail recovery instead of being collapsed
+            // into a plausible lifecycle state.
+            let (status, terminal, receipt) = match record.status.as_str() {
+                "running" => {
+                    if record.terminal.is_some() || record.receipt.is_some() {
+                        return Err(ReactError::Other(format!(
+                            "running run {} must not carry terminal settlement",
+                            record.run_id
+                        )));
+                    }
+                    (RunStatus::Interrupted, None, None)
+                }
+                "settled" => {
+                    let terminal = record.terminal.as_ref().ok_or_else(|| {
+                        ReactError::Other(format!(
+                            "settled run {} is missing its terminal",
+                            record.run_id
+                        ))
+                    })?;
+                    let receipt = record.receipt.as_ref().ok_or_else(|| {
+                        ReactError::Other(format!(
+                            "settled run {} is missing its receipt",
+                            record.run_id
+                        ))
+                    })?;
+                    validate_settled_run(&record.run_id, terminal, receipt, record.last_sequence)?;
+                    let status = match terminal {
+                        RunTerminal::Completed { .. } => RunStatus::Completed,
+                        RunTerminal::Cancelled => RunStatus::Cancelled,
+                        RunTerminal::Failed { .. } => RunStatus::Failed,
+                    };
+                    (status, Some(terminal.clone()), Some(receipt.clone()))
+                }
+                status => {
+                    return Err(ReactError::Other(format!(
+                        "run {} has unknown durable status {status}",
+                        record.run_id
+                    )));
+                }
             };
-            let receipt = record.receipt.clone();
+            let last_sequence = record.last_sequence;
             runs.push(RecoveredRun {
                 record,
                 status,
-                last_sequence: 0,
+                last_sequence,
                 terminal,
                 receipt,
             });
         }
         Ok(runs)
+    }
+
+    /// Validate the real Journal watermark after opening a recovered run.
+    /// The index and Journal are separate files, so recovery must fail closed
+    /// when they do not describe the same committed prefix.
+    pub fn validate_recovered_journal(
+        &self,
+        recovered: &RecoveredRun,
+        journal_sequence: u64,
+    ) -> Result<()> {
+        if recovered.status == RunStatus::Interrupted {
+            return Ok(());
+        }
+        if journal_sequence != recovered.record.last_sequence {
+            return Err(ReactError::Other(format!(
+                "run {} Journal sequence {journal_sequence} conflicts with index sequence {}",
+                recovered.record.run_id, recovered.record.last_sequence
+            )));
+        }
+        let terminal = recovered.terminal.as_ref().ok_or_else(|| {
+            ReactError::Other(format!(
+                "settled run {} is missing its recovered terminal",
+                recovered.record.run_id
+            ))
+        })?;
+        let receipt = recovered.receipt.as_ref().ok_or_else(|| {
+            ReactError::Other(format!(
+                "settled run {} is missing its recovered receipt",
+                recovered.record.run_id
+            ))
+        })?;
+        validate_settled_run(
+            &recovered.record.run_id,
+            terminal,
+            receipt,
+            journal_sequence,
+        )
     }
 
     /// Mark a run as durably started.
@@ -315,12 +380,7 @@ impl CorePersistence {
         receipt: RunReceiptWire,
         last_sequence: u64,
     ) -> Result<()> {
-        terminal
-            .validate()
-            .map_err(|error| ReactError::Other(format!("invalid run terminal: {error}")))?;
-        receipt
-            .validate()
-            .map_err(|error| ReactError::Other(format!("invalid run receipt: {error}")))?;
+        validate_settled_run(run_id, &terminal, &receipt, last_sequence)?;
         let _guard = self
             .index_lock
             .lock()
@@ -415,6 +475,54 @@ impl CorePersistence {
     }
 }
 
+fn validate_settled_run(
+    run_id: &str,
+    terminal: &RunTerminal,
+    receipt: &RunReceiptWire,
+    committed_sequence: u64,
+) -> Result<()> {
+    terminal
+        .validate()
+        .map_err(|error| ReactError::Other(format!("invalid run terminal: {error}")))?;
+    receipt
+        .validate()
+        .map_err(|error| ReactError::Other(format!("invalid run receipt: {error}")))?;
+    if receipt.turn_id != run_id {
+        return Err(ReactError::Other(format!(
+            "run {run_id} receipt turn_id {} does not match",
+            receipt.turn_id
+        )));
+    }
+    let terminal_matches = match terminal {
+        RunTerminal::Completed { final_answer } => {
+            receipt.outcome == "completed" && final_answer == &receipt.final_answer
+        }
+        RunTerminal::Cancelled => receipt.outcome == "cancelled" && receipt.final_answer.is_none(),
+        RunTerminal::Failed { .. } => receipt.outcome == "failed" && receipt.final_answer.is_none(),
+    };
+    if !terminal_matches {
+        return Err(ReactError::Other(format!(
+            "run {run_id} terminal and receipt outcome conflict"
+        )));
+    }
+    let observed_sequence = receipt.last_event_sequence.to_u64().ok_or_else(|| {
+        ReactError::Other(format!(
+            "run {run_id} receipt has invalid observed sequence"
+        ))
+    })?;
+    if committed_sequence > observed_sequence {
+        return Err(ReactError::Other(format!(
+            "run {run_id} committed sequence {committed_sequence} exceeds observed sequence {observed_sequence}"
+        )));
+    }
+    if receipt.delivery.as_deref() == Some("delivered") && committed_sequence != observed_sequence {
+        return Err(ReactError::Other(format!(
+            "run {run_id} reports delivered at sequence {observed_sequence} but committed through {committed_sequence}"
+        )));
+    }
+    Ok(())
+}
+
 fn sanitize(id: &str) -> String {
     let safe: String = id
         .chars()
@@ -463,6 +571,24 @@ pub(crate) fn recovered_receipt_wire(recovered: &RecoveredRun) -> Option<RunRece
 #[cfg(test)]
 mod tests {
     use super::*;
+    use echo_agent::state::journal::EventJournal as _;
+
+    fn completed_receipt(run_id: &str, delivery: Option<&str>) -> RunReceiptWire {
+        RunReceiptWire {
+            turn_id: run_id.to_string(),
+            outcome: "completed".to_string(),
+            delivery: delivery.map(str::to_string),
+            delivery_error: None,
+            final_answer: Some("done".to_string()),
+            final_message_id: None,
+            prompt_tokens: echo_sdk_protocol::scalar::WireU64::from_u64(0),
+            completion_tokens: echo_sdk_protocol::scalar::WireU64::from_u64(0),
+            llm_calls: echo_sdk_protocol::scalar::WireU64::from_u64(0),
+            compaction_count: echo_sdk_protocol::scalar::WireU64::from_u64(0),
+            last_event_sequence: echo_sdk_protocol::scalar::WireU64::from_u64(1),
+            elapsed_ms: echo_sdk_protocol::scalar::WireU64::from_u64(1),
+        }
+    }
 
     #[test]
     fn generation_advances_monotonically_within_one_state_root() -> Result<()> {
@@ -495,6 +621,145 @@ mod tests {
         assert_eq!(recovered.len(), 1);
         assert_eq!(recovered[0].status, RunStatus::Interrupted);
         assert!(recovered[0].terminal.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn settlement_rejects_terminal_receipt_conflicts() -> Result<()> {
+        let directory = tempfile::tempdir().map_err(ReactError::Io)?;
+        let persistence = CorePersistence::open(directory.path())?;
+        persistence.record_run_started(
+            "run-conflict",
+            "stream-conflict",
+            "sess-1",
+            "agent-1",
+            "host_default",
+            Some(WirePath::Utf8 {
+                path: "/tmp".to_string(),
+            }),
+            "chat",
+        )?;
+        let error = persistence
+            .record_run_settled(
+                "run-conflict",
+                RunTerminal::Cancelled,
+                completed_receipt("run-conflict", Some("delivered")),
+                1,
+            )
+            .err()
+            .ok_or_else(|| ReactError::Other("conflicting settlement was accepted".to_string()))?;
+        assert!(
+            error
+                .to_string()
+                .contains("terminal and receipt outcome conflict")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_receipt_without_delivery_recovers_as_unknown() -> Result<()> {
+        let directory = tempfile::tempdir().map_err(ReactError::Io)?;
+        let persistence = CorePersistence::open(directory.path())?;
+        persistence.record_run_started(
+            "run-legacy",
+            "stream-legacy",
+            "sess-1",
+            "agent-1",
+            "host_default",
+            Some(WirePath::Utf8 {
+                path: "/tmp".to_string(),
+            }),
+            "chat",
+        )?;
+        persistence.record_run_settled(
+            "run-legacy",
+            RunTerminal::Completed {
+                final_answer: Some("done".to_string()),
+            },
+            completed_receipt("run-legacy", None),
+            1,
+        )?;
+
+        let recovered = persistence.load_recovered_runs()?;
+        let receipt = recovered
+            .first()
+            .and_then(|run| run.receipt.as_ref())
+            .ok_or_else(|| ReactError::Other("legacy receipt was not recovered".to_string()))?;
+        assert!(receipt.delivery.is_none());
+        assert_eq!(recovered.first().map(|run| run.last_sequence), Some(1));
+        Ok(())
+    }
+
+    #[test]
+    fn recovered_settlement_rejects_missing_or_truncated_journal() -> Result<()> {
+        let directory = tempfile::tempdir().map_err(ReactError::Io)?;
+        let persistence = CorePersistence::open(directory.path())?;
+        persistence.record_run_started(
+            "run-missing-journal",
+            "stream-missing-journal",
+            "sess-1",
+            "agent-1",
+            "host_default",
+            Some(WirePath::Utf8 {
+                path: "/tmp".to_string(),
+            }),
+            "chat",
+        )?;
+        persistence.record_run_settled(
+            "run-missing-journal",
+            RunTerminal::Completed {
+                final_answer: Some("done".to_string()),
+            },
+            completed_receipt("run-missing-journal", Some("delivered")),
+            1,
+        )?;
+        let recovered = persistence.load_recovered_runs()?;
+        let run = recovered
+            .first()
+            .ok_or_else(|| ReactError::Other("settled run was not recovered".to_string()))?;
+        let journal = persistence.open_run_journal("run-missing-journal")?;
+        let error = persistence
+            .validate_recovered_journal(run, journal.last_sequence())
+            .err()
+            .ok_or_else(|| ReactError::Other("missing Journal was accepted".to_string()))?;
+        assert!(error.to_string().contains("conflicts with index sequence"));
+        Ok(())
+    }
+
+    #[test]
+    fn recovery_rejects_corrupt_terminal_receipt_pair() -> Result<()> {
+        let directory = tempfile::tempdir().map_err(ReactError::Io)?;
+        let persistence = CorePersistence::open(directory.path())?;
+        persistence.record_run_started(
+            "run-corrupt",
+            "stream-corrupt",
+            "sess-1",
+            "agent-1",
+            "host_default",
+            Some(WirePath::Utf8 {
+                path: "/tmp".to_string(),
+            }),
+            "chat",
+        )?;
+        let mut records = persistence.read_index()?;
+        let record = records
+            .first_mut()
+            .ok_or_else(|| ReactError::Other("started record is missing".to_string()))?;
+        record.status = "settled".to_string();
+        record.last_sequence = 1;
+        record.terminal = Some(RunTerminal::Cancelled);
+        record.receipt = Some(completed_receipt("run-corrupt", Some("delivered")));
+        persistence.write_index(records)?;
+
+        let error = persistence
+            .load_recovered_runs()
+            .err()
+            .ok_or_else(|| ReactError::Other("corrupt settlement was recovered".to_string()))?;
+        assert!(
+            error
+                .to_string()
+                .contains("terminal and receipt outcome conflict")
+        );
         Ok(())
     }
 
@@ -532,6 +797,8 @@ mod tests {
                 RunReceiptWire {
                     turn_id: "run-a".to_string(),
                     outcome: "cancelled".to_string(),
+                    delivery: Some("delivered".to_string()),
+                    delivery_error: None,
                     final_answer: None,
                     final_message_id: None,
                     prompt_tokens: echo_sdk_protocol::scalar::WireU64::from_u64(0),
@@ -551,6 +818,8 @@ mod tests {
                 RunReceiptWire {
                     turn_id: "run-b".to_string(),
                     outcome: "cancelled".to_string(),
+                    delivery: Some("delivered".to_string()),
+                    delivery_error: None,
                     final_answer: None,
                     final_message_id: None,
                     prompt_tokens: echo_sdk_protocol::scalar::WireU64::from_u64(0),

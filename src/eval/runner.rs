@@ -5,7 +5,10 @@ use crate::agent::{
 };
 use crate::eval::{EvalCase, EvalConstraints, EvalReport, EvalResult, SuccessCriteria};
 use crate::eval::{LlmGrader, TrajectoryReplay};
-use crate::runtime::{AgentTurnDriver, EventSink, SinkControl, TurnMode, TurnOutcome, TurnRequest};
+use crate::runtime::{
+    AgentTurnDriver, EventSink, SinkControl, TurnDeliveryOutcome, TurnMode, TurnOutcome,
+    TurnReceipt, TurnRequest,
+};
 use crate::trace::Run;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -18,6 +21,31 @@ struct EvalEventSink;
 impl EventSink for EvalEventSink {
     async fn on_event(&self, _envelope: EventEnvelope) -> crate::error::Result<SinkControl> {
         Ok(SinkControl::Continue)
+    }
+}
+
+fn record_delivery_result(result: &mut EvalResult, receipt: &TurnReceipt) {
+    match &receipt.delivery {
+        TurnDeliveryOutcome::Delivered => {}
+        TurnDeliveryOutcome::Failed(failure) => {
+            result.success = false;
+            result.violations.push(format!(
+                "Turn delivery failed ({}): {}",
+                failure.code, failure.message
+            ));
+        }
+        TurnDeliveryOutcome::NotAttempted => {
+            result.success = false;
+            result
+                .violations
+                .push("Turn delivery was not attempted".to_string());
+        }
+        TurnDeliveryOutcome::Closed => {
+            result.success = false;
+            result
+                .violations
+                .push("Turn delivery closed before acceptance".to_string());
+        }
     }
 }
 
@@ -199,6 +227,7 @@ impl EvalRunner {
                 )),
             }
         } else if let Some(receipt) = receipt.as_ref() {
+            record_delivery_result(&mut result, receipt);
             match &receipt.outcome {
                 TurnOutcome::Completed => match receipt.final_answer.as_ref() {
                     Some(output) => final_output = Some(output.clone()),
@@ -983,6 +1012,36 @@ mod tests {
     use crate::trace::{RunEvent, RunStatus, RunSummary, RunTimings, TokenUsage};
     use chrono::Utc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn eval_records_delivery_failure_independently_from_execution() -> crate::error::Result<()> {
+        let mut result = EvalResult::new("delivery-failure", true);
+        let receipt = TurnReceipt {
+            turn_id: echo_core::agent::TurnId::new("eval-delivery-failure")?,
+            outcome: TurnOutcome::Completed,
+            delivery: TurnDeliveryOutcome::Failed(crate::error::AgentFailure::from(
+                &crate::error::ReactError::Other("projection failed".to_string()),
+            )),
+            final_answer: Some("done".to_string()),
+            final_message_id: None,
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            llm_calls: 0,
+            compaction_count: 0,
+            last_event_sequence: 1,
+            elapsed: std::time::Duration::ZERO,
+        };
+
+        record_delivery_result(&mut result, &receipt);
+        assert!(!result.success);
+        assert!(
+            result
+                .violations
+                .iter()
+                .any(|violation| violation.contains("Turn delivery failed"))
+        );
+        Ok(())
+    }
 
     struct WorkspaceRecordingAgent {
         cwd_tx: tokio::sync::mpsc::UnboundedSender<PathBuf>,

@@ -7,8 +7,8 @@
 pub mod turn_driver;
 
 pub use turn_driver::{
-    AgentTurnDriver, EventSink, SinkControl, TurnInput, TurnInputReceipt, TurnInputState, TurnMode,
-    TurnOutcome, TurnReceipt, TurnRequest,
+    AgentTurnDriver, EventSink, SinkControl, TurnDeliveryOutcome, TurnInput, TurnInputReceipt,
+    TurnInputState, TurnMode, TurnOutcome, TurnReceipt, TurnRequest,
 };
 
 /// Re-exported result and transport types used by the turn runtime.

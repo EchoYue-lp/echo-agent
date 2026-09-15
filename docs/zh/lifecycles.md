@@ -32,10 +32,11 @@ surface request
 | Authority | Driven execution 由 AgentTurnDriver 和 TurnReceipt 拥有；raw Agent 仍是低层 API |
 | Event 与 Effect | Model output、Tool call、tracked input、file/process/network effect和owner-defined projection可在执行中发生 |
 | Cancellation 与 failure | 请求取消，按合同收敛producer，failure保持typed |
-| Terminal | Completed、Failed 或 Cancelled receipt；不从stream EOF推断terminal |
+| Terminal | Completed、Failed 或 Cancelled execution receipt，以及独立的 delivery result；不从stream EOF推断terminal |
 | Recovery 与 Projection | Session/runtime policy 恢复状态；Trace、transcript、checkpoint、sink和adapter各自拥有write/close顺序 |
 
 Reply 和 Wait 操作返回或观察owner的result/receipt，不把partial text、notification或EOF变成新terminal fact。
+Delivery failure 在 execution terminal 旁边单独报告，不能改写 producer 已经发出的 execution result。
 Trace、transcript和checkpoint write可在finalization前或期间发生。它们各自存储的status和ordering不定义TurnReceipt，
 但Agent producer contract显式传播的write error可令driven Turn失败；best-effort transcript diagnostic本身不会。
 Adapter projection和awaited close覆盖由各详细adapter contract定义，本概览不定义一条固定顺序。

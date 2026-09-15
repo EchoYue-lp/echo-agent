@@ -569,6 +569,8 @@ fn terminal_and_receipt_project_the_framework_authority() {
     let receipt = RunReceiptWire {
         turn_id: "run-1".to_string(),
         outcome: "completed".to_string(),
+        delivery: Some("delivered".to_string()),
+        delivery_error: None,
         final_answer: Some("done".to_string()),
         final_message_id: None,
         prompt_tokens: WireU64::from_u64(10),
@@ -582,6 +584,73 @@ fn terminal_and_receipt_project_the_framework_authority() {
     // Token counters are decimal strings on the wire, never JS numbers.
     let encoded = serde_json::to_value(&receipt).unwrap_or(serde_json::Value::Null);
     assert_eq!(encoded["prompt_tokens"], "10");
+}
+
+#[test]
+fn receipt_delivery_failure_is_lossless_and_legacy_is_unknown() {
+    let failure = AgentFailureWire {
+        category: "io".to_string(),
+        terminal_kind: "failed".to_string(),
+        retryable: true,
+        code: "delivery".to_string(),
+        http_status: None,
+        message: "projection unavailable".to_string(),
+    };
+    let receipt = RunReceiptWire {
+        turn_id: "run-delivery-failed".to_string(),
+        outcome: "completed".to_string(),
+        delivery: Some("failed".to_string()),
+        delivery_error: Some(failure.clone()),
+        final_answer: Some("done".to_string()),
+        final_message_id: None,
+        prompt_tokens: WireU64::from_u64(0),
+        completion_tokens: WireU64::from_u64(0),
+        llm_calls: WireU64::from_u64(0),
+        compaction_count: WireU64::from_u64(0),
+        last_event_sequence: WireU64::from_u64(1),
+        elapsed_ms: WireU64::from_u64(1),
+    };
+    assert!(receipt.validate().is_ok());
+    let encoded = serde_json::to_value(&receipt).unwrap_or(serde_json::Value::Null);
+    assert_eq!(encoded["delivery"], "failed");
+    assert_eq!(encoded["delivery_error"]["code"], "delivery");
+
+    let mut legacy = encoded;
+    legacy.as_object_mut().map(|fields| {
+        fields.remove("delivery");
+        fields.remove("delivery_error");
+    });
+    let recovered = match serde_json::from_value::<RunReceiptWire>(legacy) {
+        Ok(receipt) => receipt,
+        Err(error) => {
+            assert!(false, "legacy receipt must remain decodable: {error}");
+            return;
+        }
+    };
+    assert!(recovered.delivery.is_none());
+    assert!(recovered.delivery_error.is_none());
+}
+
+#[test]
+fn non_completed_receipt_rejects_final_message_identity() {
+    let receipt = RunReceiptWire {
+        turn_id: "run-cancelled".to_string(),
+        outcome: "cancelled".to_string(),
+        delivery: Some("delivered".to_string()),
+        delivery_error: None,
+        final_answer: None,
+        final_message_id: Some("must-not-survive".to_string()),
+        prompt_tokens: WireU64::from_u64(0),
+        completion_tokens: WireU64::from_u64(0),
+        llm_calls: WireU64::from_u64(0),
+        compaction_count: WireU64::from_u64(0),
+        last_event_sequence: WireU64::from_u64(1),
+        elapsed_ms: WireU64::from_u64(1),
+    };
+    assert_eq!(
+        receipt.validate(),
+        Err("non-completed receipt must not carry final fields")
+    );
 }
 
 #[test]

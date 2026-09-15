@@ -281,8 +281,9 @@ real-process E2E (`echo-sdk-host/tests/core_profile_e2e.rs`):
 - **Ledger-first events.** Every accepted `EventEnvelope` is committed to a
   bounded per-run ledger (durable journal hook first) before the standard
   projection and the `_echo_agent/event` view are produced. Journal or
-  projection failure fails the run — a run never reports success over an
-  unverified journal.
+  projection failure is recorded as delivery failure. It cannot create a
+  second execution terminal after the producer has already completed the
+  Turn; see ADR 0046.
 - **ACK-bounded live delivery.** Because the official outgoing queue is
   unbounded, backpressure is enforced by the ACK window: at
   `max_outstanding_live_events` the Host sends one gap notification and

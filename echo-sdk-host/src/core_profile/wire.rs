@@ -9,7 +9,7 @@
 use echo_agent::agent::EventEnvelope;
 use echo_agent::error::ReactError;
 use echo_agent::llm::types::{FunctionCall, Message, MessageContent, ReasoningBlock, ToolCall};
-use echo_agent::runtime::{TurnOutcome, TurnReceipt};
+use echo_agent::runtime::{TurnDeliveryOutcome, TurnOutcome, TurnReceipt};
 use echo_sdk_protocol::error::{AgentFailureWire, EchoSdkError, ExtensionErrorCode, Retryability};
 use echo_sdk_protocol::event::{EventWireError, WireEventEnvelope};
 use echo_sdk_protocol::handle::{HandleKind, WireHandle};
@@ -158,9 +158,20 @@ pub(crate) fn terminal_of(receipt: &TurnReceipt) -> std::result::Result<RunTermi
 
 /// Bounded receipt projection; counters stay lossless integer strings.
 pub(crate) fn receipt_wire(receipt: &TurnReceipt) -> std::result::Result<RunReceiptWire, String> {
+    let delivery = match &receipt.delivery {
+        TurnDeliveryOutcome::NotAttempted => "not_attempted",
+        TurnDeliveryOutcome::Delivered => "delivered",
+        TurnDeliveryOutcome::Closed => "closed",
+        TurnDeliveryOutcome::Failed(_) => "failed",
+    };
     let wire = RunReceiptWire {
         turn_id: receipt.turn_id.as_str().to_string(),
         outcome: receipt.status().to_string(),
+        delivery: Some(delivery.to_string()),
+        delivery_error: match &receipt.delivery {
+            TurnDeliveryOutcome::Failed(failure) => Some(AgentFailureWire::from(failure)),
+            _ => None,
+        },
         final_answer: receipt.final_answer.clone(),
         final_message_id: receipt
             .final_message_id
@@ -192,8 +203,8 @@ pub(crate) fn status_of(receipt: Option<&TurnReceipt>) -> RunStatus {
 }
 
 /// Full `EventEnvelope` projection. Identity fields, sequence, content hash
-/// and payload are preserved verbatim; conversion failure fails the run (the
-/// observer surfaces it to the driver) instead of shipping a lossy event.
+/// and payload are preserved verbatim; conversion failure is surfaced as a
+/// delivery error instead of shipping a lossy event.
 pub(crate) fn wire_envelope(envelope: &EventEnvelope) -> Result<WireEventEnvelope, EchoSdkError> {
     WireEventEnvelope::try_from(envelope.clone()).map_err(|error: EventWireError| {
         sdk_error(
@@ -435,6 +446,7 @@ mod tests {
         assert_eq!(status_of(None), RunStatus::Running);
         let receipt = receipt_wire(&cancelled).map_err(ReactError::Other)?;
         assert_eq!(receipt.outcome, "cancelled");
+        assert_eq!(receipt.delivery.as_deref(), Some("not_attempted"));
         Ok(())
     }
 

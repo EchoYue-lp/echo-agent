@@ -6,6 +6,7 @@
   "payload": {
     "turn_id": "run-7",
     "outcome": "completed",
+    "delivery": "delivered",
     "final_answer": "done",
     "final_message_id": "msg-7",
     "prompt_tokens": "120",

@@ -1453,8 +1453,35 @@ fn push_run_fixtures(fixtures: &mut Vec<Fixture>) {
         serde_json::json!({
             "turn_id": "run-7",
             "outcome": "completed",
+            "delivery": "delivered",
             "final_answer": "done",
             "final_message_id": "msg-7",
+            "prompt_tokens": "120",
+            "completion_tokens": "48",
+            "llm_calls": "2",
+            "compaction_count": "0",
+            "last_event_sequence": "14",
+            "elapsed_ms": "1834"
+        }),
+        None,
+    ));
+    fixtures.push(fixture(
+        "run-receipt-delivery-failed",
+        FixtureKind::Valid,
+        "RunReceiptWire",
+        "Execution completion and delivery failure remain independently observable.",
+        serde_json::json!({
+            "turn_id": "run-8",
+            "outcome": "completed",
+            "delivery": "failed",
+            "delivery_error": {
+                "category": "io",
+                "terminal_kind": "failed",
+                "retryable": true,
+                "code": "delivery",
+                "message": "projection unavailable"
+            },
+            "final_answer": "done",
             "prompt_tokens": "120",
             "completion_tokens": "48",
             "llm_calls": "2",

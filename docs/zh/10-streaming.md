@@ -200,12 +200,13 @@ typed terminal。没有 input lifecycle publisher 的 Agent 即使产生输出�
 ### 规范化 turn receipt
 
 `AgentTurnDriver` 返回 framework 对通用 turn 事实的唯一权威
-`TurnReceipt`。除 typed terminal 外，它还携带 final answer 及其 message
-identity、provider 报告的输入/输出 token 合计、报告 usage 的调用次数、显式
-context compaction 次数、最后一个 envelope sequence 和耗时。产品 sink 可以持久化
-或渲染同一批 envelope，但必须从 receipt 投影这些字段，不能再从事件折叠第二份
-turn summary。workspace routing、UI retention pin、webhook delivery 等产品事实仍留在
-应用 adapter。
+`TurnReceipt`。除 typed execution terminal 外，它还携带正交的 delivery result、
+final answer 及其 message identity、provider 报告的输入/输出 token 合计、报告 usage
+的调用次数、显式 context compaction 次数、最后一个 envelope sequence 和耗时。产品
+sink 可以持久化或渲染同一批 envelope，但必须从 receipt 投影这些字段，不能再从事件
+折叠第二份 turn summary。一个 turn 可以 execution 已完成但 delivery 失败；调用方只有
+同时检查两条结果后，才能声称结果已交付。workspace routing、UI retention pin、
+webhook delivery 等产品事实仍留在应用 adapter。
 
 ---
 
