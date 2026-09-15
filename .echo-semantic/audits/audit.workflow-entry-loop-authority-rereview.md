@@ -5,23 +5,23 @@ kind: audit
 boundary_ref: boundary.task-subagent-workflow
 lens: failure_concurrency
 freshness: examined
-revision: source:89eee6de1f98710cd7a2f520432226375921ea3175a8f8f61ea900feaf4e7248
+revision: c7e54e6785f85422af83d4b384f01c2493eddc79
 finding_refs: [finding.workflow-entry-loop-drift]
 challenges:
   four-entry-single-authority:
-    revision: source:89eee6de1f98710cd7a2f520432226375921ea3175a8f8f61ea900feaf4e7248
+    revision: c7e54e6785f85422af83d4b384f01c2493eddc79
     source_refs: [echo-orchestration/src/workflow/graph.rs, docs/adr/0052-workflow-entry-loop-authority.md]
     evidence_refs: [evidence.workflow-entry-loop-authority-repair, evidence.workflow-entry-loop-authority-verification]
   event-terminal-order:
-    revision: source:89eee6de1f98710cd7a2f520432226375921ea3175a8f8f61ea900feaf4e7248
+    revision: c7e54e6785f85422af83d4b384f01c2493eddc79
     source_refs: [echo-orchestration/src/workflow/graph.rs, echo-orchestration/src/workflow/node.rs, echo-orchestration/src/workflow/mod.rs]
     evidence_refs: [evidence.workflow-entry-loop-authority-repair, evidence.workflow-entry-loop-authority-verification]
   producer-cancellation-settlement:
-    revision: source:89eee6de1f98710cd7a2f520432226375921ea3175a8f8f61ea900feaf4e7248
+    revision: c7e54e6785f85422af83d4b384f01c2493eddc79
     source_refs: [echo-orchestration/src/workflow/graph.rs, echo-orchestration/src/workflow/node.rs]
     evidence_refs: [evidence.workflow-entry-loop-authority-repair, evidence.workflow-entry-loop-authority-verification]
   checkpoint-resume-continuity:
-    revision: source:89eee6de1f98710cd7a2f520432226375921ea3175a8f8f61ea900feaf4e7248
+    revision: c7e54e6785f85422af83d4b384f01c2493eddc79
     source_refs: [echo-orchestration/src/workflow/graph.rs, echo-orchestration/src/workflow/checkpoint_store.rs]
     evidence_refs: [evidence.workflow-entry-loop-authority-repair, evidence.workflow-entry-loop-authority-verification]
 ---

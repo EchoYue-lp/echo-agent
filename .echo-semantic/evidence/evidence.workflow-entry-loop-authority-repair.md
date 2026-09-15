@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.workflow-entry-loop-authority-repair
 kind: evidence
-observed_at: source:89eee6de1f98710cd7a2f520432226375921ea3175a8f8f61ea900feaf4e7248
+observed_at: c7e54e6785f85422af83d4b384f01c2493eddc79
 source_refs:
   - echo-orchestration/src/workflow/graph.rs
   - echo-orchestration/src/workflow/node.rs
@@ -17,7 +17,7 @@ limitations:
   - 不修改CheckpointStore、SDK facade、Task DAG、DagWorkflow或Scheduler合同
 evidence_type: behavior_equivalence
 before_revision: c5f7688212d45d5bdcdbf60342605e8bfb176cae
-after_revision: source:89eee6de1f98710cd7a2f520432226375921ea3175a8f8f61ea900feaf4e7248
+after_revision: c7e54e6785f85422af83d4b384f01c2493eddc79
 scenario_results:
   four-entry-routing-authority:
     status: matched

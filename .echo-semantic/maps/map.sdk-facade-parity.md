@@ -4,11 +4,11 @@ id: map.sdk-facade-parity
 kind: capability_map
 title: 多语言 SDK facade 对等边界
 risk: high
-observed_at: source:b0dfa235d236bee9185ff26953b982f196556459fd0bf165f7114a232373b224
+observed_at: source:eb4df1b5299a110a1a1ec4b0f6019a95193b8141389dea650cefe247990fc54c
 boundary_refs: [boundary.sdk-facade-parity]
 behavior_refs: [behavior.sdk-facade-routing]
 rule_refs: [rule.sdk-rust-authority]
-evidence_refs: [evidence.sdk-contracts, evidence.tool-registry-owned-handle-verification, evidence.background-task-terminal-authority-verification, evidence.framework-concept-navigation]
+evidence_refs: [evidence.sdk-contracts, evidence.checkpoint-journal-sdk-inventory, evidence.tool-registry-owned-handle-verification, evidence.background-task-terminal-authority-verification, evidence.framework-concept-navigation]
 finding_refs: [finding.sdk-component-stream-terminal, finding.sdk-sandbox-cancellation, finding.sdk-mcp-publication-cleanup, finding.sdk-skill-load-policy-bridge, finding.sdk-no-bridge-warnings, finding.sdk-gap-ack-replay-watermark]
 audit_refs: [audit.sdk-facade-plan08-final, audit.sdk-facade-scope-contract]
 related_map_refs: [map.protocol-surfaces]
@@ -37,10 +37,10 @@ scenarios:
     evidence_refs: [evidence.sdk-contracts]
   sdk-contract-scope:
     status: mapped
-    source_refs: [echo-sdk-protocol/src/inventory.rs, contracts/sdk/parity-manifest.schema.json, contracts/sdk/parity-manifest.json, echo-sdk-protocol/tests/facade_inventory.rs, scripts/check-language-sdks.sh, docs/adr/0032-sdk-contract-scope-classification.md, docs/adr/0039-background-task-terminal-authority.md]
+    source_refs: [echo-sdk-protocol/src/inventory.rs, contracts/sdk/public-api.txt, contracts/sdk/parity-manifest.schema.json, contracts/sdk/parity-manifest.json, contracts/sdk/facade-operation-catalog.json, contracts/sdk/source-contract.json, sdks/shared/facade-operation-catalog.json, sdks/shared/contract-digests.json, echo-sdk-protocol/tests/facade_inventory.rs, scripts/check-language-sdks.sh, docs/adr/0032-sdk-contract-scope-classification.md, docs/adr/0039-background-task-terminal-authority.md]
     behavior_refs: [behavior.sdk-facade-routing]
     rule_refs: [rule.sdk-rust-authority]
-    evidence_refs: [evidence.sdk-contracts, evidence.background-task-terminal-authority-verification]
+    evidence_refs: [evidence.sdk-contracts, evidence.checkpoint-journal-sdk-inventory, evidence.background-task-terminal-authority-verification]
   gap-ack-replay-watermark:
     status: needs_review
     source_refs: [echo-sdk-host/src/core_profile/events.rs, echo-sdk-protocol/src/event.rs, echo-sdk-host/tests/core_profile_e2e.rs]
@@ -85,7 +85,7 @@ permission operation复用Session Agent的`PermissionService`。Host不得引入
 
 ## 场景处置清单
 
-ACP、core与extension已有真实Host证据；Plan 8 focused测试证明source operation逐项命中adapter。Manifest schema v2以identity级`sdk_scope`区分5620个当前external contract、1773个Host/Rust-only、787个language intrinsic、90个internal helper与1443个deferred，总量9713；551个已完成intrinsic仍属于external contract。Gap generation校验已闭合，gap ACK后的replay watermark仍保持needs_review。
+ACP、core与extension已有真实Host证据；Plan 8 focused测试证明source operation逐项命中adapter。Manifest schema v2以identity级`sdk_scope`区分5625个当前external contract、1774个Host/Rust-only、790个language intrinsic、90个internal helper与1445个deferred，总量9724；本轮只刷新Journal identity相关生成物，不新增语言SDK源码。Gap generation校验已闭合，gap ACK后的replay watermark仍保持needs_review。
 
 ## 未展开项
 

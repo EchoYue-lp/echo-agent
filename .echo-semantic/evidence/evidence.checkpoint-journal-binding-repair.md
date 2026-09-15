@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.checkpoint-journal-binding-repair
 kind: evidence
-observed_at: source:f53372ae92a88027ba3de7c1b6551d80c9cfa2e9f06668076cb206bb80eb0fbd
+observed_at: dcd25a8a19c21c3247965e527684d89c96d68ac7
 source_refs:
   - echo-state/src/journal/mod.rs
   - echo-state/src/journal/file.rs

@@ -8875,7 +8875,7 @@
       "input": null,
       "result": null,
       "operation_signatures": [],
-      "items": 2855
+      "items": 2857
     },
     {
       "route": "intrinsic:language-local-wire-helper",
@@ -9709,7 +9709,7 @@
       "required_features": [],
       "feature_semantics": "default",
       "signature_digests": [
-        "sha256:d2672aae3fba18a0c0f4b2d9eaffa08fd7f250732715932a037ad932cde7e84f"
+        "sha256:0f6be98fe84033a728438eaf9e7c661bf2b9be949530772a2b2fdc9b9af870a4"
       ],
       "input": null,
       "result": null,
@@ -9732,7 +9732,7 @@
       "input": null,
       "result": null,
       "operation_signatures": [],
-      "items": 8
+      "items": 9
     },
     {
       "route": "intrinsic:process-local-generic-journal-reducer",
@@ -11046,7 +11046,7 @@
       "input": null,
       "result": null,
       "operation_signatures": [],
-      "items": 1180
+      "items": 1183
     },
     {
       "route": "source:echo_agent::agent::react::ReactAgent::activate_skill",
@@ -17365,6 +17365,78 @@
       "items": 2
     },
     {
+      "route": "source:echo_state::journal::JournalIdentity::as_str",
+      "surface": "invoke",
+      "family": "source_operation",
+      "method": "_echo_agent/facade/invoke",
+      "operation": "echo_state::journal::JournalIdentity::as_str",
+      "handler_operation": null,
+      "required_feature": null,
+      "required_features": [],
+      "feature_semantics": "default",
+      "signature_digests": [
+        "sha256:5b03dcea06e5b2ec1439442d857ebda66b7c730358c7d5a87c5aa5835c920297"
+      ],
+      "input": {
+        "encoding": "wire_value_array",
+        "description": "FeatureOperationRequest.arguments"
+      },
+      "result": {
+        "encoding": "wire_value",
+        "description": "FeatureOperationResponse.value"
+      },
+      "operation_signatures": [],
+      "items": 1
+    },
+    {
+      "route": "source:echo_state::journal::JournalIdentity::new",
+      "surface": "invoke",
+      "family": "source_operation",
+      "method": "_echo_agent/facade/invoke",
+      "operation": "echo_state::journal::JournalIdentity::new",
+      "handler_operation": null,
+      "required_feature": null,
+      "required_features": [],
+      "feature_semantics": "default",
+      "signature_digests": [
+        "sha256:2f5eebc1ff134da6b6459e78f9782a92256ca70bd65dbd89d443791bc5dc4720"
+      ],
+      "input": {
+        "encoding": "wire_value_array",
+        "description": "FeatureOperationRequest.arguments"
+      },
+      "result": {
+        "encoding": "wire_value",
+        "description": "FeatureOperationResponse.value"
+      },
+      "operation_signatures": [],
+      "items": 1
+    },
+    {
+      "route": "source:echo_state::journal::JournalIdentity::parse",
+      "surface": "invoke",
+      "family": "source_operation",
+      "method": "_echo_agent/facade/invoke",
+      "operation": "echo_state::journal::JournalIdentity::parse",
+      "handler_operation": null,
+      "required_feature": null,
+      "required_features": [],
+      "feature_semantics": "default",
+      "signature_digests": [
+        "sha256:8da62a7f1e12e0d9a0a837c1355d9cce4a38122b51a321c8b7b9e9e82fccf3c8"
+      ],
+      "input": {
+        "encoding": "wire_value_array",
+        "description": "FeatureOperationRequest.arguments"
+      },
+      "result": {
+        "encoding": "wire_value",
+        "description": "FeatureOperationResponse.value"
+      },
+      "operation_signatures": [],
+      "items": 1
+    },
+    {
       "route": "source:echo_state::memory::sqlite_store::SqliteStore::new",
       "surface": "invoke",
       "family": "source_operation",
@@ -18141,7 +18213,7 @@
       "input": null,
       "result": null,
       "operation_signatures": [],
-      "items": 154
+      "items": 156
     },
     {
       "route": "value:statistics",
@@ -18318,5 +18390,5 @@
       "items": 432
     }
   ],
-  "total_items": 23661
+  "total_items": 23672
 }

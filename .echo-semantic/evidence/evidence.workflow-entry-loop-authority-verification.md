@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.workflow-entry-loop-authority-verification
 kind: evidence
-observed_at: source:89eee6de1f98710cd7a2f520432226375921ea3175a8f8f61ea900feaf4e7248
+observed_at: c7e54e6785f85422af83d4b384f01c2493eddc79
 source_refs:
   - echo-orchestration/src/workflow/graph.rs
   - echo-orchestration/src/workflow/node.rs
@@ -32,7 +32,7 @@ unwrap/expect/panic/unreachable严格Clippy通过；package formatter写入后ch
 
 ## 来源与范围
 
-验证绑定候选源码摘要`89eee6de`；命令均在独立#112 worktree、Rust 2024工具链和低debug、
+验证绑定候选提交`c7e54e67`；命令均在独立#112 worktree、Rust 2024工具链和低debug、
 无incremental、2 jobs约束下执行。仅覆盖Workflow Graph及其直接example contract，不把
 SDK、Scheduler或完整workspace结果推导为通过。
 
