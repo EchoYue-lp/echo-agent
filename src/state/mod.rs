@@ -18,6 +18,9 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+const RUNTIME_STATE_OPERATION_SCHEMA_VERSION: u16 = 1;
 
 /// Sequenced event journal and checkpoint-reducer primitives.
 ///
@@ -539,11 +542,68 @@ pub struct RuntimeCheckpointCasReceipt {
 /// Idempotent request to retire one exact runtime generation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeGenerationRetireRequest {
+    pub schema_version: u16,
     pub operation_id: String,
+    pub payload_digest: String,
     pub scope_id: String,
     pub runtime_state_id: String,
     pub expected_scope_revision: u64,
     pub expected_state_version: RuntimeStateExpectedVersion,
+}
+
+impl RuntimeGenerationRetireRequest {
+    pub fn prepare(
+        scope_id: impl Into<String>,
+        runtime_state_id: impl Into<String>,
+        expected_scope_revision: u64,
+        expected_state_version: RuntimeStateExpectedVersion,
+    ) -> crate::error::Result<Self> {
+        let scope_id = scope_id.into();
+        let runtime_state_id = runtime_state_id.into();
+        validate_runtime_operation_identity(&scope_id, &runtime_state_id)?;
+        let payload_digest = runtime_operation_digest(&(
+            "runtime-generation-retire-v1",
+            RUNTIME_STATE_OPERATION_SCHEMA_VERSION,
+            &scope_id,
+            &runtime_state_id,
+            expected_scope_revision,
+            &expected_state_version,
+        ))?;
+        Ok(Self {
+            schema_version: RUNTIME_STATE_OPERATION_SCHEMA_VERSION,
+            operation_id: format!("runtime-generation-retire-v1:{payload_digest}"),
+            payload_digest,
+            scope_id,
+            runtime_state_id,
+            expected_scope_revision,
+            expected_state_version,
+        })
+    }
+
+    pub fn validate(&self) -> crate::error::Result<()> {
+        validate_runtime_operation_identity(&self.scope_id, &self.runtime_state_id)?;
+        if self.schema_version != RUNTIME_STATE_OPERATION_SCHEMA_VERSION {
+            return Err(invalid_runtime_operation(
+                "unsupported runtime generation retirement schema",
+            ));
+        }
+        let digest = runtime_operation_digest(&(
+            "runtime-generation-retire-v1",
+            self.schema_version,
+            &self.scope_id,
+            &self.runtime_state_id,
+            self.expected_scope_revision,
+            &self.expected_state_version,
+        ))?;
+        if digest != self.payload_digest
+            || self.operation_id != format!("runtime-generation-retire-v1:{digest}")
+        {
+            return Err(invalid_runtime_operation(
+                "runtime generation retirement identity does not match its payload",
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Domain result of exact generation retirement.
@@ -596,11 +656,75 @@ pub struct ScopeRetirementManifest {
 /// Request to begin or replay product-scope retirement.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScopeRetirementRequest {
+    pub schema_version: u16,
     pub delete_operation_id: String,
     pub payload_digest: String,
     pub scope_id: String,
     pub expected_scope_revision: u64,
     pub expected_conversation_epoch: u64,
+}
+
+impl ScopeRetirementRequest {
+    pub fn prepare(
+        scope_id: impl Into<String>,
+        expected_scope_revision: u64,
+        delete: &crate::memory::ManagedConversationDelete,
+    ) -> crate::error::Result<Self> {
+        delete.validate()?;
+        let scope_id = scope_id.into();
+        if scope_id != delete.conversation_id {
+            return Err(invalid_runtime_operation(
+                "scope retirement must share the managed conversation identity",
+            ));
+        }
+        Ok(Self {
+            schema_version: RUNTIME_STATE_OPERATION_SCHEMA_VERSION,
+            delete_operation_id: delete.operation_id.clone(),
+            payload_digest: delete.payload_digest.clone(),
+            scope_id,
+            expected_scope_revision,
+            expected_conversation_epoch: delete.expected_epoch,
+        })
+    }
+
+    pub fn validate(&self) -> crate::error::Result<()> {
+        if self.schema_version != RUNTIME_STATE_OPERATION_SCHEMA_VERSION {
+            return Err(invalid_runtime_operation(
+                "unsupported runtime scope retirement schema",
+            ));
+        }
+        let delete = crate::memory::ManagedConversationDelete {
+            schema_version: self.schema_version,
+            operation_id: self.delete_operation_id.clone(),
+            payload_digest: self.payload_digest.clone(),
+            conversation_id: self.scope_id.clone(),
+            expected_epoch: self.expected_conversation_epoch,
+        };
+        delete.validate()
+    }
+}
+
+fn validate_runtime_operation_identity(
+    scope_id: &str,
+    runtime_state_id: &str,
+) -> crate::error::Result<()> {
+    if scope_id.trim().is_empty() || runtime_state_id.trim().is_empty() {
+        return Err(invalid_runtime_operation(
+            "runtime operation identities must not be empty",
+        ));
+    }
+    Ok(())
+}
+
+fn runtime_operation_digest(value: &impl Serialize) -> crate::error::Result<String> {
+    let encoded = serde_json::to_vec(value).map_err(|error| {
+        invalid_runtime_operation(format!("failed to serialize runtime operation: {error}"))
+    })?;
+    Ok(format!("{:x}", Sha256::digest(encoded)))
+}
+
+fn invalid_runtime_operation(message: impl Into<String>) -> crate::error::ReactError {
+    echo_core::error::RuntimeStateError::SerializationError(message.into()).into()
 }
 
 /// One durable advancement of an existing retirement manifest.
@@ -1103,6 +1227,31 @@ mod checkpoint_tests {
         assert!(checkpoint.restore_runtime_payload().is_err());
         let restored = checkpoint.restore_managed_runtime_payload()?;
         assert_eq!(restored.pending_transcript_projection, Some(pending));
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_retirement_identity_rejects_revision_rebinding() -> crate::error::Result<()> {
+        let mut request = RuntimeGenerationRetireRequest::prepare(
+            "scope",
+            "runtime",
+            3,
+            RuntimeStateExpectedVersion::Managed { revision: 7 },
+        )?;
+        request.expected_scope_revision = 4;
+
+        assert!(request.validate().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn scope_retirement_reuses_managed_delete_identity() -> crate::error::Result<()> {
+        let delete = crate::memory::ManagedConversationDelete::prepare("scope", 5)?;
+        let request = ScopeRetirementRequest::prepare("scope", 9, &delete)?;
+
+        assert_eq!(request.delete_operation_id, delete.operation_id);
+        assert_eq!(request.payload_digest, delete.payload_digest);
+        request.validate()?;
         Ok(())
     }
 }
