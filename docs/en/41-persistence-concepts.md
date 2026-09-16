@@ -86,6 +86,9 @@ generation + ordinal to canonical transcript records and persists only ordinal/d
 state in `AgentCheckpoint`. Repeated safe points and checkpoint/product-store crash cuts are
 idempotent even when two turns have identical content; compaction realigns the cursor only after
 the complete pre-compaction transcript is durable.
+When `transcript_generation_id` is present, it must equal the effective runtime-state identity.
+The framework rejects mismatches before admission side effects and checks again before a
+checkpoint write, so it cannot persist a checkpoint that recovery will reject for identity drift.
 One shared Agent may process multiple value-scoped invocations: a change in effective
 `runtime_state_id` forces exact reset/restore before model preparation, while same-ID warm context
 is reused. The runtime records `Hydrating(target)` before cancellable mutation and commits

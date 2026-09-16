@@ -10,8 +10,8 @@ focus: [state_authority, time_lifecycle, failure_concurrency]
 observed_at: f1e9027246760661144786e9e35615cd46d580c6
 behavior_refs: [behavior.agent-turn-lifecycle, behavior.context-memory-lifecycle]
 code_refs: [echo-state/src/compression/mod.rs, src/agent/snapshot.rs, src/agent/react/run/phases/compact.rs, src/agent/react/run/phases/tools.rs, src/agent/react/run/phases/finalize.rs, src/state/mod.rs, echo-core/src/memory/conversation.rs, echo-core/src/memory/store.rs, docs/en/41-persistence-concepts.md]
-evidence_refs: [evidence.agent-context-execution, evidence.persistence-observation]
-finding_refs: [finding.transcript-projection-settlement]
+evidence_refs: [evidence.agent-context-execution, evidence.persistence-observation, evidence.transcript-generation-runtime-identity-repair, evidence.transcript-generation-runtime-identity-verification]
+finding_refs: [finding.transcript-projection-settlement, finding.transcript-generation-runtime-identity]
 ---
 
 # Context 与持久化职责分离

@@ -75,7 +75,10 @@ after adding a sender coordinate.
 - `AgentInvocationContext.runtime_state_id` separates ReAct checkpoint identity
   from the stable product conversation carried by `ExternalRunContext`.
   `transcript_generation_id` enables typed append projection for that runtime
-  incarnation. A shared `ReactAgent` records the identity currently represented
+  incarnation. When present, it must equal the effective runtime-state identity;
+  the framework rejects a mismatch before guard, trace, context, model, or
+  checkpoint side effects, and validates the invariant again at checkpoint save.
+  A shared `ReactAgent` records the identity currently represented
   by its warm context; a value-scoped identity change forces exact reset/restore
   before preparing model input, while only the same identity may reuse warmth.
   Hydration is a three-state protocol: `Hydrating(target)` is published before
