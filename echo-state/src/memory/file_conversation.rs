@@ -1601,6 +1601,29 @@ impl ConversationStore for FileConversationStore {
         )
     }
 
+    fn get_projection_authority<'a>(
+        &'a self,
+        conversation_id: &'a str,
+    ) -> BoxFut<'a, Option<ConversationProjectionAuthority>> {
+        let conversation_id = conversation_id.to_string();
+        self.run_blocking(
+            Self::conversation_scope(conversation_id.clone()),
+            move |store| {
+                if conversation_id.trim().is_empty() {
+                    return Err(MemoryError::SerializationError(
+                        "managed conversation id must not be empty".to_string(),
+                    )
+                    .into());
+                }
+                let _conversation = store.authority.scan_barrier.read().map_err(poison)?;
+                Ok(store
+                    .read_manifest(&conversation_id)?
+                    .and_then(|record| record.projection)
+                    .map(|state| state.authority(&conversation_id)))
+            },
+        )
+    }
+
     fn apply_transcript_projection<'a>(
         &'a self,
         batch: TranscriptProjectionBatch,
@@ -2128,7 +2151,7 @@ mod tests {
     use echo_core::memory::conversation::{
         ConversationProjectionCapability, ConversationProjectionEpochStatus,
         EnsureConversationProjectionRequest, ManagedConversationDelete,
-        ManagedConversationDeleteStatus, ManagedConversationImport,
+        ManagedConversationDeleteStatus, ManagedConversationImport, PersistenceCallContext,
         TranscriptProjectionApplyStatus, TranscriptProjectionBatch,
         TranscriptProjectionConflictKind,
     };
@@ -2320,6 +2343,112 @@ mod tests {
                 .status,
             ConversationProjectionEpochStatus::AdoptedLegacy
         );
+
+        std::fs::remove_dir_all(base)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn projection_authority_query_is_read_only_and_fails_closed_on_corruption() -> TestResult
+    {
+        let base = tmp_base();
+        let store = FileConversationStore::new(&base)?;
+
+        assert!(
+            store
+                .get_projection_authority("authority-live")
+                .await?
+                .is_none()
+        );
+        assert!(store.get_conversation("authority-live").await?.is_none());
+        let acquired = store
+            .ensure_projection_epoch(ensure_projection_request("authority-live", None))
+            .await?;
+        assert_eq!(acquired.status, ConversationProjectionEpochStatus::Created);
+        assert_eq!(
+            store
+                .get_projection_authority_with_context(
+                    PersistenceCallContext {
+                        absolute_deadline_unix_ms: i64::MAX,
+                    },
+                    "authority-live",
+                )
+                .await?,
+            Some(acquired.authority.clone())
+        );
+
+        store
+            .create_conversation(new_conv("authority-legacy", Some("legacy")))
+            .await?;
+        assert!(
+            store
+                .get_projection_authority("authority-legacy")
+                .await?
+                .is_none()
+        );
+        assert_eq!(
+            store
+                .ensure_projection_epoch(ensure_projection_request("authority-legacy", None))
+                .await?
+                .status,
+            ConversationProjectionEpochStatus::AdoptedLegacy
+        );
+
+        let deleted = store
+            .delete_managed_conversation(managed_delete(
+                "authority-live",
+                acquired.authority.epoch,
+            )?)
+            .await?;
+        let deleted_authority = store
+            .get_projection_authority("authority-live")
+            .await?
+            .ok_or_else(|| std::io::Error::other("deleted authority disappeared"))?;
+        assert_eq!(deleted_authority.conversation_id, "authority-live");
+        assert_eq!(deleted_authority.epoch, deleted.deleted_epoch);
+        assert_eq!(
+            deleted_authority.revision,
+            acquired
+                .authority
+                .revision
+                .checked_add(1)
+                .ok_or_else(|| { std::io::Error::other("deleted authority revision overflow") })?
+        );
+        assert_eq!(
+            deleted_authority.lifecycle,
+            ConversationProjectionLifecycle::Deleted
+        );
+        assert_eq!(
+            deleted_authority.delete_receipt_retention_floor_epoch,
+            deleted.retention_floor_epoch
+        );
+
+        store
+            .ensure_projection_epoch(ensure_projection_request("authority-corrupt", None))
+            .await?;
+        let mut record = manifest(&store, "authority-corrupt")?;
+        record
+            .projection
+            .as_mut()
+            .ok_or_else(|| std::io::Error::other("projection state was not persisted"))?
+            .epoch = 0;
+        store.write_manifest(&record)?;
+        let corrupt_path = store.conv_path("authority-corrupt")?;
+        let before = std::fs::read_to_string(&corrupt_path)?;
+        let query = store.get_projection_authority("authority-corrupt").await;
+        assert!(matches!(
+            query,
+            Err(echo_core::error::ReactError::Memory(error))
+                if matches!(error.as_ref(), MemoryError::SerializationError(_))
+        ));
+        assert_eq!(std::fs::read_to_string(corrupt_path)?, before);
+
+        let invalid = store.get_projection_authority("  ").await;
+        assert!(matches!(
+            invalid,
+            Err(echo_core::error::ReactError::Memory(error))
+                if matches!(error.as_ref(), MemoryError::SerializationError(_))
+        ));
 
         std::fs::remove_dir_all(base)?;
         Ok(())
