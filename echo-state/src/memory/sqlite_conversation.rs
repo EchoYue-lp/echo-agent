@@ -768,7 +768,11 @@ impl ConversationStore for SqliteConversationStore {
                     if state.lifecycle == ConversationProjectionLifecycle::Live {
                         return Ok(ConversationProjectionEpochReceipt {
                             authority: state.authority(&conversation_id),
-                            status: ConversationProjectionEpochStatus::Existing,
+                            status: if request.expected_tombstone_epoch.is_some() {
+                                ConversationProjectionEpochStatus::EpochConflict
+                            } else {
+                                ConversationProjectionEpochStatus::Existing
+                            },
                         });
                     }
                     if request.expected_tombstone_epoch != Some(state.epoch) {
@@ -862,6 +866,19 @@ impl ConversationStore for SqliteConversationStore {
                     .map_err(|error| {
                         memory_io_error("failed to inspect legacy conversation", error)
                     })?;
+                if request.expected_tombstone_epoch.is_some() {
+                    let authority = SqliteProjectionState {
+                        epoch: 1,
+                        revision: 1,
+                        lifecycle: ConversationProjectionLifecycle::Live,
+                        retention_floor_epoch: 0,
+                    }
+                    .authority(&conversation_id);
+                    return Ok(ConversationProjectionEpochReceipt {
+                        authority,
+                        status: ConversationProjectionEpochStatus::EpochConflict,
+                    });
+                }
                 let status = if exists {
                     ConversationProjectionEpochStatus::AdoptedLegacy
                 } else {
@@ -960,6 +977,72 @@ impl ConversationStore for SqliteConversationStore {
                         status: TranscriptProjectionApplyStatus::Fenced {
                             current_epoch: state.epoch,
                             lifecycle: state.lifecycle,
+                        },
+                    });
+                }
+
+                let (ordinal_count, first_ordinal, last_ordinal) = tx
+                    .query_row(
+                        "SELECT COUNT(*), MIN(ordinal), MAX(ordinal)
+                         FROM transcript_projection_ordinal
+                         WHERE conversation_id = ?1 AND generation_id = ?2",
+                        params![batch.conversation_id, batch.generation_id],
+                        |row| {
+                            Ok((
+                                row.get::<_, i64>(0)?,
+                                row.get::<_, Option<i64>>(1)?,
+                                row.get::<_, Option<i64>>(2)?,
+                            ))
+                        },
+                    )
+                    .map_err(|error| {
+                        memory_io_error("failed to query transcript projection frontier", error)
+                    })?;
+                let generation_frontier = u64::try_from(ordinal_count).map_err(|_| {
+                    MemoryError::SerializationError(
+                        "transcript projection ordinal count is negative".to_string(),
+                    )
+                })?;
+                if ordinal_count == 0 {
+                    if first_ordinal.is_some() || last_ordinal.is_some() {
+                        return Err(MemoryError::SerializationError(
+                            "empty transcript projection generation has ordinal bounds".to_string(),
+                        )
+                        .into());
+                    }
+                } else {
+                    let expected_last = ordinal_count.checked_sub(1).ok_or_else(|| {
+                        MemoryError::SerializationError(
+                            "transcript projection ordinal frontier underflow".to_string(),
+                        )
+                    })?;
+                    if first_ordinal != Some(0) || last_ordinal != Some(expected_last) {
+                        return Err(MemoryError::SerializationError(format!(
+                            "transcript projection generation is not contiguous: {}",
+                            batch.generation_id
+                        ))
+                        .into());
+                    }
+                }
+                let batch_first_ordinal =
+                    batch
+                        .items
+                        .first()
+                        .map(|item| item.ordinal)
+                        .ok_or_else(|| {
+                            MemoryError::SerializationError(
+                                "transcript projection batch must not be empty".to_string(),
+                            )
+                        })?;
+                if batch_first_ordinal != generation_frontier {
+                    return Ok(TranscriptProjectionApplyReceipt {
+                        operation_id: batch.operation_id,
+                        payload_digest: batch.payload_digest,
+                        authority: state.authority(&batch.conversation_id),
+                        status: TranscriptProjectionApplyStatus::Conflict {
+                            current_epoch: state.epoch,
+                            current_revision: state.revision,
+                            kind: TranscriptProjectionConflictKind::OrdinalDigest,
                         },
                     });
                 }
@@ -1838,6 +1921,174 @@ mod tests {
         guard
             .execute_batch(sql)
             .map_err(|error| memory_io_error("execute SQLite test fault", error))?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn projection_epoch_recreation_requires_a_matching_tombstone() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!("echo-test-{}", uuid::Uuid::new_v4()));
+        let store = SqliteConversationStore::new(dir.join("conversations.db"))?;
+
+        let absent = store
+            .ensure_projection_epoch(ensure_projection_request("absent-epoch", Some(7)))
+            .await?;
+        assert_eq!(
+            absent.status,
+            ConversationProjectionEpochStatus::EpochConflict
+        );
+        assert!(store.get_conversation("absent-epoch").await?.is_none());
+        assert_eq!(
+            store
+                .ensure_projection_epoch(ensure_projection_request("absent-epoch", None))
+                .await?
+                .status,
+            ConversationProjectionEpochStatus::Created
+        );
+        assert_eq!(
+            store
+                .ensure_projection_epoch(ensure_projection_request("absent-epoch", Some(1)))
+                .await?
+                .status,
+            ConversationProjectionEpochStatus::EpochConflict
+        );
+        assert_eq!(
+            store
+                .ensure_projection_epoch(ensure_projection_request("absent-epoch", None))
+                .await?
+                .status,
+            ConversationProjectionEpochStatus::Existing
+        );
+
+        store
+            .create_conversation(new_conversation("legacy-epoch"))
+            .await?;
+        store
+            .save_messages(
+                "legacy-epoch",
+                &[stored_message("legacy-epoch", None, "before-conflict")],
+            )
+            .await?;
+        let legacy = store
+            .ensure_projection_epoch(ensure_projection_request("legacy-epoch", Some(1)))
+            .await?;
+        assert_eq!(
+            legacy.status,
+            ConversationProjectionEpochStatus::EpochConflict
+        );
+        assert_eq!(store.count_messages("legacy-epoch").await?, 1);
+        assert_eq!(
+            store
+                .ensure_projection_epoch(ensure_projection_request("legacy-epoch", None))
+                .await?
+                .status,
+            ConversationProjectionEpochStatus::AdoptedLegacy
+        );
+
+        drop(store);
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn transcript_projection_rejects_non_contiguous_generation_batches() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!("echo-test-{}", uuid::Uuid::new_v4()));
+        let store = SqliteConversationStore::new(dir.join("conversations.db"))?;
+        store
+            .ensure_projection_epoch(ensure_projection_request("frontier", None))
+            .await?;
+
+        let ordinal_ten = store
+            .apply_transcript_projection(projection_batch(
+                "frontier",
+                1,
+                "generation-a",
+                10,
+                &["ordinal-10"],
+            )?)
+            .await?;
+        assert!(matches!(
+            ordinal_ten.status,
+            TranscriptProjectionApplyStatus::Conflict {
+                kind: TranscriptProjectionConflictKind::OrdinalDigest,
+                ..
+            }
+        ));
+        assert_eq!(ordinal_ten.authority.revision, 1);
+        assert_eq!(store.count_messages("frontier").await?, 0);
+
+        let first = projection_batch("frontier", 1, "generation-a", 0, &["ordinal-0"])?;
+        assert_eq!(
+            store
+                .apply_transcript_projection(first.clone())
+                .await?
+                .status,
+            TranscriptProjectionApplyStatus::Applied
+        );
+        assert_eq!(
+            store.apply_transcript_projection(first).await?.status,
+            TranscriptProjectionApplyStatus::AlreadyApplied
+        );
+
+        let gap = store
+            .apply_transcript_projection(projection_batch(
+                "frontier",
+                1,
+                "generation-a",
+                2,
+                &["ordinal-2"],
+            )?)
+            .await?;
+        assert!(matches!(
+            gap.status,
+            TranscriptProjectionApplyStatus::Conflict {
+                kind: TranscriptProjectionConflictKind::OrdinalDigest,
+                ..
+            }
+        ));
+        assert_eq!(gap.authority.revision, 2);
+        assert_eq!(store.count_messages("frontier").await?, 1);
+
+        assert_eq!(
+            store
+                .apply_transcript_projection(projection_batch(
+                    "frontier",
+                    1,
+                    "generation-a",
+                    1,
+                    &["ordinal-1"],
+                )?)
+                .await?
+                .status,
+            TranscriptProjectionApplyStatus::Applied
+        );
+        let late_zero = store
+            .apply_transcript_projection(projection_batch(
+                "frontier",
+                1,
+                "generation-a",
+                0,
+                &["late-ordinal-0"],
+            )?)
+            .await?;
+        assert!(matches!(
+            late_zero.status,
+            TranscriptProjectionApplyStatus::Conflict {
+                kind: TranscriptProjectionConflictKind::OrdinalDigest,
+                ..
+            }
+        ));
+        assert_eq!(late_zero.authority.revision, 3);
+        let messages = store.get_messages("frontier").await?;
+        assert_eq!(
+            messages
+                .iter()
+                .filter_map(|message| message.content.as_deref())
+                .collect::<Vec<_>>(),
+            vec!["ordinal-0", "ordinal-1"]
+        );
+
+        drop(store);
+        std::fs::remove_dir_all(dir)?;
         Ok(())
     }
 

@@ -1516,6 +1516,12 @@ impl ConversationStore for FileConversationStore {
                 let _conversation = store.authority.scan_barrier.read().map_err(poison)?;
                 let Some(mut record) = store.read_record(&conversation_id)? else {
                     let state = FileProjectionState::live();
+                    if request.expected_tombstone_epoch.is_some() {
+                        return Ok(ConversationProjectionEpochReceipt {
+                            authority: state.authority(&conversation_id),
+                            status: ConversationProjectionEpochStatus::EpochConflict,
+                        });
+                    }
                     store.create_conversation_sync_with_projection(
                         request.conversation,
                         Some(state.clone()),
@@ -1529,6 +1535,12 @@ impl ConversationStore for FileConversationStore {
                 let Some(state) = record.projection.as_mut() else {
                     let state = FileProjectionState::live();
                     let authority = state.authority(&conversation_id);
+                    if request.expected_tombstone_epoch.is_some() {
+                        return Ok(ConversationProjectionEpochReceipt {
+                            authority,
+                            status: ConversationProjectionEpochStatus::EpochConflict,
+                        });
+                    }
                     record.projection = Some(state);
                     store.write_manifest(&record)?;
                     return Ok(ConversationProjectionEpochReceipt {
@@ -1540,7 +1552,11 @@ impl ConversationStore for FileConversationStore {
                 if state.lifecycle == ConversationProjectionLifecycle::Live {
                     return Ok(ConversationProjectionEpochReceipt {
                         authority: state.authority(&conversation_id),
-                        status: ConversationProjectionEpochStatus::Existing,
+                        status: if request.expected_tombstone_epoch.is_some() {
+                            ConversationProjectionEpochStatus::EpochConflict
+                        } else {
+                            ConversationProjectionEpochStatus::Existing
+                        },
                     });
                 }
                 if request.expected_tombstone_epoch != Some(state.epoch) {
@@ -1625,6 +1641,47 @@ impl ConversationStore for FileConversationStore {
                         TranscriptProjectionApplyStatus::Fenced {
                             current_epoch: state.epoch,
                             lifecycle: state.lifecycle,
+                        },
+                    ));
+                }
+
+                let mut generation_frontier = 0_u64;
+                if let Some(ordinals) = state.ordinals.get(&batch.generation_id) {
+                    for ordinal in ordinals.keys() {
+                        if *ordinal != generation_frontier {
+                            return Err(MemoryError::SerializationError(format!(
+                                "transcript projection generation is not contiguous: {}",
+                                batch.generation_id
+                            ))
+                            .into());
+                        }
+                        generation_frontier =
+                            generation_frontier.checked_add(1).ok_or_else(|| {
+                                MemoryError::SerializationError(format!(
+                                    "transcript projection frontier exhausted: {}",
+                                    batch.generation_id
+                                ))
+                            })?;
+                    }
+                }
+                let first_ordinal =
+                    batch
+                        .items
+                        .first()
+                        .map(|item| item.ordinal)
+                        .ok_or_else(|| {
+                            MemoryError::SerializationError(
+                                "transcript projection batch must not be empty".to_string(),
+                            )
+                        })?;
+                if first_ordinal != generation_frontier {
+                    return Ok(Self::apply_receipt(
+                        &batch,
+                        current_authority,
+                        TranscriptProjectionApplyStatus::Conflict {
+                            current_epoch: state.epoch,
+                            current_revision: state.revision,
+                            kind: TranscriptProjectionConflictKind::OrdinalDigest,
                         },
                     ));
                 }
@@ -2202,6 +2259,172 @@ mod tests {
                     MemoryError::ManagedConversationRequiresProjection(_)
                 )
         )
+    }
+
+    #[tokio::test]
+    async fn projection_epoch_recreation_requires_a_matching_tombstone() -> TestResult {
+        let base = tmp_base();
+        let store = FileConversationStore::new(&base)?;
+
+        let absent = store
+            .ensure_projection_epoch(ensure_projection_request("absent-epoch", Some(7)))
+            .await?;
+        assert_eq!(
+            absent.status,
+            ConversationProjectionEpochStatus::EpochConflict
+        );
+        assert!(store.get_conversation("absent-epoch").await?.is_none());
+        assert_eq!(
+            store
+                .ensure_projection_epoch(ensure_projection_request("absent-epoch", None))
+                .await?
+                .status,
+            ConversationProjectionEpochStatus::Created
+        );
+        assert_eq!(
+            store
+                .ensure_projection_epoch(ensure_projection_request("absent-epoch", Some(1)))
+                .await?
+                .status,
+            ConversationProjectionEpochStatus::EpochConflict
+        );
+        assert_eq!(
+            store
+                .ensure_projection_epoch(ensure_projection_request("absent-epoch", None))
+                .await?
+                .status,
+            ConversationProjectionEpochStatus::Existing
+        );
+
+        store
+            .create_conversation(new_conv("legacy-epoch", Some("legacy")))
+            .await?;
+        store
+            .save_messages(
+                "legacy-epoch",
+                &[projection_message("legacy-epoch", "before-conflict")],
+            )
+            .await?;
+        let legacy = store
+            .ensure_projection_epoch(ensure_projection_request("legacy-epoch", Some(1)))
+            .await?;
+        assert_eq!(
+            legacy.status,
+            ConversationProjectionEpochStatus::EpochConflict
+        );
+        assert_eq!(store.count_messages("legacy-epoch").await?, 1);
+        assert_eq!(
+            store
+                .ensure_projection_epoch(ensure_projection_request("legacy-epoch", None))
+                .await?
+                .status,
+            ConversationProjectionEpochStatus::AdoptedLegacy
+        );
+
+        std::fs::remove_dir_all(base)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn transcript_projection_rejects_non_contiguous_generation_batches() -> TestResult {
+        let base = tmp_base();
+        let store = FileConversationStore::new(&base)?;
+        store
+            .ensure_projection_epoch(ensure_projection_request("frontier", None))
+            .await?;
+
+        let ordinal_ten = store
+            .apply_transcript_projection(projection_batch(
+                "frontier",
+                1,
+                "generation-a",
+                10,
+                &["ordinal-10"],
+            )?)
+            .await?;
+        assert!(matches!(
+            ordinal_ten.status,
+            TranscriptProjectionApplyStatus::Conflict {
+                kind: TranscriptProjectionConflictKind::OrdinalDigest,
+                ..
+            }
+        ));
+        assert_eq!(ordinal_ten.authority.revision, 1);
+        assert_eq!(store.count_messages("frontier").await?, 0);
+
+        let first = projection_batch("frontier", 1, "generation-a", 0, &["ordinal-0"])?;
+        assert_eq!(
+            store
+                .apply_transcript_projection(first.clone())
+                .await?
+                .status,
+            TranscriptProjectionApplyStatus::Applied
+        );
+        assert_eq!(
+            store.apply_transcript_projection(first).await?.status,
+            TranscriptProjectionApplyStatus::AlreadyApplied
+        );
+
+        let gap = store
+            .apply_transcript_projection(projection_batch(
+                "frontier",
+                1,
+                "generation-a",
+                2,
+                &["ordinal-2"],
+            )?)
+            .await?;
+        assert!(matches!(
+            gap.status,
+            TranscriptProjectionApplyStatus::Conflict {
+                kind: TranscriptProjectionConflictKind::OrdinalDigest,
+                ..
+            }
+        ));
+        assert_eq!(gap.authority.revision, 2);
+        assert_eq!(store.count_messages("frontier").await?, 1);
+
+        assert_eq!(
+            store
+                .apply_transcript_projection(projection_batch(
+                    "frontier",
+                    1,
+                    "generation-a",
+                    1,
+                    &["ordinal-1"],
+                )?)
+                .await?
+                .status,
+            TranscriptProjectionApplyStatus::Applied
+        );
+        let late_zero = store
+            .apply_transcript_projection(projection_batch(
+                "frontier",
+                1,
+                "generation-a",
+                0,
+                &["late-ordinal-0"],
+            )?)
+            .await?;
+        assert!(matches!(
+            late_zero.status,
+            TranscriptProjectionApplyStatus::Conflict {
+                kind: TranscriptProjectionConflictKind::OrdinalDigest,
+                ..
+            }
+        ));
+        assert_eq!(late_zero.authority.revision, 3);
+        let messages = store.get_messages("frontier").await?;
+        assert_eq!(
+            messages
+                .iter()
+                .filter_map(|message| message.content.as_deref())
+                .collect::<Vec<_>>(),
+            vec!["ordinal-0", "ordinal-1"]
+        );
+
+        std::fs::remove_dir_all(base)?;
+        Ok(())
     }
 
     #[tokio::test]
