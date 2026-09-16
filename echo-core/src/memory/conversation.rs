@@ -409,6 +409,106 @@ impl ManagedConversationImport {
     }
 }
 
+/// Epoch- and revision-fenced metadata mutation for a managed conversation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManagedConversationMetadataUpdate {
+    pub schema_version: u16,
+    pub operation_id: String,
+    pub payload_digest: String,
+    pub conversation_id: String,
+    pub expected_epoch: u64,
+    pub expected_revision: u64,
+    pub title: Option<String>,
+    pub summary: Option<String>,
+    pub compressed_before_id: Option<i64>,
+}
+
+impl ManagedConversationMetadataUpdate {
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare(
+        conversation_id: impl Into<String>,
+        expected_epoch: u64,
+        expected_revision: u64,
+        title: Option<String>,
+        summary: Option<String>,
+        compressed_before_id: Option<i64>,
+    ) -> Result<Self> {
+        let conversation_id = conversation_id.into();
+        if conversation_id.trim().is_empty() {
+            return Err(projection_error(
+                "managed conversation metadata identity must not be empty",
+            ));
+        }
+        validate_managed_epoch(expected_epoch)?;
+        let payload_digest = digest_serialized(&ManagedMetadataIdentity {
+            schema_version: TRANSCRIPT_PROJECTION_SCHEMA_VERSION,
+            conversation_id: &conversation_id,
+            expected_epoch,
+            expected_revision,
+            title: title.as_deref(),
+            summary: summary.as_deref(),
+            compressed_before_id,
+        })?;
+        Ok(Self {
+            schema_version: TRANSCRIPT_PROJECTION_SCHEMA_VERSION,
+            operation_id: format!("managed-conversation-metadata-v1:{payload_digest}"),
+            payload_digest,
+            conversation_id,
+            expected_epoch,
+            expected_revision,
+            title,
+            summary,
+            compressed_before_id,
+        })
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if self.conversation_id.trim().is_empty()
+            || self.schema_version != TRANSCRIPT_PROJECTION_SCHEMA_VERSION
+        {
+            return Err(projection_error(
+                "invalid managed conversation metadata update",
+            ));
+        }
+        validate_managed_epoch(self.expected_epoch)?;
+        let digest = digest_serialized(&ManagedMetadataIdentity {
+            schema_version: self.schema_version,
+            conversation_id: &self.conversation_id,
+            expected_epoch: self.expected_epoch,
+            expected_revision: self.expected_revision,
+            title: self.title.as_deref(),
+            summary: self.summary.as_deref(),
+            compressed_before_id: self.compressed_before_id,
+        })?;
+        if digest != self.payload_digest
+            || self.operation_id != format!("managed-conversation-metadata-v1:{digest}")
+        {
+            return Err(projection_error(
+                "managed conversation metadata identity does not match its payload",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ManagedConversationMetadataUpdateStatus {
+    Updated,
+    AlreadyUpdated,
+    EpochConflict,
+    RevisionConflict,
+    IdentityConflict,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManagedConversationMetadataUpdateReceipt {
+    pub operation_id: String,
+    pub payload_digest: String,
+    pub authority: ConversationProjectionAuthority,
+    pub status: ManagedConversationMetadataUpdateStatus,
+}
+
 /// Request to fence and delete one managed conversation incarnation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ManagedConversationDelete {
@@ -511,6 +611,17 @@ struct ManagedDeleteIdentity<'a> {
     schema_version: u16,
     conversation_id: &'a str,
     expected_epoch: u64,
+}
+
+#[derive(Serialize)]
+struct ManagedMetadataIdentity<'a> {
+    schema_version: u16,
+    conversation_id: &'a str,
+    expected_epoch: u64,
+    expected_revision: u64,
+    title: Option<&'a str>,
+    summary: Option<&'a str>,
+    compressed_before_id: Option<i64>,
 }
 
 fn validate_managed_messages(conversation_id: &str, messages: &[StoredMessage]) -> Result<()> {
@@ -703,6 +814,16 @@ pub trait ConversationStore: Send + Sync {
         })
     }
 
+    /// Update managed metadata only when epoch and revision still match.
+    fn update_managed_conversation<'a>(
+        &'a self,
+        _request: ManagedConversationMetadataUpdate,
+    ) -> BoxFuture<'a, Result<ManagedConversationMetadataUpdateReceipt>> {
+        Box::pin(async {
+            Err(MemoryError::Unsupported("managed conversation metadata update".to_string()).into())
+        })
+    }
+
     /// Delete one managed incarnation behind an epoch fence and stable receipt.
     fn delete_managed_conversation<'a>(
         &'a self,
@@ -849,6 +970,22 @@ mod transcript_projection_contract_tests {
         assert_ne!(first.payload_digest, changed.payload_digest);
         first.validate()?;
         changed.validate()?;
+        Ok(())
+    }
+
+    #[test]
+    fn managed_metadata_identity_rejects_late_revision_rebinding() -> Result<()> {
+        let mut request = ManagedConversationMetadataUpdate::prepare(
+            "conversation",
+            2,
+            7,
+            Some("title".to_string()),
+            Some("summary".to_string()),
+            Some(42),
+        )?;
+        request.expected_revision = 8;
+
+        assert!(request.validate().is_err());
         Ok(())
     }
 }

@@ -35,10 +35,11 @@ pub use echo_core::memory::conversation::{
     ConversationProjectionEpochStatus, ConversationProjectionLifecycle, ConversationStore,
     EnsureConversationProjectionRequest, ManagedConversationDelete,
     ManagedConversationDeleteReceipt, ManagedConversationDeleteStatus, ManagedConversationImport,
-    NewConversation, StoredMessage, TranscriptProjectionApplyReceipt,
-    TranscriptProjectionApplyStatus, TranscriptProjectionBatch, TranscriptProjectionConflictKind,
-    TranscriptProjectionErrorClass, TranscriptProjectionItem, TranscriptProjectionSettlement,
-    TranscriptProjectionSettlementStatus,
+    ManagedConversationMetadataUpdate, ManagedConversationMetadataUpdateReceipt,
+    ManagedConversationMetadataUpdateStatus, NewConversation, StoredMessage,
+    TranscriptProjectionApplyReceipt, TranscriptProjectionApplyStatus, TranscriptProjectionBatch,
+    TranscriptProjectionConflictKind, TranscriptProjectionErrorClass, TranscriptProjectionItem,
+    TranscriptProjectionSettlement, TranscriptProjectionSettlementStatus,
 };
 pub use echo_core::memory::embedder::Embedder;
 pub use echo_core::memory::store::{SearchMode, SearchQuery, Store, StoreItem};

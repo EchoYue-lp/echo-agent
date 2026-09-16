@@ -26,10 +26,11 @@ pub use conversation::{
     ConversationProjectionEpochStatus, ConversationProjectionLifecycle, ConversationStore,
     EnsureConversationProjectionRequest, ManagedConversationDelete,
     ManagedConversationDeleteReceipt, ManagedConversationDeleteStatus, ManagedConversationImport,
-    NewConversation, StoredMessage, TranscriptProjectionApplyReceipt,
-    TranscriptProjectionApplyStatus, TranscriptProjectionBatch, TranscriptProjectionConflictKind,
-    TranscriptProjectionErrorClass, TranscriptProjectionItem, TranscriptProjectionSettlement,
-    TranscriptProjectionSettlementStatus,
+    ManagedConversationMetadataUpdate, ManagedConversationMetadataUpdateReceipt,
+    ManagedConversationMetadataUpdateStatus, NewConversation, StoredMessage,
+    TranscriptProjectionApplyReceipt, TranscriptProjectionApplyStatus, TranscriptProjectionBatch,
+    TranscriptProjectionConflictKind, TranscriptProjectionErrorClass, TranscriptProjectionItem,
+    TranscriptProjectionSettlement, TranscriptProjectionSettlementStatus,
 };
 pub use embedder::Embedder;
 pub use store::{SearchMode, SearchQuery, Store, StoreItem};
