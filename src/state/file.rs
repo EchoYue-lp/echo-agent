@@ -13,8 +13,9 @@
 //!
 //! - **Path-safe ids.** Conversation ids are sanitized before joining into the
 //!   path (rejecting `/`, `\`, `..`, empty) to prevent directory escapes.
-//! - **Corrupt JSON is an error.** A malformed owner record surfaces as
-//!   `ReactError::Other` rather than silently returning `None`.
+//! - **Corrupt JSON is an error.** A malformed owner record surfaces as a
+//!   typed runtime-state serialization error rather than silently returning
+//!   `None`.
 //! - **Unique temp names.** Each atomic write uses a uuid-suffixed temp file
 //!   (no cross-write collisions; multi-process belt-and-suspenders).
 //!
@@ -41,8 +42,9 @@ use super::{
     RuntimeGenerationRetireRequest, RuntimeGenerationRetireStatus, RuntimeScopeAuthority,
     RuntimeScopeLifecycle, RuntimeStateCapability, RuntimeStateClearReceipt,
     RuntimeStateExpectedVersion, RuntimeStateScopeClearReceipt, RuntimeStateStore,
-    RuntimeStateVersion, ScopeRetirementAdvance, ScopeRetirementItem, ScopeRetirementItemStatus,
-    ScopeRetirementManifest, ScopeRetirementReceipt, ScopeRetirementRequest, ScopeRetirementStatus,
+    RuntimeStateVersion, RuntimeTranscriptAckRequest, ScopeRetirementAdvance, ScopeRetirementItem,
+    ScopeRetirementItemStatus, ScopeRetirementManifest, ScopeRetirementReceipt,
+    ScopeRetirementRequest, ScopeRetirementStatus,
 };
 
 const SCOPE_INDEX_VERSION: u8 = 1;
@@ -87,6 +89,14 @@ struct RuntimeStateOwner {
     cas_expected_state_version: Option<RuntimeStateExpectedVersion>,
     #[serde(default)]
     cas_expected_scope_revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    transcript_ack_proof: Option<RuntimeTranscriptAckProof>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+struct RuntimeTranscriptAckProof {
+    operation_id: String,
+    payload_digest: String,
 }
 
 fn active_scope_lifecycle() -> RuntimeScopeLifecycle {
@@ -144,18 +154,20 @@ impl FileRuntimeStateStore {
     pub fn new(base: impl AsRef<Path>) -> Result<Self, ReactError> {
         let base = base.as_ref().join("runtime_state");
         create_dir_all_durable(&base)
-            .map_err(|e| ReactError::Other(format!("create runtime_state dir: {e}")))?;
+            .map_err(|error| Self::to_react_err(format!("create runtime_state dir: {error}")))?;
         create_dir_all_durable(&base.join("_runtime_owners"))
-            .map_err(|e| ReactError::Other(format!("create runtime owners dir: {e}")))?;
+            .map_err(|error| Self::to_react_err(format!("create runtime owners dir: {error}")))?;
         create_dir_all_durable(&base.join("_scope_index"))
-            .map_err(|e| ReactError::Other(format!("create runtime scope dir: {e}")))?;
-        create_dir_all_durable(&base.join("_scope_owners"))
-            .map_err(|e| ReactError::Other(format!("create runtime scope owners dir: {e}")))?;
-        let base = std::fs::canonicalize(&base)
-            .map_err(|e| ReactError::Other(format!("canonicalize runtime_state dir: {e}")))?;
+            .map_err(|error| Self::to_react_err(format!("create runtime scope dir: {error}")))?;
+        create_dir_all_durable(&base.join("_scope_owners")).map_err(|error| {
+            Self::to_react_err(format!("create runtime scope owners dir: {error}"))
+        })?;
+        let base = std::fs::canonicalize(&base).map_err(|error| {
+            Self::to_react_err(format!("canonicalize runtime_state dir: {error}"))
+        })?;
         let mut registry = runtime_state_authorities()
             .lock()
-            .map_err(|error| ReactError::Other(format!("runtime authority poisoned: {error}")))?;
+            .map_err(|error| Self::to_react_err(format!("runtime authority poisoned: {error}")))?;
         let authority = match registry.get(&base).and_then(Weak::upgrade) {
             Some(authority) => authority,
             None => {
@@ -233,7 +245,11 @@ impl FileRuntimeStateStore {
     }
 
     fn to_react_err(e: impl std::fmt::Display) -> ReactError {
-        ReactError::Other(format!("FileRuntimeStateStore: {e}"))
+        echo_core::error::RuntimeStateError::Io(format!("FileRuntimeStateStore: {e}")).into()
+    }
+
+    fn invalid_state(message: impl Into<String>) -> ReactError {
+        echo_core::error::RuntimeStateError::SerializationError(message.into()).into()
     }
 
     fn managed_state_error(message: impl Into<String>) -> ReactError {
@@ -259,12 +275,22 @@ impl FileRuntimeStateStore {
         Ok(format!("{:x}", Sha256::digest(encoded)))
     }
 
+    fn serialized_eq<T: Serialize>(left: &T, right: &T) -> crate::error::Result<bool> {
+        let left = serde_json::to_vec(left).map_err(|error| {
+            Self::invalid_state(format!("failed to serialize runtime payload: {error}"))
+        })?;
+        let right = serde_json::to_vec(right).map_err(|error| {
+            Self::invalid_state(format!("failed to serialize runtime payload: {error}"))
+        })?;
+        Ok(left == right)
+    }
+
     fn owner_state_version(owner: &RuntimeStateOwner) -> crate::error::Result<RuntimeStateVersion> {
         if let Some(version) = owner.state_version.as_ref() {
             return Ok(version.clone());
         }
         let checkpoint = owner.checkpoint.as_ref().ok_or_else(|| {
-            Self::to_react_err(format!(
+            Self::invalid_state(format!(
                 "legacy runtime state {} is missing its checkpoint",
                 owner.runtime_state_id
             ))
@@ -311,22 +337,169 @@ impl FileRuntimeStateStore {
         let _safe_scope = safe_segment(&request.scope_id)?;
         let _safe_runtime = safe_segment(&request.runtime_state_id)?;
         if request.checkpoint.conversation_id != request.runtime_state_id {
-            return Err(Self::to_react_err(
+            return Err(Self::invalid_state(
                 "checkpoint identity does not match CAS runtime identity",
             ));
         }
         if !Self::epoch_is_valid(request.conversation_epoch) {
-            return Err(Self::to_react_err(
+            return Err(Self::invalid_state(
                 "conversation epoch is outside the supported range",
             ));
         }
         let payload = request.checkpoint.restore_managed_runtime_payload()?;
-        if let Some(pending) = payload.pending_transcript_projection
+        if let Some(pending) = payload.pending_transcript_projection.as_ref()
             && (pending.batch.conversation_id != request.scope_id
-                || Some(pending.batch.conversation_epoch) != request.conversation_epoch)
+                || Some(pending.batch.conversation_epoch) != request.conversation_epoch
+                || payload.transcript_projection.as_ref() != Some(&pending.cursor_before))
         {
-            return Err(Self::to_react_err(
-                "pending transcript projection does not match CAS scope and epoch",
+            return Err(Self::invalid_state(
+                "pending transcript projection does not match CAS scope, epoch, and cursor",
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_pending_transition(
+        owner: Option<&RuntimeStateOwner>,
+        checkpoint: &AgentCheckpoint,
+    ) -> crate::error::Result<()> {
+        let next = checkpoint.restore_managed_runtime_payload()?;
+        let current = match owner {
+            Some(owner)
+                if matches!(
+                    owner.state_version,
+                    Some(RuntimeStateVersion::Managed { .. })
+                ) =>
+            {
+                Some(
+                    owner
+                        .checkpoint
+                        .as_ref()
+                        .ok_or_else(|| {
+                            Self::invalid_state(format!(
+                                "managed runtime state {} lost its checkpoint",
+                                owner.runtime_state_id
+                            ))
+                        })?
+                        .restore_managed_runtime_payload()?,
+                )
+            }
+            _ => None,
+        };
+        let current_revision = owner
+            .and_then(|owner| owner.state_version.as_ref())
+            .map(Self::state_revision)
+            .unwrap_or(0);
+        let resulting_revision =
+            Self::next_revision(current_revision, &checkpoint.conversation_id)?;
+        if let (Some(owner), Some(current_pending)) = (
+            owner,
+            current
+                .as_ref()
+                .and_then(|payload| payload.pending_transcript_projection.as_ref()),
+        ) && current_pending.base_runtime_revision
+            != owner
+                .state_version
+                .as_ref()
+                .map(Self::state_revision)
+                .unwrap_or(0)
+        {
+            return Err(Self::invalid_state(
+                "current pending transcript revision does not match runtime authority",
+            ));
+        }
+        let messages_match = match current.as_ref() {
+            Some(current) => Self::serialized_eq(&current.messages, &next.messages)?,
+            None => true,
+        };
+        match (
+            current
+                .as_ref()
+                .and_then(|payload| payload.pending_transcript_projection.as_ref()),
+            next.pending_transcript_projection.as_ref(),
+        ) {
+            (None, None) => Ok(()),
+            (None, Some(next_pending))
+                if next_pending.base_runtime_revision == resulting_revision =>
+            {
+                Ok(())
+            }
+            (None, Some(_)) => Err(Self::invalid_state(
+                "new pending transcript revision does not match resulting runtime revision",
+            )),
+            (Some(_), None) => Err(Self::managed_state_error(
+                "pending transcript projection requires proof-carrying acknowledgement",
+            )),
+            (Some(current_pending), Some(next_pending))
+                if current_pending.batch == next_pending.batch
+                    && current_pending.cursor_before == next_pending.cursor_before
+                    && current_pending.cursor_after == next_pending.cursor_after
+                    && next_pending.base_runtime_revision == resulting_revision
+                    && current_pending.prepared_at == next_pending.prepared_at
+                    && current_pending
+                        .attempt
+                        .checked_add(1)
+                        .is_some_and(|attempt| next_pending.attempt == attempt)
+                    && next_pending.last_attempt_class.is_some()
+                    && next_pending
+                        .last_error
+                        .as_deref()
+                        .is_some_and(|error| !error.trim().is_empty())
+                    && messages_match
+                    && current.as_ref().is_some_and(|current| {
+                        current.transcript_projection == next.transcript_projection
+                    }) =>
+            {
+                Ok(())
+            }
+            (Some(_), Some(_)) => Err(Self::managed_state_error(
+                "pending transcript projection identity is immutable until acknowledgement",
+            )),
+        }
+    }
+
+    fn validate_transcript_ack(
+        owner: &RuntimeStateOwner,
+        request: &RuntimeTranscriptAckRequest,
+    ) -> crate::error::Result<()> {
+        let checkpoint = owner.checkpoint.as_ref().ok_or_else(|| {
+            Self::invalid_state(format!(
+                "managed runtime state {} lost its checkpoint",
+                owner.runtime_state_id
+            ))
+        })?;
+        let current = checkpoint.restore_managed_runtime_payload()?;
+        let pending = current.pending_transcript_projection.ok_or_else(|| {
+            Self::managed_state_error(
+                "runtime transcript acknowledgement has no current pending projection",
+            )
+        })?;
+        let current_revision = owner
+            .state_version
+            .as_ref()
+            .map(Self::state_revision)
+            .unwrap_or(0);
+        if pending.base_runtime_revision != current_revision {
+            return Err(Self::invalid_state(
+                "current pending transcript revision does not match runtime authority",
+            ));
+        }
+        let acknowledged = request.checkpoint.restore_managed_runtime_payload()?;
+        let messages_match = Self::serialized_eq(&acknowledged.messages, &current.messages)?;
+        if pending.batch.operation_id != request.projection_receipt.operation_id
+            || pending.batch.payload_digest != request.projection_receipt.payload_digest
+            || pending.batch.conversation_id != request.scope_id
+            || pending.batch.generation_id != request.runtime_state_id
+            || pending.batch.conversation_epoch != request.conversation_epoch
+            || acknowledged.transcript_projection.as_ref() != Some(&pending.cursor_after)
+            || !messages_match
+            || request.checkpoint.current_plan != checkpoint.current_plan
+            || request.checkpoint.active_skills != checkpoint.active_skills
+            || request.checkpoint.blocked_reason != checkpoint.blocked_reason
+            || request.checkpoint.working_dir != checkpoint.working_dir
+        {
+            return Err(Self::managed_state_error(
+                "runtime transcript acknowledgement does not match current pending projection",
             ));
         }
         Ok(())
@@ -372,6 +545,7 @@ impl FileRuntimeStateStore {
             scope_lifecycle: RuntimeScopeLifecycle::Active,
             cas_expected_state_version: None,
             cas_expected_scope_revision: 0,
+            transcript_ack_proof: None,
         })
     }
 
@@ -382,12 +556,12 @@ impl FileRuntimeStateStore {
                 .map(|_removed| ())
                 .map_err(Self::to_react_err);
         }
-        let parent = path.parent().ok_or_else(|| {
-            ReactError::Other("runtime state scope index has no parent".to_string())
-        })?;
+        let parent = path
+            .parent()
+            .ok_or_else(|| Self::invalid_state("runtime state scope index has no parent"))?;
         create_dir_all_durable(parent).map_err(Self::to_react_err)?;
         let raw = serde_json::to_vec_pretty(index)
-            .map_err(|error| ReactError::Other(format!("serialize scope index: {error}")))?;
+            .map_err(|error| Self::invalid_state(format!("serialize scope index: {error}")))?;
         echo_core::utils::fs::atomic_write(&path, &raw).map_err(Self::to_react_err)
     }
 
@@ -402,39 +576,40 @@ impl FileRuntimeStateStore {
             Err(error) => return Err(Self::to_react_err(error)),
         };
         let owner: RuntimeScopeOwner = serde_json::from_str(&raw)
-            .map_err(|error| Self::to_react_err(format!("parse {}: {error}", path.display())))?;
+            .map_err(|error| Self::invalid_state(format!("parse {}: {error}", path.display())))?;
         if owner.version != RUNTIME_SCOPE_RECORD_VERSION || owner.authority.scope_id != scope_id {
-            return Err(Self::to_react_err(format!(
+            return Err(Self::invalid_state(format!(
                 "runtime scope owner identity mismatch at {}",
                 path.display()
             )));
         }
         if owner.authority.revision == 0 {
-            return Err(Self::to_react_err(format!(
+            return Err(Self::invalid_state(format!(
                 "managed runtime scope has zero revision at {}",
                 path.display()
             )));
         }
         if !Self::epoch_is_valid(owner.authority.conversation_epoch) {
-            return Err(Self::to_react_err(format!(
+            return Err(Self::invalid_state(format!(
                 "runtime scope has an invalid conversation epoch at {}",
                 path.display()
             )));
         }
-        Self::validate_scope_owner(&owner)
-            .map_err(|error| Self::to_react_err(format!("{}: {error}", path.display())))?;
+        Self::validate_scope_owner(&owner)?;
+        self.validate_retirement_tombstones_sync(&owner)?;
         Ok(Some(owner))
     }
 
     fn write_scope_owner_sync(&self, owner: &RuntimeScopeOwner) -> crate::error::Result<()> {
         Self::validate_scope_owner(owner)?;
+        self.validate_retirement_tombstones_sync(owner)?;
         let path = self.scope_owner_path(&owner.authority.scope_id)?;
         let parent = path.parent().ok_or_else(|| {
-            Self::to_react_err("runtime scope owner path has no parent directory")
+            Self::invalid_state("runtime scope owner path has no parent directory")
         })?;
         create_dir_all_durable(parent).map_err(Self::to_react_err)?;
         let raw = serde_json::to_vec_pretty(owner)
-            .map_err(|error| Self::to_react_err(format!("serialize runtime scope: {error}")))?;
+            .map_err(|error| Self::invalid_state(format!("serialize runtime scope: {error}")))?;
         echo_core::utils::fs::atomic_write(&path, &raw).map_err(Self::to_react_err)
     }
 
@@ -443,19 +618,19 @@ impl FileRuntimeStateStore {
             (RuntimeScopeLifecycle::Retiring, Some(manifest)) => {
                 if owner.authority.conversation_epoch != Some(manifest.expected_conversation_epoch)
                 {
-                    return Err(Self::to_react_err(
+                    return Err(Self::invalid_state(
                         "retiring runtime scope manifest epoch does not match its authority",
                     ));
                 }
-                Self::validate_retirement_manifest(&owner.authority.scope_id, manifest)?;
+                manifest.validate(&owner.authority.scope_id)?;
             }
             (RuntimeScopeLifecycle::Retiring, None) => {
-                return Err(Self::to_react_err(
+                return Err(Self::invalid_state(
                     "retiring runtime scope is missing its manifest",
                 ));
             }
             (RuntimeScopeLifecycle::Active | RuntimeScopeLifecycle::Tombstoned, Some(_)) => {
-                return Err(Self::to_react_err(
+                return Err(Self::invalid_state(
                     "non-retiring runtime scope must not retain a retirement manifest",
                 ));
             }
@@ -463,38 +638,62 @@ impl FileRuntimeStateStore {
         }
         for receipt in &owner.completed_retirements {
             if receipt.scope.scope_id != owner.authority.scope_id {
-                return Err(Self::to_react_err(
+                return Err(Self::invalid_state(
                     "completed retirement receipt belongs to a different scope",
                 ));
             }
-            Self::validate_retirement_manifest(&owner.authority.scope_id, &receipt.manifest)?;
+            if receipt.status != ScopeRetirementStatus::Completed
+                || receipt.scope.lifecycle != RuntimeScopeLifecycle::Tombstoned
+                || receipt.scope.conversation_epoch
+                    != Some(receipt.manifest.expected_conversation_epoch)
+            {
+                return Err(Self::invalid_state(
+                    "completed retirement history contains a non-completed receipt",
+                ));
+            }
+            receipt.validate()?;
         }
         Ok(())
     }
 
-    fn validate_retirement_manifest(
-        scope_id: &str,
-        manifest: &ScopeRetirementManifest,
+    fn validate_retirement_tombstones_sync(
+        &self,
+        owner: &RuntimeScopeOwner,
     ) -> crate::error::Result<()> {
-        let delete = crate::memory::ManagedConversationDelete::prepare(
-            scope_id,
-            manifest.expected_conversation_epoch,
-        )?;
-        if manifest.delete_operation_id != delete.operation_id
-            || manifest.payload_digest != delete.payload_digest
-        {
-            return Err(Self::to_react_err(
-                "scope retirement manifest identity does not match its canonical delete",
-            ));
-        }
-        if let Some(receipt) = manifest.conversation_delete_receipt.as_ref()
-            && (receipt.operation_id != manifest.delete_operation_id
-                || receipt.payload_digest != manifest.payload_digest
-                || receipt.deleted_epoch != manifest.expected_conversation_epoch)
-        {
-            return Err(Self::to_react_err(
-                "conversation delete receipt does not match its retirement manifest",
-            ));
+        let manifests = owner.current_retirement.iter().chain(
+            owner
+                .completed_retirements
+                .iter()
+                .map(|receipt| &receipt.manifest),
+        );
+        for manifest in manifests {
+            for item in manifest
+                .items
+                .iter()
+                .filter(|item| item.status == ScopeRetirementItemStatus::DroppedByDelete)
+            {
+                let runtime = self
+                    .read_runtime_owner_sync(&item.runtime_state_id)?
+                    .ok_or_else(|| {
+                        Self::invalid_state(format!(
+                            "dropped runtime state {} is missing its retirement tombstone",
+                            item.runtime_state_id
+                        ))
+                    })?;
+                if runtime.scope_id != owner.authority.scope_id
+                    || runtime.phase != RuntimeStatePhase::Deleting
+                    || !matches!(
+                        runtime.state_version.as_ref(),
+                        Some(RuntimeStateVersion::Retired { operation_id, .. })
+                            if operation_id == &manifest.delete_operation_id
+                    )
+                {
+                    return Err(Self::invalid_state(format!(
+                        "dropped runtime state {} lacks the matching retirement tombstone",
+                        item.runtime_state_id
+                    )));
+                }
+            }
         }
         Ok(())
     }
@@ -578,43 +777,76 @@ impl FileRuntimeStateStore {
             Err(error) => return Err(Self::to_react_err(error)),
         };
         let owner: RuntimeStateOwner = serde_json::from_str(&raw)
-            .map_err(|error| ReactError::Other(format!("parse {}: {error}", path.display())))?;
+            .map_err(|error| Self::invalid_state(format!("parse {}: {error}", path.display())))?;
         if !matches!(
             owner.version,
             LEGACY_RUNTIME_STATE_RECORD_VERSION | RUNTIME_STATE_RECORD_VERSION
         ) || owner.runtime_state_id != runtime_state_id
         {
-            return Err(ReactError::Other(format!(
+            return Err(Self::invalid_state(format!(
                 "runtime state owner identity mismatch at {}",
                 path.display()
             )));
         }
         let _safe = safe_segment(&owner.scope_id)?;
         if owner.version == LEGACY_RUNTIME_STATE_RECORD_VERSION && owner.state_version.is_some() {
-            return Err(Self::to_react_err(format!(
+            return Err(Self::invalid_state(format!(
                 "legacy runtime state unexpectedly contains managed metadata at {}",
+                path.display()
+            )));
+        }
+        if owner.version == LEGACY_RUNTIME_STATE_RECORD_VERSION
+            && owner.transcript_ack_proof.is_some()
+        {
+            return Err(Self::invalid_state(format!(
+                "legacy runtime state unexpectedly contains transcript acknowledgement proof at {}",
                 path.display()
             )));
         }
         if owner.version == RUNTIME_STATE_RECORD_VERSION
             && (owner.state_version.is_none() || owner.scope_revision == 0)
         {
-            return Err(Self::to_react_err(format!(
+            return Err(Self::invalid_state(format!(
                 "managed runtime state is missing revision metadata at {}",
                 path.display()
             )));
         }
         if matches!(owner.state_version, Some(RuntimeStateVersion::Absent)) {
-            return Err(Self::to_react_err(format!(
+            return Err(Self::invalid_state(format!(
                 "runtime state persisted an absent version at {}",
                 path.display()
             )));
         }
         if !Self::epoch_is_valid(owner.conversation_epoch) {
-            return Err(Self::to_react_err(format!(
+            return Err(Self::invalid_state(format!(
                 "runtime state has an invalid conversation epoch at {}",
                 path.display()
             )));
+        }
+        if let Some(proof) = owner.transcript_ack_proof.as_ref() {
+            let payload = owner
+                .checkpoint
+                .as_ref()
+                .ok_or_else(|| {
+                    Self::invalid_state(format!(
+                        "acknowledged runtime state is missing checkpoint at {}",
+                        path.display()
+                    ))
+                })?
+                .restore_managed_runtime_payload()?;
+            if proof.operation_id.trim().is_empty()
+                || proof.payload_digest.trim().is_empty()
+                || !matches!(
+                    owner.state_version,
+                    Some(RuntimeStateVersion::Managed { .. })
+                )
+                || payload.pending_transcript_projection.is_some()
+            {
+                return Err(Self::invalid_state(format!(
+                    "runtime transcript acknowledgement proof is corrupt at {}",
+                    path.display()
+                )));
+            }
         }
         match owner.phase {
             RuntimeStatePhase::Active => {
@@ -623,7 +855,7 @@ impl FileRuntimeStateStore {
                     .as_ref()
                     .is_none_or(|checkpoint| checkpoint.conversation_id != runtime_state_id)
                 {
-                    return Err(ReactError::Other(format!(
+                    return Err(Self::invalid_state(format!(
                         "active runtime state record is missing checkpoint at {}",
                         path.display()
                     )));
@@ -631,7 +863,7 @@ impl FileRuntimeStateStore {
             }
             RuntimeStatePhase::Deleting => {
                 if owner.checkpoint.is_some() {
-                    return Err(ReactError::Other(format!(
+                    return Err(Self::invalid_state(format!(
                         "deleting runtime state record retained checkpoint at {}",
                         path.display()
                     )));
@@ -642,7 +874,7 @@ impl FileRuntimeStateStore {
                         Some(RuntimeStateVersion::Retired { .. })
                     )
                 {
-                    return Err(Self::to_react_err(format!(
+                    return Err(Self::invalid_state(format!(
                         "managed deleting runtime state is missing a retirement tombstone at {}",
                         path.display()
                     )));
@@ -669,14 +901,35 @@ impl FileRuntimeStateStore {
     }
 
     fn write_runtime_owner_sync(&self, owner: &RuntimeStateOwner) -> crate::error::Result<()> {
+        if let Some(proof) = owner.transcript_ack_proof.as_ref() {
+            let payload = owner
+                .checkpoint
+                .as_ref()
+                .ok_or_else(|| {
+                    Self::invalid_state("acknowledged runtime state is missing checkpoint")
+                })?
+                .restore_managed_runtime_payload()?;
+            if proof.operation_id.trim().is_empty()
+                || proof.payload_digest.trim().is_empty()
+                || !matches!(
+                    owner.state_version,
+                    Some(RuntimeStateVersion::Managed { .. })
+                )
+                || payload.pending_transcript_projection.is_some()
+            {
+                return Err(Self::invalid_state(
+                    "runtime transcript acknowledgement proof is corrupt",
+                ));
+            }
+        }
         let _safe_scope = safe_segment(&owner.scope_id)?;
         let path = self.runtime_owner_path(&owner.runtime_state_id)?;
-        let parent = path.parent().ok_or_else(|| {
-            ReactError::Other("runtime state owner path has no parent".to_string())
-        })?;
+        let parent = path
+            .parent()
+            .ok_or_else(|| Self::invalid_state("runtime state owner path has no parent"))?;
         create_dir_all_durable(parent).map_err(Self::to_react_err)?;
         let raw = serde_json::to_vec_pretty(owner)
-            .map_err(|error| ReactError::Other(format!("serialize runtime owner: {error}")))?;
+            .map_err(|error| Self::invalid_state(format!("serialize runtime owner: {error}")))?;
         echo_core::utils::fs::atomic_write(&path, &raw).map_err(Self::to_react_err)
     }
 
@@ -689,7 +942,7 @@ impl FileRuntimeStateStore {
             return Ok(false);
         };
         if owner.scope_id != scope_id {
-            return Err(ReactError::Other(format!(
+            return Err(Self::invalid_state(format!(
                 "runtime state {runtime_state_id} belongs to scope {}, not {scope_id}",
                 owner.scope_id
             )));
@@ -707,6 +960,7 @@ impl FileRuntimeStateStore {
                 scope_lifecycle: owner.scope_lifecycle,
                 cas_expected_state_version: owner.cas_expected_state_version,
                 cas_expected_scope_revision: owner.cas_expected_scope_revision,
+                transcript_ack_proof: owner.transcript_ack_proof,
             })?;
         }
         Ok(true)
@@ -726,10 +980,11 @@ impl FileRuntimeStateStore {
                 continue;
             }
             let raw = std::fs::read_to_string(&path).map_err(Self::to_react_err)?;
-            let record: RuntimeStateOwner = serde_json::from_str(&raw)
-                .map_err(|error| ReactError::Other(format!("parse {}: {error}", path.display())))?;
+            let record: RuntimeStateOwner = serde_json::from_str(&raw).map_err(|error| {
+                Self::invalid_state(format!("parse {}: {error}", path.display()))
+            })?;
             if self.runtime_owner_path(&record.runtime_state_id)? != path {
-                return Err(ReactError::Other(format!(
+                return Err(Self::invalid_state(format!(
                     "runtime state record filename does not match identity: {}",
                     path.display()
                 )));
@@ -737,7 +992,7 @@ impl FileRuntimeStateStore {
             let validated = self
                 .read_runtime_owner_sync(&record.runtime_state_id)?
                 .ok_or_else(|| {
-                    ReactError::Other(format!(
+                    echo_core::error::RuntimeStateError::NotFound(format!(
                         "runtime state record disappeared: {}",
                         path.display()
                     ))
@@ -995,7 +1250,7 @@ impl RuntimeStateStore for FileRuntimeStateStore {
                 return Ok(None);
             };
             if owner.scope_id != scope_id {
-                return Err(Self::to_react_err(format!(
+                return Err(Self::invalid_state(format!(
                     "runtime state {runtime_state_id} belongs to scope {}, not {scope_id}",
                     owner.scope_id
                 )));
@@ -1043,7 +1298,7 @@ impl RuntimeStateStore for FileRuntimeStateStore {
             if let Some(owner) = owner.as_ref()
                 && owner.scope_id != request.scope_id
             {
-                return Err(Self::to_react_err(format!(
+                return Err(Self::invalid_state(format!(
                     "runtime state {runtime_state_id} already belongs to scope {}",
                     owner.scope_id
                 )));
@@ -1057,7 +1312,7 @@ impl RuntimeStateStore for FileRuntimeStateStore {
                     scope,
                     runtime_state_id,
                     version: current_version.ok_or_else(|| {
-                        Self::to_react_err("retired runtime state lost its version")
+                        Self::invalid_state("retired runtime state lost its version")
                     })?,
                     status: RuntimeCheckpointCasStatus::GenerationRetired,
                 });
@@ -1088,7 +1343,7 @@ impl RuntimeStateStore for FileRuntimeStateStore {
                     scope,
                     runtime_state_id,
                     version: current_version.ok_or_else(|| {
-                        Self::to_react_err("current runtime state lost its version")
+                        Self::invalid_state("current runtime state lost its version")
                     })?,
                     status: RuntimeCheckpointCasStatus::AlreadyCurrent,
                 });
@@ -1107,6 +1362,7 @@ impl RuntimeStateStore for FileRuntimeStateStore {
                     status: RuntimeCheckpointCasStatus::RevisionConflict,
                 });
             }
+            Self::validate_pending_transition(owner.as_ref(), &request.checkpoint)?;
             let current_state_revision = current_version
                 .as_ref()
                 .map(Self::state_revision)
@@ -1134,6 +1390,144 @@ impl RuntimeStateStore for FileRuntimeStateStore {
                 scope_lifecycle: RuntimeScopeLifecycle::Active,
                 cas_expected_state_version: Some(request.expected_state_version),
                 cas_expected_scope_revision: request.expected_scope_revision,
+                transcript_ack_proof: None,
+            })?;
+            let completed_retirements = scope_record
+                .take()
+                .map(|record| record.completed_retirements)
+                .unwrap_or_default();
+            store.write_scope_owner_sync(&RuntimeScopeOwner {
+                version: RUNTIME_SCOPE_RECORD_VERSION,
+                authority: authority.clone(),
+                current_retirement: None,
+                completed_retirements,
+            })?;
+            store.repair_scope_index_best_effort(&request.scope_id);
+            Ok(RuntimeCheckpointCasReceipt {
+                scope: authority,
+                runtime_state_id,
+                version,
+                status: RuntimeCheckpointCasStatus::Applied,
+            })
+        })
+    }
+
+    fn acknowledge_transcript_projection<'a>(
+        &'a self,
+        request: RuntimeTranscriptAckRequest,
+    ) -> BoxFuture<'a, crate::error::Result<RuntimeCheckpointCasReceipt>> {
+        if let Err(error) = request.validate() {
+            return Box::pin(async move { Err(error) });
+        }
+        let runtime_state_id = request.runtime_state_id.clone();
+        self.run_blocking(runtime_state_id, move |store, runtime_state_id| {
+            let _scope = store.lock_scope(&request.scope_id)?;
+            let _runtime = store.lock_runtime(&runtime_state_id)?;
+            let mut scope_record = store.reconcile_scope_owner_sync(&request.scope_id)?;
+            let owner = store.read_live_runtime_owner_sync(&runtime_state_id)?;
+            if let Some(owner) = owner.as_ref()
+                && owner.scope_id != request.scope_id
+            {
+                return Err(Self::invalid_state(format!(
+                    "runtime state {runtime_state_id} belongs to scope {}, not {}",
+                    owner.scope_id, request.scope_id
+                )));
+            }
+            let owners = owner.iter().cloned().collect::<Vec<_>>();
+            let scope =
+                Self::authority_or_unmanaged(&request.scope_id, scope_record.as_ref(), &owners);
+            let current_version = owner.as_ref().map(Self::owner_state_version).transpose()?;
+            if matches!(current_version, Some(RuntimeStateVersion::Retired { .. })) {
+                return Ok(RuntimeCheckpointCasReceipt {
+                    scope,
+                    runtime_state_id,
+                    version: current_version.unwrap_or(RuntimeStateVersion::Absent),
+                    status: RuntimeCheckpointCasStatus::GenerationRetired,
+                });
+            }
+            if scope.lifecycle != RuntimeScopeLifecycle::Active
+                || scope.conversation_epoch != Some(request.conversation_epoch)
+            {
+                return Ok(RuntimeCheckpointCasReceipt {
+                    scope,
+                    runtime_state_id,
+                    version: current_version.unwrap_or(RuntimeStateVersion::Absent),
+                    status: RuntimeCheckpointCasStatus::ScopeFenced,
+                });
+            }
+            if let Some(owner) = owner.as_ref()
+                && owner.cas_expected_state_version.as_ref()
+                    == Some(&request.expected_state_version)
+                && owner.cas_expected_scope_revision == request.expected_scope_revision
+                && request.expected_scope_revision.checked_add(1) == Some(owner.scope_revision)
+                && owner.transcript_ack_proof.as_ref()
+                    == Some(&RuntimeTranscriptAckProof {
+                        operation_id: request.projection_receipt.operation_id.clone(),
+                        payload_digest: request.projection_receipt.payload_digest.clone(),
+                    })
+                && Self::checkpoint_is_current(owner, &request.checkpoint)?
+            {
+                return Ok(RuntimeCheckpointCasReceipt {
+                    scope,
+                    runtime_state_id,
+                    version: current_version.ok_or_else(|| {
+                        Self::invalid_state("acknowledged runtime state lost its version")
+                    })?,
+                    status: RuntimeCheckpointCasStatus::AlreadyCurrent,
+                });
+            }
+            if scope.revision != request.expected_scope_revision
+                || !Self::state_matches_expected(
+                    current_version.as_ref(),
+                    &request.expected_state_version,
+                )
+            {
+                return Ok(RuntimeCheckpointCasReceipt {
+                    scope,
+                    runtime_state_id,
+                    version: current_version.unwrap_or(RuntimeStateVersion::Absent),
+                    status: RuntimeCheckpointCasStatus::RevisionConflict,
+                });
+            }
+            let owner = owner.as_ref().ok_or_else(|| {
+                echo_core::error::RuntimeStateError::NotFound(format!(
+                    "runtime state {runtime_state_id} is absent"
+                ))
+            })?;
+            Self::validate_transcript_ack(owner, &request)?;
+            let state_revision = Self::next_revision(
+                current_version
+                    .as_ref()
+                    .map(Self::state_revision)
+                    .unwrap_or(0),
+                &runtime_state_id,
+            )?;
+            let scope_revision = Self::next_revision(scope.revision, &request.scope_id)?;
+            let version = RuntimeStateVersion::Managed {
+                revision: state_revision,
+            };
+            let authority = RuntimeScopeAuthority {
+                scope_id: request.scope_id.clone(),
+                conversation_epoch: Some(request.conversation_epoch),
+                revision: scope_revision,
+                lifecycle: RuntimeScopeLifecycle::Active,
+            };
+            store.write_runtime_owner_sync(&RuntimeStateOwner {
+                version: RUNTIME_STATE_RECORD_VERSION,
+                runtime_state_id: runtime_state_id.clone(),
+                scope_id: request.scope_id.clone(),
+                phase: RuntimeStatePhase::Active,
+                checkpoint: Some(request.checkpoint),
+                state_version: Some(version.clone()),
+                conversation_epoch: Some(request.conversation_epoch),
+                scope_revision,
+                scope_lifecycle: RuntimeScopeLifecycle::Active,
+                cas_expected_state_version: Some(request.expected_state_version),
+                cas_expected_scope_revision: request.expected_scope_revision,
+                transcript_ack_proof: Some(RuntimeTranscriptAckProof {
+                    operation_id: request.projection_receipt.operation_id,
+                    payload_digest: request.projection_receipt.payload_digest,
+                }),
             })?;
             let completed_retirements = scope_record
                 .take()
@@ -1172,7 +1566,7 @@ impl RuntimeStateStore for FileRuntimeStateStore {
             if let Some(owner) = owner.as_ref()
                 && owner.scope_id != request.scope_id
             {
-                return Err(Self::to_react_err(format!(
+                return Err(Self::invalid_state(format!(
                     "runtime state {runtime_state_id} belongs to scope {}",
                     owner.scope_id
                 )));
@@ -1186,7 +1580,7 @@ impl RuntimeStateStore for FileRuntimeStateStore {
                     scope,
                     runtime_state_id,
                     version: current_version.clone().ok_or_else(|| {
-                        Self::to_react_err("retired runtime state lost its version")
+                        Self::invalid_state("retired runtime state lost its version")
                     })?,
                     status: if owner
                         .as_ref()
@@ -1214,7 +1608,7 @@ impl RuntimeStateStore for FileRuntimeStateStore {
                     scope,
                     runtime_state_id,
                     version: current_version.ok_or_else(|| {
-                        Self::to_react_err("pending runtime state lost its version")
+                        Self::invalid_state("pending runtime state lost its version")
                     })?,
                     status: RuntimeGenerationRetireStatus::PendingProjection,
                 });
@@ -1257,6 +1651,7 @@ impl RuntimeStateStore for FileRuntimeStateStore {
                 scope_lifecycle: RuntimeScopeLifecycle::Active,
                 cas_expected_state_version: Some(request.expected_state_version),
                 cas_expected_scope_revision: request.expected_scope_revision,
+                transcript_ack_proof: None,
             })?;
             let mut record = scope_record.take().unwrap_or(RuntimeScopeOwner {
                 version: RUNTIME_SCOPE_RECORD_VERSION,
@@ -1629,6 +2024,7 @@ impl RuntimeStateStore for FileRuntimeStateStore {
                             scope_lifecycle: RuntimeScopeLifecycle::Retiring,
                             cas_expected_state_version: None,
                             cas_expected_scope_revision: 0,
+                            transcript_ack_proof: None,
                         });
                         item.status = ScopeRetirementItemStatus::DroppedByDelete;
                     }
@@ -1732,7 +2128,7 @@ impl RuntimeStateStore for FileRuntimeStateStore {
                 }
                 match record.phase {
                     RuntimeStatePhase::Active if record.scope_id != scope_id => {
-                        return Err(ReactError::Other(format!(
+                        return Err(Self::invalid_state(format!(
                             "runtime state {runtime_state_id} already belongs to scope {}",
                             record.scope_id
                         )));
@@ -1755,6 +2151,7 @@ impl RuntimeStateStore for FileRuntimeStateStore {
                 scope_lifecycle: RuntimeScopeLifecycle::Active,
                 cas_expected_state_version: None,
                 cas_expected_scope_revision: 0,
+                transcript_ack_proof: None,
             })?;
             store.repair_scope_index_best_effort(&scope_id);
             Ok(())
@@ -1863,8 +2260,9 @@ impl RuntimeStateStore for FileRuntimeStateStore {
 
 /// Validate an id and encode its exact UTF-8 bytes as one safe path segment.
 fn safe_segment(id: &str) -> Result<String, ReactError> {
-    echo_core::utils::fs::encode_path_segment_identity(id)
-        .map_err(|error| ReactError::Other(error.to_string()))
+    echo_core::utils::fs::encode_path_segment_identity(id).map_err(|error| {
+        echo_core::error::RuntimeStateError::SerializationError(error.to_string()).into()
+    })
 }
 
 #[cfg(test)]
@@ -1909,6 +2307,14 @@ mod tests {
         runtime_state_id: &str,
         scope_id: &str,
     ) -> crate::error::Result<AgentCheckpoint> {
+        pending_checkpoint_at_revision(runtime_state_id, scope_id, 1)
+    }
+
+    fn pending_checkpoint_at_revision(
+        runtime_state_id: &str,
+        scope_id: &str,
+        base_runtime_revision: u64,
+    ) -> crate::error::Result<AgentCheckpoint> {
         let messages = vec![crate::llm::types::Message::user("pending".to_string())];
         let projected = crate::memory::project_messages(scope_id, &messages)?;
         let batch = crate::memory::TranscriptProjectionBatch::prepare(
@@ -1944,7 +2350,7 @@ mod tests {
                     batch,
                     cursor_before,
                     cursor_after,
-                    base_runtime_revision: 1,
+                    base_runtime_revision,
                     prepared_at: Utc::now(),
                     attempt: 1,
                     last_attempt_class: None,
@@ -1956,6 +2362,49 @@ mod tests {
             blocked_reason: None,
             working_dir: None,
             timestamp: Utc::now(),
+        })
+    }
+
+    fn transcript_ack_request(
+        checkpoint: &AgentCheckpoint,
+        scope_revision: u64,
+        state_revision: u64,
+        status: crate::memory::TranscriptProjectionApplyStatus,
+    ) -> crate::error::Result<RuntimeTranscriptAckRequest> {
+        let payload = checkpoint.restore_managed_runtime_payload()?;
+        let pending = payload.pending_transcript_projection.ok_or_else(|| {
+            echo_core::error::RuntimeStateError::NotFound(
+                "test checkpoint has no pending transcript projection".to_string(),
+            )
+        })?;
+        let mut acknowledged = checkpoint.clone();
+        acknowledged.messages_json = AgentCheckpoint::serialize_managed_payload(
+            payload.messages,
+            Some(pending.cursor_after.clone()),
+            None,
+        )?;
+        acknowledged.timestamp = Utc::now();
+        Ok(RuntimeTranscriptAckRequest {
+            scope_id: pending.batch.conversation_id.clone(),
+            runtime_state_id: pending.batch.generation_id.clone(),
+            conversation_epoch: pending.batch.conversation_epoch,
+            expected_scope_revision: scope_revision,
+            expected_state_version: RuntimeStateExpectedVersion::Managed {
+                revision: state_revision,
+            },
+            projection_receipt: crate::memory::TranscriptProjectionApplyReceipt {
+                operation_id: pending.batch.operation_id,
+                payload_digest: pending.batch.payload_digest,
+                authority: crate::memory::ConversationProjectionAuthority {
+                    conversation_id: pending.batch.conversation_id,
+                    epoch: pending.batch.conversation_epoch,
+                    revision: 1,
+                    lifecycle: crate::memory::ConversationProjectionLifecycle::Live,
+                    delete_receipt_retention_floor_epoch: 0,
+                },
+                status,
+            },
+            checkpoint: acknowledged,
         })
     }
 
@@ -2154,6 +2603,213 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pending_transcript_requires_proof_carrying_acknowledgement() -> crate::error::Result<()>
+    {
+        let tmp = tmp_base();
+        let store = FileRuntimeStateStore::new(&tmp)?;
+        let pending = pending_checkpoint("runtime-pending", "scope-pending")?;
+        let created = store
+            .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                scope_id: "scope-pending".to_string(),
+                runtime_state_id: "runtime-pending".to_string(),
+                conversation_epoch: Some(1),
+                expected_scope_revision: 0,
+                expected_state_version: RuntimeStateExpectedVersion::Absent,
+                checkpoint: pending.clone(),
+            })
+            .await?;
+
+        let clear = transcript_ack_request(
+            &pending,
+            created.scope.revision,
+            1,
+            crate::memory::TranscriptProjectionApplyStatus::Applied,
+        )?
+        .checkpoint;
+        assert!(
+            store
+                .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                    scope_id: "scope-pending".to_string(),
+                    runtime_state_id: "runtime-pending".to_string(),
+                    conversation_epoch: Some(1),
+                    expected_scope_revision: created.scope.revision,
+                    expected_state_version: RuntimeStateExpectedVersion::Managed { revision: 1 },
+                    checkpoint: clear,
+                })
+                .await
+                .is_err()
+        );
+        assert!(
+            store
+                .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                    scope_id: "scope-pending".to_string(),
+                    runtime_state_id: "runtime-pending".to_string(),
+                    conversation_epoch: Some(1),
+                    expected_scope_revision: created.scope.revision,
+                    expected_state_version: RuntimeStateExpectedVersion::Managed { revision: 1 },
+                    checkpoint: pending_checkpoint("runtime-pending", "scope-pending")?,
+                })
+                .await
+                .is_err()
+        );
+
+        let payload = pending.restore_managed_runtime_payload()?;
+        let mut retry_debt = payload.pending_transcript_projection.ok_or_else(|| {
+            echo_core::error::RuntimeStateError::NotFound("pending debt".to_string())
+        })?;
+        retry_debt.base_runtime_revision = 2;
+        let mut invalid_retry = pending.clone();
+        invalid_retry.messages_json = AgentCheckpoint::serialize_managed_payload(
+            payload.messages.clone(),
+            Some(retry_debt.cursor_before.clone()),
+            Some(retry_debt.clone()),
+        )?;
+        assert!(
+            store
+                .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                    scope_id: "scope-pending".to_string(),
+                    runtime_state_id: "runtime-pending".to_string(),
+                    conversation_epoch: Some(1),
+                    expected_scope_revision: created.scope.revision,
+                    expected_state_version: RuntimeStateExpectedVersion::Managed { revision: 1 },
+                    checkpoint: invalid_retry,
+                })
+                .await
+                .is_err()
+        );
+        retry_debt.attempt = 2;
+        retry_debt.last_attempt_class =
+            Some(super::super::TranscriptProjectionAttemptClass::TransientNoCommit);
+        retry_debt.last_error = Some("retryable".to_string());
+        let mut retried = pending.clone();
+        retried.messages_json = AgentCheckpoint::serialize_managed_payload(
+            payload.messages,
+            Some(retry_debt.cursor_before.clone()),
+            Some(retry_debt),
+        )?;
+        let retry = store
+            .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                scope_id: "scope-pending".to_string(),
+                runtime_state_id: "runtime-pending".to_string(),
+                conversation_epoch: Some(1),
+                expected_scope_revision: created.scope.revision,
+                expected_state_version: RuntimeStateExpectedVersion::Managed { revision: 1 },
+                checkpoint: retried.clone(),
+            })
+            .await?;
+        assert_eq!(retry.status, RuntimeCheckpointCasStatus::Applied);
+
+        let mut forged = transcript_ack_request(
+            &retried,
+            retry.scope.revision,
+            2,
+            crate::memory::TranscriptProjectionApplyStatus::Applied,
+        )?;
+        forged.projection_receipt.payload_digest = "forged".to_string();
+        assert!(
+            store
+                .acknowledge_transcript_projection(forged)
+                .await
+                .is_err()
+        );
+        let unchanged = store
+            .load_runtime_state("scope-pending", "runtime-pending")
+            .await?
+            .ok_or_else(|| {
+                echo_core::error::RuntimeStateError::NotFound("runtime-pending".to_string())
+            })?;
+        assert_eq!(
+            unchanged.version,
+            RuntimeStateVersion::Managed { revision: 2 }
+        );
+        assert!(
+            unchanged
+                .checkpoint
+                .as_ref()
+                .ok_or_else(|| {
+                    echo_core::error::RuntimeStateError::NotFound(
+                        "runtime-pending checkpoint".to_string(),
+                    )
+                })?
+                .restore_managed_runtime_payload()?
+                .pending_transcript_projection
+                .is_some()
+        );
+
+        let ack = transcript_ack_request(
+            &retried,
+            retry.scope.revision,
+            2,
+            crate::memory::TranscriptProjectionApplyStatus::Applied,
+        )?;
+        let mut forged_replay = ack.clone();
+        forged_replay.projection_receipt.payload_digest = "forged-after-apply".to_string();
+        let applied = store.acknowledge_transcript_projection(ack.clone()).await?;
+        assert_eq!(applied.status, RuntimeCheckpointCasStatus::Applied);
+        assert_eq!(
+            store
+                .acknowledge_transcript_projection(forged_replay)
+                .await?
+                .status,
+            RuntimeCheckpointCasStatus::RevisionConflict
+        );
+        let replay = store.acknowledge_transcript_projection(ack).await?;
+        assert_eq!(replay.status, RuntimeCheckpointCasStatus::AlreadyCurrent);
+        assert_eq!(replay.scope, applied.scope);
+        assert_eq!(replay.version, applied.version);
+
+        let second = pending_checkpoint("runtime-pending-2", "scope-pending")?;
+        let generic_checkpoint = managed_checkpoint("runtime-generic", "generic")?;
+        let generic = store
+            .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                scope_id: "scope-pending".to_string(),
+                runtime_state_id: "runtime-generic".to_string(),
+                conversation_epoch: Some(1),
+                expected_scope_revision: applied.scope.revision,
+                expected_state_version: RuntimeStateExpectedVersion::Absent,
+                checkpoint: generic_checkpoint.clone(),
+            })
+            .await?;
+        let mut impersonation = transcript_ack_request(
+            &second,
+            applied.scope.revision,
+            1,
+            crate::memory::TranscriptProjectionApplyStatus::Applied,
+        )?;
+        impersonation.runtime_state_id = "runtime-generic".to_string();
+        impersonation.checkpoint = generic_checkpoint;
+        assert_eq!(
+            store
+                .acknowledge_transcript_projection(impersonation)
+                .await?
+                .status,
+            RuntimeCheckpointCasStatus::RevisionConflict
+        );
+        let prepared = store
+            .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                scope_id: "scope-pending".to_string(),
+                runtime_state_id: "runtime-pending-2".to_string(),
+                conversation_epoch: Some(1),
+                expected_scope_revision: generic.scope.revision,
+                expected_state_version: RuntimeStateExpectedVersion::Absent,
+                checkpoint: second.clone(),
+            })
+            .await?;
+        let already_applied = store
+            .acknowledge_transcript_projection(transcript_ack_request(
+                &second,
+                prepared.scope.revision,
+                1,
+                crate::memory::TranscriptProjectionApplyStatus::AlreadyApplied,
+            )?)
+            .await?;
+        assert_eq!(already_applied.status, RuntimeCheckpointCasStatus::Applied);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn invalid_runtime_state_requests_have_no_durable_side_effects()
     -> crate::error::Result<()> {
         let tmp = tmp_base();
@@ -2303,6 +2959,149 @@ mod tests {
         echo_core::utils::fs::atomic_write(&path, &raw)
             .map_err(FileRuntimeStateStore::to_react_err)?;
         assert!(store.load_scope_authority("scope-corrupt").await.is_err());
+
+        let checkpoint = managed_checkpoint("runtime-false-drop", "still-active")?;
+        let created = store
+            .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                scope_id: "scope-false-drop".to_string(),
+                runtime_state_id: "runtime-false-drop".to_string(),
+                conversation_epoch: Some(1),
+                expected_scope_revision: 0,
+                expected_state_version: RuntimeStateExpectedVersion::Absent,
+                checkpoint,
+            })
+            .await?;
+        let delete = crate::memory::ManagedConversationDelete::prepare("scope-false-drop", 1)?;
+        let dropped_item = ScopeRetirementItem {
+            runtime_state_id: "runtime-false-drop".to_string(),
+            state_version: RuntimeStateVersion::Managed { revision: 1 },
+            pending_operation_id: None,
+            status: ScopeRetirementItemStatus::DroppedByDelete,
+        };
+        let manifest = ScopeRetirementManifest {
+            delete_operation_id: delete.operation_id.clone(),
+            payload_digest: delete.payload_digest.clone(),
+            expected_conversation_epoch: 1,
+            items: vec![dropped_item.clone()],
+            conversation_delete_receipt: None,
+        };
+        let false_drop_path = store.scope_owner_path("scope-false-drop")?;
+        let false_drop = RuntimeScopeOwner {
+            version: RUNTIME_SCOPE_RECORD_VERSION,
+            authority: RuntimeScopeAuthority {
+                lifecycle: RuntimeScopeLifecycle::Retiring,
+                revision: created.scope.revision.saturating_add(1),
+                ..created.scope.clone()
+            },
+            current_retirement: Some(manifest.clone()),
+            completed_retirements: Vec::new(),
+        };
+        let raw = serde_json::to_vec_pretty(&false_drop)
+            .map_err(|error| FileRuntimeStateStore::invalid_state(error.to_string()))?;
+        echo_core::utils::fs::atomic_write(&false_drop_path, &raw)
+            .map_err(FileRuntimeStateStore::to_react_err)?;
+        let runtime_path = store.runtime_owner_path("runtime-false-drop")?;
+        let runtime_before =
+            std::fs::read(&runtime_path).map_err(FileRuntimeStateStore::to_react_err)?;
+        assert!(
+            store
+                .continue_scope_retirement(
+                    "scope-false-drop",
+                    &delete.operation_id,
+                    false_drop.authority.revision,
+                    ScopeRetirementAdvance::Complete,
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            std::fs::read(&runtime_path).map_err(FileRuntimeStateStore::to_react_err)?,
+            runtime_before
+        );
+
+        let mut duplicate = false_drop.clone();
+        duplicate
+            .current_retirement
+            .as_mut()
+            .ok_or_else(|| {
+                echo_core::error::RuntimeStateError::NotFound(
+                    "test retirement manifest".to_string(),
+                )
+            })?
+            .items
+            .push(dropped_item);
+        let raw = serde_json::to_vec_pretty(&duplicate)
+            .map_err(|error| FileRuntimeStateStore::invalid_state(error.to_string()))?;
+        echo_core::utils::fs::atomic_write(&false_drop_path, &raw)
+            .map_err(FileRuntimeStateStore::to_react_err)?;
+        assert!(
+            store
+                .load_scope_authority("scope-false-drop")
+                .await
+                .is_err()
+        );
+
+        let mut forged_receipt = manifest;
+        forged_receipt.conversation_delete_receipt =
+            Some(crate::memory::ManagedConversationDeleteReceipt {
+                operation_id: delete.operation_id,
+                payload_digest: delete.payload_digest,
+                deleted_epoch: 1,
+                retention_floor_epoch: 0,
+                status: crate::memory::ManagedConversationDeleteStatus::EpochConflict,
+            });
+        let forged = RuntimeScopeOwner {
+            current_retirement: Some(forged_receipt),
+            ..false_drop.clone()
+        };
+        let raw = serde_json::to_vec_pretty(&forged)
+            .map_err(|error| FileRuntimeStateStore::invalid_state(error.to_string()))?;
+        echo_core::utils::fs::atomic_write(&false_drop_path, &raw)
+            .map_err(FileRuntimeStateStore::to_react_err)?;
+        assert!(
+            store
+                .load_scope_authority("scope-false-drop")
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            std::fs::read(&runtime_path).map_err(FileRuntimeStateStore::to_react_err)?,
+            runtime_before
+        );
+
+        let incomplete_manifest = retirement_manifest("scope-false-drop", 1)?;
+        let incomplete_history = RuntimeScopeOwner {
+            version: RUNTIME_SCOPE_RECORD_VERSION,
+            authority: RuntimeScopeAuthority {
+                scope_id: "scope-false-drop".to_string(),
+                conversation_epoch: Some(1),
+                revision: false_drop.authority.revision.saturating_add(1),
+                lifecycle: RuntimeScopeLifecycle::Active,
+            },
+            current_retirement: None,
+            completed_retirements: vec![ScopeRetirementReceipt {
+                scope: RuntimeScopeAuthority {
+                    scope_id: "scope-false-drop".to_string(),
+                    conversation_epoch: Some(1),
+                    revision: false_drop.authority.revision,
+                    lifecycle: RuntimeScopeLifecycle::Tombstoned,
+                },
+                manifest: incomplete_manifest,
+                dropped_operation_ids: Vec::new(),
+                retention_floor_epoch: 0,
+                status: ScopeRetirementStatus::InProgress,
+            }],
+        };
+        let raw = serde_json::to_vec_pretty(&incomplete_history)
+            .map_err(|error| FileRuntimeStateStore::invalid_state(error.to_string()))?;
+        echo_core::utils::fs::atomic_write(&false_drop_path, &raw)
+            .map_err(FileRuntimeStateStore::to_react_err)?;
+        assert!(
+            store
+                .load_scope_authority("scope-false-drop")
+                .await
+                .is_err()
+        );
         let _ = std::fs::remove_dir_all(&tmp);
         Ok(())
     }
@@ -2720,7 +3519,7 @@ mod tests {
                 conversation_epoch: Some(1),
                 expected_scope_revision: initial.scope.revision,
                 expected_state_version: RuntimeStateExpectedVersion::Managed { revision: 1 },
-                checkpoint: pending_checkpoint("runtime-p", "scope-p")?,
+                checkpoint: pending_checkpoint_at_revision("runtime-p", "scope-p", 2)?,
             })
             .await?;
         let retirement = store
@@ -2964,7 +3763,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reset_keeps_transcript_and_product_delete_clears_all_incarnations()
+    async fn reset_keeps_transcript_and_product_delete_retires_all_incarnations()
     -> crate::error::Result<()> {
         use crate::memory::{ConversationStore, FileConversationStore, NewConversation};
 
@@ -2991,13 +3790,13 @@ mod tests {
                 .await?;
         }
         runtime
-            .save_checkpoint_for_scope("alice", &checkpoint("alice-1", "one"))
+            .save_checkpoint_for_scope("alice", &managed_checkpoint("alice-1", "one")?)
             .await?;
         runtime
-            .save_checkpoint_for_scope("alice", &checkpoint("alice-2", "two"))
+            .save_checkpoint_for_scope("alice", &managed_checkpoint("alice-2", "two")?)
             .await?;
         runtime
-            .save_checkpoint_for_scope("bob", &checkpoint("bob-1", "bob"))
+            .save_checkpoint_for_scope("bob", &managed_checkpoint("bob-1", "bob")?)
             .await?;
 
         for runtime_state_id in ["alice-1", "bob-1"] {
@@ -3046,8 +3845,12 @@ mod tests {
             super::super::delete_persisted_conversation(&conversations, &runtime, "alice").await?;
         assert_eq!(deleted.runtime_state_ids, vec!["alice-2".to_string()]);
         assert!(conversations.get_conversation("alice").await?.is_none());
+        assert!(runtime.get_checkpoint("alice-1").await?.is_none());
         assert!(runtime.get_checkpoint("alice-2").await?.is_none());
-        assert!(runtime.runtime_state_ids("alice").await?.is_empty());
+        assert_eq!(
+            runtime.runtime_state_ids("alice").await?,
+            vec!["alice-1".to_string(), "alice-2".to_string()]
+        );
         assert!(conversations.get_conversation("bob").await?.is_some());
         assert!(conversations.get_conversation("bob-1").await?.is_some());
         assert!(runtime.get_checkpoint("bob-1").await?.is_some());
@@ -3074,6 +3877,7 @@ mod tests {
             scope_lifecycle: RuntimeScopeLifecycle::Active,
             cas_expected_state_version: None,
             cas_expected_scope_revision: 0,
+            transcript_ack_proof: None,
         })?;
         drop(store);
 
