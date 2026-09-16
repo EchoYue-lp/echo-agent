@@ -346,12 +346,67 @@ pub struct TranscriptProjectionSettlement {
 /// Explicit CAS import for replacing a managed transcript.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ManagedConversationImport {
+    pub schema_version: u16,
     pub operation_id: String,
     pub payload_digest: String,
     pub conversation_id: String,
     pub expected_epoch: u64,
     pub expected_revision: u64,
     pub messages: Vec<StoredMessage>,
+}
+
+impl ManagedConversationImport {
+    pub fn prepare(
+        conversation_id: impl Into<String>,
+        expected_epoch: u64,
+        expected_revision: u64,
+        messages: Vec<StoredMessage>,
+    ) -> Result<Self> {
+        let conversation_id = conversation_id.into();
+        validate_managed_messages(&conversation_id, &messages)?;
+        validate_managed_epoch(expected_epoch)?;
+        let payload_digest = digest_serialized(&ManagedImportIdentity {
+            schema_version: TRANSCRIPT_PROJECTION_SCHEMA_VERSION,
+            conversation_id: &conversation_id,
+            expected_epoch,
+            expected_revision,
+            messages: &messages,
+        })?;
+        Ok(Self {
+            schema_version: TRANSCRIPT_PROJECTION_SCHEMA_VERSION,
+            operation_id: format!("managed-conversation-import-v1:{payload_digest}"),
+            payload_digest,
+            conversation_id,
+            expected_epoch,
+            expected_revision,
+            messages,
+        })
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        validate_managed_messages(&self.conversation_id, &self.messages)?;
+        validate_managed_epoch(self.expected_epoch)?;
+        if self.schema_version != TRANSCRIPT_PROJECTION_SCHEMA_VERSION {
+            return Err(projection_error(
+                "unsupported managed conversation import schema",
+            ));
+        }
+        let digest = digest_serialized(&ManagedImportIdentity {
+            schema_version: self.schema_version,
+            conversation_id: &self.conversation_id,
+            expected_epoch: self.expected_epoch,
+            expected_revision: self.expected_revision,
+            messages: &self.messages,
+        })?;
+        if digest != self.payload_digest
+            || self.operation_id != format!("managed-conversation-import-v1:{digest}")
+        {
+            return Err(projection_error(
+                "managed conversation import identity does not match its payload",
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Request to fence and delete one managed conversation incarnation.
@@ -362,6 +417,54 @@ pub struct ManagedConversationDelete {
     pub payload_digest: String,
     pub conversation_id: String,
     pub expected_epoch: u64,
+}
+
+impl ManagedConversationDelete {
+    pub fn prepare(conversation_id: impl Into<String>, expected_epoch: u64) -> Result<Self> {
+        let conversation_id = conversation_id.into();
+        if conversation_id.trim().is_empty() {
+            return Err(projection_error(
+                "managed conversation delete identity must not be empty",
+            ));
+        }
+        validate_managed_epoch(expected_epoch)?;
+        let payload_digest = digest_serialized(&ManagedDeleteIdentity {
+            schema_version: TRANSCRIPT_PROJECTION_SCHEMA_VERSION,
+            conversation_id: &conversation_id,
+            expected_epoch,
+        })?;
+        Ok(Self {
+            schema_version: TRANSCRIPT_PROJECTION_SCHEMA_VERSION,
+            operation_id: format!("managed-conversation-delete-v1:{payload_digest}"),
+            payload_digest,
+            conversation_id,
+            expected_epoch,
+        })
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if self.conversation_id.trim().is_empty()
+            || self.schema_version != TRANSCRIPT_PROJECTION_SCHEMA_VERSION
+        {
+            return Err(projection_error(
+                "invalid managed conversation delete request",
+            ));
+        }
+        validate_managed_epoch(self.expected_epoch)?;
+        let digest = digest_serialized(&ManagedDeleteIdentity {
+            schema_version: self.schema_version,
+            conversation_id: &self.conversation_id,
+            expected_epoch: self.expected_epoch,
+        })?;
+        if digest != self.payload_digest
+            || self.operation_id != format!("managed-conversation-delete-v1:{digest}")
+        {
+            return Err(projection_error(
+                "managed conversation delete identity does not match its payload",
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Domain result of a managed delete request.
@@ -392,6 +495,51 @@ struct ProjectionPayloadIdentity<'a> {
     conversation_epoch: u64,
     generation_id: &'a str,
     items: &'a [TranscriptProjectionItem],
+}
+
+#[derive(Serialize)]
+struct ManagedImportIdentity<'a> {
+    schema_version: u16,
+    conversation_id: &'a str,
+    expected_epoch: u64,
+    expected_revision: u64,
+    messages: &'a [StoredMessage],
+}
+
+#[derive(Serialize)]
+struct ManagedDeleteIdentity<'a> {
+    schema_version: u16,
+    conversation_id: &'a str,
+    expected_epoch: u64,
+}
+
+fn validate_managed_messages(conversation_id: &str, messages: &[StoredMessage]) -> Result<()> {
+    if conversation_id.trim().is_empty() {
+        return Err(projection_error(
+            "managed conversation identity must not be empty",
+        ));
+    }
+    for message in messages {
+        if message.id.is_some()
+            || message.conversation_id != conversation_id
+            || message.created_at.trim().is_empty()
+        {
+            return Err(projection_error(
+                "managed conversation import messages are not canonical",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_managed_epoch(epoch: u64) -> Result<()> {
+    if epoch == 0 || epoch > TRANSCRIPT_PROJECTION_EPOCH_MAX {
+        return Err(MemoryError::ProjectionEpochExhausted(format!(
+            "epoch {epoch} is outside 1..={TRANSCRIPT_PROJECTION_EPOCH_MAX}"
+        ))
+        .into());
+    }
+    Ok(())
 }
 
 fn validate_projection_identity(
@@ -671,5 +819,36 @@ mod transcript_projection_contract_tests {
         );
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn managed_delete_identity_rejects_epoch_rebinding() -> Result<()> {
+        let mut request = ManagedConversationDelete::prepare("conversation", 4)?;
+        request.expected_epoch = 5;
+
+        assert!(request.validate().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn managed_import_identity_binds_complete_replacement() -> Result<()> {
+        let first = ManagedConversationImport::prepare(
+            "conversation",
+            2,
+            9,
+            vec![message("conversation", "2026-09-16T00:00:00Z")],
+        )?;
+        let changed = ManagedConversationImport::prepare(
+            "conversation",
+            2,
+            9,
+            vec![message("conversation", "2026-09-16T00:00:01Z")],
+        )?;
+
+        assert_ne!(first.operation_id, changed.operation_id);
+        assert_ne!(first.payload_digest, changed.payload_digest);
+        first.validate()?;
+        changed.validate()?;
+        Ok(())
     }
 }
