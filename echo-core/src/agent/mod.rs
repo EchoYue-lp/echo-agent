@@ -435,6 +435,10 @@ pub struct AgentInvocationContext {
     /// and appends only new messages from this generation. This prevents a
     /// fresh model context from being content-deduplicated against an older
     /// product transcript that happens to end with identical text.
+    /// The value must equal the effective runtime-state identity resolved from
+    /// explicit `runtime_state_id`, the runtime conversation, or the configured
+    /// conversation. A mismatch fails closed with a runtime-state error before
+    /// admission side effects or checkpoint persistence.
     pub transcript_generation_id: Option<String>,
     /// Per-invocation working directory. `None` uses the agent's configured default.
     pub working_dir: Option<std::path::PathBuf>,

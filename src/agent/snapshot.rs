@@ -428,6 +428,44 @@ impl RuntimeConfig {
     }
 }
 
+pub(crate) fn effective_runtime_state_id<'a>(
+    configured_runtime_state_id: Option<&'a str>,
+    invocation: Option<&'a echo_core::agent::AgentInvocationContext>,
+    legacy: Option<&'a crate::agent::react::LegacyExternalContextSnapshot>,
+) -> Option<&'a str> {
+    let legacy_conversation_id = if invocation.is_none() {
+        legacy.and_then(|context| context.conversation_id.as_deref())
+    } else {
+        None
+    };
+    invocation
+        .and_then(|context| context.runtime_state_id.as_deref())
+        .or_else(|| {
+            invocation
+                .and_then(|context| context.runtime.as_ref())
+                .and_then(|runtime| runtime.conversation_id.as_deref())
+        })
+        .or(legacy_conversation_id)
+        .or(configured_runtime_state_id)
+}
+
+pub(crate) fn validate_transcript_generation_identity(
+    runtime_state_id: Option<&str>,
+    transcript_generation_id: Option<&str>,
+) -> crate::error::Result<()> {
+    if let (Some(runtime_state_id), Some(transcript_generation_id)) =
+        (runtime_state_id, transcript_generation_id)
+        && runtime_state_id != transcript_generation_id
+    {
+        return Err(crate::error::ReactError::RuntimeState(Box::new(
+            echo_core::error::RuntimeStateError::SerializationError(format!(
+                "transcript generation identity '{transcript_generation_id}' does not match runtime state identity '{runtime_state_id}'",
+            )),
+        )));
+    }
+    Ok(())
+}
+
 // ── ToolRuntime ──────────────────────────────────────────────────────
 
 /// Tool execution state (tools, hooks, interventions). Shared via `Arc`.
@@ -744,6 +782,7 @@ impl AgentRunSnapshot {
         legacy: Option<&crate::agent::react::LegacyExternalContextSnapshot>,
     ) -> Self {
         let mut config = RuntimeConfig::from_agent_config(&agent.config);
+        let configured_runtime_state_id = config.runtime_state_id.clone();
         config.input_modalities = agent
             .llm_config()
             .map(|llm_config| llm_config.input_modalities.clone());
@@ -756,19 +795,15 @@ impl AgentRunSnapshot {
         let runtime = invocation.and_then(|context| context.runtime.as_ref());
         if let Some(conversation_id) = runtime.and_then(|context| context.conversation_id.clone()) {
             config.conversation_id = Some(conversation_id.clone());
-            config.runtime_state_id = Some(conversation_id);
         } else if invocation.is_none()
             && let Some(conversation_id) =
                 legacy.and_then(|context| context.conversation_id.clone())
         {
             config.conversation_id = Some(conversation_id.clone());
-            config.runtime_state_id = Some(conversation_id);
         }
-        if let Some(runtime_state_id) =
-            invocation.and_then(|context| context.runtime_state_id.clone())
-        {
-            config.runtime_state_id = Some(runtime_state_id);
-        }
+        config.runtime_state_id =
+            effective_runtime_state_id(configured_runtime_state_id.as_deref(), invocation, legacy)
+                .map(str::to_string);
         let tools = ToolRuntime::from_agent(
             agent,
             invocation.and_then(|context| context.disabled_tools.as_ref()),
@@ -1012,6 +1047,10 @@ impl AgentRunSnapshot {
         let Some(ref conv_id) = self.config.runtime_state_id else {
             return Ok(());
         };
+        validate_transcript_generation_identity(
+            Some(conv_id.as_str()),
+            self.transcript_generation_id.as_deref(),
+        )?;
 
         let messages = {
             let ctx = context.lock().await;
@@ -2106,6 +2145,57 @@ mod transcript_filter_tests {
             snapshot.config.runtime_state_id.as_deref(),
             Some("runtime-incarnation")
         );
+    }
+
+    #[tokio::test]
+    async fn transcript_generation_runtime_identity_rejects_checkpoint_write_before_store_mutation()
+    -> Result<()> {
+        use crate::state::RuntimeStateStore;
+
+        let temp = tempfile::tempdir()?;
+        let store = Arc::new(crate::state::FileRuntimeStateStore::new(temp.path())?);
+        let config = crate::agent::AgentConfig::new("test-model", "agent", "system")
+            .conversation_id("configured-state");
+        let mut agent = crate::agent::ReactAgent::new(config);
+        agent.set_state_store(store.clone());
+        agent
+            .memory
+            .context
+            .lock()
+            .await
+            .push(Message::user("must not persist".to_string()));
+        let invocation = echo_core::agent::AgentInvocationContext {
+            runtime_state_id: Some("runtime-a".to_string()),
+            transcript_generation_id: Some("runtime-b".to_string()),
+            runtime: Some(echo_core::tools::ExternalRunContext {
+                conversation_id: Some("product-conversation".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let snapshot = AgentRunSnapshot::from_agent_with_invocation(&agent, &invocation);
+
+        let error = match snapshot
+            .save_runtime_checkpoint(&agent.memory.context, None)
+            .await
+        {
+            Ok(()) => {
+                return Err(ReactError::Other(
+                    "mismatched transcript generation unexpectedly saved".to_string(),
+                ));
+            }
+            Err(error) => error,
+        };
+        assert!(matches!(error, ReactError::RuntimeState(_)));
+        assert!(error.to_string().contains("transcript generation identity"));
+        assert!(store.get_checkpoint("runtime-a").await?.is_none());
+        assert!(
+            store
+                .runtime_state_ids("product-conversation")
+                .await?
+                .is_empty()
+        );
+        Ok(())
     }
 
     #[tokio::test]

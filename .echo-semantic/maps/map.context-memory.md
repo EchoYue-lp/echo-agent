@@ -4,13 +4,13 @@ id: map.context-memory
 kind: capability_map
 title: Context、Memory、Compression 与 Checkpoint
 risk: high
-observed_at: source:552140ec57df7b7bfc4d7ebf0e9e9c8a9c777a78ce249fc8e8cb89635e9e23cc
+observed_at: source:71db36711961e65e13fcef99f7f7e671ddd391e4853eecc77c4e07ac041915f6
 boundary_refs: [boundary.context-memory]
 behavior_refs: [behavior.context-memory-lifecycle]
 rule_refs: [rule.context-persistence-separation]
 evidence_refs: [evidence.agent-context-execution, evidence.persistence-observation, evidence.high-risk-audit-frontier, evidence.framework-concept-navigation]
 finding_refs: [finding.transcript-projection-settlement, finding.transcript-generation-runtime-identity, finding.checkpoint-current-plan-orphan-authority]
-audit_refs: [audit.context-memory.data-durability]
+audit_refs: [audit.context-memory.data-durability, audit.transcript-generation-runtime-identity-rereview]
 related_map_refs: [map.agent-session-turn, map.observation-persistence-delivery, map.eval-evolution]
 scenarios:
   active-context-and-compression:
@@ -35,11 +35,12 @@ scenarios:
     behavior_refs: [behavior.context-memory-lifecycle]
     evidence_refs: [evidence.agent-context-execution]
   runtime-transcript-identity:
-    status: needs_review
+    status: mapped
     source_refs: [src/agent/snapshot.rs, src/state/mod.rs, src/agent/react/run/stream_channel.rs]
+    behavior_refs: [behavior.context-memory-lifecycle]
+    rule_refs: [rule.context-persistence-separation]
+    evidence_refs: [evidence.transcript-generation-runtime-identity-repair]
     finding_refs: [finding.transcript-generation-runtime-identity]
-    unknown: invocation 可配置不相等的 runtime state 与 transcript generation identity，保存成功但恢复要求相等
-    next_step: repair 接纳/保存前 identity invariant，并补重启组合测试
   assembler-manager-alignment:
     status: needs_review
     source_refs: [src/context/mod.rs, echo-state/src/compression/mod.rs]

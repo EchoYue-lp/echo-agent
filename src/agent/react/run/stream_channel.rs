@@ -147,6 +147,17 @@ impl ReactAgent {
         } else {
             None
         };
+        let runtime_state_id = crate::agent::snapshot::effective_runtime_state_id(
+            self.config.conversation_id.as_deref(),
+            invocation.as_ref(),
+            legacy_runtime.as_ref(),
+        );
+        crate::agent::snapshot::validate_transcript_generation_identity(
+            runtime_state_id,
+            invocation
+                .as_ref()
+                .and_then(|context| context.transcript_generation_id.as_deref()),
+        )?;
 
         // ★ Acquire execution mutex BEFORE context mutation — using lock_owned()
         // so the guard can be moved into the spawned task and held for the
@@ -277,21 +288,6 @@ impl ReactAgent {
             .as_ref()
             .and_then(|value| value.history.as_deref())
             .unwrap_or_default();
-        let runtime_state_id = invocation
-            .as_ref()
-            .and_then(|context| context.runtime_state_id.as_deref())
-            .or_else(|| {
-                invocation
-                    .as_ref()
-                    .and_then(|context| context.runtime.as_ref())
-                    .and_then(|runtime| runtime.conversation_id.as_deref())
-            })
-            .or_else(|| {
-                legacy_runtime
-                    .as_ref()
-                    .and_then(|runtime| runtime.conversation_id.as_deref())
-            })
-            .or(self.config.conversation_id.as_deref());
         let recalled = if let Some(ref msg) = message {
             self.prepare_stream_context_with_message(mode, msg, history, runtime_state_id)
                 .await
@@ -867,7 +863,7 @@ mod tests {
     use crate::compression::{ContextProjection, PreModelContextProjector, ProjectionContext};
     use crate::intent::{Intent, IntentClassifier, IntentRouter, IntentRouterConfig};
     use echo_core::agent::{Agent, AgentInputLifecycle};
-    use echo_core::guard::{Guard, GuardDirection, GuardResult};
+    use echo_core::guard::{Guard, GuardDirection, GuardManager, GuardResult};
     use futures::StreamExt;
     use futures::future::BoxFuture;
     use std::sync::Arc;
@@ -1004,6 +1000,25 @@ mod tests {
                     Ok(GuardResult::Pass)
                 }
             })
+        }
+    }
+
+    struct CountingGuard {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Guard for CountingGuard {
+        fn name(&self) -> &str {
+            "counting-guard"
+        }
+
+        fn check<'a>(
+            &'a self,
+            _content: &'a str,
+            _direction: GuardDirection,
+        ) -> BoxFuture<'a, Result<GuardResult>> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async { Ok(GuardResult::Pass) })
         }
     }
 
@@ -2697,6 +2712,102 @@ mod tests {
                 .text_content()
                 .is_some_and(|content| content == "configured checkpoint marker")
         }));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn transcript_generation_runtime_identity_rejects_admission_without_side_effects()
+    -> Result<()> {
+        let root = tempfile::tempdir().map_err(|error| ReactError::Other(error.to_string()))?;
+        let store = Arc::new(crate::state::FileRuntimeStateStore::new(root.path())?);
+        let llm = Arc::new(MockLlmClient::new().with_response("must not run"));
+        let run_store = Arc::new(crate::trace::InMemoryRunStore::new());
+        let guard_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let input_lifecycle = Arc::new(InputLifecycleProbe::default());
+        let mut agent = ReactAgentBuilder::new()
+            .llm_client(llm.clone())
+            .system_prompt("system")
+            .conversation_id("configured-state")
+            .state_store(store.clone())
+            .build()?;
+        agent.set_run_store(run_store.clone());
+        let mut guard_manager = GuardManager::new();
+        guard_manager.add(Arc::new(CountingGuard {
+            calls: guard_calls.clone(),
+        }));
+        agent.set_guard_manager(guard_manager);
+        let original_message_count = agent.memory.context.lock().await.messages().len();
+        let _execution_guard = agent.execution_mutex.lock().await;
+
+        for (runtime_state_id, product_conversation_id) in [
+            (Some("runtime-a"), "product-conversation"),
+            (None, "product-fallback"),
+        ] {
+            let invocation = echo_core::agent::AgentInvocationContext {
+                runtime_state_id: runtime_state_id.map(str::to_string),
+                transcript_generation_id: Some("runtime-b".to_string()),
+                runtime: Some(echo_core::tools::ExternalRunContext {
+                    conversation_id: Some(product_conversation_id.to_string()),
+                    run_id: Some(format!("run-{product_conversation_id}")),
+                    ..Default::default()
+                }),
+                input_lifecycle: Some(input_lifecycle.clone()),
+                ..Default::default()
+            };
+            let admission = tokio::time::timeout(
+                std::time::Duration::from_millis(100),
+                agent.run_stream_channel(
+                    StreamInit {
+                        text: "must fail before admission".to_string(),
+                        message: None,
+                        label: String::new(),
+                        invocation: Some(invocation),
+                    },
+                    StreamMode::Chat,
+                ),
+            )
+            .await
+            .map_err(|_| {
+                ReactError::Other("identity validation waited for the execution mutex".to_string())
+            })?;
+            let error = match admission {
+                Ok(_stream) => {
+                    return Err(ReactError::Other(
+                        "mismatched transcript generation unexpectedly admitted".to_string(),
+                    ));
+                }
+                Err(error) => error,
+            };
+            assert!(matches!(error, ReactError::RuntimeState(_)));
+            assert!(error.to_string().contains("transcript generation identity"));
+        }
+
+        assert_eq!(llm.call_count(), 0);
+        assert!(run_store.is_empty().await);
+        assert_eq!(guard_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(
+            input_lifecycle
+                .drained
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        assert_eq!(
+            agent.memory.context.lock().await.messages().len(),
+            original_message_count
+        );
+        assert!(store.get_checkpoint("runtime-a").await?.is_none());
+        assert!(
+            store
+                .runtime_state_ids("product-conversation")
+                .await?
+                .is_empty()
+        );
+        assert!(
+            store
+                .runtime_state_ids("product-fallback")
+                .await?
+                .is_empty()
+        );
         Ok(())
     }
 

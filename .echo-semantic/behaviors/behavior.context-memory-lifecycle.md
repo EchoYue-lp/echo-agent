@@ -11,8 +11,8 @@ boundary: boundary.context-memory
 observed_at: f1e9027246760661144786e9e35615cd46d580c6
 code_refs: [echo-state/src/compression/mod.rs, src/context/mod.rs, src/agent/snapshot.rs, src/agent/react/run/phases/compact.rs, src/agent/react/run/phases/tools.rs, src/agent/react/run/phases/finalize.rs, src/state/mod.rs, src/state/file.rs, src/state/sqlite.rs, echo-core/src/memory/conversation.rs, echo-core/src/memory/store.rs]
 rule_refs: [rule.context-persistence-separation]
-evidence_refs: [evidence.agent-context-execution, evidence.persistence-observation]
-finding_refs: [finding.transcript-projection-settlement]
+evidence_refs: [evidence.agent-context-execution, evidence.persistence-observation, evidence.transcript-generation-runtime-identity-repair, evidence.transcript-generation-runtime-identity-verification]
+finding_refs: [finding.transcript-projection-settlement, finding.transcript-generation-runtime-identity]
 ---
 
 # Context、Memory 与 Checkpoint 生命周期

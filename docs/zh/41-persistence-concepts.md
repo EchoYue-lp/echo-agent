@@ -92,6 +92,9 @@ transcript 身份，`runtime_state_id` 只选择 `RuntimeStateStore` checkpoint 
 附加 typed generation + ordinal，并在 `AgentCheckpoint` 中只保存 ordinal/digest cursor。即使两轮
 内容完全相同，多次 safe point、checkpoint 与产品 Store 的 crash cut 也保持幂等；压缩只在完整
 pre-compaction transcript 已落盘后重新对齐 cursor。
+只要设置了 `transcript_generation_id`，它就必须与有效 runtime-state identity 相等。framework
+会在 admission 产生 guard、trace、context、模型或 checkpoint 副作用前拒绝不匹配，并在
+checkpoint 写入前再次校验，因此不会持久化出恢复端必然拒绝的 identity 漂移状态。
 同一个共享 Agent 可以处理多个 value-scoped invocation：effective `runtime_state_id` 变化时，
 framework 会在模型准备前精确 reset/restore；只有相同 ID 才复用 warm context。运行时显式记录
 当前 hydrated ID：任何可取消的状态修改前先写 `Hydrating(target)`，restore hook 完整结算后才
