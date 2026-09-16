@@ -182,7 +182,7 @@ fn default_agent_checkpoint_payload_version() -> u16 {
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum AgentCheckpointPayloadCompat {
-    Current(AgentCheckpointPayload),
+    Current(Box<AgentCheckpointPayload>),
     Legacy(Vec<crate::llm::types::Message>),
 }
 
