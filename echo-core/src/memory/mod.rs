@@ -28,7 +28,8 @@ pub use conversation::{
     ManagedConversationDeleteReceipt, ManagedConversationDeleteStatus, ManagedConversationImport,
     NewConversation, StoredMessage, TranscriptProjectionApplyReceipt,
     TranscriptProjectionApplyStatus, TranscriptProjectionBatch, TranscriptProjectionConflictKind,
-    TranscriptProjectionItem,
+    TranscriptProjectionErrorClass, TranscriptProjectionItem, TranscriptProjectionSettlement,
+    TranscriptProjectionSettlementStatus,
 };
 pub use embedder::Embedder;
 pub use store::{SearchMode, SearchQuery, Store, StoreItem};

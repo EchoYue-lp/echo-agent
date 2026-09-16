@@ -301,6 +301,12 @@ pub enum MemoryError {
     /// Unsupported operation
     #[error("Unsupported operation: {0}")]
     Unsupported(String),
+    /// A legacy mutation attempted to overwrite a managed transcript authority.
+    #[error("Managed conversation requires projection operation: {0}")]
+    ManagedConversationRequiresProjection(String),
+    /// A managed conversation epoch cannot be advanced without overflow.
+    #[error("Conversation projection epoch exhausted: {0}")]
+    ProjectionEpochExhausted(String),
     /// A reviewed mutation proposal no longer matches current memory state.
     #[error("Stale proposal: {0}")]
     StaleProposal(String),

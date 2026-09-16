@@ -307,6 +307,42 @@ pub struct TranscriptProjectionApplyReceipt {
     pub status: TranscriptProjectionApplyStatus,
 }
 
+/// Framework settlement state observed before an invocation terminal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TranscriptProjectionSettlementStatus {
+    Settled,
+    Deferred,
+    Blocked,
+    Conflict,
+}
+
+/// Stable classification for projection settlement failures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TranscriptProjectionErrorClass {
+    OutcomeUnknown,
+    TransientNoCommit,
+    RevisionConflict,
+    DeadlineExceeded,
+    Unsupported,
+    InvalidConfiguration,
+    CorruptState,
+    SemanticConflict,
+}
+
+/// Typed observation of one transcript projection safe point.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranscriptProjectionSettlement {
+    pub status: TranscriptProjectionSettlementStatus,
+    pub operation_id: Option<String>,
+    pub conversation_id: Option<String>,
+    pub generation_id: Option<String>,
+    pub attempt: u32,
+    pub error_class: Option<TranscriptProjectionErrorClass>,
+    pub detail: Option<String>,
+}
+
 /// Explicit CAS import for replacing a managed transcript.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ManagedConversationImport {
