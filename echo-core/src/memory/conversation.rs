@@ -4,9 +4,13 @@
 //! multi-agent isolation. Concrete implementation (`SqliteConversationStore`)
 //! lives in `echo_state`.
 
-use crate::error::Result;
+use crate::error::{MemoryError, Result};
 use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+const TRANSCRIPT_PROJECTION_SCHEMA_VERSION: u16 = 1;
+const TRANSCRIPT_PROJECTION_EPOCH_MAX: u64 = i64::MAX as u64;
 /// Parameters for creating a new conversation
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NewConversation {
@@ -61,7 +65,7 @@ pub struct ConversationMeta {
 }
 
 /// Persisted message (independent from LLM Message, with persistence fields)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredMessage {
     /// Database auto-increment ID (None for new messages)
     pub id: Option<i64>,
@@ -81,6 +85,326 @@ pub struct StoredMessage {
     pub created_at: String,
 }
 
+/// Atomic transcript projection support advertised without mutating a store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationProjectionCapability {
+    Unsupported,
+    AtomicV1,
+}
+
+/// Durable lifecycle of a managed conversation transcript.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationProjectionLifecycle {
+    Live,
+    Deleted,
+}
+
+/// Current epoch and revision of the committed transcript authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConversationProjectionAuthority {
+    pub conversation_id: String,
+    pub epoch: u64,
+    pub revision: u64,
+    pub lifecycle: ConversationProjectionLifecycle,
+    /// Highest deleted epoch whose exact operation receipt is no longer retained.
+    pub delete_receipt_retention_floor_epoch: u64,
+}
+
+/// Request to acquire the epoch used by one projection generation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnsureConversationProjectionRequest {
+    pub conversation: NewConversation,
+    /// Required when recreating a conversation whose managed tombstone exists.
+    pub expected_tombstone_epoch: Option<u64>,
+}
+
+/// Result of acquiring a managed transcript epoch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationProjectionEpochStatus {
+    Created,
+    AdoptedLegacy,
+    Existing,
+    Recreated,
+    Tombstoned,
+    EpochConflict,
+}
+
+/// Stable receipt for managed transcript epoch acquisition.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConversationProjectionEpochReceipt {
+    pub authority: ConversationProjectionAuthority,
+    pub status: ConversationProjectionEpochStatus,
+}
+
+/// One complete, immutable message effect within a transcript projection batch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranscriptProjectionItem {
+    pub ordinal: u64,
+    pub digest: String,
+    pub message: StoredMessage,
+}
+
+/// Canonical, retry-stable transcript effect for one runtime generation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranscriptProjectionBatch {
+    pub schema_version: u16,
+    pub operation_id: String,
+    pub payload_digest: String,
+    pub conversation_id: String,
+    pub conversation_epoch: u64,
+    pub generation_id: String,
+    pub items: Vec<TranscriptProjectionItem>,
+}
+
+impl TranscriptProjectionBatch {
+    /// Prepare a canonical batch once. Recovery persists and reuses this value;
+    /// it must not regenerate message timestamps or other effect fields.
+    pub fn prepare(
+        conversation_id: impl Into<String>,
+        conversation_epoch: u64,
+        generation_id: impl Into<String>,
+        first_ordinal: u64,
+        messages: Vec<StoredMessage>,
+    ) -> Result<Self> {
+        let conversation_id = conversation_id.into();
+        let generation_id = generation_id.into();
+        validate_projection_identity(&conversation_id, conversation_epoch, &generation_id)?;
+        if messages.is_empty() {
+            return Err(projection_error(
+                "transcript projection batch must not be empty",
+            ));
+        }
+
+        let mut items = Vec::with_capacity(messages.len());
+        for (offset, message) in messages.into_iter().enumerate() {
+            if message.id.is_some() {
+                return Err(projection_error(
+                    "prepared transcript projection messages must not carry backend ids",
+                ));
+            }
+            if message.conversation_id != conversation_id {
+                return Err(projection_error(
+                    "prepared transcript projection message belongs to another conversation",
+                ));
+            }
+            if message.created_at.trim().is_empty() {
+                return Err(projection_error(
+                    "prepared transcript projection message is missing created_at",
+                ));
+            }
+            let offset = u64::try_from(offset).map_err(|error| {
+                projection_error(format!("transcript projection ordinal overflow: {error}"))
+            })?;
+            let ordinal = first_ordinal
+                .checked_add(offset)
+                .ok_or_else(|| projection_error("transcript projection ordinal overflow"))?;
+            let digest = digest_serialized(&message)?;
+            items.push(TranscriptProjectionItem {
+                ordinal,
+                digest,
+                message,
+            });
+        }
+
+        let payload_digest = projection_payload_digest(
+            TRANSCRIPT_PROJECTION_SCHEMA_VERSION,
+            &conversation_id,
+            conversation_epoch,
+            &generation_id,
+            &items,
+        )?;
+        Ok(Self {
+            schema_version: TRANSCRIPT_PROJECTION_SCHEMA_VERSION,
+            operation_id: format!("transcript-projection-v1:{payload_digest}"),
+            payload_digest,
+            conversation_id,
+            conversation_epoch,
+            generation_id,
+            items,
+        })
+    }
+
+    /// Validate a decoded batch before a backend observes any effect.
+    pub fn validate(&self) -> Result<()> {
+        validate_projection_identity(
+            &self.conversation_id,
+            self.conversation_epoch,
+            &self.generation_id,
+        )?;
+        if self.schema_version != TRANSCRIPT_PROJECTION_SCHEMA_VERSION || self.items.is_empty() {
+            return Err(projection_error(
+                "unsupported or empty transcript projection batch",
+            ));
+        }
+        let mut previous: Option<u64> = None;
+        for item in &self.items {
+            if item.message.id.is_some()
+                || item.message.conversation_id != self.conversation_id
+                || item.message.created_at.trim().is_empty()
+                || previous.is_some_and(|ordinal| item.ordinal != ordinal.saturating_add(1))
+                || digest_serialized(&item.message)? != item.digest
+            {
+                return Err(projection_error(
+                    "transcript projection batch payload is not canonical",
+                ));
+            }
+            previous = Some(item.ordinal);
+        }
+        let digest = projection_payload_digest(
+            self.schema_version,
+            &self.conversation_id,
+            self.conversation_epoch,
+            &self.generation_id,
+            &self.items,
+        )?;
+        if digest != self.payload_digest
+            || self.operation_id != format!("transcript-projection-v1:{digest}")
+        {
+            return Err(projection_error(
+                "transcript projection operation identity does not match its payload",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Domain result of atomically applying a transcript projection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TranscriptProjectionConflictKind {
+    OperationIdentity,
+    OrdinalDigest,
+    Revision,
+    ManagedImport,
+}
+
+/// Domain result of atomically applying a transcript projection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TranscriptProjectionApplyStatus {
+    Applied,
+    AlreadyApplied,
+    Fenced {
+        current_epoch: u64,
+        lifecycle: ConversationProjectionLifecycle,
+    },
+    Conflict {
+        current_epoch: u64,
+        current_revision: u64,
+        kind: TranscriptProjectionConflictKind,
+    },
+}
+
+/// Stable receipt for one atomic projection attempt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranscriptProjectionApplyReceipt {
+    pub operation_id: String,
+    pub payload_digest: String,
+    pub authority: ConversationProjectionAuthority,
+    pub status: TranscriptProjectionApplyStatus,
+}
+
+/// Explicit CAS import for replacing a managed transcript.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManagedConversationImport {
+    pub operation_id: String,
+    pub payload_digest: String,
+    pub conversation_id: String,
+    pub expected_epoch: u64,
+    pub expected_revision: u64,
+    pub messages: Vec<StoredMessage>,
+}
+
+/// Request to fence and delete one managed conversation incarnation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManagedConversationDelete {
+    pub schema_version: u16,
+    pub operation_id: String,
+    pub payload_digest: String,
+    pub conversation_id: String,
+    pub expected_epoch: u64,
+}
+
+/// Domain result of a managed delete request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ManagedConversationDeleteStatus {
+    Deleted,
+    AlreadyDeleted,
+    EpochConflict,
+    ReceiptExpired,
+    IdentityConflict,
+}
+
+/// Stable receipt for epoch-fenced transcript deletion.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManagedConversationDeleteReceipt {
+    pub operation_id: String,
+    pub payload_digest: String,
+    pub deleted_epoch: u64,
+    pub retention_floor_epoch: u64,
+    pub status: ManagedConversationDeleteStatus,
+}
+
+#[derive(Serialize)]
+struct ProjectionPayloadIdentity<'a> {
+    schema_version: u16,
+    conversation_id: &'a str,
+    conversation_epoch: u64,
+    generation_id: &'a str,
+    items: &'a [TranscriptProjectionItem],
+}
+
+fn validate_projection_identity(
+    conversation_id: &str,
+    conversation_epoch: u64,
+    generation_id: &str,
+) -> Result<()> {
+    if conversation_id.trim().is_empty() || generation_id.trim().is_empty() {
+        return Err(projection_error(
+            "transcript projection identities must not be empty",
+        ));
+    }
+    if conversation_epoch == 0 || conversation_epoch > TRANSCRIPT_PROJECTION_EPOCH_MAX {
+        return Err(projection_error(
+            "transcript projection epoch is outside the supported range",
+        ));
+    }
+    Ok(())
+}
+
+fn projection_payload_digest(
+    schema_version: u16,
+    conversation_id: &str,
+    conversation_epoch: u64,
+    generation_id: &str,
+    items: &[TranscriptProjectionItem],
+) -> Result<String> {
+    digest_serialized(&ProjectionPayloadIdentity {
+        schema_version,
+        conversation_id,
+        conversation_epoch,
+        generation_id,
+        items,
+    })
+}
+
+fn digest_serialized(value: &impl Serialize) -> Result<String> {
+    let encoded = serde_json::to_vec(value).map_err(|error| {
+        projection_error(format!(
+            "failed to serialize transcript projection identity: {error}"
+        ))
+    })?;
+    Ok(format!("{:x}", Sha256::digest(encoded)))
+}
+
+fn projection_error(message: impl Into<String>) -> crate::error::ReactError {
+    MemoryError::SerializationError(message.into()).into()
+}
+
 /// List filter criteria
 #[derive(Debug, Clone, Default)]
 pub struct ConversationFilter {
@@ -96,6 +420,11 @@ pub struct ConversationFilter {
 ///
 /// Provides CRUD operations for conversations and messages, supporting different storage backends.
 pub trait ConversationStore: Send + Sync {
+    /// Report atomic transcript projection support without performing I/O.
+    fn projection_capability(&self) -> ConversationProjectionCapability {
+        ConversationProjectionCapability::Unsupported
+    }
+
     /// Create a new conversation
     fn create_conversation<'a>(
         &'a self,
@@ -157,6 +486,49 @@ pub trait ConversationStore: Send + Sync {
         })
     }
 
+    /// Acquire or inspect the atomic projection epoch for one conversation.
+    fn ensure_projection_epoch<'a>(
+        &'a self,
+        _request: EnsureConversationProjectionRequest,
+    ) -> BoxFuture<'a, Result<ConversationProjectionEpochReceipt>> {
+        Box::pin(async {
+            Err(MemoryError::Unsupported(
+                "atomic conversation projection epoch acquisition".to_string(),
+            )
+            .into())
+        })
+    }
+
+    /// Atomically merge one canonical generation-scoped transcript batch.
+    fn apply_transcript_projection<'a>(
+        &'a self,
+        _batch: TranscriptProjectionBatch,
+    ) -> BoxFuture<'a, Result<TranscriptProjectionApplyReceipt>> {
+        Box::pin(async {
+            Err(MemoryError::Unsupported("atomic transcript projection apply".to_string()).into())
+        })
+    }
+
+    /// Replace a managed transcript only when epoch and revision still match.
+    fn import_managed_messages<'a>(
+        &'a self,
+        _request: ManagedConversationImport,
+    ) -> BoxFuture<'a, Result<TranscriptProjectionApplyReceipt>> {
+        Box::pin(async {
+            Err(MemoryError::Unsupported("managed conversation import".to_string()).into())
+        })
+    }
+
+    /// Delete one managed incarnation behind an epoch fence and stable receipt.
+    fn delete_managed_conversation<'a>(
+        &'a self,
+        _request: ManagedConversationDelete,
+    ) -> BoxFuture<'a, Result<ManagedConversationDeleteReceipt>> {
+        Box::pin(async {
+            Err(MemoryError::Unsupported("managed conversation deletion".to_string()).into())
+        })
+    }
+
     /// Search conversations by query matching title and message content.
     ///
     /// Default implementation scans all conversations and their messages (naive).
@@ -201,5 +573,67 @@ pub trait ConversationStore: Send + Sync {
             }
             Ok(results)
         })
+    }
+}
+
+#[cfg(test)]
+mod transcript_projection_contract_tests {
+    use super::*;
+
+    fn message(conversation_id: &str, created_at: &str) -> StoredMessage {
+        StoredMessage {
+            id: None,
+            conversation_id: conversation_id.to_string(),
+            role: "user".to_string(),
+            content: Some("hello".to_string()),
+            attachments_json: Some(r#"{"kind":"text"}"#.to_string()),
+            tool_calls_json: None,
+            tool_result_json: None,
+            created_at: created_at.to_string(),
+        }
+    }
+
+    #[test]
+    fn transcript_projection_batch_identity_binds_complete_prepared_effect() -> Result<()> {
+        let first = TranscriptProjectionBatch::prepare(
+            "conversation",
+            7,
+            "generation",
+            3,
+            vec![message("conversation", "2026-09-16T00:00:00Z")],
+        )?;
+        let repeated = TranscriptProjectionBatch::prepare(
+            "conversation",
+            7,
+            "generation",
+            3,
+            vec![message("conversation", "2026-09-16T00:00:00Z")],
+        )?;
+        let changed_created_at = TranscriptProjectionBatch::prepare(
+            "conversation",
+            7,
+            "generation",
+            3,
+            vec![message("conversation", "2026-09-16T00:00:01Z")],
+        )?;
+
+        assert_eq!(first.operation_id, repeated.operation_id);
+        assert_eq!(first.payload_digest, repeated.payload_digest);
+        assert_ne!(first.operation_id, changed_created_at.operation_id);
+        assert_ne!(first.payload_digest, changed_created_at.payload_digest);
+        Ok(())
+    }
+
+    #[test]
+    fn transcript_projection_batch_rejects_cross_conversation_message() {
+        let result = TranscriptProjectionBatch::prepare(
+            "conversation-a",
+            1,
+            "generation",
+            0,
+            vec![message("conversation-b", "2026-09-16T00:00:00Z")],
+        );
+
+        assert!(result.is_err());
     }
 }

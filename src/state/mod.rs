@@ -128,6 +128,36 @@ pub struct TranscriptProjectionCheckpoint {
     pub projected: Vec<TranscriptProjectionMessage>,
 }
 
+/// Last known retry classification for one durable transcript effect.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TranscriptProjectionAttemptClass {
+    OutcomeUnknown,
+    TransientNoCommit,
+    RevisionConflict,
+}
+
+/// Durable intent written before a transcript backend can observe the effect.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PendingTranscriptProjection {
+    pub batch: crate::memory::TranscriptProjectionBatch,
+    pub cursor_before: TranscriptProjectionCheckpoint,
+    pub cursor_after: TranscriptProjectionCheckpoint,
+    pub base_runtime_revision: u64,
+    #[serde(with = "crate::utils::time::local_rfc3339")]
+    pub prepared_at: DateTime<Utc>,
+    pub attempt: u32,
+    pub last_attempt_class: Option<TranscriptProjectionAttemptClass>,
+    pub last_error: Option<String>,
+}
+
+/// Parsed checkpoint payload including any unsettled transcript intent.
+pub struct ManagedAgentCheckpointPayload {
+    pub messages: Vec<crate::llm::types::Message>,
+    pub transcript_projection: Option<TranscriptProjectionCheckpoint>,
+    pub pending_transcript_projection: Option<PendingTranscriptProjection>,
+}
+
 /// Validated runtime payload restored from one `AgentCheckpoint` parse.
 pub struct RestoredAgentCheckpoint {
     pub messages: Vec<crate::llm::types::Message>,
@@ -136,9 +166,17 @@ pub struct RestoredAgentCheckpoint {
 
 #[derive(Serialize, Deserialize)]
 struct AgentCheckpointPayload {
+    #[serde(default = "default_agent_checkpoint_payload_version")]
+    schema_version: u16,
     messages: Vec<crate::llm::types::Message>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     transcript_projection: Option<TranscriptProjectionCheckpoint>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pending_transcript_projection: Option<PendingTranscriptProjection>,
+}
+
+fn default_agent_checkpoint_payload_version() -> u16 {
+    1
 }
 
 #[derive(Deserialize)]
@@ -183,13 +221,30 @@ impl AgentCheckpoint {
 
     /// Parse and validate messages plus transcript cursor exactly once.
     pub fn restore_runtime_payload(&self) -> crate::error::Result<RestoredAgentCheckpoint> {
-        let (messages, projection) = self.restore_payload()?;
-        validate_tool_message_pairing(&messages)?;
-        self.validate_transcript_projection(projection.as_ref())?;
+        let payload = self.restore_managed_runtime_payload()?;
+        if payload.pending_transcript_projection.is_some() {
+            return Err(invalid_checkpoint(
+                "checkpoint has unsettled transcript projection; managed recovery is required"
+                    .to_string(),
+            ));
+        }
         Ok(RestoredAgentCheckpoint {
-            messages,
-            transcript_projection: projection,
+            messages: payload.messages,
+            transcript_projection: payload.transcript_projection,
         })
+    }
+
+    /// Parse and validate runtime messages, cursor, and durable pending effect.
+    pub fn restore_managed_runtime_payload(
+        &self,
+    ) -> crate::error::Result<ManagedAgentCheckpointPayload> {
+        let payload = self.restore_payload()?;
+        validate_tool_message_pairing(&payload.messages)?;
+        self.validate_transcript_projection(payload.transcript_projection.as_ref())?;
+        self.validate_pending_transcript_projection(
+            payload.pending_transcript_projection.as_ref(),
+        )?;
+        Ok(payload)
     }
 
     fn validate_transcript_projection(
@@ -220,15 +275,64 @@ impl AgentCheckpoint {
         Ok(())
     }
 
+    fn validate_pending_transcript_projection(
+        &self,
+        pending: Option<&PendingTranscriptProjection>,
+    ) -> crate::error::Result<()> {
+        let Some(pending) = pending else {
+            return Ok(());
+        };
+        pending.batch.validate()?;
+        if pending.batch.generation_id != self.conversation_id
+            || pending.cursor_before.generation_id != self.conversation_id
+            || pending.cursor_after.generation_id != self.conversation_id
+            || pending.base_runtime_revision == 0
+            || pending.attempt == 0
+            || pending.cursor_before.next_ordinal
+                != pending
+                    .batch
+                    .items
+                    .first()
+                    .map(|item| item.ordinal)
+                    .unwrap_or(pending.cursor_before.next_ordinal)
+            || pending.cursor_after.next_ordinal
+                != pending
+                    .batch
+                    .items
+                    .last()
+                    .and_then(|item| item.ordinal.checked_add(1))
+                    .unwrap_or(pending.cursor_after.next_ordinal)
+        {
+            return Err(invalid_checkpoint(
+                "pending transcript projection is not aligned with checkpoint identity and cursor"
+                    .to_string(),
+            ));
+        }
+        self.validate_transcript_projection(Some(&pending.cursor_before))?;
+        self.validate_transcript_projection(Some(&pending.cursor_after))?;
+        Ok(())
+    }
+
     /// Serialize messages and their exact transcript projection cursor into the
     /// existing checkpoint payload column/file.
     pub fn serialize_payload(
         messages: Vec<crate::llm::types::Message>,
         transcript_projection: Option<TranscriptProjectionCheckpoint>,
     ) -> crate::error::Result<String> {
+        Self::serialize_managed_payload(messages, transcript_projection, None)
+    }
+
+    /// Serialize messages, cursor, and one durable pending transcript effect.
+    pub fn serialize_managed_payload(
+        messages: Vec<crate::llm::types::Message>,
+        transcript_projection: Option<TranscriptProjectionCheckpoint>,
+        pending_transcript_projection: Option<PendingTranscriptProjection>,
+    ) -> crate::error::Result<String> {
         serde_json::to_string(&AgentCheckpointPayload {
+            schema_version: 2,
             messages,
             transcript_projection,
+            pending_transcript_projection,
         })
         .map_err(|error| {
             crate::error::ReactError::RuntimeState(Box::new(
@@ -239,12 +343,7 @@ impl AgentCheckpoint {
         })
     }
 
-    fn restore_payload(
-        &self,
-    ) -> crate::error::Result<(
-        Vec<crate::llm::types::Message>,
-        Option<TranscriptProjectionCheckpoint>,
-    )> {
+    fn restore_payload(&self) -> crate::error::Result<ManagedAgentCheckpointPayload> {
         let payload: AgentCheckpointPayloadCompat = serde_json::from_str(&self.messages_json)
             .map_err(|error| {
                 crate::error::ReactError::RuntimeState(Box::new(
@@ -253,12 +352,32 @@ impl AgentCheckpoint {
                     )),
                 ))
             })?;
-        Ok(match payload {
+        match payload {
             AgentCheckpointPayloadCompat::Current(payload) => {
-                (payload.messages, payload.transcript_projection)
+                if !(1..=2).contains(&payload.schema_version) {
+                    return Err(invalid_checkpoint(format!(
+                        "unsupported checkpoint payload version {}",
+                        payload.schema_version
+                    )));
+                }
+                if payload.schema_version == 1 && payload.pending_transcript_projection.is_some() {
+                    return Err(invalid_checkpoint(
+                        "legacy checkpoint payload cannot contain pending transcript projection"
+                            .to_string(),
+                    ));
+                }
+                Ok(ManagedAgentCheckpointPayload {
+                    messages: payload.messages,
+                    transcript_projection: payload.transcript_projection,
+                    pending_transcript_projection: payload.pending_transcript_projection,
+                })
             }
-            AgentCheckpointPayloadCompat::Legacy(messages) => (messages, None),
-        })
+            AgentCheckpointPayloadCompat::Legacy(messages) => Ok(ManagedAgentCheckpointPayload {
+                messages,
+                transcript_projection: None,
+                pending_transcript_projection: None,
+            }),
+        }
     }
 
     /// Completed tool call IDs present in this checkpoint, in message order.
@@ -332,6 +451,195 @@ fn invalid_checkpoint(message: String) -> crate::error::ReactError {
 
 // ── RuntimeStateStore trait ────────────────────────────────────────────
 
+/// Revisioned runtime-state support advertised without performing I/O.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeStateCapability {
+    Unsupported,
+    RevisionedV1,
+}
+
+/// Durable version of one runtime generation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeStateVersion {
+    Unmanaged { digest: String },
+    Managed { revision: u64 },
+    Retired { revision: u64, operation_id: String },
+}
+
+/// Version a compare-and-save request expects to replace.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeStateExpectedVersion {
+    Absent,
+    Unmanaged { digest: String },
+    Managed { revision: u64 },
+}
+
+/// Durable lifecycle of one stable runtime scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeScopeLifecycle {
+    Active,
+    Retiring,
+    Tombstoned,
+}
+
+/// Stable runtime-scope authority consulted by admission and checkpoint CAS.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeScopeAuthority {
+    pub scope_id: String,
+    pub conversation_epoch: Option<u64>,
+    pub revision: u64,
+    pub lifecycle: RuntimeScopeLifecycle,
+}
+
+/// Revisioned view of one runtime checkpoint or retirement tombstone.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManagedRuntimeStateSnapshot {
+    pub scope: RuntimeScopeAuthority,
+    pub runtime_state_id: String,
+    pub version: RuntimeStateVersion,
+    pub checkpoint: Option<AgentCheckpoint>,
+}
+
+/// Atomic checkpoint write request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeCheckpointCasRequest {
+    pub scope_id: String,
+    pub runtime_state_id: String,
+    pub conversation_epoch: Option<u64>,
+    pub expected_scope_revision: u64,
+    pub expected_state_version: RuntimeStateExpectedVersion,
+    pub checkpoint: AgentCheckpoint,
+}
+
+/// Domain result of compare-and-save.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeCheckpointCasStatus {
+    Applied,
+    AlreadyCurrent,
+    RevisionConflict,
+    GenerationRetired,
+    ScopeFenced,
+}
+
+/// Stable receipt for compare-and-save.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeCheckpointCasReceipt {
+    pub scope: RuntimeScopeAuthority,
+    pub runtime_state_id: String,
+    pub version: RuntimeStateVersion,
+    pub status: RuntimeCheckpointCasStatus,
+}
+
+/// Idempotent request to retire one exact runtime generation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeGenerationRetireRequest {
+    pub operation_id: String,
+    pub scope_id: String,
+    pub runtime_state_id: String,
+    pub expected_scope_revision: u64,
+    pub expected_state_version: RuntimeStateExpectedVersion,
+}
+
+/// Domain result of exact generation retirement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeGenerationRetireStatus {
+    Retired,
+    AlreadyRetired,
+    Conflict,
+    PendingProjection,
+    ScopeFenced,
+}
+
+/// Stable receipt for exact generation retirement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeGenerationRetireReceipt {
+    pub scope: RuntimeScopeAuthority,
+    pub runtime_state_id: String,
+    pub version: RuntimeStateVersion,
+    pub status: RuntimeGenerationRetireStatus,
+}
+
+/// Progress of one generation captured by a scope-retirement manifest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScopeRetirementItemStatus {
+    Pending,
+    DroppedByDelete,
+}
+
+/// One immutable generation entry captured before product deletion begins.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScopeRetirementItem {
+    pub runtime_state_id: String,
+    pub state_version: RuntimeStateVersion,
+    pub pending_operation_id: Option<String>,
+    pub status: ScopeRetirementItemStatus,
+}
+
+/// Durable manifest that fences every generation in a stable scope.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScopeRetirementManifest {
+    pub delete_operation_id: String,
+    pub payload_digest: String,
+    pub expected_conversation_epoch: u64,
+    pub items: Vec<ScopeRetirementItem>,
+    pub conversation_delete_receipt: Option<crate::memory::ManagedConversationDeleteReceipt>,
+}
+
+/// Request to begin or replay product-scope retirement.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScopeRetirementRequest {
+    pub delete_operation_id: String,
+    pub payload_digest: String,
+    pub scope_id: String,
+    pub expected_scope_revision: u64,
+    pub expected_conversation_epoch: u64,
+}
+
+/// One durable advancement of an existing retirement manifest.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScopeRetirementAdvance {
+    ConversationDeleted {
+        receipt: crate::memory::ManagedConversationDeleteReceipt,
+    },
+    GenerationDropped {
+        runtime_state_id: String,
+        pending_operation_id: Option<String>,
+    },
+    Complete,
+}
+
+/// Stable lifecycle result for scope retirement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScopeRetirementStatus {
+    Begun,
+    InProgress,
+    Completed,
+    AlreadyCompleted,
+    RevisionConflict,
+    EpochConflict,
+    ReceiptExpired,
+    IdentityConflict,
+}
+
+/// Durable receipt and current manifest for product-scope retirement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScopeRetirementReceipt {
+    pub scope: RuntimeScopeAuthority,
+    pub manifest: ScopeRetirementManifest,
+    pub dropped_operation_ids: Vec<String>,
+    pub retention_floor_epoch: u64,
+    pub status: ScopeRetirementStatus,
+}
+
 /// Result of deleting one exact runtime-state incarnation from a stable scope.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RuntimeStateClearReceipt {
@@ -358,6 +666,94 @@ pub struct PersistedConversationDeleteReceipt {
 ///
 /// Implementations may use SQLite, JSON files, or another durable backend.
 pub trait RuntimeStateStore: Send + Sync {
+    /// Report revisioned checkpoint support without performing I/O.
+    fn runtime_state_capability(&self) -> RuntimeStateCapability {
+        RuntimeStateCapability::Unsupported
+    }
+
+    /// Load one managed checkpoint/tombstone and its stable scope revision.
+    fn load_runtime_state<'a>(
+        &'a self,
+        _scope_id: &'a str,
+        _runtime_state_id: &'a str,
+    ) -> futures::future::BoxFuture<'a, crate::error::Result<Option<ManagedRuntimeStateSnapshot>>>
+    {
+        Box::pin(async {
+            Err(echo_core::error::RuntimeStateError::Unsupported(
+                "revisioned runtime-state load".to_string(),
+            )
+            .into())
+        })
+    }
+
+    /// Load the stable scope authority used to fence admission and deletion.
+    fn load_scope_authority<'a>(
+        &'a self,
+        _scope_id: &'a str,
+    ) -> futures::future::BoxFuture<'a, crate::error::Result<Option<RuntimeScopeAuthority>>> {
+        Box::pin(async {
+            Err(echo_core::error::RuntimeStateError::Unsupported(
+                "runtime scope authority load".to_string(),
+            )
+            .into())
+        })
+    }
+
+    /// Atomically write a checkpoint only when scope and generation versions match.
+    fn compare_and_save_checkpoint<'a>(
+        &'a self,
+        _request: RuntimeCheckpointCasRequest,
+    ) -> futures::future::BoxFuture<'a, crate::error::Result<RuntimeCheckpointCasReceipt>> {
+        Box::pin(async {
+            Err(echo_core::error::RuntimeStateError::Unsupported(
+                "runtime checkpoint compare-and-save".to_string(),
+            )
+            .into())
+        })
+    }
+
+    /// Retire one generation behind a durable tombstone.
+    fn retire_runtime_generation<'a>(
+        &'a self,
+        _request: RuntimeGenerationRetireRequest,
+    ) -> futures::future::BoxFuture<'a, crate::error::Result<RuntimeGenerationRetireReceipt>> {
+        Box::pin(async {
+            Err(echo_core::error::RuntimeStateError::Unsupported(
+                "runtime generation retirement".to_string(),
+            )
+            .into())
+        })
+    }
+
+    /// Fence a stable scope and atomically capture its complete delete manifest.
+    fn begin_scope_retirement<'a>(
+        &'a self,
+        _request: ScopeRetirementRequest,
+    ) -> futures::future::BoxFuture<'a, crate::error::Result<ScopeRetirementReceipt>> {
+        Box::pin(async {
+            Err(echo_core::error::RuntimeStateError::Unsupported(
+                "runtime scope retirement".to_string(),
+            )
+            .into())
+        })
+    }
+
+    /// Persist one idempotent advancement of a scope-retirement saga.
+    fn continue_scope_retirement<'a>(
+        &'a self,
+        _scope_id: &'a str,
+        _delete_operation_id: &'a str,
+        _expected_scope_revision: u64,
+        _advance: ScopeRetirementAdvance,
+    ) -> futures::future::BoxFuture<'a, crate::error::Result<ScopeRetirementReceipt>> {
+        Box::pin(async {
+            Err(echo_core::error::RuntimeStateError::Unsupported(
+                "runtime scope retirement advancement".to_string(),
+            )
+            .into())
+        })
+    }
+
     /// Get the most recent checkpoint for a conversation, if any.
     fn get_checkpoint<'a>(
         &'a self,
@@ -646,6 +1042,66 @@ mod checkpoint_tests {
                 checkpoint.messages_json.len(),
             )));
         }
+        Ok(())
+    }
+
+    #[test]
+    fn pending_transcript_projection_round_trips_and_requires_managed_recovery()
+    -> crate::error::Result<()> {
+        let batch = crate::memory::TranscriptProjectionBatch::prepare(
+            "product-conversation",
+            1,
+            "conversation-1",
+            0,
+            vec![crate::memory::StoredMessage {
+                id: None,
+                conversation_id: "product-conversation".to_string(),
+                role: "user".to_string(),
+                content: Some("hello".to_string()),
+                attachments_json: None,
+                tool_calls_json: None,
+                tool_result_json: None,
+                created_at: "2026-09-16T00:00:00Z".to_string(),
+            }],
+        )?;
+        let projected = vec![TranscriptProjectionMessage {
+            ordinal: 0,
+            digest: batch
+                .items
+                .first()
+                .map(|item| item.digest.clone())
+                .ok_or_else(|| {
+                    crate::error::ReactError::Other("prepared batch is empty".to_string())
+                })?,
+        }];
+        let pending = PendingTranscriptProjection {
+            batch,
+            cursor_before: TranscriptProjectionCheckpoint {
+                generation_id: "conversation-1".to_string(),
+                next_ordinal: 0,
+                projected: Vec::new(),
+            },
+            cursor_after: TranscriptProjectionCheckpoint {
+                generation_id: "conversation-1".to_string(),
+                next_ordinal: 1,
+                projected,
+            },
+            base_runtime_revision: 1,
+            prepared_at: Utc::now(),
+            attempt: 1,
+            last_attempt_class: None,
+            last_error: None,
+        };
+        let mut checkpoint = AgentCheckpoint::new("conversation-1");
+        checkpoint.messages_json = AgentCheckpoint::serialize_managed_payload(
+            vec![Message::user("hello".to_string())],
+            Some(pending.cursor_before.clone()),
+            Some(pending.clone()),
+        )?;
+
+        assert!(checkpoint.restore_runtime_payload().is_err());
+        let restored = checkpoint.restore_managed_runtime_payload()?;
+        assert_eq!(restored.pending_transcript_projection, Some(pending));
         Ok(())
     }
 }

@@ -726,6 +726,15 @@ pub enum RuntimeStateError {
     /// State not found
     #[error("State not found: {0}")]
     NotFound(String),
+    /// The backend does not implement a required atomic runtime-state contract.
+    #[error("Unsupported operation: {0}")]
+    Unsupported(String),
+    /// A legacy mutation attempted to overwrite revision-managed state.
+    #[error("Managed runtime state requires compare-and-save: {0}")]
+    ManagedStateRequiresCas(String),
+    /// A durable revision cannot be advanced without overflow.
+    #[error("Runtime state revision exhausted: {0}")]
+    RevisionExhausted(String),
 }
 
 impl From<RuntimeStateError> for ReactError {

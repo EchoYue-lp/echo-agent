@@ -21,8 +21,14 @@ pub mod types;
 pub use scope::MemoryScope;
 
 pub use conversation::{
-    Conversation, ConversationFilter, ConversationMeta, ConversationStore, NewConversation,
-    StoredMessage,
+    Conversation, ConversationFilter, ConversationMeta, ConversationProjectionAuthority,
+    ConversationProjectionCapability, ConversationProjectionEpochReceipt,
+    ConversationProjectionEpochStatus, ConversationProjectionLifecycle, ConversationStore,
+    EnsureConversationProjectionRequest, ManagedConversationDelete,
+    ManagedConversationDeleteReceipt, ManagedConversationDeleteStatus, ManagedConversationImport,
+    NewConversation, StoredMessage, TranscriptProjectionApplyReceipt,
+    TranscriptProjectionApplyStatus, TranscriptProjectionBatch, TranscriptProjectionConflictKind,
+    TranscriptProjectionItem,
 };
 pub use embedder::Embedder;
 pub use store::{SearchMode, SearchQuery, Store, StoreItem};

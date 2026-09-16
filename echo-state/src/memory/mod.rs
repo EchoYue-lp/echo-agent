@@ -30,8 +30,14 @@ pub mod typed_store;
 // Re-export traits and data types from echo-core (backward compatibility)
 pub use echo_core::memory::MemoryScope;
 pub use echo_core::memory::conversation::{
-    Conversation, ConversationFilter, ConversationMeta, ConversationStore, NewConversation,
-    StoredMessage,
+    Conversation, ConversationFilter, ConversationMeta, ConversationProjectionAuthority,
+    ConversationProjectionCapability, ConversationProjectionEpochReceipt,
+    ConversationProjectionEpochStatus, ConversationProjectionLifecycle, ConversationStore,
+    EnsureConversationProjectionRequest, ManagedConversationDelete,
+    ManagedConversationDeleteReceipt, ManagedConversationDeleteStatus, ManagedConversationImport,
+    NewConversation, StoredMessage, TranscriptProjectionApplyReceipt,
+    TranscriptProjectionApplyStatus, TranscriptProjectionBatch, TranscriptProjectionConflictKind,
+    TranscriptProjectionItem,
 };
 pub use echo_core::memory::embedder::Embedder;
 pub use echo_core::memory::store::{SearchMode, SearchQuery, Store, StoreItem};
