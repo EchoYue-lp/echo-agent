@@ -158,6 +158,7 @@ impl ReactAgent {
                 .as_ref()
                 .and_then(|context| context.transcript_generation_id.as_deref()),
         )?;
+        self.validate_persistence_configuration()?;
 
         // ★ Acquire execution mutex BEFORE context mutation — using lock_owned()
         // so the guard can be moved into the spawned task and held for the

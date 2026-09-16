@@ -2841,6 +2841,52 @@ async fn recall_injects_memories_into_current_user_message() -> Result<(), Strin
 
 // ── save_transcript_projection ──────────────────────────────────────────────
 
+#[tokio::test]
+async fn conversation_store_without_runtime_state_is_rejected_before_run_side_effects()
+-> crate::error::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = Arc::new(crate::memory::FileConversationStore::new(temp.path())?);
+    let config = AgentConfig::new("test-model", "agent", "system")
+        .conversation_id("store-only-conversation");
+    let mut agent = ReactAgent::new(config);
+    agent.set_conversation_store(store.clone());
+    let before = serde_json::to_value(agent.memory.context.lock().await.messages())?;
+
+    let direct = agent.run_direct("must not run").await;
+    assert!(matches!(direct, Err(crate::error::ReactError::Config(_))));
+    assert_eq!(
+        serde_json::to_value(agent.memory.context.lock().await.messages())?,
+        before
+    );
+    assert!(
+        crate::memory::ConversationStore::get_conversation(
+            store.as_ref(),
+            "store-only-conversation"
+        )
+        .await?
+        .is_none()
+    );
+
+    let streaming = agent.execute_stream("must not stream").await;
+    assert!(matches!(
+        streaming,
+        Err(crate::error::ReactError::Config(_))
+    ));
+    assert_eq!(
+        serde_json::to_value(agent.memory.context.lock().await.messages())?,
+        before
+    );
+    assert!(
+        crate::memory::ConversationStore::get_conversation(
+            store.as_ref(),
+            "store-only-conversation"
+        )
+        .await?
+        .is_none()
+    );
+    Ok(())
+}
+
 /// Verify `AgentRunSnapshot::save_transcript_projection` calls
 /// `ConversationStore::save_messages` with the projection of in-memory messages,
 /// and silently no-ops when no `conversation_id` is configured.

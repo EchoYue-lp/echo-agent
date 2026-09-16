@@ -1864,12 +1864,44 @@ impl ReactAgent {
         self.memory.conversation_store = Some(store);
     }
 
+    /// Validate transcript persistence wiring without performing store I/O.
+    pub(crate) fn validate_persistence_configuration(&self) -> Result<()> {
+        let Some(conversation_store) = self.memory.conversation_store.as_ref() else {
+            return Ok(());
+        };
+        let Some(runtime_state_store) = self.memory.state_store.as_ref() else {
+            return Err(crate::error::ConfigError::ConfigFileError(
+                "ConversationStore requires RuntimeStateStore for durable transcript projection"
+                    .to_string(),
+            )
+            .into());
+        };
+        if conversation_store.projection_capability()
+            != crate::memory::ConversationProjectionCapability::AtomicV1
+        {
+            return Err(crate::error::ConfigError::ConfigFileError(
+                "ConversationStore does not support atomic transcript projection".to_string(),
+            )
+            .into());
+        }
+        if runtime_state_store.runtime_state_capability()
+            != crate::state::RuntimeStateCapability::RevisionedV1
+        {
+            return Err(crate::error::ConfigError::ConfigFileError(
+                "RuntimeStateStore does not support revisioned transcript settlement".to_string(),
+            )
+            .into());
+        }
+        Ok(())
+    }
+
     /// Load historical messages into the agent context (replaces existing context).
     ///
     /// Used to restore a conversation from persistent storage so the agent
     /// can continue a previous dialogue. Messages should include the system
     /// prompt as the first entry if needed.
-    pub async fn load_messages(&self, messages: Vec<crate::llm::types::Message>) {
+    pub async fn load_messages(&self, messages: Vec<crate::llm::types::Message>) -> Result<()> {
+        self.validate_persistence_configuration()?;
         let _execution_guard = self.execution_mutex.lock().await;
         let runtime_state_id = self.config.conversation_id.clone();
         let _previous_hydration = self
@@ -1879,6 +1911,7 @@ impl ReactAgent {
         self.memory.context.lock().await.set_messages(messages);
         self.commit_runtime_state_hydration(runtime_state_id.as_deref())
             .await;
+        Ok(())
     }
 
     /// Resume agent state from a [`RuntimeStateStore`](crate::state::RuntimeStateStore) checkpoint.
@@ -1891,6 +1924,7 @@ impl ReactAgent {
     /// checkpoint was found and restored, or `None` if no state store is
     /// configured or no checkpoint exists.
     pub async fn resume_from_state_store(&self) -> Result<Option<crate::state::AgentCheckpoint>> {
+        self.validate_persistence_configuration()?;
         let _execution_guard = self.execution_mutex.lock().await;
         let Some(runtime_state_id) = self.config.conversation_id.clone() else {
             tracing::debug!("resume_from_state_store: no conversation_id configured");
@@ -1914,6 +1948,7 @@ impl ReactAgent {
         &self,
         runtime_state_id: &str,
     ) -> Result<Option<crate::state::AgentCheckpoint>> {
+        self.validate_persistence_configuration()?;
         let Some(ref store) = self.memory.state_store else {
             return Ok(None);
         };
@@ -1999,6 +2034,7 @@ impl ReactAgent {
     /// Useful for user-initiated checkpoint saves (e.g., `/checkpoint` command).
     /// Silently no-ops if no state store or conversation_id is configured.
     pub async fn force_checkpoint(&self) -> Result<()> {
+        self.validate_persistence_configuration()?;
         let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(self);
         snapshot
             .save_runtime_checkpoint(&self.memory.context, None)
@@ -3672,9 +3708,9 @@ impl ReactAgent {
     /// ```
     pub async fn execute_with_image_url(&self, task: &str, image_url: &str) -> Result<String> {
         use crate::llm::types::{ContentPart, ImageUrl, Message};
+        use futures::StreamExt;
 
-        // Reset context
-        self.reset_messages().await;
+        self.validate_persistence_configuration()?;
 
         let message = Message::user_multimodal(vec![
             ContentPart::Text {
@@ -3688,6 +3724,29 @@ impl ReactAgent {
             },
         ]);
 
-        self.chat_multimodal(message).await
+        let mut stream = self.execute_stream_message(message).await?;
+        let mut final_content = None;
+        while let Some(event) = stream.next().await {
+            match event? {
+                AgentEvent::FinalAnswer(content) => final_content = Some(content),
+                AgentEvent::Cancelled => {
+                    return Err(crate::error::AgentError::Cancelled(
+                        "multimodal execute".to_string(),
+                    )
+                    .into());
+                }
+                AgentEvent::Error { message, .. } => {
+                    return Err(crate::error::ReactError::Other(message));
+                }
+                _ => {}
+            }
+        }
+        final_content.ok_or_else(|| {
+            crate::error::AgentError::NoResponse {
+                model: self.config.model_name.clone(),
+                agent: self.config.agent_name.clone(),
+            }
+            .into()
+        })
     }
 }

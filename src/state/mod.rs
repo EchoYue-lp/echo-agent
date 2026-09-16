@@ -463,6 +463,7 @@ pub enum RuntimeStateCapability {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeStateVersion {
+    Absent,
     Unmanaged { digest: String },
     Managed { revision: u64 },
     Retired { revision: u64, operation_id: String },

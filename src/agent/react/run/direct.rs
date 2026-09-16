@@ -7,6 +7,7 @@ use tracing::{Instrument, debug, info, info_span};
 impl ReactAgent {
     /// Direct execution (no planning): reset/restore context, then enter ReAct loop
     pub(crate) async fn run_direct(&self, task: &str) -> Result<String> {
+        self.validate_persistence_configuration()?;
         let agent = self.config.agent_name.clone();
         self.restore_thread_context().await?;
 
@@ -27,6 +28,7 @@ impl ReactAgent {
 
     /// Multi-turn conversation: do not reset context, append message then enter ReAct loop
     pub(crate) async fn run_chat_direct(&self, message: &str) -> Result<String> {
+        self.validate_persistence_configuration()?;
         let agent = self.config.agent_name.clone();
         self.restore_chat_context_if_cold().await?;
 
