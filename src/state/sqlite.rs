@@ -1,15 +1,45 @@
 //! SQLite-backed [`RuntimeStateStore`] implementation.
 
 use super::{
-    AgentCheckpoint, RuntimeStateClearReceipt, RuntimeStateScopeClearReceipt, RuntimeStateStore,
+    AgentCheckpoint, ManagedRuntimeStateSnapshot, RuntimeCheckpointCasReceipt,
+    RuntimeCheckpointCasRequest, RuntimeCheckpointCasStatus, RuntimeGenerationRetireReceipt,
+    RuntimeGenerationRetireRequest, RuntimeGenerationRetireStatus, RuntimeScopeAuthority,
+    RuntimeScopeLifecycle, RuntimeStateCapability, RuntimeStateClearReceipt,
+    RuntimeStateExpectedVersion, RuntimeStateScopeClearReceipt, RuntimeStateStore,
+    RuntimeStateVersion, ScopeRetirementAdvance, ScopeRetirementItem, ScopeRetirementItemStatus,
+    ScopeRetirementManifest, ScopeRetirementReceipt, ScopeRetirementRequest, ScopeRetirementStatus,
 };
 use crate::error::{Result, RuntimeStateError};
 use echo_core::utils::blocking::{
     BlockingFileOperationKey, BlockingFileOperationScope, run_keyed_file_operation,
 };
 use futures::future::BoxFuture;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::path::Path;
+
+const MAX_CONVERSATION_EPOCH: u64 = i64::MAX as u64;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct SqliteRuntimeScopeRecord {
+    authority: RuntimeScopeAuthority,
+    current_retirement: Option<ScopeRetirementManifest>,
+    completed_retirements: Vec<ScopeRetirementReceipt>,
+}
+
+#[derive(Clone, Debug)]
+struct SqliteRuntimeStateRecord {
+    runtime_state_id: String,
+    scope_id: String,
+    version: RuntimeStateVersion,
+    conversation_epoch: Option<u64>,
+    scope_revision: u64,
+    scope_lifecycle: RuntimeScopeLifecycle,
+    cas_expected_state_version: Option<RuntimeStateExpectedVersion>,
+    cas_expected_scope_revision: u64,
+    checkpoint: Option<AgentCheckpoint>,
+}
 
 /// SQLite-backed runtime checkpoint store.
 #[derive(Clone)]
@@ -63,6 +93,26 @@ impl SqliteRuntimeStateStore {
                 ON runtime_state_scopes(runtime_state_id);
             CREATE UNIQUE INDEX IF NOT EXISTS uniq_runtime_state_scope_owner
                 ON runtime_state_scopes(runtime_state_id);
+            CREATE TABLE IF NOT EXISTS runtime_state_authorities (
+                scope_id                      TEXT PRIMARY KEY,
+                authority_json                TEXT NOT NULL,
+                current_retirement_json       TEXT,
+                completed_retirements_json    TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS runtime_state_versions (
+                runtime_state_id       TEXT PRIMARY KEY,
+                scope_id               TEXT NOT NULL,
+                state_version_json      TEXT NOT NULL,
+                conversation_epoch      INTEGER,
+                scope_revision          TEXT NOT NULL,
+                scope_lifecycle_json    TEXT NOT NULL,
+                cas_expected_state_version_json TEXT,
+                cas_expected_scope_revision TEXT
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS uniq_runtime_state_version_owner
+                ON runtime_state_versions(runtime_state_id);
+            CREATE INDEX IF NOT EXISTS idx_runtime_state_versions_scope
+                ON runtime_state_versions(scope_id);
             "#,
         )
         .map_err(|error| RuntimeStateError::Io(format!("failed to init tables: {error}")))?;
@@ -82,15 +132,696 @@ impl SqliteRuntimeStateStore {
                 .into());
             }
         }
+        for statement in [
+            "ALTER TABLE runtime_state_versions ADD COLUMN cas_expected_state_version_json TEXT",
+            "ALTER TABLE runtime_state_versions ADD COLUMN cas_expected_scope_revision TEXT",
+        ] {
+            if let Err(error) = conn.execute(statement, []) {
+                let message = error.to_string();
+                if !message.contains("duplicate column name") {
+                    return Err(RuntimeStateError::Io(format!(
+                        "failed to migrate runtime-state CAS metadata: {message}"
+                    ))
+                    .into());
+                }
+            }
+        }
         Ok(())
+    }
+
+    fn immediate_transaction(conn: &mut Connection) -> Result<rusqlite::Transaction<'_>> {
+        conn.transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| {
+                RuntimeStateError::Io(format!(
+                    "failed to begin immediate runtime-state transaction: {error}"
+                ))
+                .into()
+            })
+    }
+
+    fn managed_state_error(message: impl Into<String>) -> crate::error::ReactError {
+        RuntimeStateError::ManagedStateRequiresCas(message.into()).into()
+    }
+
+    fn next_revision(current: u64, identity: &str) -> Result<u64> {
+        current
+            .checked_add(1)
+            .ok_or_else(|| RuntimeStateError::RevisionExhausted(identity.to_string()).into())
+    }
+
+    fn checkpoint_digest(checkpoint: &AgentCheckpoint) -> Result<String> {
+        let encoded = serde_json::to_vec(checkpoint).map_err(|error| {
+            RuntimeStateError::SerializationError(format!(
+                "failed to serialize checkpoint digest: {error}"
+            ))
+        })?;
+        Ok(format!("{:x}", Sha256::digest(encoded)))
+    }
+
+    fn encode<T: Serialize>(value: &T, label: &str) -> Result<String> {
+        serde_json::to_string(value).map_err(|error| {
+            RuntimeStateError::SerializationError(format!("failed to serialize {label}: {error}"))
+                .into()
+        })
+    }
+
+    fn decode<T: serde::de::DeserializeOwned>(value: &str, label: &str) -> Result<T> {
+        serde_json::from_str(value).map_err(|error| {
+            RuntimeStateError::SerializationError(format!("failed to deserialize {label}: {error}"))
+                .into()
+        })
+    }
+
+    fn state_revision(version: &RuntimeStateVersion) -> u64 {
+        match version {
+            RuntimeStateVersion::Absent => 0,
+            RuntimeStateVersion::Unmanaged { .. } => 0,
+            RuntimeStateVersion::Managed { revision }
+            | RuntimeStateVersion::Retired { revision, .. } => *revision,
+        }
+    }
+
+    fn state_matches_expected(
+        current: Option<&RuntimeStateVersion>,
+        expected: &RuntimeStateExpectedVersion,
+    ) -> bool {
+        match (current, expected) {
+            (None, RuntimeStateExpectedVersion::Absent) => true,
+            (
+                Some(RuntimeStateVersion::Unmanaged { digest: current }),
+                RuntimeStateExpectedVersion::Unmanaged { digest: expected },
+            ) => current == expected,
+            (
+                Some(RuntimeStateVersion::Managed { revision: current }),
+                RuntimeStateExpectedVersion::Managed { revision: expected },
+            ) => current == expected,
+            _ => false,
+        }
+    }
+
+    fn epoch_is_valid(epoch: Option<u64>) -> bool {
+        epoch.is_none_or(|epoch| (1..=MAX_CONVERSATION_EPOCH).contains(&epoch))
+    }
+
+    fn validate_checkpoint_cas_request(request: &RuntimeCheckpointCasRequest) -> Result<()> {
+        if request.scope_id.trim().is_empty() || request.runtime_state_id.trim().is_empty() {
+            return Err(RuntimeStateError::SerializationError(
+                "checkpoint CAS scope and runtime identities must not be empty".to_string(),
+            )
+            .into());
+        }
+        if request.checkpoint.conversation_id != request.runtime_state_id {
+            return Err(RuntimeStateError::SerializationError(
+                "checkpoint identity does not match CAS runtime identity".to_string(),
+            )
+            .into());
+        }
+        if !Self::epoch_is_valid(request.conversation_epoch) {
+            return Err(RuntimeStateError::SerializationError(
+                "conversation epoch is outside the supported range".to_string(),
+            )
+            .into());
+        }
+        let payload = request.checkpoint.restore_managed_runtime_payload()?;
+        if let Some(pending) = payload.pending_transcript_projection
+            && (pending.batch.conversation_id != request.scope_id
+                || Some(pending.batch.conversation_epoch) != request.conversation_epoch)
+        {
+            return Err(RuntimeStateError::SerializationError(
+                "pending transcript projection does not match CAS scope and epoch".to_string(),
+            )
+            .into());
+        }
+        Ok(())
+    }
+
+    fn is_direct_cas_replay(
+        state: &SqliteRuntimeStateRecord,
+        request: &RuntimeCheckpointCasRequest,
+    ) -> Result<bool> {
+        Ok(matches!(state.version, RuntimeStateVersion::Managed { .. })
+            && state.cas_expected_state_version.as_ref() == Some(&request.expected_state_version)
+            && state.cas_expected_scope_revision == request.expected_scope_revision
+            && request.expected_scope_revision.checked_add(1) == Some(state.scope_revision)
+            && Self::checkpoint_is_current(state, &request.checkpoint)?)
+    }
+
+    fn is_direct_retirement_replay(
+        state: &SqliteRuntimeStateRecord,
+        request: &RuntimeGenerationRetireRequest,
+    ) -> bool {
+        matches!(
+            &state.version,
+            RuntimeStateVersion::Retired { operation_id, .. }
+                if operation_id == &request.operation_id
+        ) && state.cas_expected_state_version.as_ref() == Some(&request.expected_state_version)
+            && state.cas_expected_scope_revision == request.expected_scope_revision
+            && request.expected_scope_revision.checked_add(1) == Some(state.scope_revision)
+    }
+
+    fn load_checkpoint_on_connection(
+        conn: &Connection,
+        conversation_id: &str,
+    ) -> Result<Option<AgentCheckpoint>> {
+        let row = conn
+            .query_row(
+                "SELECT messages_json, current_plan, active_skills, blocked_reason, working_dir, timestamp
+                 FROM agent_checkpoints WHERE conversation_id = ?1",
+                params![conversation_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, String>(5)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|error| {
+                RuntimeStateError::Io(format!("failed to query checkpoint: {error}"))
+            })?;
+        let Some((
+            messages_json,
+            current_plan,
+            active_skills_json,
+            blocked_reason,
+            working_dir,
+            timestamp,
+        )) = row
+        else {
+            return Ok(None);
+        };
+        let active_skills = serde_json::from_str(&active_skills_json).map_err(|error| {
+            RuntimeStateError::SerializationError(format!(
+                "invalid checkpoint active_skills: {error}"
+            ))
+        })?;
+        let timestamp = chrono::DateTime::parse_from_rfc3339(&timestamp)
+            .map_err(|error| {
+                RuntimeStateError::SerializationError(format!(
+                    "invalid checkpoint timestamp: {error}"
+                ))
+            })?
+            .with_timezone(&chrono::Utc);
+        Ok(Some(AgentCheckpoint {
+            conversation_id: conversation_id.to_string(),
+            messages_json,
+            current_plan,
+            active_skills,
+            blocked_reason,
+            working_dir: working_dir.map(std::path::PathBuf::from),
+            timestamp,
+        }))
+    }
+
+    fn load_scope_record_on_connection(
+        conn: &Connection,
+        scope_id: &str,
+    ) -> Result<Option<SqliteRuntimeScopeRecord>> {
+        let row = conn
+            .query_row(
+                "SELECT authority_json, current_retirement_json, completed_retirements_json
+                 FROM runtime_state_authorities WHERE scope_id = ?1",
+                params![scope_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|error| {
+                RuntimeStateError::Io(format!("failed to query runtime scope: {error}"))
+            })?;
+        let Some((authority, current, completed)) = row else {
+            return Ok(None);
+        };
+        let authority: RuntimeScopeAuthority = Self::decode(&authority, "runtime scope")?;
+        if authority.scope_id != scope_id || authority.revision == 0 {
+            return Err(RuntimeStateError::SerializationError(format!(
+                "runtime scope authority mismatch for {scope_id}"
+            ))
+            .into());
+        }
+        if !Self::epoch_is_valid(authority.conversation_epoch) {
+            return Err(RuntimeStateError::SerializationError(format!(
+                "runtime scope {scope_id} has an invalid conversation epoch"
+            ))
+            .into());
+        }
+        let current_retirement = current
+            .as_deref()
+            .map(|value| Self::decode(value, "scope retirement manifest"))
+            .transpose()?;
+        if authority.lifecycle == RuntimeScopeLifecycle::Retiring && current_retirement.is_none() {
+            return Err(RuntimeStateError::SerializationError(format!(
+                "retiring runtime scope {scope_id} is missing its manifest"
+            ))
+            .into());
+        }
+        Ok(Some(SqliteRuntimeScopeRecord {
+            authority,
+            current_retirement,
+            completed_retirements: Self::decode(&completed, "completed scope retirements")?,
+        }))
+    }
+
+    fn save_scope_record_on_connection(
+        conn: &Connection,
+        record: &SqliteRuntimeScopeRecord,
+    ) -> Result<()> {
+        conn.execute(
+            "INSERT INTO runtime_state_authorities
+             (scope_id, authority_json, current_retirement_json, completed_retirements_json)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(scope_id) DO UPDATE SET
+                 authority_json = excluded.authority_json,
+                 current_retirement_json = excluded.current_retirement_json,
+                 completed_retirements_json = excluded.completed_retirements_json",
+            params![
+                &record.authority.scope_id,
+                Self::encode(&record.authority, "runtime scope")?,
+                record
+                    .current_retirement
+                    .as_ref()
+                    .map(|manifest| Self::encode(manifest, "scope retirement manifest"))
+                    .transpose()?,
+                Self::encode(&record.completed_retirements, "completed scope retirements")?,
+            ],
+        )
+        .map_err(|error| RuntimeStateError::Io(format!("failed to save runtime scope: {error}")))?;
+        Ok(())
+    }
+
+    fn load_state_record_on_connection(
+        conn: &Connection,
+        runtime_state_id: &str,
+    ) -> Result<Option<SqliteRuntimeStateRecord>> {
+        let managed = conn
+            .query_row(
+                "SELECT scope_id, state_version_json, conversation_epoch, scope_revision,
+                        scope_lifecycle_json, cas_expected_state_version_json,
+                        cas_expected_scope_revision
+                 FROM runtime_state_versions WHERE runtime_state_id = ?1",
+                params![runtime_state_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<u64>>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                        row.get::<_, Option<String>>(6)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|error| {
+                RuntimeStateError::Io(format!("failed to query runtime version: {error}"))
+            })?;
+        if let Some((
+            scope_id,
+            version,
+            epoch,
+            scope_revision,
+            lifecycle,
+            cas_expected_state_version,
+            cas_expected_scope_revision,
+        )) = managed
+        {
+            let version: RuntimeStateVersion = Self::decode(&version, "runtime state version")?;
+            let scope_revision = scope_revision.parse::<u64>().map_err(|error| {
+                RuntimeStateError::SerializationError(format!(
+                    "invalid runtime scope revision: {error}"
+                ))
+            })?;
+            if version == RuntimeStateVersion::Absent {
+                return Err(RuntimeStateError::SerializationError(format!(
+                    "runtime state {runtime_state_id} persisted an absent version"
+                ))
+                .into());
+            }
+            if !Self::epoch_is_valid(epoch) {
+                return Err(RuntimeStateError::SerializationError(format!(
+                    "runtime state {runtime_state_id} has an invalid conversation epoch"
+                ))
+                .into());
+            }
+            let checkpoint = Self::load_checkpoint_on_connection(conn, runtime_state_id)?;
+            if matches!(version, RuntimeStateVersion::Retired { .. }) && checkpoint.is_some() {
+                return Err(RuntimeStateError::SerializationError(format!(
+                    "retired runtime state {runtime_state_id} retained a checkpoint"
+                ))
+                .into());
+            }
+            if matches!(version, RuntimeStateVersion::Managed { .. }) && checkpoint.is_none() {
+                return Err(RuntimeStateError::SerializationError(format!(
+                    "managed runtime state {runtime_state_id} lost its checkpoint"
+                ))
+                .into());
+            }
+            return Ok(Some(SqliteRuntimeStateRecord {
+                runtime_state_id: runtime_state_id.to_string(),
+                scope_id,
+                version,
+                conversation_epoch: epoch,
+                scope_revision,
+                scope_lifecycle: Self::decode(&lifecycle, "runtime scope lifecycle")?,
+                cas_expected_state_version: cas_expected_state_version
+                    .as_deref()
+                    .map(|value| Self::decode(value, "runtime CAS predecessor"))
+                    .transpose()?,
+                cas_expected_scope_revision: cas_expected_scope_revision
+                    .as_deref()
+                    .map(|value| {
+                        value.parse::<u64>().map_err(|error| {
+                            crate::error::ReactError::from(RuntimeStateError::SerializationError(
+                                format!("invalid runtime CAS scope predecessor: {error}"),
+                            ))
+                        })
+                    })
+                    .transpose()?
+                    .unwrap_or(0),
+                checkpoint,
+            }));
+        }
+        let scope_id = conn
+            .query_row(
+                "SELECT scope_id FROM runtime_state_scopes WHERE runtime_state_id = ?1",
+                params![runtime_state_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|error| {
+                RuntimeStateError::Io(format!("failed to query legacy runtime owner: {error}"))
+            })?;
+        let checkpoint = Self::load_checkpoint_on_connection(conn, runtime_state_id)?;
+        let Some(checkpoint) = checkpoint else {
+            return Ok(None);
+        };
+        let scope_id = scope_id.unwrap_or_else(|| runtime_state_id.to_string());
+        Ok(Some(SqliteRuntimeStateRecord {
+            runtime_state_id: runtime_state_id.to_string(),
+            scope_id,
+            version: RuntimeStateVersion::Unmanaged {
+                digest: Self::checkpoint_digest(&checkpoint)?,
+            },
+            conversation_epoch: None,
+            scope_revision: 0,
+            scope_lifecycle: RuntimeScopeLifecycle::Active,
+            cas_expected_state_version: None,
+            cas_expected_scope_revision: 0,
+            checkpoint: Some(checkpoint),
+        }))
+    }
+
+    fn save_state_record_on_connection(
+        conn: &Connection,
+        record: &SqliteRuntimeStateRecord,
+    ) -> Result<()> {
+        conn.execute(
+            "INSERT INTO runtime_state_scopes (scope_id, runtime_state_id) VALUES (?1, ?2)
+             ON CONFLICT(scope_id, runtime_state_id) DO NOTHING",
+            params![&record.scope_id, &record.runtime_state_id],
+        )
+        .map_err(|error| {
+            RuntimeStateError::Io(format!("failed to bind managed runtime scope: {error}"))
+        })?;
+        conn.execute(
+            "INSERT INTO runtime_state_versions
+             (runtime_state_id, scope_id, state_version_json, conversation_epoch, scope_revision,
+              scope_lifecycle_json, cas_expected_state_version_json, cas_expected_scope_revision)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(runtime_state_id) DO UPDATE SET
+                 scope_id = excluded.scope_id,
+                 state_version_json = excluded.state_version_json,
+                 conversation_epoch = excluded.conversation_epoch,
+                 scope_revision = excluded.scope_revision,
+                 scope_lifecycle_json = excluded.scope_lifecycle_json,
+                 cas_expected_state_version_json = excluded.cas_expected_state_version_json,
+                 cas_expected_scope_revision = excluded.cas_expected_scope_revision",
+            params![
+                &record.runtime_state_id,
+                &record.scope_id,
+                Self::encode(&record.version, "runtime state version")?,
+                record.conversation_epoch,
+                record.scope_revision.to_string(),
+                Self::encode(&record.scope_lifecycle, "runtime scope lifecycle")?,
+                record
+                    .cas_expected_state_version
+                    .as_ref()
+                    .map(|version| Self::encode(version, "runtime CAS predecessor"))
+                    .transpose()?,
+                record.cas_expected_scope_revision.to_string(),
+            ],
+        )
+        .map_err(|error| {
+            RuntimeStateError::Io(format!("failed to save managed runtime version: {error}"))
+        })?;
+        if let Some(checkpoint) = record.checkpoint.as_ref() {
+            Self::save_checkpoint_on_connection(conn, checkpoint)?;
+        } else {
+            conn.execute(
+                "DELETE FROM agent_checkpoints WHERE conversation_id = ?1",
+                params![&record.runtime_state_id],
+            )
+            .map_err(|error| {
+                RuntimeStateError::Io(format!("failed to clear retired checkpoint: {error}"))
+            })?;
+        }
+        Ok(())
+    }
+
+    fn scope_state_records_on_connection(
+        conn: &Connection,
+        scope_id: &str,
+    ) -> Result<Vec<SqliteRuntimeStateRecord>> {
+        let mut statement = conn
+            .prepare(
+                "SELECT runtime_state_id FROM runtime_state_scopes
+                 WHERE scope_id = ?1 ORDER BY runtime_state_id",
+            )
+            .map_err(|error| {
+                RuntimeStateError::Io(format!("failed to prepare runtime scope query: {error}"))
+            })?;
+        let rows = statement
+            .query_map(params![scope_id], |row| row.get::<_, String>(0))
+            .map_err(|error| {
+                RuntimeStateError::Io(format!("failed to query runtime scope: {error}"))
+            })?;
+        let mut records = Vec::new();
+        for row in rows {
+            let runtime_state_id = row.map_err(|error| {
+                RuntimeStateError::Io(format!("failed to read runtime scope: {error}"))
+            })?;
+            let record = Self::load_state_record_on_connection(conn, &runtime_state_id)?
+                .ok_or_else(|| {
+                    RuntimeStateError::SerializationError(format!(
+                        "runtime scope {scope_id} references missing state {runtime_state_id}"
+                    ))
+                })?;
+            if record.scope_id != scope_id {
+                return Err(RuntimeStateError::SerializationError(format!(
+                    "runtime state {runtime_state_id} has conflicting scope ownership"
+                ))
+                .into());
+            }
+            records.push(record);
+        }
+        if !records
+            .iter()
+            .any(|record| record.runtime_state_id == scope_id)
+        {
+            let owner = conn
+                .query_row(
+                    "SELECT scope_id FROM runtime_state_scopes WHERE runtime_state_id = ?1",
+                    params![scope_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(|error| {
+                    RuntimeStateError::Io(format!(
+                        "failed to inspect same-id legacy runtime state: {error}"
+                    ))
+                })?;
+            if owner.is_none()
+                && let Some(record) = Self::load_state_record_on_connection(conn, scope_id)?
+            {
+                records.push(record);
+                records.sort_by(|left, right| left.runtime_state_id.cmp(&right.runtime_state_id));
+            }
+        }
+        Ok(records)
+    }
+
+    fn authority_or_unmanaged(
+        scope_id: &str,
+        scope: Option<&SqliteRuntimeScopeRecord>,
+        states: &[SqliteRuntimeStateRecord],
+    ) -> RuntimeScopeAuthority {
+        scope
+            .map(|record| record.authority.clone())
+            .or_else(|| {
+                states
+                    .iter()
+                    .max_by_key(|state| state.scope_revision)
+                    .map(|state| RuntimeScopeAuthority {
+                        scope_id: scope_id.to_string(),
+                        conversation_epoch: state.conversation_epoch,
+                        revision: state.scope_revision,
+                        lifecycle: state.scope_lifecycle,
+                    })
+            })
+            .unwrap_or(RuntimeScopeAuthority {
+                scope_id: scope_id.to_string(),
+                conversation_epoch: None,
+                revision: 0,
+                lifecycle: RuntimeScopeLifecycle::Active,
+            })
+    }
+
+    fn pending_operation_id(record: &SqliteRuntimeStateRecord) -> Result<Option<String>> {
+        let Some(checkpoint) = record.checkpoint.as_ref() else {
+            return Ok(None);
+        };
+        Ok(checkpoint
+            .restore_managed_runtime_payload()?
+            .pending_transcript_projection
+            .map(|pending| pending.batch.operation_id))
+    }
+
+    fn checkpoint_is_current(
+        record: &SqliteRuntimeStateRecord,
+        checkpoint: &AgentCheckpoint,
+    ) -> Result<bool> {
+        match record.checkpoint.as_ref() {
+            Some(current) => {
+                Ok(Self::checkpoint_digest(current)? == Self::checkpoint_digest(checkpoint)?)
+            }
+            None => Ok(false),
+        }
+    }
+
+    fn retirement_receipt(
+        scope: RuntimeScopeAuthority,
+        manifest: ScopeRetirementManifest,
+        status: ScopeRetirementStatus,
+    ) -> ScopeRetirementReceipt {
+        let mut dropped_operation_ids = manifest
+            .items
+            .iter()
+            .filter(|item| item.status == ScopeRetirementItemStatus::DroppedByDelete)
+            .filter_map(|item| item.pending_operation_id.clone())
+            .collect::<Vec<_>>();
+        dropped_operation_ids.sort();
+        dropped_operation_ids.dedup();
+        let retention_floor_epoch = manifest
+            .conversation_delete_receipt
+            .as_ref()
+            .map(|receipt| receipt.retention_floor_epoch)
+            .unwrap_or(0);
+        ScopeRetirementReceipt {
+            scope,
+            manifest,
+            dropped_operation_ids,
+            retention_floor_epoch,
+            status,
+        }
+    }
+
+    fn completed_retirement(
+        record: &SqliteRuntimeScopeRecord,
+        delete_operation_id: &str,
+    ) -> Option<ScopeRetirementReceipt> {
+        let retention_floor_epoch = record
+            .completed_retirements
+            .iter()
+            .map(|receipt| receipt.retention_floor_epoch)
+            .chain(
+                record
+                    .current_retirement
+                    .as_ref()
+                    .and_then(|manifest| manifest.conversation_delete_receipt.as_ref())
+                    .map(|receipt| receipt.retention_floor_epoch),
+            )
+            .max()
+            .unwrap_or(0);
+        record
+            .completed_retirements
+            .iter()
+            .find(|receipt| receipt.manifest.delete_operation_id == delete_operation_id)
+            .cloned()
+            .map(|mut receipt| {
+                receipt.scope = record.authority.clone();
+                receipt.retention_floor_epoch = retention_floor_epoch;
+                receipt.status =
+                    if retention_floor_epoch >= receipt.manifest.expected_conversation_epoch {
+                        ScopeRetirementStatus::ReceiptExpired
+                    } else {
+                        ScopeRetirementStatus::AlreadyCompleted
+                    };
+                receipt
+            })
+    }
+
+    fn successful_conversation_delete(
+        receipt: &crate::memory::ManagedConversationDeleteReceipt,
+    ) -> bool {
+        matches!(
+            receipt.status,
+            crate::memory::ManagedConversationDeleteStatus::Deleted
+                | crate::memory::ManagedConversationDeleteStatus::AlreadyDeleted
+        ) && receipt.retention_floor_epoch < receipt.deleted_epoch
+    }
+
+    fn conversation_delete_failure_status(
+        receipt: &crate::memory::ManagedConversationDeleteReceipt,
+    ) -> Option<ScopeRetirementStatus> {
+        match receipt.status {
+            crate::memory::ManagedConversationDeleteStatus::Deleted
+            | crate::memory::ManagedConversationDeleteStatus::AlreadyDeleted => None,
+            crate::memory::ManagedConversationDeleteStatus::EpochConflict => {
+                Some(ScopeRetirementStatus::EpochConflict)
+            }
+            crate::memory::ManagedConversationDeleteStatus::ReceiptExpired => {
+                Some(ScopeRetirementStatus::ReceiptExpired)
+            }
+            crate::memory::ManagedConversationDeleteStatus::IdentityConflict => {
+                Some(ScopeRetirementStatus::IdentityConflict)
+            }
+        }
+    }
+
+    fn same_conversation_delete_effect(
+        left: &crate::memory::ManagedConversationDeleteReceipt,
+        right: &crate::memory::ManagedConversationDeleteReceipt,
+    ) -> bool {
+        left.operation_id == right.operation_id
+            && left.payload_digest == right.payload_digest
+            && left.deleted_epoch == right.deleted_epoch
+            && Self::successful_conversation_delete(left)
+            && Self::successful_conversation_delete(right)
     }
 
     /// Delete a conversation checkpoint synchronously.
     pub fn clear_conversation_sync(&self, conversation_id: &str) -> Result<()> {
         let mut conn = self.open_conn()?;
-        let transaction = conn.transaction().map_err(|error| {
-            RuntimeStateError::Io(format!("failed to begin checkpoint clear: {error}"))
-        })?;
+        let transaction = Self::immediate_transaction(&mut conn)?;
+        if Self::load_scope_record_on_connection(&transaction, conversation_id)?.is_some()
+            || Self::load_state_record_on_connection(&transaction, conversation_id)?.is_some_and(
+                |state| !matches!(state.version, RuntimeStateVersion::Unmanaged { .. }),
+            )
+        {
+            return Err(Self::managed_state_error(format!(
+                "runtime state {conversation_id} is revision managed"
+            )));
+        }
         let owner = transaction
             .query_row(
                 "SELECT scope_id FROM runtime_state_scopes WHERE runtime_state_id = ?1",
@@ -203,6 +934,721 @@ impl SqliteRuntimeStateStore {
 }
 
 impl RuntimeStateStore for SqliteRuntimeStateStore {
+    fn runtime_state_capability(&self) -> RuntimeStateCapability {
+        RuntimeStateCapability::RevisionedV1
+    }
+
+    fn load_runtime_state<'a>(
+        &'a self,
+        scope_id: &'a str,
+        runtime_state_id: &'a str,
+    ) -> BoxFuture<'a, Result<Option<ManagedRuntimeStateSnapshot>>> {
+        let scope_id = scope_id.to_string();
+        let runtime_state_id = runtime_state_id.to_string();
+        self.run_blocking(Self::entity_scope(&runtime_state_id), move |store| {
+            let mut conn = store.open_conn()?;
+            let transaction = Self::immediate_transaction(&mut conn)?;
+            let Some(state) =
+                Self::load_state_record_on_connection(&transaction, &runtime_state_id)?
+            else {
+                return Ok(None);
+            };
+            if state.scope_id != scope_id {
+                return Err(RuntimeStateError::Io(format!(
+                    "runtime state {runtime_state_id} belongs to scope {}, not {scope_id}",
+                    state.scope_id
+                ))
+                .into());
+            }
+            let scope_record = Self::load_scope_record_on_connection(&transaction, &scope_id)?;
+            let scope = Self::authority_or_unmanaged(
+                &scope_id,
+                scope_record.as_ref(),
+                std::slice::from_ref(&state),
+            );
+            let snapshot = ManagedRuntimeStateSnapshot {
+                scope,
+                runtime_state_id,
+                version: state.version,
+                checkpoint: state.checkpoint,
+            };
+            transaction.commit().map_err(|error| {
+                RuntimeStateError::Io(format!("failed to commit runtime-state load: {error}"))
+            })?;
+            Ok(Some(snapshot))
+        })
+    }
+
+    fn load_scope_authority<'a>(
+        &'a self,
+        scope_id: &'a str,
+    ) -> BoxFuture<'a, Result<Option<RuntimeScopeAuthority>>> {
+        let scope_id = scope_id.to_string();
+        self.run_blocking(Self::collection_scope(&scope_id), move |store| {
+            let mut conn = store.open_conn()?;
+            let transaction = Self::immediate_transaction(&mut conn)?;
+            let authority = if let Some(record) =
+                Self::load_scope_record_on_connection(&transaction, &scope_id)?
+            {
+                Some(record.authority)
+            } else {
+                let states = Self::scope_state_records_on_connection(&transaction, &scope_id)?;
+                (!states.is_empty()).then(|| Self::authority_or_unmanaged(&scope_id, None, &states))
+            };
+            transaction.commit().map_err(|error| {
+                RuntimeStateError::Io(format!("failed to commit runtime scope load: {error}"))
+            })?;
+            Ok(authority)
+        })
+    }
+
+    fn compare_and_save_checkpoint<'a>(
+        &'a self,
+        request: RuntimeCheckpointCasRequest,
+    ) -> BoxFuture<'a, Result<RuntimeCheckpointCasReceipt>> {
+        if let Err(error) = Self::validate_checkpoint_cas_request(&request) {
+            return Box::pin(async move { Err(error) });
+        }
+        self.run_blocking(Self::collection_scope(&request.scope_id), move |store| {
+            let mut conn = store.open_conn()?;
+            let transaction = Self::immediate_transaction(&mut conn)?;
+            let mut scope_record =
+                Self::load_scope_record_on_connection(&transaction, &request.scope_id)?;
+            let state =
+                Self::load_state_record_on_connection(&transaction, &request.runtime_state_id)?;
+            if let Some(state) = state.as_ref()
+                && state.scope_id != request.scope_id
+            {
+                return Err(RuntimeStateError::Io(format!(
+                    "runtime state {} already belongs to scope {}",
+                    request.runtime_state_id, state.scope_id
+                ))
+                .into());
+            }
+            let states = state.iter().cloned().collect::<Vec<_>>();
+            let scope =
+                Self::authority_or_unmanaged(&request.scope_id, scope_record.as_ref(), &states);
+            let current_version = state.as_ref().map(|state| state.version.clone());
+            if matches!(current_version, Some(RuntimeStateVersion::Retired { .. })) {
+                return Ok(RuntimeCheckpointCasReceipt {
+                    scope,
+                    runtime_state_id: request.runtime_state_id,
+                    version: current_version
+                        .clone()
+                        .unwrap_or(RuntimeStateVersion::Absent),
+                    status: RuntimeCheckpointCasStatus::GenerationRetired,
+                });
+            }
+            let epoch_matches = scope.conversation_epoch == request.conversation_epoch;
+            let can_bind_epoch = scope.revision == 0 && scope.conversation_epoch.is_none();
+            let can_reopen = scope.lifecycle == RuntimeScopeLifecycle::Tombstoned
+                && request.conversation_epoch.is_some()
+                && request.conversation_epoch > scope.conversation_epoch;
+            let fenced = match scope.lifecycle {
+                RuntimeScopeLifecycle::Active => !epoch_matches && !can_bind_epoch,
+                RuntimeScopeLifecycle::Retiring => true,
+                RuntimeScopeLifecycle::Tombstoned => !can_reopen,
+            };
+            if fenced {
+                return Ok(RuntimeCheckpointCasReceipt {
+                    scope,
+                    runtime_state_id: request.runtime_state_id,
+                    version: current_version.unwrap_or(RuntimeStateVersion::Absent),
+                    status: RuntimeCheckpointCasStatus::ScopeFenced,
+                });
+            }
+            if let Some(state) = state.as_ref()
+                && Self::is_direct_cas_replay(state, &request)?
+            {
+                return Ok(RuntimeCheckpointCasReceipt {
+                    scope,
+                    runtime_state_id: request.runtime_state_id,
+                    version: state.version.clone(),
+                    status: RuntimeCheckpointCasStatus::AlreadyCurrent,
+                });
+            }
+            if scope.revision != request.expected_scope_revision
+                || !Self::state_matches_expected(
+                    current_version.as_ref(),
+                    &request.expected_state_version,
+                )
+            {
+                return Ok(RuntimeCheckpointCasReceipt {
+                    scope,
+                    runtime_state_id: request.runtime_state_id,
+                    version: current_version.unwrap_or(RuntimeStateVersion::Absent),
+                    status: RuntimeCheckpointCasStatus::RevisionConflict,
+                });
+            }
+            let state_revision = Self::next_revision(
+                current_version
+                    .as_ref()
+                    .map(Self::state_revision)
+                    .unwrap_or(0),
+                &request.runtime_state_id,
+            )?;
+            let scope_revision = Self::next_revision(scope.revision, &request.scope_id)?;
+            let version = RuntimeStateVersion::Managed {
+                revision: state_revision,
+            };
+            let authority = RuntimeScopeAuthority {
+                scope_id: request.scope_id.clone(),
+                conversation_epoch: request.conversation_epoch,
+                revision: scope_revision,
+                lifecycle: RuntimeScopeLifecycle::Active,
+            };
+            Self::save_state_record_on_connection(
+                &transaction,
+                &SqliteRuntimeStateRecord {
+                    runtime_state_id: request.runtime_state_id.clone(),
+                    scope_id: request.scope_id.clone(),
+                    version: version.clone(),
+                    conversation_epoch: request.conversation_epoch,
+                    scope_revision,
+                    scope_lifecycle: RuntimeScopeLifecycle::Active,
+                    cas_expected_state_version: Some(request.expected_state_version),
+                    cas_expected_scope_revision: request.expected_scope_revision,
+                    checkpoint: Some(request.checkpoint),
+                },
+            )?;
+            Self::save_scope_record_on_connection(
+                &transaction,
+                &SqliteRuntimeScopeRecord {
+                    authority: authority.clone(),
+                    current_retirement: None,
+                    completed_retirements: scope_record
+                        .take()
+                        .map(|record| record.completed_retirements)
+                        .unwrap_or_default(),
+                },
+            )?;
+            transaction.commit().map_err(|error| {
+                RuntimeStateError::Io(format!("failed to commit runtime checkpoint CAS: {error}"))
+            })?;
+            Ok(RuntimeCheckpointCasReceipt {
+                scope: authority,
+                runtime_state_id: request.runtime_state_id,
+                version,
+                status: RuntimeCheckpointCasStatus::Applied,
+            })
+        })
+    }
+
+    fn retire_runtime_generation<'a>(
+        &'a self,
+        request: RuntimeGenerationRetireRequest,
+    ) -> BoxFuture<'a, Result<RuntimeGenerationRetireReceipt>> {
+        if let Err(error) = request.validate() {
+            return Box::pin(async move { Err(error) });
+        }
+        self.run_blocking(Self::collection_scope(&request.scope_id), move |store| {
+            let mut conn = store.open_conn()?;
+            let transaction = Self::immediate_transaction(&mut conn)?;
+            let mut scope_record =
+                Self::load_scope_record_on_connection(&transaction, &request.scope_id)?;
+            let state =
+                Self::load_state_record_on_connection(&transaction, &request.runtime_state_id)?;
+            if let Some(state) = state.as_ref()
+                && state.scope_id != request.scope_id
+            {
+                return Err(RuntimeStateError::Io(format!(
+                    "runtime state {} belongs to scope {}",
+                    request.runtime_state_id, state.scope_id
+                ))
+                .into());
+            }
+            let states = state.iter().cloned().collect::<Vec<_>>();
+            let scope =
+                Self::authority_or_unmanaged(&request.scope_id, scope_record.as_ref(), &states);
+            let current_version = state.as_ref().map(|state| state.version.clone());
+            if matches!(current_version, Some(RuntimeStateVersion::Retired { .. })) {
+                let is_replay = state
+                    .as_ref()
+                    .is_some_and(|state| Self::is_direct_retirement_replay(state, &request));
+                return Ok(RuntimeGenerationRetireReceipt {
+                    scope,
+                    runtime_state_id: request.runtime_state_id,
+                    version: current_version
+                        .clone()
+                        .unwrap_or(RuntimeStateVersion::Absent),
+                    status: if is_replay {
+                        RuntimeGenerationRetireStatus::AlreadyRetired
+                    } else {
+                        RuntimeGenerationRetireStatus::Conflict
+                    },
+                });
+            }
+            if scope.lifecycle != RuntimeScopeLifecycle::Active {
+                return Ok(RuntimeGenerationRetireReceipt {
+                    scope,
+                    runtime_state_id: request.runtime_state_id,
+                    version: current_version.unwrap_or(RuntimeStateVersion::Absent),
+                    status: RuntimeGenerationRetireStatus::ScopeFenced,
+                });
+            }
+            if let Some(state) = state.as_ref()
+                && Self::pending_operation_id(state)?.is_some()
+            {
+                return Ok(RuntimeGenerationRetireReceipt {
+                    scope,
+                    runtime_state_id: request.runtime_state_id,
+                    version: state.version.clone(),
+                    status: RuntimeGenerationRetireStatus::PendingProjection,
+                });
+            }
+            if scope.revision != request.expected_scope_revision
+                || !Self::state_matches_expected(
+                    current_version.as_ref(),
+                    &request.expected_state_version,
+                )
+            {
+                return Ok(RuntimeGenerationRetireReceipt {
+                    scope,
+                    runtime_state_id: request.runtime_state_id,
+                    version: current_version.unwrap_or(RuntimeStateVersion::Absent),
+                    status: RuntimeGenerationRetireStatus::Conflict,
+                });
+            }
+            let state_revision = Self::next_revision(
+                current_version
+                    .as_ref()
+                    .map(Self::state_revision)
+                    .unwrap_or(0),
+                &request.runtime_state_id,
+            )?;
+            let scope_revision = Self::next_revision(scope.revision, &request.scope_id)?;
+            let version = RuntimeStateVersion::Retired {
+                revision: state_revision,
+                operation_id: request.operation_id,
+            };
+            Self::save_state_record_on_connection(
+                &transaction,
+                &SqliteRuntimeStateRecord {
+                    runtime_state_id: request.runtime_state_id.clone(),
+                    scope_id: request.scope_id.clone(),
+                    version: version.clone(),
+                    conversation_epoch: scope.conversation_epoch,
+                    scope_revision,
+                    scope_lifecycle: RuntimeScopeLifecycle::Active,
+                    cas_expected_state_version: Some(request.expected_state_version),
+                    cas_expected_scope_revision: request.expected_scope_revision,
+                    checkpoint: None,
+                },
+            )?;
+            let mut record = scope_record.take().unwrap_or(SqliteRuntimeScopeRecord {
+                authority: scope,
+                current_retirement: None,
+                completed_retirements: Vec::new(),
+            });
+            record.authority.revision = scope_revision;
+            Self::save_scope_record_on_connection(&transaction, &record)?;
+            transaction.commit().map_err(|error| {
+                RuntimeStateError::Io(format!("failed to commit runtime retirement: {error}"))
+            })?;
+            Ok(RuntimeGenerationRetireReceipt {
+                scope: record.authority,
+                runtime_state_id: request.runtime_state_id,
+                version,
+                status: RuntimeGenerationRetireStatus::Retired,
+            })
+        })
+    }
+
+    fn begin_scope_retirement<'a>(
+        &'a self,
+        request: ScopeRetirementRequest,
+    ) -> BoxFuture<'a, Result<ScopeRetirementReceipt>> {
+        if let Err(error) = request.validate() {
+            return Box::pin(async move { Err(error) });
+        }
+        self.run_blocking(Self::collection_scope(&request.scope_id), move |store| {
+            let mut conn = store.open_conn()?;
+            let transaction = Self::immediate_transaction(&mut conn)?;
+            let mut record =
+                Self::load_scope_record_on_connection(&transaction, &request.scope_id)?;
+            if let Some(record) = record.as_ref() {
+                if let Some(mut receipt) =
+                    Self::completed_retirement(record, &request.delete_operation_id)
+                {
+                    if receipt.manifest.payload_digest != request.payload_digest
+                        || receipt.manifest.expected_conversation_epoch
+                            != request.expected_conversation_epoch
+                    {
+                        receipt.status = ScopeRetirementStatus::IdentityConflict;
+                    }
+                    return Ok(receipt);
+                }
+                if let Some(manifest) = record.current_retirement.as_ref()
+                    && manifest.delete_operation_id == request.delete_operation_id
+                {
+                    let status = if manifest.payload_digest == request.payload_digest
+                        && manifest.expected_conversation_epoch
+                            == request.expected_conversation_epoch
+                    {
+                        ScopeRetirementStatus::InProgress
+                    } else {
+                        ScopeRetirementStatus::IdentityConflict
+                    };
+                    return Ok(Self::retirement_receipt(
+                        record.authority.clone(),
+                        manifest.clone(),
+                        status,
+                    ));
+                }
+            }
+            let states = Self::scope_state_records_on_connection(&transaction, &request.scope_id)?;
+            let authority =
+                Self::authority_or_unmanaged(&request.scope_id, record.as_ref(), &states);
+            if authority.conversation_epoch.is_some()
+                && authority.conversation_epoch != Some(request.expected_conversation_epoch)
+            {
+                return Ok(Self::retirement_receipt(
+                    authority,
+                    ScopeRetirementManifest {
+                        delete_operation_id: request.delete_operation_id,
+                        payload_digest: request.payload_digest,
+                        expected_conversation_epoch: request.expected_conversation_epoch,
+                        items: Vec::new(),
+                        conversation_delete_receipt: None,
+                    },
+                    ScopeRetirementStatus::EpochConflict,
+                ));
+            }
+            if authority.lifecycle != RuntimeScopeLifecycle::Active {
+                let status = if authority.lifecycle == RuntimeScopeLifecycle::Retiring {
+                    ScopeRetirementStatus::IdentityConflict
+                } else {
+                    ScopeRetirementStatus::EpochConflict
+                };
+                return Ok(Self::retirement_receipt(
+                    authority,
+                    ScopeRetirementManifest {
+                        delete_operation_id: request.delete_operation_id,
+                        payload_digest: request.payload_digest,
+                        expected_conversation_epoch: request.expected_conversation_epoch,
+                        items: Vec::new(),
+                        conversation_delete_receipt: None,
+                    },
+                    status,
+                ));
+            }
+            if authority.revision != request.expected_scope_revision {
+                return Ok(Self::retirement_receipt(
+                    authority,
+                    ScopeRetirementManifest {
+                        delete_operation_id: request.delete_operation_id,
+                        payload_digest: request.payload_digest,
+                        expected_conversation_epoch: request.expected_conversation_epoch,
+                        items: Vec::new(),
+                        conversation_delete_receipt: None,
+                    },
+                    ScopeRetirementStatus::RevisionConflict,
+                ));
+            }
+            let mut items = Vec::new();
+            for state in &states {
+                if matches!(state.version, RuntimeStateVersion::Retired { .. }) {
+                    continue;
+                }
+                items.push(ScopeRetirementItem {
+                    runtime_state_id: state.runtime_state_id.clone(),
+                    state_version: state.version.clone(),
+                    pending_operation_id: Self::pending_operation_id(state)?,
+                    status: ScopeRetirementItemStatus::Pending,
+                });
+            }
+            let manifest = ScopeRetirementManifest {
+                delete_operation_id: request.delete_operation_id,
+                payload_digest: request.payload_digest,
+                expected_conversation_epoch: request.expected_conversation_epoch,
+                items,
+                conversation_delete_receipt: None,
+            };
+            let authority = RuntimeScopeAuthority {
+                scope_id: request.scope_id.clone(),
+                conversation_epoch: Some(request.expected_conversation_epoch),
+                revision: Self::next_revision(authority.revision, &request.scope_id)?,
+                lifecycle: RuntimeScopeLifecycle::Retiring,
+            };
+            let record = SqliteRuntimeScopeRecord {
+                authority: authority.clone(),
+                current_retirement: Some(manifest.clone()),
+                completed_retirements: record
+                    .take()
+                    .map(|record| record.completed_retirements)
+                    .unwrap_or_default(),
+            };
+            Self::save_scope_record_on_connection(&transaction, &record)?;
+            transaction.commit().map_err(|error| {
+                RuntimeStateError::Io(format!("failed to begin scope retirement: {error}"))
+            })?;
+            Ok(Self::retirement_receipt(
+                authority,
+                manifest,
+                ScopeRetirementStatus::Begun,
+            ))
+        })
+    }
+
+    fn continue_scope_retirement<'a>(
+        &'a self,
+        scope_id: &'a str,
+        delete_operation_id: &'a str,
+        expected_scope_revision: u64,
+        advance: ScopeRetirementAdvance,
+    ) -> BoxFuture<'a, Result<ScopeRetirementReceipt>> {
+        let scope_id = scope_id.to_string();
+        let delete_operation_id = delete_operation_id.to_string();
+        self.run_blocking(Self::collection_scope(&scope_id), move |store| {
+            let mut conn = store.open_conn()?;
+            let transaction = Self::immediate_transaction(&mut conn)?;
+            let mut record = Self::load_scope_record_on_connection(&transaction, &scope_id)?
+                .ok_or_else(|| {
+                    RuntimeStateError::NotFound(format!("runtime scope {scope_id} is absent"))
+                })?;
+            if let Some(receipt) = Self::completed_retirement(&record, &delete_operation_id) {
+                return Ok(receipt);
+            }
+            let Some(mut manifest) = record.current_retirement.take() else {
+                return Ok(Self::retirement_receipt(
+                    record.authority.clone(),
+                    ScopeRetirementManifest {
+                        delete_operation_id,
+                        payload_digest: String::new(),
+                        expected_conversation_epoch: record
+                            .authority
+                            .conversation_epoch
+                            .unwrap_or(0),
+                        items: Vec::new(),
+                        conversation_delete_receipt: None,
+                    },
+                    ScopeRetirementStatus::IdentityConflict,
+                ));
+            };
+            if manifest.delete_operation_id != delete_operation_id {
+                return Ok(Self::retirement_receipt(
+                    record.authority,
+                    manifest,
+                    ScopeRetirementStatus::IdentityConflict,
+                ));
+            }
+            if let ScopeRetirementAdvance::ConversationDeleted { receipt } = &advance {
+                if receipt.operation_id != manifest.delete_operation_id
+                    || receipt.payload_digest != manifest.payload_digest
+                    || receipt.deleted_epoch != manifest.expected_conversation_epoch
+                {
+                    return Ok(Self::retirement_receipt(
+                        record.authority,
+                        manifest,
+                        ScopeRetirementStatus::IdentityConflict,
+                    ));
+                }
+                if let Some(status) = Self::conversation_delete_failure_status(receipt) {
+                    let mut result = Self::retirement_receipt(
+                        record.authority,
+                        manifest,
+                        status,
+                    );
+                    if status == ScopeRetirementStatus::ReceiptExpired {
+                        result.retention_floor_epoch = receipt.retention_floor_epoch;
+                    }
+                    return Ok(result);
+                }
+            }
+            if let ScopeRetirementAdvance::ConversationDeleted { receipt } = &advance
+                && let Some(current_floor) = manifest
+                    .conversation_delete_receipt
+                    .as_ref()
+                    .filter(|current| Self::same_conversation_delete_effect(current, receipt))
+                    .map(|current| current.retention_floor_epoch)
+            {
+                if receipt.retention_floor_epoch > current_floor {
+                    if let Some(current) = manifest.conversation_delete_receipt.as_mut() {
+                        current.retention_floor_epoch = receipt.retention_floor_epoch;
+                    }
+                    record.authority.revision =
+                        Self::next_revision(record.authority.revision, &scope_id)?;
+                    record.current_retirement = Some(manifest.clone());
+                    Self::save_scope_record_on_connection(&transaction, &record)?;
+                    transaction.commit().map_err(|error| {
+                        RuntimeStateError::Io(format!(
+                            "failed to update scope-retirement retention floor: {error}"
+                        ))
+                    })?;
+                }
+                return Ok(Self::retirement_receipt(
+                    record.authority,
+                    manifest,
+                    ScopeRetirementStatus::InProgress,
+                ));
+            }
+            match &advance {
+                ScopeRetirementAdvance::ConversationDeleted { .. } => {}
+                ScopeRetirementAdvance::GenerationDropped {
+                    runtime_state_id,
+                    pending_operation_id,
+                } if manifest.items.iter().any(|item| {
+                    item.runtime_state_id == *runtime_state_id
+                        && item.pending_operation_id == *pending_operation_id
+                        && item.status == ScopeRetirementItemStatus::DroppedByDelete
+                }) => {
+                    return Ok(Self::retirement_receipt(
+                        record.authority,
+                        manifest,
+                        ScopeRetirementStatus::InProgress,
+                    ));
+                }
+                _ => {}
+            }
+            if record.authority.revision != expected_scope_revision {
+                return Ok(Self::retirement_receipt(
+                    record.authority,
+                    manifest,
+                    ScopeRetirementStatus::RevisionConflict,
+                ));
+            }
+
+            let completing = matches!(&advance, ScopeRetirementAdvance::Complete);
+            let mut changed_state: Option<SqliteRuntimeStateRecord> = None;
+            let can_complete;
+            match advance {
+                ScopeRetirementAdvance::ConversationDeleted { receipt } => {
+                    if receipt.operation_id != manifest.delete_operation_id
+                        || receipt.payload_digest != manifest.payload_digest
+                        || receipt.deleted_epoch != manifest.expected_conversation_epoch
+                        || !Self::successful_conversation_delete(&receipt)
+                    {
+                        return Ok(Self::retirement_receipt(
+                            record.authority,
+                            manifest,
+                            ScopeRetirementStatus::IdentityConflict,
+                        ));
+                    }
+                    if let Some(current) = manifest.conversation_delete_receipt.as_ref()
+                        && !Self::same_conversation_delete_effect(current, &receipt)
+                    {
+                        return Ok(Self::retirement_receipt(
+                            record.authority,
+                            manifest,
+                            ScopeRetirementStatus::IdentityConflict,
+                        ));
+                    }
+                    manifest.conversation_delete_receipt = Some(receipt);
+                    can_complete = false;
+                }
+                ScopeRetirementAdvance::GenerationDropped {
+                    runtime_state_id,
+                    pending_operation_id,
+                } => {
+                    if manifest.conversation_delete_receipt.is_none() {
+                        return Ok(Self::retirement_receipt(
+                            record.authority,
+                            manifest,
+                            ScopeRetirementStatus::InProgress,
+                        ));
+                    }
+                    let item = manifest
+                        .items
+                        .iter_mut()
+                        .find(|item| item.runtime_state_id == runtime_state_id)
+                        .ok_or_else(|| {
+                            RuntimeStateError::NotFound(format!(
+                                "runtime state {runtime_state_id} is absent from retirement manifest"
+                            ))
+                        })?;
+                    if item.pending_operation_id != pending_operation_id {
+                        return Ok(Self::retirement_receipt(
+                            record.authority,
+                            manifest,
+                            ScopeRetirementStatus::IdentityConflict,
+                        ));
+                    }
+                    let state = Self::load_state_record_on_connection(
+                        &transaction,
+                        &runtime_state_id,
+                    )?
+                    .ok_or_else(|| {
+                        RuntimeStateError::NotFound(format!(
+                            "runtime state {runtime_state_id} disappeared during retirement"
+                        ))
+                    })?;
+                    if state.scope_id != scope_id || state.version != item.state_version {
+                        return Ok(Self::retirement_receipt(
+                            record.authority,
+                            manifest,
+                            ScopeRetirementStatus::IdentityConflict,
+                        ));
+                    }
+                    changed_state = Some(SqliteRuntimeStateRecord {
+                        runtime_state_id: runtime_state_id.clone(),
+                        scope_id: scope_id.clone(),
+                        version: RuntimeStateVersion::Retired {
+                            revision: Self::next_revision(
+                                Self::state_revision(&item.state_version),
+                                &runtime_state_id,
+                            )?,
+                            operation_id: delete_operation_id.clone(),
+                        },
+                        conversation_epoch: record.authority.conversation_epoch,
+                        scope_revision: 0,
+                        scope_lifecycle: RuntimeScopeLifecycle::Retiring,
+                        cas_expected_state_version: None,
+                        cas_expected_scope_revision: 0,
+                        checkpoint: None,
+                    });
+                    item.status = ScopeRetirementItemStatus::DroppedByDelete;
+                    can_complete = false;
+                }
+                ScopeRetirementAdvance::Complete => {
+                    can_complete = manifest.conversation_delete_receipt.is_some()
+                        && manifest.items.iter().all(|item| {
+                            item.status == ScopeRetirementItemStatus::DroppedByDelete
+                        });
+                }
+            }
+            if completing && !can_complete {
+                return Ok(Self::retirement_receipt(
+                    record.authority,
+                    manifest,
+                    ScopeRetirementStatus::InProgress,
+                ));
+            }
+            let revision = Self::next_revision(record.authority.revision, &scope_id)?;
+            if let Some(mut state) = changed_state {
+                state.scope_revision = revision;
+                Self::save_state_record_on_connection(&transaction, &state)?;
+            }
+            record.authority.revision = revision;
+            if can_complete {
+                record.authority.lifecycle = RuntimeScopeLifecycle::Tombstoned;
+                let completed = Self::retirement_receipt(
+                    record.authority.clone(),
+                    manifest.clone(),
+                    ScopeRetirementStatus::Completed,
+                );
+                record.completed_retirements.push(completed.clone());
+                record.current_retirement = None;
+                Self::save_scope_record_on_connection(&transaction, &record)?;
+                transaction.commit().map_err(|error| {
+                    RuntimeStateError::Io(format!(
+                        "failed to complete scope retirement: {error}"
+                    ))
+                })?;
+                return Ok(completed);
+            }
+            record.current_retirement = Some(manifest.clone());
+            Self::save_scope_record_on_connection(&transaction, &record)?;
+            transaction.commit().map_err(|error| {
+                RuntimeStateError::Io(format!("failed to continue scope retirement: {error}"))
+            })?;
+            Ok(Self::retirement_receipt(
+                record.authority,
+                manifest,
+                ScopeRetirementStatus::InProgress,
+            ))
+        })
+    }
+
     fn get_checkpoint<'a>(
         &'a self,
         conversation_id: &'a str,
@@ -210,64 +1656,7 @@ impl RuntimeStateStore for SqliteRuntimeStateStore {
         let conversation_id = conversation_id.to_string();
         self.run_blocking(Self::entity_scope(&conversation_id), move |store| {
             let conn = store.open_conn()?;
-            let mut statement = conn
-                .prepare(
-                    "SELECT messages_json, current_plan, active_skills, blocked_reason, working_dir, timestamp
-                     FROM agent_checkpoints WHERE conversation_id = ?1",
-                )
-                .map_err(|error| {
-                    RuntimeStateError::Io(format!("failed to prepare query: {error}"))
-                })?;
-
-            let row = statement.query_row(params![&conversation_id], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, Option<String>>(3)?,
-                    row.get::<_, Option<String>>(4)?,
-                    row.get::<_, String>(5)?,
-                ))
-            });
-            let (
-                messages_json,
-                current_plan,
-                active_skills_json,
-                blocked_reason,
-                working_dir,
-                timestamp,
-            ) = match row {
-                Ok(row) => row,
-                Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
-                Err(error) => {
-                    return Err(RuntimeStateError::Io(format!(
-                        "failed to query checkpoint: {error}"
-                    ))
-                    .into());
-                }
-            };
-            let active_skills = serde_json::from_str(&active_skills_json).map_err(|error| {
-                RuntimeStateError::SerializationError(format!(
-                    "invalid checkpoint active_skills: {error}"
-                ))
-            })?;
-            let timestamp = chrono::DateTime::parse_from_rfc3339(&timestamp)
-                .map_err(|error| {
-                    RuntimeStateError::SerializationError(format!(
-                        "invalid checkpoint timestamp: {error}"
-                    ))
-                })?
-                .with_timezone(&chrono::Utc);
-
-            Ok(Some(AgentCheckpoint {
-                conversation_id,
-                messages_json,
-                current_plan,
-                active_skills,
-                blocked_reason,
-                working_dir: working_dir.map(std::path::PathBuf::from),
-                timestamp,
-            }))
+            Self::load_checkpoint_on_connection(&conn, &conversation_id)
         })
     }
 
@@ -286,11 +1675,21 @@ impl RuntimeStateStore for SqliteRuntimeStateStore {
             Self::entity_scope(&checkpoint.conversation_id),
             move |store| {
                 let mut conn = store.open_conn()?;
-                let transaction = conn.transaction().map_err(|error| {
-                    RuntimeStateError::Io(format!(
-                        "failed to begin checkpoint transaction: {error}"
-                    ))
-                })?;
+                let transaction = Self::immediate_transaction(&mut conn)?;
+                if Self::load_scope_record_on_connection(&transaction, &scope_id)?.is_some()
+                    || Self::load_state_record_on_connection(
+                        &transaction,
+                        &checkpoint.conversation_id,
+                    )?
+                    .is_some_and(|state| {
+                        !matches!(state.version, RuntimeStateVersion::Unmanaged { .. })
+                    })
+                {
+                    return Err(Self::managed_state_error(format!(
+                        "runtime state {} is revision managed",
+                        checkpoint.conversation_id
+                    )));
+                }
                 transaction
                 .execute(
                     "INSERT INTO runtime_state_scopes (scope_id, runtime_state_id) VALUES (?1, ?2)
@@ -346,9 +1745,17 @@ impl RuntimeStateStore for SqliteRuntimeStateStore {
         let runtime_state_id = runtime_state_id.to_string();
         self.run_blocking(Self::entity_scope(&runtime_state_id), move |store| {
             let mut conn = store.open_conn()?;
-            let transaction = conn.transaction().map_err(|error| {
-                RuntimeStateError::Io(format!("failed to begin runtime clear: {error}"))
-            })?;
+            let transaction = Self::immediate_transaction(&mut conn)?;
+            if Self::load_scope_record_on_connection(&transaction, &scope_id)?.is_some()
+                || Self::load_state_record_on_connection(&transaction, &runtime_state_id)?
+                    .is_some_and(|state| {
+                        !matches!(state.version, RuntimeStateVersion::Unmanaged { .. })
+                    })
+            {
+                return Err(Self::managed_state_error(format!(
+                    "runtime state {runtime_state_id} is revision managed"
+                )));
+            }
             let owner = transaction
                 .query_row(
                     "SELECT scope_id FROM runtime_state_scopes WHERE runtime_state_id = ?1",
@@ -414,9 +1821,20 @@ impl RuntimeStateStore for SqliteRuntimeStateStore {
         let scope_id = scope_id.to_string();
         self.run_blocking(Self::collection_scope(&scope_id), move |store| {
             let mut conn = store.open_conn()?;
-            let transaction = conn.transaction().map_err(|error| {
-                RuntimeStateError::Io(format!("failed to begin scope clear: {error}"))
-            })?;
+            let transaction = Self::immediate_transaction(&mut conn)?;
+            if Self::load_scope_record_on_connection(&transaction, &scope_id)?.is_some() {
+                return Err(Self::managed_state_error(format!(
+                    "runtime scope {scope_id} is revision managed"
+                )));
+            }
+            if Self::scope_state_records_on_connection(&transaction, &scope_id)?
+                .iter()
+                .any(|state| !matches!(state.version, RuntimeStateVersion::Unmanaged { .. }))
+            {
+                return Err(Self::managed_state_error(format!(
+                    "runtime scope {scope_id} contains revision-managed state"
+                )));
+            }
             let mut runtime_state_ids = {
                 let mut statement = transaction
                     .prepare(
@@ -520,6 +1938,872 @@ mod tests {
     use super::*;
     use chrono::Utc;
     use std::time::Duration;
+
+    fn checkpoint(runtime_state_id: &str, marker: &str) -> Result<AgentCheckpoint> {
+        Ok(AgentCheckpoint {
+            conversation_id: runtime_state_id.to_string(),
+            messages_json: AgentCheckpoint::serialize_payload(
+                vec![crate::llm::types::Message::user(marker.to_string())],
+                None,
+            )?,
+            current_plan: None,
+            active_skills: Vec::new(),
+            blocked_reason: None,
+            working_dir: None,
+            timestamp: Utc::now(),
+        })
+    }
+
+    fn pending_checkpoint(runtime_state_id: &str, scope_id: &str) -> Result<AgentCheckpoint> {
+        let messages = vec![crate::llm::types::Message::user("pending".to_string())];
+        let projected = crate::memory::project_messages(scope_id, &messages)?;
+        let batch = crate::memory::TranscriptProjectionBatch::prepare(
+            scope_id,
+            1,
+            runtime_state_id,
+            0,
+            projected,
+        )?;
+        let cursor_before = super::super::TranscriptProjectionCheckpoint {
+            generation_id: runtime_state_id.to_string(),
+            next_ordinal: 0,
+            projected: Vec::new(),
+        };
+        let cursor_after = super::super::TranscriptProjectionCheckpoint {
+            generation_id: runtime_state_id.to_string(),
+            next_ordinal: 1,
+            projected: batch
+                .items
+                .iter()
+                .map(|item| super::super::TranscriptProjectionMessage {
+                    ordinal: item.ordinal,
+                    digest: item.digest.clone(),
+                })
+                .collect(),
+        };
+        Ok(AgentCheckpoint {
+            conversation_id: runtime_state_id.to_string(),
+            messages_json: AgentCheckpoint::serialize_managed_payload(
+                messages,
+                Some(cursor_before.clone()),
+                Some(super::super::PendingTranscriptProjection {
+                    batch,
+                    cursor_before,
+                    cursor_after,
+                    base_runtime_revision: 1,
+                    prepared_at: Utc::now(),
+                    attempt: 1,
+                    last_attempt_class: None,
+                    last_error: None,
+                }),
+            )?,
+            current_plan: None,
+            active_skills: Vec::new(),
+            blocked_reason: None,
+            working_dir: None,
+            timestamp: Utc::now(),
+        })
+    }
+
+    #[tokio::test]
+    async fn revisioned_runtime_state_contract_is_supported() -> Result<()> {
+        let path = std::env::temp_dir().join(format!(
+            "echo-state-revisioned-{}-{}.sqlite",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let store = SqliteRuntimeStateStore::new(&path)?;
+
+        assert_eq!(
+            store.runtime_state_capability(),
+            super::super::RuntimeStateCapability::RevisionedV1
+        );
+        assert!(store.load_scope_authority("scope-a").await?.is_none());
+
+        for epoch in [0, MAX_CONVERSATION_EPOCH.saturating_add(1)] {
+            assert!(
+                store
+                    .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                        scope_id: "scope-a".to_string(),
+                        runtime_state_id: "runtime-a".to_string(),
+                        conversation_epoch: Some(epoch),
+                        expected_scope_revision: 0,
+                        expected_state_version: RuntimeStateExpectedVersion::Absent,
+                        checkpoint: checkpoint("runtime-a", "invalid-epoch")?,
+                    })
+                    .await
+                    .is_err()
+            );
+        }
+        assert!(store.load_scope_authority("scope-a").await?.is_none());
+
+        let _ = std::fs::remove_file(path);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn revisioned_cas_replays_and_fences_legacy_mutators() -> Result<()> {
+        let path = std::env::temp_dir().join(format!(
+            "echo-state-cas-{}-{}.sqlite",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let store = SqliteRuntimeStateStore::new(&path)?;
+        let initial = checkpoint("runtime-a", "initial")?;
+        let create = RuntimeCheckpointCasRequest {
+            scope_id: "scope-a".to_string(),
+            runtime_state_id: "runtime-a".to_string(),
+            conversation_epoch: Some(1),
+            expected_scope_revision: 0,
+            expected_state_version: RuntimeStateExpectedVersion::Absent,
+            checkpoint: initial.clone(),
+        };
+        let applied = store.compare_and_save_checkpoint(create.clone()).await?;
+        assert_eq!(applied.status, RuntimeCheckpointCasStatus::Applied);
+        assert_eq!(
+            applied.version,
+            RuntimeStateVersion::Managed { revision: 1 }
+        );
+        assert_eq!(
+            store.compare_and_save_checkpoint(create).await?.status,
+            RuntimeCheckpointCasStatus::AlreadyCurrent
+        );
+        let false_replay = store
+            .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                scope_id: "scope-a".to_string(),
+                runtime_state_id: "runtime-a".to_string(),
+                conversation_epoch: Some(1),
+                expected_scope_revision: 99,
+                expected_state_version: RuntimeStateExpectedVersion::Managed { revision: 99 },
+                checkpoint: initial.clone(),
+            })
+            .await?;
+        assert_eq!(
+            false_replay.status,
+            RuntimeCheckpointCasStatus::RevisionConflict
+        );
+        let stale = store
+            .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                scope_id: "scope-a".to_string(),
+                runtime_state_id: "runtime-a".to_string(),
+                conversation_epoch: Some(1),
+                expected_scope_revision: 0,
+                expected_state_version: RuntimeStateExpectedVersion::Managed { revision: 1 },
+                checkpoint: checkpoint("runtime-a", "stale")?,
+            })
+            .await?;
+        assert_eq!(stale.status, RuntimeCheckpointCasStatus::RevisionConflict);
+        assert!(store.save_checkpoint(&initial).await.is_err());
+        assert!(store.clear_conversation_sync("runtime-a").is_err());
+        assert!(
+            store
+                .clear_runtime_state("scope-a", "runtime-a")
+                .await
+                .is_err()
+        );
+
+        let updated = store
+            .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                scope_id: "scope-a".to_string(),
+                runtime_state_id: "runtime-a".to_string(),
+                conversation_epoch: Some(1),
+                expected_scope_revision: 1,
+                expected_state_version: RuntimeStateExpectedVersion::Managed { revision: 1 },
+                checkpoint: checkpoint("runtime-a", "updated")?,
+            })
+            .await?;
+        assert_eq!(updated.status, RuntimeCheckpointCasStatus::Applied);
+        let retired = store
+            .retire_runtime_generation(RuntimeGenerationRetireRequest::prepare(
+                "scope-a",
+                "runtime-a",
+                updated.scope.revision,
+                RuntimeStateExpectedVersion::Managed { revision: 2 },
+            )?)
+            .await?;
+        assert_eq!(retired.status, RuntimeGenerationRetireStatus::Retired);
+        assert!(store.get_checkpoint("runtime-a").await?.is_none());
+        drop(store);
+
+        let restarted = SqliteRuntimeStateStore::new(&path)?;
+        let snapshot = restarted
+            .load_runtime_state("scope-a", "runtime-a")
+            .await?
+            .ok_or_else(|| RuntimeStateError::NotFound("retirement tombstone".to_string()))?;
+        assert!(matches!(
+            snapshot.version,
+            RuntimeStateVersion::Retired { .. }
+        ));
+        assert_eq!(
+            restarted
+                .retire_runtime_generation(RuntimeGenerationRetireRequest::prepare(
+                    "scope-a",
+                    "runtime-a",
+                    updated.scope.revision,
+                    RuntimeStateExpectedVersion::Managed { revision: 2 },
+                )?)
+                .await?
+                .status,
+            RuntimeGenerationRetireStatus::AlreadyRetired
+        );
+        assert_eq!(
+            restarted
+                .retire_runtime_generation(RuntimeGenerationRetireRequest::prepare(
+                    "scope-a",
+                    "runtime-a",
+                    1,
+                    RuntimeStateExpectedVersion::Managed { revision: 1 },
+                )?)
+                .await?
+                .status,
+            RuntimeGenerationRetireStatus::Conflict
+        );
+
+        let legacy = AgentCheckpoint {
+            conversation_id: "runtime-b".to_string(),
+            messages_json: "[]".to_string(),
+            current_plan: None,
+            active_skills: Vec::new(),
+            blocked_reason: None,
+            working_dir: None,
+            timestamp: Utc::now(),
+        };
+        restarted
+            .save_checkpoint_for_scope("scope-b", &legacy)
+            .await?;
+        let unmanaged = restarted
+            .load_runtime_state("scope-b", "runtime-b")
+            .await?
+            .ok_or_else(|| RuntimeStateError::NotFound("unmanaged checkpoint".to_string()))?;
+        let RuntimeStateVersion::Unmanaged { digest } = unmanaged.version else {
+            return Err(RuntimeStateError::SerializationError(
+                "legacy checkpoint was not reported as unmanaged".to_string(),
+            )
+            .into());
+        };
+        let adopted = restarted
+            .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                scope_id: "scope-b".to_string(),
+                runtime_state_id: "runtime-b".to_string(),
+                conversation_epoch: Some(1),
+                expected_scope_revision: 0,
+                expected_state_version: RuntimeStateExpectedVersion::Unmanaged { digest },
+                checkpoint: checkpoint("runtime-b", "adopted")?,
+            })
+            .await?;
+        assert_eq!(adopted.status, RuntimeCheckpointCasStatus::Applied);
+        assert_eq!(
+            adopted.version,
+            RuntimeStateVersion::Managed { revision: 1 }
+        );
+        let _ = std::fs::remove_file(path);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn invalid_runtime_state_requests_have_no_durable_side_effects() -> Result<()> {
+        let path = std::env::temp_dir().join(format!(
+            "echo-state-validation-{}-{}.sqlite",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let store = SqliteRuntimeStateStore::new(&path)?;
+        let applied = store
+            .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                scope_id: "scope-validation".to_string(),
+                runtime_state_id: "runtime-validation".to_string(),
+                conversation_epoch: Some(1),
+                expected_scope_revision: 0,
+                expected_state_version: RuntimeStateExpectedVersion::Absent,
+                checkpoint: checkpoint("runtime-validation", "original")?,
+            })
+            .await?;
+        let authority_before = applied.scope;
+
+        let mut invalid_retirement = RuntimeGenerationRetireRequest::prepare(
+            "scope-validation",
+            "runtime-validation",
+            authority_before.revision,
+            RuntimeStateExpectedVersion::Managed { revision: 1 },
+        )?;
+        invalid_retirement.payload_digest = "tampered".to_string();
+        assert!(
+            store
+                .retire_runtime_generation(invalid_retirement)
+                .await
+                .is_err()
+        );
+
+        let delete = crate::memory::ManagedConversationDelete::prepare("scope-validation", 1)?;
+        let mut invalid_scope_retirement = ScopeRetirementRequest::prepare(
+            "scope-validation",
+            authority_before.revision,
+            &delete,
+        )?;
+        invalid_scope_retirement.payload_digest = "tampered".to_string();
+        assert!(
+            store
+                .begin_scope_retirement(invalid_scope_retirement)
+                .await
+                .is_err()
+        );
+
+        let mut malformed_checkpoint = checkpoint("runtime-validation", "invalid")?;
+        malformed_checkpoint.messages_json = "{".to_string();
+        assert!(
+            store
+                .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                    scope_id: "scope-validation".to_string(),
+                    runtime_state_id: "runtime-validation".to_string(),
+                    conversation_epoch: Some(1),
+                    expected_scope_revision: authority_before.revision,
+                    expected_state_version: RuntimeStateExpectedVersion::Managed { revision: 1 },
+                    checkpoint: malformed_checkpoint,
+                })
+                .await
+                .is_err()
+        );
+
+        assert!(
+            store
+                .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                    scope_id: String::new(),
+                    runtime_state_id: "runtime-validation".to_string(),
+                    conversation_epoch: Some(1),
+                    expected_scope_revision: authority_before.revision,
+                    expected_state_version: RuntimeStateExpectedVersion::Managed { revision: 1 },
+                    checkpoint: checkpoint("runtime-validation", "invalid scope")?,
+                })
+                .await
+                .is_err()
+        );
+        assert!(
+            store
+                .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                    scope_id: "scope-validation".to_string(),
+                    runtime_state_id: String::new(),
+                    conversation_epoch: Some(1),
+                    expected_scope_revision: authority_before.revision,
+                    expected_state_version: RuntimeStateExpectedVersion::Managed { revision: 1 },
+                    checkpoint: checkpoint("", "invalid runtime")?,
+                })
+                .await
+                .is_err()
+        );
+
+        assert_eq!(
+            store.load_scope_authority("scope-validation").await?,
+            Some(authority_before)
+        );
+        let state = store
+            .load_runtime_state("scope-validation", "runtime-validation")
+            .await?
+            .ok_or_else(|| RuntimeStateError::NotFound("runtime state".to_string()))?;
+        assert_eq!(state.version, RuntimeStateVersion::Managed { revision: 1 });
+        assert!(
+            state
+                .checkpoint
+                .is_some_and(|checkpoint| checkpoint.messages_json.contains("original"))
+        );
+        let _ = std::fs::remove_file(path);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_state_scope_retirement_replays_and_isolates_new_incarnation() -> Result<()> {
+        let path = std::env::temp_dir().join(format!(
+            "echo-state-retirement-{}-{}.sqlite",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let store = SqliteRuntimeStateStore::new(&path)?;
+        let first_request = RuntimeCheckpointCasRequest {
+            scope_id: "scope-a".to_string(),
+            runtime_state_id: "runtime-a1".to_string(),
+            conversation_epoch: Some(10),
+            expected_scope_revision: 0,
+            expected_state_version: RuntimeStateExpectedVersion::Absent,
+            checkpoint: checkpoint("runtime-a1", "one")?,
+        };
+        let first = store
+            .compare_and_save_checkpoint(first_request.clone())
+            .await?;
+        let second = store
+            .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                scope_id: "scope-a".to_string(),
+                runtime_state_id: "runtime-a2".to_string(),
+                conversation_epoch: Some(10),
+                expected_scope_revision: first.scope.revision,
+                expected_state_version: RuntimeStateExpectedVersion::Absent,
+                checkpoint: checkpoint("runtime-a2", "two")?,
+            })
+            .await?;
+        assert_eq!(
+            store
+                .compare_and_save_checkpoint(first_request)
+                .await?
+                .status,
+            RuntimeCheckpointCasStatus::AlreadyCurrent
+        );
+        let delete = crate::memory::ManagedConversationDelete::prepare("scope-a", 10)?;
+        let request = ScopeRetirementRequest::prepare("scope-a", second.scope.revision, &delete)?;
+        let begun = store.begin_scope_retirement(request.clone()).await?;
+        assert_eq!(begun.manifest.items.len(), 2);
+        assert_eq!(begun.retention_floor_epoch, 0);
+        let premature_drop = store
+            .continue_scope_retirement(
+                "scope-a",
+                &request.delete_operation_id,
+                begun.scope.revision,
+                ScopeRetirementAdvance::GenerationDropped {
+                    runtime_state_id: "runtime-a1".to_string(),
+                    pending_operation_id: None,
+                },
+            )
+            .await?;
+        assert_eq!(premature_drop.status, ScopeRetirementStatus::InProgress);
+        assert_eq!(premature_drop.scope.revision, begun.scope.revision);
+        assert_eq!(premature_drop.retention_floor_epoch, 0);
+        assert!(store.get_checkpoint("runtime-a1").await?.is_some());
+        let expired = store
+            .continue_scope_retirement(
+                "scope-a",
+                &request.delete_operation_id,
+                begun.scope.revision,
+                ScopeRetirementAdvance::ConversationDeleted {
+                    receipt: crate::memory::ManagedConversationDeleteReceipt {
+                        operation_id: request.delete_operation_id.clone(),
+                        payload_digest: request.payload_digest.clone(),
+                        deleted_epoch: 10,
+                        retention_floor_epoch: 11,
+                        status: crate::memory::ManagedConversationDeleteStatus::ReceiptExpired,
+                    },
+                },
+            )
+            .await?;
+        assert_eq!(expired.status, ScopeRetirementStatus::ReceiptExpired);
+        assert_eq!(expired.retention_floor_epoch, 11);
+        let conversation = store
+            .continue_scope_retirement(
+                "scope-a",
+                &request.delete_operation_id,
+                begun.scope.revision,
+                ScopeRetirementAdvance::ConversationDeleted {
+                    receipt: crate::memory::ManagedConversationDeleteReceipt {
+                        operation_id: request.delete_operation_id.clone(),
+                        payload_digest: request.payload_digest.clone(),
+                        deleted_epoch: 10,
+                        retention_floor_epoch: 1,
+                        status: crate::memory::ManagedConversationDeleteStatus::Deleted,
+                    },
+                },
+            )
+            .await?;
+        let conversation_replay = store
+            .continue_scope_retirement(
+                "scope-a",
+                &request.delete_operation_id,
+                begun.scope.revision,
+                ScopeRetirementAdvance::ConversationDeleted {
+                    receipt: crate::memory::ManagedConversationDeleteReceipt {
+                        operation_id: request.delete_operation_id.clone(),
+                        payload_digest: request.payload_digest.clone(),
+                        deleted_epoch: 10,
+                        retention_floor_epoch: 2,
+                        status: crate::memory::ManagedConversationDeleteStatus::AlreadyDeleted,
+                    },
+                },
+            )
+            .await?;
+        assert_eq!(
+            conversation_replay.scope.revision,
+            conversation.scope.revision.saturating_add(1)
+        );
+        assert_eq!(conversation_replay.retention_floor_epoch, 2);
+        let first_drop = store
+            .continue_scope_retirement(
+                "scope-a",
+                &request.delete_operation_id,
+                conversation_replay.scope.revision,
+                ScopeRetirementAdvance::GenerationDropped {
+                    runtime_state_id: "runtime-a1".to_string(),
+                    pending_operation_id: None,
+                },
+            )
+            .await?;
+        let replay = store
+            .continue_scope_retirement(
+                "scope-a",
+                &request.delete_operation_id,
+                conversation_replay.scope.revision,
+                ScopeRetirementAdvance::GenerationDropped {
+                    runtime_state_id: "runtime-a1".to_string(),
+                    pending_operation_id: None,
+                },
+            )
+            .await?;
+        assert_eq!(replay.scope.revision, first_drop.scope.revision);
+        let second_drop = store
+            .continue_scope_retirement(
+                "scope-a",
+                &request.delete_operation_id,
+                first_drop.scope.revision,
+                ScopeRetirementAdvance::GenerationDropped {
+                    runtime_state_id: "runtime-a2".to_string(),
+                    pending_operation_id: None,
+                },
+            )
+            .await?;
+        let completed = store
+            .continue_scope_retirement(
+                "scope-a",
+                &request.delete_operation_id,
+                second_drop.scope.revision,
+                ScopeRetirementAdvance::Complete,
+            )
+            .await?;
+        assert_eq!(completed.status, ScopeRetirementStatus::Completed);
+
+        let old_epoch_reopen = store
+            .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                scope_id: "scope-a".to_string(),
+                runtime_state_id: "runtime-old-epoch".to_string(),
+                conversation_epoch: Some(10),
+                expected_scope_revision: completed.scope.revision,
+                expected_state_version: RuntimeStateExpectedVersion::Absent,
+                checkpoint: checkpoint("runtime-old-epoch", "stale")?,
+            })
+            .await?;
+        assert_eq!(
+            old_epoch_reopen.status,
+            RuntimeCheckpointCasStatus::ScopeFenced
+        );
+
+        let next = store
+            .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                scope_id: "scope-a".to_string(),
+                runtime_state_id: "runtime-a3".to_string(),
+                conversation_epoch: Some(11),
+                expected_scope_revision: completed.scope.revision,
+                expected_state_version: RuntimeStateExpectedVersion::Absent,
+                checkpoint: checkpoint("runtime-a3", "three")?,
+            })
+            .await?;
+        assert_eq!(next.scope.conversation_epoch, Some(11));
+        assert_eq!(
+            store.begin_scope_retirement(request.clone()).await?.status,
+            ScopeRetirementStatus::AlreadyCompleted
+        );
+
+        let second_delete = crate::memory::ManagedConversationDelete::prepare("scope-a", 11)?;
+        let second_request =
+            ScopeRetirementRequest::prepare("scope-a", next.scope.revision, &second_delete)?;
+        let second_begun = store.begin_scope_retirement(second_request.clone()).await?;
+        assert_eq!(second_begun.status, ScopeRetirementStatus::Begun);
+        assert_eq!(second_begun.manifest.items.len(), 1);
+        let second_conversation = store
+            .continue_scope_retirement(
+                "scope-a",
+                &second_request.delete_operation_id,
+                second_begun.scope.revision,
+                ScopeRetirementAdvance::ConversationDeleted {
+                    receipt: crate::memory::ManagedConversationDeleteReceipt {
+                        operation_id: second_request.delete_operation_id.clone(),
+                        payload_digest: second_request.payload_digest.clone(),
+                        deleted_epoch: 11,
+                        retention_floor_epoch: 10,
+                        status: crate::memory::ManagedConversationDeleteStatus::Deleted,
+                    },
+                },
+            )
+            .await?;
+        let second_dropped = store
+            .continue_scope_retirement(
+                "scope-a",
+                &second_request.delete_operation_id,
+                second_conversation.scope.revision,
+                ScopeRetirementAdvance::GenerationDropped {
+                    runtime_state_id: "runtime-a3".to_string(),
+                    pending_operation_id: None,
+                },
+            )
+            .await?;
+        let second_completed = store
+            .continue_scope_retirement(
+                "scope-a",
+                &second_request.delete_operation_id,
+                second_dropped.scope.revision,
+                ScopeRetirementAdvance::Complete,
+            )
+            .await?;
+        assert_eq!(second_completed.status, ScopeRetirementStatus::Completed);
+        let authority_before_old_replay = store
+            .load_scope_authority("scope-a")
+            .await?
+            .ok_or_else(|| RuntimeStateError::NotFound("scope authority".to_string()))?;
+        let expired_old_receipt = store.begin_scope_retirement(request.clone()).await?;
+        assert_eq!(
+            expired_old_receipt.status,
+            ScopeRetirementStatus::ReceiptExpired
+        );
+        assert_eq!(expired_old_receipt.retention_floor_epoch, 10);
+        assert_eq!(expired_old_receipt.scope, authority_before_old_replay);
+        assert_eq!(
+            store.load_scope_authority("scope-a").await?,
+            Some(authority_before_old_replay.clone())
+        );
+
+        let mut invalid_request = request;
+        invalid_request.payload_digest = "different-digest".to_string();
+        assert!(store.begin_scope_retirement(invalid_request).await.is_err());
+        assert_eq!(
+            store.load_scope_authority("scope-a").await?,
+            Some(authority_before_old_replay)
+        );
+        let stale_delete = crate::memory::ManagedConversationDelete::prepare("scope-a", 9)?;
+        assert_eq!(
+            store
+                .begin_scope_retirement(ScopeRetirementRequest::prepare(
+                    "scope-a",
+                    second_completed.scope.revision,
+                    &stale_delete,
+                )?)
+                .await?
+                .status,
+            ScopeRetirementStatus::EpochConflict
+        );
+        let _ = std::fs::remove_file(path);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn revisioned_tables_migrate_legacy_checkpoint_database() -> Result<()> {
+        let path = std::env::temp_dir().join(format!(
+            "echo-state-legacy-migration-{}-{}.sqlite",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let connection =
+            Connection::open(&path).map_err(|error| RuntimeStateError::Io(error.to_string()))?;
+        connection
+            .execute_batch(
+                "CREATE TABLE agent_checkpoints (
+                    conversation_id TEXT PRIMARY KEY,
+                    messages_json TEXT NOT NULL,
+                    current_plan TEXT,
+                    active_skills TEXT NOT NULL,
+                    blocked_reason TEXT,
+                    timestamp TEXT NOT NULL
+                 );",
+            )
+            .map_err(|error| RuntimeStateError::Io(error.to_string()))?;
+        connection
+            .execute(
+                "INSERT INTO agent_checkpoints
+                 (conversation_id, messages_json, current_plan, active_skills, blocked_reason, timestamp)
+                 VALUES (?1, ?2, NULL, ?3, NULL, ?4)",
+                params!["legacy", "[]", "[]", Utc::now().to_rfc3339()],
+            )
+            .map_err(|error| RuntimeStateError::Io(error.to_string()))?;
+        connection
+            .execute(
+                "INSERT INTO agent_checkpoints
+                 (conversation_id, messages_json, current_plan, active_skills, blocked_reason, timestamp)
+                 VALUES (?1, ?2, NULL, ?3, NULL, ?4)",
+                params!["legacy-delete", "[]", "[]", Utc::now().to_rfc3339()],
+            )
+            .map_err(|error| RuntimeStateError::Io(error.to_string()))?;
+        drop(connection);
+
+        let store = SqliteRuntimeStateStore::new(&path)?;
+        let delete = crate::memory::ManagedConversationDelete::prepare("legacy-delete", 10)?;
+        let request = ScopeRetirementRequest::prepare("legacy-delete", 0, &delete)?;
+        let begun = store.begin_scope_retirement(request.clone()).await?;
+        assert_eq!(begun.manifest.items.len(), 1);
+        assert_eq!(
+            begun
+                .manifest
+                .items
+                .first()
+                .map(|item| item.runtime_state_id.as_str()),
+            Some("legacy-delete")
+        );
+        let conversation = store
+            .continue_scope_retirement(
+                "legacy-delete",
+                &request.delete_operation_id,
+                begun.scope.revision,
+                ScopeRetirementAdvance::ConversationDeleted {
+                    receipt: crate::memory::ManagedConversationDeleteReceipt {
+                        operation_id: request.delete_operation_id.clone(),
+                        payload_digest: request.payload_digest.clone(),
+                        deleted_epoch: 10,
+                        retention_floor_epoch: 0,
+                        status: crate::memory::ManagedConversationDeleteStatus::Deleted,
+                    },
+                },
+            )
+            .await?;
+        let dropped = store
+            .continue_scope_retirement(
+                "legacy-delete",
+                &request.delete_operation_id,
+                conversation.scope.revision,
+                ScopeRetirementAdvance::GenerationDropped {
+                    runtime_state_id: "legacy-delete".to_string(),
+                    pending_operation_id: None,
+                },
+            )
+            .await?;
+        let completed = store
+            .continue_scope_retirement(
+                "legacy-delete",
+                &request.delete_operation_id,
+                dropped.scope.revision,
+                ScopeRetirementAdvance::Complete,
+            )
+            .await?;
+        assert_eq!(completed.status, ScopeRetirementStatus::Completed);
+        assert!(store.get_checkpoint("legacy-delete").await?.is_none());
+
+        let unmanaged = store
+            .load_runtime_state("legacy", "legacy")
+            .await?
+            .ok_or_else(|| RuntimeStateError::NotFound("legacy checkpoint".to_string()))?;
+        let RuntimeStateVersion::Unmanaged { digest } = unmanaged.version else {
+            return Err(RuntimeStateError::SerializationError(
+                "legacy checkpoint was not exposed as unmanaged".to_string(),
+            )
+            .into());
+        };
+        let adopted = store
+            .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                scope_id: "legacy".to_string(),
+                runtime_state_id: "legacy".to_string(),
+                conversation_epoch: Some(1),
+                expected_scope_revision: 0,
+                expected_state_version: RuntimeStateExpectedVersion::Unmanaged { digest },
+                checkpoint: checkpoint("legacy", "adopted")?,
+            })
+            .await?;
+        assert_eq!(adopted.status, RuntimeCheckpointCasStatus::Applied);
+        let _ = std::fs::remove_file(path);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn generation_retirement_waits_for_pending_projection() -> Result<()> {
+        let path = std::env::temp_dir().join(format!(
+            "echo-state-pending-retirement-{}-{}.sqlite",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let store = SqliteRuntimeStateStore::new(&path)?;
+        let initial = store
+            .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                scope_id: "scope-p".to_string(),
+                runtime_state_id: "runtime-p".to_string(),
+                conversation_epoch: Some(1),
+                expected_scope_revision: 0,
+                expected_state_version: RuntimeStateExpectedVersion::Absent,
+                checkpoint: checkpoint("runtime-p", "initial")?,
+            })
+            .await?;
+        let pending = store
+            .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                scope_id: "scope-p".to_string(),
+                runtime_state_id: "runtime-p".to_string(),
+                conversation_epoch: Some(1),
+                expected_scope_revision: initial.scope.revision,
+                expected_state_version: RuntimeStateExpectedVersion::Managed { revision: 1 },
+                checkpoint: pending_checkpoint("runtime-p", "scope-p")?,
+            })
+            .await?;
+        let retirement = store
+            .retire_runtime_generation(RuntimeGenerationRetireRequest::prepare(
+                "scope-p",
+                "runtime-p",
+                pending.scope.revision,
+                RuntimeStateExpectedVersion::Managed { revision: 2 },
+            )?)
+            .await?;
+        assert_eq!(
+            retirement.status,
+            RuntimeGenerationRetireStatus::PendingProjection
+        );
+        assert!(store.get_checkpoint("runtime-p").await?.is_some());
+        let _ = std::fs::remove_file(path);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn concurrent_generation_writers_cannot_overwrite_each_other() -> Result<()> {
+        let path = std::env::temp_dir().join(format!(
+            "echo-state-concurrent-cas-{}-{}.sqlite",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let first_store = SqliteRuntimeStateStore::new(&path)?;
+        let second_store = SqliteRuntimeStateStore::new(&path)?;
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(3));
+        let first_barrier = std::sync::Arc::clone(&barrier);
+        let first = tokio::spawn(async move {
+            first_barrier.wait().await;
+            first_store
+                .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                    scope_id: "scope-c".to_string(),
+                    runtime_state_id: "runtime-c".to_string(),
+                    conversation_epoch: Some(1),
+                    expected_scope_revision: 0,
+                    expected_state_version: RuntimeStateExpectedVersion::Absent,
+                    checkpoint: checkpoint("runtime-c", "first")?,
+                })
+                .await
+        });
+        let second_barrier = std::sync::Arc::clone(&barrier);
+        let second = tokio::spawn(async move {
+            second_barrier.wait().await;
+            second_store
+                .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                    scope_id: "scope-c".to_string(),
+                    runtime_state_id: "runtime-c".to_string(),
+                    conversation_epoch: Some(1),
+                    expected_scope_revision: 0,
+                    expected_state_version: RuntimeStateExpectedVersion::Absent,
+                    checkpoint: checkpoint("runtime-c", "second")?,
+                })
+                .await
+        });
+        barrier.wait().await;
+        let first = first
+            .await
+            .map_err(|error| RuntimeStateError::Io(error.to_string()))??;
+        let second = second
+            .await
+            .map_err(|error| RuntimeStateError::Io(error.to_string()))??;
+        let statuses = [first.status, second.status];
+        assert_eq!(
+            statuses
+                .iter()
+                .filter(|status| **status == RuntimeCheckpointCasStatus::Applied)
+                .count(),
+            1
+        );
+        assert_eq!(
+            statuses
+                .iter()
+                .filter(|status| **status == RuntimeCheckpointCasStatus::RevisionConflict)
+                .count(),
+            1
+        );
+        let authority = SqliteRuntimeStateStore::new(&path)?
+            .load_scope_authority("scope-c")
+            .await?
+            .ok_or_else(|| RuntimeStateError::NotFound("concurrent scope".to_string()))?;
+        assert_eq!(authority.revision, 1);
+        let _ = std::fs::remove_file(path);
+        Ok(())
+    }
 
     #[tokio::test]
     async fn sqlite_runtime_checkpoint_lifecycle() -> Result<()> {
