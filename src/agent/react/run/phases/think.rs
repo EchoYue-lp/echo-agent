@@ -2,7 +2,7 @@
 //! callbacks, stream LLM chunks, derive token counts and emit `ThinkEnd`.
 
 use super::super::processor::process_stream_chunk;
-use super::super::stream_macros::{try_send_or, yield_event_or};
+use super::super::stream_macros::yield_event_or;
 use super::{ThinkOutcome, ThinkOutput};
 use crate::agent::AgentEvent;
 use crate::agent::snapshot::AgentRunSnapshot;
@@ -39,6 +39,13 @@ pub(crate) async fn run_think(
     for intervention in &snap.tools.intervention_callbacks {
         let result = intervention.on_think_start(agent, &messages).await;
         if result.cancel {
+            super::finalize::settle_terminal_projection(
+                snap,
+                context,
+                Some("Agent execution cancelled by intervention at think".to_string()),
+                tx,
+            )
+            .await?;
             snap.finalize_run(
                 crate::trace::RunStatus::Cancelled,
                 None,
@@ -52,6 +59,19 @@ pub(crate) async fn run_think(
             let reason = result
                 .block_reason
                 .unwrap_or_else(|| "blocked by intervention at think".into());
+            super::finalize::settle_terminal_projection(
+                snap,
+                context,
+                Some(format!("Think blocked by intervention: {reason}")),
+                tx,
+            )
+            .await?;
+            snap.finalize_run(
+                crate::trace::RunStatus::Failed,
+                None,
+                Some(&format!("Think blocked by intervention: {reason}")),
+            )
+            .await;
             let _ = tx
                 .send(Ok(AgentEvent::error_message(
                     "intervention",
@@ -80,15 +100,24 @@ pub(crate) async fn run_think(
     let context_breakdown =
         crate::trace::LlmContextBreakdown::estimate(&messages, snap.calibrated_tokenizer.as_ref());
     let request_tools = tools_for_request(snap, final_only);
-    try_send_or!(
-        tx,
-        validate_request_budget(
-            snap,
-            estimated_context_tokens,
-            request_tools.as_deref().unwrap_or_default(),
-        ),
-        ThinkOutcome::Failed
-    );
+    if let Err(error) = validate_request_budget(
+        snap,
+        estimated_context_tokens,
+        request_tools.as_deref().unwrap_or_default(),
+    ) {
+        super::finalize::settle_terminal_projection(snap, context, Some(error.to_string()), tx)
+            .await?;
+        snap.finalize_run(
+            crate::trace::RunStatus::Failed,
+            None,
+            Some(&error.to_string()),
+        )
+        .await;
+        let _ = tx
+            .send(Ok(AgentEvent::from_error("react_loop", &error)))
+            .await;
+        return Ok(ThinkOutcome::Failed);
+    }
     let cache_fingerprint = cache_fingerprint(&messages, request_tools.as_deref());
     let (protected_message_count, protected_context_tokens) = {
         let context = context.lock().await;
@@ -98,11 +127,23 @@ pub(crate) async fn run_think(
         )
     };
     let llm_started = Instant::now();
-    let mut llm_stream = Box::pin(try_send_or!(
-        tx,
-        create_llm_stream(snap, messages.clone(), final_only).await,
-        ThinkOutcome::Failed
-    ));
+    let mut llm_stream = match create_llm_stream(snap, messages.clone(), final_only).await {
+        Ok(stream) => Box::pin(stream),
+        Err(error) => {
+            super::finalize::settle_terminal_projection(snap, context, Some(error.to_string()), tx)
+                .await?;
+            snap.finalize_run(
+                crate::trace::RunStatus::Failed,
+                None,
+                Some(&error.to_string()),
+            )
+            .await;
+            let _ = tx
+                .send(Ok(AgentEvent::from_error("react_loop", &error)))
+                .await;
+            return Ok(ThinkOutcome::Failed);
+        }
+    };
     let mut content_buffer = String::new();
     let mut reasoning_buffer = String::new();
     let mut reasoning_blocks = Vec::new();
@@ -120,6 +161,12 @@ pub(crate) async fn run_think(
                     None => std::future::pending().await,
                 }
             } => {
+                super::finalize::settle_terminal_projection(
+                    snap,
+                    context,
+                    Some("Agent execution cancelled during model response".to_string()),
+                    tx,
+                ).await?;
                 snap.finalize_run(
                     crate::trace::RunStatus::Cancelled,
                     None,
@@ -141,6 +188,13 @@ pub(crate) async fn run_think(
                     .as_ref()
                     .is_some_and(crate::agent::CancellationToken::is_cancelled)
                 {
+                    super::finalize::settle_terminal_projection(
+                        snap,
+                        context,
+                        Some("Agent execution cancelled during model response".to_string()),
+                        tx,
+                    )
+                    .await?;
                     snap.finalize_run(
                         crate::trace::RunStatus::Cancelled,
                         None,
@@ -150,6 +204,19 @@ pub(crate) async fn run_think(
                     let _ = tx.send(Ok(AgentEvent::Cancelled)).await;
                     return Ok(ThinkOutcome::Cancelled);
                 }
+                super::finalize::settle_terminal_projection(
+                    snap,
+                    context,
+                    Some(error.to_string()),
+                    tx,
+                )
+                .await?;
+                snap.finalize_run(
+                    crate::trace::RunStatus::Failed,
+                    None,
+                    Some(&error.to_string()),
+                )
+                .await;
                 emit_partial_content_before_failure(tx, &content_buffer).await;
                 let _ = tx
                     .send(Ok(AgentEvent::from_error("react_loop", &error)))
@@ -193,6 +260,8 @@ pub(crate) async fn run_think(
                 crate::error::ReactError::Llm(Box::new(crate::error::LlmError::InvalidResponse(
                     format!("model stream ended with non-success finish reason '{reason}'"),
                 )));
+            super::finalize::settle_terminal_projection(snap, context, Some(error.to_string()), tx)
+                .await?;
             snap.finalize_run(
                 crate::trace::RunStatus::Failed,
                 None,
@@ -209,6 +278,8 @@ pub(crate) async fn run_think(
                     "model stream ended without a finish reason; response may be truncated"
                         .to_string(),
                 )));
+            super::finalize::settle_terminal_projection(snap, context, Some(error.to_string()), tx)
+                .await?;
             snap.finalize_run(
                 crate::trace::RunStatus::Failed,
                 None,

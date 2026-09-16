@@ -44,7 +44,7 @@ pub use echo_core::agent::{
 };
 
 pub(crate) const AGENT_CANCELLATION_SETTLE_PERIOD: std::time::Duration =
-    std::time::Duration::from_secs(6);
+    std::time::Duration::from_secs(12);
 
 // ── Core sub-modules ───────────────────────────────────────────────────────
 

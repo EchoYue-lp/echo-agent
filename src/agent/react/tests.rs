@@ -2887,12 +2887,9 @@ async fn conversation_store_without_runtime_state_is_rejected_before_run_side_ef
     Ok(())
 }
 
-/// Verify `AgentRunSnapshot::save_transcript_projection` calls
-/// `ConversationStore::save_messages` with the projection of in-memory messages,
-/// and silently no-ops when no `conversation_id` is configured.
+/// Third-party stores remain source-compatible but cannot claim atomic support.
 #[tokio::test]
-async fn save_transcript_projection_writes_to_conversation_store() {
-    use crate::agent::snapshot::AgentRunSnapshot;
+async fn legacy_conversation_store_defaults_to_unsupported_projection() {
     use crate::memory::{
         Conversation, ConversationFilter, ConversationMeta, ConversationStore, NewConversation,
         StoredMessage,
@@ -3030,105 +3027,10 @@ async fn save_transcript_projection_writes_to_conversation_store() {
         }
     }
 
-    // ── Case 1: conversation_id + store both set → save_messages is invoked ──
     let store = Arc::new(RecordingStore::new());
-    let config =
-        AgentConfig::new("test-model", "agent", "sys").conversation_id("conv-projection-test");
-    let mut agent = ReactAgent::new(config);
-    agent.set_conversation_store(store.clone());
-    // Seed two user messages.
-    {
-        let mut ctx = agent.memory.context.lock().await;
-        ctx.push(Message::user("hello".to_string()));
-        ctx.push(Message::user("world".to_string()));
-    }
-
-    let snap = AgentRunSnapshot::from_agent(&agent);
-    snap.save_transcript_projection(&agent.memory.context).await;
-
-    let saves = store.saves.lock().unwrap().clone();
-    assert_eq!(saves.len(), 1, "save_messages should fire exactly once");
-    let (saved_conv_id, saved_msgs) = &saves[0];
-    assert_eq!(saved_conv_id, "conv-projection-test");
-    assert!(
-        saved_msgs.len() >= 2,
-        "projection should include the two pushed user messages, got {} messages",
-        saved_msgs.len()
-    );
-    let user_texts: Vec<&str> = saved_msgs
-        .iter()
-        .filter(|m| m.role == "user")
-        .filter_map(|m| m.content.as_deref())
-        .collect();
-    assert!(user_texts.contains(&"hello"));
-    assert!(user_texts.contains(&"world"));
-
-    // A compacted active window is only a continuation view. Saving it must
-    // append new visible messages without deleting older transcript entries.
-    {
-        let mut ctx = agent.memory.context.lock().await;
-        ctx.set_messages(vec![
-            Message::system("sys".to_string()),
-            Message::system(
-                "[\u{5bf9}\u{8bdd}\u{5386}\u{53f2}\u{6458}\u{8981}]\ncheckpoint".to_string(),
-            ),
-            Message::user("world".to_string()),
-            Message::assistant("final answer".to_string()),
-        ]);
-    }
-    snap.save_transcript_projection(&agent.memory.context).await;
-    let persisted = store
-        .persisted
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .clone();
-    let visible_text: Vec<&str> = persisted
-        .iter()
-        .filter_map(|message| message.content.as_deref())
-        .collect();
-    assert_eq!(visible_text, vec!["hello", "world", "final answer"]);
-
-    // Deterministic tool-trace folding can rewrite the middle of the active
-    // view. The last durable message remains the append boundary, so neither
-    // the rewritten prefix nor the existing tail may be duplicated.
-    {
-        let mut ctx = agent.memory.context.lock().await;
-        ctx.set_messages(vec![
-            Message::system("sys".to_string()),
-            Message::user("hello".to_string()),
-            Message::user("[Tool trace compacted]".to_string()),
-            Message::user("world".to_string()),
-            Message::assistant("final answer".to_string()),
-            Message::assistant("post-fold answer".to_string()),
-        ]);
-    }
-    snap.save_transcript_projection(&agent.memory.context).await;
-    let persisted_after_fold = store
-        .persisted
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .clone();
-    let visible_after_fold: Vec<&str> = persisted_after_fold
-        .iter()
-        .filter_map(|message| message.content.as_deref())
-        .collect();
     assert_eq!(
-        visible_after_fold,
-        vec!["hello", "world", "final answer", "post-fold answer"]
-    );
-
-    // ── Case 2: missing conversation_id → no-op ──
-    let store2 = Arc::new(RecordingStore::new());
-    let config2 = AgentConfig::new("test-model", "agent", "sys"); // no conversation_id
-    let mut agent2 = ReactAgent::new(config2);
-    agent2.set_conversation_store(store2.clone());
-    let snap2 = AgentRunSnapshot::from_agent(&agent2);
-    snap2
-        .save_transcript_projection(&agent2.memory.context)
-        .await;
-    assert!(
-        store2.saves.lock().unwrap().is_empty(),
-        "without conversation_id, save_transcript_projection must early-return without saving"
+        store.projection_capability(),
+        crate::memory::ConversationProjectionCapability::Unsupported
     );
 }
 

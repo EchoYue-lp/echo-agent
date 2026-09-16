@@ -85,13 +85,21 @@ fn agent_event(event: ToolPipelineEvent) -> AgentEvent {
 
 async fn close_cancelled_batch(
     snap: &AgentRunSnapshot,
+    context: &Arc<Mutex<crate::compression::ContextManager>>,
     tx: &mpsc::Sender<Result<AgentEvent>>,
     tool_names: &[String],
     success_count: usize,
-) {
+) -> Result<()> {
     let failure_count = tool_names.len().saturating_sub(success_count);
     snap.fire_post_tool_batch(tool_names, success_count, failure_count)
         .await;
+    super::finalize::settle_terminal_projection(
+        snap,
+        context,
+        Some("Tool batch cancelled".to_string()),
+        tx,
+    )
+    .await?;
     snap.finalize_run(
         crate::trace::RunStatus::Cancelled,
         None,
@@ -100,18 +108,21 @@ async fn close_cancelled_batch(
     .await;
     let _ = tx.send(Ok(AgentEvent::ToolBatchEnd)).await;
     let _ = tx.send(Ok(AgentEvent::Cancelled)).await;
+    Ok(())
 }
 
 async fn close_failed_batch(
     snap: &AgentRunSnapshot,
+    context: &Arc<Mutex<crate::compression::ContextManager>>,
     tx: &mpsc::Sender<Result<AgentEvent>>,
     tool_names: &[String],
     success_count: usize,
     error: ReactError,
-) {
+) -> Result<()> {
     let failure_count = tool_names.len().saturating_sub(success_count);
     snap.fire_post_tool_batch(tool_names, success_count, failure_count)
         .await;
+    super::finalize::settle_terminal_projection(snap, context, Some(error.to_string()), tx).await?;
     snap.finalize_run(
         crate::trace::RunStatus::Failed,
         None,
@@ -122,6 +133,7 @@ async fn close_failed_batch(
     let _ = tx
         .send(Ok(AgentEvent::from_error("tool_batch", &error)))
         .await;
+    Ok(())
 }
 
 fn build_execution_waves(
@@ -349,10 +361,11 @@ pub(crate) async fn run_tools(
                             );
                             close_cancelled_batch(
                                 snap,
+                                context,
                                 tx,
                                 &batch_tool_names,
                                 batch_success_count,
-                            ).await;
+                            ).await?;
                             return Ok(IterOutcome::Abandoned);
                         }
                         _ = &mut cancel, if !cancellation_observed => {
@@ -367,11 +380,12 @@ pub(crate) async fn run_tools(
                             ));
                             close_failed_batch(
                                 snap,
+                                context,
                                 tx,
                                 &batch_tool_names,
                                 batch_success_count,
                                 error,
-                            ).await;
+                            ).await?;
                             return Ok(IterOutcome::Abandoned);
                         }
                         Some((id, fname, result)) = futs.next(), if !futs.is_empty() => {
@@ -399,7 +413,14 @@ pub(crate) async fn run_tools(
                     }
                 }
                 if cancellation_observed {
-                    close_cancelled_batch(snap, tx, &batch_tool_names, batch_success_count).await;
+                    close_cancelled_batch(
+                        snap,
+                        context,
+                        tx,
+                        &batch_tool_names,
+                        batch_success_count,
+                    )
+                    .await?;
                     return Ok(IterOutcome::Abandoned);
                 }
 
@@ -493,7 +514,14 @@ pub(crate) async fn run_tools(
                     .as_ref()
                     .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
                 {
-                    close_cancelled_batch(snap, tx, &batch_tool_names, batch_success_count).await;
+                    close_cancelled_batch(
+                        snap,
+                        context,
+                        tx,
+                        &batch_tool_names,
+                        batch_success_count,
+                    )
+                    .await?;
                     return Ok(IterOutcome::Abandoned);
                 }
                 let params = if let Value::Object(m) = &args {
@@ -524,10 +552,11 @@ pub(crate) async fn run_tools(
                             );
                             close_cancelled_batch(
                                 snap,
+                                context,
                                 tx,
                                 &batch_tool_names,
                                 batch_success_count,
-                            ).await;
+                            ).await?;
                             return Ok(IterOutcome::Abandoned);
                         }
                         _ = async {
@@ -624,7 +653,14 @@ pub(crate) async fn run_tools(
                     }
                 }
                 if cancellation_observed {
-                    close_cancelled_batch(snap, tx, &batch_tool_names, batch_success_count).await;
+                    close_cancelled_batch(
+                        snap,
+                        context,
+                        tx,
+                        &batch_tool_names,
+                        batch_success_count,
+                    )
+                    .await?;
                     return Ok(IterOutcome::Abandoned);
                 }
             }

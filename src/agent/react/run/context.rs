@@ -199,10 +199,35 @@ impl ReactAgent {
             .await
     }
 
+    async fn reconcile_configured_pending_projection(
+        &self,
+        runtime_state_id: Option<&str>,
+    ) -> crate::error::Result<()> {
+        if self.memory.conversation_store.is_none()
+            || runtime_state_id != self.config.conversation_id.as_deref()
+        {
+            return Ok(());
+        }
+        let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(self);
+        if let Some(settlement) = snapshot.reconcile_pending_transcript_projection().await?
+            && settlement.status != crate::memory::TranscriptProjectionSettlementStatus::Settled
+        {
+            return Err(crate::error::ReactError::RuntimeState(Box::new(
+                echo_core::error::RuntimeStateError::ManagedStateRequiresCas(format!(
+                    "pending transcript projection did not settle before hydration: {:?}",
+                    settlement.status
+                )),
+            )));
+        }
+        Ok(())
+    }
+
     async fn restore_thread_context_for(
         &self,
         runtime_state_id: Option<&str>,
     ) -> crate::error::Result<()> {
+        self.reconcile_configured_pending_projection(runtime_state_id)
+            .await?;
         let _previous_hydration = self.begin_runtime_state_hydration(runtime_state_id).await;
         self.clear_runtime_snapshots();
         let agent = self.config.agent_name.clone();
@@ -257,6 +282,8 @@ impl ReactAgent {
         &self,
         runtime_state_id: Option<&str>,
     ) -> crate::error::Result<()> {
+        self.reconcile_configured_pending_projection(runtime_state_id)
+            .await?;
         let is_cold = {
             let context = self.memory.context.lock().await;
             context

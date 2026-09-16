@@ -32,13 +32,22 @@ pub(crate) async fn run_compact(
     // `ContextManager::should_compress()` so it only fires when compaction is
     // actually imminent (not every ReAct iteration).
     let _ = snap.pre_compaction_flush(context).await;
-    // Persist the complete user-visible transcript before ContextManager may
-    // replace active history through horizon folding or semantic compaction.
-    // The runtime checkpoint below remains the resume view; these two stores
-    // intentionally have different retention semantics.
-    snap.save_transcript_projection(context).await;
-    // Save checkpoint before compression (preserves the current resume view).
-    snap.save_runtime_checkpoint(context, None).await?;
+    // A complete transcript batch must be acknowledged before active context
+    // can cross the compaction horizon or realign its generation cursor.
+    let settlement = snap.save_transcript_projection(context, None).await?;
+    yield_event_or!(
+        tx,
+        AgentEvent::TranscriptProjectionSettlement(settlement.clone()),
+        CompactOutcome::Abandoned
+    );
+    if settlement.status != crate::memory::TranscriptProjectionSettlementStatus::Settled {
+        return Err(crate::error::ReactError::RuntimeState(Box::new(
+            echo_core::error::RuntimeStateError::ManagedStateRequiresCas(format!(
+                "pre-compact transcript projection did not settle: {:?}",
+                settlement.status
+            )),
+        )));
+    }
     let projection_context = crate::compression::ProjectionContext {
         iteration,
         agent_name: snap.config.agent_name.clone(),

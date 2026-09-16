@@ -93,6 +93,7 @@ pub struct ReactAgentBuilder {
     intent_router: Option<crate::intent::IntentRouter>,
     /// Optional runtime state store for checkpointing.
     state_store: Option<Arc<dyn crate::state::RuntimeStateStore>>,
+    conversation_store: Option<Arc<dyn crate::memory::ConversationStore>>,
     /// Optional visibility horizon config for proactive tool trace compaction.
     visibility_horizon: Option<echo_state::compression::horizon::VisibilityHorizonConfig>,
 }
@@ -164,6 +165,7 @@ impl ReactAgentBuilder {
             react_checkpoint_interval: 0,
             intent_router: None,
             state_store: None,
+            conversation_store: None,
             visibility_horizon: None,
         }
     }
@@ -598,6 +600,16 @@ impl ReactAgentBuilder {
         self
     }
 
+    /// Set the committed transcript projection store.
+    ///
+    /// Durable projection requires pairing this with [`Self::state_store`].
+    /// Invocation admission rejects an incomplete or non-atomic pair before
+    /// context, model, trace, guard, or persistence side effects.
+    pub fn conversation_store(mut self, store: Arc<dyn crate::memory::ConversationStore>) -> Self {
+        self.conversation_store = Some(store);
+        self
+    }
+
     /// Set a visibility horizon for proactive tool trace compaction.
     ///
     /// When configured, tool call/result pairs beyond the active window
@@ -975,6 +987,9 @@ impl ReactAgentBuilder {
         // Set runtime state store
         if let Some(store) = self.state_store {
             agent.memory.state_store = Some(store);
+        }
+        if let Some(store) = self.conversation_store {
+            agent.memory.conversation_store = Some(store);
         }
 
         // Set visibility horizon on the ContextManager

@@ -1902,6 +1902,14 @@ impl ReactAgent {
     /// prompt as the first entry if needed.
     pub async fn load_messages(&self, messages: Vec<crate::llm::types::Message>) -> Result<()> {
         self.validate_persistence_configuration()?;
+        if self.memory.conversation_store.is_some() {
+            return Err(
+                echo_core::error::MemoryError::ManagedConversationRequiresProjection(
+                    "ReactAgent::load_messages cannot bypass managed transcript import".to_string(),
+                )
+                .into(),
+            );
+        }
         let _execution_guard = self.execution_mutex.lock().await;
         let runtime_state_id = self.config.conversation_id.clone();
         let _previous_hydration = self
@@ -1926,6 +1934,17 @@ impl ReactAgent {
     pub async fn resume_from_state_store(&self) -> Result<Option<crate::state::AgentCheckpoint>> {
         self.validate_persistence_configuration()?;
         let _execution_guard = self.execution_mutex.lock().await;
+        let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(self);
+        if let Some(settlement) = snapshot.reconcile_pending_transcript_projection().await?
+            && settlement.status != crate::memory::TranscriptProjectionSettlementStatus::Settled
+        {
+            return Err(crate::error::ReactError::RuntimeState(Box::new(
+                echo_core::error::RuntimeStateError::ManagedStateRequiresCas(format!(
+                    "pending transcript projection did not settle before resume: {:?}",
+                    settlement.status
+                )),
+            )));
+        }
         let Some(runtime_state_id) = self.config.conversation_id.clone() else {
             tracing::debug!("resume_from_state_store: no conversation_id configured");
             return Ok(None);
@@ -1953,7 +1972,19 @@ impl ReactAgent {
             return Ok(None);
         };
 
-        let checkpoint = store.get_checkpoint(runtime_state_id).await?;
+        let checkpoint = if self.memory.conversation_store.is_some() {
+            let scope_id = self
+                .config
+                .conversation_id
+                .as_deref()
+                .unwrap_or(runtime_state_id);
+            store
+                .load_runtime_state(scope_id, runtime_state_id)
+                .await?
+                .and_then(|state| state.checkpoint)
+        } else {
+            store.get_checkpoint(runtime_state_id).await?
+        };
         if let Some(ref cp) = checkpoint {
             let restored = cp.restore_runtime_payload()?;
             let messages = restored.messages;

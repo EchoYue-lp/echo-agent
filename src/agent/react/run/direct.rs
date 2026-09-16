@@ -9,7 +9,6 @@ impl ReactAgent {
     pub(crate) async fn run_direct(&self, task: &str) -> Result<String> {
         self.validate_persistence_configuration()?;
         let agent = self.config.agent_name.clone();
-        self.restore_thread_context().await?;
 
         info!(agent = %agent, "🧠 Agent starting task execution");
         debug!(
@@ -21,7 +20,7 @@ impl ReactAgent {
         );
 
         let model = self.config.model_name.clone();
-        self.run_react_loop(task)
+        self.run_react_loop_mode(task, super::StreamMode::Execute)
             .instrument(info_span!("agent_execute", agent.name = %agent, agent.model = %model))
             .await
     }
@@ -30,7 +29,6 @@ impl ReactAgent {
     pub(crate) async fn run_chat_direct(&self, message: &str) -> Result<String> {
         self.validate_persistence_configuration()?;
         let agent = self.config.agent_name.clone();
-        self.restore_chat_context_if_cold().await?;
 
         info!(agent = %agent, "💬 Agent in multi-turn conversation");
         debug!(
@@ -42,7 +40,7 @@ impl ReactAgent {
         );
 
         let model = self.config.model_name.clone();
-        self.run_react_loop(message)
+        self.run_react_loop_mode(message, super::StreamMode::Chat)
             .instrument(info_span!("agent_chat", agent.name = %agent, agent.model = %model))
             .await
     }

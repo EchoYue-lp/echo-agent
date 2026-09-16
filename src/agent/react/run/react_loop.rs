@@ -111,13 +111,29 @@ impl ReactAgent {
     /// Creates a snapshot + channel, runs the unified core loop in a spawned task,
     /// then collects `FinalAnswer` from the event stream.
     #[tracing::instrument(skip(self, message), fields(agent = %self.config.agent_name, model = %self.config.model_name))]
+    #[cfg(test)]
     pub(crate) async fn run_react_loop(&self, message: &str) -> Result<String> {
+        self.run_react_loop_mode(message, StreamMode::Chat).await
+    }
+
+    pub(crate) async fn run_react_loop_mode(
+        &self,
+        message: &str,
+        mode: StreamMode,
+    ) -> Result<String> {
         // Capture legacy mutable context before queueing. A later caller may
         // update or clear the shared setters while this invocation waits for
         // the execution mutex, but cannot change this invocation's ownership.
         let legacy_runtime = self.capture_legacy_external_context();
         // ★ Serialize all execution on this agent — only one run at a time.
         let _execution_guard = self.execution_mutex.lock().await;
+
+        match mode {
+            StreamMode::Execute => self.restore_thread_context().await?,
+            StreamMode::Chat => self.restore_chat_context_if_cold().await?,
+        }
+        let admission_snapshot =
+            AgentRunSnapshot::from_agent_with_legacy_context(self, &legacy_runtime);
 
         // Prepare context (guard check, memory recall, push message, start trace)
         let (recalled, effective_message) =
@@ -127,6 +143,21 @@ impl ReactAgent {
                     // Guard blocked — return the message directly (not an error)
                     let msg = e.to_string();
                     if msg.starts_with("Request blocked by safety guard:") {
+                        let settlement = admission_snapshot
+                            .save_transcript_projection(&self.memory.context, Some(msg.clone()))
+                            .await?;
+                        if matches!(
+                            settlement.status,
+                            crate::memory::TranscriptProjectionSettlementStatus::Blocked
+                                | crate::memory::TranscriptProjectionSettlementStatus::Conflict
+                        ) {
+                            return Err(crate::error::ReactError::RuntimeState(Box::new(
+                                echo_core::error::RuntimeStateError::ManagedStateRequiresCas(
+                                    "guard terminal transcript projection did not settle"
+                                        .to_string(),
+                                ),
+                            )));
+                        }
                         return Ok(msg);
                     }
                     return Err(e);

@@ -12,6 +12,41 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
 use tracing::info;
 
+pub(crate) async fn settle_terminal_projection(
+    snap: &AgentRunSnapshot,
+    context: &Arc<Mutex<crate::compression::ContextManager>>,
+    blocked_reason: Option<String>,
+    tx: &mpsc::Sender<Result<AgentEvent>>,
+) -> Result<()> {
+    let settlement = snap
+        .save_transcript_projection(context, blocked_reason)
+        .await?;
+    if tx
+        .send(Ok(AgentEvent::TranscriptProjectionSettlement(
+            settlement.clone(),
+        )))
+        .await
+        .is_err()
+    {
+        return Err(ReactError::Other(
+            "transcript settlement observer closed before terminal".to_string(),
+        ));
+    }
+    match settlement.status {
+        crate::memory::TranscriptProjectionSettlementStatus::Settled
+        | crate::memory::TranscriptProjectionSettlementStatus::Deferred => Ok(()),
+        crate::memory::TranscriptProjectionSettlementStatus::Blocked
+        | crate::memory::TranscriptProjectionSettlementStatus::Conflict => {
+            Err(ReactError::RuntimeState(Box::new(
+                echo_core::error::RuntimeStateError::ManagedStateRequiresCas(format!(
+                    "terminal transcript projection did not settle: {:?}",
+                    settlement.status
+                )),
+            )))
+        }
+    }
+}
+
 /// Tools-branch terminal: a `final_answer` tool call has passed verifier.
 /// Runs `on_final_answer` callbacks + interventions, audit, runtime
 /// checkpoint and transcript projection, emits the
@@ -94,10 +129,7 @@ pub(crate) async fn finalize_completed_run(
             tracing::error!(error = %e, "audit log write failed — event dropped");
         }
     }
-    // Rich runtime checkpoint
-    snap.save_runtime_checkpoint(context, None).await?;
-    // Persist transcript projection so product layers see the final state.
-    snap.save_transcript_projection(context).await;
+    settle_terminal_projection(snap, context, None, tx).await?;
     snap.finalize_run(crate::trace::RunStatus::Completed, Some(output), None)
         .await;
     if tx
@@ -188,12 +220,7 @@ pub(crate) async fn emit_final_text(
             tracing::error!(error = %e, "audit log write failed — event dropped");
         }
     }
-    // Rich runtime checkpoint (messages + plan + skills + blocked reason)
-    snap.save_runtime_checkpoint(context, None).await?;
-    // Persist user-visible transcript projection — single source of truth
-    // for application UI history. Product layers should rely on this instead of
-    // re-implementing save_messages on every chat turn.
-    snap.save_transcript_projection(context).await;
+    settle_terminal_projection(snap, context, None, tx).await?;
     // Finalize trace before moving the answer into the event
     snap.finalize_run(crate::trace::RunStatus::Completed, Some(&answer), None)
         .await;
@@ -213,8 +240,11 @@ pub(crate) async fn emit_final_text(
 /// LLM produced neither tool calls nor content — terminal failure.
 pub(crate) async fn finalize_no_response(
     snap: &AgentRunSnapshot,
+    context: &Arc<Mutex<crate::compression::ContextManager>>,
     tx: mpsc::Sender<Result<AgentEvent>>,
 ) -> Result<()> {
+    settle_terminal_projection(snap, context, Some("No response from LLM".to_string()), &tx)
+        .await?;
     snap.finalize_run(
         crate::trace::RunStatus::Failed,
         None,
@@ -245,12 +275,13 @@ pub(crate) async fn finalize_max_iterations(
         Some("max_iterations"),
     )
     .await;
-    // Save runtime checkpoint with blocked reason before failing
-    snap.save_runtime_checkpoint(context, Some("Max iterations exceeded".to_string()))
-        .await?;
-    // Even on failure we save the transcript so the user sees what was
-    // attempted in the application UI history pane.
-    snap.save_transcript_projection(context).await;
+    settle_terminal_projection(
+        snap,
+        context,
+        Some("Max iterations exceeded".to_string()),
+        &tx,
+    )
+    .await?;
     snap.finalize_run(
         crate::trace::RunStatus::Failed,
         None,
@@ -295,13 +326,27 @@ mod tests {
     /// and finalizes the trace as `Failed`.
     #[tokio::test]
     async fn finalize_no_response_sends_error_and_marks_trace_failed() {
-        let (snap, store, _agent) = snap_with_trace("agent-noresp").await;
+        let (snap, store, agent) = snap_with_trace("agent-noresp").await;
         let (tx, mut rx) = mpsc::channel::<Result<AgentEvent>>(8);
-        finalize_no_response(&snap, tx)
+        finalize_no_response(&snap, &agent.memory.context, tx)
             .await
             .expect("finalize_no_response must succeed");
 
-        let item = rx.recv().await.expect("error must be forwarded to tx");
+        let settlement = rx
+            .recv()
+            .await
+            .expect("settlement must be forwarded before terminal")
+            .expect("settlement event must use the typed event stream");
+        assert!(matches!(
+            settlement,
+            AgentEvent::TranscriptProjectionSettlement(
+                crate::memory::TranscriptProjectionSettlement {
+                    status: crate::memory::TranscriptProjectionSettlementStatus::Settled,
+                    ..
+                }
+            )
+        ));
+        let item = rx.recv().await.expect("error must follow settlement");
         let event = item.expect("terminal error event must use the typed event stream");
         let (source, msg) = match event {
             AgentEvent::Error {
@@ -341,7 +386,21 @@ mod tests {
             .await
             .expect("finalize_max_iterations must succeed");
 
-        let item = rx.recv().await.expect("error must be forwarded to tx");
+        let settlement = rx
+            .recv()
+            .await
+            .expect("settlement must be forwarded before terminal")
+            .expect("settlement event must use the typed event stream");
+        assert!(matches!(
+            settlement,
+            AgentEvent::TranscriptProjectionSettlement(
+                crate::memory::TranscriptProjectionSettlement {
+                    status: crate::memory::TranscriptProjectionSettlementStatus::Settled,
+                    ..
+                }
+            )
+        ));
+        let item = rx.recv().await.expect("error must follow settlement");
         let event = item.expect("terminal error event must use the typed event stream");
         let (source, msg) = match event {
             AgentEvent::Error {

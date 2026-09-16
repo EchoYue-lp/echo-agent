@@ -165,6 +165,32 @@ impl ReactAgent {
         // entire stream lifetime.
         let execution_guard = self.execution_mutex.clone().lock_owned().await;
 
+        let admission_snapshot = match (invocation.as_ref(), legacy_runtime.as_ref()) {
+            (Some(invocation), _) => AgentSnapshot::from_agent_with_invocation(self, invocation),
+            (None, Some(legacy)) => AgentSnapshot::from_agent_with_legacy_context(self, legacy),
+            (None, None) => make_snapshot(self),
+        };
+        if let Some(settlement) = admission_snapshot
+            .reconcile_pending_transcript_projection()
+            .await?
+        {
+            if settlement.status != crate::memory::TranscriptProjectionSettlementStatus::Settled {
+                return Err(crate::error::ReactError::RuntimeState(Box::new(
+                    echo_core::error::RuntimeStateError::ManagedStateRequiresCas(format!(
+                        "pending transcript projection did not settle during admission: {:?}",
+                        settlement.status
+                    )),
+                )));
+            }
+            tx.send(Ok(AgentEvent::TranscriptProjectionSettlement(settlement)))
+                .await
+                .map_err(|_| {
+                    crate::error::ReactError::Other(
+                        "event consumer closed during transcript recovery".to_string(),
+                    )
+                })?;
+        }
+
         // Guard raw input before trace, hooks, memory, or conversation context
         // can retain it. Transformations become the authoritative turn input.
         if let Some(gm) = &self.guard.guard_manager {
@@ -188,6 +214,32 @@ impl ReactAgent {
                         if let Err(error) = al.log(event).await {
                             tracing::warn!(%error, "Failed to log guard audit event");
                         }
+                    }
+                    let settlement = admission_snapshot
+                        .save_transcript_projection(
+                            &context,
+                            Some(format!("Request blocked by safety guard: {reason}")),
+                        )
+                        .await?;
+                    tx.send(Ok(AgentEvent::TranscriptProjectionSettlement(
+                        settlement.clone(),
+                    )))
+                    .await
+                    .map_err(|_| {
+                        crate::error::ReactError::Other(
+                            "event consumer closed during guard settlement".to_string(),
+                        )
+                    })?;
+                    if matches!(
+                        settlement.status,
+                        crate::memory::TranscriptProjectionSettlementStatus::Blocked
+                            | crate::memory::TranscriptProjectionSettlementStatus::Conflict
+                    ) {
+                        return Err(crate::error::ReactError::RuntimeState(Box::new(
+                            echo_core::error::RuntimeStateError::ManagedStateRequiresCas(
+                                "guard terminal transcript projection did not settle".to_string(),
+                            ),
+                        )));
                     }
                     let trace_run_id = if let Some(runtime) = invocation
                         .as_ref()
@@ -474,6 +526,29 @@ impl AgentSnapshot {
         }
     }
 
+    async fn settle_unobserved_terminal(
+        &self,
+        context: &Arc<tokio::sync::Mutex<crate::compression::ContextManager>>,
+        reason: &str,
+    ) -> Result<()> {
+        let settlement = self
+            .save_transcript_projection(context, Some(reason.to_string()))
+            .await?;
+        match settlement.status {
+            crate::memory::TranscriptProjectionSettlementStatus::Settled
+            | crate::memory::TranscriptProjectionSettlementStatus::Deferred => Ok(()),
+            crate::memory::TranscriptProjectionSettlementStatus::Blocked
+            | crate::memory::TranscriptProjectionSettlementStatus::Conflict => {
+                Err(crate::error::ReactError::RuntimeState(Box::new(
+                    echo_core::error::RuntimeStateError::ManagedStateRequiresCas(format!(
+                        "unobserved terminal persistence did not settle: {:?}",
+                        settlement.status
+                    )),
+                )))
+            }
+        }
+    }
+
     async fn drain_steer_into_context(
         &self,
         context: &Arc<tokio::sync::Mutex<crate::compression::ContextManager>>,
@@ -546,6 +621,11 @@ impl AgentSnapshot {
                 return Ok(crate::agent::AgentSteerTurnOutcome::Failed);
             }
             PrepareOutcome::Abandoned => {
+                self.settle_unobserved_terminal(
+                    &context,
+                    "event consumer disconnected during preparation",
+                )
+                .await?;
                 self.finalize_run(
                     crate::trace::RunStatus::Cancelled,
                     None,
@@ -626,6 +706,11 @@ impl AgentSnapshot {
                 match phases::compact::run_compact(&self, &context, &tx, iteration).await? {
                     phases::CompactOutcome::Continue(m) => m,
                     phases::CompactOutcome::Abandoned => {
+                        self.settle_unobserved_terminal(
+                            &context,
+                            "event consumer disconnected during compaction",
+                        )
+                        .await?;
                         self.finalize_run(
                             crate::trace::RunStatus::Cancelled,
                             None,
@@ -653,6 +738,11 @@ impl AgentSnapshot {
                 match phases::think::run_think(&self, &context, &tx, messages, final_only).await? {
                     phases::ThinkOutcome::Continue(t) => t,
                     phases::ThinkOutcome::Abandoned => {
+                        self.settle_unobserved_terminal(
+                            &context,
+                            "event consumer disconnected during model response",
+                        )
+                        .await?;
                         self.finalize_run(
                             crate::trace::RunStatus::Cancelled,
                             None,
@@ -836,10 +926,15 @@ impl AgentSnapshot {
                     }
                 }
                 IterOutcome::NoResponse => {
-                    phases::finalize::finalize_no_response(&self, tx).await?;
+                    phases::finalize::finalize_no_response(&self, &context, tx).await?;
                     return Ok(crate::agent::AgentSteerTurnOutcome::Failed);
                 }
                 IterOutcome::Abandoned => {
+                    self.settle_unobserved_terminal(
+                        &context,
+                        "event consumer disconnected or tool batch was abandoned",
+                    )
+                    .await?;
                     self.finalize_run(
                         crate::trace::RunStatus::Cancelled,
                         None,
@@ -1143,10 +1238,8 @@ mod tests {
         agent
     }
 
-    /// A blocked input guard yields a stream containing exactly one terminal
-    /// FinalAnswer carrying the block reason — mirroring the non-streaming
-    /// path's `Ok("Request blocked...")` semantics — and must NOT enter the
-    /// core loop (no ThinkStart/Token events).
+    /// A blocked input guard settles persistence before its single terminal
+    /// FinalAnswer and must not enter the core loop.
     #[tokio::test]
     async fn stream_guard_block_yields_single_final_answer() {
         let agent = agent_with_blocking_guard();
@@ -1165,21 +1258,24 @@ mod tests {
 
         let events: Vec<_> = stream.collect().await;
 
-        // Exactly one event, and it is a terminal FinalAnswer.
         assert_eq!(
             events.len(),
-            1,
-            "blocked stream should have exactly one event"
+            2,
+            "blocked stream should emit settlement then one terminal"
         );
-        match events[0].as_ref().expect("event is Ok") {
-            AgentEvent::FinalAnswer(text) => {
+        assert!(matches!(
+            events.first().and_then(|event| event.as_ref().ok()),
+            Some(AgentEvent::TranscriptProjectionSettlement(_))
+        ));
+        match events.get(1).and_then(|event| event.as_ref().ok()) {
+            Some(AgentEvent::FinalAnswer(text)) => {
                 assert!(
                     text.starts_with("Request blocked by safety guard:"),
                     "expected block message, got: {text:?}",
                 );
                 assert!(text.contains("test-input-blocked"));
             }
-            other => panic!("expected FinalAnswer, got {other:?}"),
+            other => panic!("expected FinalAnswer after settlement, got {other:?}"),
         }
     }
 
@@ -1270,10 +1366,14 @@ mod tests {
         .expect("second stream");
 
         let events: Vec<_> = s2.collect().await;
-        assert_eq!(events.len(), 1, "second blocked stream also has one event");
+        assert_eq!(events.len(), 2, "second blocked stream also settles first");
         assert!(matches!(
-            events[0].as_ref().unwrap(),
-            AgentEvent::FinalAnswer(_)
+            events.first().and_then(|event| event.as_ref().ok()),
+            Some(AgentEvent::TranscriptProjectionSettlement(_))
+        ));
+        assert!(matches!(
+            events.get(1).and_then(|event| event.as_ref().ok()),
+            Some(AgentEvent::FinalAnswer(_))
         ));
     }
 
