@@ -30,15 +30,22 @@
 //!   advances. Readers ignore an uncommitted tail, and the next append removes
 //!   it before writing, so a crash cannot expose a partial message.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
 
 use echo_core::error::{MemoryError, Result};
 use echo_core::memory::conversation::{
-    Conversation, ConversationFilter, ConversationMeta, ConversationStore, NewConversation,
-    StoredMessage,
+    Conversation, ConversationFilter, ConversationMeta, ConversationProjectionAuthority,
+    ConversationProjectionCapability, ConversationProjectionEpochReceipt,
+    ConversationProjectionEpochStatus, ConversationProjectionLifecycle, ConversationStore,
+    EnsureConversationProjectionRequest, ManagedConversationDelete,
+    ManagedConversationDeleteReceipt, ManagedConversationDeleteStatus, ManagedConversationImport,
+    ManagedConversationMetadataUpdate, ManagedConversationMetadataUpdateReceipt,
+    ManagedConversationMetadataUpdateStatus, NewConversation, StoredMessage,
+    TranscriptProjectionApplyReceipt, TranscriptProjectionApplyStatus, TranscriptProjectionBatch,
+    TranscriptProjectionConflictKind,
 };
 use echo_core::utils::blocking::{
     BlockingFileOperationKey, BlockingFileOperationScope, run_keyed_file_operation,
@@ -51,6 +58,8 @@ use sha2::{Digest, Sha256};
 type BoxFut<'a, T> = BoxFuture<'a, Result<T>>;
 
 const SEARCH_FILTER_WORDS: usize = 64;
+const MAX_PROJECTION_EPOCH: u64 = i64::MAX as u64;
+const DELETE_RECEIPT_RETENTION: usize = 32;
 
 /// One conversation manifest plus messages loaded from its committed log.
 ///
@@ -66,6 +75,77 @@ struct ConversationRecord {
     message_log: Option<MessageLogMeta>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     search_filter: Option<SearchFilter>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    projection: Option<FileProjectionState>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct FileProjectionState {
+    epoch: u64,
+    revision: u64,
+    lifecycle: ConversationProjectionLifecycle,
+    #[serde(default)]
+    retention_floor_epoch: u64,
+    #[serde(default)]
+    applied_operations: HashMap<String, String>,
+    #[serde(default)]
+    ordinals: BTreeMap<String, BTreeMap<u64, String>>,
+    #[serde(default)]
+    delete_receipts: HashMap<String, FileDeleteReceipt>,
+}
+
+impl FileProjectionState {
+    fn live() -> Self {
+        Self {
+            epoch: 1,
+            revision: 1,
+            lifecycle: ConversationProjectionLifecycle::Live,
+            retention_floor_epoch: 0,
+            applied_operations: HashMap::new(),
+            ordinals: BTreeMap::new(),
+            delete_receipts: HashMap::new(),
+        }
+    }
+
+    fn authority(&self, conversation_id: &str) -> ConversationProjectionAuthority {
+        ConversationProjectionAuthority {
+            conversation_id: conversation_id.to_string(),
+            epoch: self.epoch,
+            revision: self.revision,
+            lifecycle: self.lifecycle,
+            delete_receipt_retention_floor_epoch: self.retention_floor_epoch,
+        }
+    }
+
+    fn next_revision(&self, conversation_id: &str) -> Result<u64> {
+        self.revision.checked_add(1).ok_or_else(|| {
+            MemoryError::Unsupported(format!(
+                "conversation projection revision exhausted: {conversation_id}"
+            ))
+            .into()
+        })
+    }
+
+    fn retain_delete_receipts(&mut self) {
+        while self.delete_receipts.len() > DELETE_RECEIPT_RETENTION {
+            let oldest = self
+                .delete_receipts
+                .iter()
+                .min_by_key(|(_, receipt)| receipt.deleted_epoch)
+                .map(|(operation_id, receipt)| (operation_id.clone(), receipt.deleted_epoch));
+            let Some((operation_id, deleted_epoch)) = oldest else {
+                break;
+            };
+            self.delete_receipts.remove(&operation_id);
+            self.retention_floor_epoch = self.retention_floor_epoch.max(deleted_epoch);
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct FileDeleteReceipt {
+    payload_digest: String,
+    deleted_epoch: u64,
 }
 
 /// Durable commit marker for one message-log generation.
@@ -240,6 +320,8 @@ struct FileConversationAuthority {
     scan_barrier: RwLock<()>,
     #[cfg(test)]
     search_snapshot_hook: Mutex<Option<SearchSnapshotHook>>,
+    #[cfg(test)]
+    fail_next_manifest_write: Mutex<bool>,
     _lease: ExclusiveFileLease,
 }
 
@@ -284,6 +366,8 @@ impl FileConversationStore {
             scan_barrier: RwLock::new(()),
             #[cfg(test)]
             search_snapshot_hook: Mutex::new(None),
+            #[cfg(test)]
+            fail_next_manifest_write: Mutex::new(false),
             _lease: lease,
         });
         registry.insert(base.clone(), Arc::downgrade(&authority));
@@ -330,6 +414,17 @@ impl FileConversationStore {
         hook.release
             .recv_timeout(std::time::Duration::from_secs(2))
             .map_err(|error| MemoryError::IoError(format!("release search snapshot: {error}")))?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn fail_next_manifest_write(&self) -> Result<()> {
+        let mut fail = self
+            .authority
+            .fail_next_manifest_write
+            .lock()
+            .map_err(poison)?;
+        *fail = true;
         Ok(())
     }
 
@@ -498,6 +593,45 @@ impl FileConversationStore {
             ))
             .into());
         }
+        if let Some(projection) = record.projection.as_ref() {
+            let invalid_authority = projection.epoch == 0
+                || projection.epoch > MAX_PROJECTION_EPOCH
+                || projection.revision == 0
+                || projection.retention_floor_epoch > projection.epoch;
+            let invalid_operations =
+                projection
+                    .applied_operations
+                    .iter()
+                    .any(|(operation_id, payload_digest)| {
+                        operation_id.trim().is_empty() || payload_digest.trim().is_empty()
+                    });
+            let invalid_ordinals = projection.ordinals.iter().any(|(generation_id, ordinals)| {
+                generation_id.trim().is_empty()
+                    || ordinals.values().any(|digest| digest.trim().is_empty())
+            });
+            let invalid_delete_receipts =
+                projection
+                    .delete_receipts
+                    .iter()
+                    .any(|(operation_id, receipt)| {
+                        operation_id.trim().is_empty()
+                            || receipt.payload_digest.trim().is_empty()
+                            || receipt.deleted_epoch == 0
+                            || receipt.deleted_epoch > projection.epoch
+                            || receipt.deleted_epoch <= projection.retention_floor_epoch
+                    });
+            if invalid_authority
+                || invalid_operations
+                || invalid_ordinals
+                || invalid_delete_receipts
+            {
+                return Err(MemoryError::SerializationError(format!(
+                    "manifest {} has invalid conversation projection authority",
+                    path.display()
+                ))
+                .into());
+            }
+        }
         Ok(record)
     }
 
@@ -609,6 +743,21 @@ impl FileConversationStore {
     }
 
     fn write_manifest(&self, record: &ConversationRecord) -> Result<()> {
+        #[cfg(test)]
+        {
+            let mut fail = self
+                .authority
+                .fail_next_manifest_write
+                .lock()
+                .map_err(poison)?;
+            if *fail {
+                *fail = false;
+                return Err(MemoryError::IoError(
+                    "injected conversation manifest publish failure".to_string(),
+                )
+                .into());
+            }
+        }
         let mut manifest = record.clone();
         if manifest.message_log.is_some() {
             manifest.messages.clear();
@@ -789,7 +938,98 @@ impl FileConversationStore {
         }
     }
 
+    fn replace_record_messages(
+        &self,
+        record: &mut ConversationRecord,
+        messages: &[StoredMessage],
+    ) -> Result<()> {
+        let conversation_id = record.conversation.conversation_id.clone();
+        let assigned = self.reserve_messages(&conversation_id, messages)?;
+        let generation = Self::next_generation(record.message_log.as_ref())?;
+        let bytes = Self::serialize_message_log(&assigned)?;
+        let path = self.message_log_path(&conversation_id, generation)?;
+        echo_core::utils::fs::atomic_write(&path, &bytes).map_err(|error| {
+            MemoryError::IoError(format!(
+                "replace conversation message log {}: {error}",
+                path.display()
+            ))
+        })?;
+        let committed_bytes = u64::try_from(bytes.len()).map_err(|error| {
+            MemoryError::Unsupported(format!("message log length is unsupported: {error}"))
+        })?;
+        let log = MessageLogMeta {
+            generation,
+            committed_bytes,
+            message_count: assigned.len(),
+            max_message_id: assigned.iter().filter_map(|message| message.id).max(),
+        };
+        let replaced = record.message_log.clone();
+        record.messages.clear();
+        record.message_log = Some(log.clone());
+        record.search_filter = Some(SearchFilter::from_conversation(
+            &record.conversation,
+            &assigned,
+        ));
+        self.persist_current_meta()?;
+        self.write_manifest(record)?;
+        self.remove_replaced_log(&conversation_id, replaced.as_ref());
+        self.authority.conversations.lock().map_err(poison)?.insert(
+            conversation_id,
+            ConversationCache {
+                log: Some(log),
+                messages: assigned
+                    .iter()
+                    .map(|message| {
+                        Ok(Self::cached_message(
+                            message,
+                            Self::semantic_digest(message)?,
+                        ))
+                    })
+                    .collect::<Result<Vec<_>>>()?,
+            },
+        );
+        Ok(())
+    }
+
+    fn managed_conversation_error(conversation_id: &str) -> echo_core::error::ReactError {
+        MemoryError::ManagedConversationRequiresProjection(conversation_id.to_string()).into()
+    }
+
+    fn apply_receipt(
+        batch: &TranscriptProjectionBatch,
+        authority: ConversationProjectionAuthority,
+        status: TranscriptProjectionApplyStatus,
+    ) -> TranscriptProjectionApplyReceipt {
+        TranscriptProjectionApplyReceipt {
+            operation_id: batch.operation_id.clone(),
+            payload_digest: batch.payload_digest.clone(),
+            authority,
+            status,
+        }
+    }
+
+    fn import_receipt(
+        request: &ManagedConversationImport,
+        authority: ConversationProjectionAuthority,
+        status: TranscriptProjectionApplyStatus,
+    ) -> TranscriptProjectionApplyReceipt {
+        TranscriptProjectionApplyReceipt {
+            operation_id: request.operation_id.clone(),
+            payload_digest: request.payload_digest.clone(),
+            authority,
+            status,
+        }
+    }
+
     fn create_conversation_sync(&self, conv: NewConversation) -> Result<Conversation> {
+        self.create_conversation_sync_with_projection(conv, None)
+    }
+
+    fn create_conversation_sync_with_projection(
+        &self,
+        conv: NewConversation,
+        projection: Option<FileProjectionState>,
+    ) -> Result<Conversation> {
         if self.read_manifest(&conv.conversation_id)?.is_some() {
             return Err(MemoryError::IoError(format!(
                 "conversation already exists: {}",
@@ -818,6 +1058,7 @@ impl FileConversationStore {
             messages: Vec::new(),
             message_log: Some(MessageLogMeta::empty()),
             search_filter: Some(SearchFilter::from_conversation(&conversation, &[])),
+            projection,
         };
         let log_path = self.message_log_path(&record.conversation.conversation_id, 1)?;
         echo_core::utils::fs::atomic_write(&log_path, &[])
@@ -860,10 +1101,20 @@ fn poison<T>(_: std::sync::PoisonError<T>) -> MemoryError {
 }
 
 impl ConversationStore for FileConversationStore {
+    fn projection_capability(&self) -> ConversationProjectionCapability {
+        ConversationProjectionCapability::AtomicV1
+    }
+
     fn create_conversation<'a>(&'a self, conv: NewConversation) -> BoxFut<'a, Conversation> {
         let scope = Self::conversation_scope(conv.conversation_id.clone());
         self.run_blocking(scope, move |store| {
             let _conversation = store.authority.scan_barrier.read().map_err(poison)?;
+            if store
+                .read_manifest(&conv.conversation_id)?
+                .is_some_and(|record| record.projection.is_some())
+            {
+                return Err(Self::managed_conversation_error(&conv.conversation_id));
+            }
             store.create_conversation_sync(conv)
         })
     }
@@ -879,6 +1130,11 @@ impl ConversationStore for FileConversationStore {
                 let _conversation = store.authority.scan_barrier.read().map_err(poison)?;
                 Ok(store
                     .read_manifest(&conversation_id)?
+                    .filter(|record| {
+                        record.projection.as_ref().is_none_or(|projection| {
+                            projection.lifecycle == ConversationProjectionLifecycle::Live
+                        })
+                    })
                     .map(|record| record.conversation))
             },
         )
@@ -895,6 +1151,11 @@ impl ConversationStore for FileConversationStore {
                 let mut metas: Vec<ConversationMeta> = store
                     .read_all_manifests()?
                     .into_iter()
+                    .filter(|record| {
+                        record.projection.as_ref().is_none_or(|projection| {
+                            projection.lifecycle == ConversationProjectionLifecycle::Live
+                        })
+                    })
                     .filter(|r| {
                         filter
                             .user_id
@@ -951,6 +1212,9 @@ impl ConversationStore for FileConversationStore {
                     Some(r) => r,
                     None => return Ok(()), // matches SQL UPDATE on 0 rows.
                 };
+                if record.projection.is_some() {
+                    return Err(Self::managed_conversation_error(&conversation_id));
+                }
                 if title.is_some() || summary.is_some() || compressed_before_id.is_some() {
                     if let Some(t) = title {
                         record.conversation.title = Some(t.clone());
@@ -979,6 +1243,12 @@ impl ConversationStore for FileConversationStore {
             move |store| {
                 let _conversation = store.authority.scan_barrier.read().map_err(poison)?;
                 let manifest = store.read_manifest(&conversation_id)?;
+                if manifest
+                    .as_ref()
+                    .is_some_and(|record| record.projection.is_some())
+                {
+                    return Err(Self::managed_conversation_error(&conversation_id));
+                }
                 let path = store.conv_path(&conversation_id)?;
                 match std::fs::remove_file(&path) {
                     Ok(()) => {}
@@ -1020,6 +1290,9 @@ impl ConversationStore for FileConversationStore {
                 let mut record = store.read_manifest(&conversation_id)?.ok_or_else(|| {
                     MemoryError::NotFound(format!("conversation: {conversation_id}"))
                 })?;
+                if record.projection.is_some() {
+                    return Err(Self::managed_conversation_error(&conversation_id));
+                }
                 let cache = match store
                     .authority
                     .conversations
@@ -1183,6 +1456,11 @@ impl ConversationStore for FileConversationStore {
                 let _conversation = store.authority.scan_barrier.read().map_err(poison)?;
                 let record = store.read_record(&conversation_id)?;
                 if let Some(record) = record {
+                    if record.projection.as_ref().is_some_and(|projection| {
+                        projection.lifecycle == ConversationProjectionLifecycle::Deleted
+                    }) {
+                        return Ok(Vec::new());
+                    }
                     store
                         .authority
                         .conversations
@@ -1205,6 +1483,11 @@ impl ConversationStore for FileConversationStore {
                 let _conversation = store.authority.scan_barrier.read().map_err(poison)?;
                 Ok(store
                     .read_manifest(&conversation_id)?
+                    .filter(|record| {
+                        record.projection.as_ref().is_none_or(|projection| {
+                            projection.lifecycle == ConversationProjectionLifecycle::Live
+                        })
+                    })
                     .map(|record| {
                         record
                             .message_log
@@ -1212,6 +1495,461 @@ impl ConversationStore for FileConversationStore {
                             .map_or(record.messages.len(), |log| log.message_count)
                     })
                     .unwrap_or(0))
+            },
+        )
+    }
+
+    fn ensure_projection_epoch<'a>(
+        &'a self,
+        request: EnsureConversationProjectionRequest,
+    ) -> BoxFut<'a, ConversationProjectionEpochReceipt> {
+        let conversation_id = request.conversation.conversation_id.clone();
+        self.run_blocking(
+            Self::conversation_scope(conversation_id.clone()),
+            move |store| {
+                if conversation_id.trim().is_empty() {
+                    return Err(MemoryError::SerializationError(
+                        "managed conversation id must not be empty".to_string(),
+                    )
+                    .into());
+                }
+                let _conversation = store.authority.scan_barrier.read().map_err(poison)?;
+                let Some(mut record) = store.read_record(&conversation_id)? else {
+                    let state = FileProjectionState::live();
+                    store.create_conversation_sync_with_projection(
+                        request.conversation,
+                        Some(state.clone()),
+                    )?;
+                    return Ok(ConversationProjectionEpochReceipt {
+                        authority: state.authority(&conversation_id),
+                        status: ConversationProjectionEpochStatus::Created,
+                    });
+                };
+
+                let Some(state) = record.projection.as_mut() else {
+                    let state = FileProjectionState::live();
+                    let authority = state.authority(&conversation_id);
+                    record.projection = Some(state);
+                    store.write_manifest(&record)?;
+                    return Ok(ConversationProjectionEpochReceipt {
+                        authority,
+                        status: ConversationProjectionEpochStatus::AdoptedLegacy,
+                    });
+                };
+
+                if state.lifecycle == ConversationProjectionLifecycle::Live {
+                    return Ok(ConversationProjectionEpochReceipt {
+                        authority: state.authority(&conversation_id),
+                        status: ConversationProjectionEpochStatus::Existing,
+                    });
+                }
+                if request.expected_tombstone_epoch != Some(state.epoch) {
+                    return Ok(ConversationProjectionEpochReceipt {
+                        authority: state.authority(&conversation_id),
+                        status: if request.expected_tombstone_epoch.is_none() {
+                            ConversationProjectionEpochStatus::Tombstoned
+                        } else {
+                            ConversationProjectionEpochStatus::EpochConflict
+                        },
+                    });
+                }
+
+                let next_epoch = state
+                    .epoch
+                    .checked_add(1)
+                    .filter(|epoch| *epoch <= MAX_PROJECTION_EPOCH)
+                    .ok_or_else(|| {
+                        MemoryError::ProjectionEpochExhausted(conversation_id.clone())
+                    })?;
+                let next_revision = state.next_revision(&conversation_id)?;
+                state.epoch = next_epoch;
+                state.revision = next_revision;
+                state.lifecycle = ConversationProjectionLifecycle::Live;
+                state.applied_operations.clear();
+                state.ordinals.clear();
+                let now = now_rfc3339();
+                record.conversation.user_id = request.conversation.user_id;
+                record.conversation.agent_type = request.conversation.agent_type;
+                record.conversation.title = request.conversation.title;
+                record.conversation.summary = None;
+                record.conversation.compressed_before_id = None;
+                record.conversation.created_at = now.clone();
+                record.conversation.updated_at = now;
+                let authority = state.authority(&conversation_id);
+                store.replace_record_messages(&mut record, &[])?;
+                Ok(ConversationProjectionEpochReceipt {
+                    authority,
+                    status: ConversationProjectionEpochStatus::Recreated,
+                })
+            },
+        )
+    }
+
+    fn apply_transcript_projection<'a>(
+        &'a self,
+        batch: TranscriptProjectionBatch,
+    ) -> BoxFut<'a, TranscriptProjectionApplyReceipt> {
+        let validation = batch.validate();
+        let conversation_id = batch.conversation_id.clone();
+        self.run_blocking(
+            Self::conversation_scope(conversation_id.clone()),
+            move |store| {
+                validation?;
+                let _conversation = store.authority.scan_barrier.read().map_err(poison)?;
+                let mut record = store.read_record(&conversation_id)?.ok_or_else(|| {
+                    MemoryError::NotFound(format!("conversation: {conversation_id}"))
+                })?;
+                let state = record
+                    .projection
+                    .as_ref()
+                    .ok_or_else(|| Self::managed_conversation_error(&conversation_id))?;
+                let current_authority = state.authority(&conversation_id);
+                if let Some(existing_digest) = state.applied_operations.get(&batch.operation_id) {
+                    let status = if existing_digest == &batch.payload_digest {
+                        TranscriptProjectionApplyStatus::AlreadyApplied
+                    } else {
+                        TranscriptProjectionApplyStatus::Conflict {
+                            current_epoch: state.epoch,
+                            current_revision: state.revision,
+                            kind: TranscriptProjectionConflictKind::OperationIdentity,
+                        }
+                    };
+                    return Ok(Self::apply_receipt(&batch, current_authority, status));
+                }
+                if state.epoch != batch.conversation_epoch
+                    || state.lifecycle != ConversationProjectionLifecycle::Live
+                {
+                    return Ok(Self::apply_receipt(
+                        &batch,
+                        current_authority,
+                        TranscriptProjectionApplyStatus::Fenced {
+                            current_epoch: state.epoch,
+                            lifecycle: state.lifecycle,
+                        },
+                    ));
+                }
+
+                let mut new_messages = Vec::new();
+                for item in &batch.items {
+                    let existing = state
+                        .ordinals
+                        .get(&batch.generation_id)
+                        .and_then(|ordinals| ordinals.get(&item.ordinal));
+                    match existing {
+                        Some(digest) if digest != &item.digest => {
+                            return Ok(Self::apply_receipt(
+                                &batch,
+                                current_authority,
+                                TranscriptProjectionApplyStatus::Conflict {
+                                    current_epoch: state.epoch,
+                                    current_revision: state.revision,
+                                    kind: TranscriptProjectionConflictKind::OrdinalDigest,
+                                },
+                            ));
+                        }
+                        Some(_) => {}
+                        None => new_messages.push(item.message.clone()),
+                    }
+                }
+
+                let next_revision = state.next_revision(&conversation_id)?;
+                let state = record
+                    .projection
+                    .as_mut()
+                    .ok_or_else(|| Self::managed_conversation_error(&conversation_id))?;
+                let generation = state
+                    .ordinals
+                    .entry(batch.generation_id.clone())
+                    .or_default();
+                for item in &batch.items {
+                    generation.insert(item.ordinal, item.digest.clone());
+                }
+                state
+                    .applied_operations
+                    .insert(batch.operation_id.clone(), batch.payload_digest.clone());
+                state.revision = next_revision;
+                record.conversation.updated_at = now_rfc3339();
+                let authority = state.authority(&conversation_id);
+                if new_messages.is_empty() {
+                    store.write_manifest(&record)?;
+                } else {
+                    let mut messages = record.messages.clone();
+                    messages.extend(new_messages);
+                    store.replace_record_messages(&mut record, &messages)?;
+                }
+                Ok(Self::apply_receipt(
+                    &batch,
+                    authority,
+                    TranscriptProjectionApplyStatus::Applied,
+                ))
+            },
+        )
+    }
+
+    fn import_managed_messages<'a>(
+        &'a self,
+        request: ManagedConversationImport,
+    ) -> BoxFut<'a, TranscriptProjectionApplyReceipt> {
+        let validation = request.validate();
+        let conversation_id = request.conversation_id.clone();
+        self.run_blocking(
+            Self::conversation_scope(conversation_id.clone()),
+            move |store| {
+                validation?;
+                let _conversation = store.authority.scan_barrier.read().map_err(poison)?;
+                let mut record = store.read_record(&conversation_id)?.ok_or_else(|| {
+                    MemoryError::NotFound(format!("conversation: {conversation_id}"))
+                })?;
+                let state = record
+                    .projection
+                    .as_ref()
+                    .ok_or_else(|| Self::managed_conversation_error(&conversation_id))?;
+                let current_authority = state.authority(&conversation_id);
+                if let Some(existing_digest) = state.applied_operations.get(&request.operation_id) {
+                    let status = if existing_digest == &request.payload_digest {
+                        TranscriptProjectionApplyStatus::AlreadyApplied
+                    } else {
+                        TranscriptProjectionApplyStatus::Conflict {
+                            current_epoch: state.epoch,
+                            current_revision: state.revision,
+                            kind: TranscriptProjectionConflictKind::OperationIdentity,
+                        }
+                    };
+                    return Ok(Self::import_receipt(&request, current_authority, status));
+                }
+                if state.epoch != request.expected_epoch
+                    || state.lifecycle != ConversationProjectionLifecycle::Live
+                {
+                    return Ok(Self::import_receipt(
+                        &request,
+                        current_authority,
+                        TranscriptProjectionApplyStatus::Fenced {
+                            current_epoch: state.epoch,
+                            lifecycle: state.lifecycle,
+                        },
+                    ));
+                }
+                if state.revision != request.expected_revision {
+                    return Ok(Self::import_receipt(
+                        &request,
+                        current_authority,
+                        TranscriptProjectionApplyStatus::Conflict {
+                            current_epoch: state.epoch,
+                            current_revision: state.revision,
+                            kind: TranscriptProjectionConflictKind::Revision,
+                        },
+                    ));
+                }
+
+                let next_epoch = state
+                    .epoch
+                    .checked_add(1)
+                    .filter(|epoch| *epoch <= MAX_PROJECTION_EPOCH)
+                    .ok_or_else(|| {
+                        MemoryError::ProjectionEpochExhausted(conversation_id.clone())
+                    })?;
+                let next_revision = state.next_revision(&conversation_id)?;
+                let state = record
+                    .projection
+                    .as_mut()
+                    .ok_or_else(|| Self::managed_conversation_error(&conversation_id))?;
+                state.epoch = next_epoch;
+                state.applied_operations.clear();
+                state.ordinals.clear();
+                state
+                    .applied_operations
+                    .insert(request.operation_id.clone(), request.payload_digest.clone());
+                state.revision = next_revision;
+                record.conversation.updated_at = now_rfc3339();
+                record.conversation.summary = None;
+                record.conversation.compressed_before_id = None;
+                let authority = state.authority(&conversation_id);
+                store.replace_record_messages(&mut record, &request.messages)?;
+                Ok(Self::import_receipt(
+                    &request,
+                    authority,
+                    TranscriptProjectionApplyStatus::Applied,
+                ))
+            },
+        )
+    }
+
+    fn update_managed_conversation<'a>(
+        &'a self,
+        request: ManagedConversationMetadataUpdate,
+    ) -> BoxFut<'a, ManagedConversationMetadataUpdateReceipt> {
+        let validation = request.validate();
+        let conversation_id = request.conversation_id.clone();
+        self.run_blocking(
+            Self::conversation_scope(conversation_id.clone()),
+            move |store| {
+                validation?;
+                let _conversation = store.authority.scan_barrier.read().map_err(poison)?;
+                let mut record = store.read_record(&conversation_id)?.ok_or_else(|| {
+                    MemoryError::NotFound(format!("conversation: {conversation_id}"))
+                })?;
+                let state = record
+                    .projection
+                    .as_ref()
+                    .ok_or_else(|| Self::managed_conversation_error(&conversation_id))?;
+                let current_authority = state.authority(&conversation_id);
+                if let Some(existing_digest) = state.applied_operations.get(&request.operation_id) {
+                    return Ok(ManagedConversationMetadataUpdateReceipt {
+                        operation_id: request.operation_id,
+                        payload_digest: request.payload_digest.clone(),
+                        authority: current_authority,
+                        status: if existing_digest == &request.payload_digest {
+                            ManagedConversationMetadataUpdateStatus::AlreadyUpdated
+                        } else {
+                            ManagedConversationMetadataUpdateStatus::IdentityConflict
+                        },
+                    });
+                }
+                if state.epoch != request.expected_epoch
+                    || state.lifecycle != ConversationProjectionLifecycle::Live
+                {
+                    return Ok(ManagedConversationMetadataUpdateReceipt {
+                        operation_id: request.operation_id,
+                        payload_digest: request.payload_digest,
+                        authority: current_authority,
+                        status: ManagedConversationMetadataUpdateStatus::EpochConflict,
+                    });
+                }
+                if state.revision != request.expected_revision {
+                    return Ok(ManagedConversationMetadataUpdateReceipt {
+                        operation_id: request.operation_id,
+                        payload_digest: request.payload_digest,
+                        authority: current_authority,
+                        status: ManagedConversationMetadataUpdateStatus::RevisionConflict,
+                    });
+                }
+                if let Some(compressed_before_id) = request.compressed_before_id
+                    && !record
+                        .messages
+                        .iter()
+                        .any(|message| message.id == Some(compressed_before_id))
+                {
+                    return Err(MemoryError::NotFound(format!(
+                        "conversation compression boundary: {compressed_before_id}"
+                    ))
+                    .into());
+                }
+
+                let next_revision = state.next_revision(&conversation_id)?;
+                if let Some(title) = request.title.as_ref() {
+                    record.conversation.title = Some(title.clone());
+                    if let Some(filter) = record.search_filter.as_mut() {
+                        filter.insert_text(title);
+                    }
+                }
+                if let Some(summary) = request.summary.as_ref() {
+                    record.conversation.summary = Some(summary.clone());
+                }
+                if let Some(compressed_before_id) = request.compressed_before_id {
+                    record.conversation.compressed_before_id = Some(compressed_before_id);
+                }
+                record.conversation.updated_at = now_rfc3339();
+                let state = record
+                    .projection
+                    .as_mut()
+                    .ok_or_else(|| Self::managed_conversation_error(&conversation_id))?;
+                state.revision = next_revision;
+                state
+                    .applied_operations
+                    .insert(request.operation_id.clone(), request.payload_digest.clone());
+                let authority = state.authority(&conversation_id);
+                store.write_manifest(&record)?;
+                Ok(ManagedConversationMetadataUpdateReceipt {
+                    operation_id: request.operation_id,
+                    payload_digest: request.payload_digest,
+                    authority,
+                    status: ManagedConversationMetadataUpdateStatus::Updated,
+                })
+            },
+        )
+    }
+
+    fn delete_managed_conversation<'a>(
+        &'a self,
+        request: ManagedConversationDelete,
+    ) -> BoxFut<'a, ManagedConversationDeleteReceipt> {
+        let validation = request.validate();
+        let conversation_id = request.conversation_id.clone();
+        self.run_blocking(
+            Self::conversation_scope(conversation_id.clone()),
+            move |store| {
+                validation?;
+                let _conversation = store.authority.scan_barrier.read().map_err(poison)?;
+                let mut record = store.read_record(&conversation_id)?.ok_or_else(|| {
+                    MemoryError::NotFound(format!("conversation: {conversation_id}"))
+                })?;
+                let state = record
+                    .projection
+                    .as_ref()
+                    .ok_or_else(|| Self::managed_conversation_error(&conversation_id))?;
+                if let Some(existing) = state.delete_receipts.get(&request.operation_id) {
+                    return Ok(ManagedConversationDeleteReceipt {
+                        operation_id: request.operation_id,
+                        payload_digest: existing.payload_digest.clone(),
+                        deleted_epoch: existing.deleted_epoch,
+                        retention_floor_epoch: state.retention_floor_epoch,
+                        status: if existing.payload_digest == request.payload_digest {
+                            ManagedConversationDeleteStatus::AlreadyDeleted
+                        } else {
+                            ManagedConversationDeleteStatus::IdentityConflict
+                        },
+                    });
+                }
+                if request.expected_epoch <= state.retention_floor_epoch {
+                    return Ok(ManagedConversationDeleteReceipt {
+                        operation_id: request.operation_id,
+                        payload_digest: request.payload_digest,
+                        deleted_epoch: request.expected_epoch,
+                        retention_floor_epoch: state.retention_floor_epoch,
+                        status: ManagedConversationDeleteStatus::ReceiptExpired,
+                    });
+                }
+                if state.epoch != request.expected_epoch
+                    || state.lifecycle != ConversationProjectionLifecycle::Live
+                {
+                    return Ok(ManagedConversationDeleteReceipt {
+                        operation_id: request.operation_id,
+                        payload_digest: request.payload_digest,
+                        deleted_epoch: request.expected_epoch,
+                        retention_floor_epoch: state.retention_floor_epoch,
+                        status: ManagedConversationDeleteStatus::EpochConflict,
+                    });
+                }
+
+                let next_revision = state.next_revision(&conversation_id)?;
+                let state = record
+                    .projection
+                    .as_mut()
+                    .ok_or_else(|| Self::managed_conversation_error(&conversation_id))?;
+                state.revision = next_revision;
+                state.lifecycle = ConversationProjectionLifecycle::Deleted;
+                state.applied_operations.clear();
+                state.ordinals.clear();
+                state.delete_receipts.insert(
+                    request.operation_id.clone(),
+                    FileDeleteReceipt {
+                        payload_digest: request.payload_digest.clone(),
+                        deleted_epoch: request.expected_epoch,
+                    },
+                );
+                state.retain_delete_receipts();
+                let retention_floor_epoch = state.retention_floor_epoch;
+                record.conversation.summary = None;
+                record.conversation.compressed_before_id = None;
+                record.conversation.updated_at = now_rfc3339();
+                store.replace_record_messages(&mut record, &[])?;
+                Ok(ManagedConversationDeleteReceipt {
+                    operation_id: request.operation_id,
+                    payload_digest: request.payload_digest,
+                    deleted_epoch: request.expected_epoch,
+                    retention_floor_epoch,
+                    status: ManagedConversationDeleteStatus::Deleted,
+                })
             },
         )
     }
@@ -1232,6 +1970,11 @@ impl ConversationStore for FileConversationStore {
                 #[cfg(test)]
                 store.pause_search_after_snapshot()?;
                 for mut record in records {
+                    if record.projection.as_ref().is_some_and(|projection| {
+                        projection.lifecycle == ConversationProjectionLifecycle::Deleted
+                    }) {
+                        continue;
+                    }
                     let title_hit = record
                         .conversation
                         .title
@@ -1287,6 +2030,9 @@ impl ConversationStore for FileConversationStore {
         self.run_blocking(scope, move |store| {
             let _conversation = store.authority.scan_barrier.read().map_err(poison)?;
             if let Some(existing) = store.read_manifest(&conv.conversation_id)? {
+                if existing.projection.is_some() {
+                    return Err(Self::managed_conversation_error(&conv.conversation_id));
+                }
                 return Ok(existing.conversation);
             }
             store.create_conversation_sync(conv)
@@ -1322,6 +2068,13 @@ fn is_message_log_file_name(file_name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use echo_core::memory::conversation::{
+        ConversationProjectionCapability, ConversationProjectionEpochStatus,
+        EnsureConversationProjectionRequest, ManagedConversationDelete,
+        ManagedConversationDeleteStatus, ManagedConversationImport,
+        TranscriptProjectionApplyStatus, TranscriptProjectionBatch,
+        TranscriptProjectionConflictKind,
+    };
     use std::time::Duration;
 
     type TestResult<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -1354,6 +2107,788 @@ mod tests {
             tool_result_json: None,
             created_at: String::new(),
         }
+    }
+
+    fn projection_message(conversation_id: &str, content: &str) -> StoredMessage {
+        StoredMessage {
+            id: None,
+            conversation_id: conversation_id.to_string(),
+            role: "user".to_string(),
+            content: Some(content.to_string()),
+            attachments_json: None,
+            tool_calls_json: None,
+            tool_result_json: None,
+            created_at: "2026-09-16T00:00:00Z".to_string(),
+        }
+    }
+
+    fn projection_batch(
+        conversation_id: &str,
+        epoch: u64,
+        generation_id: &str,
+        first_ordinal: u64,
+        contents: &[&str],
+    ) -> Result<TranscriptProjectionBatch> {
+        TranscriptProjectionBatch::prepare(
+            conversation_id,
+            epoch,
+            generation_id,
+            first_ordinal,
+            contents
+                .iter()
+                .map(|content| projection_message(conversation_id, content))
+                .collect(),
+        )
+    }
+
+    fn ensure_projection_request(
+        conversation_id: &str,
+        expected_tombstone_epoch: Option<u64>,
+    ) -> EnsureConversationProjectionRequest {
+        EnsureConversationProjectionRequest {
+            conversation: new_conv(conversation_id, None),
+            expected_tombstone_epoch,
+        }
+    }
+
+    fn managed_import(
+        conversation_id: &str,
+        expected_epoch: u64,
+        expected_revision: u64,
+        contents: &[&str],
+    ) -> Result<ManagedConversationImport> {
+        ManagedConversationImport::prepare(
+            conversation_id,
+            expected_epoch,
+            expected_revision,
+            contents
+                .iter()
+                .map(|content| projection_message(conversation_id, content))
+                .collect(),
+        )
+    }
+
+    fn managed_delete(
+        conversation_id: &str,
+        expected_epoch: u64,
+    ) -> Result<ManagedConversationDelete> {
+        ManagedConversationDelete::prepare(conversation_id, expected_epoch)
+    }
+
+    fn managed_metadata_update(
+        conversation_id: &str,
+        expected_epoch: u64,
+        expected_revision: u64,
+        title: &str,
+        summary: &str,
+        compressed_before_id: i64,
+    ) -> Result<ManagedConversationMetadataUpdate> {
+        ManagedConversationMetadataUpdate::prepare(
+            conversation_id,
+            expected_epoch,
+            expected_revision,
+            Some(title.to_string()),
+            Some(summary.to_string()),
+            Some(compressed_before_id),
+        )
+    }
+
+    fn is_managed_projection_error<T>(result: echo_core::error::Result<T>) -> bool {
+        matches!(
+            result,
+            Err(echo_core::error::ReactError::Memory(error))
+                if matches!(
+                    error.as_ref(),
+                    MemoryError::ManagedConversationRequiresProjection(_)
+                )
+        )
+    }
+
+    #[tokio::test]
+    async fn atomic_projection_is_idempotent_and_merges_generations() -> TestResult {
+        let base = tmp_base();
+        let store = FileConversationStore::new(&base)?;
+        assert_eq!(
+            store.projection_capability(),
+            ConversationProjectionCapability::AtomicV1
+        );
+        let acquired = store
+            .ensure_projection_epoch(ensure_projection_request("atomic", None))
+            .await?;
+        assert_eq!(acquired.status, ConversationProjectionEpochStatus::Created);
+        assert_eq!(acquired.authority.epoch, 1);
+
+        let first = projection_batch("atomic", 1, "generation-a", 0, &["a0", "a1"])?;
+        let applied = store.apply_transcript_projection(first.clone()).await?;
+        assert_eq!(applied.status, TranscriptProjectionApplyStatus::Applied);
+        let repeated = store.apply_transcript_projection(first).await?;
+        assert_eq!(
+            repeated.status,
+            TranscriptProjectionApplyStatus::AlreadyApplied
+        );
+
+        let second = projection_batch("atomic", 1, "generation-b", 0, &["b0"])?;
+        let merged = store.apply_transcript_projection(second).await?;
+        assert_eq!(merged.status, TranscriptProjectionApplyStatus::Applied);
+        let messages = store.get_messages("atomic").await?;
+        assert_eq!(messages.len(), 3);
+        assert_eq!(
+            messages
+                .iter()
+                .filter_map(|message| message.content.as_deref())
+                .collect::<Vec<_>>(),
+            vec!["a0", "a1", "b0"]
+        );
+
+        let conflict = projection_batch("atomic", 1, "generation-a", 0, &["changed"])?;
+        let receipt = store.apply_transcript_projection(conflict).await?;
+        assert!(matches!(
+            receipt.status,
+            TranscriptProjectionApplyStatus::Conflict {
+                kind: TranscriptProjectionConflictKind::OrdinalDigest,
+                ..
+            }
+        ));
+        assert_eq!(store.count_messages("atomic").await?, 3);
+        std::fs::remove_dir_all(base)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn managed_import_uses_revision_cas_and_fences_raw_mutators() -> TestResult {
+        let base = tmp_base();
+        let store = FileConversationStore::new(&base)?;
+        store
+            .create_conversation(new_conv("managed-import", None))
+            .await?;
+        store
+            .save_messages(
+                "managed-import",
+                &[projection_message("managed-import", "legacy")],
+            )
+            .await?;
+        let adopted = store
+            .ensure_projection_epoch(ensure_projection_request("managed-import", None))
+            .await?;
+        assert_eq!(
+            adopted.status,
+            ConversationProjectionEpochStatus::AdoptedLegacy
+        );
+
+        assert!(is_managed_projection_error(
+            store
+                .save_messages(
+                    "managed-import",
+                    &[projection_message("managed-import", "raw-overwrite")],
+                )
+                .await
+        ));
+        assert!(is_managed_projection_error(
+            store.delete_conversation("managed-import").await
+        ));
+        assert!(is_managed_projection_error(
+            store
+                .ensure_conversation(new_conv("managed-import", None))
+                .await
+        ));
+        assert!(is_managed_projection_error(
+            store
+                .create_conversation(new_conv("managed-import", None))
+                .await
+        ));
+        assert!(is_managed_projection_error(
+            store
+                .update_conversation("managed-import", Some("late"), Some("late"), Some(1))
+                .await
+        ));
+
+        let old_batch = projection_batch(
+            "managed-import",
+            adopted.authority.epoch,
+            "pre-import-generation",
+            0,
+            &["old-projection"],
+        )?;
+        let projected = store.apply_transcript_projection(old_batch.clone()).await?;
+        assert_eq!(projected.status, TranscriptProjectionApplyStatus::Applied);
+        let import = managed_import(
+            "managed-import",
+            adopted.authority.epoch,
+            projected.authority.revision,
+            &["restored"],
+        )?;
+        let imported = store.import_managed_messages(import.clone()).await?;
+        assert_eq!(imported.status, TranscriptProjectionApplyStatus::Applied);
+        let repeated = store.import_managed_messages(import.clone()).await?;
+        assert_eq!(
+            repeated.status,
+            TranscriptProjectionApplyStatus::AlreadyApplied
+        );
+        let mut tampered_import = import;
+        tampered_import.messages = vec![projection_message("managed-import", "tampered")];
+        assert!(
+            store
+                .import_managed_messages(tampered_import)
+                .await
+                .is_err()
+        );
+        let late_old_projection = store.apply_transcript_projection(old_batch).await?;
+        assert!(matches!(
+            late_old_projection.status,
+            TranscriptProjectionApplyStatus::Fenced {
+                current_epoch: 2,
+                ..
+            }
+        ));
+        let stale = store
+            .import_managed_messages(managed_import(
+                "managed-import",
+                imported.authority.epoch,
+                adopted.authority.revision,
+                &["stale"],
+            )?)
+            .await?;
+        assert!(matches!(
+            stale.status,
+            TranscriptProjectionApplyStatus::Conflict {
+                kind: TranscriptProjectionConflictKind::Revision,
+                ..
+            }
+        ));
+        let messages = store.get_messages("managed-import").await?;
+        assert_eq!(
+            messages
+                .first()
+                .and_then(|message| message.content.as_deref()),
+            Some("restored")
+        );
+        std::fs::remove_dir_all(base)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn managed_metadata_update_is_idempotent_and_epoch_fenced() -> TestResult {
+        let base = tmp_base();
+        let store = FileConversationStore::new(&base)?;
+        let acquired = store
+            .ensure_projection_epoch(ensure_projection_request("metadata", None))
+            .await?;
+        let applied = store
+            .apply_transcript_projection(projection_batch(
+                "metadata",
+                acquired.authority.epoch,
+                "generation-a",
+                0,
+                &["message"],
+            )?)
+            .await?;
+        let message_id = store
+            .get_messages("metadata")
+            .await?
+            .first()
+            .and_then(|message| message.id)
+            .ok_or_else(|| std::io::Error::other("managed message id was not assigned"))?;
+        let update = managed_metadata_update(
+            "metadata",
+            applied.authority.epoch,
+            applied.authority.revision,
+            "title",
+            "summary",
+            message_id,
+        )?;
+        let updated = store.update_managed_conversation(update.clone()).await?;
+        assert_eq!(
+            updated.status,
+            ManagedConversationMetadataUpdateStatus::Updated
+        );
+        assert_eq!(
+            store
+                .update_managed_conversation(update.clone())
+                .await?
+                .status,
+            ManagedConversationMetadataUpdateStatus::AlreadyUpdated
+        );
+        let mut tampered = update.clone();
+        tampered.summary = Some("tampered".to_string());
+        assert!(store.update_managed_conversation(tampered).await.is_err());
+        let stale = store
+            .update_managed_conversation(managed_metadata_update(
+                "metadata",
+                updated.authority.epoch,
+                applied.authority.revision,
+                "stale",
+                "stale",
+                message_id,
+            )?)
+            .await?;
+        assert_eq!(
+            stale.status,
+            ManagedConversationMetadataUpdateStatus::RevisionConflict
+        );
+        let conversation = store
+            .get_conversation("metadata")
+            .await?
+            .ok_or_else(|| std::io::Error::other("managed conversation disappeared"))?;
+        assert_eq!(conversation.title.as_deref(), Some("title"));
+        assert_eq!(conversation.summary.as_deref(), Some("summary"));
+        assert_eq!(conversation.compressed_before_id, Some(message_id));
+
+        let imported = store
+            .import_managed_messages(managed_import(
+                "metadata",
+                updated.authority.epoch,
+                updated.authority.revision,
+                &["replacement"],
+            )?)
+            .await?;
+        let after_import = store
+            .get_conversation("metadata")
+            .await?
+            .ok_or_else(|| std::io::Error::other("conversation disappeared after import"))?;
+        assert!(after_import.summary.is_none());
+        assert!(after_import.compressed_before_id.is_none());
+        assert_eq!(
+            store.update_managed_conversation(update).await?.status,
+            ManagedConversationMetadataUpdateStatus::EpochConflict
+        );
+        let replacement_id = store
+            .get_messages("metadata")
+            .await?
+            .first()
+            .and_then(|message| message.id)
+            .ok_or_else(|| std::io::Error::other("imported message id was not assigned"))?;
+        let after_import = managed_metadata_update(
+            "metadata",
+            imported.authority.epoch,
+            imported.authority.revision,
+            "new-title",
+            "new-summary",
+            replacement_id,
+        )?;
+        let updated_again = store
+            .update_managed_conversation(after_import.clone())
+            .await?;
+        let deleted = store
+            .delete_managed_conversation(managed_delete("metadata", updated_again.authority.epoch)?)
+            .await?;
+        assert_eq!(deleted.status, ManagedConversationDeleteStatus::Deleted);
+        let recreated = store
+            .ensure_projection_epoch(ensure_projection_request(
+                "metadata",
+                Some(updated_again.authority.epoch),
+            ))
+            .await?;
+        assert_eq!(
+            store
+                .update_managed_conversation(after_import)
+                .await?
+                .status,
+            ManagedConversationMetadataUpdateStatus::EpochConflict
+        );
+        assert!(is_managed_projection_error(
+            store
+                .update_conversation("metadata", Some("late"), Some("late"), Some(1))
+                .await
+        ));
+        let conversation = store
+            .get_conversation("metadata")
+            .await?
+            .ok_or_else(|| std::io::Error::other("recreated conversation disappeared"))?;
+        assert_eq!(recreated.authority.epoch, 3);
+        assert!(conversation.title.is_none());
+        assert!(conversation.summary.is_none());
+        assert!(conversation.compressed_before_id.is_none());
+        std::fs::remove_dir_all(base)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn managed_delete_receipt_fences_late_effects_and_survives_recreate() -> TestResult {
+        let base = tmp_base();
+        let store = FileConversationStore::new(&base)?;
+        let acquired = store
+            .ensure_projection_epoch(ensure_projection_request("delete-fence", None))
+            .await?;
+        let batch = projection_batch("delete-fence", 1, "generation-a", 0, &["before"])?;
+        assert_eq!(
+            store
+                .apply_transcript_projection(batch.clone())
+                .await?
+                .status,
+            TranscriptProjectionApplyStatus::Applied
+        );
+        let delete = managed_delete("delete-fence", acquired.authority.epoch)?;
+        let deleted = store.delete_managed_conversation(delete.clone()).await?;
+        assert_eq!(deleted.status, ManagedConversationDeleteStatus::Deleted);
+        let repeated = store.delete_managed_conversation(delete.clone()).await?;
+        assert_eq!(
+            repeated.status,
+            ManagedConversationDeleteStatus::AlreadyDeleted
+        );
+        let mut tampered_delete = delete.clone();
+        tampered_delete.payload_digest = "different-delete-payload".to_string();
+        assert!(
+            store
+                .delete_managed_conversation(tampered_delete)
+                .await
+                .is_err()
+        );
+        assert!(store.get_conversation("delete-fence").await?.is_none());
+        assert!(
+            store
+                .ensure_projection_epoch(ensure_projection_request("delete-fence", None))
+                .await?
+                .status
+                == ConversationProjectionEpochStatus::Tombstoned
+        );
+
+        let recreated = store
+            .ensure_projection_epoch(ensure_projection_request("delete-fence", Some(1)))
+            .await?;
+        assert_eq!(
+            recreated.status,
+            ConversationProjectionEpochStatus::Recreated
+        );
+        assert_eq!(recreated.authority.epoch, 2);
+        assert_eq!(
+            store.delete_managed_conversation(delete).await?.status,
+            ManagedConversationDeleteStatus::AlreadyDeleted
+        );
+        assert!(store.get_conversation("delete-fence").await?.is_some());
+
+        let stale_delete = store
+            .delete_managed_conversation(managed_delete("delete-fence", 3)?)
+            .await?;
+        assert_eq!(
+            stale_delete.status,
+            ManagedConversationDeleteStatus::EpochConflict
+        );
+        let late_apply = store.apply_transcript_projection(batch).await?;
+        assert!(matches!(
+            late_apply.status,
+            TranscriptProjectionApplyStatus::Fenced {
+                current_epoch: 2,
+                ..
+            }
+        ));
+        assert!(store.get_conversation("delete-fence").await?.is_some());
+        std::fs::remove_dir_all(base)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn concurrent_generations_merge_without_lost_updates() -> TestResult {
+        let base = tmp_base();
+        let store = FileConversationStore::new(&base)?;
+        store
+            .ensure_projection_epoch(ensure_projection_request("concurrent", None))
+            .await?;
+        let first_store = store.clone();
+        let second_store = store.clone();
+        let first = projection_batch("concurrent", 1, "generation-a", 0, &["a"])?;
+        let second = projection_batch("concurrent", 1, "generation-b", 0, &["b"])?;
+        let (first, second) = tokio::join!(
+            first_store.apply_transcript_projection(first),
+            second_store.apply_transcript_projection(second),
+        );
+        assert_eq!(first?.status, TranscriptProjectionApplyStatus::Applied);
+        assert_eq!(second?.status, TranscriptProjectionApplyStatus::Applied);
+        let mut contents = store
+            .get_messages("concurrent")
+            .await?
+            .into_iter()
+            .filter_map(|message| message.content)
+            .collect::<Vec<_>>();
+        contents.sort();
+        assert_eq!(contents, vec!["a", "b"]);
+        std::fs::remove_dir_all(base)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn managed_manifest_publish_failures_leave_no_partial_effect() -> TestResult {
+        let base = tmp_base();
+        let store = FileConversationStore::new(&base)?;
+        let acquired = store
+            .ensure_projection_epoch(ensure_projection_request("fault", None))
+            .await?;
+        let batch = projection_batch("fault", acquired.authority.epoch, "generation-a", 0, &["a"])?;
+
+        let blocked_meta = block_meta_writes(&store)?;
+        assert!(
+            store
+                .apply_transcript_projection(batch.clone())
+                .await
+                .is_err()
+        );
+        unblock_meta_writes(&blocked_meta)?;
+        assert_eq!(store.count_messages("fault").await?, 0);
+        let after_failed_apply = store
+            .ensure_projection_epoch(ensure_projection_request("fault", None))
+            .await?;
+        assert_eq!(after_failed_apply.authority, acquired.authority);
+        let applied = store.apply_transcript_projection(batch).await?;
+        assert_eq!(applied.status, TranscriptProjectionApplyStatus::Applied);
+
+        let pre_import_message_id = store
+            .get_messages("fault")
+            .await?
+            .first()
+            .and_then(|message| message.id)
+            .ok_or_else(|| std::io::Error::other("pre-import message id was not assigned"))?;
+        let pre_import_metadata = store
+            .update_managed_conversation(managed_metadata_update(
+                "fault",
+                applied.authority.epoch,
+                applied.authority.revision,
+                "pre-import-title",
+                "pre-import-summary",
+                pre_import_message_id,
+            )?)
+            .await?;
+        let import = managed_import(
+            "fault",
+            pre_import_metadata.authority.epoch,
+            pre_import_metadata.authority.revision,
+            &["imported"],
+        )?;
+        let blocked_meta = block_meta_writes(&store)?;
+        assert!(store.import_managed_messages(import.clone()).await.is_err());
+        unblock_meta_writes(&blocked_meta)?;
+        assert_eq!(
+            store
+                .get_messages("fault")
+                .await?
+                .first()
+                .and_then(|message| message.content.as_deref()),
+            Some("a")
+        );
+        let after_failed_import_metadata = store
+            .get_conversation("fault")
+            .await?
+            .ok_or_else(|| std::io::Error::other("conversation disappeared after import fault"))?;
+        assert_eq!(
+            after_failed_import_metadata.summary.as_deref(),
+            Some("pre-import-summary")
+        );
+        assert_eq!(
+            after_failed_import_metadata.compressed_before_id,
+            Some(pre_import_message_id)
+        );
+        let after_failed_import = store
+            .ensure_projection_epoch(ensure_projection_request("fault", None))
+            .await?;
+        assert_eq!(after_failed_import.authority, pre_import_metadata.authority);
+        let imported = store.import_managed_messages(import).await?;
+        assert_eq!(imported.status, TranscriptProjectionApplyStatus::Applied);
+        let after_import_metadata = store
+            .get_conversation("fault")
+            .await?
+            .ok_or_else(|| std::io::Error::other("conversation disappeared after import"))?;
+        assert!(after_import_metadata.summary.is_none());
+        assert!(after_import_metadata.compressed_before_id.is_none());
+
+        let imported_message_id = store
+            .get_messages("fault")
+            .await?
+            .first()
+            .and_then(|message| message.id)
+            .ok_or_else(|| std::io::Error::other("imported message id was not assigned"))?;
+        let metadata = managed_metadata_update(
+            "fault",
+            imported.authority.epoch,
+            imported.authority.revision,
+            "metadata-title",
+            "metadata-summary",
+            imported_message_id,
+        )?;
+        store.fail_next_manifest_write()?;
+        assert!(
+            store
+                .update_managed_conversation(metadata.clone())
+                .await
+                .is_err()
+        );
+        let after_failed_metadata = store.get_conversation("fault").await?.ok_or_else(|| {
+            std::io::Error::other("conversation disappeared after metadata fault")
+        })?;
+        assert_eq!(
+            after_failed_metadata.title.as_deref(),
+            Some("pre-import-title")
+        );
+        assert!(after_failed_metadata.summary.is_none());
+        assert!(after_failed_metadata.compressed_before_id.is_none());
+        let after_failed_metadata_authority = store
+            .ensure_projection_epoch(ensure_projection_request("fault", None))
+            .await?;
+        assert_eq!(
+            after_failed_metadata_authority.authority,
+            imported.authority
+        );
+        let metadata_updated = store.update_managed_conversation(metadata).await?;
+        assert_eq!(
+            metadata_updated.status,
+            ManagedConversationMetadataUpdateStatus::Updated
+        );
+
+        let delete = managed_delete("fault", metadata_updated.authority.epoch)?;
+        let blocked_meta = block_meta_writes(&store)?;
+        assert!(
+            store
+                .delete_managed_conversation(delete.clone())
+                .await
+                .is_err()
+        );
+        unblock_meta_writes(&blocked_meta)?;
+        assert!(store.get_conversation("fault").await?.is_some());
+        assert_eq!(
+            store
+                .get_messages("fault")
+                .await?
+                .first()
+                .and_then(|message| message.content.as_deref()),
+            Some("imported")
+        );
+        let after_failed_delete = store
+            .ensure_projection_epoch(ensure_projection_request("fault", None))
+            .await?;
+        assert_eq!(after_failed_delete.authority, metadata_updated.authority);
+        assert_eq!(
+            store.delete_managed_conversation(delete).await?.status,
+            ManagedConversationDeleteStatus::Deleted
+        );
+        std::fs::remove_dir_all(base)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn delete_receipt_retention_floor_prevents_expired_replay() -> TestResult {
+        let base = tmp_base();
+        let store = FileConversationStore::new(&base)?;
+        store
+            .ensure_projection_epoch(ensure_projection_request("retention", None))
+            .await?;
+        let cycles = DELETE_RECEIPT_RETENTION.saturating_add(1);
+        for offset in 0..cycles {
+            let epoch = u64::try_from(offset)?.saturating_add(1);
+            let receipt = store
+                .delete_managed_conversation(managed_delete("retention", epoch)?)
+                .await?;
+            assert_eq!(receipt.status, ManagedConversationDeleteStatus::Deleted);
+            if offset.saturating_add(1) < cycles {
+                let recreated = store
+                    .ensure_projection_epoch(ensure_projection_request("retention", Some(epoch)))
+                    .await?;
+                assert_eq!(
+                    recreated.status,
+                    ConversationProjectionEpochStatus::Recreated
+                );
+            }
+        }
+
+        let expired = store
+            .delete_managed_conversation(managed_delete("retention", 1)?)
+            .await?;
+        assert_eq!(
+            expired.status,
+            ManagedConversationDeleteStatus::ReceiptExpired
+        );
+        assert!(expired.retention_floor_epoch >= 1);
+        let last_epoch = u64::try_from(cycles)?;
+        let live = store
+            .ensure_projection_epoch(ensure_projection_request("retention", Some(last_epoch)))
+            .await?;
+        let mut tampered_expired = managed_delete("retention", 1)?;
+        tampered_expired.expected_epoch = live.authority.epoch;
+        assert!(
+            store
+                .delete_managed_conversation(tampered_expired)
+                .await
+                .is_err()
+        );
+        assert!(store.get_conversation("retention").await?.is_some());
+        std::fs::remove_dir_all(base)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn maximum_projection_epoch_cannot_be_recreated() -> TestResult {
+        let base = tmp_base();
+        let store = FileConversationStore::new(&base)?;
+        store
+            .ensure_projection_epoch(ensure_projection_request("epoch-max", None))
+            .await?;
+        let mut record = manifest(&store, "epoch-max")?;
+        let state = record
+            .projection
+            .as_mut()
+            .ok_or_else(|| std::io::Error::other("projection state was not persisted"))?;
+        state.epoch = MAX_PROJECTION_EPOCH;
+        state.lifecycle = ConversationProjectionLifecycle::Deleted;
+        store.write_manifest(&record)?;
+
+        let result = store
+            .ensure_projection_epoch(ensure_projection_request(
+                "epoch-max",
+                Some(MAX_PROJECTION_EPOCH),
+            ))
+            .await;
+        assert!(matches!(
+            result,
+            Err(echo_core::error::ReactError::Memory(error))
+                if matches!(error.as_ref(), MemoryError::ProjectionEpochExhausted(_))
+        ));
+        std::fs::remove_dir_all(base)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn managed_receipts_survive_store_reopen() -> TestResult {
+        let base = tmp_base();
+        let batch = projection_batch("reopen", 1, "generation-a", 0, &["durable"])?;
+        let delete = managed_delete("reopen", 1)?;
+        {
+            let store = FileConversationStore::new(&base)?;
+            store
+                .ensure_projection_epoch(ensure_projection_request("reopen", None))
+                .await?;
+            assert_eq!(
+                store
+                    .apply_transcript_projection(batch.clone())
+                    .await?
+                    .status,
+                TranscriptProjectionApplyStatus::Applied
+            );
+        }
+        {
+            let reopened = FileConversationStore::new(&base)?;
+            assert_eq!(
+                reopened.apply_transcript_projection(batch).await?.status,
+                TranscriptProjectionApplyStatus::AlreadyApplied
+            );
+            assert_eq!(
+                reopened
+                    .delete_managed_conversation(delete.clone())
+                    .await?
+                    .status,
+                ManagedConversationDeleteStatus::Deleted
+            );
+        }
+        let reopened = FileConversationStore::new(&base)?;
+        assert_eq!(
+            reopened.delete_managed_conversation(delete).await?.status,
+            ManagedConversationDeleteStatus::AlreadyDeleted
+        );
+        assert_eq!(
+            reopened
+                .ensure_projection_epoch(ensure_projection_request("reopen", Some(1)))
+                .await?
+                .status,
+            ConversationProjectionEpochStatus::Recreated
+        );
+        drop(reopened);
+        std::fs::remove_dir_all(base)?;
+        Ok(())
     }
 
     fn manifest(
