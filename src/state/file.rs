@@ -421,18 +421,13 @@ impl FileRuntimeStateStore {
                 path.display()
             )));
         }
-        if owner.authority.lifecycle == RuntimeScopeLifecycle::Retiring
-            && owner.current_retirement.is_none()
-        {
-            return Err(Self::to_react_err(format!(
-                "retiring runtime scope is missing its manifest at {}",
-                path.display()
-            )));
-        }
+        Self::validate_scope_owner(&owner)
+            .map_err(|error| Self::to_react_err(format!("{}: {error}", path.display())))?;
         Ok(Some(owner))
     }
 
     fn write_scope_owner_sync(&self, owner: &RuntimeScopeOwner) -> crate::error::Result<()> {
+        Self::validate_scope_owner(owner)?;
         let path = self.scope_owner_path(&owner.authority.scope_id)?;
         let parent = path.parent().ok_or_else(|| {
             Self::to_react_err("runtime scope owner path has no parent directory")
@@ -441,6 +436,67 @@ impl FileRuntimeStateStore {
         let raw = serde_json::to_vec_pretty(owner)
             .map_err(|error| Self::to_react_err(format!("serialize runtime scope: {error}")))?;
         echo_core::utils::fs::atomic_write(&path, &raw).map_err(Self::to_react_err)
+    }
+
+    fn validate_scope_owner(owner: &RuntimeScopeOwner) -> crate::error::Result<()> {
+        match (owner.authority.lifecycle, owner.current_retirement.as_ref()) {
+            (RuntimeScopeLifecycle::Retiring, Some(manifest)) => {
+                if owner.authority.conversation_epoch != Some(manifest.expected_conversation_epoch)
+                {
+                    return Err(Self::to_react_err(
+                        "retiring runtime scope manifest epoch does not match its authority",
+                    ));
+                }
+                Self::validate_retirement_manifest(&owner.authority.scope_id, manifest)?;
+            }
+            (RuntimeScopeLifecycle::Retiring, None) => {
+                return Err(Self::to_react_err(
+                    "retiring runtime scope is missing its manifest",
+                ));
+            }
+            (RuntimeScopeLifecycle::Active | RuntimeScopeLifecycle::Tombstoned, Some(_)) => {
+                return Err(Self::to_react_err(
+                    "non-retiring runtime scope must not retain a retirement manifest",
+                ));
+            }
+            (RuntimeScopeLifecycle::Active | RuntimeScopeLifecycle::Tombstoned, None) => {}
+        }
+        for receipt in &owner.completed_retirements {
+            if receipt.scope.scope_id != owner.authority.scope_id {
+                return Err(Self::to_react_err(
+                    "completed retirement receipt belongs to a different scope",
+                ));
+            }
+            Self::validate_retirement_manifest(&owner.authority.scope_id, &receipt.manifest)?;
+        }
+        Ok(())
+    }
+
+    fn validate_retirement_manifest(
+        scope_id: &str,
+        manifest: &ScopeRetirementManifest,
+    ) -> crate::error::Result<()> {
+        let delete = crate::memory::ManagedConversationDelete::prepare(
+            scope_id,
+            manifest.expected_conversation_epoch,
+        )?;
+        if manifest.delete_operation_id != delete.operation_id
+            || manifest.payload_digest != delete.payload_digest
+        {
+            return Err(Self::to_react_err(
+                "scope retirement manifest identity does not match its canonical delete",
+            ));
+        }
+        if let Some(receipt) = manifest.conversation_delete_receipt.as_ref()
+            && (receipt.operation_id != manifest.delete_operation_id
+                || receipt.payload_digest != manifest.payload_digest
+                || receipt.deleted_epoch != manifest.expected_conversation_epoch)
+        {
+            return Err(Self::to_react_err(
+                "conversation delete receipt does not match its retirement manifest",
+            ));
+        }
+        Ok(())
     }
 
     fn synthetic_scope_authority(
@@ -1903,6 +1959,20 @@ mod tests {
         })
     }
 
+    fn retirement_manifest(
+        scope_id: &str,
+        epoch: u64,
+    ) -> crate::error::Result<ScopeRetirementManifest> {
+        let delete = crate::memory::ManagedConversationDelete::prepare(scope_id, epoch)?;
+        Ok(ScopeRetirementManifest {
+            delete_operation_id: delete.operation_id,
+            payload_digest: delete.payload_digest,
+            expected_conversation_epoch: epoch,
+            items: Vec::new(),
+            conversation_delete_receipt: None,
+        })
+    }
+
     #[tokio::test]
     async fn revisioned_runtime_state_contract_is_supported() -> crate::error::Result<()> {
         let tmp = tmp_base();
@@ -2158,6 +2228,81 @@ mod tests {
                 .checkpoint
                 .is_some_and(|checkpoint| checkpoint.messages_json.contains("original"))
         );
+        let _ = std::fs::remove_dir_all(&tmp);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn corrupt_runtime_scope_saga_fails_closed() -> crate::error::Result<()> {
+        let tmp = tmp_base();
+        let store = FileRuntimeStateStore::new(&tmp)?;
+        let path = store.scope_owner_path("scope-corrupt")?;
+        let active_with_manifest = RuntimeScopeOwner {
+            version: RUNTIME_SCOPE_RECORD_VERSION,
+            authority: RuntimeScopeAuthority {
+                scope_id: "scope-corrupt".to_string(),
+                conversation_epoch: Some(1),
+                revision: 1,
+                lifecycle: RuntimeScopeLifecycle::Active,
+            },
+            current_retirement: Some(retirement_manifest("scope-corrupt", 1)?),
+            completed_retirements: Vec::new(),
+        };
+        let raw = serde_json::to_vec_pretty(&active_with_manifest)
+            .map_err(FileRuntimeStateStore::to_react_err)?;
+        echo_core::utils::fs::atomic_write(&path, &raw)
+            .map_err(FileRuntimeStateStore::to_react_err)?;
+        assert!(store.load_scope_authority("scope-corrupt").await.is_err());
+        assert!(
+            store
+                .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                    scope_id: "scope-corrupt".to_string(),
+                    runtime_state_id: "runtime-corrupt".to_string(),
+                    conversation_epoch: Some(1),
+                    expected_scope_revision: 1,
+                    expected_state_version: RuntimeStateExpectedVersion::Absent,
+                    checkpoint: managed_checkpoint("runtime-corrupt", "must not persist")?,
+                })
+                .await
+                .is_err()
+        );
+        assert!(!store.runtime_owner_path("runtime-corrupt")?.exists());
+
+        let retiring_epoch_mismatch = RuntimeScopeOwner {
+            version: RUNTIME_SCOPE_RECORD_VERSION,
+            authority: RuntimeScopeAuthority {
+                scope_id: "scope-corrupt".to_string(),
+                conversation_epoch: Some(1),
+                revision: 1,
+                lifecycle: RuntimeScopeLifecycle::Retiring,
+            },
+            current_retirement: Some(retirement_manifest("scope-corrupt", 2)?),
+            completed_retirements: Vec::new(),
+        };
+        let raw = serde_json::to_vec_pretty(&retiring_epoch_mismatch)
+            .map_err(FileRuntimeStateStore::to_react_err)?;
+        echo_core::utils::fs::atomic_write(&path, &raw)
+            .map_err(FileRuntimeStateStore::to_react_err)?;
+        assert!(store.load_scope_authority("scope-corrupt").await.is_err());
+
+        let mut identity_mismatch = retirement_manifest("scope-corrupt", 1)?;
+        identity_mismatch.payload_digest = "tampered".to_string();
+        let retiring_identity_mismatch = RuntimeScopeOwner {
+            version: RUNTIME_SCOPE_RECORD_VERSION,
+            authority: RuntimeScopeAuthority {
+                scope_id: "scope-corrupt".to_string(),
+                conversation_epoch: Some(1),
+                revision: 1,
+                lifecycle: RuntimeScopeLifecycle::Retiring,
+            },
+            current_retirement: Some(identity_mismatch),
+            completed_retirements: Vec::new(),
+        };
+        let raw = serde_json::to_vec_pretty(&retiring_identity_mismatch)
+            .map_err(FileRuntimeStateStore::to_react_err)?;
+        echo_core::utils::fs::atomic_write(&path, &raw)
+            .map_err(FileRuntimeStateStore::to_react_err)?;
+        assert!(store.load_scope_authority("scope-corrupt").await.is_err());
         let _ = std::fs::remove_dir_all(&tmp);
         Ok(())
     }

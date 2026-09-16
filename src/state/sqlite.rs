@@ -378,23 +378,20 @@ impl SqliteRuntimeStateStore {
             .as_deref()
             .map(|value| Self::decode(value, "scope retirement manifest"))
             .transpose()?;
-        if authority.lifecycle == RuntimeScopeLifecycle::Retiring && current_retirement.is_none() {
-            return Err(RuntimeStateError::SerializationError(format!(
-                "retiring runtime scope {scope_id} is missing its manifest"
-            ))
-            .into());
-        }
-        Ok(Some(SqliteRuntimeScopeRecord {
+        let record = SqliteRuntimeScopeRecord {
             authority,
             current_retirement,
             completed_retirements: Self::decode(&completed, "completed scope retirements")?,
-        }))
+        };
+        Self::validate_scope_record(&record)?;
+        Ok(Some(record))
     }
 
     fn save_scope_record_on_connection(
         conn: &Connection,
         record: &SqliteRuntimeScopeRecord,
     ) -> Result<()> {
+        Self::validate_scope_record(record)?;
         conn.execute(
             "INSERT INTO runtime_state_authorities
              (scope_id, authority_json, current_retirement_json, completed_retirements_json)
@@ -415,6 +412,78 @@ impl SqliteRuntimeStateStore {
             ],
         )
         .map_err(|error| RuntimeStateError::Io(format!("failed to save runtime scope: {error}")))?;
+        Ok(())
+    }
+
+    fn validate_scope_record(record: &SqliteRuntimeScopeRecord) -> Result<()> {
+        match (
+            record.authority.lifecycle,
+            record.current_retirement.as_ref(),
+        ) {
+            (RuntimeScopeLifecycle::Retiring, Some(manifest)) => {
+                if record.authority.conversation_epoch != Some(manifest.expected_conversation_epoch)
+                {
+                    return Err(RuntimeStateError::SerializationError(
+                        "retiring runtime scope manifest epoch does not match its authority"
+                            .to_string(),
+                    )
+                    .into());
+                }
+                Self::validate_retirement_manifest(&record.authority.scope_id, manifest)?;
+            }
+            (RuntimeScopeLifecycle::Retiring, None) => {
+                return Err(RuntimeStateError::SerializationError(
+                    "retiring runtime scope is missing its manifest".to_string(),
+                )
+                .into());
+            }
+            (RuntimeScopeLifecycle::Active | RuntimeScopeLifecycle::Tombstoned, Some(_)) => {
+                return Err(RuntimeStateError::SerializationError(
+                    "non-retiring runtime scope must not retain a retirement manifest".to_string(),
+                )
+                .into());
+            }
+            (RuntimeScopeLifecycle::Active | RuntimeScopeLifecycle::Tombstoned, None) => {}
+        }
+        for receipt in &record.completed_retirements {
+            if receipt.scope.scope_id != record.authority.scope_id {
+                return Err(RuntimeStateError::SerializationError(
+                    "completed retirement receipt belongs to a different scope".to_string(),
+                )
+                .into());
+            }
+            Self::validate_retirement_manifest(&record.authority.scope_id, &receipt.manifest)?;
+        }
+        Ok(())
+    }
+
+    fn validate_retirement_manifest(
+        scope_id: &str,
+        manifest: &ScopeRetirementManifest,
+    ) -> Result<()> {
+        let delete = crate::memory::ManagedConversationDelete::prepare(
+            scope_id,
+            manifest.expected_conversation_epoch,
+        )?;
+        if manifest.delete_operation_id != delete.operation_id
+            || manifest.payload_digest != delete.payload_digest
+        {
+            return Err(RuntimeStateError::SerializationError(
+                "scope retirement manifest identity does not match its canonical delete"
+                    .to_string(),
+            )
+            .into());
+        }
+        if let Some(receipt) = manifest.conversation_delete_receipt.as_ref()
+            && (receipt.operation_id != manifest.delete_operation_id
+                || receipt.payload_digest != manifest.payload_digest
+                || receipt.deleted_epoch != manifest.expected_conversation_epoch)
+        {
+            return Err(RuntimeStateError::SerializationError(
+                "conversation delete receipt does not match its retirement manifest".to_string(),
+            )
+            .into());
+        }
         Ok(())
     }
 
@@ -2005,6 +2074,43 @@ mod tests {
         })
     }
 
+    fn retirement_manifest(scope_id: &str, epoch: u64) -> Result<ScopeRetirementManifest> {
+        let delete = crate::memory::ManagedConversationDelete::prepare(scope_id, epoch)?;
+        Ok(ScopeRetirementManifest {
+            delete_operation_id: delete.operation_id,
+            payload_digest: delete.payload_digest,
+            expected_conversation_epoch: epoch,
+            items: Vec::new(),
+            conversation_delete_receipt: None,
+        })
+    }
+
+    fn inject_scope_record(
+        store: &SqliteRuntimeStateStore,
+        authority: &RuntimeScopeAuthority,
+        manifest: &ScopeRetirementManifest,
+    ) -> Result<()> {
+        let connection = store.open_conn()?;
+        connection
+            .execute(
+                "INSERT OR REPLACE INTO runtime_state_authorities
+                 (scope_id, authority_json, current_retirement_json, completed_retirements_json)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    &authority.scope_id,
+                    serde_json::to_string(authority).map_err(|error| {
+                        RuntimeStateError::SerializationError(error.to_string())
+                    })?,
+                    serde_json::to_string(manifest).map_err(|error| {
+                        RuntimeStateError::SerializationError(error.to_string())
+                    })?,
+                    "[]",
+                ],
+            )
+            .map_err(|error| RuntimeStateError::Io(error.to_string()))?;
+        Ok(())
+    }
+
     #[tokio::test]
     async fn revisioned_runtime_state_contract_is_supported() -> Result<()> {
         let path = std::env::temp_dir().join(format!(
@@ -2305,6 +2411,62 @@ mod tests {
                 .checkpoint
                 .is_some_and(|checkpoint| checkpoint.messages_json.contains("original"))
         );
+        let _ = std::fs::remove_file(path);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn corrupt_runtime_scope_saga_fails_closed() -> Result<()> {
+        let path = std::env::temp_dir().join(format!(
+            "echo-state-corrupt-saga-{}-{}.sqlite",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let store = SqliteRuntimeStateStore::new(&path)?;
+        let mut authority = RuntimeScopeAuthority {
+            scope_id: "scope-corrupt".to_string(),
+            conversation_epoch: Some(1),
+            revision: 1,
+            lifecycle: RuntimeScopeLifecycle::Active,
+        };
+        inject_scope_record(
+            &store,
+            &authority,
+            &retirement_manifest("scope-corrupt", 1)?,
+        )?;
+        assert!(store.load_scope_authority("scope-corrupt").await.is_err());
+        assert!(
+            store
+                .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                    scope_id: "scope-corrupt".to_string(),
+                    runtime_state_id: "runtime-corrupt".to_string(),
+                    conversation_epoch: Some(1),
+                    expected_scope_revision: 1,
+                    expected_state_version: RuntimeStateExpectedVersion::Absent,
+                    checkpoint: checkpoint("runtime-corrupt", "must not persist")?,
+                })
+                .await
+                .is_err()
+        );
+        assert!(
+            store
+                .load_runtime_state("scope-corrupt", "runtime-corrupt")
+                .await?
+                .is_none()
+        );
+
+        authority.lifecycle = RuntimeScopeLifecycle::Retiring;
+        inject_scope_record(
+            &store,
+            &authority,
+            &retirement_manifest("scope-corrupt", 2)?,
+        )?;
+        assert!(store.load_scope_authority("scope-corrupt").await.is_err());
+
+        let mut identity_mismatch = retirement_manifest("scope-corrupt", 1)?;
+        identity_mismatch.payload_digest = "tampered".to_string();
+        inject_scope_record(&store, &authority, &identity_mismatch)?;
+        assert!(store.load_scope_authority("scope-corrupt").await.is_err());
         let _ = std::fs::remove_file(path);
         Ok(())
     }
