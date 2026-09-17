@@ -238,6 +238,8 @@ pub struct TaskSubagentContext {
     /// Dependencies explicitly waived by a Skipped lifecycle rather than a
     /// reusable successful output.
     pub waived_dependency_ids: Vec<TaskId>,
+    task_id: Option<TaskId>,
+    claim: Option<TaskClaim>,
 }
 
 impl TaskSubagentContext {
@@ -247,6 +249,86 @@ impl TaskSubagentContext {
             cancel: CancellationToken::new(),
             delegation_policy: NestedDelegationPolicy::default(),
             waived_dependency_ids: Vec::new(),
+            task_id: None,
+            claim: None,
+        }
+    }
+
+    /// Construct a runtime-bound context from one exact durable claim.
+    pub fn from_claim(
+        run_id: impl Into<String>,
+        task_id: impl Into<TaskId>,
+        claim: TaskClaim,
+        cancel: CancellationToken,
+    ) -> std::result::Result<Self, String> {
+        let run_id = run_id.into();
+        let task_id = task_id.into();
+        if run_id.trim().is_empty() {
+            return Err("runtime task context requires run_id".to_string());
+        }
+        if task_id.trim().is_empty() {
+            return Err("runtime task context requires task_id".to_string());
+        }
+        if claim.revision == 0 || claim.attempt == 0 {
+            return Err(
+                "runtime task context requires a non-zero claim revision and attempt".to_string(),
+            );
+        }
+        Ok(Self {
+            run_id,
+            cancel,
+            delegation_policy: NestedDelegationPolicy::default(),
+            waived_dependency_ids: Vec::new(),
+            task_id: Some(task_id),
+            claim: Some(claim),
+        })
+    }
+
+    /// Return the exact durable claim, when this is a runtime-bound context.
+    pub fn claim(&self) -> Option<&TaskClaim> {
+        self.claim.as_ref()
+    }
+
+    pub fn task_id(&self) -> Option<&str> {
+        self.task_id.as_deref()
+    }
+
+    /// Return the stable execution identity derived from this context claim.
+    pub fn execution_id(&self, task_id: &str) -> Option<String> {
+        self.claim
+            .as_ref()
+            .map(|claim| claim.execution_id(&self.run_id, task_id))
+    }
+
+    /// Convert the exact context into the framework's existing runtime lineage
+    /// carrier without allowing callers to replace claim-derived identity.
+    pub fn runtime_context(&self) -> echo_core::tools::ExternalRunContext {
+        let (execution_id, task_id, attempt, plan_revision) = self
+            .claim
+            .as_ref()
+            .zip(self.task_id.as_deref())
+            .map(|(claim, task_id)| {
+                (
+                    claim.execution_id(&self.run_id, task_id),
+                    task_id.to_string(),
+                    claim.attempt,
+                    claim.revision,
+                )
+            })
+            .unwrap_or_else(|| (String::new(), String::new(), 0, 0));
+        echo_core::tools::ExternalRunContext {
+            run_id: Some(self.run_id.clone()),
+            execution_id: (!execution_id.is_empty()).then_some(execution_id.clone()),
+            turn_id: (!execution_id.is_empty()).then_some(execution_id),
+            cancel: Some(std::sync::Arc::new(self.cancel.clone())),
+            subagent_lineage: Some(echo_core::tools::SubagentLineage {
+                task_id: (!task_id.is_empty()).then_some(task_id),
+                attempt: (attempt != 0).then_some(attempt),
+                plan_revision: (plan_revision != 0).then_some(plan_revision),
+                run_id: Some(self.run_id.clone()),
+                ..echo_core::tools::SubagentLineage::default()
+            }),
+            ..echo_core::tools::ExternalRunContext::default()
         }
     }
 
@@ -273,6 +355,8 @@ impl TaskSubagentContext {
                 cancel: self.cancel.child_token(),
                 delegation_policy,
                 waived_dependency_ids: self.waived_dependency_ids.clone(),
+                task_id: self.task_id.clone(),
+                claim: self.claim.clone(),
             })
     }
 }

@@ -225,7 +225,6 @@ impl RuntimeDagController for FacadeController {
     async fn dispatch_task(
         &self,
         _context: echo_agent::tasks::TaskSubagentContext,
-        _claim: TaskClaim,
         _task: Task,
     ) -> echo_agent::error::Result<Self::DispatchOutput> {
         Ok(())

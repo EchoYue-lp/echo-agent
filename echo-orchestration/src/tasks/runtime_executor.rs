@@ -174,7 +174,6 @@ pub trait RuntimeDagController: Send + Sync + 'static {
     async fn dispatch_task(
         &self,
         context: TaskSubagentContext,
-        claim: TaskClaim,
         task: Task,
     ) -> Result<Self::DispatchOutput>;
 
@@ -517,7 +516,9 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
                 let controller = self.controller.clone();
                 let semaphore = subagent_semaphore.clone();
                 let shared_admission = self.config.shared_admission.clone();
-                let task_cancel = cancel.clone();
+                // Each claim owns a child token: cancelling one exact attempt
+                // must not cancel sibling tasks in the same ready wave.
+                let task_cancel = cancel.child_token();
                 let claim = match self
                     .controller
                     .claim_task(run_id, &task, snapshot.revision)
@@ -551,11 +552,22 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
                         };
                         match lease {
                             Ok(lease) => {
-                                let context = TaskSubagentContext::new(dispatch_run_id)
-                                    .with_cancel(task_cancel)
-                                    .with_delegation_policy(delegation_policy)
-                                    .with_waived_dependencies(waived_dependency_ids);
-                                let result = controller.dispatch_task(context, claim, task).await;
+                                let context = match TaskSubagentContext::from_claim(
+                                    dispatch_run_id,
+                                    task.spec.id.clone(),
+                                    claim.clone(),
+                                    task_cancel.clone(),
+                                )
+                                {
+                                    Ok(context) => context
+                                        .with_delegation_policy(delegation_policy)
+                                        .with_waived_dependencies(waived_dependency_ids),
+                                    Err(error) => {
+                                        drop(lease);
+                                        return (claim_id, Err(ReactError::Other(error)));
+                                    }
+                                };
+                                let result = controller.dispatch_task(context, task).await;
                                 drop(lease);
                                 result
                             }
@@ -564,11 +576,22 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
                     } else {
                         match semaphore.acquire_owned().await {
                             Ok(permit) => {
-                                let context = TaskSubagentContext::new(dispatch_run_id)
-                                    .with_cancel(task_cancel)
-                                    .with_delegation_policy(delegation_policy)
-                                    .with_waived_dependencies(waived_dependency_ids);
-                                let result = controller.dispatch_task(context, claim, task).await;
+                                let context = match TaskSubagentContext::from_claim(
+                                    dispatch_run_id,
+                                    task.spec.id.clone(),
+                                    claim.clone(),
+                                    task_cancel.clone(),
+                                )
+                                {
+                                    Ok(context) => context
+                                        .with_delegation_policy(delegation_policy)
+                                        .with_waived_dependencies(waived_dependency_ids),
+                                    Err(error) => {
+                                        drop(permit);
+                                        return (claim_id, Err(ReactError::Other(error)));
+                                    }
+                                };
+                                let result = controller.dispatch_task(context, task).await;
                                 drop(permit);
                                 result
                             }
@@ -1156,7 +1179,6 @@ mod tests {
         async fn dispatch_task(
             &self,
             context: TaskSubagentContext,
-            _claim: TaskClaim,
             task: Task,
         ) -> Result<Self::DispatchOutput> {
             self.order

@@ -729,39 +729,6 @@ impl SubagentExecutor {
         Ok(())
     }
 
-    fn team_member_runtime_context(
-        mut context: echo_core::tools::ExternalRunContext,
-        parent_agent: &str,
-        agent_name: &str,
-        parent_event_id: Option<&str>,
-    ) -> echo_core::tools::ExternalRunContext {
-        let parent_execution_id = context.execution_id.clone();
-        let parent_path = context
-            .subagent_lineage
-            .as_ref()
-            .and_then(|lineage| lineage.agent_path.clone())
-            .unwrap_or_else(|| format!("root/{parent_agent}"));
-        let execution_id = format!("team-member-{}", uuid::Uuid::new_v4().as_simple());
-        context.execution_id = Some(execution_id.clone());
-        context.isolation_id = context
-            .run_id
-            .as_ref()
-            .map(|run_id| format!("{run_id}:{agent_name}"));
-        context.subagent_lineage = Some(echo_core::tools::SubagentLineage {
-            agent_name: Some(agent_name.to_string()),
-            execution_id: Some(execution_id),
-            run_id: context.run_id.clone(),
-            parent_agent: Some(parent_agent.to_string()),
-            parent_execution_id,
-            parent_event_id: parent_event_id.map(str::to_string),
-            agent_path: Some(format!("{parent_path}/{agent_name}")),
-            task_id: None,
-            attempt: None,
-            plan_revision: None,
-        });
-        context
-    }
-
     async fn dispatch_inner(
         &self,
         mut req: DispatchRequest,
@@ -1603,7 +1570,6 @@ impl SubagentExecutor {
             .and_then(|context| context.run_id.clone())
             .unwrap_or_else(|| format!("team-{}", uuid::Uuid::new_v4().as_simple()));
         let parent_agent = req.agent_name.clone();
-        let team_runtime = req.runtime_context.clone();
         let team_prompt_payload = req.prompt_payload.clone();
         let team_prompt_context = req.prompt_context.clone();
         let team_constraints = req.constraints.clone();
@@ -1616,7 +1582,12 @@ impl SubagentExecutor {
             .clone()
             .filter(|context| !context.messages.is_empty() || context.parent_goal.is_some());
         let spawned = self.clone_for_spawn();
-        let dispatch: super::team::TeamDispatchFn = Arc::new(move |agent_name, task, cancel| {
+        let dispatch: super::team::TeamDispatchFn = Arc::new(move |request| {
+            let super::team::TeamDispatchRequest {
+                member: agent_name,
+                task,
+                context,
+            } = request;
             let executor = spawned.clone_for_spawn();
             let parent_agent = parent_agent.clone();
             let parent_context = inherited_history.clone();
@@ -1627,14 +1598,7 @@ impl SubagentExecutor {
                 context.task_title = Some(task.clone());
             }
             let constraints = team_constraints.clone();
-            let runtime_context = team_runtime.clone().map(|context| {
-                Self::team_member_runtime_context(
-                    context,
-                    &parent_agent,
-                    &agent_name,
-                    team_parent_event_id.as_deref(),
-                )
-            });
+            let parent_event_id = team_parent_event_id.clone();
             Box::pin(async move {
                 let member = executor
                     .registry
@@ -1646,16 +1610,24 @@ impl SubagentExecutor {
                         "nested Team mode is not supported for '{agent_name}'"
                     ));
                 }
+                let mut runtime_context = context.runtime_context();
+                runtime_context.subagent_lineage =
+                    runtime_context.subagent_lineage.map(|mut lineage| {
+                        lineage.agent_name = Some(agent_name.clone());
+                        lineage.parent_agent = Some(parent_agent.clone());
+                        lineage.parent_event_id = parent_event_id.clone();
+                        lineage
+                    });
                 executor
                     .dispatch_owned(DispatchRequest {
                         agent_name,
                         task,
                         mode_override: None,
-                        cancel,
+                        cancel: context.cancel.clone(),
                         parent_agent,
                         parent_context,
                         delegation_policy,
-                        runtime_context,
+                        runtime_context: Some(runtime_context),
                         message,
                         prompt_payload,
                         prompt_context,
@@ -2729,46 +2701,25 @@ mod tests {
     }
 
     #[test]
-    fn team_member_runtime_rebuilds_exact_child_lineage() {
-        let parent = echo_core::tools::ExternalRunContext {
-            run_id: Some("run-team".to_string()),
-            execution_id: Some("team-execution".to_string()),
-            subagent_lineage: Some(echo_core::tools::SubagentLineage {
-                agent_path: Some("root/manager".to_string()),
-                task_id: Some("manager-task".to_string()),
-                attempt: Some(4),
-                plan_revision: Some(9),
-                ..echo_core::tools::SubagentLineage::default()
-            }),
-            ..echo_core::tools::ExternalRunContext::default()
-        };
-        let child = SubagentExecutor::team_member_runtime_context(
-            parent,
-            "manager",
-            "researcher",
-            Some("evt_team_started"),
-        );
-        let lineage = child.subagent_lineage.unwrap_or_default();
-        assert_eq!(lineage.agent_name.as_deref(), Some("researcher"));
-        assert_eq!(lineage.parent_agent.as_deref(), Some("manager"));
+    fn task_claim_context_preserves_exact_lineage() -> Result<()> {
+        let claim = echo_orchestration::tasks::TaskClaim::new(9, 4, "spec-hash".to_string());
+        let context = echo_orchestration::tasks::TaskSubagentContext::from_claim(
+            "run-team",
+            "research-task",
+            claim.clone(),
+            CancellationToken::new(),
+        )
+        .map_err(ReactError::Other)?;
+        let runtime = context.runtime_context();
+        let lineage = runtime.subagent_lineage.unwrap_or_default();
+        assert_eq!(lineage.task_id.as_deref(), Some("research-task"));
+        assert_eq!(lineage.attempt, Some(4));
+        assert_eq!(lineage.plan_revision, Some(9));
         assert_eq!(
-            lineage.parent_execution_id.as_deref(),
-            Some("team-execution")
+            runtime.execution_id.as_deref(),
+            Some(claim.execution_id("run-team", "research-task").as_str())
         );
-        assert_eq!(lineage.parent_event_id.as_deref(), Some("evt_team_started"));
-        assert_eq!(
-            lineage.agent_path.as_deref(),
-            Some("root/manager/researcher")
-        );
-        assert!(lineage.task_id.is_none());
-        assert!(lineage.attempt.is_none());
-        assert!(lineage.plan_revision.is_none());
-        assert!(
-            child
-                .execution_id
-                .as_deref()
-                .is_some_and(|execution_id| execution_id.starts_with("team-member-"))
-        );
+        Ok(())
     }
 
     #[tokio::test]

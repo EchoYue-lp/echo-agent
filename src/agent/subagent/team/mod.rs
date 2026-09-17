@@ -29,6 +29,7 @@ use echo_orchestration::tasks::{
     TaskRevisionError, TaskRevisionService, TaskSpec, TaskStatus, TaskSubagentContext,
 };
 
+use super::control::SubagentAttemptIdentity;
 use super::executor::{DispatchRequest, SubagentExecutor, SubagentExecutorConfig};
 use super::registry::SubagentRegistry;
 use super::types::{ExecutionMode, SubagentDefinition, SubagentResult, SubagentStatus};
@@ -277,7 +278,12 @@ impl Team {
         let runtime = Arc::new(tokio::sync::OnceCell::<Arc<SubagentExecutor>>::new());
         let parent_agent = self.name.clone();
         let config = self.config.clone();
-        Arc::new(move |name, task, cancel| {
+        Arc::new(move |request| {
+            let TeamDispatchRequest {
+                member: name,
+                task,
+                context,
+            } = request;
             let member = members.get(&name).cloned();
             let members = members.clone();
             let runtime = runtime.clone();
@@ -304,22 +310,37 @@ impl Team {
                         ))
                     })
                     .await;
+                let claim = context
+                    .claim()
+                    .ok_or_else(|| "Team member dispatch requires an exact claim".to_string())?;
+                let task_id = context
+                    .task_id()
+                    .ok_or_else(|| "Team member dispatch requires an exact task id".to_string())?;
+                let identity = SubagentAttemptIdentity::new(
+                    task_id.to_string(),
+                    claim.execution_id(&context.run_id, task_id),
+                    claim.attempt,
+                )
+                .map_err(|error| error.to_string())?;
                 executor
-                    .dispatch(DispatchRequest {
-                        agent_name: name,
-                        task,
-                        mode_override: Some(ExecutionMode::Sync),
-                        cancel,
-                        parent_agent,
-                        parent_context: None,
-                        delegation_policy: NestedDelegationPolicy::default(),
-                        runtime_context: None,
-                        message: None,
-                        prompt_payload: None,
-                        prompt_context: None,
-                        constraints: Vec::new(),
-                        background: false,
-                    })
+                    .dispatch_attempt(
+                        DispatchRequest {
+                            agent_name: name,
+                            task,
+                            mode_override: Some(ExecutionMode::Sync),
+                            cancel: context.cancel.clone(),
+                            parent_agent,
+                            parent_context: None,
+                            delegation_policy: NestedDelegationPolicy::default(),
+                            runtime_context: Some(context.runtime_context()),
+                            message: None,
+                            prompt_payload: None,
+                            prompt_context: None,
+                            constraints: Vec::new(),
+                            background: false,
+                        },
+                        identity,
+                    )
                     .await
                     .map_err(|error| error.to_string())
             })
@@ -545,13 +566,17 @@ impl TeamAgentBuilder {
     }
 }
 
+/// Structured request sent to one exact Team member attempt.
+#[derive(Debug, Clone)]
+pub struct TeamDispatchRequest {
+    pub member: String,
+    pub task: String,
+    pub context: TaskSubagentContext,
+}
+
 /// Canonical member execution adapter supplied by [`super::SubagentExecutor`].
 pub type TeamDispatchFn = Arc<
-    dyn Fn(
-            String,
-            String,
-            CancellationToken,
-        ) -> BoxFuture<'static, std::result::Result<SubagentResult, String>>
+    dyn Fn(TeamDispatchRequest) -> BoxFuture<'static, std::result::Result<SubagentResult, String>>
         + Send
         + Sync,
 >;
@@ -1234,7 +1259,6 @@ impl RuntimeDagController for TeamRuntimeController {
     async fn dispatch_task(
         &self,
         context: TaskSubagentContext,
-        _claim: TaskClaim,
         task: Task,
     ) -> Result<Self::DispatchOutput> {
         let outputs = self.outputs.lock().await;
@@ -1287,9 +1311,18 @@ impl RuntimeDagController for TeamRuntimeController {
             prompt.push_str(dependency);
             prompt.push_str("' was explicitly skipped; no reusable output is available.");
         }
-        (self.dispatch)(extension.member, prompt, context.cancel)
-            .await
-            .map_err(ReactError::Other)
+        if context.claim().is_none() {
+            return Err(ReactError::Other(
+                "Team runtime dispatch requires an exact TaskClaim context".to_string(),
+            ));
+        }
+        (self.dispatch)(TeamDispatchRequest {
+            member: extension.member,
+            task: prompt,
+            context,
+        })
+        .await
+        .map_err(ReactError::Other)
     }
 
     async fn resolve_dispatch(
@@ -1503,7 +1536,13 @@ mod tests {
     async fn manager_team_uses_canonical_graph_and_dependency_outputs() -> Result<()> {
         let calls = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
         let observed = calls.clone();
-        let dispatch: TeamDispatchFn = Arc::new(move |name, task, _cancel| {
+        let dispatch: TeamDispatchFn = Arc::new(move |request| {
+            let TeamDispatchRequest {
+                member: name,
+                task,
+                context,
+            } = request;
+            let _cancel = context.cancel.clone();
             let observed = observed.clone();
             Box::pin(async move {
                 observed.lock().await.push((name.clone(), task.clone()));
@@ -1556,7 +1595,13 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_manager_expansion_converges_on_one_exact_revision() -> Result<()> {
-        let dispatch: TeamDispatchFn = Arc::new(|name, task, _cancel| {
+        let dispatch: TeamDispatchFn = Arc::new(|request| {
+            let TeamDispatchRequest {
+                member: name,
+                task,
+                context,
+            } = request;
+            let _cancel = context.cancel.clone();
             Box::pin(async move { Ok(successful_result(name, &task)) })
         });
         let runtime = TeamRuntimeController::new(dispatch);
@@ -1617,7 +1662,13 @@ mod tests {
     async fn concurrent_callers_resume_one_manager_run_without_duplicate_dispatch() -> Result<()> {
         let calls = Arc::new(Mutex::new(Vec::<String>::new()));
         let observed = calls.clone();
-        let dispatch: TeamDispatchFn = Arc::new(move |name, task, _cancel| {
+        let dispatch: TeamDispatchFn = Arc::new(move |request| {
+            let TeamDispatchRequest {
+                member: name,
+                task,
+                context,
+            } = request;
+            let _cancel = context.cancel.clone();
             let observed = observed.clone();
             Box::pin(async move {
                 observed.lock().await.push(name.clone());
@@ -1667,7 +1718,13 @@ mod tests {
     async fn caller_owned_runtime_resumes_manager_graph_without_redispatch() -> Result<()> {
         let calls = Arc::new(Mutex::new(0usize));
         let observed = calls.clone();
-        let dispatch: TeamDispatchFn = Arc::new(move |name, task, _cancel| {
+        let dispatch: TeamDispatchFn = Arc::new(move |request| {
+            let TeamDispatchRequest {
+                member: name,
+                task,
+                context,
+            } = request;
+            let _cancel = context.cancel.clone();
             let observed = observed.clone();
             Box::pin(async move {
                 let mut count = observed.lock().await;
@@ -1720,7 +1777,13 @@ mod tests {
     async fn reused_run_id_rejects_a_different_team_identity() -> Result<()> {
         let calls = Arc::new(Mutex::new(0usize));
         let observed = calls.clone();
-        let dispatch: TeamDispatchFn = Arc::new(move |name, task, _cancel| {
+        let dispatch: TeamDispatchFn = Arc::new(move |request| {
+            let TeamDispatchRequest {
+                member: name,
+                task,
+                context,
+            } = request;
+            let _cancel = context.cancel.clone();
             let observed = observed.clone();
             Box::pin(async move {
                 let mut count = observed.lock().await;
@@ -1761,7 +1824,13 @@ mod tests {
 
     #[tokio::test]
     async fn superseded_claim_does_not_publish_a_team_result() -> Result<()> {
-        let dispatch: TeamDispatchFn = Arc::new(|name, task, _cancel| {
+        let dispatch: TeamDispatchFn = Arc::new(|request| {
+            let TeamDispatchRequest {
+                member: name,
+                task,
+                context,
+            } = request;
+            let _cancel = context.cancel.clone();
             Box::pin(async move { Ok(successful_result(name, &task)) })
         });
         let runtime = TeamRuntimeController::new(dispatch);
@@ -1827,7 +1896,13 @@ mod tests {
     #[tokio::test]
     async fn superseded_settlement_preserves_the_committed_team_result() -> Result<()> {
         for current_first in [true, false] {
-            let dispatch: TeamDispatchFn = Arc::new(|name, task, _cancel| {
+            let dispatch: TeamDispatchFn = Arc::new(|request| {
+                let TeamDispatchRequest {
+                    member: name,
+                    task,
+                    context,
+                } = request;
+                let _cancel = context.cancel.clone();
                 Box::pin(async move { Ok(successful_result(name, &task)) })
             });
             let runtime = TeamRuntimeController::new(dispatch);
@@ -1922,7 +1997,13 @@ mod tests {
     async fn pipeline_passes_previous_output_to_next_prompt() -> Result<()> {
         let calls = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
         let observed = calls.clone();
-        let dispatch: TeamDispatchFn = Arc::new(move |name, task, _cancel| {
+        let dispatch: TeamDispatchFn = Arc::new(move |request| {
+            let TeamDispatchRequest {
+                member: name,
+                task,
+                context,
+            } = request;
+            let _cancel = context.cancel.clone();
             let observed = observed.clone();
             Box::pin(async move {
                 observed.lock().await.push((name.clone(), task.clone()));
@@ -1959,7 +2040,13 @@ mod tests {
     async fn skipped_team_dependency_is_a_typed_waiver_without_required_output() -> Result<()> {
         let calls = Arc::new(Mutex::new(Vec::<String>::new()));
         let observed = calls.clone();
-        let dispatch: TeamDispatchFn = Arc::new(move |name, task, _cancel| {
+        let dispatch: TeamDispatchFn = Arc::new(move |request| {
+            let TeamDispatchRequest {
+                member: name,
+                task,
+                context,
+            } = request;
+            let _cancel = context.cancel.clone();
             let observed = observed.clone();
             Box::pin(async move {
                 observed.lock().await.push(task.clone());
@@ -2017,7 +2104,13 @@ mod tests {
     async fn failed_member_blocks_synthesis() {
         let calls = Arc::new(Mutex::new(Vec::<String>::new()));
         let observed = calls.clone();
-        let dispatch: TeamDispatchFn = Arc::new(move |name, task, _cancel| {
+        let dispatch: TeamDispatchFn = Arc::new(move |request| {
+            let TeamDispatchRequest {
+                member: name,
+                task,
+                context,
+            } = request;
+            let _cancel = context.cancel.clone();
             let observed = observed.clone();
             Box::pin(async move {
                 observed.lock().await.push(name.clone());
@@ -2057,7 +2150,13 @@ mod tests {
     async fn pre_cancelled_team_dispatches_nothing() {
         let calls = Arc::new(Mutex::new(0usize));
         let observed = calls.clone();
-        let dispatch: TeamDispatchFn = Arc::new(move |name, task, _cancel| {
+        let dispatch: TeamDispatchFn = Arc::new(move |request| {
+            let TeamDispatchRequest {
+                member: name,
+                task,
+                context,
+            } = request;
+            let _cancel = context.cancel.clone();
             let observed = observed.clone();
             Box::pin(async move {
                 let mut count = observed.lock().await;
@@ -2087,7 +2186,13 @@ mod tests {
 
     #[tokio::test]
     async fn unresolved_member_is_a_graph_failure() {
-        let dispatch: TeamDispatchFn = Arc::new(|name, _task, _cancel| {
+        let dispatch: TeamDispatchFn = Arc::new(|request| {
+            let TeamDispatchRequest {
+                member: name,
+                task: _task,
+                context,
+            } = request;
+            let _cancel = context.cancel.clone();
             Box::pin(async move { Err(format!("Team Subagent '{name}' not registered")) })
         });
         let result = execute_team(
@@ -2281,7 +2386,13 @@ mod tests {
     async fn team_timeout_cancels_the_root_token() {
         let settled = Arc::new(AtomicBool::new(false));
         let observed_settlement = settled.clone();
-        let dispatch: TeamDispatchFn = Arc::new(move |_name, _task, cancel| {
+        let dispatch: TeamDispatchFn = Arc::new(move |request| {
+            let TeamDispatchRequest {
+                member: _name,
+                task: _task,
+                context,
+            } = request;
+            let cancel = context.cancel.clone();
             let observed_settlement = observed_settlement.clone();
             Box::pin(async move {
                 cancel.cancelled().await;
