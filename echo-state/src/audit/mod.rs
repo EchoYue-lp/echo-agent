@@ -183,7 +183,10 @@ fn diagnostic_delivery_sender() -> Option<&'static SyncSender<DiagnosticDelivery
     static SENDER: OnceLock<Option<SyncSender<DiagnosticDeliveryNotification>>> = OnceLock::new();
     SENDER
         .get_or_init(|| {
-            let (sender, receiver) = std::sync::mpsc::sync_channel(DIAGNOSTIC_DELIVERY_CAPACITY);
+            let (sender, receiver) =
+                std::sync::mpsc::sync_channel::<DiagnosticDeliveryNotification>(
+                    DIAGNOSTIC_DELIVERY_CAPACITY,
+                );
             let spawn = std::thread::Builder::new()
                 .name("echo-diagnostic-delivery".to_string())
                 .spawn(move || {

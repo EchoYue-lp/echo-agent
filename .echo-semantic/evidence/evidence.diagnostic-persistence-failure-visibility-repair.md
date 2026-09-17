@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.diagnostic-persistence-failure-visibility-repair
 kind: evidence
-observed_at: source:96384cfb5e0bbc3384493805d026d65c6b096b3d0c3a26fde0cc1c007378e2c5
+observed_at: source:cbbde65a0aed106aa28d69d4e514afd4038ce9eb4b407629ece1451cbf45279e
 source_refs:
   - src/trace/mod.rs
   - src/audit.rs
@@ -21,8 +21,8 @@ source_refs:
   - docs/zh/27-tracing.md
 supports: [behavior.observation-persistence, rule.fact-projection-separation]
 limitations:
-  - 工程focused tests、Clippy与最终semantic change-evidence尚待父任务分配的串行验证窗口执行
-  - Finding保持open，verification与最终rereview evidence未建立，本证据不代表main-ready
+  - 修正后的focused tests与cargo check已完成；最终主线集成、feature矩阵、完整门禁与revision-bound rereview尚待完成
+  - Finding保持open，完整verification与最终rereview未闭合，本证据不代表main-ready
   - InMemoryAuditLogger poisoned lock成功丢写继续由finding.in-memory-audit-successful-drop追踪
   - Trace/Audit backend error文本脱敏继续由finding.trace-audit-secret-boundary追踪
 ---

@@ -1,11 +1,11 @@
 # ADR 0053: Separate Diagnostic Persistence Delivery from Execution
 
+- Date: 2026-09-15
+- Owners: `src::trace`, `echo_state::audit`, `src::agent::react`
+
 ## Status
 
 Accepted
-
-- Date: 2026-09-15
-- Owners: `src::trace`, `echo_state::audit`, `src::agent::react`
 
 ## Context
 
@@ -133,3 +133,14 @@ reentrant and unwinding observers, `SyncData`-backed file writes, path
 replacement, crash-torn final record recovery, valid non-newline tails, and
 complete corruption rejection. Full workspace and SDK contract gates remain
 required before closing Finding #46 on main.
+
+Final-save failure coverage uses the canonical `AgentRunSnapshot::finalize_run`:
+the initial save and subsequent load succeed, while the terminal save fails.
+`FinalizeSaveFailingRunStore` is a private test injector with a bounded save
+counter, not a second production persistence or execution authority. The test
+observes a Finalize delivery failure without changing the producer terminal.
+
+The public inventory generation and review now belong to the independent
+`echo-agent-sdk` repository. Framework verification does not complete that
+obligation or close Issue #46; process-local observer/control APIs remain
+Host/Rust-only or deferred until the SDK owner refreshes and classifies them.
