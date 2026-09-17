@@ -1233,6 +1233,8 @@ mod tests {
         claim_ready: Mutex<Option<Arc<tokio::sync::Notify>>>,
         reserved: Mutex<Vec<String>>,
         retired: Mutex<Vec<String>>,
+        current_check_count: Mutex<usize>,
+        stale_after_current_check: Mutex<Option<usize>>,
     }
 
     impl ScriptedController {
@@ -1316,6 +1318,22 @@ mod tests {
             task_id: &str,
             claim: &TaskClaim,
         ) -> Result<bool> {
+            let check_count = {
+                let mut count = self
+                    .current_check_count
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                *count = count.saturating_add(1);
+                *count
+            };
+            if self
+                .stale_after_current_check
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_some_and(|limit| check_count >= limit)
+            {
+                return Ok(false);
+            }
             let snapshot = self
                 .snapshot
                 .lock()
@@ -2010,6 +2028,71 @@ mod tests {
         let outcome = tokio::time::timeout(Duration::from_secs(2), execution)
             .await
             .map_err(|_| ReactError::Other("exact interrupt did not settle".to_string()))?
+            .map_err(|error| ReactError::Other(format!("runtime task panicked: {error}")))??;
+        assert_eq!(outcome, RuntimeDagOutcome::Cancelled);
+        assert_eq!(
+            controller.statuses().get("slow"),
+            Some(&TaskStatus::Cancelled)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn exact_interrupt_retires_projection_when_claim_supersedes_during_request() -> Result<()>
+    {
+        let controller = Arc::new(ScriptedController::with_tasks(vec![runtime_task(
+            "slow",
+            TaskStatus::Pending,
+            &[],
+        )]));
+        let claim_ready = Arc::new(tokio::sync::Notify::new());
+        *controller
+            .claim_ready
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(claim_ready.clone());
+        controller
+            .wait_for_cancel
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert("slow".to_string());
+        *controller
+            .stale_after_current_check
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(2);
+        let runtime_tasks = Arc::new(super::super::RuntimeTaskService::new(
+            controller.clone(),
+            RuntimeTaskServiceConfig::default(),
+        ));
+        let execution = tokio::spawn({
+            let runtime_tasks = Arc::clone(&runtime_tasks);
+            async move {
+                runtime_tasks
+                    .execute("stale-interrupt", CancellationToken::new())
+                    .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(2), claim_ready.notified())
+            .await
+            .map_err(|_| ReactError::Other("claim was not admitted".to_string()))?;
+        let claim = controller
+            .snapshot
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .and_then(|snapshot| snapshot.tasks.first())
+            .and_then(|task| task.execution.claim.clone())
+            .ok_or_else(|| ReactError::Other("claimed task was not persisted".to_string()))?;
+        let error = runtime_tasks
+            .request_attempt_interrupt("stale-interrupt", "slow", &claim)
+            .await
+            .err()
+            .ok_or_else(|| {
+                ReactError::Other("stale interrupt unexpectedly succeeded".to_string())
+            })?;
+        assert!(error.to_string().contains("stale or settled"));
+        let outcome = tokio::time::timeout(Duration::from_secs(2), execution)
+            .await
+            .map_err(|_| ReactError::Other("stale interrupt did not settle".to_string()))?
             .map_err(|error| ReactError::Other(format!("runtime task panicked: {error}")))??;
         assert_eq!(outcome, RuntimeDagOutcome::Cancelled);
         assert_eq!(

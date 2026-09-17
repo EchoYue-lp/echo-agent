@@ -192,6 +192,24 @@ impl<C: RuntimeDagController> RuntimeTaskService<C> {
                 true
             })
             .unwrap_or(false);
+        // The claim can be superseded between the first precondition check and
+        // the live-token write. Re-read the durable authority and retire only
+        // the exact projection just written; never let a stale command claim a
+        // future attempt or turn the race into a second task transition.
+        if !self
+            .executor
+            .controller
+            .claim_is_current(run_id, task_id, claim)
+            .await?
+        {
+            if requested && let Ok(mut controls) = self.executor.attempt_cancellations.lock() {
+                controls.remove(&execution_id);
+            }
+            return Err(echo_core::error::ReactError::Other(
+                "runtime attempt claim became stale or settled during interrupt request"
+                    .to_string(),
+            ));
+        }
         Ok(RuntimeTaskAttemptInterruptReceipt {
             run_id: run_id.to_string(),
             task_id: task_id.to_string(),
