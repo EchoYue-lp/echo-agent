@@ -3,7 +3,7 @@ schema_version: 1
 id: finding.tool-terminal-observation-divergence
 kind: finding
 type: authority_conflict
-status: open
+status: resolved
 severity: high
 primary_focus: result_side_effect
 focus: [state_authority, contract_evidence, data_durability]
@@ -13,9 +13,9 @@ rule_refs: [rule.permission-effect-order, rule.fact-projection-separation]
 evidence_refs: [evidence.effects-extensions, evidence.persistence-observation]
 audit_refs: [audit.tool-permission-sandbox.result-side-effect]
 decision_refs: []
-repair_evidence_refs: []
-verification_evidence_refs: []
-rereview_audit_refs: []
+repair_evidence_refs: [evidence.tool-terminal-observation-repair]
+verification_evidence_refs: [evidence.tool-terminal-observation-verification]
+rereview_audit_refs: [audit.tool-terminal-observation-rereview]
 discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 ---
 
@@ -39,4 +39,7 @@ PostToolUse block 在 effect 后短路 OutputGuard/artifact/Trace/CallbackEnd；
 
 ## 处理记录
 
-Result-side-effect Audit 确认；后续 repair 需统一 typed terminal observation，并明确 post-effect policy failure 与 effect outcome 分离。
+Result-side-effect Audit 确认；本轮修复统一 typed terminal observation，并明确执行后策略拒绝与已发生
+effect 的区别。公开 audit_logger 在输出处理后记录一次终态，失败 callback 分流与护栏投影均有真实
+caller 回归、四项 red/green 证据和独立复审；最后示例同步后的全量合并门禁 exit 0，0 failed。
+最终 repair、verification、rereview 绑定同一源码摘要；GitHub Issue 的交付关闭仍以 PR 合入 main 为准。

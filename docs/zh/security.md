@@ -375,6 +375,10 @@ export JWT_SECRET="your-secret-at-least-32-characters-long"
 
 所有工具调用、权限决策、Guard 拦截均被记录：
 
+通过 `ReactAgentBuilder::audit_logger` 配置的 `AuditLogger` 在工具结果结算后记录
+`ToolCall`（包含耗时与处理后的输出）。PostToolUse 在执行后拒绝时记为失败，同时保留
+工具已产生的输出；执行前被拒绝的调用不生成工具结果审计事件。
+
 ```rust
 let logs = state.get_audit_logs().await;
 // 每条：tool_name, decision, reason, source, timestamp, duration

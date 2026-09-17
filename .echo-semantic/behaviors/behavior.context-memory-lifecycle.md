@@ -8,7 +8,7 @@ risk: high
 primary_focus: data_durability
 focus: [state_authority, time_lifecycle, failure_concurrency, contract_evidence]
 boundary: boundary.context-memory
-observed_at: source:eff0290e1aff3c3a56f0ba94f57460e220d08f8eb04d3023efde058982972f03
+observed_at: 44b2ed68772c7c016d09af6c2e1adac9fe4fea70
 code_refs: [echo-state/src/compression/mod.rs, src/context/mod.rs, src/agent/snapshot.rs, src/agent/react/run/phases/compact.rs, src/agent/react/run/phases/tools.rs, src/agent/react/run/phases/finalize.rs, src/state/mod.rs, src/state/file.rs, src/state/sqlite.rs, echo-core/src/memory/conversation.rs, echo-core/src/memory/store.rs]
 rule_refs: [rule.context-persistence-separation]
 evidence_refs: [evidence.agent-context-execution, evidence.persistence-observation, evidence.transcript-generation-runtime-identity-repair, evidence.transcript-generation-runtime-identity-verification, evidence.transcript-projection-settlement-repair, evidence.transcript-projection-settlement-verification]

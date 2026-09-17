@@ -6,7 +6,7 @@ title: Conversation Transcript Store
 asset_type: state_authority
 status: active
 risk: high
-observed_at: source:eff0290e1aff3c3a56f0ba94f57460e220d08f8eb04d3023efde058982972f03
+observed_at: 44b2ed68772c7c016d09af6c2e1adac9fe4fea70
 boundary_refs: [boundary.context-memory, boundary.observation-persistence-delivery]
 code_refs: [echo-core/src/memory/conversation.rs, echo-state/src/memory/conversation.rs, echo-state/src/memory/file_conversation.rs, echo-state/src/memory/sqlite_conversation.rs, src/agent/snapshot.rs]
 consumer_refs: [src/agent/react/run/phases/compact.rs, src/agent/react/run/phases/finalize.rs, docs/en/03-memory.md]

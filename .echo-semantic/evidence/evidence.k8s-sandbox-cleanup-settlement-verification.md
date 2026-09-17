@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.k8s-sandbox-cleanup-settlement-verification
 kind: evidence
-observed_at: source:eff0290e1aff3c3a56f0ba94f57460e220d08f8eb04d3023efde058982972f03
+observed_at: 44b2ed68772c7c016d09af6c2e1adac9fe4fea70
 source_refs:
   - echo-execution/src/sandbox/k8s.rs
   - docs/adr/0002-sandbox-cancellation-cleanup.md
