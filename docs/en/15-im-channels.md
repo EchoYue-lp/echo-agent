@@ -194,14 +194,17 @@ clones and `SessionEndInfo` observe that rotation, so consumers can retire the
 exact old model/runtime context while keeping journals and task history under a
 stable product conversation ID.
 
-A reset reply and its replacement session are available immediately. If an old
-stream is still active (including an admitted stream that has not been polled),
-the old `SessionEndInfo` cleanup callback runs only after that stream settles.
-This ordering lets a consumer retire the exact old checkpoint after its final
-write instead of allowing the old stream to recreate state after cleanup.
-If consumer callback code panics, `SessionHandler` contains that panic at the
-lifecycle boundary; it does not propagate from stream teardown or poison the
-replacement session.
+A reset retires the old generation and cancels its stream. A chunk already
+accepted by the built-in transport is allowed to settle before reset is
+acknowledged; later chunks from the old generation are rejected before queue or
+network admission. The replacement handler and reset reply are published only
+after that delivery barrier, so stale output cannot appear after the reset
+acknowledgement. An admitted stream that has never been polled still owns its
+receipt, so its `SessionEndInfo` cleanup callback runs when that stream is
+dropped. If consumer callback code panics, `SessionHandler` contains that panic
+at the lifecycle boundary; it does not propagate from stream teardown or poison
+the replacement session. See
+[ADR 0057](../adr/0057-channel-generation-delivery-fence.md).
 
 For custom Agent drivers, carry the stable product ID in
 `AgentInvocationContext.runtime.conversation_id`, and use the instance-derived runtime key for
@@ -224,6 +227,7 @@ pub struct OutboundMessage {
     pub chat_type: ChatType,
     pub text: String,
     pub reply_to: Option<String>,  // Replied message ID
+    // SessionHandler attaches an opaque process-local delivery fence.
 }
 ```
 

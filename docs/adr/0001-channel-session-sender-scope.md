@@ -66,12 +66,14 @@ after adding a sender coordinate.
 - `SessionEndInfo.incarnation_id` always reports the incarnation that actually
   ended, including an application rotation, so exact runtime cleanup does not
   depend on reconstructing identities from strings.
-- Reset publishes its reply and installs the replacement immediately, but the
-  old generation retains its end callback until every admitted stream settles.
-  This prevents cleanup from racing a final checkpoint written by an older
-  stream. Timeout replacement remains restricted to idle generations. External
-  callback panics are contained so stream teardown cannot double-panic during
-  another unwind or poison the replacement session.
+- Reset retires the old generation's delivery fence, cancels its stream, and
+  waits for already admitted transport delivery before publishing the
+  replacement reply. Output that has not crossed transport admission is
+  rejected as stale. An admitted but unpolled stream still retains the end
+  callback until its receipt is dropped. Timeout replacement remains restricted
+  to idle generations. External callback panics are contained so stream
+  teardown cannot double-panic during another unwind or poison the replacement
+  session. See [ADR 0057](0057-channel-generation-delivery-fence.md).
 - `AgentInvocationContext.runtime_state_id` separates ReAct checkpoint identity
   from the stable product conversation carried by `ExternalRunContext`.
   `transcript_generation_id` enables typed append projection for that runtime
@@ -138,7 +140,9 @@ fail-closed behavior, and QQ/Feishu ingress rejection.
 Incarnation coverage additionally exercises same-handler reuse, application
 rotation, timeout callback accuracy after rotation, fresh replacement IDs,
 deferred cleanup for both parked and admitted-but-unpolled streams, and callback
-panic containment during another unwind.
+panic containment during another unwind. Delivery-fence coverage parks an
+accepted transport receipt, proves reset cannot acknowledge before it settles,
+and proves the retired stream cannot enqueue another chunk.
 Persistence coverage exercises same-incarnation checkpoint recovery, rotated
 checkpoint isolation, identical-tail transcript append, repeated safe-point
 idempotency, crash-cut catch-up, corrupt cursor rejection, and post-compaction

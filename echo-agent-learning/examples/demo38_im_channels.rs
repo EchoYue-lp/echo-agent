@@ -53,6 +53,8 @@ async fn main() -> echo_agent::error::Result<()> {
             session_config.clone(),
             move |instance: &ChannelSessionInstance| -> Box<dyn MessageHandler> {
                 let _runtime_incarnation = instance.incarnation_id();
+                // SessionHandler fences late output from this incarnation
+                // before a timeout/reset replacement is acknowledged.
                 Box::new(AgentChannelHandler::from_config_with_client(
                     AgentConfig::standard(&model, "im-assistant", "Answer the user clearly."),
                     Arc::clone(&llm_client),

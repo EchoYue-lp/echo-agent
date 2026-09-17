@@ -264,19 +264,25 @@ impl ChannelPlugin for FeishuChannel {
 
         self.send_handle = Some(tokio::spawn(async move {
             while let Some(request) = send_rx.recv().await {
+                let DeliveryRequest {
+                    message,
+                    receipt,
+                    delivery_permit,
+                } = request;
                 let result = async {
                     let token = token_mgr.get_token().await?;
                     send_feishu_message_internal(
                         &http,
                         &api_domain,
                         &token,
-                        request.message,
+                        message,
                         running_cards.clone(),
                     )
                     .await
                 }
                 .await;
-                let _ = request.receipt.send(result);
+                drop(delivery_permit);
+                let _ = receipt.send(result);
             }
         }));
 
@@ -365,6 +371,7 @@ impl ChannelPlugin for FeishuChannel {
     }
 
     async fn send(&self, msg: OutboundMessage) -> Result<()> {
+        let _delivery_permit = msg.begin_delivery()?;
         let token_manager = self.token_manager.as_ref().ok_or_else(|| {
             ReactError::Channel(Box::new(ChannelError::SendError(
                 "Feishu channel not started".to_string(),
@@ -487,6 +494,7 @@ impl MessageHandler for FeishuMessageHandler {
 #[cfg(test)]
 mod config_tests {
     use super::*;
+    use crate::channels::types::ChannelDeliveryFence;
 
     #[test]
     fn debug_does_not_expose_webhook_credentials() {
@@ -520,5 +528,35 @@ mod config_tests {
         for secret in ["api-domain-secret", "ws-domain-secret"] {
             assert!(!debug.contains(secret), "debug leaked URL secret: {debug}");
         }
+    }
+
+    #[tokio::test]
+    async fn direct_send_rejects_retired_generation_before_channel_state() -> Result<()> {
+        let channel = FeishuChannel::new(FeishuConfig::new_long_poll(
+            "app-id".to_string(),
+            "app-secret".to_string(),
+        ))?;
+        let fence = ChannelDeliveryFence::new("retired-feishu".to_string());
+        fence.retire();
+        let result = channel
+            .send(
+                OutboundMessage::new("feishu", "recipient", ChatType::Direct, "stale")
+                    .with_delivery_fence(fence),
+            )
+            .await;
+        if !matches!(
+            result,
+            Err(ReactError::Channel(ref error))
+                if matches!(
+                    error.as_ref(),
+                    ChannelError::StaleDelivery { incarnation_id }
+                        if incarnation_id == "retired-feishu"
+                )
+        ) {
+            return Err(ReactError::Other(
+                "Feishu direct send did not reject the retired generation first".to_string(),
+            ));
+        }
+        Ok(())
     }
 }

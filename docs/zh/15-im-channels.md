@@ -187,11 +187,13 @@ handler 持续复用 incarnation；framework timeout/reset 替换会创建新 in
 clone 与 `SessionEndInfo` 都能看到该变化，因此应用可以精确回收旧模型/runtime context，同时
 继续用稳定产品会话 ID 保存 journal 与 Task 历史。
 
-reset 回复和 replacement session 会立即可用。如果旧 stream 仍在运行（包括已准入但尚未 poll 的
-stream），旧 `SessionEndInfo` 清理回调只会在该 stream 完成结算后触发。这样消费者总是在旧
-stream 最后一次写入之后精确回收 checkpoint，不会发生“先清理、后被旧 stream 重新写回”。
-如果消费者回调自身 panic，`SessionHandler` 会在 lifecycle 边界内隔离该 panic，不会让它从
-stream 析构继续传播，也不会污染 replacement session。
+reset 会先 retire 旧 generation 并取消其 stream。已经被内置 transport 接纳的 chunk 可以先完成
+结算，reset 随后才会确认；旧 generation 的后续 chunk 会在进入队列或网络请求前被拒绝。
+replacement handler 与 reset 回复只在该 delivery barrier 之后发布，因此 reset 确认之后不会再出现
+旧回复。已经准入但从未 poll 的 stream 仍持有自己的 receipt，其 `SessionEndInfo` 清理回调会在
+stream 被 drop 后执行。如果消费者回调自身 panic，`SessionHandler` 会在 lifecycle 边界内隔离
+该 panic，不会让它从 stream 析构继续传播，也不会污染 replacement session。详见
+[ADR 0057](../adr/0057-channel-generation-delivery-fence.md)。
 
 自定义 Agent driver 应把稳定产品 ID 放在
 `AgentInvocationContext.runtime.conversation_id`，并把 instance 派生的 runtime key 同时传给
@@ -211,6 +213,7 @@ pub struct OutboundMessage {
     pub chat_type: ChatType,
     pub text: String,
     pub reply_to: Option<String>,  // 被回复的消息 ID
+    // SessionHandler 会附加进程内 opaque delivery fence。
 }
 ```
 

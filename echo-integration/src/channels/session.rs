@@ -50,6 +50,7 @@ use dashmap::DashMap;
 use std::sync::{Arc, Mutex as StdMutex, MutexGuard as StdMutexGuard};
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, OwnedMutexGuard};
+use tokio_util::sync::CancellationToken;
 
 // ── SessionConfig ────────────────────────────────────────────────────────────
 
@@ -185,7 +186,7 @@ pub struct ChannelSessionInstance {
     channel_id: String,
     conversation_id: String,
     sender_id: String,
-    incarnation_id: Arc<StdMutex<String>>,
+    delivery_fence: Arc<StdMutex<ChannelDeliveryFence>>,
     previous_incarnation_id: Option<String>,
 }
 
@@ -211,20 +212,21 @@ impl ChannelSessionRotation {
 
 impl ChannelSessionInstance {
     fn from_key(key: &SessionKey, previous_incarnation_id: Option<String>) -> Self {
+        let incarnation_id = uuid::Uuid::new_v4().to_string();
         Self {
             channel_id: key.channel_id.clone(),
             conversation_id: key.conversation_id.clone(),
             sender_id: key.sender_id.clone(),
-            incarnation_id: Arc::new(StdMutex::new(uuid::Uuid::new_v4().to_string())),
+            delivery_fence: Arc::new(StdMutex::new(ChannelDeliveryFence::new(incarnation_id))),
             previous_incarnation_id,
         }
     }
 
-    fn lock_incarnation(&self) -> StdMutexGuard<'_, String> {
-        match self.incarnation_id.lock() {
-            Ok(incarnation_id) => incarnation_id,
+    fn lock_delivery_fence(&self) -> StdMutexGuard<'_, ChannelDeliveryFence> {
+        match self.delivery_fence.lock() {
+            Ok(delivery_fence) => delivery_fence,
             Err(poisoned) => {
-                tracing::error!("channel session incarnation mutex was poisoned");
+                tracing::error!("channel session delivery fence mutex was poisoned");
                 poisoned.into_inner()
             }
         }
@@ -247,7 +249,7 @@ impl ChannelSessionInstance {
 
     /// Opaque identity for this concrete handler incarnation.
     pub fn incarnation_id(&self) -> String {
-        self.lock_incarnation().clone()
+        self.lock_delivery_fence().incarnation_id().to_string()
     }
 
     /// Incarnation replaced directly by this factory-created instance.
@@ -266,12 +268,17 @@ impl ChannelSessionInstance {
     /// of this instance and the framework end callback observe the new value.
     pub fn rotate(&self) -> ChannelSessionRotation {
         let incarnation_id = uuid::Uuid::new_v4().to_string();
-        let mut current = self.lock_incarnation();
-        let previous_incarnation_id = std::mem::replace(&mut *current, incarnation_id.clone());
+        let mut current = self.lock_delivery_fence();
+        let previous_incarnation_id = current.incarnation_id().to_string();
+        *current = current.rotate(incarnation_id.clone());
         ChannelSessionRotation {
             previous_incarnation_id,
             incarnation_id,
         }
+    }
+
+    fn current_delivery_fence(&self) -> ChannelDeliveryFence {
+        self.lock_delivery_fence().clone()
     }
 }
 
@@ -297,6 +304,8 @@ struct Session {
 
 struct SessionGeneration {
     state: StdMutex<SessionGenerationState>,
+    instance: ChannelSessionInstance,
+    cancellation: CancellationToken,
 }
 
 struct SessionGenerationState {
@@ -322,13 +331,15 @@ impl DeferredSessionEnd {
 }
 
 impl SessionGeneration {
-    fn new() -> Self {
+    fn new(instance: ChannelSessionInstance) -> Self {
         Self {
             state: StdMutex::new(SessionGenerationState {
                 active_streams: 0,
                 last_active: Instant::now(),
                 deferred_end: None,
             }),
+            instance,
+            cancellation: CancellationToken::new(),
         }
     }
 
@@ -343,6 +354,9 @@ impl SessionGeneration {
     }
 
     fn begin(self: &Arc<Self>) -> Option<SessionStreamReceipt> {
+        if self.cancellation.is_cancelled() {
+            return None;
+        }
         let mut state = self.lock_state();
         state.active_streams = state.active_streams.checked_add(1)?;
         state.last_active = Instant::now();
@@ -354,7 +368,12 @@ impl SessionGeneration {
 
     fn is_idle_and_expired(&self, timeout: Duration) -> bool {
         let state = self.lock_state();
-        state.active_streams == 0 && state.last_active.elapsed() >= timeout
+        state.active_streams == 0
+            && !self
+                .instance
+                .current_delivery_fence()
+                .has_active_deliveries()
+            && state.last_active.elapsed() >= timeout
     }
 
     fn touch(&self) {
@@ -377,6 +396,14 @@ impl SessionGeneration {
         if let Some(deferred) = deferred {
             deferred.settle();
         }
+    }
+
+    async fn retire(&self) {
+        self.cancellation.cancel();
+        self.instance
+            .current_delivery_fence()
+            .retire_and_wait()
+            .await;
     }
 }
 
@@ -486,11 +513,12 @@ impl SessionHandler {
 
     /// Set the session-end callback used for exact resource cleanup.
     ///
-    /// Reset can publish its reply and replacement session immediately, but the
-    /// callback for the retired generation is deferred until every admitted
-    /// stream from that generation has settled. Timeout replacement is already
-    /// restricted to idle generations. Callback panics are contained at the
-    /// framework boundary and never propagate through stream teardown.
+    /// Reset retires old delivery, cancels its stream, and waits for already
+    /// admitted transport leases before publishing the replacement reply. The
+    /// callback for a still-unpolled stream remains deferred until its receipt
+    /// is dropped. Timeout replacement is restricted to idle generations.
+    /// Callback panics are contained at the framework boundary and never
+    /// propagate through stream teardown.
     pub fn with_on_session_end<F>(mut self, callback: F) -> Self
     where
         F: Fn(SessionEndInfo) + Send + Sync + 'static,
@@ -512,8 +540,8 @@ impl SessionHandler {
         let handler = Arc::from(self.factory.create(&instance));
         Session {
             handler,
-            instance,
-            generation: Arc::new(SessionGeneration::new()),
+            instance: instance.clone(),
+            generation: Arc::new(SessionGeneration::new(instance)),
         }
     }
 
@@ -590,6 +618,7 @@ impl SessionHandler {
                 .is_some();
             drop(guard);
             if removed {
+                ended_generation.retire().await;
                 self.settle_session_end(
                     &ended_generation,
                     ended_instance,
@@ -609,7 +638,9 @@ impl MessageHandler for SessionHandler {
         if self.config.is_reset(&msg.text) {
             let ended_instance = guard.instance.clone();
             let ended_generation = Arc::clone(&guard.generation);
+            ended_generation.retire().await;
             *guard = self.create_session(&key, Some(ended_instance.incarnation_id()));
+            let delivery_fence = guard.instance.current_delivery_fence();
             drop(guard);
             self.settle_session_end(
                 &ended_generation,
@@ -621,11 +652,13 @@ impl MessageHandler for SessionHandler {
                 msg.reply_target(),
                 msg.chat_type,
                 &self.config.reset_reply,
-            ));
+            )
+            .with_delivery_fence(delivery_fence));
         }
         if guard.generation.is_idle_and_expired(self.config.timeout) {
             let ended_instance = guard.instance.clone();
             let ended_generation = Arc::clone(&guard.generation);
+            ended_generation.retire().await;
             *guard = self.create_session(&key, Some(ended_instance.incarnation_id()));
             self.settle_session_end(
                 &ended_generation,
@@ -636,7 +669,7 @@ impl MessageHandler for SessionHandler {
         guard.generation.touch();
         let result = guard.handler.handle(msg).await;
         guard.generation.touch();
-        result
+        result.map(|message| message.with_delivery_fence(guard.instance.current_delivery_fence()))
     }
 
     async fn handle_stream<'a>(
@@ -652,7 +685,9 @@ impl MessageHandler for SessionHandler {
         if self.config.is_reset(&msg.text) {
             let ended_instance = guard.instance.clone();
             let ended_generation = Arc::clone(&guard.generation);
+            ended_generation.retire().await;
             *guard = self.create_session(&key, Some(ended_instance.incarnation_id()));
+            let delivery_fence = guard.instance.current_delivery_fence();
             drop(guard);
             self.settle_session_end(
                 &ended_generation,
@@ -664,7 +699,8 @@ impl MessageHandler for SessionHandler {
                 msg.reply_target(),
                 msg.chat_type,
                 &self.config.reset_reply,
-            );
+            )
+            .with_delivery_fence(delivery_fence);
             return Ok(futures::stream::once(async move { Ok(reply) }).boxed());
         }
 
@@ -672,6 +708,9 @@ impl MessageHandler for SessionHandler {
         let ended_instance = timeout_replaced.then(|| guard.instance.clone());
         let ended_generation = timeout_replaced.then(|| Arc::clone(&guard.generation));
         if timeout_replaced {
+            if let Some(generation) = ended_generation.as_ref() {
+                generation.retire().await;
+            }
             *guard = self.create_session(
                 &key,
                 ended_instance
@@ -680,7 +719,10 @@ impl MessageHandler for SessionHandler {
             );
         }
         let handler = guard.handler.clone();
-        let Some(stream_receipt) = guard.generation.begin() else {
+        let generation = Arc::clone(&guard.generation);
+        let delivery_fence = guard.instance.current_delivery_fence();
+        let cancellation = generation.cancellation.clone();
+        let Some(stream_receipt) = generation.begin() else {
             return Err(echo_core::error::ReactError::Other(
                 "session active stream capacity exhausted".to_string(),
             ));
@@ -696,7 +738,15 @@ impl MessageHandler for SessionHandler {
 
         let stream = async_stream::stream! {
             let mut stream_receipt = Some(stream_receipt);
-            let mut inner = match handler.handle_stream(msg).await {
+            let setup = tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => {
+                    drop(stream_receipt.take());
+                    return;
+                }
+                setup = handler.handle_stream(msg) => setup,
+            };
+            let mut inner = match setup {
                 Ok(stream) => stream,
                 Err(error) => {
                     drop(stream_receipt.take());
@@ -704,14 +754,26 @@ impl MessageHandler for SessionHandler {
                     return;
                 }
             };
-            while let Some(item) = inner.next().await {
-                if item.is_err() {
-                    drop(inner);
-                    drop(stream_receipt.take());
-                    yield item;
-                    return;
+            loop {
+                let item = tokio::select! {
+                    biased;
+                    _ = cancellation.cancelled() => None,
+                    item = inner.next() => item,
+                };
+                let Some(item) = item else {
+                    break;
+                };
+                match item {
+                    Ok(message) => {
+                        yield Ok(message.with_delivery_fence(delivery_fence.clone()));
+                    }
+                    Err(error) => {
+                        drop(inner);
+                        drop(stream_receipt.take());
+                        yield Err(error);
+                        return;
+                    }
                 }
-                yield item;
             }
             drop(inner);
             drop(stream_receipt.take());
@@ -857,6 +919,51 @@ mod tests {
             Box::new(ConcurrentStreamHandler {
                 parked_started: self.parked_started.clone(),
                 release_parked: self.release_parked.clone(),
+            })
+        }
+    }
+
+    struct SetupBlockingHandler {
+        setup_started: Arc<Notify>,
+        release_setup: Arc<Notify>,
+    }
+
+    #[async_trait]
+    impl MessageHandler for SetupBlockingHandler {
+        async fn handle(&self, msg: InboundMessage) -> echo_core::error::Result<OutboundMessage> {
+            Ok(OutboundMessage::new(
+                &msg.channel_id,
+                msg.reply_target(),
+                msg.chat_type,
+                "fallback",
+            ))
+        }
+
+        async fn reply(&self, _msg: OutboundMessage) -> echo_core::error::Result<()> {
+            Ok(())
+        }
+
+        async fn handle_stream<'a>(
+            &'a self,
+            _msg: InboundMessage,
+        ) -> echo_core::error::Result<BoxStream<'a, echo_core::error::Result<OutboundMessage>>>
+        {
+            self.setup_started.notify_one();
+            self.release_setup.notified().await;
+            Ok(futures::stream::empty().boxed())
+        }
+    }
+
+    struct SetupBlockingFactory {
+        setup_started: Arc<Notify>,
+        release_setup: Arc<Notify>,
+    }
+
+    impl SessionFactory for SetupBlockingFactory {
+        fn create(&self, _instance: &ChannelSessionInstance) -> Box<dyn MessageHandler> {
+            Box::new(SetupBlockingHandler {
+                setup_started: Arc::clone(&self.setup_started),
+                release_setup: Arc::clone(&self.release_setup),
             })
         }
     }
@@ -1515,6 +1622,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn framework_reset_waits_for_delivery_admitted_before_application_rotation()
+    -> Result<(), String> {
+        let handler = Arc::new(SessionHandler::new(
+            SessionConfig::default()
+                .with_reset_keywords(vec!["framework-reset".to_string()])
+                .with_command_prefix(None),
+            TwoChunkFactory {
+                counter: Arc::new(AtomicUsize::new(0)),
+            },
+        ));
+        let first = handler
+            .handle(test_message("first", "m1"))
+            .await
+            .map_err(|error| error.to_string())?;
+        let permit = first
+            .begin_delivery()
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "session output had no delivery fence".to_string())?;
+
+        let key = SessionKey::from_message(&test_message("probe", "probe"))
+            .map_err(|error| error.to_string())?;
+        let session = handler
+            .sessions
+            .get(&key)
+            .map(|entry| Arc::clone(entry.value()))
+            .ok_or_else(|| "session was not registered".to_string())?;
+        let instance = session.lock().await.instance.clone();
+        let _rotation = instance.rotate();
+
+        let reset_started = Arc::new(Notify::new());
+        let reset_handler = Arc::clone(&handler);
+        let reset_started_task = Arc::clone(&reset_started);
+        let reset = tokio::spawn(async move {
+            reset_started_task.notify_one();
+            single_stream_text(&reset_handler, "framework-reset", "m2").await
+        });
+        reset_started.notified().await;
+        tokio::task::yield_now().await;
+        if reset.is_finished() {
+            return Err("reset ignored delivery admitted before application rotation".to_string());
+        }
+
+        drop(permit);
+        let reset_reply = timeout(TEST_TIMEOUT, reset)
+            .await
+            .map_err(|_| "reset did not settle after old delivery".to_string())?
+            .map_err(|error| format!("reset task failed: {error}"))??;
+        if reset_reply != SessionConfig::default().reset_reply {
+            return Err("reset returned an unexpected acknowledgement".to_string());
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn missing_or_unknown_sender_identity_fails_closed() -> Result<(), String> {
         let (handler, created, _, _) = sender_scoped_handler();
         for sender_id in ["", "   ", "unknown", "UNKNOWN", " alice "] {
@@ -1776,7 +1937,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn explicit_reset_remains_immediate_while_old_stream_settles() -> Result<(), String> {
+    async fn explicit_reset_cancels_old_stream_before_acknowledgement() -> Result<(), String> {
         let created = Arc::new(AtomicUsize::new(0));
         let parked_started = Arc::new(Notify::new());
         let release_parked = Arc::new(Notify::new());
@@ -1814,16 +1975,12 @@ mod tests {
         if reset != reset_reply {
             return Err("explicit reset did not return its configured reply".to_string());
         }
-        if match ended.lock() {
-            Ok(ended) => ended
-                .iter()
-                .any(|reason| reason == &SessionEndReason::CommandReset),
-            Err(poisoned) => poisoned
-                .into_inner()
-                .iter()
-                .any(|reason| reason == &SessionEndReason::CommandReset),
-        } {
-            return Err("reset cleanup ran while the old stream was active".to_string());
+        let parked = timeout(TEST_TIMEOUT, first)
+            .await
+            .map_err(|_| "parked stream did not stop during reset".to_string())?
+            .map_err(|error| error.to_string())?;
+        if !matches!(parked, Err(ref error) if error == "parked stream closed without an item") {
+            return Err("explicit reset did not cancel the old stream".to_string());
         }
 
         let reset_generation = current_test_generation(&handler).await?;
@@ -1837,15 +1994,6 @@ mod tests {
         let current_generation = current_test_generation(&handler).await?;
         let (_, current_last_active) = generation_snapshot(&current_generation);
 
-        release_parked.notify_one();
-        let parked = timeout(TEST_TIMEOUT, first)
-            .await
-            .map_err(|_| "parked stream did not finish".to_string())?
-            .map_err(|error| error.to_string())??;
-
-        if parked != "generation-1:parked-complete" {
-            return Err("explicit reset interrupted the already-active stream".to_string());
-        }
         let reset_callbacks = match ended.lock() {
             Ok(ended) => ended
                 .iter()
@@ -1858,14 +2006,64 @@ mod tests {
                 .count(),
         };
         if reset_callbacks != 1 {
-            return Err(format!(
-                "old generation settled with {reset_callbacks} reset callbacks"
-            ));
+            return Err(format!("reset settled with {reset_callbacks} callbacks"));
         }
         let (_, current_last_active_after_old_settlement) =
             generation_snapshot(&current_generation);
         if current_last_active_after_old_settlement != current_last_active {
             return Err("old stream settlement touched the current generation".to_string());
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reset_cancels_blocked_stream_setup_and_settles_cleanup() -> Result<(), String> {
+        let setup_started = Arc::new(Notify::new());
+        let release_setup = Arc::new(Notify::new());
+        let ended = Arc::new(AtomicUsize::new(0));
+        let callback_ended = Arc::clone(&ended);
+        let handler = Arc::new(
+            SessionHandler::new(
+                SessionConfig::default()
+                    .with_reset_keywords(vec!["framework-reset".to_string()])
+                    .with_command_prefix(None),
+                SetupBlockingFactory {
+                    setup_started: Arc::clone(&setup_started),
+                    release_setup,
+                },
+            )
+            .with_on_session_end(move |info| {
+                if info.reason == SessionEndReason::CommandReset {
+                    callback_ended.fetch_add(1, Ordering::AcqRel);
+                }
+            }),
+        );
+
+        let old_handler = Arc::clone(&handler);
+        let old_poll = tokio::spawn(async move {
+            let mut old_stream = old_handler
+                .handle_stream(test_message("blocked-setup", "m1"))
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok::<_, String>(old_stream.next().await)
+        });
+        timeout(TEST_TIMEOUT, setup_started.notified())
+            .await
+            .map_err(|_| "old stream setup did not start".to_string())?;
+
+        let reset = single_stream_text(&handler, "framework-reset", "m2").await?;
+        if reset != SessionConfig::default().reset_reply {
+            return Err("reset did not return its acknowledgement".to_string());
+        }
+        let old_output = timeout(TEST_TIMEOUT, old_poll)
+            .await
+            .map_err(|_| "retired stream setup remained blocked".to_string())?
+            .map_err(|error| format!("old setup task failed: {error}"))??;
+        if old_output.is_some() {
+            return Err("retired stream setup produced output".to_string());
+        }
+        if ended.load(Ordering::Acquire) != 1 {
+            return Err("blocked setup did not settle reset cleanup exactly once".to_string());
         }
         Ok(())
     }

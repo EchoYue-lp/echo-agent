@@ -596,6 +596,12 @@ pub enum ChannelError {
     /// Send error
     #[error("Send error: {0}")]
     SendError(String),
+    /// Output belongs to a retired channel-session generation.
+    #[error("Stale channel delivery generation: {incarnation_id}")]
+    StaleDelivery {
+        /// Opaque incarnation that no longer owns channel delivery.
+        incarnation_id: String,
+    },
     /// Invalid config
     #[error("Invalid config: {0}")]
     InvalidConfig(String),
