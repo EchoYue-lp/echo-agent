@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.k8s-sandbox-cleanup-settlement-verification
 kind: evidence
-observed_at: source:71db36711961e65e13fcef99f7f7e671ddd391e4853eecc77c4e07ac041915f6
+observed_at: source:bfa5b4590c617d8286f2b80571d5c450622d47c7425d6f1ecb1978bf85743352
 source_refs:
   - echo-execution/src/sandbox/k8s.rs
   - docs/adr/0002-sandbox-cancellation-cleanup.md
@@ -34,7 +34,7 @@ kubectl 控制命令启动还对 Linux `ETXTBSY` 瞬态错误执行共享 deadli
 
 ## 来源与范围
 
-以下命令均在最终源码摘要`71db36711961e65e13fcef99f7f7e671ddd391e4853eecc77c4e07ac041915f6`
+以下命令均在最终源码摘要`bfa5b4590c617d8286f2b80571d5c450622d47c7425d6f1ecb1978bf85743352`
 上以`CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
 CARGO_BUILD_JOBS=2`执行并返回0：
 

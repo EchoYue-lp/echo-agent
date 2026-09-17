@@ -3,12 +3,12 @@ schema_version: 1
 id: evidence.sdk-repository-extraction-equivalence
 kind: evidence
 evidence_type: behavior_equivalence
-observed_at: source:71db36711961e65e13fcef99f7f7e671ddd391e4853eecc77c4e07ac041915f6
+observed_at: source:bfa5b4590c617d8286f2b80571d5c450622d47c7425d6f1ecb1978bf85743352
 source_refs: [Cargo.toml, README.md, README.zh.md, .github/workflows/rust-ci.yml, echo-agent-learning/tests/documentation_contract.rs, scripts/verify.sh, src/acp/adapter.rs, src/acp/runtime.rs, src/acp/projection.rs, tests/acp_agent_adapter.rs, tests/fixtures/acp/v1/prompt-resource-link-valid.json, tests/fixtures/acp/v1/session-relative-cwd-invalid.json, docs/en/architecture.md, docs/zh/architecture.md, docs/en/lifecycles.md, docs/zh/lifecycles.md]
 supports: [finding.sdk-repository-extraction, asset.framework-acp-adapter, asset.sdk-source-product]
 limitations: ["本 Evidence 证明 framework 删除只改变 repository ownership；SDK protocol coupling、accepted external contract 和三语言 gate 在独立 SDK 仓库的后续 outcome 中验证。", "全量 semantic change-evidence 的其它历史 needs_review/unresolved backlog 不属于本删除切片。"]
 before_revision: 0e09324a977851cee5db8ff55d8c8497e852a4ad
-after_revision: source:71db36711961e65e13fcef99f7f7e671ddd391e4853eecc77c4e07ac041915f6
+after_revision: source:bfa5b4590c617d8286f2b80571d5c450622d47c7425d6f1ecb1978bf85743352
 scenario_results:
   framework-workspace-members:
     status: matched

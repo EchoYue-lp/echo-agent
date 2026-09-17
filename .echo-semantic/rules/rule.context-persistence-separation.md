@@ -7,10 +7,10 @@ expectation: human_confirmed
 risk: high
 primary_focus: data_durability
 focus: [state_authority, time_lifecycle, failure_concurrency]
-observed_at: f1e9027246760661144786e9e35615cd46d580c6
+observed_at: source:bfa5b4590c617d8286f2b80571d5c450622d47c7425d6f1ecb1978bf85743352
 behavior_refs: [behavior.agent-turn-lifecycle, behavior.context-memory-lifecycle]
 code_refs: [echo-state/src/compression/mod.rs, src/agent/snapshot.rs, src/agent/react/run/phases/compact.rs, src/agent/react/run/phases/tools.rs, src/agent/react/run/phases/finalize.rs, src/state/mod.rs, echo-core/src/memory/conversation.rs, echo-core/src/memory/store.rs, docs/en/41-persistence-concepts.md]
-evidence_refs: [evidence.agent-context-execution, evidence.persistence-observation, evidence.transcript-generation-runtime-identity-repair, evidence.transcript-generation-runtime-identity-verification]
+evidence_refs: [evidence.agent-context-execution, evidence.persistence-observation, evidence.transcript-generation-runtime-identity-repair, evidence.transcript-generation-runtime-identity-verification, evidence.transcript-projection-settlement-repair, evidence.transcript-projection-settlement-verification]
 finding_refs: [finding.transcript-projection-settlement, finding.transcript-generation-runtime-identity]
 ---
 
@@ -26,7 +26,9 @@ finding_refs: [finding.transcript-projection-settlement, finding.transcript-gene
 
 ## 当前实现
 
-各 trait 使用独立数据模型与 key/scope；runtime lineage 区分稳定 conversation scope 和可轮换 runtime state ID。
+各 trait 使用独立数据模型与 key/scope；runtime lineage 区分稳定 conversation scope 和可轮换 runtime
+state ID。RuntimeStateStore 保存未提交 intent 与 retirement，ConversationStore receipt 才确认 transcript fact；
+单一 framework coordinator 编排两者，不建立第二 Outbox。
 
 ## 期望行为
 
@@ -34,7 +36,8 @@ finding_refs: [finding.transcript-projection-settlement, finding.transcript-gene
 
 ## 证据
 
-Persistence 文档、ADR 0004/0006、Store/Conversation/RuntimeState implementations 与 crash-cut tests 提供证据。
+Persistence 文档、ADR 0004/0006/0056、Store/Conversation/RuntimeState implementations、crash-cut tests
+与独立复审提供证据。
 
 ## 裁决记录
 

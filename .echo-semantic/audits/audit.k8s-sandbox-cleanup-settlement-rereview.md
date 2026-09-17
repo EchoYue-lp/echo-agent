@@ -5,19 +5,19 @@ kind: audit
 boundary_ref: boundary.tool-permission-sandbox
 lens: result_side_effect
 freshness: examined
-revision: source:71db36711961e65e13fcef99f7f7e671ddd391e4853eecc77c4e07ac041915f6
+revision: source:bfa5b4590c617d8286f2b80571d5c450622d47c7425d6f1ecb1978bf85743352
 finding_refs: [finding.k8s-sandbox-cleanup-settlement]
 challenges:
   pod-owner-and-drain-settlement:
-    revision: source:71db36711961e65e13fcef99f7f7e671ddd391e4853eecc77c4e07ac041915f6
+    revision: source:bfa5b4590c617d8286f2b80571d5c450622d47c7425d6f1ecb1978bf85743352
     source_refs: [echo-execution/src/sandbox/k8s.rs, docs/adr/0002-sandbox-cancellation-cleanup.md]
     evidence_refs: [evidence.k8s-sandbox-cleanup-settlement-repair, evidence.k8s-sandbox-cleanup-settlement-verification]
   cleanup-debt-and-join-recovery:
-    revision: source:71db36711961e65e13fcef99f7f7e671ddd391e4853eecc77c4e07ac041915f6
+    revision: source:bfa5b4590c617d8286f2b80571d5c450622d47c7425d6f1ecb1978bf85743352
     source_refs: [echo-execution/src/sandbox/k8s.rs]
     evidence_refs: [evidence.k8s-sandbox-cleanup-settlement-repair, evidence.k8s-sandbox-cleanup-settlement-verification]
   ambiguous-create-delete-commit:
-    revision: source:71db36711961e65e13fcef99f7f7e671ddd391e4853eecc77c4e07ac041915f6
+    revision: source:bfa5b4590c617d8286f2b80571d5c450622d47c7425d6f1ecb1978bf85743352
     source_refs: [echo-execution/src/sandbox/k8s.rs, docs/adr/0002-sandbox-cancellation-cleanup.md]
     evidence_refs: [evidence.k8s-sandbox-cleanup-settlement-repair, evidence.k8s-sandbox-cleanup-settlement-verification]
 ---

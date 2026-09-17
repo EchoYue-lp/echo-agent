@@ -7,10 +7,10 @@ expectation: human_confirmed
 risk: high
 primary_focus: state_authority
 focus: [data_durability, contract_evidence, failure_concurrency]
-observed_at: source:71db36711961e65e13fcef99f7f7e671ddd391e4853eecc77c4e07ac041915f6
+observed_at: source:bfa5b4590c617d8286f2b80571d5c450622d47c7425d6f1ecb1978bf85743352
 behavior_refs: [behavior.observation-persistence]
 code_refs: [echo-core/src/agent/event_envelope.rs, echo-state/src/journal/mod.rs, echo-state/src/journal/file.rs, echo-state/src/journal/segmented.rs, echo-state/src/delivery.rs, src/trace/mod.rs, src/eval/runner.rs, docs/en/41-persistence-concepts.md, docs/zh/41-persistence-concepts.md, docs/adr/0038-eval-trace-correlation-identity.md, docs/adr/0046-turn-execution-delivery-settlement.md, docs/adr/0055-checkpoint-journal-identity.md]
-evidence_refs: [evidence.persistence-observation, evidence.checkpoint-journal-binding-repair, evidence.checkpoint-journal-binding-verification, evidence.checkpoint-journal-sdk-inventory, evidence.eval-trace-correlation-repair, evidence.eval-trace-correlation-verification, evidence.turn-terminal-delivery-settlement-repair, evidence.turn-terminal-delivery-settlement-verification]
+evidence_refs: [evidence.persistence-observation, evidence.checkpoint-journal-binding-repair, evidence.checkpoint-journal-binding-verification, evidence.checkpoint-journal-sdk-inventory, evidence.eval-trace-correlation-repair, evidence.eval-trace-correlation-verification, evidence.turn-terminal-delivery-settlement-repair, evidence.turn-terminal-delivery-settlement-verification, evidence.transcript-projection-settlement-repair, evidence.transcript-projection-settlement-verification]
 finding_refs: [finding.trace-effect-event-producers, finding.eval-trace-identity, finding.trace-audit-secret-boundary, finding.turn-terminal-commit-projection-order, finding.checkpoint-journal-binding]
 ---
 
@@ -26,7 +26,7 @@ finding_refs: [finding.trace-effect-event-producers, finding.eval-trace-identity
 
 ## 当前实现
 
-EventEnvelope提供versioned identity/sequence；Journal generation identity与sequence共同限定事实位置，CheckpointedReducer只接受同generation checkpoint，DeliveryLedger继续使用同一Journal+reducer；RunStore独立保存producer-owned trace。Turn execution由producer terminal决定，sink projection只决定delivery；外部SDK Host恢复用真实Journal反查receipt watermark，不能从索引投影发明已交付事实。
+EventEnvelope提供versioned identity/sequence；Journal generation identity与sequence共同限定事实位置，CheckpointedReducer只接受同generation checkpoint，DeliveryLedger继续使用同一Journal+reducer；RunStore独立保存producer-owned trace。Transcript pending marker是可恢复intent，只有ConversationStore applied receipt成为用户历史fact；typed settlement event和Trace都是该结果的projection。Turn execution由producer terminal决定，sink projection只决定delivery；外部SDK Host恢复用真实Journal反查receipt watermark，不能从索引投影发明已交付事实。
 
 ## 期望行为
 
