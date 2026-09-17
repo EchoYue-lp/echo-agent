@@ -49,6 +49,17 @@ pub enum RuntimeTaskMutationError {
     InvalidClaim { task_id: String, message: String },
 }
 
+/// Immediate result of requesting cancellation for one exact claimed attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeTaskAttemptInterruptReceipt {
+    pub run_id: String,
+    pub task_id: TaskId,
+    pub execution_id: String,
+    pub revision: u64,
+    pub attempt: u32,
+    pub requested: bool,
+}
+
 /// Typed compare-and-set result for one exact physical claim settlement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeTaskSettlementOutcome {
@@ -148,6 +159,47 @@ impl<C: RuntimeDagController> RuntimeTaskService<C> {
         cancel: CancellationToken,
     ) -> Result<RuntimeDagOutcome> {
         self.executor.execute(run_id, cancel).await
+    }
+
+    /// Request cancellation for one exact current claim without affecting
+    /// sibling task children. The durable claim check is the authority; the
+    /// process-local token map is only the live cancellation projection.
+    pub async fn request_attempt_interrupt(
+        &self,
+        run_id: &str,
+        task_id: &str,
+        claim: &TaskClaim,
+    ) -> Result<RuntimeTaskAttemptInterruptReceipt> {
+        let current = self
+            .executor
+            .controller
+            .claim_is_current(run_id, task_id, claim)
+            .await?;
+        if !current {
+            return Err(echo_core::error::ReactError::Other(
+                "runtime attempt claim is stale or already settled".to_string(),
+            ));
+        }
+        let execution_id = claim.execution_id(run_id, task_id);
+        let requested = self
+            .executor
+            .attempt_cancellations
+            .lock()
+            .ok()
+            .and_then(|controls| controls.get(&execution_id).cloned())
+            .map(|cancel| {
+                cancel.cancel();
+                true
+            })
+            .unwrap_or(false);
+        Ok(RuntimeTaskAttemptInterruptReceipt {
+            run_id: run_id.to_string(),
+            task_id: task_id.to_string(),
+            execution_id,
+            revision: claim.revision,
+            attempt: claim.attempt,
+            requested,
+        })
     }
 }
 

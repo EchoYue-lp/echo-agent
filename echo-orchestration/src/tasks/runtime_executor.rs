@@ -6,7 +6,7 @@
 //! through [`RuntimeDagController`].
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -274,9 +274,10 @@ impl Default for RuntimeTaskServiceConfig {
 
 /// The framework's executor for revisioned dynamic Agent plans.
 pub(crate) struct RuntimeDagExecutor<C: RuntimeDagController> {
-    controller: Arc<C>,
+    pub(crate) controller: Arc<C>,
     config: RuntimeTaskServiceConfig,
     validator: PlanValidator,
+    pub(crate) attempt_cancellations: Arc<Mutex<HashMap<String, CancellationToken>>>,
 }
 
 enum InterruptionBoundary {
@@ -291,6 +292,7 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
             controller,
             config,
             validator: PlanValidator::default(),
+            attempt_cancellations: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -516,9 +518,6 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
                 let controller = self.controller.clone();
                 let semaphore = subagent_semaphore.clone();
                 let shared_admission = self.config.shared_admission.clone();
-                // Each claim owns a child token: cancelling one exact attempt
-                // must not cancel sibling tasks in the same ready wave.
-                let task_cancel = cancel.child_token();
                 let claim = match self
                     .controller
                     .claim_task(run_id, &task, snapshot.revision)
@@ -532,9 +531,18 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
                     }
                 };
                 let claim_id = claim.claim_id.clone();
+                // Each claim owns a child token: cancelling one exact attempt
+                // must not cancel sibling tasks in the same ready wave. The
+                // token is published before waiting for shared admission.
+                let task_cancel = cancel.child_token();
+                let execution_id = claim.execution_id(run_id, &task.spec.id);
+                if let Ok(mut controls) = self.attempt_cancellations.lock() {
+                    controls.insert(execution_id.clone(), task_cancel.clone());
+                }
                 outstanding_claims.insert(claim_id.clone(), (task.clone(), claim.clone()));
                 let dispatch_run_id = run_id.to_string();
                 let delegation_policy = self.config.delegation_policy;
+                let attempt_cancellations = Arc::clone(&self.attempt_cancellations);
                 let waived_dependency_ids = match dependency_states.get(&task.spec.id) {
                     Some(DagDependencyState::Satisfied {
                         waived_dependency_ids,
@@ -611,6 +619,9 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
                             ))),
                         }
                     };
+                    if let Ok(mut controls) = attempt_cancellations.lock() {
+                        controls.remove(&execution_id);
+                    }
                     (claim_id, dispatch)
                 });
             }
@@ -657,6 +668,15 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
                         }
                         break;
                     }
+                }
+            }
+
+            // Every wave future is joined (including targeted/root aborts) before
+            // releasing its live exact-cancellation projection.
+            if let Ok(mut controls) = self.attempt_cancellations.lock() {
+                for (task, claim) in outstanding_claims.values() {
+                    let execution_id = claim.execution_id(run_id, &task.spec.id);
+                    controls.remove(&execution_id);
                 }
             }
 
@@ -1106,6 +1126,7 @@ mod tests {
         interruption_error: Mutex<Option<String>>,
         dispatch_barrier: Mutex<Option<Arc<tokio::sync::Barrier>>>,
         cancel_after_dispatch: Mutex<HashMap<TaskId, CancellationToken>>,
+        claim_ready: Mutex<Option<Arc<tokio::sync::Notify>>>,
     }
 
     impl ScriptedController {
@@ -1166,8 +1187,21 @@ mod tests {
             let snapshot = snapshot
                 .as_mut()
                 .ok_or_else(|| ReactError::Other("missing snapshot".to_string()))?;
-            super::super::runtime_service::claim_runtime_task(snapshot, task, expected_revision)
-                .map_err(|error| ReactError::Other(error.to_string()))
+            let result = super::super::runtime_service::claim_runtime_task(
+                snapshot,
+                task,
+                expected_revision,
+            )
+            .map_err(|error| ReactError::Other(error.to_string()))?;
+            if let Some(notify) = self
+                .claim_ready
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .as_ref()
+            {
+                notify.notify_one();
+            }
+            Ok(result)
         }
 
         async fn claim_is_current(
@@ -1431,7 +1465,7 @@ mod tests {
 
         let outcome = executor.execute("run", CancellationToken::new()).await?;
 
-        assert_eq!(outcome, RuntimeDagOutcome::Completed);
+        assert_eq!(outcome, RuntimeDagOutcome::Cancelled);
         let order = controller
             .order
             .lock()
@@ -1465,7 +1499,7 @@ mod tests {
 
         let outcome = executor.execute("run", CancellationToken::new()).await?;
 
-        assert_eq!(outcome, RuntimeDagOutcome::Completed);
+        assert_eq!(outcome, RuntimeDagOutcome::Cancelled);
         Ok(())
     }
 
@@ -1663,10 +1697,10 @@ mod tests {
             runtime_task("a", TaskStatus::Pending, &[]),
             runtime_task("b", TaskStatus::Pending, &[]),
         ]));
-        let runtime_tasks = super::super::RuntimeTaskService::new(
+        let runtime_tasks = Arc::new(super::super::RuntimeTaskService::new(
             controller.clone(),
             RuntimeTaskServiceConfig::default(),
-        );
+        ));
         let cancel = CancellationToken::new();
         cancel.cancel();
 
@@ -1703,10 +1737,10 @@ mod tests {
             RuntimeInterruptionDisposition::Paused {
                 reason: "deterministic pause".to_string(),
             };
-        let runtime_tasks = super::super::RuntimeTaskService::new(
+        let runtime_tasks = Arc::new(super::super::RuntimeTaskService::new(
             controller.clone(),
             RuntimeTaskServiceConfig::default(),
-        );
+        ));
         let cancel = CancellationToken::new();
         cancel.cancel();
 
@@ -1762,6 +1796,60 @@ mod tests {
         let statuses = controller.statuses();
         assert_eq!(statuses.get("fast"), Some(&TaskStatus::Completed));
         assert_eq!(statuses.get("slow"), Some(&TaskStatus::Cancelled));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn exact_runtime_interrupt_cancels_only_claimed_task_child() -> Result<()> {
+        let controller = Arc::new(ScriptedController::with_tasks(vec![runtime_task(
+            "slow",
+            TaskStatus::Pending,
+            &[],
+        )]));
+        let claim_ready = Arc::new(tokio::sync::Notify::new());
+        *controller
+            .claim_ready
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(claim_ready.clone());
+        controller
+            .wait_for_cancel
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert("slow".to_string());
+        let runtime_tasks = Arc::new(super::super::RuntimeTaskService::new(
+            controller.clone(),
+            RuntimeTaskServiceConfig::default(),
+        ));
+        let run_cancel = CancellationToken::new();
+        let execution = tokio::spawn({
+            let runtime_tasks = Arc::clone(&runtime_tasks);
+            let run_cancel = run_cancel.clone();
+            async move { runtime_tasks.execute("exact-interrupt", run_cancel).await }
+        });
+        tokio::time::timeout(Duration::from_secs(2), claim_ready.notified())
+            .await
+            .map_err(|_| ReactError::Other("claim was not admitted".to_string()))?;
+        let claim = controller
+            .snapshot
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .and_then(|snapshot| snapshot.tasks.first())
+            .and_then(|task| task.execution.claim.clone())
+            .ok_or_else(|| ReactError::Other("claimed task was not persisted".to_string()))?;
+        let receipt = runtime_tasks
+            .request_attempt_interrupt("exact-interrupt", "slow", &claim)
+            .await?;
+        assert!(receipt.requested);
+        let outcome = tokio::time::timeout(Duration::from_secs(2), execution)
+            .await
+            .map_err(|_| ReactError::Other("exact interrupt did not settle".to_string()))?
+            .map_err(|error| ReactError::Other(format!("runtime task panicked: {error}")))??;
+        assert_eq!(outcome, RuntimeDagOutcome::Cancelled);
+        assert_eq!(
+            controller.statuses().get("slow"),
+            Some(&TaskStatus::Cancelled)
+        );
         Ok(())
     }
 

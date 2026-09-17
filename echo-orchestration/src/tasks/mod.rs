@@ -50,12 +50,13 @@ pub use runtime_executor::{
     RuntimeTaskResolutionRequest, RuntimeTaskServiceConfig,
 };
 pub use runtime_service::{
-    RuntimeInterruptionReceipt, RuntimeInterruptionSettlementOutcome, RuntimeTaskMutationError,
-    RuntimeTaskRequeueOutcome, RuntimeTaskResumeOutcome, RuntimeTaskRetryOutcome,
-    RuntimeTaskService, RuntimeTaskSettlementOutcome, cancel_unfinished_runtime_tasks,
-    claim_runtime_task, requeue_runtime_claim, resume_runtime_task, retry_runtime_task,
-    runtime_claim_is_current, settle_runtime_claim, settle_runtime_interruption,
-    settle_runtime_resolution, validate_runtime_snapshot_claims,
+    RuntimeInterruptionReceipt, RuntimeInterruptionSettlementOutcome,
+    RuntimeTaskAttemptInterruptReceipt, RuntimeTaskMutationError, RuntimeTaskRequeueOutcome,
+    RuntimeTaskResumeOutcome, RuntimeTaskRetryOutcome, RuntimeTaskService,
+    RuntimeTaskSettlementOutcome, cancel_unfinished_runtime_tasks, claim_runtime_task,
+    requeue_runtime_claim, resume_runtime_task, retry_runtime_task, runtime_claim_is_current,
+    settle_runtime_claim, settle_runtime_interruption, settle_runtime_resolution,
+    validate_runtime_snapshot_claims,
 };
 pub use task_tools::{
     TaskCreateTool, TaskListTool, TaskUpdateTool, build_task_create_tool, build_task_list_tool,
