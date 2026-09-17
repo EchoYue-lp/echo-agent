@@ -286,6 +286,7 @@ pub struct SubagentInterruptRequestReceipt {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SubagentInterruptRequestDisposition {
     QueuedBeforeAdmission,
+    ReservedRequested,
     ActiveRequested,
     ActiveAlreadyRequested,
     AlreadySettled(SubagentStatus),
@@ -435,6 +436,7 @@ impl SubagentAttemptBinding {
 pub(crate) struct SubagentAttemptAdmission {
     pub(crate) binding: SubagentAttemptBinding,
     pub(crate) guidance: Vec<String>,
+    pub(crate) cancel: CancellationToken,
     settled: bool,
 }
 
@@ -448,9 +450,12 @@ impl SubagentAttemptAdmission {
 impl Drop for SubagentAttemptAdmission {
     fn drop(&mut self) {
         if !self.settled {
-            self.binding
-                .registry
-                .settle(&self.binding.identity, SubagentStatus::Failed);
+            let status = if self.binding.registry.is_cancelled(&self.binding.identity) {
+                SubagentStatus::Cancelled
+            } else {
+                SubagentStatus::Failed
+            };
+            self.binding.registry.settle(&self.binding.identity, status);
         }
     }
 }
@@ -468,6 +473,7 @@ impl Drop for SubagentSteeringLease {
 struct ActiveAttempt {
     identity: SubagentAttemptIdentity,
     cancel: CancellationToken,
+    reserved: bool,
     phase: SubagentControlPhase,
     agent: Option<Arc<dyn Agent>>,
     turn_id: Option<String>,
@@ -512,6 +518,82 @@ pub struct SubagentControlRegistry {
 }
 
 impl SubagentControlRegistry {
+    /// Reserve an exact attempt before it waits for shared execution capacity.
+    /// The later [`Self::admit`] call consumes this reservation and receives
+    /// the same binding; no second identity or cancellation token is created.
+    pub(crate) fn reserve(
+        self: &Arc<Self>,
+        identity: SubagentAttemptIdentity,
+        cancel: CancellationToken,
+    ) -> Result<(), SubagentControlError> {
+        identity.validate()?;
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| SubagentControlError::StateUnavailable)?;
+        if state.active.contains_key(&identity.execution_id)
+            || state.settled.contains_key(&identity.execution_id)
+        {
+            return Err(SubagentControlError::DuplicateExecution {
+                execution_id: identity.execution_id,
+            });
+        }
+        let task_attempt = identity.task_attempt();
+        if state.active_by_task_attempt.contains_key(&task_attempt)
+            || state.settled_by_task_attempt.contains_key(&task_attempt)
+        {
+            return Err(SubagentControlError::AttemptAlreadyStarted {
+                task_id: identity.task_id,
+                attempt: identity.attempt,
+            });
+        }
+        if let Some(pending) = state.pending_interrupts.get(&identity.execution_id)
+            && pending.attempt != identity.attempt
+        {
+            return Err(SubagentControlError::AttemptMismatch {
+                execution_id: identity.execution_id,
+                expected: identity.attempt,
+                actual: pending.attempt,
+            });
+        }
+        if let Some(conflict) = state.pending_interrupts.values().find(|pending| {
+            pending.task_id == identity.task_id
+                && pending.attempt == identity.attempt
+                && pending.execution_id != identity.execution_id
+        }) {
+            return Err(SubagentControlError::IdentityConflict {
+                task_id: identity.task_id,
+                attempt: identity.attempt,
+                expected_execution_id: identity.execution_id,
+                actual_execution_id: conflict.execution_id.clone(),
+            });
+        }
+        let pending_interrupt = state.pending_interrupts.remove(&identity.execution_id);
+        let (ready_tx, _) = watch::channel(false);
+        let (settled_tx, _) = watch::channel(None);
+        state
+            .active_by_task_attempt
+            .insert(task_attempt, identity.execution_id.clone());
+        state.active.insert(
+            identity.execution_id.clone(),
+            ActiveAttempt {
+                identity: identity.clone(),
+                cancel: cancel.clone(),
+                reserved: true,
+                phase: SubagentControlPhase::Starting,
+                agent: None,
+                turn_id: None,
+                ready_tx,
+                settled_tx,
+            },
+        );
+        drop(state);
+        if pending_interrupt.is_some() {
+            cancel.cancel();
+        }
+        Ok(())
+    }
+
     pub(crate) fn admit(
         self: &Arc<Self>,
         identity: SubagentAttemptIdentity,
@@ -522,9 +604,35 @@ impl SubagentControlRegistry {
             .state
             .lock()
             .map_err(|_| SubagentControlError::StateUnavailable)?;
-        if state.active.contains_key(&identity.execution_id)
-            || state.settled.contains_key(&identity.execution_id)
-        {
+        if let Some(active) = state.active.get_mut(&identity.execution_id) {
+            Self::validate_attempt(&active.identity, identity.attempt)?;
+            if !active.reserved {
+                return Err(SubagentControlError::DuplicateExecution {
+                    execution_id: identity.execution_id,
+                });
+            }
+            // The reservation owns the child token. Use it for the dispatch
+            // even if a caller supplied another token for this identity.
+            let cancel = active.cancel.clone();
+            active.reserved = false;
+            let guidance = state
+                .queued_guidance
+                .remove(&identity.task_attempt())
+                .map(VecDeque::into_iter)
+                .into_iter()
+                .flatten()
+                .collect();
+            return Ok(SubagentAttemptAdmission {
+                binding: SubagentAttemptBinding {
+                    registry: Arc::clone(self),
+                    identity,
+                },
+                guidance,
+                cancel,
+                settled: false,
+            });
+        }
+        if state.settled.contains_key(&identity.execution_id) {
             return Err(SubagentControlError::DuplicateExecution {
                 execution_id: identity.execution_id,
             });
@@ -565,6 +673,7 @@ impl SubagentControlRegistry {
             ActiveAttempt {
                 identity: identity.clone(),
                 cancel: cancel.clone(),
+                reserved: false,
                 phase: SubagentControlPhase::Starting,
                 agent: None,
                 turn_id: None,
@@ -582,6 +691,7 @@ impl SubagentControlRegistry {
                 identity,
             },
             guidance,
+            cancel,
             settled: false,
         })
     }
@@ -611,7 +721,9 @@ impl SubagentControlRegistry {
                 let already_requested = active.phase == SubagentControlPhase::InterruptRequested;
                 active.phase = SubagentControlPhase::InterruptRequested;
                 let cancel = active.cancel.clone();
-                let disposition = if already_requested {
+                let disposition = if active.reserved {
+                    SubagentInterruptRequestDisposition::ReservedRequested
+                } else if already_requested {
                     SubagentInterruptRequestDisposition::ActiveAlreadyRequested
                 } else {
                     SubagentInterruptRequestDisposition::ActiveRequested
@@ -960,6 +1072,15 @@ impl SubagentControlRegistry {
                     .remove(&old.identity.task_attempt());
             }
         }
+    }
+
+    fn is_cancelled(&self, identity: &SubagentAttemptIdentity) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .active
+            .get(&identity.execution_id)
+            .is_some_and(|active| active.identity == *identity && active.cancel.is_cancelled())
     }
 
     fn validate_attempt(
@@ -1389,6 +1510,63 @@ mod tests {
                 .retire_pending(&identity)
                 .is_ok_and(|retired| !retired)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn reserved_attempt_is_consumed_by_dispatch_admission() -> Result<(), String> {
+        let registry = Arc::new(SubagentControlRegistry::default());
+        let identity = SubagentAttemptIdentity::new("task-reserved", "execution-reserved", 1)
+            .map_err(|error| error.to_string())?;
+        let cancel = CancellationToken::new();
+        registry
+            .reserve(identity.clone(), cancel.clone())
+            .map_err(|error| error.to_string())?;
+
+        let admission = registry
+            .admit(identity.clone(), CancellationToken::new())
+            .map_err(|error| error.to_string())?;
+        assert!(!admission.cancel.is_cancelled());
+        admission.settle(SubagentStatus::Completed);
+        assert!(matches!(
+            registry
+                .request_interrupt(identity)
+                .map_err(|error| error.to_string())?
+                .disposition,
+            SubagentInterruptRequestDisposition::AlreadySettled(SubagentStatus::Completed)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn reserved_interrupt_drops_as_cancelled_not_failed() -> Result<(), String> {
+        let registry = Arc::new(SubagentControlRegistry::default());
+        let identity = SubagentAttemptIdentity::new("task-reserved", "execution-cancelled", 1)
+            .map_err(|error| error.to_string())?;
+        let cancel = CancellationToken::new();
+        registry
+            .reserve(identity.clone(), cancel.clone())
+            .map_err(|error| error.to_string())?;
+
+        let receipt = registry
+            .request_interrupt(identity.clone())
+            .map_err(|error| error.to_string())?;
+        assert_eq!(
+            receipt.disposition,
+            SubagentInterruptRequestDisposition::ReservedRequested
+        );
+        assert!(cancel.is_cancelled());
+        let admission = registry
+            .admit(identity.clone(), CancellationToken::new())
+            .map_err(|error| error.to_string())?;
+        drop(admission);
+        assert!(matches!(
+            registry
+                .request_interrupt(identity)
+                .map_err(|error| error.to_string())?
+                .disposition,
+            SubagentInterruptRequestDisposition::AlreadySettled(SubagentStatus::Cancelled)
+        ));
         Ok(())
     }
 }

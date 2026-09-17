@@ -197,6 +197,18 @@ pub trait RuntimeDagController: Send + Sync + 'static {
         Ok(())
     }
 
+    /// Project a durable exact interrupt into the live reservation/attempt
+    /// registry. Returning `true` means the controller accepted the request;
+    /// the runtime still re-checks the durable claim before returning.
+    async fn request_live_interrupt(
+        &self,
+        _run_id: &str,
+        _task_id: &str,
+        _claim: &TaskClaim,
+    ) -> Result<bool> {
+        Ok(false)
+    }
+
     /// Retire the process-local control projection after the durable claim has
     /// reached a terminal or superseded outcome. Cleanup is diagnostic and must
     /// never mutate the already committed task state.

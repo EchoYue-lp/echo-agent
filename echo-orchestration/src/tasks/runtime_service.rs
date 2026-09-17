@@ -181,17 +181,23 @@ impl<C: RuntimeDagController> RuntimeTaskService<C> {
             ));
         }
         let execution_id = claim.execution_id(run_id, task_id);
-        let requested = self
+        let registry_requested = self
             .executor
-            .attempt_cancellations
-            .lock()
-            .ok()
-            .and_then(|controls| controls.get(&execution_id).cloned())
-            .map(|cancel| {
-                cancel.cancel();
-                true
-            })
-            .unwrap_or(false);
+            .controller
+            .request_live_interrupt(run_id, task_id, claim)
+            .await?;
+        let requested = registry_requested
+            || self
+                .executor
+                .attempt_cancellations
+                .lock()
+                .ok()
+                .and_then(|controls| controls.get(&execution_id).cloned())
+                .map(|cancel| {
+                    cancel.cancel();
+                    true
+                })
+                .unwrap_or(false);
         // The claim can be superseded between the first precondition check and
         // the live-token write. Re-read the durable authority and retire only
         // the exact projection just written; never let a stale command claim a

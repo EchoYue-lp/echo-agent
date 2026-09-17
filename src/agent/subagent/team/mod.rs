@@ -21,12 +21,13 @@ use tokio_util::sync::CancellationToken;
 
 use echo_orchestration::tasks::{
     DefaultTaskToolPolicy, InMemoryRevisionedTaskStore, NestedDelegationPolicy,
-    RevisionedTaskGraph, RevisionedTaskStore, RuntimeClaimAbandonment, RuntimeDagController,
-    RuntimeDagOutcome, RuntimeInterruptionDisposition, RuntimeInterruptionSettlementOutcome,
-    RuntimePlanSnapshot, RuntimeTaskClaimOutcome, RuntimeTaskResolution,
-    RuntimeTaskResolutionRequest, RuntimeTaskService, RuntimeTaskServiceConfig, Task, TaskClaim,
-    TaskExecution, TaskGraphContext, TaskGraphExecutionMode, TaskPlanPatch, TaskPlanPatchOp,
-    TaskRevisionError, TaskRevisionService, TaskSpec, TaskStatus, TaskSubagentContext,
+    RevisionedTaskGraph, RevisionedTaskStore, RuntimeAttemptControlCleanupReceipt,
+    RuntimeClaimAbandonment, RuntimeDagController, RuntimeDagOutcome,
+    RuntimeInterruptionDisposition, RuntimeInterruptionSettlementOutcome, RuntimePlanSnapshot,
+    RuntimeTaskClaimOutcome, RuntimeTaskResolution, RuntimeTaskResolutionRequest,
+    RuntimeTaskService, RuntimeTaskServiceConfig, Task, TaskClaim, TaskExecution, TaskGraphContext,
+    TaskGraphExecutionMode, TaskPlanPatch, TaskPlanPatchOp, TaskRevisionError, TaskRevisionService,
+    TaskSpec, TaskStatus, TaskSubagentContext,
 };
 
 use super::control::SubagentAttemptIdentity;
@@ -581,6 +582,40 @@ pub type TeamDispatchFn = Arc<
         + Sync,
 >;
 
+/// Process-local reservation hook paired with a Team dispatch callback.
+pub type TeamReserveAttemptFn =
+    Arc<dyn Fn(TaskSubagentContext) -> std::result::Result<(), String> + Send + Sync>;
+
+/// Live exact-interrupt projection hook paired with a Team runtime.
+pub type TeamRequestInterruptFn =
+    Arc<dyn Fn(String, String, TaskClaim) -> std::result::Result<bool, String> + Send + Sync>;
+
+/// Post-settlement cleanup hook for a Team attempt control projection.
+pub type TeamRetireAttemptFn = Arc<
+    dyn Fn(String, Task, TaskClaim) -> BoxFuture<'static, RuntimeAttemptControlCleanupReceipt>
+        + Send
+        + Sync,
+>;
+
+#[derive(Clone)]
+pub(super) struct TeamDispatchControl {
+    pub reserve_attempt: TeamReserveAttemptFn,
+    pub request_interrupt: TeamRequestInterruptFn,
+    pub retire_attempt: TeamRetireAttemptFn,
+}
+
+impl Default for TeamDispatchControl {
+    fn default() -> Self {
+        Self {
+            reserve_attempt: Arc::new(|_| Ok(())),
+            request_interrupt: Arc::new(|_, _, _| Ok(false)),
+            retire_attempt: Arc::new(|_, _, _| {
+                Box::pin(async { RuntimeAttemptControlCleanupReceipt::Retired })
+            }),
+        }
+    }
+}
+
 /// Terminal output of one Team graph execution.
 #[derive(Debug, Clone)]
 pub struct TeamExecutionResult {
@@ -632,6 +667,18 @@ pub(super) async fn execute_team_with_runtime_dispatch(
     dispatch: TeamDispatchFn,
 ) -> Result<TeamExecutionResult> {
     let runtime = Arc::new(TeamRuntimeController::new(dispatch));
+    execute_team_on_runtime(spec, objective, run_id, cancel, runtime).await
+}
+
+pub(super) async fn execute_team_with_runtime_dispatch_and_control(
+    spec: &TeamSpec,
+    objective: &str,
+    run_id: &str,
+    cancel: CancellationToken,
+    dispatch: TeamDispatchFn,
+    control: TeamDispatchControl,
+) -> Result<TeamExecutionResult> {
+    let runtime = Arc::new(TeamRuntimeController::with_control(dispatch, control));
     execute_team_on_runtime(spec, objective, run_id, cancel, runtime).await
 }
 
@@ -1196,6 +1243,7 @@ struct TeamRuntimeController {
     store: Arc<InMemoryRevisionedTaskStore>,
     revisions: TaskRevisionService,
     dispatch: TeamDispatchFn,
+    control: TeamDispatchControl,
     outputs: Mutex<HashMap<String, HashMap<String, SubagentResult>>>,
     staged_outputs: Mutex<HashMap<String, StagedTeamOutput>>,
     settlement: Mutex<()>,
@@ -1203,6 +1251,10 @@ struct TeamRuntimeController {
 
 impl TeamRuntimeController {
     fn new(dispatch: TeamDispatchFn) -> Self {
+        Self::with_control(dispatch, TeamDispatchControl::default())
+    }
+
+    fn with_control(dispatch: TeamDispatchFn, control: TeamDispatchControl) -> Self {
         let store = Arc::new(InMemoryRevisionedTaskStore::new());
         let revisions = TaskRevisionService::new(
             store.clone(),
@@ -1212,6 +1264,7 @@ impl TeamRuntimeController {
             store,
             revisions,
             dispatch,
+            control,
             outputs: Mutex::new(HashMap::new()),
             staged_outputs: Mutex::new(HashMap::new()),
             settlement: Mutex::new(()),
@@ -1254,6 +1307,29 @@ impl RuntimeDagController for TeamRuntimeController {
             .runtime_claim_is_current(run_id, task_id, claim)
             .await
             .map_err(|error| ReactError::Other(error.to_string()))
+    }
+
+    async fn reserve_attempt_control(&self, context: &TaskSubagentContext) -> Result<()> {
+        (self.control.reserve_attempt)(context.clone()).map_err(ReactError::Other)
+    }
+
+    async fn request_live_interrupt(
+        &self,
+        run_id: &str,
+        task_id: &str,
+        claim: &TaskClaim,
+    ) -> Result<bool> {
+        (self.control.request_interrupt)(run_id.to_string(), task_id.to_string(), claim.clone())
+            .map_err(ReactError::Other)
+    }
+
+    async fn retire_attempt_control(
+        &self,
+        run_id: &str,
+        task: &Task,
+        claim: &TaskClaim,
+    ) -> RuntimeAttemptControlCleanupReceipt {
+        (self.control.retire_attempt)(run_id.to_string(), task.clone(), claim.clone()).await
     }
 
     async fn dispatch_task(

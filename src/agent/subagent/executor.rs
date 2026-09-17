@@ -568,6 +568,10 @@ impl SubagentExecutor {
             .control_registry
             .admit(identity, req.cancel.clone())
             .map_err(Self::control_react_error)?;
+        req.cancel = admission.cancel.clone();
+        if let Some(context) = req.runtime_context.as_mut() {
+            context.cancel = Some(Arc::new(req.cancel.clone()));
+        }
         Self::append_queued_guidance(&mut req.task, &admission.guidance);
         Ok((req, admission))
     }
@@ -632,6 +636,23 @@ impl SubagentExecutor {
     ) -> std::result::Result<super::control::SubagentInterruptRequestReceipt, SubagentControlError>
     {
         self.control_registry.request_interrupt(identity)
+    }
+
+    /// Bind a claimed Team task to its exact live-control identity before it
+    /// waits for execution capacity. The later dispatch consumes this binding.
+    pub(crate) fn reserve_attempt(
+        &self,
+        identity: SubagentAttemptIdentity,
+        cancel: CancellationToken,
+    ) -> std::result::Result<(), SubagentControlError> {
+        self.control_registry.reserve(identity, cancel)
+    }
+
+    pub(crate) fn retire_attempt_control(
+        &self,
+        identity: &SubagentAttemptIdentity,
+    ) -> std::result::Result<bool, SubagentControlError> {
+        self.control_registry.retire_pending(identity)
     }
 
     /// Stamp identity/lineage basics and install the default uplink sink on a
@@ -1588,6 +1609,66 @@ impl SubagentExecutor {
             .clone()
             .filter(|context| !context.messages.is_empty() || context.parent_goal.is_some());
         let spawned = self.clone_for_spawn();
+        let control_executor = self.clone_for_spawn();
+        let interrupt_executor = self.clone_for_spawn();
+        let cleanup_executor = self.clone_for_spawn();
+        let reserve_attempt: super::team::TeamReserveAttemptFn = Arc::new(move |context| {
+            let claim = context
+                .claim()
+                .ok_or_else(|| "Team reservation requires an exact TaskClaim".to_string())?;
+            let task_id = context
+                .task_id()
+                .ok_or_else(|| "Team reservation requires an exact task id".to_string())?;
+            let identity = SubagentAttemptIdentity::new(
+                task_id.to_string(),
+                claim.execution_id(&context.run_id, task_id),
+                claim.attempt,
+            )
+            .map_err(|error| error.to_string())?;
+            control_executor
+                .reserve_attempt(identity, context.cancel.clone())
+                .map_err(|error| error.to_string())
+        });
+        let request_interrupt: super::team::TeamRequestInterruptFn =
+            Arc::new(move |run_id, task_id, claim| {
+                let execution_id = claim.execution_id(&run_id, &task_id);
+                let identity = SubagentAttemptIdentity::new(task_id, execution_id, claim.attempt)
+                    .map_err(|error| error.to_string())?;
+                interrupt_executor
+                    .request_interrupt(identity)
+                    .map(|_| true)
+                    .map_err(|error| error.to_string())
+            });
+        let retire_attempt: super::team::TeamRetireAttemptFn = Arc::new(
+            move |run_id, task, claim| {
+                let cleanup_executor = cleanup_executor.clone_for_spawn();
+                Box::pin(async move {
+                    let task_id = task.spec.id.clone();
+                    let execution_id = claim.execution_id(&run_id, &task_id);
+                    let identity = match SubagentAttemptIdentity::new(
+                        task_id,
+                        execution_id,
+                        claim.attempt,
+                    ) {
+                        Ok(identity) => identity,
+                        Err(error) => {
+                            return echo_orchestration::tasks::RuntimeAttemptControlCleanupReceipt::RetryableFailure {
+                                error: error.to_string(),
+                            };
+                        }
+                    };
+                    match cleanup_executor.retire_attempt_control(&identity) {
+                        Ok(true) => {
+                            echo_orchestration::tasks::RuntimeAttemptControlCleanupReceipt::Retired
+                        }
+                        Ok(false) => echo_orchestration::tasks::RuntimeAttemptControlCleanupReceipt::AlreadyConsumed,
+                        Err(error) => echo_orchestration::tasks::RuntimeAttemptControlCleanupReceipt::RetryableFailure {
+                            error: error.to_string(),
+                        },
+                    }
+                })
+            },
+        );
         let dispatch: super::team::TeamDispatchFn = Arc::new(move |request| {
             let super::team::TeamDispatchRequest {
                 member: agent_name,
@@ -1669,12 +1750,18 @@ impl SubagentExecutor {
             })
         });
         let start = Instant::now();
-        let result = super::team::execute_team_with_runtime_dispatch(
+        let control = super::team::TeamDispatchControl {
+            reserve_attempt,
+            request_interrupt,
+            retire_attempt,
+        };
+        let result = super::team::execute_team_with_runtime_dispatch_and_control(
             &spec,
             &team_objective,
             &run_id,
             req.cancel.child_token(),
             dispatch,
+            control,
         )
         .await?;
         let tokens_used = result
