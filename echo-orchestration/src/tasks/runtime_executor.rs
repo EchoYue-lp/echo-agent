@@ -574,8 +574,13 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
                             Err(error) => Err(error),
                         }
                     } else {
-                        match semaphore.acquire_owned().await {
-                            Ok(permit) => {
+                        let permit = tokio::select! {
+                            biased;
+                            _ = task_cancel.cancelled() => None,
+                            permit = semaphore.acquire_owned() => Some(permit),
+                        };
+                        match permit {
+                            Some(Ok(permit)) => {
                                 let context = match TaskSubagentContext::from_claim(
                                     dispatch_run_id,
                                     task.spec.id.clone(),
@@ -595,8 +600,14 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
                                 drop(permit);
                                 result
                             }
-                            Err(error) => Err(ReactError::Other(format!(
+                            Some(Err(error)) => Err(ReactError::Other(format!(
                                 "Subagent semaphore closed: {error}"
+                            ))),
+                            None => Err(ReactError::Agent(Box::new(
+                                echo_core::error::AgentError::Cancelled(
+                                    "cancelled while waiting for Subagent execution admission"
+                                        .to_string(),
+                                ),
                             ))),
                         }
                     };
