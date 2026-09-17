@@ -76,7 +76,7 @@ File Journal batches, checkpoints, and segmented retention markers use identity-
 
 Restoration validates assistant tool calls and tool results as paired messages. This prevents provider-invalid context and avoids replaying already completed side effects.
 
-`AgentCheckpoint` owns only ReAct runtime state. It does not own an application task DAG and is not the user-visible transcript stored by `ConversationStore`.
+`AgentCheckpoint` owns only ReAct runtime state. It does not own an application task DAG and is not the user-visible transcript stored by `ConversationStore`. When transcript projection is enabled, its private versioned payload may carry one complete `PendingTranscriptProjection`; that value is durable intent until a ConversationStore receipt confirms the committed fact.
 
 `AgentInvocationContext` may separate these identities explicitly. `runtime.conversation_id`
 remains the product/event/transcript identity, while `runtime_state_id` selects the
@@ -100,10 +100,24 @@ conversation. Together these rules prevent A -> B -> A from writing A messages i
 Rotating `runtime_state_id` starts a clean model context without deleting the stable product
 conversation. `save_checkpoint_for_scope` durably indexes each runtime ID under that product
 scope. After its admission/settlement barrier, reset uses
-`clear_persisted_runtime_incarnation` to reclaim the exact retired checkpoint and any
-incarnation-keyed transcript while keeping the stable transcript. Product deletion uses
-`delete_persisted_conversation` to clear the complete runtime lineage and incarnation transcripts
-before deleting the stable transcript. See [ADR 0006](../adr/0006-runtime-state-scope-lineage.md).
+`clear_persisted_runtime_incarnation` to settle any durable pending projection and retire the exact
+runtime checkpoint while keeping transcript data. It only removes an incarnation-keyed transcript
+for a legacy unmanaged Store pair; managed cleanup cannot safely infer a stable delete identity
+after recreation. Managed product deletion requires a caller-retained `ManagedConversationDelete`
+request and `delete_persisted_conversation_managed`; the request identity is reused across timeout,
+restart, receipt loss, and later conversation recreation. The convenience
+`delete_persisted_conversation` entry remains for legacy unmanaged Store pairs and fails closed for
+managed pairs because it cannot infer whether a call targets an old delete or a recreated epoch.
+Managed generations use revision CAS and retirement tombstones, while product deletion persists a
+complete scope manifest, the full dropped-operation set, and an epoch-fenced ConversationStore
+receipt. See [ADR 0006](../adr/0006-runtime-state-scope-lineage.md) and
+[ADR 0056](../adr/0056-durable-transcript-projection-settlement.md).
+
+Managed clear/delete helpers have context-aware variants that preserve a caller-owned absolute
+deadline through the complete saga. Legacy unmanaged Store traits have no context-bearing raw
+operations, so their compatibility helpers retain the historical unbounded contract and the
+context-aware variants reject them as unsupported rather than claiming a deadline they cannot
+enforce.
 
 ### Other checkpoint domains
 

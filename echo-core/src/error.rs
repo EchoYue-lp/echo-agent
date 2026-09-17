@@ -144,13 +144,29 @@ impl From<&ReactError> for AgentFailure {
                 "mcp",
                 None,
             ),
-            ReactError::Memory(_) => (
-                AgentFailureCategory::Memory,
-                AgentTerminalKind::Failed,
-                false,
-                "memory",
-                None,
-            ),
+            ReactError::Memory(inner) => match inner.as_ref() {
+                MemoryError::DeadlineExceeded(_) => (
+                    AgentFailureCategory::Memory,
+                    AgentTerminalKind::TimedOut,
+                    true,
+                    "memory_deadline",
+                    None,
+                ),
+                MemoryError::TransientNoCommit(_) => (
+                    AgentFailureCategory::Memory,
+                    AgentTerminalKind::Failed,
+                    true,
+                    "memory_transient_no_commit",
+                    None,
+                ),
+                _ => (
+                    AgentFailureCategory::Memory,
+                    AgentTerminalKind::Failed,
+                    false,
+                    "memory",
+                    None,
+                ),
+            },
             ReactError::Sandbox(inner) => match inner.as_ref() {
                 SandboxError::Timeout(_) => (
                     AgentFailureCategory::Sandbox,
@@ -181,13 +197,50 @@ impl From<&ReactError> for AgentFailure {
                     None,
                 ),
             },
-            ReactError::RuntimeState(_) => (
-                AgentFailureCategory::RuntimeState,
-                AgentTerminalKind::Failed,
-                false,
-                "runtime_state",
-                None,
-            ),
+            ReactError::RuntimeState(inner) => match inner.as_ref() {
+                RuntimeStateError::TranscriptProjectionDeferred { .. } => (
+                    AgentFailureCategory::RuntimeState,
+                    AgentTerminalKind::Failed,
+                    true,
+                    "transcript_projection_deferred",
+                    None,
+                ),
+                RuntimeStateError::DeadlineExceeded(_) => (
+                    AgentFailureCategory::RuntimeState,
+                    AgentTerminalKind::TimedOut,
+                    true,
+                    "runtime_state_deadline",
+                    None,
+                ),
+                RuntimeStateError::TranscriptProjectionBlocked { .. } => (
+                    AgentFailureCategory::RuntimeState,
+                    AgentTerminalKind::Failed,
+                    false,
+                    "transcript_projection_blocked",
+                    None,
+                ),
+                RuntimeStateError::Io(_) => (
+                    AgentFailureCategory::RuntimeState,
+                    AgentTerminalKind::Failed,
+                    true,
+                    "runtime_state_io",
+                    None,
+                ),
+                RuntimeStateError::TransientNoCommit(_) => (
+                    AgentFailureCategory::RuntimeState,
+                    AgentTerminalKind::Failed,
+                    true,
+                    "runtime_state_transient_no_commit",
+                    None,
+                ),
+                _ => (
+                    AgentFailureCategory::RuntimeState,
+                    AgentTerminalKind::Failed,
+                    false,
+                    "runtime_state",
+                    None,
+                ),
+            },
             #[cfg(feature = "channels")]
             ReactError::Channel(_) => (
                 AgentFailureCategory::Channel,
@@ -711,6 +764,43 @@ mod agent_failure_tests {
                 true,
                 None,
             ),
+            (
+                ReactError::Memory(Box::new(MemoryError::DeadlineExceeded("late".to_string()))),
+                AgentFailureCategory::Memory,
+                AgentTerminalKind::TimedOut,
+                true,
+                None,
+            ),
+            (
+                ReactError::Memory(Box::new(MemoryError::TransientNoCommit(
+                    "retry".to_string(),
+                ))),
+                AgentFailureCategory::Memory,
+                AgentTerminalKind::Failed,
+                true,
+                None,
+            ),
+            (
+                ReactError::RuntimeState(Box::new(
+                    RuntimeStateError::TranscriptProjectionDeferred {
+                        operation_id: Some("operation".to_string()),
+                        reason: "backend unavailable".to_string(),
+                    },
+                )),
+                AgentFailureCategory::RuntimeState,
+                AgentTerminalKind::Failed,
+                true,
+                None,
+            ),
+            (
+                ReactError::RuntimeState(Box::new(RuntimeStateError::TransientNoCommit(
+                    "retry".to_string(),
+                ))),
+                AgentFailureCategory::RuntimeState,
+                AgentTerminalKind::Failed,
+                true,
+                None,
+            ),
         ];
         for (error, category, terminal, retryable, status) in cases {
             let failure = AgentFailure::from(&error);
@@ -747,6 +837,21 @@ pub enum RuntimeStateError {
     /// A durable revision cannot be advanced without overflow.
     #[error("Runtime state revision exhausted: {0}")]
     RevisionExhausted(String),
+    /// A persistence call exceeded the shared absolute deadline.
+    #[error("Runtime state deadline exceeded: {0}")]
+    DeadlineExceeded(String),
+    /// A durable transcript effect remains retryable before new admission.
+    #[error("Transcript projection deferred ({operation_id:?}): {reason}")]
+    TranscriptProjectionDeferred {
+        operation_id: Option<String>,
+        reason: String,
+    },
+    /// A persistence failure was observed and must replace the original terminal.
+    #[error("Transcript projection blocked ({status}): {reason}")]
+    TranscriptProjectionBlocked { status: String, reason: String },
+    /// A retryable runtime-state failure known to have made no durable commit.
+    #[error("Transient runtime-state no-commit failure: {0}")]
+    TransientNoCommit(String),
 }
 
 impl From<RuntimeStateError> for ReactError {

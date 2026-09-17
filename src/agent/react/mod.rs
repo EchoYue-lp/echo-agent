@@ -650,6 +650,7 @@ impl ReactAgent {
                 runtime_state_hydration: Arc::new(tokio::sync::Mutex::new(
                     subsystems::memory::RuntimeStateHydration::default(),
                 )),
+                runtime_state_version: Arc::new(tokio::sync::Mutex::new(None)),
                 configured_working_dir,
                 transcript_projection_cursor: Arc::new(tokio::sync::Mutex::new(
                     crate::agent::snapshot::TranscriptProjectionCursor::default(),
@@ -1869,6 +1870,12 @@ impl ReactAgent {
         let Some(conversation_store) = self.memory.conversation_store.as_ref() else {
             return Ok(());
         };
+        if self.config.persistence_settlement_timeout.is_zero() {
+            return Err(crate::error::ConfigError::ConfigFileError(
+                "persistence_settlement_timeout must be greater than zero".to_string(),
+            )
+            .into());
+        }
         let Some(runtime_state_store) = self.memory.state_store.as_ref() else {
             return Err(crate::error::ConfigError::ConfigFileError(
                 "ConversationStore requires RuntimeStateStore for durable transcript projection"
@@ -1884,11 +1891,27 @@ impl ReactAgent {
             )
             .into());
         }
+        if conversation_store.persistence_call_capability()
+            != crate::memory::PersistenceCallCapability::AbsoluteDeadlineV1
+        {
+            return Err(crate::error::ConfigError::ConfigFileError(
+                "ConversationStore does not propagate absolute persistence deadlines".to_string(),
+            )
+            .into());
+        }
         if runtime_state_store.runtime_state_capability()
             != crate::state::RuntimeStateCapability::RevisionedV1
         {
             return Err(crate::error::ConfigError::ConfigFileError(
                 "RuntimeStateStore does not support revisioned transcript settlement".to_string(),
+            )
+            .into());
+        }
+        if runtime_state_store.persistence_call_capability()
+            != crate::memory::PersistenceCallCapability::AbsoluteDeadlineV1
+        {
+            return Err(crate::error::ConfigError::ConfigFileError(
+                "RuntimeStateStore does not propagate absolute persistence deadlines".to_string(),
             )
             .into());
         }
@@ -1938,12 +1961,7 @@ impl ReactAgent {
         if let Some(settlement) = snapshot.reconcile_pending_transcript_projection().await?
             && settlement.status != crate::memory::TranscriptProjectionSettlementStatus::Settled
         {
-            return Err(crate::error::ReactError::RuntimeState(Box::new(
-                echo_core::error::RuntimeStateError::ManagedStateRequiresCas(format!(
-                    "pending transcript projection did not settle before resume: {:?}",
-                    settlement.status
-                )),
-            )));
+            return Err(crate::agent::snapshot::transcript_settlement_admission_error(&settlement));
         }
         let Some(runtime_state_id) = self.config.conversation_id.clone() else {
             tracing::debug!("resume_from_state_store: no conversation_id configured");
@@ -1967,23 +1985,45 @@ impl ReactAgent {
         &self,
         runtime_state_id: &str,
     ) -> Result<Option<crate::state::AgentCheckpoint>> {
+        let scope_id = self
+            .config
+            .conversation_id
+            .as_deref()
+            .unwrap_or(runtime_state_id);
+        self.resume_from_state_store_scope(scope_id, runtime_state_id)
+            .await
+    }
+
+    pub(crate) async fn resume_from_state_store_scope(
+        &self,
+        scope_id: &str,
+        runtime_state_id: &str,
+    ) -> Result<Option<crate::state::AgentCheckpoint>> {
         self.validate_persistence_configuration()?;
         let Some(ref store) = self.memory.state_store else {
             return Ok(None);
         };
 
-        let checkpoint = if self.memory.conversation_store.is_some() {
-            let scope_id = self
-                .config
-                .conversation_id
-                .as_deref()
-                .unwrap_or(runtime_state_id);
-            store
-                .load_runtime_state(scope_id, runtime_state_id)
-                .await?
-                .and_then(|state| state.checkpoint)
+        let managed = self.memory.conversation_store.is_some();
+        let (checkpoint, runtime_version) = if managed {
+            let timeout = std::time::Duration::from_secs(10);
+            let context = crate::memory::PersistenceCallContext::with_timeout(timeout)?;
+            let loaded = tokio::time::timeout(
+                timeout,
+                store.load_runtime_state_with_context(context, scope_id, runtime_state_id),
+            )
+            .await
+            .map_err(|_| {
+                echo_core::error::RuntimeStateError::DeadlineExceeded(
+                    "runtime state hydration".to_string(),
+                )
+            })??;
+            match loaded {
+                Some(state) => (state.checkpoint, Some(state.version)),
+                None => (None, Some(crate::state::RuntimeStateVersion::Absent)),
+            }
         } else {
-            store.get_checkpoint(runtime_state_id).await?
+            (store.get_checkpoint(runtime_state_id).await?, None)
         };
         if let Some(ref cp) = checkpoint {
             let restored = cp.restore_runtime_payload()?;
@@ -1998,6 +2038,7 @@ impl ReactAgent {
 
             let msg_count = messages.len();
             self.memory.context.lock().await.set_messages(messages);
+            *self.memory.runtime_state_version.lock().await = runtime_version.clone();
 
             // Restore identity-local plan state exactly; `None` must not retain
             // the previous runtime identity's plan.
@@ -2052,6 +2093,9 @@ impl ReactAgent {
                 "Resumed from RuntimeStateStore checkpoint"
             );
         } else {
+            if managed {
+                *self.memory.runtime_state_version.lock().await = runtime_version;
+            }
             tracing::debug!(
                 conversation_id = runtime_state_id,
                 "No checkpoint found in RuntimeStateStore"
@@ -2207,30 +2251,6 @@ impl ReactAgent {
             tracing::warn!(error = %error, "Failed to save scoped trace run on start");
         }
         Some(run_id)
-    }
-
-    pub(crate) async fn finalize_scoped_trace_run(
-        &self,
-        trace_run_id: Option<&str>,
-        status: crate::trace::RunStatus,
-        output: Option<&str>,
-        error: Option<&str>,
-    ) {
-        let Some(run_id) = trace_run_id else {
-            return;
-        };
-        let Some(store) = self.run_store.as_ref() else {
-            return;
-        };
-        if let Ok(Some(mut run)) = store.load(run_id).await {
-            run.status = status;
-            run.final_output = output.map(str::to_string);
-            run.error = error.map(str::to_string);
-            run.finished_at = Some(chrono::Utc::now());
-            if let Err(error) = store.save(run).await {
-                tracing::warn!(error = %error, run_id, "Failed to finalize scoped trace run");
-            }
-        }
     }
 
     /// Shut down the agent and release all resources.

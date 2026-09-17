@@ -344,7 +344,7 @@ Built-in data tools (feature `data`): Polars-powered read/filter/aggregate/stats
 
 - **Store**: Long-term key-value storage with namespace isolation (`InMemoryStore`, `FileStore`, `SqliteStore`)
 - **RuntimeStateStore**: Full runtime checkpoint (messages + plan + active skills + blocked reason) for crash recovery (`SqliteRuntimeStateStore`)
-- **ConversationStore**: User-visible transcript projection persisted automatically at run finalization
+- **ConversationStore**: User-visible transcript projection, atomically settled with a paired `RuntimeStateStore` before compaction or terminal publication
 
 One line to give your agent persistent memory — no manual tool wiring:
 

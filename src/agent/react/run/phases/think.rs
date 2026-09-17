@@ -20,9 +20,8 @@ use tokio::sync::{Mutex, mpsc};
 /// Returns:
 /// - [`ThinkOutcome::Continue`] with the assembled [`ThinkOutput`].
 /// - [`ThinkOutcome::Abandoned`] when the channel was closed mid-stream.
-/// - [`ThinkOutcome::Cancelled`] / [`ThinkOutcome::Blocked`] when an
-///   intervention callback aborted the turn (the error has already been
-///   forwarded to the channel).
+/// - [`ThinkOutcome::TerminalSettled`] when this phase already persisted and
+///   published the single terminal outcome.
 pub(crate) async fn run_think(
     snap: &AgentRunSnapshot,
     context: &Arc<Mutex<crate::compression::ContextManager>>,
@@ -53,7 +52,9 @@ pub(crate) async fn run_think(
             )
             .await;
             let _ = tx.send(Ok(AgentEvent::Cancelled)).await;
-            return Ok(ThinkOutcome::Cancelled);
+            return Ok(ThinkOutcome::TerminalSettled {
+                outcome: crate::agent::AgentSteerTurnOutcome::Cancelled,
+            });
         }
         if result.block {
             let reason = result
@@ -78,7 +79,9 @@ pub(crate) async fn run_think(
                     format!("Think blocked by intervention: {reason}"),
                 )))
                 .await;
-            return Ok(ThinkOutcome::Blocked);
+            return Ok(ThinkOutcome::TerminalSettled {
+                outcome: crate::agent::AgentSteerTurnOutcome::Failed,
+            });
         }
         if let Some(injected) = result.injected_context {
             super::super::context::push_runtime_context_note(
@@ -116,7 +119,9 @@ pub(crate) async fn run_think(
         let _ = tx
             .send(Ok(AgentEvent::from_error("react_loop", &error)))
             .await;
-        return Ok(ThinkOutcome::Failed);
+        return Ok(ThinkOutcome::TerminalSettled {
+            outcome: crate::agent::AgentSteerTurnOutcome::Failed,
+        });
     }
     let cache_fingerprint = cache_fingerprint(&messages, request_tools.as_deref());
     let (protected_message_count, protected_context_tokens) = {
@@ -141,7 +146,9 @@ pub(crate) async fn run_think(
             let _ = tx
                 .send(Ok(AgentEvent::from_error("react_loop", &error)))
                 .await;
-            return Ok(ThinkOutcome::Failed);
+            return Ok(ThinkOutcome::TerminalSettled {
+                outcome: crate::agent::AgentSteerTurnOutcome::Failed,
+            });
         }
     };
     let mut content_buffer = String::new();
@@ -173,7 +180,9 @@ pub(crate) async fn run_think(
                     Some("Agent execution cancelled during model response"),
                 ).await;
                 let _ = tx.send(Ok(AgentEvent::Cancelled)).await;
-                return Ok(ThinkOutcome::Cancelled);
+                return Ok(ThinkOutcome::TerminalSettled {
+                    outcome: crate::agent::AgentSteerTurnOutcome::Cancelled,
+                });
             }
             next = llm_stream.next() => next,
         };
@@ -202,7 +211,9 @@ pub(crate) async fn run_think(
                     )
                     .await;
                     let _ = tx.send(Ok(AgentEvent::Cancelled)).await;
-                    return Ok(ThinkOutcome::Cancelled);
+                    return Ok(ThinkOutcome::TerminalSettled {
+                        outcome: crate::agent::AgentSteerTurnOutcome::Cancelled,
+                    });
                 }
                 super::finalize::settle_terminal_projection(
                     snap,
@@ -221,7 +232,9 @@ pub(crate) async fn run_think(
                 let _ = tx
                     .send(Ok(AgentEvent::from_error("react_loop", &error)))
                     .await;
-                return Ok(ThinkOutcome::Failed);
+                return Ok(ThinkOutcome::TerminalSettled {
+                    outcome: crate::agent::AgentSteerTurnOutcome::Failed,
+                });
             }
         };
         for reason in chunk
@@ -270,7 +283,9 @@ pub(crate) async fn run_think(
             .await;
             emit_partial_content_before_failure(tx, &content_buffer).await;
             let _ = tx.send(Err(error)).await;
-            return Ok(ThinkOutcome::Failed);
+            return Ok(ThinkOutcome::TerminalSettled {
+                outcome: crate::agent::AgentSteerTurnOutcome::Failed,
+            });
         }
         None => {
             let error =
@@ -288,7 +303,9 @@ pub(crate) async fn run_think(
             .await;
             emit_partial_content_before_failure(tx, &content_buffer).await;
             let _ = tx.send(Err(error)).await;
-            return Ok(ThinkOutcome::Failed);
+            return Ok(ThinkOutcome::TerminalSettled {
+                outcome: crate::agent::AgentSteerTurnOutcome::Failed,
+            });
         }
     }
 

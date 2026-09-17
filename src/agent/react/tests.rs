@@ -2448,7 +2448,7 @@ async fn invocation_history_is_inserted_before_current_input() -> Result<(), Str
     ];
 
     agent
-        .prepare_stream_context(StreamMode::Chat, "current input", &history, None)
+        .prepare_stream_context(StreamMode::Chat, "current input", &history, None, None)
         .await
         .map_err(|error| error.to_string())?;
 
@@ -2738,7 +2738,7 @@ async fn recall_injects_memories_into_current_user_message() -> Result<(), Strin
 
     // Drive prepare_stream_context with a query that should hit the seeded fact.
     let recalled = agent
-        .prepare_stream_context(StreamMode::Chat, "Rust", &[], None)
+        .prepare_stream_context(StreamMode::Chat, "Rust", &[], None, None)
         .await
         .map_err(|error| error.to_string())?;
     assert!(
@@ -2814,7 +2814,7 @@ async fn recall_injects_memories_into_current_user_message() -> Result<(), Strin
 
     drop(ctx);
     agent
-        .prepare_stream_context(StreamMode::Chat, "unrelated-query", &[], None)
+        .prepare_stream_context(StreamMode::Chat, "unrelated-query", &[], None, None)
         .await
         .map_err(|error| error.to_string())?;
     let ctx = agent.memory.context.lock().await;
@@ -2883,6 +2883,172 @@ async fn conversation_store_without_runtime_state_is_rejected_before_run_side_ef
         )
         .await?
         .is_none()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn revisioned_runtime_without_deadline_capability_is_rejected_before_side_effects()
+-> crate::error::Result<()> {
+    struct RevisionedWithoutDeadline;
+
+    impl crate::state::RuntimeStateStore for RevisionedWithoutDeadline {
+        fn runtime_state_capability(&self) -> crate::state::RuntimeStateCapability {
+            crate::state::RuntimeStateCapability::RevisionedV1
+        }
+
+        fn get_checkpoint<'a>(
+            &'a self,
+            _conversation_id: &'a str,
+        ) -> futures::future::BoxFuture<
+            'a,
+            crate::error::Result<Option<crate::state::AgentCheckpoint>>,
+        > {
+            Box::pin(async { Ok(None) })
+        }
+
+        fn save_checkpoint<'a>(
+            &'a self,
+            _checkpoint: &'a crate::state::AgentCheckpoint,
+        ) -> futures::future::BoxFuture<'a, crate::error::Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn save_checkpoint_for_scope<'a>(
+            &'a self,
+            _scope_id: &'a str,
+            _checkpoint: &'a crate::state::AgentCheckpoint,
+        ) -> futures::future::BoxFuture<'a, crate::error::Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn runtime_state_ids<'a>(
+            &'a self,
+            _scope_id: &'a str,
+        ) -> futures::future::BoxFuture<'a, crate::error::Result<Vec<String>>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn clear_runtime_state<'a>(
+            &'a self,
+            scope_id: &'a str,
+            runtime_state_id: &'a str,
+        ) -> futures::future::BoxFuture<
+            'a,
+            crate::error::Result<crate::state::RuntimeStateClearReceipt>,
+        > {
+            Box::pin(async move {
+                Ok(crate::state::RuntimeStateClearReceipt {
+                    scope_id: scope_id.to_string(),
+                    runtime_state_id: runtime_state_id.to_string(),
+                    checkpoint_removed: false,
+                })
+            })
+        }
+
+        fn clear_runtime_state_scope<'a>(
+            &'a self,
+            scope_id: &'a str,
+        ) -> futures::future::BoxFuture<
+            'a,
+            crate::error::Result<crate::state::RuntimeStateScopeClearReceipt>,
+        > {
+            Box::pin(async move {
+                Ok(crate::state::RuntimeStateScopeClearReceipt {
+                    scope_id: scope_id.to_string(),
+                    runtime_state_ids: Vec::new(),
+                })
+            })
+        }
+
+        fn clear_conversation<'a>(
+            &'a self,
+            _conversation_id: &'a str,
+        ) -> futures::future::BoxFuture<'a, crate::error::Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    let root = tempfile::tempdir()?;
+    let conversations = Arc::new(crate::memory::FileConversationStore::new(root.path())?);
+    let config =
+        AgentConfig::new("test-model", "agent", "system").conversation_id("deadline-capability");
+    let mut agent = ReactAgent::new(config);
+    agent.set_conversation_store(conversations.clone());
+    agent.set_state_store(Arc::new(RevisionedWithoutDeadline));
+    let before = serde_json::to_value(agent.memory.context.lock().await.messages())?;
+
+    let result = agent.run_direct("must not run").await;
+    assert!(matches!(result, Err(crate::error::ReactError::Config(_))));
+    assert_eq!(
+        serde_json::to_value(agent.memory.context.lock().await.messages())?,
+        before
+    );
+    assert!(
+        crate::memory::ConversationStore::get_conversation(
+            conversations.as_ref(),
+            "deadline-capability"
+        )
+        .await?
+        .is_none()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn managed_force_checkpoint_settles_transcript_before_returning() -> crate::error::Result<()>
+{
+    let conversation_root = tempfile::tempdir()?;
+    let runtime_root = tempfile::tempdir()?;
+    let conversations = Arc::new(crate::memory::FileConversationStore::new(
+        conversation_root.path(),
+    )?);
+    let runtime = Arc::new(crate::state::FileRuntimeStateStore::new(
+        runtime_root.path(),
+    )?);
+    let config = AgentConfig::new("test-model", "agent", "system")
+        .conversation_id("managed-force-checkpoint");
+    let mut agent = ReactAgent::new(config);
+    agent.set_conversation_store(conversations.clone());
+    agent.set_state_store(runtime.clone());
+    agent
+        .memory
+        .context
+        .lock()
+        .await
+        .push(Message::user("persist both authorities".to_string()));
+
+    agent.force_checkpoint().await?;
+
+    let messages = crate::memory::ConversationStore::get_messages(
+        conversations.as_ref(),
+        "managed-force-checkpoint",
+    )
+    .await?;
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.content.as_deref() == Some("persist both authorities"))
+    );
+    let state = crate::state::RuntimeStateStore::load_runtime_state(
+        runtime.as_ref(),
+        "managed-force-checkpoint",
+        "managed-force-checkpoint",
+    )
+    .await?
+    .ok_or_else(|| {
+        crate::error::ReactError::Other("managed runtime checkpoint missing".to_string())
+    })?;
+    let payload = state
+        .checkpoint
+        .as_ref()
+        .ok_or_else(|| crate::error::ReactError::Other("checkpoint payload missing".to_string()))?
+        .restore_managed_runtime_payload()?;
+    assert!(payload.pending_transcript_projection.is_none());
+    assert!(
+        payload
+            .transcript_projection
+            .is_some_and(|cursor| cursor.next_ordinal > 0)
     );
     Ok(())
 }

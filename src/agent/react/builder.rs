@@ -56,6 +56,7 @@ pub struct ReactAgentBuilder {
     tool_execution: ToolExecutionConfig,
     max_iterations: usize,
     run_budget: echo_core::agent::RunBudgetPolicy,
+    persistence_settlement_timeout: std::time::Duration,
     model_profile: Option<echo_core::llm::capabilities::ModelProfile>,
     token_limit: usize,
     token_limit_explicit: bool,
@@ -135,6 +136,7 @@ impl ReactAgentBuilder {
             tool_execution: ToolExecutionConfig::default(),
             max_iterations: 10,
             run_budget: echo_core::agent::RunBudgetPolicy::default(),
+            persistence_settlement_timeout: std::time::Duration::from_secs(10),
             model_profile: None,
             token_limit: DEFAULT_TOKEN_LIMIT,
             token_limit_explicit: false,
@@ -447,6 +449,12 @@ impl ReactAgentBuilder {
     /// Configure one-shot iteration wind-down and provider-reported token budget.
     pub fn run_budget(mut self, policy: echo_core::agent::RunBudgetPolicy) -> Self {
         self.run_budget = policy;
+        self
+    }
+
+    /// Set the non-zero total budget for a transcript persistence safe point.
+    pub fn persistence_settlement_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.persistence_settlement_timeout = timeout;
         self
     }
 
@@ -804,6 +812,12 @@ impl ReactAgentBuilder {
             )
             .into());
         }
+        if self.persistence_settlement_timeout.is_zero() {
+            return Err(crate::error::ConfigError::ConfigFileError(
+                "persistence_settlement_timeout must be greater than zero".to_string(),
+            )
+            .into());
+        }
         if self.enable_subagent && !self.enable_builtin_tools {
             return Err(crate::error::ConfigError::ConfigFileError(
                 "Enabling subagent dispatch (enable_subagent) requires enabling tool calls (enable_builtin_tools)"
@@ -832,6 +846,7 @@ impl ReactAgentBuilder {
             .tool_execution(self.tool_execution)
             .max_iterations(self.max_iterations)
             .run_budget(self.run_budget)
+            .persistence_settlement_timeout(self.persistence_settlement_timeout)
             .max_tokens(self.max_tokens)
             .temperature(self.temperature);
         #[cfg(feature = "subagent")]
@@ -1167,6 +1182,25 @@ mod tests {
         assert!(agent.llm_client().is_none());
         assert!(agent.llm_config().is_none());
         Ok(())
+    }
+
+    #[test]
+    fn builder_applies_nonzero_persistence_settlement_timeout() -> std::result::Result<(), String> {
+        let timeout = std::time::Duration::from_millis(750);
+        let agent = ReactAgentBuilder::new()
+            .persistence_settlement_timeout(timeout)
+            .build()
+            .map_err(|error| error.to_string())?;
+        assert_eq!(agent.config().persistence_settlement_timeout, timeout);
+        Ok(())
+    }
+
+    #[test]
+    fn builder_rejects_zero_persistence_settlement_timeout() {
+        let result = ReactAgentBuilder::new()
+            .persistence_settlement_timeout(std::time::Duration::ZERO)
+            .build();
+        assert!(matches!(result, Err(crate::error::ReactError::Config(_))));
     }
 
     #[test]

@@ -146,6 +146,9 @@ pub struct AgentConfig {
     /// from the last checkpointed iteration because the conversation history
     /// (including all tool calls and results) is preserved.
     pub(crate) react_checkpoint_interval: usize,
+    /// Total budget for one transcript projection settlement safe point.
+    /// Applications may shorten this default without changing effect identity.
+    pub(crate) persistence_settlement_timeout: std::time::Duration,
 
     /// Whether the verifier (Critic) is enabled for final_answer validation.
     pub(crate) verifier_enabled: bool,
@@ -219,6 +222,7 @@ impl AgentConfig {
             token_budget_config: TokenBudgetConfig::default(),
             permission_mode: PermissionMode::Default,
             react_checkpoint_interval: 0,
+            persistence_settlement_timeout: std::time::Duration::from_secs(10),
             verifier_enabled: false,
             verifier_min_score: 7.0,
             verifier_max_retries: 2,
@@ -451,6 +455,12 @@ impl AgentConfig {
     /// Set soft run budgets for iteration wind-down and model-token finalization.
     pub fn run_budget(mut self, policy: echo_core::agent::RunBudgetPolicy) -> Self {
         self.run_budget = policy;
+        self
+    }
+
+    /// Set the non-zero total budget for a transcript persistence safe point.
+    pub fn persistence_settlement_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.persistence_settlement_timeout = timeout;
         self
     }
 

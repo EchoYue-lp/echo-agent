@@ -35,18 +35,16 @@ pub(crate) async fn run_compact(
     // A complete transcript batch must be acknowledged before active context
     // can cross the compaction horizon or realign its generation cursor.
     let settlement = snap.save_transcript_projection(context, None).await?;
-    yield_event_or!(
-        tx,
-        AgentEvent::TranscriptProjectionSettlement(settlement.clone()),
-        CompactOutcome::Abandoned
-    );
+    if snap.conversation_store.is_some() {
+        yield_event_or!(
+            tx,
+            AgentEvent::TranscriptProjectionSettlement(settlement.clone()),
+            CompactOutcome::Abandoned
+        );
+        snap.mark_transcript_settlement_observed();
+    }
     if settlement.status != crate::memory::TranscriptProjectionSettlementStatus::Settled {
-        return Err(crate::error::ReactError::RuntimeState(Box::new(
-            echo_core::error::RuntimeStateError::ManagedStateRequiresCas(format!(
-                "pre-compact transcript projection did not settle: {:?}",
-                settlement.status
-            )),
-        )));
+        return Err(crate::agent::snapshot::transcript_settlement_admission_error(&settlement));
     }
     let projection_context = crate::compression::ProjectionContext {
         iteration,
@@ -313,6 +311,10 @@ mod tests {
 
         let temp = tempfile::tempdir()?;
         let conversation_store = Arc::new(FileConversationStore::new(temp.path())?);
+        let runtime_root = tempfile::tempdir()?;
+        let runtime_store = Arc::new(crate::state::FileRuntimeStateStore::new(
+            runtime_root.path(),
+        )?);
         // Rule injection stays off for the same reason as the trace test
         // above: injected workspace rules would exceed the tiny token limit
         // and turn the expected Continue outcome into Failed.
@@ -324,6 +326,7 @@ mod tests {
         config.auto_project_rules = false;
         let mut agent = ReactAgent::new(config);
         agent.set_conversation_store(conversation_store.clone());
+        agent.set_state_store(runtime_store);
         agent.set_compressor(SlidingWindowCompressor::new(1)).await;
         {
             let mut context = agent.memory.context.lock().await;

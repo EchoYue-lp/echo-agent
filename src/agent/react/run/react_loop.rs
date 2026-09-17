@@ -128,12 +128,27 @@ impl ReactAgent {
         // ★ Serialize all execution on this agent — only one run at a time.
         let _execution_guard = self.execution_mutex.lock().await;
 
-        match mode {
-            StreamMode::Execute => self.restore_thread_context().await?,
-            StreamMode::Chat => self.restore_chat_context_if_cold().await?,
-        }
         let admission_snapshot =
             AgentRunSnapshot::from_agent_with_legacy_context(self, &legacy_runtime);
+        if let Some(settlement) = admission_snapshot
+            .reconcile_pending_transcript_projection()
+            .await?
+            && settlement.status != crate::memory::TranscriptProjectionSettlementStatus::Settled
+        {
+            return Err(crate::agent::snapshot::transcript_settlement_admission_error(&settlement));
+        }
+        let scope_id = admission_snapshot.config.conversation_id.as_deref();
+        let runtime_state_id = admission_snapshot.config.runtime_state_id.as_deref();
+        match mode {
+            StreamMode::Execute => {
+                self.restore_thread_context_for(scope_id, runtime_state_id)
+                    .await?
+            }
+            StreamMode::Chat => {
+                self.restore_chat_context_if_cold_for(scope_id, runtime_state_id)
+                    .await?
+            }
+        }
 
         // Prepare context (guard check, memory recall, push message, start trace)
         let (recalled, effective_message) =
@@ -143,21 +158,52 @@ impl ReactAgent {
                     // Guard blocked — return the message directly (not an error)
                     let msg = e.to_string();
                     if msg.starts_with("Request blocked by safety guard:") {
-                        let settlement = admission_snapshot
+                        let trace_run_id = self
+                            .start_legacy_trace_run("[input blocked by guard]", &legacy_runtime)
+                            .await;
+                        let mut terminal_snapshot =
+                            AgentRunSnapshot::from_agent_with_legacy_context(self, &legacy_runtime);
+                        terminal_snapshot.trace_run_id = trace_run_id;
+                        let settlement = match terminal_snapshot
                             .save_transcript_projection(&self.memory.context, Some(msg.clone()))
-                            .await?;
+                            .await
+                        {
+                            Ok(settlement) => settlement,
+                            Err(error) => {
+                                if terminal_snapshot.conversation_store.is_some() {
+                                    terminal_snapshot.observe_persistence_failure(&error).await;
+                                }
+                                terminal_snapshot
+                                    .finalize_run(
+                                        crate::trace::RunStatus::Failed,
+                                        None,
+                                        Some(&error.to_string()),
+                                    )
+                                    .await;
+                                return Err(error);
+                            }
+                        };
                         if matches!(
                             settlement.status,
                             crate::memory::TranscriptProjectionSettlementStatus::Blocked
                                 | crate::memory::TranscriptProjectionSettlementStatus::Conflict
                         ) {
-                            return Err(crate::error::ReactError::RuntimeState(Box::new(
-                                echo_core::error::RuntimeStateError::ManagedStateRequiresCas(
-                                    "guard terminal transcript projection did not settle"
-                                        .to_string(),
-                                ),
-                            )));
+                            let error =
+                                crate::agent::snapshot::transcript_settlement_admission_error(
+                                    &settlement,
+                                );
+                            terminal_snapshot
+                                .finalize_run(
+                                    crate::trace::RunStatus::Failed,
+                                    None,
+                                    Some(&error.to_string()),
+                                )
+                                .await;
+                            return Err(error);
                         }
+                        terminal_snapshot
+                            .finalize_run(crate::trace::RunStatus::Failed, None, Some(&msg))
+                            .await;
                         return Ok(msg);
                     }
                     return Err(e);
@@ -220,6 +266,7 @@ impl ReactAgent {
             .external_cancel
             .as_ref()
             .map(|cancel| cancel.as_ref().clone());
+        let failure_snapshot = snap.clone();
 
         // Run the shared core loop in a spawned task
         let context = self.memory.context.clone();
@@ -276,9 +323,32 @@ impl ReactAgent {
                     crate::agent::AgentSteerTurnOutcome::Failed
                 };
                 active_turn_lease.settle(outcome);
+                let settlement_already_observed =
+                    failure_snapshot.transcript_settlement_was_observed();
+                if failure_snapshot.conversation_store.is_some() && !settlement_already_observed {
+                    failure_snapshot.observe_persistence_failure(&error).await;
+                }
+                failure_snapshot
+                    .finalize_run(
+                        if outcome == crate::agent::AgentSteerTurnOutcome::Cancelled {
+                            crate::trace::RunStatus::Cancelled
+                        } else {
+                            crate::trace::RunStatus::Failed
+                        },
+                        None,
+                        Some(&error.to_string()),
+                    )
+                    .await;
                 return Err(error);
             }
             Err(error) => {
+                failure_snapshot
+                    .finalize_run(
+                        crate::trace::RunStatus::Failed,
+                        None,
+                        Some(&error.to_string()),
+                    )
+                    .await;
                 drop(active_turn_lease);
                 return Err(error);
             }

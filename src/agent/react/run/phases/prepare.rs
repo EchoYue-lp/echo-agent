@@ -73,6 +73,12 @@ pub(crate) async fn prepare_turn(
                 tx,
             )
             .await?;
+            snap.finalize_run(
+                crate::trace::RunStatus::Failed,
+                None,
+                Some(&format!("Blocked by UserPromptSubmit hook: {reason}")),
+            )
+            .await;
             yield_final_event_or!(
                 tx,
                 AgentEvent::FinalAnswer(format!("Blocked by UserPromptSubmit hook: {}", reason)),

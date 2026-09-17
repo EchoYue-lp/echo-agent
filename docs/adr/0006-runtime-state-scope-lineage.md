@@ -1,6 +1,6 @@
 # ADR 0006: Durable Runtime-State Scope Lineage
 
-- Status: Accepted
+- Status: Accepted; managed cleanup semantics amended by ADR 0056
 - Date: 2026-08-25
 - Owners: `state`, `agent/snapshot`
 
@@ -48,10 +48,15 @@ globally unique `runtime_state_id` saved for that scope.
   replacement model context.
 - `clear_runtime_state_scope` deletes all indexed incarnations. It is
   idempotent and also reclaims a legacy checkpoint whose ID equals the scope.
-- `clear_persisted_runtime_incarnation` also deletes any transcript written
-  under the incarnation ID, while preserving the stable scope transcript.
-- `delete_persisted_conversation` enumerates and deletes incarnation-keyed
-  transcripts, clears the runtime scope, then deletes the stable transcript.
+- For a legacy unmanaged Store pair, `clear_persisted_runtime_incarnation` also
+  deletes a transcript written under the incarnation ID. For a managed pair it
+  settles pending projection and retires runtime authority only; it does not
+  guess a separate transcript delete identity that could target a recreated
+  epoch.
+- Legacy `delete_persisted_conversation` retains the unmanaged cleanup path.
+  Managed product deletion uses a caller-retained `ManagedConversationDelete`
+  with `delete_persisted_conversation_managed`, a durable scope manifest, and
+  an epoch-fenced receipt.
 
 The framework does not derive product IDs, decide when a product reset is
 allowed, or delete Task/application journals. Callers supply the stable scope
@@ -80,10 +85,12 @@ cleanup of rows genuinely owned by that other scope.
 
 ## Consequences
 
-Reset remains a new empty model context, not a product-history wipe. It reclaims
-the retired runtime checkpoint and any incarnation-keyed transcript while
-preserving the stable transcript. Product delete removes the stable transcript,
-incarnation transcripts, and every indexed runtime checkpoint.
+Reset remains a new empty model context, not a product-history wipe. Managed
+reset retires the exact runtime checkpoint while preserving transcript facts;
+legacy reset also removes its unmanaged incarnation transcript. Managed product
+delete removes the stable transcript and retires the runtime lineage using its
+explicit stable request. See ADR 0056 for the crash-recoverable settlement and
+delete-fence contract.
 
 The `RuntimeStateStore` public contract grows by four scope operations. Built-in
 File and SQLite backends implement the same semantics; custom implementations

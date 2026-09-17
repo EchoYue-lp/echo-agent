@@ -4470,7 +4470,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reset_keeps_transcript_and_product_delete_retires_all_incarnations()
+    async fn managed_reset_retires_runtime_without_guessing_incarnation_delete()
     -> crate::error::Result<()> {
         use crate::memory::{
             ConversationStore, EnsureConversationProjectionRequest, FileConversationStore,
@@ -4549,7 +4549,7 @@ mod tests {
         )
         .await?;
         assert_eq!(conversations.count_messages("alice").await?, 1);
-        assert!(conversations.get_conversation("alice-1").await?.is_none());
+        assert!(conversations.get_conversation("alice-1").await?.is_some());
 
         let authority = conversations
             .ensure_projection_epoch(EnsureConversationProjectionRequest {
@@ -4569,6 +4569,7 @@ mod tests {
                 .await?;
         assert_eq!(deleted.runtime_state_ids, vec!["alice-2".to_string()]);
         assert!(conversations.get_conversation("alice").await?.is_none());
+        assert!(conversations.get_conversation("alice-1").await?.is_some());
         assert!(runtime.get_checkpoint("alice-1").await?.is_none());
         assert!(runtime.get_checkpoint("alice-2").await?.is_none());
         assert_eq!(

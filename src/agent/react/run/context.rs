@@ -160,6 +160,30 @@ impl ReactAgent {
         self.set_working_dir(self.memory.configured_working_dir.clone());
     }
 
+    /// Hydrate the managed runtime identity before an input guard can produce
+    /// a terminal. This restores only durable runtime state; lifecycle hooks
+    /// and the raw user input remain deferred until normal context preparation.
+    pub(crate) async fn hydrate_managed_runtime_before_input_guard(
+        &self,
+        scope_id: &str,
+        runtime_state_id: &str,
+    ) -> crate::error::Result<()> {
+        let _previous_hydration = self
+            .begin_runtime_state_hydration(Some(runtime_state_id))
+            .await;
+        self.clear_runtime_snapshots();
+        if self
+            .resume_from_state_store_scope(scope_id, runtime_state_id)
+            .await?
+            .is_none()
+        {
+            self.reset_runtime_context().await;
+        }
+        self.commit_runtime_state_hydration(Some(runtime_state_id))
+            .await;
+        Ok(())
+    }
+
     pub(crate) async fn begin_runtime_state_hydration(
         &self,
         runtime_state_id: Option<&str>,
@@ -193,9 +217,10 @@ impl ReactAgent {
         }
     }
 
+    #[cfg(test)]
     pub(crate) async fn restore_thread_context(&self) -> crate::error::Result<()> {
         let runtime_state_id = self.config.conversation_id.clone();
-        self.restore_thread_context_for(runtime_state_id.as_deref())
+        self.restore_thread_context_for(runtime_state_id.as_deref(), runtime_state_id.as_deref())
             .await
     }
 
@@ -212,18 +237,14 @@ impl ReactAgent {
         if let Some(settlement) = snapshot.reconcile_pending_transcript_projection().await?
             && settlement.status != crate::memory::TranscriptProjectionSettlementStatus::Settled
         {
-            return Err(crate::error::ReactError::RuntimeState(Box::new(
-                echo_core::error::RuntimeStateError::ManagedStateRequiresCas(format!(
-                    "pending transcript projection did not settle before hydration: {:?}",
-                    settlement.status
-                )),
-            )));
+            return Err(crate::agent::snapshot::transcript_settlement_admission_error(&settlement));
         }
         Ok(())
     }
 
-    async fn restore_thread_context_for(
+    pub(crate) async fn restore_thread_context_for(
         &self,
+        scope_id: Option<&str>,
         runtime_state_id: Option<&str>,
     ) -> crate::error::Result<()> {
         self.reconcile_configured_pending_projection(runtime_state_id)
@@ -236,7 +257,13 @@ impl ReactAgent {
         // Try RuntimeStateStore checkpoint (messages + plan + skills)
         if self.memory.state_store.is_some() {
             let restored = match runtime_state_id {
-                Some(runtime_state_id) => self.resume_from_state_store_id(runtime_state_id).await,
+                Some(runtime_state_id) => {
+                    self.resume_from_state_store_scope(
+                        scope_id.unwrap_or(runtime_state_id),
+                        runtime_state_id,
+                    )
+                    .await
+                }
                 None => Ok(None),
             };
             match restored {
@@ -272,16 +299,26 @@ impl ReactAgent {
     /// Restore a persisted chat exactly once on a cold agent instance.
     /// Existing in-process history is authoritative and must never be replaced
     /// between turns.
+    #[cfg(test)]
     pub(crate) async fn restore_chat_context_if_cold(&self) -> crate::error::Result<()> {
         let runtime_state_id = self.config.conversation_id.clone();
-        self.restore_chat_context_if_cold_for(runtime_state_id.as_deref())
-            .await
+        self.restore_chat_context_if_cold_for(
+            runtime_state_id.as_deref(),
+            runtime_state_id.as_deref(),
+        )
+        .await
     }
 
-    async fn restore_chat_context_if_cold_for(
+    pub(crate) async fn restore_chat_context_if_cold_for(
         &self,
+        scope_id: Option<&str>,
         runtime_state_id: Option<&str>,
     ) -> crate::error::Result<()> {
+        if self.memory.conversation_store.is_some() {
+            return self
+                .restore_thread_context_for(scope_id, runtime_state_id)
+                .await;
+        }
         self.reconcile_configured_pending_projection(runtime_state_id)
             .await?;
         let is_cold = {
@@ -312,7 +349,8 @@ impl ReactAgent {
             }
         };
         if should_restore {
-            self.restore_thread_context_for(runtime_state_id).await?;
+            self.restore_thread_context_for(scope_id, runtime_state_id)
+                .await?;
         }
         Ok(())
     }
@@ -522,6 +560,7 @@ impl ReactAgent {
         mode: StreamMode,
         input: &str,
         history: &[Message],
+        scope_id: Option<&str>,
         runtime_state_id: Option<&str>,
     ) -> crate::error::Result<usize> {
         // Clear read-before-edit tracking for the new conversation turn
@@ -530,10 +569,11 @@ impl ReactAgent {
         self.clear_read_files();
         match mode {
             StreamMode::Execute => {
-                self.restore_thread_context_for(runtime_state_id).await?;
+                self.restore_thread_context_for(scope_id, runtime_state_id)
+                    .await?;
             }
             StreamMode::Chat => {
-                self.restore_chat_context_if_cold_for(runtime_state_id)
+                self.restore_chat_context_if_cold_for(scope_id, runtime_state_id)
                     .await?;
             }
         }
@@ -576,6 +616,12 @@ impl ReactAgent {
         let hook_result = self
             .fire_lifecycle_hook(HookEvent::UserPromptSubmit, Some(input))
             .await;
+        if hook_result.block {
+            return Err(crate::error::ReactError::Other(format!(
+                "Blocked by UserPromptSubmit hook: {}",
+                hook_result.block_reason.unwrap_or_default()
+            )));
+        }
         // Cache hook activation result for TriggerSupervisor (P4) consumption
         if hook_result.activate_skill.is_some()
             && let Ok(mut cache) = self.hook_activation_cache.lock()
@@ -595,16 +641,18 @@ impl ReactAgent {
         mode: StreamMode,
         message: &Message,
         history: &[Message],
+        scope_id: Option<&str>,
         runtime_state_id: Option<&str>,
     ) -> crate::error::Result<usize> {
         // Clear read-before-edit tracking (see prepare_stream_context).
         self.clear_read_files();
         match mode {
             StreamMode::Execute => {
-                self.restore_thread_context_for(runtime_state_id).await?;
+                self.restore_thread_context_for(scope_id, runtime_state_id)
+                    .await?;
             }
             StreamMode::Chat => {
-                self.restore_chat_context_if_cold_for(runtime_state_id)
+                self.restore_chat_context_if_cold_for(scope_id, runtime_state_id)
                     .await?
             }
         }
@@ -648,6 +696,12 @@ impl ReactAgent {
             let hook_result = self
                 .fire_lifecycle_hook(HookEvent::UserPromptSubmit, Some(&text))
                 .await;
+            if hook_result.block {
+                return Err(crate::error::ReactError::Other(format!(
+                    "Blocked by UserPromptSubmit hook: {}",
+                    hook_result.block_reason.unwrap_or_default()
+                )));
+            }
             if hook_result.activate_skill.is_some()
                 && let Ok(mut cache) = self.hook_activation_cache.lock()
             {

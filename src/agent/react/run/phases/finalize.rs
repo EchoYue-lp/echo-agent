@@ -12,79 +12,44 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
 use tracing::info;
 
-pub(crate) async fn settle_terminal_projection(
+async fn settle_final_intervention(
     snap: &AgentRunSnapshot,
     context: &Arc<Mutex<crate::compression::ContextManager>>,
-    blocked_reason: Option<String>,
-    tx: &mpsc::Sender<Result<AgentEvent>>,
-) -> Result<()> {
-    let settlement = snap
-        .save_transcript_projection(context, blocked_reason)
-        .await?;
-    if tx
-        .send(Ok(AgentEvent::TranscriptProjectionSettlement(
-            settlement.clone(),
-        )))
-        .await
-        .is_err()
-    {
-        return Err(ReactError::Other(
-            "transcript settlement observer closed before terminal".to_string(),
-        ));
-    }
-    match settlement.status {
-        crate::memory::TranscriptProjectionSettlementStatus::Settled
-        | crate::memory::TranscriptProjectionSettlementStatus::Deferred => Ok(()),
-        crate::memory::TranscriptProjectionSettlementStatus::Blocked
-        | crate::memory::TranscriptProjectionSettlementStatus::Conflict => {
-            Err(ReactError::RuntimeState(Box::new(
-                echo_core::error::RuntimeStateError::ManagedStateRequiresCas(format!(
-                    "terminal transcript projection did not settle: {:?}",
-                    settlement.status
-                )),
-            )))
-        }
-    }
-}
-
-/// Tools-branch terminal: a `final_answer` tool call has passed verifier.
-/// Runs `on_final_answer` callbacks + interventions, audit, runtime
-/// checkpoint and transcript projection, emits the
-/// `FinalAnswer` event, runs the `Stop` hook (best-effort continuation
-/// injection without retry — `finish` is genuinely terminal here), then
-/// fires `SessionEnd("complete")`.
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn finalize_completed_run(
-    snap: &AgentRunSnapshot,
-    context: &Arc<Mutex<crate::compression::ContextManager>>,
-    label: &str,
     output: &str,
-    _iteration: usize,
-    state: &LoopState,
     tx: &mpsc::Sender<Result<AgentEvent>>,
-) -> Result<ControlFlow<(), ()>> {
+) -> Result<Option<crate::agent::AgentSteerTurnOutcome>> {
     let agent = &snap.config.agent_name;
-    for cb in snap.config.callbacks.iter() {
-        cb.on_final_answer(agent, output).await;
-    }
-
-    // ── Intervention callbacks for final answer (streaming path) ──
     for intervention in &snap.tools.intervention_callbacks {
         let result = intervention.on_final_answer(agent, output).await;
         if result.cancel {
-            return Err(ReactError::Other(
-                "Agent execution cancelled by intervention at final answer".into(),
-            ));
+            let reason = "Agent execution cancelled by intervention at final answer";
+            settle_terminal_projection(snap, context, Some(reason.to_string()), tx).await?;
+            snap.finalize_run(crate::trace::RunStatus::Cancelled, None, Some(reason))
+                .await;
+            let _ = tx.send(Ok(AgentEvent::Cancelled)).await;
+            snap.fire_hook(
+                crate::skills::hooks::HookEvent::SessionEnd,
+                Some("cancelled"),
+            )
+            .await;
+            return Ok(Some(crate::agent::AgentSteerTurnOutcome::Cancelled));
         }
         if result.block {
             let reason = result
                 .block_reason
-                .unwrap_or_else(|| "blocked by intervention at final answer".into());
+                .unwrap_or_else(|| "blocked by intervention at final answer".to_string());
+            let detail = format!("Final answer blocked by intervention: {reason}");
             info!(agent = %agent, reason = %reason, "Intervention blocked final answer (streaming)");
-            return Err(ReactError::Other(format!(
-                "Final answer blocked by intervention: {}",
-                reason
-            )));
+            settle_terminal_projection(snap, context, Some(detail.clone()), tx).await?;
+            snap.finalize_run(crate::trace::RunStatus::Failed, None, Some(&detail))
+                .await;
+            let error = ReactError::Other(detail);
+            let _ = tx
+                .send(Ok(AgentEvent::from_error("intervention", &error)))
+                .await;
+            snap.fire_hook(crate::skills::hooks::HookEvent::SessionEnd, Some("blocked"))
+                .await;
+            return Ok(Some(crate::agent::AgentSteerTurnOutcome::Failed));
         }
         if let Some(injected) = result.injected_context {
             super::super::context::push_runtime_context_note(
@@ -95,7 +60,63 @@ pub(crate) async fn finalize_completed_run(
             .await;
         }
     }
+    Ok(None)
+}
 
+pub(crate) async fn settle_terminal_projection(
+    snap: &AgentRunSnapshot,
+    context: &Arc<Mutex<crate::compression::ContextManager>>,
+    blocked_reason: Option<String>,
+    tx: &mpsc::Sender<Result<AgentEvent>>,
+) -> Result<()> {
+    let settlement = snap
+        .save_transcript_projection(context, blocked_reason)
+        .await?;
+    if snap.conversation_store.is_some() {
+        if tx
+            .send(Ok(AgentEvent::TranscriptProjectionSettlement(
+                settlement.clone(),
+            )))
+            .await
+            .is_err()
+        {
+            return Err(ReactError::Other(
+                "transcript settlement observer closed before terminal".to_string(),
+            ));
+        }
+        snap.mark_transcript_settlement_observed();
+    }
+    match settlement.status {
+        crate::memory::TranscriptProjectionSettlementStatus::Settled
+        | crate::memory::TranscriptProjectionSettlementStatus::Deferred => Ok(()),
+        crate::memory::TranscriptProjectionSettlementStatus::Blocked
+        | crate::memory::TranscriptProjectionSettlementStatus::Conflict => Err(
+            echo_core::error::RuntimeStateError::TranscriptProjectionBlocked {
+                status: format!("{:?}", settlement.status),
+                reason: settlement
+                    .detail
+                    .unwrap_or_else(|| "terminal transcript projection did not settle".to_string()),
+            }
+            .into(),
+        ),
+    }
+}
+
+/// Tools-branch terminal: a `final_answer` tool call has passed verifier.
+/// Applies the one-shot `Stop` continuation first, then final callbacks and
+/// interventions, audit, durable transcript settlement, trace finalization,
+/// the single `FinalAnswer`, and `SessionEnd("complete")`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn finalize_completed_run(
+    snap: &AgentRunSnapshot,
+    context: &Arc<Mutex<crate::compression::ContextManager>>,
+    label: &str,
+    output: &str,
+    _iteration: usize,
+    state: &LoopState,
+    tx: &mpsc::Sender<Result<AgentEvent>>,
+) -> Result<ControlFlow<crate::agent::AgentSteerTurnOutcome, ()>> {
+    let agent = &snap.config.agent_name;
     let hc = crate::skills::hooks::HookContext::for_stop(
         None,
         snap.config.session_id.as_deref().unwrap_or(""),
@@ -114,6 +135,13 @@ pub(crate) async fn finalize_completed_run(
         )
         .await;
         return Ok(ControlFlow::Continue(()));
+    }
+
+    for cb in snap.config.callbacks.iter() {
+        cb.on_final_answer(agent, output).await;
+    }
+    if let Some(outcome) = settle_final_intervention(snap, context, output, tx).await? {
+        return Ok(ControlFlow::Break(outcome));
     }
 
     info!(agent = %agent, "Streaming execution completed{label}");
@@ -137,22 +165,25 @@ pub(crate) async fn finalize_completed_run(
         .await
         .is_err()
     {
-        return Ok(ControlFlow::Break(()));
+        return Ok(ControlFlow::Break(
+            crate::agent::AgentSteerTurnOutcome::Completed,
+        ));
     }
     snap.fire_hook(
         crate::skills::hooks::HookEvent::SessionEnd,
         Some("complete"),
     )
     .await;
-    Ok(ControlFlow::Break(()))
+    Ok(ControlFlow::Break(
+        crate::agent::AgentSteerTurnOutcome::Completed,
+    ))
 }
 
 /// Text-branch terminal: the LLM produced content that passed verification.
-/// Runs `on_think_end` + `on_final_answer` callbacks, pushes the assistant
-/// message, takes an auto-snapshot, audits the final answer, takes a
-/// runtime checkpoint + transcript projection, finalizes the trace, emits the
-/// `FinalAnswer` event, and runs
-/// the `Stop` hook with one-shot continuation.
+/// Pushes the assistant message, applies the one-shot `Stop` continuation,
+/// then runs final callbacks and interventions, takes an auto-snapshot, audits
+/// and durably settles the transcript, finalizes the trace, and emits the
+/// single `FinalAnswer` followed by `SessionEnd("complete")`.
 ///
 /// Returns:
 /// - [`ControlFlow::Continue`] when the `Stop` hook returned a
@@ -172,7 +203,7 @@ pub(crate) async fn emit_final_text(
     answer: String,
     reasoning_content: String,
     reasoning_blocks: Vec<crate::llm::types::ReasoningBlock>,
-) -> Result<ControlFlow<(), ()>> {
+) -> Result<ControlFlow<crate::agent::AgentSteerTurnOutcome, ()>> {
     let agent = &snap.config.agent_name;
 
     let ts = vec![crate::agent::react::StepType::Thought(answer.clone())];
@@ -207,6 +238,9 @@ pub(crate) async fn emit_final_text(
     for cb in snap.config.callbacks.iter() {
         cb.on_final_answer(agent, &answer).await;
     }
+    if let Some(outcome) = settle_final_intervention(snap, context, &answer, tx).await? {
+        return Ok(ControlFlow::Break(outcome));
+    }
     snap.auto_snapshot(context, iteration).await;
     if let Some(al) = &snap.guard.audit_logger {
         let ev = crate::audit::AuditEvent::now(
@@ -227,14 +261,18 @@ pub(crate) async fn emit_final_text(
     // Sending FinalAnswer is mandatory; on a closed receiver the macro
     // returns Ok(()) from this fn — but we model that as ControlFlow::Break.
     if tx.send(Ok(AgentEvent::FinalAnswer(answer))).await.is_err() {
-        return Ok(ControlFlow::Break(()));
+        return Ok(ControlFlow::Break(
+            crate::agent::AgentSteerTurnOutcome::Completed,
+        ));
     }
     snap.fire_hook(
         crate::skills::hooks::HookEvent::SessionEnd,
         Some("complete"),
     )
     .await;
-    Ok(ControlFlow::Break(()))
+    Ok(ControlFlow::Break(
+        crate::agent::AgentSteerTurnOutcome::Completed,
+    ))
 }
 
 /// LLM produced neither tool calls nor content — terminal failure.
@@ -265,6 +303,13 @@ pub(crate) async fn finalize_max_iterations(
     context: &Arc<Mutex<crate::compression::ContextManager>>,
     tx: mpsc::Sender<Result<AgentEvent>>,
 ) -> Result<()> {
+    settle_terminal_projection(
+        snap,
+        context,
+        Some("Max iterations exceeded".to_string()),
+        &tx,
+    )
+    .await?;
     snap.fire_hook(
         crate::skills::hooks::HookEvent::SessionEnd,
         Some("max_iterations"),
@@ -275,13 +320,6 @@ pub(crate) async fn finalize_max_iterations(
         Some("max_iterations"),
     )
     .await;
-    settle_terminal_projection(
-        snap,
-        context,
-        Some("Max iterations exceeded".to_string()),
-        &tx,
-    )
-    .await?;
     snap.finalize_run(
         crate::trace::RunStatus::Failed,
         None,
@@ -332,21 +370,7 @@ mod tests {
             .await
             .expect("finalize_no_response must succeed");
 
-        let settlement = rx
-            .recv()
-            .await
-            .expect("settlement must be forwarded before terminal")
-            .expect("settlement event must use the typed event stream");
-        assert!(matches!(
-            settlement,
-            AgentEvent::TranscriptProjectionSettlement(
-                crate::memory::TranscriptProjectionSettlement {
-                    status: crate::memory::TranscriptProjectionSettlementStatus::Settled,
-                    ..
-                }
-            )
-        ));
-        let item = rx.recv().await.expect("error must follow settlement");
+        let item = rx.recv().await.expect("error must be forwarded to tx");
         let event = item.expect("terminal error event must use the typed event stream");
         let (source, msg) = match event {
             AgentEvent::Error {
@@ -386,21 +410,7 @@ mod tests {
             .await
             .expect("finalize_max_iterations must succeed");
 
-        let settlement = rx
-            .recv()
-            .await
-            .expect("settlement must be forwarded before terminal")
-            .expect("settlement event must use the typed event stream");
-        assert!(matches!(
-            settlement,
-            AgentEvent::TranscriptProjectionSettlement(
-                crate::memory::TranscriptProjectionSettlement {
-                    status: crate::memory::TranscriptProjectionSettlementStatus::Settled,
-                    ..
-                }
-            )
-        ));
-        let item = rx.recv().await.expect("error must follow settlement");
+        let item = rx.recv().await.expect("error must be forwarded to tx");
         let event = item.expect("terminal error event must use the typed event stream");
         let (source, msg) = match event {
             AgentEvent::Error {
@@ -422,5 +432,88 @@ mod tests {
             .expect("run row must exist");
         assert_eq!(run.status, RunStatus::Failed);
         assert_eq!(run.error.as_deref(), Some("Max iterations exceeded"));
+    }
+
+    #[tokio::test]
+    async fn blocked_max_iterations_settlement_does_not_publish_business_hooks() -> Result<()> {
+        use crate::memory::ConversationStore;
+        use crate::skills::hooks::{HookAction, HookEvent, HookRule, HooksDefinition};
+        use crate::state::RuntimeStateStore;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let conversation_root = tempfile::tempdir()?;
+        let runtime_root = tempfile::tempdir()?;
+        let conversations = Arc::new(crate::memory::FileConversationStore::new(
+            conversation_root.path(),
+        )?);
+        let runtime = Arc::new(crate::state::FileRuntimeStateStore::new(
+            runtime_root.path(),
+        )?);
+        let acquired = conversations
+            .ensure_projection_epoch(crate::memory::EnsureConversationProjectionRequest {
+                conversation: crate::memory::NewConversation {
+                    conversation_id: "blocked-max-iterations".to_string(),
+                    user_id: "default".to_string(),
+                    agent_type: None,
+                    title: None,
+                },
+                expected_tombstone_epoch: None,
+            })
+            .await?;
+        let delete = crate::memory::ManagedConversationDelete::prepare(
+            "blocked-max-iterations",
+            acquired.authority.epoch,
+        )?;
+        runtime
+            .begin_scope_retirement(crate::state::ScopeRetirementRequest::prepare(
+                "blocked-max-iterations",
+                0,
+                &delete,
+            )?)
+            .await?;
+
+        let mut agent = ReactAgent::new(
+            AgentConfig::new("test-model", "agent-max-blocked", "sys")
+                .conversation_id("blocked-max-iterations"),
+        );
+        agent.set_conversation_store(conversations);
+        agent.set_state_store(runtime);
+        let hook_calls = Arc::new(AtomicUsize::new(0));
+        {
+            let calls = hook_calls.clone();
+            let mut hooks = agent.hook_registry().write().await;
+            hooks.set_subagent_executor(Arc::new(move |_name, _task| {
+                let calls = calls.clone();
+                Box::pin(async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Ok("called".to_string())
+                })
+            }));
+            let mut definition = HooksDefinition::default();
+            for event in [HookEvent::SessionEnd, HookEvent::StopFailure] {
+                definition.add_rules(
+                    event,
+                    vec![HookRule {
+                        matcher: "max_iterations".to_string(),
+                        hooks: vec![HookAction::Subagent {
+                            name: "terminal-probe".to_string(),
+                            task: None,
+                            timeout: 0,
+                        }],
+                    }],
+                );
+            }
+            hooks.register_user_hooks(definition);
+        }
+
+        let snapshot = AgentRunSnapshot::from_agent(&agent);
+        let (tx, _rx) = mpsc::channel::<Result<AgentEvent>>(8);
+        let error = finalize_max_iterations(&snapshot, &agent.memory.context, tx)
+            .await
+            .err()
+            .ok_or_else(|| ReactError::Other("blocked settlement unexpectedly completed".into()))?;
+        assert!(matches!(error, ReactError::RuntimeState(_)));
+        assert_eq!(hook_calls.load(Ordering::SeqCst), 0);
+        Ok(())
     }
 }
