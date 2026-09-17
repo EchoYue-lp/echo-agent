@@ -24,7 +24,8 @@ pub use context::{ContextInheritance, SubagentContext};
 pub use control::{
     ActiveAttemptSummary, SubagentAttemptIdentity, SubagentCommandIdentity, SubagentCommandPhase,
     SubagentControlError, SubagentControlPhase, SubagentGuidanceQueueReceipt,
-    SubagentInterruptOutcome, SubagentMessageReceipt,
+    SubagentInterruptOutcome, SubagentInterruptRequestDisposition, SubagentInterruptRequestReceipt,
+    SubagentMessageReceipt,
 };
 pub use events::{
     SubagentEvent, SubagentEventBus, SubagentEventEnvelope, SubagentEventGap, SubagentEventPayload,

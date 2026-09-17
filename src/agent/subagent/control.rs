@@ -17,6 +17,7 @@ use tokio::sync::watch;
 use super::types::SubagentStatus;
 
 const SETTLED_RETENTION: usize = 256;
+const PENDING_INTERRUPT_CAPACITY: usize = 256;
 
 /// Stable identity for one attempt of a logical subagent task.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
@@ -274,6 +275,22 @@ pub struct SubagentInterruptOutcome {
     pub terminal_status: Option<SubagentStatus>,
 }
 
+/// Immediate acknowledgement for an exact interrupt request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubagentInterruptRequestReceipt {
+    pub identity: SubagentAttemptIdentity,
+    pub disposition: SubagentInterruptRequestDisposition,
+}
+
+/// Process-local disposition before an exact interrupt is fully settled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubagentInterruptRequestDisposition {
+    QueuedBeforeAdmission,
+    ActiveRequested,
+    ActiveAlreadyRequested,
+    AlreadySettled(SubagentStatus),
+}
+
 /// Typed rejection from the process-scoped Subagent control plane.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SubagentControlError {
@@ -304,6 +321,15 @@ pub enum SubagentControlError {
     InterruptPending {
         execution_id: String,
         attempt: u32,
+    },
+    PendingCapacityExceeded {
+        limit: usize,
+    },
+    IdentityConflict {
+        task_id: String,
+        attempt: u32,
+        expected_execution_id: String,
+        actual_execution_id: String,
     },
     AttemptSettled {
         execution_id: String,
@@ -351,6 +377,21 @@ impl fmt::Display for SubagentControlError {
             } => write!(
                 f,
                 "Subagent execution {execution_id} attempt {attempt} is settling an interrupt"
+            ),
+            Self::PendingCapacityExceeded { limit } => {
+                write!(
+                    f,
+                    "Subagent interrupt pending capacity exceeded (limit {limit})"
+                )
+            }
+            Self::IdentityConflict {
+                task_id,
+                attempt,
+                expected_execution_id,
+                actual_execution_id,
+            } => write!(
+                f,
+                "Subagent task {task_id} attempt {attempt} execution identity conflict: expected {expected_execution_id}, actual {actual_execution_id}"
             ),
             Self::AttemptSettled {
                 execution_id,
@@ -445,6 +486,7 @@ struct ControlState {
     active: HashMap<String, ActiveAttempt>,
     active_by_task_attempt: HashMap<(String, u32), String>,
     queued_guidance: HashMap<(String, u32), VecDeque<String>>,
+    pending_interrupts: HashMap<String, SubagentAttemptIdentity>,
     settled: HashMap<String, SettledAttempt>,
     settled_by_task_attempt: HashMap<(String, u32), String>,
     settled_order: VecDeque<String>,
@@ -496,6 +538,16 @@ impl SubagentControlRegistry {
                 attempt: identity.attempt,
             });
         }
+        if let Some(pending) = state.pending_interrupts.get(&identity.execution_id)
+            && pending.attempt != identity.attempt
+        {
+            return Err(SubagentControlError::AttemptMismatch {
+                execution_id: identity.execution_id,
+                expected: identity.attempt,
+                actual: pending.attempt,
+            });
+        }
+        let pending_interrupt = state.pending_interrupts.remove(&identity.execution_id);
         let guidance = state
             .queued_guidance
             .remove(&task_attempt)
@@ -512,7 +564,7 @@ impl SubagentControlRegistry {
             identity.execution_id.clone(),
             ActiveAttempt {
                 identity: identity.clone(),
-                cancel,
+                cancel: cancel.clone(),
                 phase: SubagentControlPhase::Starting,
                 agent: None,
                 turn_id: None,
@@ -521,6 +573,9 @@ impl SubagentControlRegistry {
             },
         );
         drop(state);
+        if pending_interrupt.is_some() {
+            cancel.cancel();
+        }
         Ok(SubagentAttemptAdmission {
             binding: SubagentAttemptBinding {
                 registry: Arc::clone(self),
@@ -529,6 +584,103 @@ impl SubagentControlRegistry {
             guidance,
             settled: false,
         })
+    }
+
+    /// Request an exact interrupt without waiting for execution settlement.
+    pub(crate) fn request_interrupt(
+        &self,
+        identity: SubagentAttemptIdentity,
+    ) -> Result<SubagentInterruptRequestReceipt, SubagentControlError> {
+        identity.validate()?;
+        let cancel: Option<CancellationToken> = {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| SubagentControlError::StateUnavailable)?;
+            if let Some(settled) = state.settled.get(&identity.execution_id) {
+                Self::validate_attempt(&settled.identity, identity.attempt)?;
+                return Ok(SubagentInterruptRequestReceipt {
+                    identity,
+                    disposition: SubagentInterruptRequestDisposition::AlreadySettled(
+                        settled.status,
+                    ),
+                });
+            }
+            if let Some(active) = state.active.get_mut(&identity.execution_id) {
+                Self::validate_attempt(&active.identity, identity.attempt)?;
+                let already_requested = active.phase == SubagentControlPhase::InterruptRequested;
+                active.phase = SubagentControlPhase::InterruptRequested;
+                let cancel = active.cancel.clone();
+                let disposition = if already_requested {
+                    SubagentInterruptRequestDisposition::ActiveAlreadyRequested
+                } else {
+                    SubagentInterruptRequestDisposition::ActiveRequested
+                };
+                drop(state);
+                if !already_requested {
+                    cancel.cancel();
+                }
+                return Ok(SubagentInterruptRequestReceipt {
+                    identity,
+                    disposition,
+                });
+            }
+            if let Some(pending) = state.pending_interrupts.get(&identity.execution_id) {
+                Self::validate_attempt(pending, identity.attempt)?;
+                return Ok(SubagentInterruptRequestReceipt {
+                    identity,
+                    disposition: SubagentInterruptRequestDisposition::QueuedBeforeAdmission,
+                });
+            }
+            if let Some(conflict) = state.pending_interrupts.values().find(|pending| {
+                pending.task_id == identity.task_id && pending.attempt == identity.attempt
+            }) {
+                return Err(SubagentControlError::IdentityConflict {
+                    task_id: identity.task_id,
+                    attempt: identity.attempt,
+                    expected_execution_id: identity.execution_id,
+                    actual_execution_id: conflict.execution_id.clone(),
+                });
+            }
+            if state.pending_interrupts.len() >= PENDING_INTERRUPT_CAPACITY {
+                return Err(SubagentControlError::PendingCapacityExceeded {
+                    limit: PENDING_INTERRUPT_CAPACITY,
+                });
+            }
+            state
+                .pending_interrupts
+                .insert(identity.execution_id.clone(), identity.clone());
+            None
+        };
+        if let Some(cancel) = cancel {
+            cancel.cancel();
+            return Ok(SubagentInterruptRequestReceipt {
+                identity,
+                disposition: SubagentInterruptRequestDisposition::ActiveRequested,
+            });
+        }
+        Ok(SubagentInterruptRequestReceipt {
+            identity,
+            disposition: SubagentInterruptRequestDisposition::QueuedBeforeAdmission,
+        })
+    }
+
+    /// Retire a pending request after durable claim settlement or supersession.
+    #[allow(dead_code)]
+    pub(crate) fn retire_pending(
+        &self,
+        identity: &SubagentAttemptIdentity,
+    ) -> Result<bool, SubagentControlError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| SubagentControlError::StateUnavailable)?;
+        if let Some(current) = state.pending_interrupts.get(&identity.execution_id) {
+            Self::validate_attempt(current, identity.attempt)?;
+            state.pending_interrupts.remove(&identity.execution_id);
+            return Ok(true);
+        }
+        Ok(false)
     }
 
     pub(crate) fn queue_guidance(
@@ -775,6 +927,7 @@ impl SubagentControlRegistry {
         let Ok(mut state) = self.state.lock() else {
             return;
         };
+        state.pending_interrupts.remove(&identity.execution_id);
         let Some(active) = state.active.remove(&identity.execution_id) else {
             return;
         };
@@ -1210,6 +1363,32 @@ mod tests {
         assert!(!replay.requested);
         assert!(replay.settled);
         assert_eq!(replay.previous_status, SubagentControlPhase::Settled);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pending_interrupt_is_consumed_by_exact_admission() -> Result<(), String> {
+        let registry = Arc::new(SubagentControlRegistry::default());
+        let identity = SubagentAttemptIdentity::new("task", "execution-pending", 2)
+            .map_err(|error| error.to_string())?;
+        let receipt = registry
+            .request_interrupt(identity.clone())
+            .map_err(|error| error.to_string())?;
+        assert_eq!(
+            receipt.disposition,
+            SubagentInterruptRequestDisposition::QueuedBeforeAdmission
+        );
+        let cancel = CancellationToken::new();
+        let admission = registry
+            .admit(identity.clone(), cancel.clone())
+            .map_err(|error| error.to_string())?;
+        assert!(cancel.is_cancelled());
+        admission.settle(SubagentStatus::Cancelled);
+        assert!(
+            registry
+                .retire_pending(&identity)
+                .is_ok_and(|retired| !retired)
+        );
         Ok(())
     }
 }

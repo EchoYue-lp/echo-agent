@@ -621,6 +621,19 @@ impl SubagentExecutor {
             .await
     }
 
+    /// Request an exact attempt interruption without waiting for settlement.
+    ///
+    /// This process-local acknowledgement may be queued before dispatch
+    /// admission. Durable callers must validate the corresponding TaskClaim
+    /// before invoking this registry-level projection.
+    pub fn request_interrupt(
+        &self,
+        identity: SubagentAttemptIdentity,
+    ) -> std::result::Result<super::control::SubagentInterruptRequestReceipt, SubagentControlError>
+    {
+        self.control_registry.request_interrupt(identity)
+    }
+
     /// Stamp identity/lineage basics and install the default uplink sink on a
     /// dispatch request.
     ///
