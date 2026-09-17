@@ -45,9 +45,10 @@ pub use runtime::{
     TaskExecutionSummary, TaskId, TaskSpec, TaskStatus, TaskSubagent, TaskSubagentContext,
 };
 pub use runtime_executor::{
-    RuntimeClaimAbandonment, RuntimeDagController, RuntimeDagOutcome, RuntimePlanSnapshot,
-    RuntimeRetryExhaustion, RuntimeStopDisposition, RuntimeTaskClaimOutcome, RuntimeTaskResolution,
-    RuntimeTaskResolutionRequest, RuntimeTaskServiceConfig,
+    RuntimeAttemptControlCleanupReceipt, RuntimeClaimAbandonment, RuntimeDagController,
+    RuntimeDagOutcome, RuntimePlanSnapshot, RuntimeRetryExhaustion, RuntimeStopDisposition,
+    RuntimeTaskClaimOutcome, RuntimeTaskResolution, RuntimeTaskResolutionRequest,
+    RuntimeTaskServiceConfig,
 };
 pub use runtime_service::{
     RuntimeInterruptionReceipt, RuntimeInterruptionSettlementOutcome,

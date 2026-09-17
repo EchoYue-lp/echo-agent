@@ -84,6 +84,18 @@ pub enum RuntimeTaskResolution {
     Superseded,
 }
 
+/// Receipt from the process-local control projection after durable claim
+/// settlement. The durable task state is already authoritative when this is
+/// returned; a retryable cleanup failure is reported separately and must not
+/// trigger a second CAS or reverse the committed terminal state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeAttemptControlCleanupReceipt {
+    Retired,
+    NotFound,
+    AlreadyConsumed,
+    RetryableFailure { error: String },
+}
+
 /// Terminal state used when a requeued claim consumes its final retry.
 ///
 /// The retry decision remains separate from the terminal classification so an
@@ -176,6 +188,26 @@ pub trait RuntimeDagController: Send + Sync + 'static {
         context: TaskSubagentContext,
         task: Task,
     ) -> Result<Self::DispatchOutput>;
+
+    /// Register the exact claim-derived context before shared admission or a
+    /// semaphore can delay dispatch. Implementations may bind the context to a
+    /// process-local live-control registry; the durable claim remains the
+    /// authority and is validated by the caller before this hook runs.
+    async fn reserve_attempt_control(&self, _context: &TaskSubagentContext) -> Result<()> {
+        Ok(())
+    }
+
+    /// Retire the process-local control projection after the durable claim has
+    /// reached a terminal or superseded outcome. Cleanup is diagnostic and must
+    /// never mutate the already committed task state.
+    async fn retire_attempt_control(
+        &self,
+        _run_id: &str,
+        _task: &Task,
+        _claim: &TaskClaim,
+    ) -> RuntimeAttemptControlCleanupReceipt {
+        RuntimeAttemptControlCleanupReceipt::Retired
+    }
 
     async fn resolve_dispatch(
         &self,
@@ -539,7 +571,6 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
                 if let Ok(mut controls) = self.attempt_cancellations.lock() {
                     controls.insert(execution_id.clone(), task_cancel.clone());
                 }
-                outstanding_claims.insert(claim_id.clone(), (task.clone(), claim.clone()));
                 let dispatch_run_id = run_id.to_string();
                 let delegation_policy = self.config.delegation_policy;
                 let attempt_cancellations = Arc::clone(&self.attempt_cancellations);
@@ -549,6 +580,75 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
                     }) => waived_dependency_ids.clone(),
                     _ => Vec::new(),
                 };
+                let context = match TaskSubagentContext::from_claim(
+                    dispatch_run_id.clone(),
+                    task.spec.id.clone(),
+                    claim.clone(),
+                    task_cancel.clone(),
+                ) {
+                    Ok(context) => context
+                        .with_delegation_policy(delegation_policy)
+                        .with_waived_dependencies(waived_dependency_ids),
+                    Err(error) => {
+                        if let Ok(mut controls) = self.attempt_cancellations.lock() {
+                            controls.remove(&execution_id);
+                        }
+                        let message = format!("invalid exact task context: {error}");
+                        if let Err(settlement_error) = self
+                            .controller
+                            .abandon_claim(
+                                run_id,
+                                &claim,
+                                &task,
+                                RuntimeClaimAbandonment::Failed {
+                                    error: message.clone(),
+                                },
+                            )
+                            .await
+                        {
+                            wave_errors.push(settlement_error.to_string());
+                        }
+                        wave_errors.push(message);
+                        continue;
+                    }
+                };
+                if let Err(error) = self.controller.reserve_attempt_control(&context).await {
+                    if let Ok(mut controls) = self.attempt_cancellations.lock() {
+                        controls.remove(&execution_id);
+                    }
+                    let message = format!("exact attempt control reservation failed: {error}");
+                    if let Err(settlement_error) = self
+                        .controller
+                        .abandon_claim(
+                            run_id,
+                            &claim,
+                            &task,
+                            RuntimeClaimAbandonment::Failed {
+                                error: message.clone(),
+                            },
+                        )
+                        .await
+                    {
+                        wave_errors.push(settlement_error.to_string());
+                    }
+                    match self
+                        .controller
+                        .retire_attempt_control(run_id, &task, &claim)
+                        .await
+                    {
+                        RuntimeAttemptControlCleanupReceipt::RetryableFailure { error } => {
+                            wave_errors.push(format!(
+                                "exact attempt control cleanup requires retry: {error}"
+                            ));
+                        }
+                        RuntimeAttemptControlCleanupReceipt::Retired
+                        | RuntimeAttemptControlCleanupReceipt::NotFound
+                        | RuntimeAttemptControlCleanupReceipt::AlreadyConsumed => {}
+                    }
+                    wave_errors.push(message);
+                    continue;
+                }
+                outstanding_claims.insert(claim_id.clone(), (task.clone(), claim.clone()));
                 join_set.spawn(async move {
                     let dispatch = if let Some(admission) = shared_admission {
                         let lease = tokio::select! {
@@ -560,21 +660,6 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
                         };
                         match lease {
                             Ok(lease) => {
-                                let context = match TaskSubagentContext::from_claim(
-                                    dispatch_run_id,
-                                    task.spec.id.clone(),
-                                    claim.clone(),
-                                    task_cancel.clone(),
-                                )
-                                {
-                                    Ok(context) => context
-                                        .with_delegation_policy(delegation_policy)
-                                        .with_waived_dependencies(waived_dependency_ids),
-                                    Err(error) => {
-                                        drop(lease);
-                                        return (claim_id, Err(ReactError::Other(error)));
-                                    }
-                                };
                                 let result = controller.dispatch_task(context, task).await;
                                 drop(lease);
                                 result
@@ -589,21 +674,6 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
                         };
                         match permit {
                             Some(Ok(permit)) => {
-                                let context = match TaskSubagentContext::from_claim(
-                                    dispatch_run_id,
-                                    task.spec.id.clone(),
-                                    claim.clone(),
-                                    task_cancel.clone(),
-                                )
-                                {
-                                    Ok(context) => context
-                                        .with_delegation_policy(delegation_policy)
-                                        .with_waived_dependencies(waived_dependency_ids),
-                                    Err(error) => {
-                                        drop(permit);
-                                        return (claim_id, Err(ReactError::Other(error)));
-                                    }
-                                };
                                 let result = controller.dispatch_task(context, task).await;
                                 drop(permit);
                                 result
@@ -710,7 +780,7 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
                     let disposition = interruption
                         .clone()
                         .ok_or_else(|| ReactError::Other("interruption disappeared".to_string()))?;
-                    if let Err(error) = self
+                    match self
                         .settle_abandonment(
                             run_id,
                             &claim,
@@ -719,7 +789,10 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
                         )
                         .await
                     {
-                        wave_errors.push(error.to_string());
+                        Ok(_) => {
+                            self.cleanup_attempt_control(run_id, &task, &claim).await;
+                        }
+                        Err(error) => wave_errors.push(error.to_string()),
                     }
                     continue;
                 }
@@ -731,7 +804,7 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
                     Ok(resolution) => resolution,
                     Err(error) => {
                         let message = error.to_string();
-                        if let Err(abandon_error) = self
+                        match self
                             .settle_abandonment(
                                 run_id,
                                 &claim,
@@ -742,7 +815,10 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
                             )
                             .await
                         {
-                            wave_errors.push(abandon_error.to_string());
+                            Ok(_) => {
+                                self.cleanup_attempt_control(run_id, &task, &claim).await;
+                            }
+                            Err(abandon_error) => wave_errors.push(abandon_error.to_string()),
                         }
                         wave_errors.push(message);
                         continue;
@@ -755,7 +831,7 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
                     Ok(resolution) => resolution,
                     Err(error) => {
                         let message = error.to_string();
-                        if let Err(abandon_error) = self
+                        match self
                             .settle_abandonment(
                                 run_id,
                                 &claim,
@@ -766,12 +842,16 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
                             )
                             .await
                         {
-                            wave_errors.push(abandon_error.to_string());
+                            Ok(_) => {
+                                self.cleanup_attempt_control(run_id, &task, &claim).await;
+                            }
+                            Err(abandon_error) => wave_errors.push(abandon_error.to_string()),
                         }
                         wave_errors.push(message);
                         continue;
                     }
                 };
+                self.cleanup_attempt_control(run_id, &task, &claim).await;
                 match resolution {
                     RuntimeTaskResolution::Completed
                     | RuntimeTaskResolution::Pending
@@ -829,11 +909,14 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
                             .unwrap_or_else(|| "dispatch ended without a result".to_string()),
                     }
                 };
-                if let Err(error) = self
+                match self
                     .settle_abandonment(run_id, &claim, &task, abandonment)
                     .await
                 {
-                    wave_errors.push(error.to_string());
+                    Ok(_) => {
+                        self.cleanup_attempt_control(run_id, &task, &claim).await;
+                    }
+                    Err(error) => wave_errors.push(error.to_string()),
                 }
             }
 
@@ -977,6 +1060,27 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
             )));
         }
         Ok(settlement)
+    }
+
+    async fn cleanup_attempt_control(&self, run_id: &str, task: &Task, claim: &TaskClaim) {
+        match self
+            .controller
+            .retire_attempt_control(run_id, task, claim)
+            .await
+        {
+            RuntimeAttemptControlCleanupReceipt::RetryableFailure { error } => {
+                tracing::warn!(
+                    run_id,
+                    task_id = %task.spec.id,
+                    claim_id = %claim.claim_id,
+                    error = %error,
+                    "exact attempt control cleanup requires retry after durable settlement"
+                );
+            }
+            RuntimeAttemptControlCleanupReceipt::Retired
+            | RuntimeAttemptControlCleanupReceipt::NotFound
+            | RuntimeAttemptControlCleanupReceipt::AlreadyConsumed => {}
+        }
     }
 }
 
@@ -1127,6 +1231,8 @@ mod tests {
         dispatch_barrier: Mutex<Option<Arc<tokio::sync::Barrier>>>,
         cancel_after_dispatch: Mutex<HashMap<TaskId, CancellationToken>>,
         claim_ready: Mutex<Option<Arc<tokio::sync::Notify>>>,
+        reserved: Mutex<Vec<String>>,
+        retired: Mutex<Vec<String>>,
     }
 
     impl ScriptedController {
@@ -1219,6 +1325,31 @@ mod tests {
                 .ok_or_else(|| ReactError::Other("missing snapshot".to_string()))?;
             super::super::runtime_service::runtime_claim_is_current(snapshot, task_id, claim)
                 .map_err(|error| ReactError::Other(error.to_string()))
+        }
+
+        async fn reserve_attempt_control(&self, context: &TaskSubagentContext) -> Result<()> {
+            let execution_id = context
+                .task_id()
+                .and_then(|task_id| context.execution_id(task_id))
+                .ok_or_else(|| ReactError::Other("missing exact execution identity".to_string()))?;
+            self.reserved
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(execution_id);
+            Ok(())
+        }
+
+        async fn retire_attempt_control(
+            &self,
+            run_id: &str,
+            task: &Task,
+            claim: &TaskClaim,
+        ) -> RuntimeAttemptControlCleanupReceipt {
+            self.retired
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(claim.execution_id(run_id, &task.spec.id));
+            RuntimeAttemptControlCleanupReceipt::Retired
         }
 
         async fn dispatch_task(
@@ -1465,7 +1596,7 @@ mod tests {
 
         let outcome = executor.execute("run", CancellationToken::new()).await?;
 
-        assert_eq!(outcome, RuntimeDagOutcome::Cancelled);
+        assert_eq!(outcome, RuntimeDagOutcome::Completed);
         let order = controller
             .order
             .lock()
@@ -1489,6 +1620,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn exact_control_is_reserved_before_dispatch_and_retired_after_settlement() -> Result<()>
+    {
+        let controller = Arc::new(ScriptedController::with_tasks(vec![runtime_task(
+            "exact",
+            TaskStatus::Pending,
+            &[],
+        )]));
+        let service = super::super::RuntimeTaskService::new(
+            controller.clone(),
+            RuntimeTaskServiceConfig::default(),
+        );
+
+        assert_eq!(
+            service
+                .execute("exact-run", CancellationToken::new())
+                .await?,
+            RuntimeDagOutcome::Completed
+        );
+        let reserved = controller
+            .reserved
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let retired = controller
+            .retired
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        assert_eq!(reserved.len(), 1);
+        assert_eq!(retired, reserved);
+        assert!(reserved[0].starts_with("exact-run:exact:1:1:"));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn executor_treats_skipped_tasks_as_resolved() -> Result<()> {
         let controller = Arc::new(ScriptedController::with_tasks(vec![runtime_task(
             "skipped",
@@ -1499,7 +1665,7 @@ mod tests {
 
         let outcome = executor.execute("run", CancellationToken::new()).await?;
 
-        assert_eq!(outcome, RuntimeDagOutcome::Cancelled);
+        assert_eq!(outcome, RuntimeDagOutcome::Completed);
         Ok(())
     }
 

@@ -1161,13 +1161,6 @@ impl SubagentExecutor {
         }
     }
 
-    fn dispatch_owned(
-        self,
-        req: DispatchRequest,
-    ) -> futures::future::BoxFuture<'static, Result<SubagentResult>> {
-        Box::pin(async move { self.dispatch(req).await })
-    }
-
     /// Clone internals so a background subagent can own an executor on a spawned task.
     fn clone_for_spawn(&self) -> Self {
         Self {
@@ -1631,30 +1624,48 @@ impl SubagentExecutor {
                         lineage.parent_event_id = parent_event_id.clone();
                         lineage
                     });
-                let _claim = context
+                let claim = context
                     .claim()
                     .ok_or_else(|| "Team dispatch requires an exact TaskClaim".to_string())?;
-                let _task_id = context
+                let task_id = context
                     .task_id()
                     .ok_or_else(|| "Team dispatch requires an exact task id".to_string())?;
-                executor
-                    .dispatch_owned(DispatchRequest {
-                        agent_name,
-                        task,
-                        mode_override: None,
-                        cancel: context.cancel.clone(),
-                        parent_agent,
-                        parent_context,
-                        delegation_policy,
-                        runtime_context: Some(runtime_context),
-                        message,
-                        prompt_payload,
-                        prompt_context,
-                        constraints,
-                        background: false,
-                    })
-                    .await
-                    .map_err(|error| error.to_string())
+                let identity = SubagentAttemptIdentity::new(
+                    task_id.to_string(),
+                    claim.execution_id(&context.run_id, task_id),
+                    claim.attempt,
+                )
+                .map_err(|error| error.to_string())?;
+                let runtime_handle = tokio::runtime::Handle::try_current()
+                    .map_err(|error| format!("Team dispatch requires a Tokio runtime: {error}"))?;
+                // The Team graph callback is a Send future, while the general
+                // executor's Team branch recursively owns that callback. Bridge
+                // this non-nested member dispatch through the existing runtime
+                // so the exact admission path stays single-sourced without a
+                // second Team executor or a weaker uncontrolled fallback.
+                let result = tokio::task::spawn_blocking(move || {
+                    runtime_handle.block_on(executor.dispatch_attempt(
+                        DispatchRequest {
+                            agent_name,
+                            task,
+                            mode_override: None,
+                            cancel: context.cancel.clone(),
+                            parent_agent,
+                            parent_context,
+                            delegation_policy,
+                            runtime_context: Some(runtime_context),
+                            message,
+                            prompt_payload,
+                            prompt_context,
+                            constraints,
+                            background: false,
+                        },
+                        identity,
+                    ))
+                })
+                .await
+                .map_err(|error| format!("Team exact dispatch bridge failed: {error}"))?;
+                result.map_err(|error| error.to_string())
             })
         });
         let start = Instant::now();
@@ -4528,6 +4539,79 @@ mod tests {
                 ReactError::Other("unregistered Team member completed successfully".to_string())
             })?;
         assert!(error.to_string().contains("not registered"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn team_member_dispatch_preserves_claim_derived_execution_identity() -> Result<()> {
+        let (registry, executor) = make_executor().await;
+        registry
+            .register(
+                SubagentDefinition::new("worker", "Team worker"),
+                Box::new(MockAgent::new("worker").with_response("worker done")),
+            )
+            .await;
+        let definition = super::super::builder::SubagentBuilder::new("pipeline-team")
+            .team(super::super::team::TeamSpec {
+                strategy: super::super::team::TeamStrategy::Pipeline(vec!["worker".to_string()]),
+                manager: String::new(),
+                subagents: Vec::new(),
+                config: super::super::team::TeamConfig {
+                    default_timeout_secs: 0,
+                    ..super::super::team::TeamConfig::default()
+                },
+            })
+            .build();
+        registry
+            .register(definition, Box::new(MockAgent::new("pipeline-team")))
+            .await;
+
+        let mut events = registry.event_bus().subscribe();
+        let request = DispatchRequest {
+            agent_name: "pipeline-team".to_string(),
+            task: "run the worker".to_string(),
+            mode_override: None,
+            cancel: CancellationToken::new(),
+            parent_agent: "parent".to_string(),
+            parent_context: None,
+            delegation_policy: DispatchRequest::policy_from_depth(0),
+            runtime_context: Some(echo_core::tools::ExternalRunContext {
+                run_id: Some("team-identity-run".to_string()),
+                ..echo_core::tools::ExternalRunContext::default()
+            }),
+            message: None,
+            prompt_payload: None,
+            prompt_context: None,
+            constraints: Vec::new(),
+            background: false,
+        };
+        let root_identity = SubagentAttemptIdentity::new("root-task", "team-identity-root", 1)
+            .map_err(|error| ReactError::Other(error.to_string()))?;
+        let result = executor.dispatch_attempt(request, root_identity).await?;
+        assert_eq!(result.outcome.status, SubagentStatus::Completed);
+
+        let mut worker_execution = None;
+        while let Ok(event) = tokio::time::timeout(Duration::from_secs(1), events.recv()).await {
+            let event = event.map_err(|error| ReactError::Other(error.to_string()))?;
+            if let SubagentEvent::DispatchStarted {
+                agent,
+                execution_id: Some(execution_id),
+                run_id: Some(run_id),
+                ..
+            } = event.as_ref()
+            {
+                if agent == "worker" {
+                    worker_execution = Some((execution_id.clone(), run_id.clone()));
+                    break;
+                }
+            }
+        }
+        let (execution_id, run_id) = worker_execution.ok_or_else(|| {
+            ReactError::Other("worker DispatchStarted event was not observed".to_string())
+        })?;
+        assert_eq!(run_id, "team-identity-run");
+        assert!(execution_id.starts_with("team-identity-run:"));
+        assert!(execution_id.contains(":1:"));
         Ok(())
     }
 
