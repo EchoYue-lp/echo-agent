@@ -50,6 +50,8 @@ pub(crate) struct ToolExecutionContext {
     pub result: Option<ToolResult>,
     /// Final output string (after output guard + truncation).
     pub output: Option<String>,
+    /// Guarded diagnostic for audit when a failure has no tool output.
+    pub audit_error_output: Option<String>,
     /// Whether a stage has blocked execution.
     pub blocked: bool,
     /// Reason for blocking (if blocked).
@@ -463,7 +465,7 @@ impl PipelineStage for SkillPermissionStage {
     }
 }
 
-/// Records business audit logs for tool execution.
+/// Records the settled tool outcome in the configured audit logger.
 pub struct AuditStage;
 
 #[async_trait]
@@ -472,22 +474,32 @@ impl PipelineStage for AuditStage {
         "audit"
     }
 
+    fn runs_after_block(&self) -> bool {
+        true
+    }
+
     async fn run(
         &self,
         ctx: &mut ToolExecutionContext,
         snapshot: &crate::agent::snapshot::AgentRunSnapshot,
     ) -> Result<()> {
-        // Log tool execution start to audit logger
-        if let Some(al) = &snapshot.guard.audit_logger {
+        if let (Some(al), Some(result)) = (&snapshot.guard.audit_logger, &ctx.result) {
+            // A post-use hook can reject an effect that has already happened.
+            // Retain that output while reporting the final failure status.
+            let output = if !result.success && result.output.is_empty() {
+                ctx.audit_error_output.as_deref().unwrap_or("")
+            } else {
+                ctx.output.as_deref().unwrap_or(&result.output)
+            };
             let ev = crate::audit::AuditEvent::now(
                 snapshot.config.session_id.clone(),
                 snapshot.config.agent_name.clone(),
                 crate::audit::AuditEventType::ToolCall {
                     tool: ctx.tool_name.clone(),
                     input: ctx.input.clone(),
-                    output: String::new(),
-                    success: true,
-                    duration_ms: 0,
+                    output: output.to_string(),
+                    success: result.success,
+                    duration_ms: ctx.duration_ms,
                 },
             );
             if let Err(e) = al.log(ev).await {
@@ -659,24 +671,6 @@ impl PipelineStage for ExecuteStage {
             Ok(r) => r,
             Err(e) => {
                 let err_msg = e.to_string();
-                // Log failure to audit logger
-                if let Some(al) = &snapshot.guard.audit_logger {
-                    let ev = crate::audit::AuditEvent::now(
-                        snapshot.config.session_id.clone(),
-                        snapshot.config.agent_name.clone(),
-                        crate::audit::AuditEventType::ToolCall {
-                            tool: ctx.tool_name.clone(),
-                            input: ctx.input.clone(),
-                            output: err_msg.clone(),
-                            success: false,
-                            duration_ms: 0,
-                        },
-                    );
-                    if let Err(e) = al.log(ev).await {
-                        tracing::error!(error = %e, "audit log write failed — event dropped");
-                    }
-                }
-
                 ToolResult {
                     kind: echo_core::tools::ToolResultKind::StructuredError {
                         error_code: "tool_execution_failed".into(),
@@ -818,11 +812,19 @@ impl PipelineStage for OutputGuardStage {
         ctx: &mut ToolExecutionContext,
         snapshot: &crate::agent::snapshot::AgentRunSnapshot,
     ) -> Result<()> {
-        if let Some(ref result) = ctx.result
-            && (result.success || ctx.blocked)
-            && let Some(guarded) = snapshot.check_tool_output_guard(&result.output).await
-        {
-            ctx.output = Some(guarded);
+        if let Some(ref result) = ctx.result {
+            if !result.success && result.output.is_empty() {
+                if let Some(error) = result.error.as_deref() {
+                    ctx.audit_error_output = Some(
+                        snapshot
+                            .check_tool_output_guard(error)
+                            .await
+                            .unwrap_or_else(|| error.to_string()),
+                    );
+                }
+            } else if let Some(guarded) = snapshot.check_tool_output_guard(&result.output).await {
+                ctx.output = Some(guarded);
+            }
         }
         Ok(())
     }
@@ -1061,12 +1063,12 @@ impl ToolExecutionPipeline {
                 Box::new(SkillPermissionStage),
                 Box::new(InvocationStage),
                 Box::new(CallbackStage::START),
-                Box::new(AuditStage),
                 Box::new(ExecuteStage),
                 Box::new(PostToolUseHookStage),
                 Box::new(OutputGuardStage),
                 Box::new(TruncationStage),
                 Box::new(TraceRecordingStage),
+                Box::new(AuditStage),
                 Box::new(CallbackStage::END),
             ],
         }
@@ -1226,6 +1228,58 @@ mod tests {
     struct InterleavingTool;
 
     struct InvalidResultTool;
+
+    struct FailedOutputTool;
+
+    struct ErrorOnlyTool;
+
+    impl Tool for ErrorOnlyTool {
+        fn name(&self) -> &str {
+            "error_only"
+        }
+
+        fn description(&self) -> &str {
+            "returns a sensitive error without tool output"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        fn execute<'a>(
+            &'a self,
+            _parameters: ToolParameters,
+        ) -> futures::future::BoxFuture<'a, crate::error::Result<ToolResult>> {
+            Box::pin(async { Ok(ToolResult::error("Bearer sensitive-token")) })
+        }
+    }
+
+    impl Tool for FailedOutputTool {
+        fn name(&self) -> &str {
+            "failed_output"
+        }
+
+        fn description(&self) -> &str {
+            "returns an unsuccessful result with output"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        fn execute<'a>(
+            &'a self,
+            _parameters: ToolParameters,
+        ) -> futures::future::BoxFuture<'a, crate::error::Result<ToolResult>> {
+            Box::pin(async {
+                Ok(ToolResult::failure(
+                    crate::tools::ToolFailureCategory::Permanent,
+                    "execution failed",
+                )
+                .with_output("sensitive raw output"))
+            })
+        }
+    }
 
     struct ResourceGuardStreamingTool {
         observed_guard_count: Arc<std::sync::atomic::AtomicUsize>,
@@ -1417,6 +1471,7 @@ mod tests {
             hook_messages: HookMessageBatches::default(),
             result: None,
             output: None,
+            audit_error_output: None,
             blocked: false,
             block_reason: None,
             block_failure: None,
@@ -1441,6 +1496,7 @@ mod tests {
             hook_messages: HookMessageBatches::default(),
             result: Some(ToolResult::success(output)),
             output: None,
+            audit_error_output: None,
             blocked: false,
             block_reason: None,
             block_failure: None,
@@ -2026,20 +2082,35 @@ mod tests {
         }
     }
 
-    fn snapshot_with_callback(
-        callback: Arc<dyn echo_core::agent::AgentCallback>,
-    ) -> crate::error::Result<crate::agent::snapshot::AgentRunSnapshot> {
-        let agent = crate::agent::ReactAgentBuilder::new()
-            .model("test-model")
-            .callback(callback)
-            .tool(Box::new(EffectTool))
-            .build()?;
-        Ok(crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent))
-    }
-
     /// Deterministic success tool so the pipeline exercises the success
     /// PostToolUse path without touching the filesystem or shell.
     struct EffectTool;
+
+    struct EmptyOutputGuard;
+
+    impl crate::guard::Guard for EmptyOutputGuard {
+        fn name(&self) -> &str {
+            "empty_output"
+        }
+
+        fn check<'a>(
+            &'a self,
+            _content: &'a str,
+            direction: crate::guard::GuardDirection,
+        ) -> futures::future::BoxFuture<'a, crate::error::Result<crate::guard::GuardResult>>
+        {
+            Box::pin(async move {
+                if direction == crate::guard::GuardDirection::Output {
+                    Ok(crate::guard::GuardResult::Transform {
+                        content: String::new(),
+                        reasons: vec!["redacted".to_string()],
+                    })
+                } else {
+                    Ok(crate::guard::GuardResult::Pass)
+                }
+            })
+        }
+    }
 
     impl Tool for EffectTool {
         fn name(&self) -> &str {
@@ -2063,9 +2134,135 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn audit_does_not_restore_output_cleared_by_guard() -> Result<()> {
+        let audit = Arc::new(crate::audit::InMemoryAuditLogger::new());
+        let agent = crate::agent::ReactAgentBuilder::new()
+            .model("test-model")
+            .audit_logger(audit.clone())
+            .guard(Arc::new(EmptyOutputGuard))
+            .tool(Box::new(EffectTool))
+            .build()?;
+        let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+        let outcome = snapshot
+            .execute_tool_with_policy(
+                "guard-clears-output".to_string(),
+                "shell",
+                &ToolParameters::new(),
+                &serde_json::json!({}),
+                None,
+            )
+            .await
+            .map_err(|failure| {
+                ReactError::Other(format!(
+                    "tool unexpectedly failed: {}",
+                    failure.result.output
+                ))
+            })?;
+        assert_eq!(outcome.result.output, "");
+        let terminal_outputs: Vec<_> = audit
+            .snapshot()
+            .into_iter()
+            .filter_map(|event| match event.event_type {
+                crate::audit::AuditEventType::ToolCall {
+                    output, success, ..
+                } => Some((output, success)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(terminal_outputs, vec![(String::new(), true)]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn failed_tool_output_is_guarded_before_caller_and_audit() -> Result<()> {
+        let audit = Arc::new(crate::audit::InMemoryAuditLogger::new());
+        let agent = crate::agent::ReactAgentBuilder::new()
+            .model("test-model")
+            .audit_logger(audit.clone())
+            .guard(Arc::new(EmptyOutputGuard))
+            .tool(Box::new(FailedOutputTool))
+            .build()?;
+        let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+        let failure = snapshot
+            .execute_tool_with_policy(
+                "failed-output".to_string(),
+                "failed_output",
+                &ToolParameters::new(),
+                &serde_json::json!({}),
+                None,
+            )
+            .await
+            .err()
+            .ok_or_else(|| ReactError::Other("failed tool unexpectedly succeeded".to_string()))?;
+        assert_eq!(failure.result.error.as_deref(), Some("execution failed"));
+        assert_eq!(failure.result.output, "");
+        let terminal_outputs: Vec<_> = audit
+            .snapshot()
+            .into_iter()
+            .filter_map(|event| match event.event_type {
+                crate::audit::AuditEventType::ToolCall {
+                    output, success, ..
+                } => Some((output, success)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(terminal_outputs, vec![(String::new(), false)]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn error_only_audit_uses_guarded_diagnostic() -> Result<()> {
+        let audit = Arc::new(crate::audit::InMemoryAuditLogger::new());
+        let agent = crate::agent::ReactAgentBuilder::new()
+            .model("test-model")
+            .audit_logger(audit.clone())
+            .guard(Arc::new(EmptyOutputGuard))
+            .tool(Box::new(ErrorOnlyTool))
+            .build()?;
+        let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+        let failure = snapshot
+            .execute_tool_with_policy(
+                "error-only".to_string(),
+                "error_only",
+                &ToolParameters::new(),
+                &serde_json::json!({}),
+                None,
+            )
+            .await
+            .err()
+            .ok_or_else(|| {
+                ReactError::Other("error-only tool unexpectedly succeeded".to_string())
+            })?;
+        assert_eq!(
+            failure.result.error.as_deref(),
+            Some("Bearer sensitive-token")
+        );
+        assert_eq!(failure.result.output, "");
+        let terminal_outputs: Vec<_> = audit
+            .snapshot()
+            .into_iter()
+            .filter_map(|event| match event.event_type {
+                crate::audit::AuditEventType::ToolCall {
+                    output, success, ..
+                } => Some((output, success)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(terminal_outputs, vec![(String::new(), false)]);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn pre_execution_block_does_not_emit_success_callback() -> Result<()> {
         let callback = Arc::new(RecordingCallback::default());
-        let snapshot = snapshot_with_callback(callback.clone())?;
+        let audit = Arc::new(crate::audit::InMemoryAuditLogger::new());
+        let agent = crate::agent::ReactAgentBuilder::new()
+            .model("test-model")
+            .callback(callback.clone())
+            .audit_logger(audit.clone())
+            .tool(Box::new(EffectTool))
+            .build()?;
+        let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
         let mut ctx = completed_context(String::new());
         ctx.result = None;
         ctx.block(
@@ -2088,6 +2285,7 @@ mod tests {
                 .load(std::sync::atomic::Ordering::SeqCst),
             0
         );
+        assert!(audit.snapshot().is_empty());
         Ok(())
     }
 
@@ -2095,10 +2293,12 @@ mod tests {
     #[tokio::test]
     async fn failed_tool_result_routes_to_on_tool_error_not_on_tool_end() -> Result<()> {
         let callback = Arc::new(RecordingCallback::default());
+        let audit = Arc::new(crate::audit::InMemoryAuditLogger::new());
 
         let agent = crate::agent::ReactAgentBuilder::new()
             .model("test-model")
             .callback(callback.clone())
+            .audit_logger(audit.clone())
             .tool(Box::new(InvalidResultTool))
             .build()?;
         let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
@@ -2123,6 +2323,22 @@ mod tests {
             0,
             "failure must not be reported as on_tool_end success"
         );
+        assert_eq!(
+            audit
+                .snapshot()
+                .iter()
+                .filter(|event| matches!(
+                    event.event_type,
+                    crate::audit::AuditEventType::ToolCall { success: false, .. }
+                ))
+                .count(),
+            1,
+        );
+        assert!(audit.snapshot().iter().any(|event| matches!(
+            &event.event_type,
+            crate::audit::AuditEventType::ToolCall { output, success: false, .. }
+            if output.contains("missing query")
+        )));
         Ok(())
     }
 
@@ -2162,24 +2378,30 @@ mod tests {
         let agent = crate::agent::ReactAgentBuilder::new()
             .model("test-model")
             .callback(callback.clone())
-            .callback(Arc::new(crate::audit::AuditCallback::new(
-                audit.clone(),
-                "test",
-                None,
-            )))
+            .audit_logger(audit.clone())
             .with_run_store(store.clone())
             .tool(Box::new(EffectTool))
             .build()?;
         let mut snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
         snapshot.trace_run_id = Some("post-block".to_string());
+        // Drain the hook context before exiting so stdin delivery cannot race
+        // the explicit block signal and turn it into a sandbox error.
+        let (command, shell) = if cfg!(target_os = "windows") {
+            (
+                "[Console]::In.ReadToEnd() | Out-Null; exit 2",
+                Some("powershell".to_string()),
+            )
+        } else {
+            ("read -r hook_context; exit 2", None)
+        };
         let mut definition = HooksDefinition::default();
         definition.add_rules(
             HookEvent::PostToolUse,
             vec![HookRule {
                 matcher: "shell".to_string(),
                 hooks: vec![HookAction::Command {
-                    command: "exit 2".to_string(),
-                    shell: None,
+                    command: command.to_string(),
+                    shell,
                     timeout: 10,
                 }],
             }],
@@ -2250,11 +2472,13 @@ mod tests {
         let audit_terminals: Vec<_> = audit_events
             .iter()
             .filter_map(|event| match &event.event_type {
-                crate::audit::AuditEventType::ToolCall { success, .. } => Some(*success),
+                crate::audit::AuditEventType::ToolCall {
+                    success, output, ..
+                } => Some((*success, output.as_str())),
                 _ => None,
             })
             .collect();
-        assert_eq!(audit_terminals, vec![false]);
+        assert_eq!(audit_terminals, vec![(false, "real effect")]);
         Ok(())
     }
 }
