@@ -4,9 +4,80 @@
 //! multi-agent isolation. Concrete implementation (`SqliteConversationStore`)
 //! lives in `echo_state`.
 
-use crate::error::Result;
+use crate::error::{MemoryError, Result};
 use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+const TRANSCRIPT_PROJECTION_SCHEMA_VERSION: u16 = 1;
+const TRANSCRIPT_PROJECTION_EPOCH_MAX: u64 = i64::MAX as u64;
+const TRANSCRIPT_PROJECTION_ORDINAL_MAX: u64 = i64::MAX as u64;
+
+/// Non-authoritative call metadata propagated through Host/extension adapters.
+///
+/// The deadline is excluded from operation digests so durable effects can be
+/// retried with a fresh bounded recovery budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersistenceCallContext {
+    pub absolute_deadline_unix_ms: i64,
+}
+
+impl PersistenceCallContext {
+    pub fn with_timeout(timeout: std::time::Duration) -> Result<Self> {
+        let deadline = std::time::SystemTime::now()
+            .checked_add(timeout)
+            .ok_or_else(|| projection_error("persistence deadline overflow"))?;
+        let since_epoch = deadline
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|error| projection_error(format!("invalid persistence deadline: {error}")))?;
+        let absolute_deadline_unix_ms =
+            i64::try_from(since_epoch.as_millis()).map_err(|error| {
+                projection_error(format!(
+                    "persistence deadline is outside i64 range: {error}"
+                ))
+            })?;
+        Ok(Self {
+            absolute_deadline_unix_ms,
+        })
+    }
+
+    /// Return the wall-clock budget remaining before this call expires.
+    pub fn remaining_duration(self) -> std::result::Result<std::time::Duration, MemoryError> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|error| {
+                MemoryError::SerializationError(format!("invalid system time: {error}"))
+            })?;
+        let now_unix_ms = i64::try_from(now.as_millis()).map_err(|error| {
+            MemoryError::SerializationError(format!("system time is outside i64 range: {error}"))
+        })?;
+        let remaining_ms = self
+            .absolute_deadline_unix_ms
+            .checked_sub(now_unix_ms)
+            .filter(|remaining| *remaining > 0)
+            .ok_or_else(|| {
+                MemoryError::DeadlineExceeded(format!(
+                    "deadline {}ms elapsed at {now_unix_ms}ms",
+                    self.absolute_deadline_unix_ms
+                ))
+            })?;
+        let remaining_ms = u64::try_from(remaining_ms).map_err(|error| {
+            MemoryError::SerializationError(format!(
+                "remaining deadline is outside u64 range: {error}"
+            ))
+        })?;
+        Ok(std::time::Duration::from_millis(remaining_ms))
+    }
+
+    /// Reject a managed persistence call before it begins durable work.
+    ///
+    /// Backends must not remap a completed durable operation to a deadline
+    /// error because that would obscure whether the operation committed.
+    pub fn ensure_not_expired(self) -> std::result::Result<(), MemoryError> {
+        self.remaining_duration().map(|_| ())
+    }
+}
+
 /// Parameters for creating a new conversation
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NewConversation {
@@ -61,7 +132,7 @@ pub struct ConversationMeta {
 }
 
 /// Persisted message (independent from LLM Message, with persistence fields)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredMessage {
     /// Database auto-increment ID (None for new messages)
     pub id: Option<i64>,
@@ -81,6 +152,642 @@ pub struct StoredMessage {
     pub created_at: String,
 }
 
+/// Atomic transcript projection support advertised without mutating a store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationProjectionCapability {
+    Unsupported,
+    AtomicV1,
+}
+
+/// Deadline contract supported by managed persistence operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PersistenceCallCapability {
+    Unsupported,
+    /// Reject calls whose absolute deadline has elapsed before durable work begins.
+    AbsoluteDeadlineV1,
+}
+
+/// Durable lifecycle of a managed conversation transcript.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationProjectionLifecycle {
+    Live,
+    Deleted,
+}
+
+/// Current epoch and revision of the committed transcript authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConversationProjectionAuthority {
+    pub conversation_id: String,
+    pub epoch: u64,
+    pub revision: u64,
+    pub lifecycle: ConversationProjectionLifecycle,
+    /// Highest deleted epoch whose exact operation receipt is no longer retained.
+    pub delete_receipt_retention_floor_epoch: u64,
+}
+
+/// Request to acquire the epoch used by one projection generation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnsureConversationProjectionRequest {
+    pub conversation: NewConversation,
+    /// Required when recreating a conversation whose managed tombstone exists.
+    pub expected_tombstone_epoch: Option<u64>,
+}
+
+/// Result of acquiring a managed transcript epoch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationProjectionEpochStatus {
+    Created,
+    AdoptedLegacy,
+    Existing,
+    Recreated,
+    Tombstoned,
+    EpochConflict,
+}
+
+/// Stable receipt for managed transcript epoch acquisition.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConversationProjectionEpochReceipt {
+    pub authority: ConversationProjectionAuthority,
+    pub status: ConversationProjectionEpochStatus,
+}
+
+/// One complete, immutable message effect within a transcript projection batch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranscriptProjectionItem {
+    pub ordinal: u64,
+    pub digest: String,
+    pub message: StoredMessage,
+}
+
+/// Canonical, retry-stable transcript effect for one runtime generation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranscriptProjectionBatch {
+    pub schema_version: u16,
+    pub operation_id: String,
+    pub payload_digest: String,
+    pub conversation_id: String,
+    pub conversation_epoch: u64,
+    pub generation_id: String,
+    pub items: Vec<TranscriptProjectionItem>,
+}
+
+impl TranscriptProjectionBatch {
+    /// Prepare a canonical batch once. Recovery persists and reuses this value;
+    /// it must not regenerate message timestamps or other effect fields.
+    pub fn prepare(
+        conversation_id: impl Into<String>,
+        conversation_epoch: u64,
+        generation_id: impl Into<String>,
+        first_ordinal: u64,
+        messages: Vec<StoredMessage>,
+    ) -> Result<Self> {
+        let conversation_id = conversation_id.into();
+        let generation_id = generation_id.into();
+        validate_projection_identity(&conversation_id, conversation_epoch, &generation_id)?;
+        if messages.is_empty() {
+            return Err(projection_error(
+                "transcript projection batch must not be empty",
+            ));
+        }
+
+        let mut items = Vec::with_capacity(messages.len());
+        for (offset, message) in messages.into_iter().enumerate() {
+            if message.id.is_some() {
+                return Err(projection_error(
+                    "prepared transcript projection messages must not carry backend ids",
+                ));
+            }
+            if message.conversation_id != conversation_id {
+                return Err(projection_error(
+                    "prepared transcript projection message belongs to another conversation",
+                ));
+            }
+            if message.created_at.trim().is_empty() {
+                return Err(projection_error(
+                    "prepared transcript projection message is missing created_at",
+                ));
+            }
+            let offset = u64::try_from(offset).map_err(|error| {
+                projection_error(format!("transcript projection ordinal overflow: {error}"))
+            })?;
+            let ordinal = first_ordinal
+                .checked_add(offset)
+                .ok_or_else(|| projection_error("transcript projection ordinal overflow"))?;
+            if ordinal > TRANSCRIPT_PROJECTION_ORDINAL_MAX {
+                return Err(projection_error(
+                    "transcript projection ordinal exceeds backend-compatible range",
+                ));
+            }
+            let digest = digest_serialized(&message)?;
+            items.push(TranscriptProjectionItem {
+                ordinal,
+                digest,
+                message,
+            });
+        }
+
+        let payload_digest = projection_payload_digest(
+            TRANSCRIPT_PROJECTION_SCHEMA_VERSION,
+            &conversation_id,
+            conversation_epoch,
+            &generation_id,
+            &items,
+        )?;
+        Ok(Self {
+            schema_version: TRANSCRIPT_PROJECTION_SCHEMA_VERSION,
+            operation_id: format!("transcript-projection-v1:{payload_digest}"),
+            payload_digest,
+            conversation_id,
+            conversation_epoch,
+            generation_id,
+            items,
+        })
+    }
+
+    /// Validate a decoded batch before a backend observes any effect.
+    pub fn validate(&self) -> Result<()> {
+        validate_projection_identity(
+            &self.conversation_id,
+            self.conversation_epoch,
+            &self.generation_id,
+        )?;
+        if self.schema_version != TRANSCRIPT_PROJECTION_SCHEMA_VERSION || self.items.is_empty() {
+            return Err(projection_error(
+                "unsupported or empty transcript projection batch",
+            ));
+        }
+        let mut previous: Option<u64> = None;
+        for item in &self.items {
+            let contiguous = match previous {
+                Some(previous) => previous
+                    .checked_add(1)
+                    .is_some_and(|next| item.ordinal == next),
+                None => true,
+            };
+            if item.message.id.is_some()
+                || item.message.conversation_id != self.conversation_id
+                || item.message.created_at.trim().is_empty()
+                || item.ordinal > TRANSCRIPT_PROJECTION_ORDINAL_MAX
+                || !contiguous
+                || digest_serialized(&item.message)? != item.digest
+            {
+                return Err(projection_error(
+                    "transcript projection batch payload is not canonical",
+                ));
+            }
+            previous = Some(item.ordinal);
+        }
+        let digest = projection_payload_digest(
+            self.schema_version,
+            &self.conversation_id,
+            self.conversation_epoch,
+            &self.generation_id,
+            &self.items,
+        )?;
+        if digest != self.payload_digest
+            || self.operation_id != format!("transcript-projection-v1:{digest}")
+        {
+            return Err(projection_error(
+                "transcript projection operation identity does not match its payload",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Domain result of atomically applying a transcript projection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TranscriptProjectionConflictKind {
+    OperationIdentity,
+    OrdinalDigest,
+    Revision,
+    ManagedImport,
+}
+
+/// Domain result of atomically applying a transcript projection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TranscriptProjectionApplyStatus {
+    Applied,
+    AlreadyApplied,
+    Fenced {
+        current_epoch: u64,
+        lifecycle: ConversationProjectionLifecycle,
+    },
+    Conflict {
+        current_epoch: u64,
+        current_revision: u64,
+        kind: TranscriptProjectionConflictKind,
+    },
+}
+
+/// Stable receipt for one atomic projection attempt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranscriptProjectionApplyReceipt {
+    pub operation_id: String,
+    pub payload_digest: String,
+    pub authority: ConversationProjectionAuthority,
+    pub status: TranscriptProjectionApplyStatus,
+}
+
+/// Framework settlement state observed before an invocation terminal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TranscriptProjectionSettlementStatus {
+    Settled,
+    Deferred,
+    Blocked,
+    Conflict,
+}
+
+/// Stable classification for projection settlement failures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TranscriptProjectionErrorClass {
+    OutcomeUnknown,
+    TransientNoCommit,
+    RevisionConflict,
+    DeadlineExceeded,
+    Unsupported,
+    InvalidConfiguration,
+    CorruptState,
+    SemanticConflict,
+}
+
+/// Typed observation of one transcript projection safe point.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranscriptProjectionSettlement {
+    pub status: TranscriptProjectionSettlementStatus,
+    pub operation_id: Option<String>,
+    pub conversation_id: Option<String>,
+    pub generation_id: Option<String>,
+    pub attempt: u32,
+    pub error_class: Option<TranscriptProjectionErrorClass>,
+    pub detail: Option<String>,
+}
+
+/// Explicit CAS import for replacing a managed transcript.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManagedConversationImport {
+    pub schema_version: u16,
+    pub operation_id: String,
+    pub payload_digest: String,
+    pub conversation_id: String,
+    pub expected_epoch: u64,
+    pub expected_revision: u64,
+    pub messages: Vec<StoredMessage>,
+}
+
+impl ManagedConversationImport {
+    pub fn prepare(
+        conversation_id: impl Into<String>,
+        expected_epoch: u64,
+        expected_revision: u64,
+        messages: Vec<StoredMessage>,
+    ) -> Result<Self> {
+        let conversation_id = conversation_id.into();
+        validate_managed_messages(&conversation_id, &messages)?;
+        validate_managed_epoch(expected_epoch)?;
+        let payload_digest = digest_serialized(&ManagedImportIdentity {
+            schema_version: TRANSCRIPT_PROJECTION_SCHEMA_VERSION,
+            conversation_id: &conversation_id,
+            expected_epoch,
+            expected_revision,
+            messages: &messages,
+        })?;
+        Ok(Self {
+            schema_version: TRANSCRIPT_PROJECTION_SCHEMA_VERSION,
+            operation_id: format!("managed-conversation-import-v1:{payload_digest}"),
+            payload_digest,
+            conversation_id,
+            expected_epoch,
+            expected_revision,
+            messages,
+        })
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        validate_managed_messages(&self.conversation_id, &self.messages)?;
+        validate_managed_epoch(self.expected_epoch)?;
+        if self.schema_version != TRANSCRIPT_PROJECTION_SCHEMA_VERSION {
+            return Err(projection_error(
+                "unsupported managed conversation import schema",
+            ));
+        }
+        let digest = digest_serialized(&ManagedImportIdentity {
+            schema_version: self.schema_version,
+            conversation_id: &self.conversation_id,
+            expected_epoch: self.expected_epoch,
+            expected_revision: self.expected_revision,
+            messages: &self.messages,
+        })?;
+        if digest != self.payload_digest
+            || self.operation_id != format!("managed-conversation-import-v1:{digest}")
+        {
+            return Err(projection_error(
+                "managed conversation import identity does not match its payload",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Epoch- and revision-fenced metadata mutation for a managed conversation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManagedConversationMetadataUpdate {
+    pub schema_version: u16,
+    pub operation_id: String,
+    pub payload_digest: String,
+    pub conversation_id: String,
+    pub expected_epoch: u64,
+    pub expected_revision: u64,
+    pub title: Option<String>,
+    pub summary: Option<String>,
+    pub compressed_before_id: Option<i64>,
+}
+
+impl ManagedConversationMetadataUpdate {
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare(
+        conversation_id: impl Into<String>,
+        expected_epoch: u64,
+        expected_revision: u64,
+        title: Option<String>,
+        summary: Option<String>,
+        compressed_before_id: Option<i64>,
+    ) -> Result<Self> {
+        let conversation_id = conversation_id.into();
+        if conversation_id.trim().is_empty() {
+            return Err(projection_error(
+                "managed conversation metadata identity must not be empty",
+            ));
+        }
+        validate_managed_epoch(expected_epoch)?;
+        let payload_digest = digest_serialized(&ManagedMetadataIdentity {
+            schema_version: TRANSCRIPT_PROJECTION_SCHEMA_VERSION,
+            conversation_id: &conversation_id,
+            expected_epoch,
+            expected_revision,
+            title: title.as_deref(),
+            summary: summary.as_deref(),
+            compressed_before_id,
+        })?;
+        Ok(Self {
+            schema_version: TRANSCRIPT_PROJECTION_SCHEMA_VERSION,
+            operation_id: format!("managed-conversation-metadata-v1:{payload_digest}"),
+            payload_digest,
+            conversation_id,
+            expected_epoch,
+            expected_revision,
+            title,
+            summary,
+            compressed_before_id,
+        })
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if self.conversation_id.trim().is_empty()
+            || self.schema_version != TRANSCRIPT_PROJECTION_SCHEMA_VERSION
+        {
+            return Err(projection_error(
+                "invalid managed conversation metadata update",
+            ));
+        }
+        validate_managed_epoch(self.expected_epoch)?;
+        let digest = digest_serialized(&ManagedMetadataIdentity {
+            schema_version: self.schema_version,
+            conversation_id: &self.conversation_id,
+            expected_epoch: self.expected_epoch,
+            expected_revision: self.expected_revision,
+            title: self.title.as_deref(),
+            summary: self.summary.as_deref(),
+            compressed_before_id: self.compressed_before_id,
+        })?;
+        if digest != self.payload_digest
+            || self.operation_id != format!("managed-conversation-metadata-v1:{digest}")
+        {
+            return Err(projection_error(
+                "managed conversation metadata identity does not match its payload",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ManagedConversationMetadataUpdateStatus {
+    Updated,
+    AlreadyUpdated,
+    EpochConflict,
+    RevisionConflict,
+    IdentityConflict,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManagedConversationMetadataUpdateReceipt {
+    pub operation_id: String,
+    pub payload_digest: String,
+    pub authority: ConversationProjectionAuthority,
+    pub status: ManagedConversationMetadataUpdateStatus,
+}
+
+/// Request to fence and delete one managed conversation incarnation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManagedConversationDelete {
+    pub schema_version: u16,
+    pub operation_id: String,
+    pub payload_digest: String,
+    pub conversation_id: String,
+    pub expected_epoch: u64,
+}
+
+impl ManagedConversationDelete {
+    pub fn prepare(conversation_id: impl Into<String>, expected_epoch: u64) -> Result<Self> {
+        let conversation_id = conversation_id.into();
+        if conversation_id.trim().is_empty() {
+            return Err(projection_error(
+                "managed conversation delete identity must not be empty",
+            ));
+        }
+        validate_managed_epoch(expected_epoch)?;
+        let payload_digest = digest_serialized(&ManagedDeleteIdentity {
+            schema_version: TRANSCRIPT_PROJECTION_SCHEMA_VERSION,
+            conversation_id: &conversation_id,
+            expected_epoch,
+        })?;
+        Ok(Self {
+            schema_version: TRANSCRIPT_PROJECTION_SCHEMA_VERSION,
+            operation_id: format!("managed-conversation-delete-v1:{payload_digest}"),
+            payload_digest,
+            conversation_id,
+            expected_epoch,
+        })
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if self.conversation_id.trim().is_empty()
+            || self.schema_version != TRANSCRIPT_PROJECTION_SCHEMA_VERSION
+        {
+            return Err(projection_error(
+                "invalid managed conversation delete request",
+            ));
+        }
+        validate_managed_epoch(self.expected_epoch)?;
+        let digest = digest_serialized(&ManagedDeleteIdentity {
+            schema_version: self.schema_version,
+            conversation_id: &self.conversation_id,
+            expected_epoch: self.expected_epoch,
+        })?;
+        if digest != self.payload_digest
+            || self.operation_id != format!("managed-conversation-delete-v1:{digest}")
+        {
+            return Err(projection_error(
+                "managed conversation delete identity does not match its payload",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Domain result of a managed delete request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ManagedConversationDeleteStatus {
+    Deleted,
+    AlreadyDeleted,
+    EpochConflict,
+    ReceiptExpired,
+    IdentityConflict,
+}
+
+/// Stable receipt for epoch-fenced transcript deletion.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManagedConversationDeleteReceipt {
+    pub operation_id: String,
+    pub payload_digest: String,
+    pub deleted_epoch: u64,
+    pub retention_floor_epoch: u64,
+    pub status: ManagedConversationDeleteStatus,
+}
+
+#[derive(Serialize)]
+struct ProjectionPayloadIdentity<'a> {
+    schema_version: u16,
+    conversation_id: &'a str,
+    conversation_epoch: u64,
+    generation_id: &'a str,
+    items: &'a [TranscriptProjectionItem],
+}
+
+#[derive(Serialize)]
+struct ManagedImportIdentity<'a> {
+    schema_version: u16,
+    conversation_id: &'a str,
+    expected_epoch: u64,
+    expected_revision: u64,
+    messages: &'a [StoredMessage],
+}
+
+#[derive(Serialize)]
+struct ManagedDeleteIdentity<'a> {
+    schema_version: u16,
+    conversation_id: &'a str,
+    expected_epoch: u64,
+}
+
+#[derive(Serialize)]
+struct ManagedMetadataIdentity<'a> {
+    schema_version: u16,
+    conversation_id: &'a str,
+    expected_epoch: u64,
+    expected_revision: u64,
+    title: Option<&'a str>,
+    summary: Option<&'a str>,
+    compressed_before_id: Option<i64>,
+}
+
+fn validate_managed_messages(conversation_id: &str, messages: &[StoredMessage]) -> Result<()> {
+    if conversation_id.trim().is_empty() {
+        return Err(projection_error(
+            "managed conversation identity must not be empty",
+        ));
+    }
+    for message in messages {
+        if message.id.is_some()
+            || message.conversation_id != conversation_id
+            || message.created_at.trim().is_empty()
+        {
+            return Err(projection_error(
+                "managed conversation import messages are not canonical",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_managed_epoch(epoch: u64) -> Result<()> {
+    if epoch == 0 || epoch > TRANSCRIPT_PROJECTION_EPOCH_MAX {
+        return Err(MemoryError::ProjectionEpochExhausted(format!(
+            "epoch {epoch} is outside 1..={TRANSCRIPT_PROJECTION_EPOCH_MAX}"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+fn validate_projection_identity(
+    conversation_id: &str,
+    conversation_epoch: u64,
+    generation_id: &str,
+) -> Result<()> {
+    if conversation_id.trim().is_empty() || generation_id.trim().is_empty() {
+        return Err(projection_error(
+            "transcript projection identities must not be empty",
+        ));
+    }
+    if conversation_epoch == 0 || conversation_epoch > TRANSCRIPT_PROJECTION_EPOCH_MAX {
+        return Err(projection_error(
+            "transcript projection epoch is outside the supported range",
+        ));
+    }
+    Ok(())
+}
+
+fn projection_payload_digest(
+    schema_version: u16,
+    conversation_id: &str,
+    conversation_epoch: u64,
+    generation_id: &str,
+    items: &[TranscriptProjectionItem],
+) -> Result<String> {
+    digest_serialized(&ProjectionPayloadIdentity {
+        schema_version,
+        conversation_id,
+        conversation_epoch,
+        generation_id,
+        items,
+    })
+}
+
+fn digest_serialized(value: &impl Serialize) -> Result<String> {
+    let encoded = serde_json::to_vec(value).map_err(|error| {
+        projection_error(format!(
+            "failed to serialize transcript projection identity: {error}"
+        ))
+    })?;
+    Ok(format!("{:x}", Sha256::digest(encoded)))
+}
+
+fn projection_error(message: impl Into<String>) -> crate::error::ReactError {
+    MemoryError::SerializationError(message.into()).into()
+}
+
 /// List filter criteria
 #[derive(Debug, Clone, Default)]
 pub struct ConversationFilter {
@@ -96,6 +803,16 @@ pub struct ConversationFilter {
 ///
 /// Provides CRUD operations for conversations and messages, supporting different storage backends.
 pub trait ConversationStore: Send + Sync {
+    /// Report atomic transcript projection support without performing I/O.
+    fn projection_capability(&self) -> ConversationProjectionCapability {
+        ConversationProjectionCapability::Unsupported
+    }
+
+    /// Report managed persistence deadline support without performing I/O.
+    fn persistence_call_capability(&self) -> PersistenceCallCapability {
+        PersistenceCallCapability::Unsupported
+    }
+
     /// Create a new conversation
     fn create_conversation<'a>(
         &'a self,
@@ -157,6 +874,117 @@ pub trait ConversationStore: Send + Sync {
         })
     }
 
+    /// Acquire or inspect the atomic projection epoch for one conversation.
+    fn ensure_projection_epoch<'a>(
+        &'a self,
+        _request: EnsureConversationProjectionRequest,
+    ) -> BoxFuture<'a, Result<ConversationProjectionEpochReceipt>> {
+        Box::pin(async {
+            Err(MemoryError::Unsupported(
+                "atomic conversation projection epoch acquisition".to_string(),
+            )
+            .into())
+        })
+    }
+
+    fn ensure_projection_epoch_with_context<'a>(
+        &'a self,
+        _context: PersistenceCallContext,
+        request: EnsureConversationProjectionRequest,
+    ) -> BoxFuture<'a, Result<ConversationProjectionEpochReceipt>> {
+        self.ensure_projection_epoch(request)
+    }
+
+    /// Read the managed conversation epoch/tombstone without creating data.
+    fn get_projection_authority<'a>(
+        &'a self,
+        _conversation_id: &'a str,
+    ) -> BoxFuture<'a, Result<Option<ConversationProjectionAuthority>>> {
+        Box::pin(async {
+            Err(MemoryError::Unsupported("managed conversation authority query".to_string()).into())
+        })
+    }
+
+    fn get_projection_authority_with_context<'a>(
+        &'a self,
+        _context: PersistenceCallContext,
+        conversation_id: &'a str,
+    ) -> BoxFuture<'a, Result<Option<ConversationProjectionAuthority>>> {
+        self.get_projection_authority(conversation_id)
+    }
+
+    /// Atomically merge one canonical generation-scoped transcript batch.
+    fn apply_transcript_projection<'a>(
+        &'a self,
+        _batch: TranscriptProjectionBatch,
+    ) -> BoxFuture<'a, Result<TranscriptProjectionApplyReceipt>> {
+        Box::pin(async {
+            Err(MemoryError::Unsupported("atomic transcript projection apply".to_string()).into())
+        })
+    }
+
+    fn apply_transcript_projection_with_context<'a>(
+        &'a self,
+        _context: PersistenceCallContext,
+        batch: TranscriptProjectionBatch,
+    ) -> BoxFuture<'a, Result<TranscriptProjectionApplyReceipt>> {
+        self.apply_transcript_projection(batch)
+    }
+
+    /// Replace a managed transcript only when epoch and revision still match.
+    fn import_managed_messages<'a>(
+        &'a self,
+        _request: ManagedConversationImport,
+    ) -> BoxFuture<'a, Result<TranscriptProjectionApplyReceipt>> {
+        Box::pin(async {
+            Err(MemoryError::Unsupported("managed conversation import".to_string()).into())
+        })
+    }
+
+    fn import_managed_messages_with_context<'a>(
+        &'a self,
+        _context: PersistenceCallContext,
+        request: ManagedConversationImport,
+    ) -> BoxFuture<'a, Result<TranscriptProjectionApplyReceipt>> {
+        self.import_managed_messages(request)
+    }
+
+    /// Update managed metadata only when epoch and revision still match.
+    fn update_managed_conversation<'a>(
+        &'a self,
+        _request: ManagedConversationMetadataUpdate,
+    ) -> BoxFuture<'a, Result<ManagedConversationMetadataUpdateReceipt>> {
+        Box::pin(async {
+            Err(MemoryError::Unsupported("managed conversation metadata update".to_string()).into())
+        })
+    }
+
+    fn update_managed_conversation_with_context<'a>(
+        &'a self,
+        _context: PersistenceCallContext,
+        request: ManagedConversationMetadataUpdate,
+    ) -> BoxFuture<'a, Result<ManagedConversationMetadataUpdateReceipt>> {
+        self.update_managed_conversation(request)
+    }
+
+    /// Delete one managed incarnation behind an epoch fence and stable receipt.
+    fn delete_managed_conversation<'a>(
+        &'a self,
+        _request: ManagedConversationDelete,
+    ) -> BoxFuture<'a, Result<ManagedConversationDeleteReceipt>> {
+        Box::pin(async {
+            Err(MemoryError::Unsupported("managed conversation deletion".to_string()).into())
+        })
+    }
+
+    fn delete_managed_conversation_with_context<'a>(
+        &'a self,
+        _context: PersistenceCallContext,
+        request: ManagedConversationDelete,
+    ) -> BoxFuture<'a, Result<ManagedConversationDeleteReceipt>> {
+        self.delete_managed_conversation(request)
+    }
+
     /// Search conversations by query matching title and message content.
     ///
     /// Default implementation scans all conversations and their messages (naive).
@@ -201,5 +1029,217 @@ pub trait ConversationStore: Send + Sync {
             }
             Ok(results)
         })
+    }
+}
+
+#[cfg(test)]
+mod transcript_projection_contract_tests {
+    use super::*;
+
+    struct DefaultCapabilityStore;
+
+    fn unsupported_store_call<'a, T>() -> BoxFuture<'a, Result<T>> {
+        Box::pin(async {
+            Err(MemoryError::Unsupported("test conversation store".to_string()).into())
+        })
+    }
+
+    impl ConversationStore for DefaultCapabilityStore {
+        fn create_conversation<'a>(
+            &'a self,
+            _conv: NewConversation,
+        ) -> BoxFuture<'a, Result<Conversation>> {
+            unsupported_store_call()
+        }
+
+        fn get_conversation<'a>(
+            &'a self,
+            _conversation_id: &'a str,
+        ) -> BoxFuture<'a, Result<Option<Conversation>>> {
+            unsupported_store_call()
+        }
+
+        fn list_conversations<'a>(
+            &'a self,
+            _filter: ConversationFilter,
+        ) -> BoxFuture<'a, Result<Vec<ConversationMeta>>> {
+            unsupported_store_call()
+        }
+
+        fn update_conversation<'a>(
+            &'a self,
+            _conversation_id: &'a str,
+            _title: Option<&'a str>,
+            _summary: Option<&'a str>,
+            _compressed_before_id: Option<i64>,
+        ) -> BoxFuture<'a, Result<()>> {
+            unsupported_store_call()
+        }
+
+        fn delete_conversation<'a>(
+            &'a self,
+            _conversation_id: &'a str,
+        ) -> BoxFuture<'a, Result<()>> {
+            unsupported_store_call()
+        }
+
+        fn save_messages<'a>(
+            &'a self,
+            _conversation_id: &'a str,
+            _messages: &'a [StoredMessage],
+        ) -> BoxFuture<'a, Result<()>> {
+            unsupported_store_call()
+        }
+
+        fn get_messages<'a>(
+            &'a self,
+            _conversation_id: &'a str,
+        ) -> BoxFuture<'a, Result<Vec<StoredMessage>>> {
+            unsupported_store_call()
+        }
+
+        fn count_messages<'a>(&'a self, _conversation_id: &'a str) -> BoxFuture<'a, Result<usize>> {
+            unsupported_store_call()
+        }
+    }
+
+    fn message(conversation_id: &str, created_at: &str) -> StoredMessage {
+        StoredMessage {
+            id: None,
+            conversation_id: conversation_id.to_string(),
+            role: "user".to_string(),
+            content: Some("hello".to_string()),
+            attachments_json: Some(r#"{"kind":"text"}"#.to_string()),
+            tool_calls_json: None,
+            tool_result_json: None,
+            created_at: created_at.to_string(),
+        }
+    }
+
+    #[test]
+    fn persistence_call_capability_requires_explicit_opt_in() {
+        assert_eq!(
+            DefaultCapabilityStore.persistence_call_capability(),
+            PersistenceCallCapability::Unsupported
+        );
+    }
+
+    #[test]
+    fn persistence_call_context_reports_future_budget_and_typed_expiration() -> Result<()> {
+        let remaining = PersistenceCallContext {
+            absolute_deadline_unix_ms: i64::MAX,
+        }
+        .remaining_duration()?;
+        assert!(remaining > std::time::Duration::ZERO);
+
+        let expired = PersistenceCallContext {
+            absolute_deadline_unix_ms: i64::MIN,
+        }
+        .remaining_duration();
+        assert!(matches!(expired, Err(MemoryError::DeadlineExceeded(_))));
+        Ok(())
+    }
+
+    #[test]
+    fn transcript_projection_batch_identity_binds_complete_prepared_effect() -> Result<()> {
+        let first = TranscriptProjectionBatch::prepare(
+            "conversation",
+            7,
+            "generation",
+            3,
+            vec![message("conversation", "2026-09-16T00:00:00Z")],
+        )?;
+        let repeated = TranscriptProjectionBatch::prepare(
+            "conversation",
+            7,
+            "generation",
+            3,
+            vec![message("conversation", "2026-09-16T00:00:00Z")],
+        )?;
+        let changed_created_at = TranscriptProjectionBatch::prepare(
+            "conversation",
+            7,
+            "generation",
+            3,
+            vec![message("conversation", "2026-09-16T00:00:01Z")],
+        )?;
+
+        assert_eq!(first.operation_id, repeated.operation_id);
+        assert_eq!(first.payload_digest, repeated.payload_digest);
+        assert_ne!(first.operation_id, changed_created_at.operation_id);
+        assert_ne!(first.payload_digest, changed_created_at.payload_digest);
+        Ok(())
+    }
+
+    #[test]
+    fn transcript_projection_batch_rejects_cross_conversation_message() {
+        let result = TranscriptProjectionBatch::prepare(
+            "conversation-a",
+            1,
+            "generation",
+            0,
+            vec![message("conversation-b", "2026-09-16T00:00:00Z")],
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn transcript_projection_batch_rejects_backend_incompatible_ordinals() {
+        let result = TranscriptProjectionBatch::prepare(
+            "conversation",
+            1,
+            "generation",
+            (i64::MAX as u64).saturating_add(1),
+            vec![message("conversation", "2026-09-16T00:00:00Z")],
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn managed_delete_identity_rejects_epoch_rebinding() -> Result<()> {
+        let mut request = ManagedConversationDelete::prepare("conversation", 4)?;
+        request.expected_epoch = 5;
+
+        assert!(request.validate().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn managed_import_identity_binds_complete_replacement() -> Result<()> {
+        let first = ManagedConversationImport::prepare(
+            "conversation",
+            2,
+            9,
+            vec![message("conversation", "2026-09-16T00:00:00Z")],
+        )?;
+        let changed = ManagedConversationImport::prepare(
+            "conversation",
+            2,
+            9,
+            vec![message("conversation", "2026-09-16T00:00:01Z")],
+        )?;
+
+        assert_ne!(first.operation_id, changed.operation_id);
+        assert_ne!(first.payload_digest, changed.payload_digest);
+        first.validate()?;
+        changed.validate()?;
+        Ok(())
+    }
+
+    #[test]
+    fn managed_metadata_identity_rejects_late_revision_rebinding() -> Result<()> {
+        let mut request = ManagedConversationMetadataUpdate::prepare(
+            "conversation",
+            2,
+            7,
+            Some("title".to_string()),
+            Some("summary".to_string()),
+            Some(42),
+        )?;
+        request.expected_revision = 8;
+
+        assert!(request.validate().is_err());
+        Ok(())
     }
 }

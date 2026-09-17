@@ -641,6 +641,8 @@ pub enum AgentEvent {
         /// Estimated token count after compression
         after_tokens: usize,
     },
+    /// Transcript projection reached a typed persistence settlement before terminal publication.
+    TranscriptProjectionSettlement(crate::memory::TranscriptProjectionSettlement),
 
     // ── Visualization ────────────────────────────────────────────────────────────
     /// Chart generation (vega-lite JSON spec)
@@ -806,6 +808,7 @@ impl AgentEvent {
             | AgentEvent::ToolBatchStart { .. }
             | AgentEvent::ToolBatchEnd
             | AgentEvent::GuardTriggered { .. }
+            | AgentEvent::TranscriptProjectionSettlement(_)
             | AgentEvent::SafetyNotice { .. }
             | AgentEvent::ParameterError { .. } => AgentPhase::Acting,
 
@@ -836,6 +839,7 @@ impl AgentEvent {
                 | AgentEvent::ToolResult { .. }
                 | AgentEvent::ParameterError { .. }
                 | AgentEvent::ContextCompressed { .. }
+                | AgentEvent::TranscriptProjectionSettlement(_)
                 | AgentEvent::FinalAnswer(_)
                 | AgentEvent::Cancelled
                 | AgentEvent::Error { .. }
@@ -855,6 +859,25 @@ mod accounting_tests {
         };
         assert_eq!(event.total_tokens(), Some(usize::MAX));
         assert_eq!(event.tokens_used(), Some(usize::MAX));
+    }
+
+    #[test]
+    fn transcript_projection_settlement_is_observable_checkpoint_not_terminal() {
+        let event = AgentEvent::TranscriptProjectionSettlement(
+            crate::memory::TranscriptProjectionSettlement {
+                status: crate::memory::TranscriptProjectionSettlementStatus::Settled,
+                operation_id: Some("operation".to_string()),
+                conversation_id: Some("conversation".to_string()),
+                generation_id: Some("generation".to_string()),
+                attempt: 1,
+                error_class: None,
+                detail: None,
+            },
+        );
+
+        assert!(!event.is_terminal());
+        assert!(event.is_checkpoint());
+        assert_eq!(event.phase(), super::AgentPhase::Acting);
     }
 }
 

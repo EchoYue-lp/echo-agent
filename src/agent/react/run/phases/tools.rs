@@ -85,13 +85,21 @@ fn agent_event(event: ToolPipelineEvent) -> AgentEvent {
 
 async fn close_cancelled_batch(
     snap: &AgentRunSnapshot,
+    context: &Arc<Mutex<crate::compression::ContextManager>>,
     tx: &mpsc::Sender<Result<AgentEvent>>,
     tool_names: &[String],
     success_count: usize,
-) {
+) -> Result<()> {
     let failure_count = tool_names.len().saturating_sub(success_count);
     snap.fire_post_tool_batch(tool_names, success_count, failure_count)
         .await;
+    super::finalize::settle_terminal_projection(
+        snap,
+        context,
+        Some("Tool batch cancelled".to_string()),
+        tx,
+    )
+    .await?;
     snap.finalize_run(
         crate::trace::RunStatus::Cancelled,
         None,
@@ -100,18 +108,21 @@ async fn close_cancelled_batch(
     .await;
     let _ = tx.send(Ok(AgentEvent::ToolBatchEnd)).await;
     let _ = tx.send(Ok(AgentEvent::Cancelled)).await;
+    Ok(())
 }
 
 async fn close_failed_batch(
     snap: &AgentRunSnapshot,
+    context: &Arc<Mutex<crate::compression::ContextManager>>,
     tx: &mpsc::Sender<Result<AgentEvent>>,
     tool_names: &[String],
     success_count: usize,
     error: ReactError,
-) {
+) -> Result<()> {
     let failure_count = tool_names.len().saturating_sub(success_count);
     snap.fire_post_tool_batch(tool_names, success_count, failure_count)
         .await;
+    super::finalize::settle_terminal_projection(snap, context, Some(error.to_string()), tx).await?;
     snap.finalize_run(
         crate::trace::RunStatus::Failed,
         None,
@@ -122,6 +133,7 @@ async fn close_failed_batch(
     let _ = tx
         .send(Ok(AgentEvent::from_error("tool_batch", &error)))
         .await;
+    Ok(())
 }
 
 fn build_execution_waves(
@@ -349,11 +361,14 @@ pub(crate) async fn run_tools(
                             );
                             close_cancelled_batch(
                                 snap,
+                                context,
                                 tx,
                                 &batch_tool_names,
                                 batch_success_count,
-                            ).await;
-                            return Ok(IterOutcome::Abandoned);
+                            ).await?;
+                            return Ok(IterOutcome::TerminalSettled {
+                                outcome: crate::agent::AgentSteerTurnOutcome::Cancelled,
+                            });
                         }
                         _ = &mut cancel, if !cancellation_observed => {
                             cancellation_observed = true;
@@ -367,12 +382,15 @@ pub(crate) async fn run_tools(
                             ));
                             close_failed_batch(
                                 snap,
+                                context,
                                 tx,
                                 &batch_tool_names,
                                 batch_success_count,
                                 error,
-                            ).await;
-                            return Ok(IterOutcome::Abandoned);
+                            ).await?;
+                            return Ok(IterOutcome::TerminalSettled {
+                                outcome: crate::agent::AgentSteerTurnOutcome::Failed,
+                            });
                         }
                         Some((id, fname, result)) = futs.next(), if !futs.is_empty() => {
                             while let Ok(event) = stream_rx.try_recv() {
@@ -399,8 +417,17 @@ pub(crate) async fn run_tools(
                     }
                 }
                 if cancellation_observed {
-                    close_cancelled_batch(snap, tx, &batch_tool_names, batch_success_count).await;
-                    return Ok(IterOutcome::Abandoned);
+                    close_cancelled_batch(
+                        snap,
+                        context,
+                        tx,
+                        &batch_tool_names,
+                        batch_success_count,
+                    )
+                    .await?;
+                    return Ok(IterOutcome::TerminalSettled {
+                        outcome: crate::agent::AgentSteerTurnOutcome::Cancelled,
+                    });
                 }
 
                 // Emit results and push them into context in call order (`conc`
@@ -493,8 +520,17 @@ pub(crate) async fn run_tools(
                     .as_ref()
                     .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
                 {
-                    close_cancelled_batch(snap, tx, &batch_tool_names, batch_success_count).await;
-                    return Ok(IterOutcome::Abandoned);
+                    close_cancelled_batch(
+                        snap,
+                        context,
+                        tx,
+                        &batch_tool_names,
+                        batch_success_count,
+                    )
+                    .await?;
+                    return Ok(IterOutcome::TerminalSettled {
+                        outcome: crate::agent::AgentSteerTurnOutcome::Cancelled,
+                    });
                 }
                 let params = if let Value::Object(m) = &args {
                     m.clone().into_iter().collect()
@@ -524,11 +560,14 @@ pub(crate) async fn run_tools(
                             );
                             close_cancelled_batch(
                                 snap,
+                                context,
                                 tx,
                                 &batch_tool_names,
                                 batch_success_count,
-                            ).await;
-                            return Ok(IterOutcome::Abandoned);
+                            ).await?;
+                            return Ok(IterOutcome::TerminalSettled {
+                                outcome: crate::agent::AgentSteerTurnOutcome::Cancelled,
+                            });
                         }
                         _ = async {
                             match snap.cancel_token.as_ref() {
@@ -624,8 +663,17 @@ pub(crate) async fn run_tools(
                     }
                 }
                 if cancellation_observed {
-                    close_cancelled_batch(snap, tx, &batch_tool_names, batch_success_count).await;
-                    return Ok(IterOutcome::Abandoned);
+                    close_cancelled_batch(
+                        snap,
+                        context,
+                        tx,
+                        &batch_tool_names,
+                        batch_success_count,
+                    )
+                    .await?;
+                    return Ok(IterOutcome::TerminalSettled {
+                        outcome: crate::agent::AgentSteerTurnOutcome::Cancelled,
+                    });
                 }
             }
         }
@@ -634,7 +682,18 @@ pub(crate) async fn run_tools(
     // This is the first point where every assistant tool call in the batch has
     // a matching result. Persist it regardless of the periodic interval so a
     // restart never loses an already completed write/dangerous tool outcome.
-    snap.save_runtime_checkpoint(context, None).await?;
+    let settlement = snap.save_transcript_projection(context, None).await?;
+    if snap.conversation_store.is_some() {
+        yield_event_or!(
+            tx,
+            AgentEvent::TranscriptProjectionSettlement(settlement.clone()),
+            IterOutcome::Abandoned
+        );
+        snap.mark_transcript_settlement_observed();
+    }
+    if settlement.status != crate::memory::TranscriptProjectionSettlementStatus::Settled {
+        return Err(crate::agent::snapshot::transcript_settlement_admission_error(&settlement));
+    }
     yield_event_or!(tx, AgentEvent::ToolBatchEnd, IterOutcome::Abandoned);
     snap.fire_post_tool_batch(&batch_tool_names, batch_success_count, batch_failure_count)
         .await;
@@ -646,7 +705,18 @@ pub(crate) async fn run_tools(
     // Periodic runtime checkpoint based on configured interval
     let interval = snap.config.react_checkpoint_interval;
     if interval > 0 && (iteration + 1).is_multiple_of(interval) {
-        snap.save_runtime_checkpoint(context, None).await?;
+        let settlement = snap.save_transcript_projection(context, None).await?;
+        if snap.conversation_store.is_some() {
+            yield_event_or!(
+                tx,
+                AgentEvent::TranscriptProjectionSettlement(settlement.clone()),
+                IterOutcome::Abandoned
+            );
+            snap.mark_transcript_settlement_observed();
+        }
+        if settlement.status != crate::memory::TranscriptProjectionSettlementStatus::Settled {
+            return Err(crate::agent::snapshot::transcript_settlement_admission_error(&settlement));
+        }
     }
 
     Ok(IterOutcome::Continue)

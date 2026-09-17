@@ -32,13 +32,20 @@ pub(crate) async fn run_compact(
     // `ContextManager::should_compress()` so it only fires when compaction is
     // actually imminent (not every ReAct iteration).
     let _ = snap.pre_compaction_flush(context).await;
-    // Persist the complete user-visible transcript before ContextManager may
-    // replace active history through horizon folding or semantic compaction.
-    // The runtime checkpoint below remains the resume view; these two stores
-    // intentionally have different retention semantics.
-    snap.save_transcript_projection(context).await;
-    // Save checkpoint before compression (preserves the current resume view).
-    snap.save_runtime_checkpoint(context, None).await?;
+    // A complete transcript batch must be acknowledged before active context
+    // can cross the compaction horizon or realign its generation cursor.
+    let settlement = snap.save_transcript_projection(context, None).await?;
+    if snap.conversation_store.is_some() {
+        yield_event_or!(
+            tx,
+            AgentEvent::TranscriptProjectionSettlement(settlement.clone()),
+            CompactOutcome::Abandoned
+        );
+        snap.mark_transcript_settlement_observed();
+    }
+    if settlement.status != crate::memory::TranscriptProjectionSettlementStatus::Settled {
+        return Err(crate::agent::snapshot::transcript_settlement_admission_error(&settlement));
+    }
     let projection_context = crate::compression::ProjectionContext {
         iteration,
         agent_name: snap.config.agent_name.clone(),
@@ -304,6 +311,10 @@ mod tests {
 
         let temp = tempfile::tempdir()?;
         let conversation_store = Arc::new(FileConversationStore::new(temp.path())?);
+        let runtime_root = tempfile::tempdir()?;
+        let runtime_store = Arc::new(crate::state::FileRuntimeStateStore::new(
+            runtime_root.path(),
+        )?);
         // Rule injection stays off for the same reason as the trace test
         // above: injected workspace rules would exceed the tiny token limit
         // and turn the expected Continue outcome into Failed.
@@ -315,6 +326,7 @@ mod tests {
         config.auto_project_rules = false;
         let mut agent = ReactAgent::new(config);
         agent.set_conversation_store(conversation_store.clone());
+        agent.set_state_store(runtime_store);
         agent.set_compressor(SlidingWindowCompressor::new(1)).await;
         {
             let mut context = agent.memory.context.lock().await;

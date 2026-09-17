@@ -4,15 +4,15 @@ id: asset.conversation-store
 kind: asset
 title: Conversation Transcript Store
 asset_type: state_authority
-status: needs_review
+status: active
 risk: high
-observed_at: f1e9027246760661144786e9e35615cd46d580c6
+observed_at: source:eff0290e1aff3c3a56f0ba94f57460e220d08f8eb04d3023efde058982972f03
 boundary_refs: [boundary.context-memory, boundary.observation-persistence-delivery]
 code_refs: [echo-core/src/memory/conversation.rs, echo-state/src/memory/conversation.rs, echo-state/src/memory/file_conversation.rs, echo-state/src/memory/sqlite_conversation.rs, src/agent/snapshot.rs]
 consumer_refs: [src/agent/react/run/phases/compact.rs, src/agent/react/run/phases/finalize.rs, docs/en/03-memory.md]
 behavior_refs: [behavior.context-memory-lifecycle, behavior.observation-persistence]
 rule_refs: [rule.context-persistence-separation, rule.fact-projection-separation]
-evidence_refs: [evidence.agent-context-execution, evidence.persistence-observation]
+evidence_refs: [evidence.agent-context-execution, evidence.persistence-observation, evidence.transcript-projection-settlement-repair, evidence.transcript-projection-settlement-verification]
 finding_refs: [finding.transcript-projection-settlement]
 candidate_refs: []
 ---
@@ -29,7 +29,8 @@ ReactAgent safe-point/finalization 写入，history consumers 查询；不与长
 
 ## 生命周期
 
-Ensure conversation、append/save projection、query、clear/delete；失败结算当前由 Finding 跟踪。
+Ensure epoch、atomic apply/AlreadyApplied、managed import/metadata/delete、query 与 retention receipt。
+每个 managed call 携带 absolute deadline；File/SQLite 在实际 authority lock/transaction 后复查。
 
 ## 候选关系
 
@@ -37,4 +38,5 @@ Ensure conversation、append/save projection、query、clear/delete；失败结�
 
 ## 未知与限制
 
-投影写失败仅告警且没有 retry/debt，故保持 needs_review；EKO 不采用 SQLite 不影响 framework option。
+外部 adapter 必须显式声明 AtomicV1 与 AbsoluteDeadlineV1；独立 SDK 尚未映射的新 public contract
+继续由 Issue #106 后续 outcome 跟踪。EKO 不采用 SQLite 不影响 framework option。

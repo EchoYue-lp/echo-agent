@@ -104,12 +104,10 @@ pub(crate) enum ThinkOutcome {
     Continue(ThinkOutput),
     /// Channel closed mid-think.
     Abandoned,
-    /// Intervention callback issued cancel.
-    Cancelled,
-    /// Intervention callback issued block.
-    Blocked,
-    /// Model setup or streaming failed after emitting an error terminal.
-    Failed,
+    /// This phase already settled persistence, trace, and one terminal event.
+    TerminalSettled {
+        outcome: crate::agent::AgentSteerTurnOutcome,
+    },
 }
 
 /// Output of the think phase, fed into the tools or verify branches.
@@ -149,6 +147,10 @@ pub(crate) enum IterOutcome {
     /// Channel closed mid-iteration (a yield/try_send macro fired
     /// `return Ok(())`). The driver returns `Ok(())` immediately.
     Abandoned,
+    /// A phase already settled persistence, trace, and exactly one terminal.
+    TerminalSettled {
+        outcome: crate::agent::AgentSteerTurnOutcome,
+    },
 }
 
 pub(crate) fn with_reasoning_content(

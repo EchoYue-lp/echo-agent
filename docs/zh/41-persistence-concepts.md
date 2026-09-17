@@ -84,7 +84,7 @@ Checkpoint:   journal=A, state@7
 
 恢复前会校验 assistant tool call 与 tool result 是否成对，避免恢复出 provider 无法接受的上下文，或重复执行已经完成的副作用。
 
-`AgentCheckpoint` 只拥有 ReAct runtime state，不拥有任务 DAG 或其它应用领域状态。它也不是 `ConversationStore` 中面向用户展示的 transcript。
+`AgentCheckpoint` 只拥有 ReAct runtime state，不拥有任务 DAG 或其它应用领域状态。它也不是 `ConversationStore` 中面向用户展示的 transcript。启用 transcript projection 时，其私有 versioned payload 可以保存一条完整的 `PendingTranscriptProjection`；在 ConversationStore receipt 确认提交前，它只是 durable intent，不是 transcript fact。
 
 `AgentInvocationContext` 可以显式拆分这两种身份：`runtime.conversation_id` 继续表示产品事件与
 transcript 身份，`runtime_state_id` 只选择 `RuntimeStateStore` checkpoint key。两者不同时，调用方
@@ -104,10 +104,21 @@ external conversation、configured conversation。因此 A -> B -> A 不会把 A
 
 轮换 `runtime_state_id` 会创建干净的模型上下文，但不会删除稳定产品会话。
 `save_checkpoint_for_scope` 把每个 runtime ID 持久索引到产品 scope。关闭 admission 并完成旧 owner
-结算后，reset 通过 `clear_persisted_runtime_incarnation` 精确回收旧 checkpoint 和可能存在的
-incarnation transcript，同时保留稳定 transcript；产品删除通过 `delete_persisted_conversation`
-先清完整 runtime lineage 与 incarnation transcripts，再删除稳定 transcript。详见
-[ADR 0006](../adr/0006-runtime-state-scope-lineage.md)。
+结算后，reset 通过 `clear_persisted_runtime_incarnation` 先结清 durable pending projection，再精确
+退役旧 runtime checkpoint，并保留 transcript 数据。只有 legacy unmanaged Store pair 会顺带删除
+incarnation-keyed transcript；managed 清理在会话重建后无法安全推断稳定 delete identity。managed 产品删除
+必须由调用方保留稳定的 `ManagedConversationDelete` request，并调用
+`delete_persisted_conversation_managed`；timeout、重启、回执丢失以及会话后来以新 epoch 重建时，都复用
+同一个 request identity。`delete_persisted_conversation` 仅保留给 legacy unmanaged Store pair；managed
+pair 会失败关闭，因为该便捷入口无法判断一次调用是在重试旧删除，还是要删除后来重建的新 epoch。
+managed generation 使用 revision CAS 与 retirement tombstone；产品删除先持久化完整 scope manifest、
+全部 dropped operation identity，再取得带 epoch fence 的 ConversationStore receipt。详见
+[ADR 0006](../adr/0006-runtime-state-scope-lineage.md) 和
+[ADR 0056](../adr/0056-durable-transcript-projection-settlement.md)。
+
+managed clear/delete helper 提供 context-aware 变体，把调用方 absolute deadline 贯穿整个 saga。
+legacy unmanaged Store 的原始 trait 没有 context 参数，因此兼容 helper 保留历史上的无界合同；其
+context-aware 变体会返回 Unsupported，不会伪装成无法兑现的 deadline 保证。
 
 ### 其它同名 checkpoint
 

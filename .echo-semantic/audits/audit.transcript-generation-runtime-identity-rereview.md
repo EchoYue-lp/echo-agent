@@ -5,19 +5,19 @@ kind: audit
 boundary_ref: boundary.context-memory
 lens: data_durability
 freshness: examined
-revision: source:71db36711961e65e13fcef99f7f7e671ddd391e4853eecc77c4e07ac041915f6
+revision: source:eff0290e1aff3c3a56f0ba94f57460e220d08f8eb04d3023efde058982972f03
 finding_refs: [finding.transcript-generation-runtime-identity]
 challenges:
   resolver-precedence:
-    revision: source:71db36711961e65e13fcef99f7f7e671ddd391e4853eecc77c4e07ac041915f6
+    revision: source:eff0290e1aff3c3a56f0ba94f57460e220d08f8eb04d3023efde058982972f03
     source_refs: [src/agent/snapshot.rs, src/agent/react/run/stream_channel.rs]
     evidence_refs: [evidence.transcript-generation-runtime-identity-repair, evidence.transcript-generation-runtime-identity-verification]
   admission-side-effects:
-    revision: source:71db36711961e65e13fcef99f7f7e671ddd391e4853eecc77c4e07ac041915f6
+    revision: source:eff0290e1aff3c3a56f0ba94f57460e220d08f8eb04d3023efde058982972f03
     source_refs: [src/agent/react/run/stream_channel.rs]
     evidence_refs: [evidence.transcript-generation-runtime-identity-verification]
   snapshot-write-bypass:
-    revision: source:71db36711961e65e13fcef99f7f7e671ddd391e4853eecc77c4e07ac041915f6
+    revision: source:eff0290e1aff3c3a56f0ba94f57460e220d08f8eb04d3023efde058982972f03
     source_refs: [src/agent/snapshot.rs, src/state/mod.rs]
     evidence_refs: [evidence.transcript-generation-runtime-identity-repair, evidence.transcript-generation-runtime-identity-verification]
 ---

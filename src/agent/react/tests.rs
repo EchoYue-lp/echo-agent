@@ -2448,7 +2448,7 @@ async fn invocation_history_is_inserted_before_current_input() -> Result<(), Str
     ];
 
     agent
-        .prepare_stream_context(StreamMode::Chat, "current input", &history, None)
+        .prepare_stream_context(StreamMode::Chat, "current input", &history, None, None)
         .await
         .map_err(|error| error.to_string())?;
 
@@ -2738,7 +2738,7 @@ async fn recall_injects_memories_into_current_user_message() -> Result<(), Strin
 
     // Drive prepare_stream_context with a query that should hit the seeded fact.
     let recalled = agent
-        .prepare_stream_context(StreamMode::Chat, "Rust", &[], None)
+        .prepare_stream_context(StreamMode::Chat, "Rust", &[], None, None)
         .await
         .map_err(|error| error.to_string())?;
     assert!(
@@ -2814,7 +2814,7 @@ async fn recall_injects_memories_into_current_user_message() -> Result<(), Strin
 
     drop(ctx);
     agent
-        .prepare_stream_context(StreamMode::Chat, "unrelated-query", &[], None)
+        .prepare_stream_context(StreamMode::Chat, "unrelated-query", &[], None, None)
         .await
         .map_err(|error| error.to_string())?;
     let ctx = agent.memory.context.lock().await;
@@ -2841,12 +2841,221 @@ async fn recall_injects_memories_into_current_user_message() -> Result<(), Strin
 
 // ── save_transcript_projection ──────────────────────────────────────────────
 
-/// Verify `AgentRunSnapshot::save_transcript_projection` calls
-/// `ConversationStore::save_messages` with the projection of in-memory messages,
-/// and silently no-ops when no `conversation_id` is configured.
 #[tokio::test]
-async fn save_transcript_projection_writes_to_conversation_store() {
-    use crate::agent::snapshot::AgentRunSnapshot;
+async fn conversation_store_without_runtime_state_is_rejected_before_run_side_effects()
+-> crate::error::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = Arc::new(crate::memory::FileConversationStore::new(temp.path())?);
+    let config = AgentConfig::new("test-model", "agent", "system")
+        .conversation_id("store-only-conversation");
+    let mut agent = ReactAgent::new(config);
+    agent.set_conversation_store(store.clone());
+    let before = serde_json::to_value(agent.memory.context.lock().await.messages())?;
+
+    let direct = agent.run_direct("must not run").await;
+    assert!(matches!(direct, Err(crate::error::ReactError::Config(_))));
+    assert_eq!(
+        serde_json::to_value(agent.memory.context.lock().await.messages())?,
+        before
+    );
+    assert!(
+        crate::memory::ConversationStore::get_conversation(
+            store.as_ref(),
+            "store-only-conversation"
+        )
+        .await?
+        .is_none()
+    );
+
+    let streaming = agent.execute_stream("must not stream").await;
+    assert!(matches!(
+        streaming,
+        Err(crate::error::ReactError::Config(_))
+    ));
+    assert_eq!(
+        serde_json::to_value(agent.memory.context.lock().await.messages())?,
+        before
+    );
+    assert!(
+        crate::memory::ConversationStore::get_conversation(
+            store.as_ref(),
+            "store-only-conversation"
+        )
+        .await?
+        .is_none()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn revisioned_runtime_without_deadline_capability_is_rejected_before_side_effects()
+-> crate::error::Result<()> {
+    struct RevisionedWithoutDeadline;
+
+    impl crate::state::RuntimeStateStore for RevisionedWithoutDeadline {
+        fn runtime_state_capability(&self) -> crate::state::RuntimeStateCapability {
+            crate::state::RuntimeStateCapability::RevisionedV1
+        }
+
+        fn get_checkpoint<'a>(
+            &'a self,
+            _conversation_id: &'a str,
+        ) -> futures::future::BoxFuture<
+            'a,
+            crate::error::Result<Option<crate::state::AgentCheckpoint>>,
+        > {
+            Box::pin(async { Ok(None) })
+        }
+
+        fn save_checkpoint<'a>(
+            &'a self,
+            _checkpoint: &'a crate::state::AgentCheckpoint,
+        ) -> futures::future::BoxFuture<'a, crate::error::Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn save_checkpoint_for_scope<'a>(
+            &'a self,
+            _scope_id: &'a str,
+            _checkpoint: &'a crate::state::AgentCheckpoint,
+        ) -> futures::future::BoxFuture<'a, crate::error::Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn runtime_state_ids<'a>(
+            &'a self,
+            _scope_id: &'a str,
+        ) -> futures::future::BoxFuture<'a, crate::error::Result<Vec<String>>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn clear_runtime_state<'a>(
+            &'a self,
+            scope_id: &'a str,
+            runtime_state_id: &'a str,
+        ) -> futures::future::BoxFuture<
+            'a,
+            crate::error::Result<crate::state::RuntimeStateClearReceipt>,
+        > {
+            Box::pin(async move {
+                Ok(crate::state::RuntimeStateClearReceipt {
+                    scope_id: scope_id.to_string(),
+                    runtime_state_id: runtime_state_id.to_string(),
+                    checkpoint_removed: false,
+                })
+            })
+        }
+
+        fn clear_runtime_state_scope<'a>(
+            &'a self,
+            scope_id: &'a str,
+        ) -> futures::future::BoxFuture<
+            'a,
+            crate::error::Result<crate::state::RuntimeStateScopeClearReceipt>,
+        > {
+            Box::pin(async move {
+                Ok(crate::state::RuntimeStateScopeClearReceipt {
+                    scope_id: scope_id.to_string(),
+                    runtime_state_ids: Vec::new(),
+                })
+            })
+        }
+
+        fn clear_conversation<'a>(
+            &'a self,
+            _conversation_id: &'a str,
+        ) -> futures::future::BoxFuture<'a, crate::error::Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    let root = tempfile::tempdir()?;
+    let conversations = Arc::new(crate::memory::FileConversationStore::new(root.path())?);
+    let config =
+        AgentConfig::new("test-model", "agent", "system").conversation_id("deadline-capability");
+    let mut agent = ReactAgent::new(config);
+    agent.set_conversation_store(conversations.clone());
+    agent.set_state_store(Arc::new(RevisionedWithoutDeadline));
+    let before = serde_json::to_value(agent.memory.context.lock().await.messages())?;
+
+    let result = agent.run_direct("must not run").await;
+    assert!(matches!(result, Err(crate::error::ReactError::Config(_))));
+    assert_eq!(
+        serde_json::to_value(agent.memory.context.lock().await.messages())?,
+        before
+    );
+    assert!(
+        crate::memory::ConversationStore::get_conversation(
+            conversations.as_ref(),
+            "deadline-capability"
+        )
+        .await?
+        .is_none()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn managed_force_checkpoint_settles_transcript_before_returning() -> crate::error::Result<()>
+{
+    let conversation_root = tempfile::tempdir()?;
+    let runtime_root = tempfile::tempdir()?;
+    let conversations = Arc::new(crate::memory::FileConversationStore::new(
+        conversation_root.path(),
+    )?);
+    let runtime = Arc::new(crate::state::FileRuntimeStateStore::new(
+        runtime_root.path(),
+    )?);
+    let config = AgentConfig::new("test-model", "agent", "system")
+        .conversation_id("managed-force-checkpoint");
+    let mut agent = ReactAgent::new(config);
+    agent.set_conversation_store(conversations.clone());
+    agent.set_state_store(runtime.clone());
+    agent
+        .memory
+        .context
+        .lock()
+        .await
+        .push(Message::user("persist both authorities".to_string()));
+
+    agent.force_checkpoint().await?;
+
+    let messages = crate::memory::ConversationStore::get_messages(
+        conversations.as_ref(),
+        "managed-force-checkpoint",
+    )
+    .await?;
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.content.as_deref() == Some("persist both authorities"))
+    );
+    let state = crate::state::RuntimeStateStore::load_runtime_state(
+        runtime.as_ref(),
+        "managed-force-checkpoint",
+        "managed-force-checkpoint",
+    )
+    .await?
+    .ok_or_else(|| {
+        crate::error::ReactError::Other("managed runtime checkpoint missing".to_string())
+    })?;
+    let payload = state
+        .checkpoint
+        .as_ref()
+        .ok_or_else(|| crate::error::ReactError::Other("checkpoint payload missing".to_string()))?
+        .restore_managed_runtime_payload()?;
+    assert!(payload.pending_transcript_projection.is_none());
+    assert!(
+        payload
+            .transcript_projection
+            .is_some_and(|cursor| cursor.next_ordinal > 0)
+    );
+    Ok(())
+}
+
+/// Third-party stores remain source-compatible but cannot claim atomic support.
+#[tokio::test]
+async fn legacy_conversation_store_defaults_to_unsupported_projection() {
     use crate::memory::{
         Conversation, ConversationFilter, ConversationMeta, ConversationStore, NewConversation,
         StoredMessage,
@@ -2984,105 +3193,10 @@ async fn save_transcript_projection_writes_to_conversation_store() {
         }
     }
 
-    // ── Case 1: conversation_id + store both set → save_messages is invoked ──
     let store = Arc::new(RecordingStore::new());
-    let config =
-        AgentConfig::new("test-model", "agent", "sys").conversation_id("conv-projection-test");
-    let mut agent = ReactAgent::new(config);
-    agent.set_conversation_store(store.clone());
-    // Seed two user messages.
-    {
-        let mut ctx = agent.memory.context.lock().await;
-        ctx.push(Message::user("hello".to_string()));
-        ctx.push(Message::user("world".to_string()));
-    }
-
-    let snap = AgentRunSnapshot::from_agent(&agent);
-    snap.save_transcript_projection(&agent.memory.context).await;
-
-    let saves = store.saves.lock().unwrap().clone();
-    assert_eq!(saves.len(), 1, "save_messages should fire exactly once");
-    let (saved_conv_id, saved_msgs) = &saves[0];
-    assert_eq!(saved_conv_id, "conv-projection-test");
-    assert!(
-        saved_msgs.len() >= 2,
-        "projection should include the two pushed user messages, got {} messages",
-        saved_msgs.len()
-    );
-    let user_texts: Vec<&str> = saved_msgs
-        .iter()
-        .filter(|m| m.role == "user")
-        .filter_map(|m| m.content.as_deref())
-        .collect();
-    assert!(user_texts.contains(&"hello"));
-    assert!(user_texts.contains(&"world"));
-
-    // A compacted active window is only a continuation view. Saving it must
-    // append new visible messages without deleting older transcript entries.
-    {
-        let mut ctx = agent.memory.context.lock().await;
-        ctx.set_messages(vec![
-            Message::system("sys".to_string()),
-            Message::system(
-                "[\u{5bf9}\u{8bdd}\u{5386}\u{53f2}\u{6458}\u{8981}]\ncheckpoint".to_string(),
-            ),
-            Message::user("world".to_string()),
-            Message::assistant("final answer".to_string()),
-        ]);
-    }
-    snap.save_transcript_projection(&agent.memory.context).await;
-    let persisted = store
-        .persisted
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .clone();
-    let visible_text: Vec<&str> = persisted
-        .iter()
-        .filter_map(|message| message.content.as_deref())
-        .collect();
-    assert_eq!(visible_text, vec!["hello", "world", "final answer"]);
-
-    // Deterministic tool-trace folding can rewrite the middle of the active
-    // view. The last durable message remains the append boundary, so neither
-    // the rewritten prefix nor the existing tail may be duplicated.
-    {
-        let mut ctx = agent.memory.context.lock().await;
-        ctx.set_messages(vec![
-            Message::system("sys".to_string()),
-            Message::user("hello".to_string()),
-            Message::user("[Tool trace compacted]".to_string()),
-            Message::user("world".to_string()),
-            Message::assistant("final answer".to_string()),
-            Message::assistant("post-fold answer".to_string()),
-        ]);
-    }
-    snap.save_transcript_projection(&agent.memory.context).await;
-    let persisted_after_fold = store
-        .persisted
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .clone();
-    let visible_after_fold: Vec<&str> = persisted_after_fold
-        .iter()
-        .filter_map(|message| message.content.as_deref())
-        .collect();
     assert_eq!(
-        visible_after_fold,
-        vec!["hello", "world", "final answer", "post-fold answer"]
-    );
-
-    // ── Case 2: missing conversation_id → no-op ──
-    let store2 = Arc::new(RecordingStore::new());
-    let config2 = AgentConfig::new("test-model", "agent", "sys"); // no conversation_id
-    let mut agent2 = ReactAgent::new(config2);
-    agent2.set_conversation_store(store2.clone());
-    let snap2 = AgentRunSnapshot::from_agent(&agent2);
-    snap2
-        .save_transcript_projection(&agent2.memory.context)
-        .await;
-    assert!(
-        store2.saves.lock().unwrap().is_empty(),
-        "without conversation_id, save_transcript_projection must early-return without saving"
+        store.projection_capability(),
+        crate::memory::ConversationProjectionCapability::Unsupported
     );
 }
 

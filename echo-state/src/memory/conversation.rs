@@ -6,6 +6,7 @@
 use echo_core::error::{MemoryError, Result};
 use echo_core::llm::types::{Message, MessageContent, Role, ToolCall};
 pub use echo_core::memory::conversation::StoredMessage;
+use sha2::{Digest, Sha256};
 
 const MESSAGE_PROJECTION_VERSION: u8 = 1;
 
@@ -32,6 +33,22 @@ struct MessageProjectionMeta {
 pub struct TranscriptProjectionMeta {
     pub generation_id: String,
     pub ordinal: u64,
+}
+
+/// Stable generation-cursor fingerprint for one user-visible transcript row.
+///
+/// Backend ids, timestamps, and generation/ordinal metadata are excluded so
+/// the active cursor can match the same logical message before and after a
+/// projection batch is prepared.
+pub fn transcript_projection_message_digest(message: &StoredMessage) -> Result<String> {
+    let normalized = serde_json::to_vec(&(
+        &message.role,
+        &message.content,
+        normalized_transcript_attachments(message)?,
+        &message.tool_calls_json,
+        &message.tool_result_json,
+    ))?;
+    Ok(format!("{:x}", Sha256::digest(normalized)))
 }
 
 /// Project runtime Message list to persistable transcript records.

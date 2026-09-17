@@ -31,6 +31,9 @@ pub(crate) struct MemorySubsystem {
     /// cancelled switch can never make partially replaced context look warm for
     /// the previous identity.
     pub(crate) runtime_state_hydration: Arc<tokio::sync::Mutex<RuntimeStateHydration>>,
+    /// Version of the runtime authority represented by the in-memory context.
+    pub(crate) runtime_state_version:
+        Arc<tokio::sync::Mutex<Option<crate::state::RuntimeStateVersion>>>,
     /// Construction-time working directory restored when a new runtime
     /// identity has no checkpoint of its own.
     pub(crate) configured_working_dir: Option<std::path::PathBuf>,
