@@ -3,19 +3,19 @@ schema_version: 1
 id: finding.transcript-generation-runtime-identity
 kind: finding
 type: authority_conflict
-status: open
+status: resolved
 severity: high
 primary_focus: data_durability
 focus: [state_authority, failure_concurrency, contract_evidence]
 boundary_ref: boundary.context-memory
 behavior_refs: [behavior.context-memory-lifecycle]
 rule_refs: [rule.context-persistence-separation]
-evidence_refs: [evidence.agent-context-execution, evidence.persistence-observation]
-audit_refs: [audit.context-memory.data-durability]
+evidence_refs: [evidence.agent-context-execution, evidence.persistence-observation, evidence.transcript-generation-runtime-identity-repair, evidence.transcript-generation-runtime-identity-verification]
+audit_refs: [audit.context-memory.data-durability, audit.transcript-generation-runtime-identity-rereview]
 decision_refs: []
-repair_evidence_refs: []
-verification_evidence_refs: []
-rereview_audit_refs: []
+repair_evidence_refs: [evidence.transcript-generation-runtime-identity-repair]
+verification_evidence_refs: [evidence.transcript-generation-runtime-identity-verification]
+rereview_audit_refs: [audit.transcript-generation-runtime-identity-rereview]
 discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 ---
 
@@ -39,4 +39,7 @@ Invocation context 允许 `runtime_state_id` 与 `transcript_generation_id` 独�
 
 ## 处理记录
 
-Data-durability Audit 确认；后续 repair 应在接纳或保存前统一验证 identity，并补不同组合的重启测试。
+修复复用唯一 effective runtime identity resolver，并在 stream admission 与 checkpoint save 边界
+双重 fail closed。A/B mismatch 在 mutex、guard、trace、input drain、context、LLM 与 Store 副作用前
+被拒绝；相等、product fallback、None 兼容和既有 corrupt checkpoint 恢复拒绝均通过回归。
+完整本地门禁与两轮独立复审通过，本 Finding 已闭合。

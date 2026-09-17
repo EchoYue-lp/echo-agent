@@ -8,11 +8,11 @@ risk: high
 primary_focus: data_durability
 focus: [state_authority, time_lifecycle, failure_concurrency, contract_evidence]
 boundary: boundary.context-memory
-observed_at: f1e9027246760661144786e9e35615cd46d580c6
+observed_at: source:eff0290e1aff3c3a56f0ba94f57460e220d08f8eb04d3023efde058982972f03
 code_refs: [echo-state/src/compression/mod.rs, src/context/mod.rs, src/agent/snapshot.rs, src/agent/react/run/phases/compact.rs, src/agent/react/run/phases/tools.rs, src/agent/react/run/phases/finalize.rs, src/state/mod.rs, src/state/file.rs, src/state/sqlite.rs, echo-core/src/memory/conversation.rs, echo-core/src/memory/store.rs]
 rule_refs: [rule.context-persistence-separation]
-evidence_refs: [evidence.agent-context-execution, evidence.persistence-observation]
-finding_refs: [finding.transcript-projection-settlement]
+evidence_refs: [evidence.agent-context-execution, evidence.persistence-observation, evidence.transcript-generation-runtime-identity-repair, evidence.transcript-generation-runtime-identity-verification, evidence.transcript-projection-settlement-repair, evidence.transcript-projection-settlement-verification]
+finding_refs: [finding.transcript-projection-settlement, finding.transcript-generation-runtime-identity]
 ---
 
 # Context、Memory 与 Checkpoint 生命周期
@@ -35,7 +35,7 @@ LLM 调用前执行预算准备与压缩，turn safe point 保存 checkpoint/tra
 
 ## 失败、重试与恢复
 
-损坏 checkpoint、部分 transcript 写入、切换 runtime ID、重复 safe point 和取消中的 hydration 必须保守失败或重建，不重放已完成 effect。
+损坏 checkpoint、部分 transcript 写入、切换 runtime ID、重复 safe point 和取消中的 hydration 必须保守失败或重建。Transcript effect 先持久化 pending，再以稳定 operation identity apply/proof-ack；timeout 不推断未提交，admission/recovery 先结算 debt。
 
 ## 证据
 
@@ -43,4 +43,5 @@ ContextManager、RuntimeStateStore、file backends、ConversationStore、Store�
 
 ## 裁决记录
 
-当前仍需复核 transcript projection 失败结算、ContextAssembler 与默认路径的策略关系，以及 `AgentCheckpoint.current_plan` 的生产写入来源。
+Transcript projection 失败结算已由 ADR 0056 与 Finding #106 的 framework outcome 闭合；当前仍需复核
+ContextAssembler 与默认路径的策略关系，以及 `AgentCheckpoint.current_plan` 的生产写入来源。

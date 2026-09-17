@@ -4,13 +4,13 @@ id: map.context-memory
 kind: capability_map
 title: Context、Memory、Compression 与 Checkpoint
 risk: high
-observed_at: source:1bcfbd1131476ae872a2dc89326675abd7c02dd26d56c8d29a058cd91fb308fc
+observed_at: source:eff0290e1aff3c3a56f0ba94f57460e220d08f8eb04d3023efde058982972f03
 boundary_refs: [boundary.context-memory]
 behavior_refs: [behavior.context-memory-lifecycle]
 rule_refs: [rule.context-persistence-separation]
-evidence_refs: [evidence.agent-context-execution, evidence.persistence-observation, evidence.high-risk-audit-frontier, evidence.framework-concept-navigation]
+evidence_refs: [evidence.agent-context-execution, evidence.persistence-observation, evidence.high-risk-audit-frontier, evidence.framework-concept-navigation, evidence.transcript-projection-settlement-repair, evidence.transcript-projection-settlement-verification]
 finding_refs: [finding.transcript-projection-settlement, finding.transcript-generation-runtime-identity, finding.checkpoint-current-plan-orphan-authority]
-audit_refs: [audit.context-memory.data-durability]
+audit_refs: [audit.context-memory.data-durability, audit.transcript-generation-runtime-identity-rereview, audit.transcript-projection-settlement-rereview]
 related_map_refs: [map.agent-session-turn, map.observation-persistence-delivery, map.eval-evolution]
 scenarios:
   active-context-and-compression:
@@ -24,22 +24,24 @@ scenarios:
     rule_refs: [rule.context-persistence-separation]
     evidence_refs: [evidence.persistence-observation]
   transcript-projection-settlement:
-    status: needs_review
-    source_refs: [src/agent/snapshot.rs, src/agent/react/run/phases/compact.rs, src/agent/react/run/phases/finalize.rs]
+    status: mapped
+    source_refs: [echo-core/src/memory/conversation.rs, echo-state/src/memory/file_conversation.rs, echo-state/src/memory/sqlite_conversation.rs, src/state/mod.rs, src/state/file.rs, src/state/sqlite.rs, src/agent/snapshot.rs, src/agent/react/run/stream_channel.rs, src/agent/react/run/phases/compact.rs, src/agent/react/run/phases/tools.rs, src/agent/react/run/phases/finalize.rs, docs/adr/0056-durable-transcript-projection-settlement.md]
+    behavior_refs: [behavior.context-memory-lifecycle, behavior.observation-persistence]
+    rule_refs: [rule.context-persistence-separation, rule.fact-projection-separation]
+    evidence_refs: [evidence.transcript-projection-settlement-repair, evidence.transcript-projection-settlement-verification]
     finding_refs: [finding.transcript-projection-settlement]
-    unknown: ConversationStore ensure/save 失败只告警并返回，缺少 retry、debt 或最终缺失的明确 durable contract
-    next_step: 在 persistence audit 中裁决 transcript projection 的 delivery guarantee 与可观测失败路径
   runtime-incarnation-clear:
     status: mapped
     source_refs: [src/state/mod.rs, src/state/file.rs, src/state/sqlite.rs, docs/adr/0006-runtime-state-scope-lineage.md]
     behavior_refs: [behavior.context-memory-lifecycle]
     evidence_refs: [evidence.agent-context-execution]
   runtime-transcript-identity:
-    status: needs_review
+    status: mapped
     source_refs: [src/agent/snapshot.rs, src/state/mod.rs, src/agent/react/run/stream_channel.rs]
+    behavior_refs: [behavior.context-memory-lifecycle]
+    rule_refs: [rule.context-persistence-separation]
+    evidence_refs: [evidence.transcript-generation-runtime-identity-repair]
     finding_refs: [finding.transcript-generation-runtime-identity]
-    unknown: invocation 可配置不相等的 runtime state 与 transcript generation identity，保存成功但恢复要求相等
-    next_step: repair 接纳/保存前 identity invariant，并补重启组合测试
   assembler-manager-alignment:
     status: needs_review
     source_refs: [src/context/mod.rs, echo-state/src/compression/mod.rs]
@@ -89,7 +91,8 @@ ConversationStore 供 history UI；active context 与 checkpoint 默认不直接
 
 ## 场景处置清单
 
-四层 authority 与 clear 已映射；transcript settlement、assembler alignment 和 current_plan writer 保持 needs_review。
+四层 authority、transcript settlement 与 clear/delete 已映射；assembler alignment 和 current_plan writer
+保持 needs_review。
 
 ## 未展开项
 

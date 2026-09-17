@@ -80,24 +80,36 @@ SQLite implementations.
 
 ## Transcript: ConversationStore
 
-`ConversationStore` is the user-visible projection of the message stream — one row per `StoredMessage`, populated automatically at `run_core_loop` finalization. It is what GUI/TUI history panes render.
+`ConversationStore` is the user-visible projection of the message stream, one row per `StoredMessage`. The framework settles it at pre-compact, tool, guard, hook, and terminal safe points; GUI/TUI history panes render the committed result.
 
-- Keyed by `conversation_id` (same key as `RuntimeStateStore`).
-- Independent of `RuntimeStateStore` — you can enable either, both, or neither.
+- Keyed by the stable product `conversation_id`. `RuntimeStateStore` keys each
+  runtime generation separately and durably binds it back to that stable scope.
+- Durable transcript projection is paired with `RuntimeStateStore`. You may
+  enable checkpoint-only persistence or neither Store, but configuring
+  `ConversationStore` without a revision-capable `RuntimeStateStore` is rejected
+  before invocation side effects.
 - Built-in implementations: dependency-free `FileConversationStore`, or
   `SqliteConversationStore` when the `sqlite` feature is enabled.
+- `AgentConfig::persistence_settlement_timeout` and
+  `ReactAgentBuilder::persistence_settlement_timeout` set the total budget for
+  each managed safe point (default 10 seconds; zero is invalid). The same
+  absolute deadline propagates to both Stores; a later recovery gets a new
+  budget without changing its durable operation identity.
 
 ```rust,no_run
 use echo_agent::memory::FileConversationStore;
 use echo_agent::prelude::*;
+use echo_agent::state::FileRuntimeStateStore;
 use std::sync::Arc;
 
 # async fn demo() -> echo_agent::error::Result<()> {
 let conv_store = Arc::new(FileConversationStore::new("./agent-data")?);
+let state_store = Arc::new(FileRuntimeStateStore::new("./agent-data")?);
 let agent = ReactAgentBuilder::new()
     .model("qwen3-max")
     .conversation_id("user-alice-conv-001")
     .conversation_store(conv_store)
+    .state_store(state_store)
     .build()?;
 # Ok(())
 # }
@@ -122,7 +134,15 @@ async work or from a blocking setup task. Only their async trait methods use the
 process file-operation owner.
 
 See [ADR 0004](../adr/0004-async-file-store-ownership.md) for ownership and
-concurrency details. SQLite remains an optional, unchanged framework backend.
+concurrency details. SQLite remains optional and implements the same atomic projection, deadline, and retirement contracts as the file backend.
+
+Projection uses prepare/apply/ack rather than read-modify-replace. The runtime
+checkpoint first records one complete pending batch; `ConversationStore` then
+atomically returns `Applied` or `AlreadyApplied`; checkpoint CAS finally
+advances the cursor and clears pending. Timeout after dispatch leaves durable
+`Deferred` debt, which warm admission and cold recovery settle before model
+execution. `TranscriptProjectionSettlement` is observed before the invocation
+terminal. See [ADR 0056](../adr/0056-durable-transcript-projection-settlement.md).
 
 ---
 

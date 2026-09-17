@@ -3,19 +3,19 @@ schema_version: 1
 id: finding.plugin-failure-isolation-contract
 kind: finding
 type: intent_gap
-status: open
+status: resolved
 severity: medium
 primary_focus: contract_evidence
 focus: [failure_concurrency, state_authority]
 boundary_ref: boundary.extension-lifecycle
 behavior_refs: [behavior.extension-publication]
 rule_refs: [rule.extension-generation-authority]
-evidence_refs: [evidence.effects-extensions]
-audit_refs: [audit.extension-lifecycle.state-authority]
+evidence_refs: [evidence.effects-extensions, evidence.plugin-component-preparation-repair, evidence.plugin-component-preparation-verification]
+audit_refs: [audit.extension-lifecycle.state-authority, audit.plugin-component-preparation-rereview]
 decision_refs: []
-repair_evidence_refs: []
-verification_evidence_refs: []
-rereview_audit_refs: []
+repair_evidence_refs: [evidence.plugin-component-preparation-repair]
+verification_evidence_refs: [evidence.plugin-component-preparation-verification]
+rereview_audit_refs: [audit.plugin-component-preparation-rereview]
 discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 ---
 
@@ -39,4 +39,8 @@ GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/71
 
 ## 处理记录
 
-Discovery 记录；下一阶段需裁决 generation 原子性或组件隔离，再统一实现和文档。
+ADR 0045 DU-71已确认“prepare阶段组件隔离、完整immutable generation原子发布”。
+`PluginIntegrator::prepare`现仅让依赖排序、完整Plugin准备或generation分配等代次级失败阻断
+apply；无效Skill/Hook/MCP组件被排除并保留error diagnostic，健康兄弟组件可继续发布。
+EKO第二阶段同样隔离Subagent/LSP/product component并投影诊断。Focused验证与独立复审已
+闭合本Finding；#72/#73/#74/#75继续独立追踪发布、生命周期与owner结算。

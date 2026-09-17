@@ -126,12 +126,16 @@ The registry scans these scopes:
 
 Applications can override the plugin data base directory. embedding application sets it to `<application-data>`.
 
-Loading proceeds in dependency order. Fatal manifest errors skip the package. Component errors remain isolated at the smallest practical boundary. Runtime replacement records ownership so disable, uninstall, and reload remove exactly the components contributed by each plugin.
+Loading proceeds in dependency order. Fatal manifest errors skip the package. Framework-parsed Skill, Hook, and MCP errors remain isolated at the component boundary and are recorded as error diagnostics; unreadable frozen Subagent or LSP documents are omitted the same way. Their product-specific syntax is validated by the embedding application's second preparation stage. Healthy siblings remain in the prepared plugin. Runtime replacement records ownership so disable, uninstall, and reload remove exactly the components contributed by each plugin.
 
 `PluginIntegrator::prepare` captures one immutable `PreparedPluginSet` with a monotonic generation,
 deterministic content identity, structured diagnostics, parsed Skills/Hooks/MCP, and owner-qualified
 Subagent/LSP documents. `wire_prepared` and rollback perform no component file reads. Disk changes
 become visible only after registry mutation or explicit invalidation. See [ADR 0012](../adr/0012-immutable-plugin-preparation.md).
+
+The set remains applicable when a component diagnostic is present. It is rejected only when a
+generation-wide invariant, such as dependency ordering or generation allocation, prevents building
+the complete immutable snapshot.
 
 ## API
 

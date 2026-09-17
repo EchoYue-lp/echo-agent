@@ -8,11 +8,11 @@ risk: high
 primary_focus: data_durability
 focus: [state_authority, time_lifecycle, failure_concurrency, contract_evidence]
 boundary: boundary.observation-persistence-delivery
-observed_at: source:96384cfb5e0bbc3384493805d026d65c6b096b3d0c3a26fde0cc1c007378e2c5
-code_refs: [echo-core/src/agent/event_envelope.rs, echo-state/src/journal/mod.rs, echo-state/src/delivery.rs, echo-state/src/audit/mod.rs, echo-state/src/audit/file.rs, src/trace/mod.rs, src/eval/runner.rs, src/agent/react/mod.rs, src/state/mod.rs, echo-core/src/memory/conversation.rs, echo-sdk-host/src/core_profile/persistence.rs, echo-sdk-host/src/core_profile/state.rs, docs/adr/0038-eval-trace-correlation-identity.md, docs/adr/0046-turn-execution-delivery-settlement.md, docs/adr/0053-trace-audit-persistence-visibility.md]
+observed_at: source:eff0290e1aff3c3a56f0ba94f57460e220d08f8eb04d3023efde058982972f03
+code_refs: [echo-core/src/agent/event_envelope.rs, echo-state/src/journal/mod.rs, echo-state/src/journal/file.rs, echo-state/src/journal/segmented.rs, echo-state/src/delivery.rs, src/trace/mod.rs, src/eval/runner.rs, src/agent/react/mod.rs, src/state/mod.rs, echo-core/src/memory/conversation.rs, docs/adr/0038-eval-trace-correlation-identity.md, docs/adr/0046-turn-execution-delivery-settlement.md, docs/adr/0055-checkpoint-journal-identity.md, echo-state/src/audit/mod.rs, echo-state/src/audit/file.rs, docs/adr/0053-trace-audit-persistence-visibility.md]
 rule_refs: [rule.fact-projection-separation]
-evidence_refs: [evidence.persistence-observation, evidence.eval-trace-correlation-repair, evidence.eval-trace-correlation-verification, evidence.turn-terminal-delivery-settlement-repair, evidence.turn-terminal-delivery-settlement-verification, evidence.diagnostic-persistence-failure-visibility-repair]
-finding_refs: [finding.trace-effect-event-producers, finding.eval-trace-identity, finding.trace-audit-secret-boundary, finding.turn-terminal-commit-projection-order, finding.diagnostic-persistence-failure-visibility, finding.in-memory-audit-successful-drop]
+evidence_refs: [evidence.persistence-observation, evidence.checkpoint-journal-binding-repair, evidence.checkpoint-journal-binding-verification, evidence.checkpoint-journal-sdk-inventory, evidence.eval-trace-correlation-repair, evidence.eval-trace-correlation-verification, evidence.turn-terminal-delivery-settlement-repair, evidence.turn-terminal-delivery-settlement-verification, evidence.transcript-projection-settlement-repair, evidence.transcript-projection-settlement-verification, evidence.diagnostic-persistence-failure-visibility-repair]
+finding_refs: [finding.trace-effect-event-producers, finding.eval-trace-identity, finding.trace-audit-secret-boundary, finding.turn-terminal-commit-projection-order, finding.checkpoint-journal-binding, finding.diagnostic-persistence-failure-visibility, finding.in-memory-audit-successful-drop]
 ---
 
 # Observation、Persistence 与 Delivery
@@ -23,7 +23,7 @@ Durable fact、checkpoint、live stream、bounded replay、projection 和 diagno
 
 ## 当前行为
 
-`EventEnvelope`提供identity/sequence/hash/parent；Journal保存有序事实；Delivery Ledger归约投递生命周期；RuntimeStateStore、ConversationStore、Store与RunStore保存不同数据域。TurnReceipt把execution与delivery作为两个不可互相覆盖的结果；SDK恢复要求Journal、index和receipt watermark一致。Trace producer分配真实Run ID，调用方identity只作为parent/turn/execution correlation。Trace/Audit backend失败候选通过有界diagnostic dispatcher报告，producer只做非阻塞提交。
+`EventEnvelope`提供identity/sequence/hash/parent；Journal保存有序事实并以generation identity限定sequence，Journal派生checkpoint携带相同identity；Delivery Ledger归约投递生命周期；RuntimeStateStore、ConversationStore、Store与RunStore保存不同数据域。Transcript pending intent由RuntimeStateStore CAS拥有，ConversationStore receipt拥有提交事实，typed settlement先于单一terminal投影到stream/trace。TurnReceipt把execution与delivery作为两个不可互相覆盖的结果；外部SDK Host恢复要求Journal、index和receipt watermark一致。Trace producer分配真实Run ID，调用方identity只作为parent/turn/execution correlation。Trace/Audit backend失败候选通过有界diagnostic dispatcher报告，producer只做非阻塞提交。
 
 ## 期望行为
 
@@ -39,7 +39,7 @@ Gap、lag、torn tail、unknown batch outcome、checkpoint mismatch、retention 
 
 ## 证据
 
-EventEnvelope、Journal/checkpoint、Delivery Ledger、Store/Trace 实现与 ADR 0007/0019/0030/0053 提供基础证据。
+EventEnvelope、Journal/checkpoint、Delivery Ledger、Store/Trace 实现与 ADR 0007/0019/0030/0053/0055 提供基础证据。
 
 ## 裁决记录
 

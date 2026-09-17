@@ -510,7 +510,9 @@ mod tests {
         > {
             Box::pin(async move {
                 let s: futures::stream::BoxStream<'a, Result<echo_core::agent::AgentEvent>> =
-                    Box::pin(futures::stream::empty());
+                    Box::pin(futures::stream::iter([Ok(
+                        echo_core::agent::AgentEvent::FinalAnswer(self.response.clone()),
+                    )]));
                 Ok(s)
             })
         }

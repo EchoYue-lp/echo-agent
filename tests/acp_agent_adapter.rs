@@ -16,7 +16,7 @@ use futures::future::BoxFuture;
 use futures::stream::{self, BoxStream, StreamExt};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tokio::sync::Notify;
 
@@ -374,14 +374,14 @@ fn client_error(message: &str) -> Error {
 #[test]
 fn acp_fixtures_use_official_typed_messages() -> agent_client_protocol::Result<()> {
     let prompt: v1::PromptRequest = serde_json::from_str(include_str!(
-        "../contracts/sdk/fixtures/acp/v1/prompt-resource-link-valid.json"
+        "fixtures/acp/v1/prompt-resource-link-valid.json"
     ))
     .map_err(Error::into_internal_error)?;
     assert_eq!(prompt.session_id, v1::SessionId::new("sess_fixture"));
     assert_eq!(prompt.prompt.len(), 2);
 
     let invalid_session: v1::NewSessionRequest = serde_json::from_str(include_str!(
-        "../contracts/sdk/fixtures/acp/v1/session-relative-cwd-invalid.json"
+        "fixtures/acp/v1/session-relative-cwd-invalid.json"
     ))
     .map_err(Error::into_internal_error)?;
     assert!(!invalid_session.cwd.is_absolute());
@@ -932,7 +932,7 @@ async fn invalid_session_and_concurrent_prompt_are_typed_errors()
                 .block_task()
                 .await?;
             let relative_session: v1::NewSessionRequest = serde_json::from_str(include_str!(
-                "../contracts/sdk/fixtures/acp/v1/session-relative-cwd-invalid.json"
+                "fixtures/acp/v1/session-relative-cwd-invalid.json"
             ))
             .map_err(Error::into_internal_error)?;
             let invalid_cwd = connection.send_request(relative_session).block_task().await;
@@ -1031,7 +1031,7 @@ async fn resource_links_tools_and_framework_failures_keep_typed_boundaries()
                 .session_id;
 
             let resource_fixture: v1::PromptRequest = serde_json::from_str(include_str!(
-                "../contracts/sdk/fixtures/acp/v1/prompt-resource-link-valid.json"
+                "fixtures/acp/v1/prompt-resource-link-valid.json"
             ))
             .map_err(Error::into_internal_error)?;
             let resource_response = connection
@@ -1175,7 +1175,7 @@ use echo_agent::acp::{
 use echo_agent::runtime::{TurnDeliveryOutcome, TurnMode, TurnOutcome, TurnRequest};
 use echo_agent::state::journal::{
     EventJournal, JournalBatchAppendError, JournalBatchAppendResult, JournalBatchLookup,
-    PreparedJournalBatch,
+    JournalIdentity, PreparedJournalBatch,
 };
 
 #[derive(Default)]
@@ -1222,6 +1222,11 @@ impl RunEventObserver for RecordingObserver {
 struct FailingJournal;
 
 impl EventJournal<echo_agent::agent::EventEnvelope> for FailingJournal {
+    fn journal_identity(&self) -> &JournalIdentity {
+        static IDENTITY: OnceLock<JournalIdentity> = OnceLock::new();
+        IDENTITY.get_or_init(JournalIdentity::new)
+    }
+
     fn append_batch(
         &self,
         batch: PreparedJournalBatch<echo_agent::agent::EventEnvelope>,

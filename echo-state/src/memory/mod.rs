@@ -30,8 +30,17 @@ pub mod typed_store;
 // Re-export traits and data types from echo-core (backward compatibility)
 pub use echo_core::memory::MemoryScope;
 pub use echo_core::memory::conversation::{
-    Conversation, ConversationFilter, ConversationMeta, ConversationStore, NewConversation,
-    StoredMessage,
+    Conversation, ConversationFilter, ConversationMeta, ConversationProjectionAuthority,
+    ConversationProjectionCapability, ConversationProjectionEpochReceipt,
+    ConversationProjectionEpochStatus, ConversationProjectionLifecycle, ConversationStore,
+    EnsureConversationProjectionRequest, ManagedConversationDelete,
+    ManagedConversationDeleteReceipt, ManagedConversationDeleteStatus, ManagedConversationImport,
+    ManagedConversationMetadataUpdate, ManagedConversationMetadataUpdateReceipt,
+    ManagedConversationMetadataUpdateStatus, NewConversation, PersistenceCallCapability,
+    PersistenceCallContext, StoredMessage, TranscriptProjectionApplyReceipt,
+    TranscriptProjectionApplyStatus, TranscriptProjectionBatch, TranscriptProjectionConflictKind,
+    TranscriptProjectionErrorClass, TranscriptProjectionItem, TranscriptProjectionSettlement,
+    TranscriptProjectionSettlementStatus,
 };
 pub use echo_core::memory::embedder::Embedder;
 pub use echo_core::memory::store::{SearchMode, SearchQuery, Store, StoreItem};
@@ -42,7 +51,8 @@ pub use echo_core::memory::types::{
 // Re-export concrete implementations from sub-modules
 pub use conversation::{
     TranscriptProjectionMeta, normalized_transcript_attachments, project_message, project_messages,
-    restore_message, restore_messages, set_transcript_projection_meta, transcript_projection_meta,
+    restore_message, restore_messages, set_transcript_projection_meta,
+    transcript_projection_message_digest, transcript_projection_meta,
 };
 pub use embedder::HttpEmbedder;
 pub use embedding_store::EmbeddingStore;

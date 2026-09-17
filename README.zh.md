@@ -122,7 +122,7 @@ Application / protocol surface
              |
   core contracts + execution + state + orchestration + integrations + tools
              |
-  SDK protocol / Host and executable learning consumers
+  外部 SDK protocol / Host consumer 和可执行 learning consumer
 ```
 
 建议从 [Framework 架构](docs/zh/architecture.md)、[核心概念](docs/zh/concepts.md)和
@@ -246,8 +246,6 @@ echo-agent/
 ├── echo-orchestration/  工作流、人工审批和 DAG 任务
 ├── echo-integration/    LLM 提供方、MCP 和 IM 通道（QQ/飞书）
 ├── echo-tools/          领域工具：chart、data、database、git、media、web、rag
-├── echo-sdk-protocol/   确定性 facade inventory、契约与代码生成
-├── echo-sdk-host/       通过 ACP 和命名空间操作暴露 echo_agent 的运行时 Host
 ├── echo-agent-learning/ 不发布的学习课程、Demo、综合示例和 facade 合同
 ├── src/                 Agent 引擎、重导出和门面层
 └── docs/                框架消费者文档（en + zh）
@@ -268,7 +266,7 @@ echo-agent/
 - **67 个注册工具** — ReAct 循环、数据分析、论文检索、Web、媒体、RAG、数据库等
 - **可运行示例与教学 crate** — 框架验收示例和 Rust 基础课程分别维护
 - **全模块单元测试** — 覆盖核心路径的测试
-- **8 个框架/运行时 package + 2 个 SDK package + 1 个学习 package** — 运行时、SDK 与可执行消费者边界保持明确
+- **8 个框架/运行时 package + 1 个学习 package** — 多语言 SDK 由独立的 [echo-agent-sdk](https://github.com/EchoYue-lp/echo-agent-sdk) 仓库维护
 - **多模态** — 文本、图片（base64 & URL）、文件附件混合消息
 - **IM 集成** — QQ Bot（WebSocket）& 飞书（Webhook）开箱即用
 - **声明式工作流** — 用 YAML/JSON 定义 Agent 图，无需写 Rust 代码
@@ -329,7 +327,7 @@ async fn weather(city: String) -> Result<ToolResult> {
 
 - **Store**：长期键值存储，支持命名空间隔离（`InMemoryStore`、`FileStore`、`SqliteStore`）
 - **RuntimeStateStore**：完整运行时检查点（消息 + 计划 + 激活技能 + 阻塞原因），用于跨进程崩溃恢复（`SqliteRuntimeStateStore`）
-- **ConversationStore**：用户可见的对话历史投影，run 收尾时自动持久化
+- **ConversationStore**：用户可见的对话历史投影，与 `RuntimeStateStore` 配对并在压缩或终态发布前原子结算
 
 一行代码让 Agent 拥有持久记忆——无需手动工具接线：
 
@@ -793,34 +791,14 @@ agent.set_circuit_breaker(cb_config);
 | 配置参考 | [EN](docs/en/28-config-reference.md) | [ZH](docs/zh/28-config-reference.md) |
 | 运行时与任务系统 | [EN](docs/en/29-long-running-tasks.md) | [ZH](docs/zh/29-long-running-tasks.md) |
 | 安全指南 | [EN](docs/en/security.md) | [ZH](docs/zh/security.md) |
-| 多语言 SDK（ACP Host 已可用） | [EN](docs/sdk/README.md) | — |
+| 多语言 SDK | [echo-agent-sdk](https://github.com/EchoYue-lp/echo-agent-sdk) | — |
 
 ### SDK 入口
 
-可从源码构建的 `echo-agent-sdk-host` 已通过官方 Client 与 stdio runtime 的标准
-ACP v1 支持面验证；在 `sdk-core-profile` feature 与显式 state root 下，还支持协商式
-`_echo_agent/*` 核心扩展 Profile（Agent/Session/Run handle、完整事件与 ACK/replay、
-重启恢复）。`sdk-facade-adapters` feature 可独立在同一连接上提供 facade feature
-家族——task/subagent/结构化输出、memory/workflow/state/delivery/
-trace/eval/improve、MCP/A2A/LSP/topology 与各工具家族——全部落到框架既有权威，
-并带有 canonical catalog 路由、冻结的 feature 语义、与广告一致的资源上限和
-teardown 级联（见 [docs/sdk/facade-feature-adapters.md](docs/sdk/facade-feature-adapters.md)）。
-`sdk-extension-bridge` 会自动包含这些 facade adapters，并进一步提供协商式双向扩展桥：
-宿主语言实现的 Tool、LlmClient、Store、HumanLoop、Hook、回调/干预、工厂与自定义
-Agent 在同一连接上注册，并由 Host 以租约、截止时间、取消与流终态语义反向调用
-（见 [docs/sdk/sdk-extension-bridge.md](docs/sdk/sdk-extension-bridge.md)）。
-Plan 08 已完成 Rust Host facade 的 canonical source operation、consumer trait
-与公共 stream 路由；Workflow 和 A2A 使用真实 Host-issued pull stream，而不是把完整
-结果缓存后伪装成流，严格 facade 复审和最终门禁均已通过。
-它复用根 crate 的 `AcpAgentAdapter`，每个 Session 创建一个
-独立框架 Agent，并只接受显式、产品无关的 JSON 配置。开发者用
-`cargo build -p echo-sdk-host --features sdk-facade-all --locked` 自行构建；仓库不
-携带 binary 或任何语言 runtime。仓库现在包含可从源码构建的 TypeScript/Python/Java Client
-基线，并已通过真实 Host 的 Agent/Session/facade invoke 验证；TypeScript/Python quickstart
-和 Java 示例已纳入源码门禁，但 process-local intrinsic 行为仍需由三种语言分别完成，
-因此还不能宣称总体 **Runnable** 或 **Parity complete**。唯一 SDK 入口是
-[docs/sdk/README.md](docs/sdk/README.md)，核心 Profile 参考见
-[docs/sdk/sdk-core-profile.md](docs/sdk/sdk-core-profile.md)。
+多语言 SDK、源码构建 ACP Host、`_echo_agent/*` protocol、合同和三语言 Client
+统一维护在独立的 [echo-agent-sdk](https://github.com/EchoYue-lp/echo-agent-sdk)
+仓库。本仓库仍是 SDK 消费的 framework runtime authority，不再把 SDK 作为 workspace
+member 编译或发布。
 
 ---
 

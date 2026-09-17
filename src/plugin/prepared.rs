@@ -141,6 +141,10 @@ impl PreparedPlugin {
 }
 
 /// Immutable output of one complete preparation generation.
+///
+/// Error diagnostics may describe components excluded from an otherwise
+/// applicable generation. Applicability is reserved for generation-wide
+/// invariants required to publish this snapshot atomically.
 #[derive(Debug, Clone)]
 pub struct PreparedPluginSet {
     generation: u64,
@@ -298,10 +302,15 @@ impl PluginIntegrator {
             .collect::<Vec<_>>();
         let mut identity = Sha256::new();
         let mut plugins = Vec::new();
+        // A component parse/read failure is isolated to that component. Only
+        // failures that prevent constructing the complete dependency-ordered
+        // generation make the snapshot inapplicable.
+        let mut applicable = true;
         let ordered = match registry.resolve_enabled_dependencies() {
             Ok(ordered) => ordered,
             Err(message) => {
                 diagnostics.push(error_diagnostic(None, "dependencies", None, message));
+                applicable = false;
                 Vec::new()
             }
         };
@@ -311,12 +320,15 @@ impl PluginIntegrator {
             if let Some(entry) = registry.get(&plugin_id) {
                 match serde_json::to_vec(&entry.manifest) {
                     Ok(serialized) => hash_field(&mut identity, "manifest", &serialized),
-                    Err(error) => diagnostics.push(error_diagnostic(
-                        Some(&plugin_id),
-                        "manifest",
-                        None,
-                        error.to_string(),
-                    )),
+                    Err(error) => {
+                        applicable = false;
+                        diagnostics.push(error_diagnostic(
+                            Some(&plugin_id),
+                            "manifest",
+                            None,
+                            error.to_string(),
+                        ));
+                    }
                 }
                 let ordered_config = entry
                     .user_config
@@ -325,18 +337,22 @@ impl PluginIntegrator {
                     .collect::<BTreeMap<_, _>>();
                 match serde_json::to_vec(&ordered_config) {
                     Ok(serialized) => hash_field(&mut identity, "user-config", &serialized),
-                    Err(error) => diagnostics.push(error_diagnostic(
-                        Some(&plugin_id),
-                        "user-config",
-                        None,
-                        error.to_string(),
-                    )),
+                    Err(error) => {
+                        applicable = false;
+                        diagnostics.push(error_diagnostic(
+                            Some(&plugin_id),
+                            "user-config",
+                            None,
+                            error.to_string(),
+                        ));
+                    }
                 }
             }
 
             let variables = match registry.variables_for(&plugin_id) {
                 Ok(variables) => variables,
                 Err(message) => {
+                    applicable = false;
                     diagnostics.push(error_diagnostic(
                         Some(&plugin_id),
                         "variables",
@@ -348,6 +364,7 @@ impl PluginIntegrator {
             };
             hash_variables(&mut identity, &variables);
             if let Err(error) = tokio::fs::create_dir_all(&variables.plugin_data).await {
+                applicable = false;
                 diagnostics.push(error_diagnostic(
                     Some(&plugin_id),
                     "data",
@@ -359,6 +376,7 @@ impl PluginIntegrator {
             let resolved = match registry.resolve_components_async(&plugin_id).await {
                 Ok(resolved) => resolved,
                 Err(message) => {
+                    applicable = false;
                     diagnostics.push(error_diagnostic(
                         Some(&plugin_id),
                         "components",
@@ -443,7 +461,12 @@ impl PluginIntegrator {
                                 contents.as_bytes(),
                             );
                             match serde_yaml_ng::from_str(&contents) {
-                                Ok(hooks) => Some(hooks),
+                                Ok(hooks) => validate_prepared_hooks(
+                                    &plugin_id,
+                                    &path,
+                                    hooks,
+                                    &mut diagnostics,
+                                ),
                                 Err(error) => {
                                     diagnostics.push(error_diagnostic(
                                         Some(&plugin_id),
@@ -574,6 +597,7 @@ impl PluginIntegrator {
 
         let generation = self.next_generation().unwrap_or(u64::MAX);
         if generation == u64::MAX {
+            applicable = false;
             diagnostics.push(error_diagnostic(
                 None,
                 "generation",
@@ -581,9 +605,6 @@ impl PluginIntegrator {
                 "plugin preparation generation exhausted or cache unavailable".to_string(),
             ));
         }
-        let applicable = !diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.severity == PluginDiagnosticSeverity::Error);
         let prepared = Arc::new(PreparedPluginSet {
             generation,
             identity: format!("{:x}", identity.finalize()),
@@ -774,6 +795,35 @@ fn warning_diagnostic(
         path,
         message,
     }
+}
+
+fn validate_prepared_hooks(
+    plugin_id: &str,
+    path: &Path,
+    hooks: echo_execution::skills::hooks::HooksDefinition,
+    diagnostics: &mut Vec<PluginPreparationDiagnostic>,
+) -> Option<echo_execution::skills::hooks::HooksDefinition> {
+    let mut failures = hooks
+        .rules
+        .iter()
+        .flat_map(|(event, rules)| {
+            rules.iter().flat_map(move |rule| {
+                rule.hooks.iter().filter_map(move |action| {
+                    action.validate().err().map(|error| {
+                        format!("event {} action {}: {error}", event.as_str(), action.kind())
+                    })
+                })
+            })
+        })
+        .collect::<Vec<_>>();
+    failures.sort();
+    if failures.is_empty() {
+        return Some(hooks);
+    }
+    diagnostics.extend(failures.into_iter().map(|message| {
+        error_diagnostic(Some(plugin_id), "hooks", Some(path.to_path_buf()), message)
+    }));
+    None
 }
 
 fn hash_field(hasher: &mut Sha256, tag: &str, contents: &[u8]) {
@@ -1067,8 +1117,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn parse_error_is_structured_and_non_applicable() -> Result<(), Box<dyn std::error::Error>>
-    {
+    async fn component_parse_error_is_isolated_and_healthy_siblings_apply()
+    -> Result<(), Box<dyn std::error::Error>> {
         let temporary = tempfile::tempdir()?;
         let source = create_plugin(temporary.path(), "invalid.test", serde_json::json!([]))?;
         let mut registry = registry(temporary.path());
@@ -1081,13 +1131,202 @@ mod tests {
         std::fs::write(&hooks, "not: [valid\n")?;
         let prepared = PluginIntegrator::new().prepare(&mut registry).await;
 
-        assert!(!prepared.is_applicable());
+        assert!(prepared.is_applicable(), "{:?}", prepared.diagnostics());
+        let plugin = prepared
+            .plugins()
+            .first()
+            .ok_or_else(|| missing("prepared plugin missing"))?;
+        assert_eq!(plugin.skills().len(), 1);
+        assert!(plugin.hooks().is_none());
+        assert_eq!(plugin.subagent_documents().len(), 1);
+        assert!(plugin.lsp_document().is_some());
         assert!(prepared.diagnostics().iter().any(|diagnostic| {
             diagnostic.plugin_id() == Some("invalid.test")
                 && diagnostic.component() == "hooks"
                 && diagnostic.severity() == PluginDiagnosticSeverity::Error
                 && diagnostic.path() == Some(hooks.as_path())
         }));
+
+        let mut agent = crate::agent::ReactAgentBuilder::new()
+            .model("prepared-test")
+            .llm_client(Arc::new(crate::testing::MockLlmClient::new()))
+            .build()?;
+        let receipt = PluginIntegrator::new()
+            .wire_prepared(&mut agent, &prepared)
+            .await?;
+        assert_eq!(receipt.plugins_loaded, vec!["invalid.test"]);
+        assert_eq!(receipt.skills_loaded.len(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn invalid_skill_is_excluded_without_dropping_healthy_plugin_components()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temporary = tempfile::tempdir()?;
+        let source = create_plugin(temporary.path(), "skills.test", serde_json::json!([]))?;
+        std::fs::create_dir_all(source.join("skills/healthy"))?;
+        std::fs::write(
+            source.join("skills/healthy/SKILL.md"),
+            "---\nname: healthy\ndescription: Healthy\n---\nhealthy\n",
+        )?;
+        std::fs::write(
+            source.join("hooks/hooks.yaml"),
+            "SessionStart:\n  - matcher: startup\n    hooks:\n      - type: prompt\n        prompt: ready\n",
+        )?;
+        let invalid_skill = source.join("skills/example/SKILL.md");
+        std::fs::write(
+            &invalid_skill,
+            "---\nname: wrong-name\ndescription: Invalid\n---\ninvalid\n",
+        )?;
+        let mut registry = registry(temporary.path());
+        registry.install(&InstallSource::Local(source), PluginScope::Local)?;
+
+        let integrator = PluginIntegrator::new();
+        let prepared = integrator.prepare(&mut registry).await;
+
+        assert!(prepared.is_applicable(), "{:?}", prepared.diagnostics());
+        let plugin = prepared
+            .plugins()
+            .first()
+            .ok_or_else(|| missing("prepared plugin missing"))?;
+        assert_eq!(plugin.skills().len(), 1);
+        assert_eq!(
+            plugin
+                .skills()
+                .first()
+                .map(|skill| skill.document().descriptor().name.as_str()),
+            Some("healthy")
+        );
+        assert!(plugin.hooks().is_some());
+        assert_eq!(plugin.subagent_documents().len(), 1);
+        assert!(plugin.lsp_document().is_some());
+        assert!(prepared.diagnostics().iter().any(|diagnostic| {
+            diagnostic.plugin_id() == Some("skills.test")
+                && diagnostic.component() == "skill"
+                && diagnostic.severity() == PluginDiagnosticSeverity::Error
+                && diagnostic
+                    .path()
+                    .is_some_and(|path| path.ends_with("skills/example/SKILL.md"))
+        }));
+
+        let mut agent = crate::agent::ReactAgentBuilder::new()
+            .model("prepared-test")
+            .llm_client(Arc::new(crate::testing::MockLlmClient::new()))
+            .build()?;
+        let receipt = integrator.wire_prepared(&mut agent, &prepared).await?;
+        assert_eq!(receipt.plugins_loaded, vec!["skills.test"]);
+        assert_eq!(receipt.skills_loaded, vec!["healthy"]);
+        assert_eq!(receipt.hooks_registered, vec!["skills.test"]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn invalid_hook_action_excludes_hook_component_with_structured_diagnostic()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temporary = tempfile::tempdir()?;
+        let source = create_plugin(temporary.path(), "hook.test", serde_json::json!([]))?;
+        let mut registry = registry(temporary.path());
+        let plugin_id = registry.install(&InstallSource::Local(source), PluginScope::Local)?;
+        let hooks = registry
+            .get(&plugin_id)
+            .ok_or_else(|| missing("hook plugin missing"))?
+            .root
+            .join("hooks/hooks.yaml");
+        std::fs::write(
+            &hooks,
+            "PreToolUse:\n  - matcher: '*'\n    hooks:\n      - type: prompt\n        prompt: ''\n",
+        )?;
+
+        let prepared = PluginIntegrator::new().prepare(&mut registry).await;
+
+        assert!(prepared.is_applicable(), "{:?}", prepared.diagnostics());
+        let plugin = prepared
+            .plugins()
+            .first()
+            .ok_or_else(|| missing("prepared hook plugin missing"))?;
+        assert_eq!(plugin.skills().len(), 1);
+        assert!(plugin.hooks().is_none());
+        assert!(prepared.diagnostics().iter().any(|diagnostic| {
+            diagnostic.plugin_id() == Some("hook.test")
+                && diagnostic.component() == "hooks"
+                && diagnostic.severity() == PluginDiagnosticSeverity::Error
+                && diagnostic.path() == Some(hooks.as_path())
+                && diagnostic.message().contains("empty prompt")
+        }));
+        Ok(())
+    }
+
+    #[cfg(feature = "mcp")]
+    #[tokio::test]
+    async fn invalid_mcp_excludes_mcp_component_without_poisoning_generation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temporary = tempfile::tempdir()?;
+        let source = create_plugin(temporary.path(), "mcp.test", serde_json::json!([]))?;
+        let mut registry = registry(temporary.path());
+        let plugin_id = registry.install(&InstallSource::Local(source), PluginScope::Local)?;
+        let mcp = registry
+            .get(&plugin_id)
+            .ok_or_else(|| missing("MCP plugin missing"))?
+            .root
+            .join("mcp.json");
+        std::fs::write(&mcp, "{\"mcpServers\":")?;
+
+        let prepared = PluginIntegrator::new().prepare(&mut registry).await;
+
+        assert!(prepared.is_applicable(), "{:?}", prepared.diagnostics());
+        let plugin = prepared
+            .plugins()
+            .first()
+            .ok_or_else(|| missing("prepared MCP plugin missing"))?;
+        assert_eq!(plugin.skills().len(), 1);
+        assert!(plugin.mcp().is_none());
+        assert!(prepared.diagnostics().iter().any(|diagnostic| {
+            diagnostic.plugin_id() == Some("mcp.test")
+                && diagnostic.component() == "mcp"
+                && diagnostic.severity() == PluginDiagnosticSeverity::Error
+                && diagnostic.path() == Some(mcp.as_path())
+        }));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn plugin_level_failure_rejects_generation_with_dependent_plugin()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temporary = tempfile::tempdir()?;
+        let base = create_plugin(temporary.path(), "base.test", serde_json::json!([]))?;
+        let consumer = create_plugin(
+            temporary.path(),
+            "consumer.test",
+            serde_json::json!([{"name":"base.test","version":">=1.0.0"}]),
+        )?;
+        let mut registry = registry(temporary.path());
+        let base_id = registry.install(&InstallSource::Local(base), PluginScope::Local)?;
+        registry.install(&InstallSource::Local(consumer), PluginScope::Local)?;
+        let data_path = registry.data_dir_for(&base_id);
+        let data_parent = data_path
+            .parent()
+            .ok_or_else(|| missing("plugin data parent missing"))?;
+        std::fs::create_dir_all(data_parent)?;
+        std::fs::write(&data_path, "not a directory")?;
+
+        let integrator = PluginIntegrator::new();
+        let prepared = integrator.prepare(&mut registry).await;
+
+        assert!(!prepared.is_applicable());
+        assert!(prepared.diagnostics().iter().any(|diagnostic| {
+            diagnostic.plugin_id() == Some("base.test")
+                && diagnostic.component() == "data"
+                && diagnostic.severity() == PluginDiagnosticSeverity::Error
+                && diagnostic.path() == Some(data_path.as_path())
+        }));
+        let mut agent = crate::agent::ReactAgentBuilder::new()
+            .model("prepared-test")
+            .llm_client(Arc::new(crate::testing::MockLlmClient::new()))
+            .build()?;
+        assert!(matches!(
+            integrator.wire_prepared(&mut agent, &prepared).await,
+            Err(PluginWiringError::InvalidPreparedSet { .. })
+        ));
         Ok(())
     }
 

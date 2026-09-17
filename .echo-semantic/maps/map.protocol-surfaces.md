@@ -4,7 +4,7 @@ id: map.protocol-surfaces
 kind: capability_map
 title: ACP、A2A、Channels、Headless 与 SDK Surfaces
 risk: high
-observed_at: source:1bcfbd1131476ae872a2dc89326675abd7c02dd26d56c8d29a058cd91fb308fc
+observed_at: c5f7688212d45d5bdcdbf60342605e8bfb176cae
 boundary_refs: [boundary.protocol-surfaces]
 behavior_refs: [behavior.protocol-projection]
 rule_refs: [rule.protocol-role-separation, rule.sdk-rust-authority]
@@ -51,7 +51,7 @@ scenarios:
     evidence_refs: [evidence.sdk-deferred-backlog-count-repair, evidence.sdk-deferred-backlog-count-verification]
     finding_refs: [finding.sdk-deferred-backlog-count-drift]
     audit_refs: [audit.semantic-governance-final-rereview]
-    unknown: 1443个deferred identity的capability分组、外部用户价值与逐组产品合同决策尚未闭合
+    unknown: 1448个deferred identity的capability分组、外部用户价值与逐组产品合同决策尚未闭合
     next_step: 按externally useful capability审查deferred；Host/Rust-only、language intrinsic与internal helper不是语言parity backlog
   product-backend-desktop-device:
     status: excluded

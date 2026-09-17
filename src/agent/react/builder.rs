@@ -56,6 +56,7 @@ pub struct ReactAgentBuilder {
     tool_execution: ToolExecutionConfig,
     max_iterations: usize,
     run_budget: echo_core::agent::RunBudgetPolicy,
+    persistence_settlement_timeout: std::time::Duration,
     model_profile: Option<echo_core::llm::capabilities::ModelProfile>,
     token_limit: usize,
     token_limit_explicit: bool,
@@ -94,6 +95,7 @@ pub struct ReactAgentBuilder {
     intent_router: Option<crate::intent::IntentRouter>,
     /// Optional runtime state store for checkpointing.
     state_store: Option<Arc<dyn crate::state::RuntimeStateStore>>,
+    conversation_store: Option<Arc<dyn crate::memory::ConversationStore>>,
     /// Optional visibility horizon config for proactive tool trace compaction.
     visibility_horizon: Option<echo_state::compression::horizon::VisibilityHorizonConfig>,
 }
@@ -135,6 +137,7 @@ impl ReactAgentBuilder {
             tool_execution: ToolExecutionConfig::default(),
             max_iterations: 10,
             run_budget: echo_core::agent::RunBudgetPolicy::default(),
+            persistence_settlement_timeout: std::time::Duration::from_secs(10),
             model_profile: None,
             token_limit: DEFAULT_TOKEN_LIMIT,
             token_limit_explicit: false,
@@ -166,6 +169,7 @@ impl ReactAgentBuilder {
             react_checkpoint_interval: 0,
             intent_router: None,
             state_store: None,
+            conversation_store: None,
             visibility_horizon: None,
         }
     }
@@ -450,6 +454,12 @@ impl ReactAgentBuilder {
         self
     }
 
+    /// Set the non-zero total budget for a transcript persistence safe point.
+    pub fn persistence_settlement_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.persistence_settlement_timeout = timeout;
+        self
+    }
+
     /// Install a resolved provider/model profile that controls harness behavior.
     pub fn model_profile(mut self, profile: echo_core::llm::capabilities::ModelProfile) -> Self {
         self.model_profile = Some(profile);
@@ -597,6 +607,16 @@ impl ReactAgentBuilder {
     /// Set a runtime state store for checkpointing agent execution state.
     pub fn state_store(mut self, store: Arc<dyn crate::state::RuntimeStateStore>) -> Self {
         self.state_store = Some(store);
+        self
+    }
+
+    /// Set the committed transcript projection store.
+    ///
+    /// Durable projection requires pairing this with [`Self::state_store`].
+    /// Invocation admission rejects an incomplete or non-atomic pair before
+    /// context, model, trace, guard, or persistence side effects.
+    pub fn conversation_store(mut self, store: Arc<dyn crate::memory::ConversationStore>) -> Self {
+        self.conversation_store = Some(store);
         self
     }
 
@@ -804,6 +824,12 @@ impl ReactAgentBuilder {
             )
             .into());
         }
+        if self.persistence_settlement_timeout.is_zero() {
+            return Err(crate::error::ConfigError::ConfigFileError(
+                "persistence_settlement_timeout must be greater than zero".to_string(),
+            )
+            .into());
+        }
         if self.enable_subagent && !self.enable_builtin_tools {
             return Err(crate::error::ConfigError::ConfigFileError(
                 "Enabling subagent dispatch (enable_subagent) requires enabling tool calls (enable_builtin_tools)"
@@ -832,6 +858,7 @@ impl ReactAgentBuilder {
             .tool_execution(self.tool_execution)
             .max_iterations(self.max_iterations)
             .run_budget(self.run_budget)
+            .persistence_settlement_timeout(self.persistence_settlement_timeout)
             .max_tokens(self.max_tokens)
             .temperature(self.temperature);
         #[cfg(feature = "subagent")]
@@ -990,6 +1017,9 @@ impl ReactAgentBuilder {
         // Set runtime state store
         if let Some(store) = self.state_store {
             agent.memory.state_store = Some(store);
+        }
+        if let Some(store) = self.conversation_store {
+            agent.memory.conversation_store = Some(store);
         }
 
         // Set visibility horizon on the ContextManager
@@ -1167,6 +1197,25 @@ mod tests {
         assert!(agent.llm_client().is_none());
         assert!(agent.llm_config().is_none());
         Ok(())
+    }
+
+    #[test]
+    fn builder_applies_nonzero_persistence_settlement_timeout() -> std::result::Result<(), String> {
+        let timeout = std::time::Duration::from_millis(750);
+        let agent = ReactAgentBuilder::new()
+            .persistence_settlement_timeout(timeout)
+            .build()
+            .map_err(|error| error.to_string())?;
+        assert_eq!(agent.config().persistence_settlement_timeout, timeout);
+        Ok(())
+    }
+
+    #[test]
+    fn builder_rejects_zero_persistence_settlement_timeout() {
+        let result = ReactAgentBuilder::new()
+            .persistence_settlement_timeout(std::time::Duration::ZERO)
+            .build();
+        assert!(matches!(result, Err(crate::error::ReactError::Config(_))));
     }
 
     #[test]

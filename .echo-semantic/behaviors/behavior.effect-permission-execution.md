@@ -8,11 +8,11 @@ risk: high
 primary_focus: permission_external
 focus: [result_side_effect, failure_concurrency, time_lifecycle, state_authority]
 boundary: boundary.tool-permission-sandbox
-observed_at: e59fe773d92bca409fe0606b608c4812f87f7ac2
-code_refs: [echo-core/src/tools/mod.rs, echo-core/src/tools/permission.rs, echo-core/src/tools/cell.rs, echo-execution/src/tools.rs, echo-orchestration/src/human_loop/service.rs, echo-orchestration/src/tasks/command_cell.rs, echo-execution/src/sandbox/local.rs, echo-execution/src/skills/hooks.rs, src/agent/react/run/pipeline.rs]
+observed_at: source:eff0290e1aff3c3a56f0ba94f57460e220d08f8eb04d3023efde058982972f03
+code_refs: [echo-core/src/tools/mod.rs, echo-core/src/tools/permission.rs, echo-core/src/tools/cell.rs, echo-execution/src/tools.rs, echo-orchestration/src/human_loop/service.rs, echo-orchestration/src/tasks/command_cell.rs, echo-execution/src/sandbox/local.rs, echo-execution/src/sandbox/k8s.rs, echo-execution/src/skills/hooks.rs, src/agent/react/run/pipeline.rs]
 rule_refs: [rule.permission-effect-order]
-evidence_refs: [evidence.effects-extensions, evidence.streaming-tool-validation-repair, evidence.streaming-tool-validation-verification, evidence.tool-read-cache-authority-repair, evidence.tool-read-cache-authority-verification, evidence.tool-registry-owned-handle-repair, evidence.tool-registry-owned-handle-verification, evidence.mcp-tool-local-classification-repair, evidence.mcp-tool-local-classification-verification]
-finding_refs: [finding.tool-read-cache-scope, finding.tool-read-cache-inflight-invalidation-race, finding.tool-registry-mutation-active-call-deadlock, finding.streaming-tool-validation, finding.plan-mode-write-surface, finding.approval-authority, finding.hook-protected-path, finding.sandbox-minimum-isolation, finding.guard-direction-contract, finding.trace-effect-event-producers, finding.trace-audit-secret-boundary, finding.effect-cleanup-owner, finding.tool-pipeline-example-drift]
+evidence_refs: [evidence.effects-extensions, evidence.streaming-tool-validation-repair, evidence.streaming-tool-validation-verification, evidence.tool-read-cache-authority-repair, evidence.tool-read-cache-authority-verification, evidence.tool-registry-owned-handle-repair, evidence.tool-registry-owned-handle-verification, evidence.mcp-tool-local-classification-repair, evidence.mcp-tool-local-classification-verification, evidence.k8s-sandbox-cleanup-settlement-repair, evidence.k8s-sandbox-cleanup-settlement-verification]
+finding_refs: [finding.tool-read-cache-scope, finding.tool-read-cache-inflight-invalidation-race, finding.tool-registry-mutation-active-call-deadlock, finding.streaming-tool-validation, finding.plan-mode-write-surface, finding.approval-authority, finding.hook-protected-path, finding.sandbox-minimum-isolation, finding.guard-direction-contract, finding.trace-effect-event-producers, finding.trace-audit-secret-boundary, finding.effect-cleanup-owner, finding.k8s-sandbox-cleanup-settlement, finding.tool-pipeline-example-drift]
 ---
 
 # Tool、Permission 与 Sandbox Effect
@@ -23,7 +23,8 @@ ReactAgent 自动工具调用的 schema/validation、可见性、permission、re
 
 ## 当前行为
 
-ToolManager管Arc Tool generation注册、owned lookup、统一validation、context-scoped read cache/epoch与执行并发；stream/non-stream共用输入及cache freshness机制，registry guard不进入异步Tool lifetime。ReactAgent的PermissionPolicy/PermissionService、Hook/Guard与tool pipeline影响自动工具调用；trusted Hook command/http可在PermissionStage前执行；Sandbox和具体工具产生文件、进程、网络、数据库或Git effect。
+ToolManager管Arc Tool generation注册、owned lookup、统一validation、context-scoped read cache/epoch与执行并发；stream/non-stream共用输入及cache freshness机制，registry guard不进入异步Tool lifetime。ReactAgent的PermissionPolicy/PermissionService、Hook/Guard与tool pipeline影响自动工具调用；trusted Hook command/http可在PermissionStage前执行；Sandbox和具体工具产生文件、进程、网络、数据库或Git effect。K8s Pod执行由detached backend owner持有，terminal在有界进程组、输出与Pod删除结算之后产生。
+具名delete receipt与confirmed absence共同处理create延迟提交，空NotFound不会成为成功terminal。
 
 ## 期望行为
 

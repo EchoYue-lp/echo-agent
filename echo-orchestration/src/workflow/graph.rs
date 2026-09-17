@@ -63,6 +63,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
@@ -676,9 +677,55 @@ pub struct GraphResult {
     pub steps: usize,
 }
 
+struct GraphExecution {
+    state: SharedState,
+    current: String,
+    path: Vec<String>,
+    step_count: usize,
+    continuation: WorkflowContinuation,
+    parent_checkpoint: Option<Checkpoint>,
+    skip_interrupt_before_once: bool,
+}
+
 impl Graph {
-    async fn execute_node(&self, node: &Node, state: &SharedState) -> Result<()> {
-        let execution = node.execute(state);
+    fn emit_event(
+        events: Option<&UnboundedSender<WorkflowEvent>>,
+        event: WorkflowEvent,
+    ) -> Result<()> {
+        let Some(events) = events else {
+            return Ok(());
+        };
+        events
+            .send(event)
+            .map_err(|_| ReactError::Other("Workflow event stream closed".to_string()))
+    }
+
+    async fn execute_node(
+        &self,
+        node_name: &str,
+        node: &Node,
+        state: &SharedState,
+        events: Option<&UnboundedSender<WorkflowEvent>>,
+    ) -> Result<()> {
+        let execution = async {
+            let node_cancel = CancellationToken::new();
+            let cancel_guard = node_cancel.clone().drop_guard();
+            let mut tokens = node.execute_stream(state, node_cancel);
+            while let Some(token) = tokens.next().await {
+                let token = token?;
+                if let Some(events) = events {
+                    Self::emit_event(
+                        Some(events),
+                        WorkflowEvent::Token {
+                            node_name: node_name.to_string(),
+                            token,
+                        },
+                    )?;
+                }
+            }
+            let _ = cancel_guard.disarm();
+            Ok(())
+        };
         let timed = async {
             if let Some(timeout) = self.node_timeout {
                 tokio::time::timeout(timeout, execution)
@@ -776,6 +823,7 @@ impl Graph {
         targets: &[String],
         path: &mut Vec<String>,
         step_count: &mut usize,
+        events: Option<&UnboundedSender<WorkflowEvent>>,
     ) -> Result<()> {
         let remaining = self.max_steps.saturating_sub(*step_count);
         if targets.len() > remaining {
@@ -784,7 +832,7 @@ impl Graph {
             )));
         }
         let mut branches = Vec::with_capacity(targets.len());
-        for target_name in targets {
+        for (offset, target_name) in targets.iter().enumerate() {
             let target_node = self.nodes.get(target_name).ok_or_else(|| {
                 ReactError::Agent(Box::new(AgentError::InitializationFailed(format!(
                     "Parallel node '{target_name}' not found in graph '{}'",
@@ -794,31 +842,63 @@ impl Graph {
             let branch_state = state.fork()?;
             branch_state.set_current_node(target_name);
             branches.push((target_name.clone(), target_node, branch_state));
+            Self::emit_event(
+                events,
+                WorkflowEvent::NodeStart {
+                    node_name: target_name.clone(),
+                    step_index: step_count.saturating_add(offset),
+                },
+            )?;
         }
         let route_cancel = CancellationToken::new();
         let mut branch_results = vec![false; branches.len()];
         let mut pending = FuturesUnordered::new();
-        for (index, (_, node, branch_state)) in branches.iter().enumerate() {
+        for (index, (target_name, node, branch_state)) in branches.iter().enumerate() {
             let branch_cancel = route_cancel.clone();
+            let target_name = target_name.clone();
             pending.push(async move {
+                let started = Instant::now();
                 let result = tokio::select! {
-                    result = self.execute_node(node, branch_state) => result,
+                    result = self.execute_node(&target_name, node, branch_state, events) => result,
                     () = branch_cancel.cancelled() => Err(ReactError::Agent(Box::new(
                         AgentError::Cancelled("parallel sibling cancelled after branch failure".to_string()),
                     ))),
                 };
-                (index, result)
+                (index, target_name, started.elapsed(), result)
             });
         }
-        while let Some((index, result)) = pending.next().await {
+        while let Some((index, target_name, elapsed, result)) = pending.next().await {
             match result {
-                Ok(()) => branch_results[index] = true,
+                Ok(()) => {
+                    let completed = branch_results.get_mut(index).ok_or_else(|| {
+                        ReactError::Other(
+                            "Parallel branch index escaped its result set".to_string(),
+                        )
+                    })?;
+                    *completed = true;
+                    Self::emit_event(
+                        events,
+                        WorkflowEvent::NodeEnd {
+                            node_name: target_name,
+                            step_index: step_count.saturating_add(index),
+                            elapsed,
+                        },
+                    )?;
+                }
                 Err(error) => {
+                    let event_result = Self::emit_event(
+                        events,
+                        WorkflowEvent::NodeError {
+                            node_name: target_name,
+                            error: error.to_string(),
+                        },
+                    );
                     route_cancel.cancel();
                     let _ = tokio::time::timeout(super::WORKFLOW_TASK_DRAIN_TIMEOUT, async {
                         while pending.next().await.is_some() {}
                     })
                     .await;
+                    event_result?;
                     return Err(error);
                 }
             }
@@ -870,31 +950,106 @@ impl Graph {
             .unwrap_or(false)
     }
 
-    /// Execute the graph workflow
-    ///
-    /// Starting from the entry node, execute nodes in sequence following edge routing logic, until reaching a finish node or `__end__`.
-    pub async fn run(&self, state: SharedState) -> Result<GraphResult> {
-        let mut current = self.entry.clone();
-        let mut path = Vec::new();
-        let mut step_count = 0;
+    fn fresh_execution(&self, state: SharedState) -> GraphExecution {
+        GraphExecution {
+            state,
+            current: self.entry.clone(),
+            path: Vec::new(),
+            step_count: 0,
+            continuation: WorkflowContinuation::Node,
+            parent_checkpoint: None,
+            skip_interrupt_before_once: false,
+        }
+    }
 
-        info!(graph = %self.name, entry = %current, "Starting graph execution");
+    async fn complete_execution(
+        &self,
+        execution: GraphExecution,
+        workflow_start: Instant,
+        events: Option<&UnboundedSender<WorkflowEvent>>,
+    ) -> Result<RunUntilInterruptResult> {
+        info!(
+            graph = %self.name,
+            steps = execution.step_count,
+            path = ?execution.path,
+            "Graph execution completed"
+        );
+        let final_result = execution
+            .state
+            .get::<String>("result")
+            .or_else(|| execution.state.get::<String>("output"))
+            .unwrap_or_default();
+        Self::emit_event(
+            events,
+            WorkflowEvent::Completed {
+                result: final_result,
+                total_steps: execution.step_count,
+                elapsed: workflow_start.elapsed(),
+            },
+        )?;
+        Ok(RunUntilInterruptResult::Completed(GraphResult {
+            state: execution.state,
+            path: execution.path,
+            steps: execution.step_count,
+        }))
+    }
+
+    /// Canonical Graph execution authority used by run, interrupt, resume, and stream entry points.
+    async fn execute_loop(
+        &self,
+        mut execution: GraphExecution,
+        honor_interrupts: bool,
+        events: Option<UnboundedSender<WorkflowEvent>>,
+    ) -> Result<RunUntilInterruptResult> {
+        let workflow_start = Instant::now();
+        info!(graph = %self.name, entry = %execution.current, "Starting graph execution");
 
         loop {
-            // Check cancellation at each node boundary
             if self.is_cancelled() {
-                warn!(graph = %self.name, steps = step_count, "Graph execution cancelled");
+                warn!(graph = %self.name, steps = execution.step_count, "Graph execution cancelled");
                 return Err(ReactError::Agent(Box::new(AgentError::Cancelled(format!(
                     "Graph '{}' cancelled after {} steps",
-                    self.name, step_count
+                    self.name, execution.step_count
                 )))));
             }
 
-            // Prevent infinite loop
-            if step_count >= self.max_steps {
+            let continuation =
+                std::mem::replace(&mut execution.continuation, WorkflowContinuation::Node);
+            match continuation {
+                WorkflowContinuation::Node => {}
+                WorkflowContinuation::FanOut { targets, then } => {
+                    debug!(
+                        graph = %self.name,
+                        targets = ?targets,
+                        then = %then,
+                        "Executing parallel fan-out"
+                    );
+                    self.execute_parallel_route(
+                        &execution.state,
+                        &targets,
+                        &mut execution.path,
+                        &mut execution.step_count,
+                        events.as_ref(),
+                    )
+                    .await?;
+                    execution.current = then;
+                    continue;
+                }
+                WorkflowContinuation::End => {
+                    execution.current = Self::END.to_string();
+                }
+            }
+
+            if execution.current == Self::END {
+                return self
+                    .complete_execution(execution, workflow_start, events.as_ref())
+                    .await;
+            }
+
+            if execution.step_count >= self.max_steps {
                 warn!(
                     graph = %self.name,
-                    steps = step_count,
+                    steps = execution.step_count,
                     "Graph execution exceeded max steps"
                 );
                 return Err(ReactError::Agent(Box::new(
@@ -902,87 +1057,132 @@ impl Graph {
                 )));
             }
 
-            // Check termination condition
-            if current == Self::END || self.finish_nodes.contains(&current) {
-                // If this is a finish node (not __end__), execute it first
-                if current != Self::END
-                    && let Some(node) = self.nodes.get(&current)
-                {
-                    state.set_current_node(&current);
-                    debug!(graph = %self.name, node = %current, "Executing finish node");
-                    self.execute_node(node, &state).await?;
-                    path.push(current.clone());
-                    step_count += 1;
-                }
-                info!(
-                    graph = %self.name,
-                    steps = step_count,
-                    path = ?path,
-                    "Graph execution completed"
-                );
-                return Ok(GraphResult {
-                    state,
-                    path,
-                    steps: step_count,
-                });
+            if honor_interrupts
+                && !execution.skip_interrupt_before_once
+                && self
+                    .interrupt_config
+                    .should_interrupt_before(&execution.current)
+            {
+                debug!(graph = %self.name, node = %execution.current, "Interrupt before node");
+                let checkpoint = self.checkpoint(
+                    execution.current.clone(),
+                    &execution.state,
+                    execution.path.clone(),
+                    execution.step_count,
+                    InterruptType::BeforeNode,
+                    WorkflowContinuation::Node,
+                )?;
+                let checkpoint = match execution.parent_checkpoint.as_ref() {
+                    Some(parent) => checkpoint.continue_run(parent),
+                    None => checkpoint,
+                };
+                self.checkpoint_store.save(&checkpoint).await?;
+                return Ok(RunUntilInterruptResult::Interrupted(
+                    InterruptState::before_node(checkpoint, execution.current),
+                ));
             }
+            execution.skip_interrupt_before_once = false;
 
-            // Execute the current node
-            let node = self.nodes.get(&current).ok_or_else(|| {
+            let node = self.nodes.get(&execution.current).ok_or_else(|| {
                 ReactError::Agent(Box::new(AgentError::InitializationFailed(format!(
                     "Node '{}' not found in graph '{}'",
-                    current, self.name
+                    execution.current, self.name
                 ))))
             })?;
+            execution.state.set_current_node(&execution.current);
+            Self::emit_event(
+                events.as_ref(),
+                WorkflowEvent::NodeStart {
+                    node_name: execution.current.clone(),
+                    step_index: execution.step_count,
+                },
+            )?;
+            let node_start = Instant::now();
+            if let Err(error) = self
+                .execute_node(&execution.current, node, &execution.state, events.as_ref())
+                .await
+            {
+                Self::emit_event(
+                    events.as_ref(),
+                    WorkflowEvent::NodeError {
+                        node_name: execution.current.clone(),
+                        error: error.to_string(),
+                    },
+                )?;
+                return Err(error);
+            }
+            Self::emit_event(
+                events.as_ref(),
+                WorkflowEvent::NodeEnd {
+                    node_name: execution.current.clone(),
+                    step_index: execution.step_count,
+                    elapsed: node_start.elapsed(),
+                },
+            )?;
+            execution.path.push(execution.current.clone());
+            execution.step_count = execution.step_count.saturating_add(1);
 
-            state.set_current_node(&current);
-            debug!(graph = %self.name, node = %current, step = step_count, "Executing node");
-            self.execute_node(node, &state).await?;
-            path.push(current.clone());
-            step_count += 1;
+            let next = if self.finish_nodes.contains(&execution.current) {
+                NextStep::End
+            } else {
+                self.resolve_next(&execution.current, &execution.state)
+                    .await?
+            };
 
-            // Route to the next node
-            let next = self.resolve_next(&current, &state).await?;
+            if honor_interrupts
+                && self
+                    .interrupt_config
+                    .should_interrupt_after(&execution.current)
+            {
+                debug!(graph = %self.name, node = %execution.current, "Interrupt after node");
+                let (next_node, continuation) = match next {
+                    NextStep::Single(name) => (name, WorkflowContinuation::Node),
+                    NextStep::Parallel { targets, then } => {
+                        (then.clone(), WorkflowContinuation::FanOut { targets, then })
+                    }
+                    NextStep::End => (Self::END.to_string(), WorkflowContinuation::End),
+                };
+                let checkpoint = self.checkpoint(
+                    next_node,
+                    &execution.state,
+                    execution.path.clone(),
+                    execution.step_count,
+                    InterruptType::AfterNode,
+                    continuation,
+                )?;
+                let checkpoint = match execution.parent_checkpoint.as_ref() {
+                    Some(parent) => checkpoint.continue_run(parent),
+                    None => checkpoint,
+                };
+                self.checkpoint_store.save(&checkpoint).await?;
+                return Ok(RunUntilInterruptResult::Interrupted(
+                    InterruptState::after_node(checkpoint, execution.current),
+                ));
+            }
 
             match next {
-                NextStep::Single(name) => {
-                    current = name;
-                }
+                NextStep::Single(name) => execution.current = name,
                 NextStep::Parallel { targets, then } => {
-                    debug!(
-                        graph = %self.name,
-                        targets = ?targets,
-                        then = %then,
-                        "Executing parallel fan-out"
-                    );
-
-                    // Parallel branch execution (sequential execution, using deep_merge to merge results)
-                    // Note: Because Node contains dyn traits (not Send + 'static),
-                    // tokio::spawn cannot be used directly. Sequential execution is used here to guarantee correctness.
-                    //
-                    // To prevent later branches from overwriting earlier modifications, each branch uses an independent state clone,
-                    // after execution completes, merge back to the main state via deep_merge semantics:
-                    // - Nested object fields are recursively merged rather than wholesale overwritten
-                    // - Simple keys (non-object) are still overwritten by later branches
-                    self.execute_parallel_route(&state, &targets, &mut path, &mut step_count)
-                        .await?;
-
-                    current = then;
+                    execution.current = then.clone();
+                    execution.continuation = WorkflowContinuation::FanOut { targets, then };
                 }
-                NextStep::End => {
-                    info!(
-                        graph = %self.name,
-                        steps = step_count,
-                        path = ?path,
-                        "Graph execution completed (reached END)"
-                    );
-                    return Ok(GraphResult {
-                        state,
-                        path,
-                        steps: step_count,
-                    });
-                }
+                NextStep::End => execution.current = Self::END.to_string(),
             }
+        }
+    }
+
+    /// Execute the graph workflow.
+    ///
+    /// Starting from the entry node, execute nodes in sequence following edge routing logic, until reaching a finish node or `__end__`.
+    pub async fn run(&self, state: SharedState) -> Result<GraphResult> {
+        match self
+            .execute_loop(self.fresh_execution(state), false, None)
+            .await?
+        {
+            RunUntilInterruptResult::Completed(result) => Ok(result),
+            _ => Err(ReactError::Other(
+                "Non-interrupting graph execution returned a non-terminal outcome".to_string(),
+            )),
         }
     }
 
@@ -998,161 +1198,8 @@ impl Graph {
     /// - `RunUntilInterruptResult::Completed(GraphResult)` - Execution completed
     /// - `RunUntilInterruptResult::Interrupted(InterruptState)` - Paused at an interrupt point
     pub async fn run_until_interrupt(&self, state: SharedState) -> Result<RunUntilInterruptResult> {
-        let mut current = self.entry.clone();
-        let mut path = Vec::new();
-        let mut step_count = 0;
-
-        info!(graph = %self.name, entry = %current, "Starting graph execution (with interrupt)");
-
-        loop {
-            // Check cancellation at each node boundary
-            if self.is_cancelled() {
-                warn!(graph = %self.name, steps = step_count, "Graph execution (with interrupt) cancelled");
-                return Err(ReactError::Agent(Box::new(AgentError::Cancelled(format!(
-                    "Graph '{}' cancelled after {} steps",
-                    self.name, step_count
-                )))));
-            }
-
-            // Prevent infinite loop
-            if step_count >= self.max_steps {
-                warn!(
-                    graph = %self.name,
-                    steps = step_count,
-                    "Graph execution exceeded max steps"
-                );
-                return Err(ReactError::Agent(Box::new(
-                    AgentError::MaxIterationsExceeded(self.max_steps),
-                )));
-            }
-
-            // Check interrupt_before
-            if self.interrupt_config.should_interrupt_before(&current) {
-                debug!(graph = %self.name, node = %current, "Interrupt before node");
-
-                let checkpoint = self.checkpoint(
-                    current.clone(),
-                    &state,
-                    path.clone(),
-                    step_count,
-                    InterruptType::BeforeNode,
-                    WorkflowContinuation::Node,
-                )?;
-
-                // Save the checkpoint
-                self.checkpoint_store.save(&checkpoint).await?;
-
-                let interrupt_state = InterruptState::before_node(checkpoint, current);
-                return Ok(RunUntilInterruptResult::Interrupted(interrupt_state));
-            }
-
-            // Check termination condition
-            if current == Self::END || self.finish_nodes.contains(&current) {
-                if current != Self::END
-                    && let Some(node) = self.nodes.get(&current)
-                {
-                    state.set_current_node(&current);
-                    debug!(graph = %self.name, node = %current, "Executing finish node");
-                    self.execute_node(node, &state).await?;
-                    path.push(current.clone());
-                    step_count += 1;
-                }
-                info!(
-                    graph = %self.name,
-                    steps = step_count,
-                    path = ?path,
-                    "Graph execution completed"
-                );
-                return Ok(RunUntilInterruptResult::Completed(GraphResult {
-                    state,
-                    path,
-                    steps: step_count,
-                }));
-            }
-
-            // Execute the current node
-            let node = self.nodes.get(&current).ok_or_else(|| {
-                ReactError::Agent(Box::new(AgentError::InitializationFailed(format!(
-                    "Node '{}' not found in graph '{}'",
-                    current, self.name
-                ))))
-            })?;
-
-            state.set_current_node(&current);
-            debug!(graph = %self.name, node = %current, step = step_count, "Executing node");
-            self.execute_node(node, &state).await?;
-            path.push(current.clone());
-            step_count += 1;
-
-            // Check interrupt_after
-            if self.interrupt_config.should_interrupt_after(&current) {
-                debug!(graph = %self.name, node = %current, "Interrupt after node");
-
-                // Get the next node
-                let next = self.resolve_next(&current, &state).await?;
-                let continuation = match &next {
-                    NextStep::Single(_) => WorkflowContinuation::Node,
-                    NextStep::Parallel { targets, then } => WorkflowContinuation::FanOut {
-                        targets: targets.clone(),
-                        then: then.clone(),
-                    },
-                    NextStep::End => WorkflowContinuation::End,
-                };
-
-                let checkpoint = self.checkpoint(
-                    match next {
-                        NextStep::Single(ref name) => name.clone(),
-                        NextStep::Parallel { ref then, .. } => then.clone(),
-                        NextStep::End => "__end__".to_string(),
-                    },
-                    &state,
-                    path.clone(),
-                    step_count,
-                    InterruptType::AfterNode,
-                    continuation,
-                )?;
-
-                self.checkpoint_store.save(&checkpoint).await?;
-
-                let interrupt_state = InterruptState::after_node(checkpoint, current);
-                return Ok(RunUntilInterruptResult::Interrupted(interrupt_state));
-            }
-
-            // Route to the next node
-            let next = self.resolve_next(&current, &state).await?;
-
-            match next {
-                NextStep::Single(name) => {
-                    current = name;
-                }
-                NextStep::Parallel { targets, then } => {
-                    debug!(
-                        graph = %self.name,
-                        targets = ?targets,
-                        then = %then,
-                        "Executing parallel fan-out"
-                    );
-
-                    self.execute_parallel_route(&state, &targets, &mut path, &mut step_count)
-                        .await?;
-
-                    current = then;
-                }
-                NextStep::End => {
-                    info!(
-                        graph = %self.name,
-                        steps = step_count,
-                        path = ?path,
-                        "Graph execution completed (reached END)"
-                    );
-                    return Ok(RunUntilInterruptResult::Completed(GraphResult {
-                        state,
-                        path,
-                        steps: step_count,
-                    }));
-                }
-            }
-        }
+        self.execute_loop(self.fresh_execution(state), true, None)
+            .await
     }
 
     /// Resume execution from a Checkpoint
@@ -1318,155 +1365,30 @@ impl Graph {
             });
         }
 
-        // Restore state
         let state = checkpoint.restore_state()?;
         if let Some(updates) = state_updates {
             for (key, value) in updates {
                 state.set(key, value)?;
             }
         }
-        let mut current = checkpoint.current_node.clone();
-        let mut path = checkpoint.path.clone();
-        let mut step_count = checkpoint.step_count;
-
-        match &checkpoint.continuation {
-            WorkflowContinuation::Node => {}
-            WorkflowContinuation::FanOut { targets, then } => {
-                self.execute_parallel_route(&state, targets, &mut path, &mut step_count)
-                    .await?;
-                current = then.clone();
-            }
-            WorkflowContinuation::End => current = Self::END.to_string(),
-        }
-
         info!(
             graph = %self.name,
             checkpoint_id = %checkpoint.id,
-            node = %current,
+            node = %checkpoint.current_node,
             "Resuming from checkpoint"
         );
-
-        // Continue execution
-        loop {
-            // Check cancellation at each node boundary
-            if self.is_cancelled() {
-                warn!(graph = %self.name, steps = step_count, "Graph resume cancelled");
-                return Err(ReactError::Agent(Box::new(AgentError::Cancelled(format!(
-                    "Graph '{}' resume cancelled after {} steps",
-                    self.name, step_count
-                )))));
-            }
-
-            if step_count >= self.max_steps {
-                return Err(ReactError::Agent(Box::new(
-                    AgentError::MaxIterationsExceeded(self.max_steps),
-                )));
-            }
-
-            // Check interrupt_before (skip, as it has already been handled)
-            // If resuming from a BeforeNode interrupt, the current node must be executed
-
-            if current == Self::END || self.finish_nodes.contains(&current) {
-                if current != Self::END
-                    && let Some(node) = self.nodes.get(&current)
-                {
-                    state.set_current_node(&current);
-                    self.execute_node(node, &state).await?;
-                    path.push(current.clone());
-                    step_count += 1;
-                }
-                return Ok(RunUntilInterruptResult::Completed(GraphResult {
-                    state,
-                    path,
-                    steps: step_count,
-                }));
-            }
-
-            // Execute the current node
-            let node = self.nodes.get(&current).ok_or_else(|| {
-                ReactError::Agent(Box::new(AgentError::InitializationFailed(format!(
-                    "Node '{}' not found",
-                    current
-                ))))
-            })?;
-
-            state.set_current_node(&current);
-            self.execute_node(node, &state).await?;
-            path.push(current.clone());
-            step_count += 1;
-
-            // Check interrupt_after
-            if self.interrupt_config.should_interrupt_after(&current) {
-                let next = self.resolve_next(&current, &state).await?;
-
-                let next_node_name = match &next {
-                    NextStep::Single(name) => name.clone(),
-                    NextStep::Parallel { then, .. } => then.clone(),
-                    NextStep::End => "__end__".to_string(),
-                };
-
-                let continuation = match &next {
-                    NextStep::Single(_) => WorkflowContinuation::Node,
-                    NextStep::Parallel { targets, then } => WorkflowContinuation::FanOut {
-                        targets: targets.clone(),
-                        then: then.clone(),
-                    },
-                    NextStep::End => WorkflowContinuation::End,
-                };
-                let new_checkpoint = self
-                    .checkpoint(
-                        next_node_name,
-                        &state,
-                        path.clone(),
-                        step_count,
-                        InterruptType::AfterNode,
-                        continuation,
-                    )?
-                    .continue_run(&checkpoint);
-
-                self.checkpoint_store.save(&new_checkpoint).await?;
-
-                let interrupt_state = InterruptState::after_node(new_checkpoint, current);
-                return Ok(RunUntilInterruptResult::Interrupted(interrupt_state));
-            }
-
-            let next = self.resolve_next(&current, &state).await?;
-
-            match next {
-                NextStep::Single(name) => {
-                    // Check interrupt_before for the next node
-                    if self.interrupt_config.should_interrupt_before(&name) {
-                        let new_checkpoint = self
-                            .checkpoint(
-                                name.clone(),
-                                &state,
-                                path.clone(),
-                                step_count,
-                                InterruptType::BeforeNode,
-                                WorkflowContinuation::Node,
-                            )?
-                            .continue_run(&checkpoint);
-                        self.checkpoint_store.save(&new_checkpoint).await?;
-
-                        let interrupt_state = InterruptState::before_node(new_checkpoint, name);
-                        return Ok(RunUntilInterruptResult::Interrupted(interrupt_state));
-                    }
-                    current = name;
-                }
-                NextStep::Parallel { targets, then } => {
-                    self.execute_parallel_route(&state, &targets, &mut path, &mut step_count)
-                        .await?;
-                    current = then;
-                }
-                NextStep::End => {
-                    return Ok(RunUntilInterruptResult::Completed(GraphResult {
-                        state,
-                        path,
-                        steps: step_count,
-                    }));
-                }
-            }
-        }
+        let skip_interrupt_before_once = checkpoint.interrupt_type == InterruptType::BeforeNode
+            && matches!(checkpoint.continuation, WorkflowContinuation::Node);
+        let execution = GraphExecution {
+            state,
+            current: checkpoint.current_node.clone(),
+            path: checkpoint.path.clone(),
+            step_count: checkpoint.step_count,
+            continuation: checkpoint.continuation.clone(),
+            parent_checkpoint: Some(checkpoint),
+            skip_interrupt_before_once,
+        };
+        self.execute_loop(execution, true, None).await
     }
 
     /// Resume execution from a checkpoint while injecting state modifications.
@@ -1614,135 +1536,44 @@ impl Graph {
         &self,
         state: SharedState,
     ) -> Result<BoxStream<'_, Result<WorkflowEvent>>> {
-        let state_clone = state.clone();
+        let (events, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let execution = self.execute_loop(self.fresh_execution(state), false, Some(events));
         let stream = async_stream::try_stream! {
-            let mut current = self.entry.clone();
-            let mut path = Vec::new();
-            let mut step_count = 0usize;
-            let workflow_start = Instant::now();
+            enum StreamPoll {
+                Event(Option<WorkflowEvent>),
+                Outcome(Box<Result<RunUntilInterruptResult>>),
+            }
 
+            tokio::pin!(execution);
             loop {
-                // Check cancellation at each node boundary
-                if self.is_cancelled() {
-                    warn!(graph = %self.name, steps = step_count, "Graph streaming execution cancelled");
-                    Err(ReactError::Agent(Box::new(AgentError::Cancelled(
-                        format!("Graph '{}' cancelled after {} steps", self.name, step_count),
-                    ))))?;
-                }
-
-                if step_count >= self.max_steps {
-                    Err(ReactError::Agent(Box::new(AgentError::MaxIterationsExceeded(self.max_steps))))?;
-                }
-
-                if current == Self::END || self.finish_nodes.contains(&current) {
-                    if current != Self::END
-                        && let Some(node) = self.nodes.get(&current)
-                    {
-                        state_clone.set_current_node(&current);
-                        yield WorkflowEvent::NodeStart {
-                            node_name: current.clone(),
-                            step_index: step_count,
-                        };
-                        let node_start = Instant::now();
-                        if let Err(error) = self.execute_node(node, &state_clone).await {
-                            yield WorkflowEvent::NodeError {
-                                node_name: current.clone(),
-                                error: error.to_string(),
-                            };
-                            Err(error)?;
-                        }
-                        yield WorkflowEvent::NodeEnd {
-                            node_name: current.clone(),
-                            step_index: step_count,
-                            elapsed: node_start.elapsed(),
-                        };
-                        path.push(current.clone());
-                        step_count += 1;
-                    }
-
-                    let final_result = state_clone
-                        .get::<String>("result")
-                        .or_else(|| state_clone.get::<String>("output"))
-                        .unwrap_or_default();
-
-                    yield WorkflowEvent::Completed {
-                        result: final_result,
-                        total_steps: step_count,
-                        elapsed: workflow_start.elapsed(),
-                    };
-                    return;
-                }
-
-                let node = self.nodes.get(&current).ok_or_else(|| {
-                    ReactError::Agent(Box::new(AgentError::InitializationFailed(format!(
-                        "Node '{}' not found in graph '{}'",
-                        current, self.name
-                    ))))
-                })?;
-
-                state_clone.set_current_node(&current);
-                yield WorkflowEvent::NodeStart {
-                    node_name: current.clone(),
-                    step_index: step_count,
+                let poll = tokio::select! {
+                    biased;
+                    event = receiver.recv() => StreamPoll::Event(event),
+                    outcome = &mut execution => StreamPoll::Outcome(Box::new(outcome)),
                 };
-                let node_start = Instant::now();
-                if let Err(error) = self.execute_node(node, &state_clone).await {
-                    yield WorkflowEvent::NodeError {
-                        node_name: current.clone(),
-                        error: error.to_string(),
-                    };
-                    Err(error)?;
-                }
-                yield WorkflowEvent::NodeEnd {
-                    node_name: current.clone(),
-                    step_index: step_count,
-                    elapsed: node_start.elapsed(),
-                };
-                path.push(current.clone());
-                step_count += 1;
-
-                let next = self.resolve_next(&current, &state_clone).await?;
-                match next {
-                    NextStep::Single(name) => {
-                        current = name;
-                    }
-                    NextStep::Parallel { targets, then } => {
-                        let branch_start = Instant::now();
-                        for (offset, target_name) in targets.iter().enumerate() {
-                            yield WorkflowEvent::NodeStart {
-                                node_name: target_name.clone(),
-                                step_index: step_count.saturating_add(offset),
-                            };
+                match poll {
+                    StreamPoll::Event(Some(event)) => yield event,
+                    StreamPoll::Event(None) => {
+                        let outcome = (&mut execution).await?;
+                        if !matches!(outcome, RunUntilInterruptResult::Completed(_)) {
+                            Err(ReactError::Other(
+                                "Streaming graph execution returned a non-terminal outcome".to_string(),
+                            ))?;
                         }
-                        self.execute_parallel_route(
-                            &state_clone,
-                            &targets,
-                            &mut path,
-                            &mut step_count,
-                        )
-                        .await?;
-                        for (offset, target_name) in targets.iter().enumerate() {
-                            yield WorkflowEvent::NodeEnd {
-                                node_name: target_name.clone(),
-                                step_index: step_count
-                                    .saturating_sub(targets.len())
-                                    .saturating_add(offset),
-                                elapsed: branch_start.elapsed(),
-                            };
-                        }
-                        current = then;
+                        break;
                     }
-                    NextStep::End => {
-                        let final_result = state_clone
-                            .get::<String>("result")
-                            .or_else(|| state_clone.get::<String>("output"))
-                            .unwrap_or_default();
-                        yield WorkflowEvent::Completed {
-                            result: final_result,
-                            total_steps: step_count,
-                            elapsed: workflow_start.elapsed(),
-                        };
-                        return;
+                    StreamPoll::Outcome(outcome) => {
+                        while let Ok(event) = receiver.try_recv() {
+                            yield event;
+                        }
+                        let outcome = *outcome;
+                        let outcome = outcome?;
+                        if !matches!(outcome, RunUntilInterruptResult::Completed(_)) {
+                            Err(ReactError::Other(
+                                "Streaming graph execution returned a non-terminal outcome".to_string(),
+                            ))?;
+                        }
+                        break;
                     }
                 }
             }
@@ -1812,6 +1643,118 @@ enum NextStep {
 mod tests {
     use super::*;
     use crate::workflow::checkpoint_store::FileCheckpointStore;
+    use echo_core::agent::AgentEvent;
+    use futures::stream;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct StreamingAgent;
+
+    impl Agent for StreamingAgent {
+        fn name(&self) -> &str {
+            "streaming-agent"
+        }
+
+        fn model_name(&self) -> &str {
+            "test"
+        }
+
+        fn system_prompt(&self) -> &str {
+            "test"
+        }
+
+        fn execute<'a>(&'a self, _task: &'a str) -> BoxFuture<'a, Result<String>> {
+            Box::pin(async { Ok("streamed answer".to_string()) })
+        }
+
+        fn execute_stream<'a>(
+            &'a self,
+            _task: &'a str,
+        ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+            Box::pin(async {
+                Ok(Box::pin(stream::iter([
+                    Ok(AgentEvent::Token("streamed ".to_string())),
+                    Ok(AgentEvent::Token("answer".to_string())),
+                    Ok(AgentEvent::FinalAnswer("streamed answer".to_string())),
+                ])) as BoxStream<'a, Result<AgentEvent>>)
+            })
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct CancellationProbeAgent {
+        started: Arc<AtomicBool>,
+        cancelled: Arc<AtomicBool>,
+    }
+
+    impl CancellationProbeAgent {
+        async fn wait_for(&self, flag: &AtomicBool) -> Result<()> {
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while !flag.load(Ordering::SeqCst) {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .map_err(|_| ReactError::Other("cancellation probe timed out".to_string()))
+        }
+
+        async fn wait_started(&self) -> Result<()> {
+            self.wait_for(&self.started).await
+        }
+
+        async fn wait_cancelled(&self) -> Result<()> {
+            self.wait_for(&self.cancelled).await
+        }
+    }
+
+    impl Agent for CancellationProbeAgent {
+        fn name(&self) -> &str {
+            "cancellation-probe"
+        }
+
+        fn model_name(&self) -> &str {
+            "test"
+        }
+
+        fn system_prompt(&self) -> &str {
+            "test"
+        }
+
+        fn execute<'a>(&'a self, _task: &'a str) -> BoxFuture<'a, Result<String>> {
+            Box::pin(std::future::pending())
+        }
+
+        fn execute_stream<'a>(
+            &'a self,
+            _task: &'a str,
+        ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+            Box::pin(async {
+                Err(ReactError::Other(
+                    "workflow must use the cancellable Agent stream".to_string(),
+                ))
+            })
+        }
+
+        fn execute_stream_with_cancel<'a>(
+            &'a self,
+            _task: &'a str,
+            cancel: CancellationToken,
+        ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+            let started = self.started.clone();
+            let cancelled = self.cancelled.clone();
+            Box::pin(async move {
+                started.store(true, Ordering::SeqCst);
+                let _producer = tokio::spawn(async move {
+                    cancel.cancelled().await;
+                    cancelled.store(true, Ordering::SeqCst);
+                });
+                let events: BoxStream<'a, Result<AgentEvent>> = Box::pin(
+                    stream::iter([Ok(AgentEvent::Token("ready".to_string()))])
+                        .chain(stream::pending()),
+                );
+                Ok(events)
+            })
+        }
+    }
 
     #[tokio::test]
     async fn test_linear_graph() {
@@ -2258,6 +2201,210 @@ mod tests {
         assert_eq!(node_starts, vec!["a", "b"]);
         assert_eq!(node_ends, vec!["a", "b"]);
         assert!(completed, "Should receive Completed event");
+    }
+
+    #[tokio::test]
+    async fn run_stream_forwards_agent_tokens_and_commits_final_answer() -> Result<()> {
+        let graph = GraphBuilder::new("stream-agent-token")
+            .add_agent_node("agent", StreamingAgent, "task", "result")
+            .set_entry("agent")
+            .set_finish("agent")
+            .build()?;
+        let state = SharedState::new();
+        state.set("task", "write")?;
+
+        let mut events = graph.run_stream(state.clone()).await?;
+        let mut tokens = Vec::new();
+        while let Some(event) = events.next().await {
+            if let WorkflowEvent::Token { node_name, token } = event? {
+                tokens.push((node_name, token));
+            }
+        }
+
+        assert_eq!(
+            tokens,
+            vec![
+                ("agent".to_string(), "streamed ".to_string()),
+                ("agent".to_string(), "answer".to_string()),
+            ]
+        );
+        assert_eq!(
+            state.get::<String>("result"),
+            Some("streamed answer".to_string())
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn dropping_workflow_stream_cancels_agent_producer() -> Result<()> {
+        let probe = CancellationProbeAgent::default();
+        let graph = GraphBuilder::new("stream-drop-cancel")
+            .add_agent_node("agent", probe.clone(), "task", "result")
+            .set_entry("agent")
+            .set_finish("agent")
+            .build()?;
+        let mut events = graph.run_stream(SharedState::new()).await?;
+
+        assert!(matches!(
+            events.next().await,
+            Some(Ok(WorkflowEvent::NodeStart { node_name, .. })) if node_name == "agent"
+        ));
+        assert!(matches!(
+            events.next().await,
+            Some(Ok(WorkflowEvent::Token { node_name, token }))
+                if node_name == "agent" && token == "ready"
+        ));
+        drop(events);
+
+        probe.wait_cancelled().await
+    }
+
+    #[tokio::test]
+    async fn graph_cancel_cancels_non_streaming_agent_producer() -> Result<()> {
+        let probe = CancellationProbeAgent::default();
+        let graph_cancel = CancellationToken::new();
+        let graph = GraphBuilder::new("graph-cancel-producer")
+            .add_agent_node("agent", probe.clone(), "task", "result")
+            .set_entry("agent")
+            .set_finish("agent")
+            .build()?
+            .with_cancel_token(graph_cancel.clone());
+        let cancel_after_start = async {
+            probe.wait_started().await?;
+            graph_cancel.cancel();
+            Result::<()>::Ok(())
+        };
+
+        let (run_result, cancel_result) =
+            tokio::join!(graph.run(SharedState::new()), cancel_after_start,);
+        cancel_result?;
+        assert!(run_result.is_err());
+        probe.wait_cancelled().await
+    }
+
+    #[tokio::test]
+    async fn node_timeout_cancels_non_streaming_agent_producer() -> Result<()> {
+        let probe = CancellationProbeAgent::default();
+        let graph = GraphBuilder::new("node-timeout-producer")
+            .add_agent_node("agent", probe.clone(), "task", "result")
+            .set_entry("agent")
+            .set_finish("agent")
+            .node_timeout(Duration::from_millis(10))
+            .build()?;
+
+        let result = graph.run(SharedState::new()).await;
+        assert!(matches!(result, Err(ReactError::Other(message)) if message.contains("timed out")));
+        probe.wait_cancelled().await
+    }
+
+    #[tokio::test]
+    async fn parallel_failure_cancels_agent_producer() -> Result<()> {
+        let probe = CancellationProbeAgent::default();
+        let graph = GraphBuilder::new("parallel-agent-cancel")
+            .add_function_node("start", |_state: &SharedState| Box::pin(async { Ok(()) }))
+            .add_agent_node("slow", probe.clone(), "task", "slow_result")
+            .add_function_node("broken", |_state: &SharedState| {
+                Box::pin(async {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    Err(ReactError::Other("branch failed".to_string()))
+                })
+            })
+            .add_function_node("merge", |_state: &SharedState| Box::pin(async { Ok(()) }))
+            .set_entry("start")
+            .add_parallel_edge("start", vec!["slow".into(), "broken".into()], "merge")
+            .set_finish("merge")
+            .build()?;
+
+        let result = graph.run(SharedState::new()).await;
+        assert!(matches!(result, Err(error) if error.to_string().contains("branch failed")));
+        probe.wait_cancelled().await
+    }
+
+    #[tokio::test]
+    async fn finish_interrupt_resumes_to_the_same_completed_path_as_run() -> Result<()> {
+        let build_graph = || {
+            GraphBuilder::new("finish-interrupt-parity")
+                .add_function_node("start", |_state: &SharedState| Box::pin(async { Ok(()) }))
+                .add_function_node("finish", |state: &SharedState| {
+                    Box::pin(async move {
+                        state
+                            .set("result", "done")
+                            .map_err(|error| ReactError::Other(error.to_string()))
+                    })
+                })
+                .set_entry("start")
+                .add_edge("start", "finish")
+                .set_finish("finish")
+                .interrupt_after(vec!["finish"])
+                .build()
+        };
+
+        let direct = build_graph()?.run(SharedState::new()).await?;
+        assert_eq!(direct.path, vec!["start", "finish"]);
+
+        let graph = build_graph()?;
+        let interrupted = graph.run_until_interrupt(SharedState::new()).await?;
+        let checkpoint = match interrupted {
+            RunUntilInterruptResult::Interrupted(interrupt) => interrupt.checkpoint,
+            other => {
+                return Err(ReactError::Other(format!(
+                    "expected finish-node interrupt, got {other:?}"
+                )));
+            }
+        };
+        assert_eq!(checkpoint.path, direct.path);
+        assert_eq!(checkpoint.continuation, WorkflowContinuation::End);
+
+        let resumed = graph.resume(checkpoint, ApprovalDecision::Approved).await?;
+        let completed = match resumed {
+            RunUntilInterruptResult::Completed(result) => result,
+            other => {
+                return Err(ReactError::Other(format!(
+                    "expected completed resume, got {other:?}"
+                )));
+            }
+        };
+        assert_eq!(completed.path, direct.path);
+        assert_eq!(completed.steps, direct.steps);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn run_stream_emits_parallel_node_error_before_failed_terminal_item() -> Result<()> {
+        let graph = GraphBuilder::new("parallel-stream-error")
+            .add_function_node("start", |_state: &SharedState| Box::pin(async { Ok(()) }))
+            .add_function_node("broken", |_state: &SharedState| {
+                Box::pin(async { Err(ReactError::Other("branch failed".to_string())) })
+            })
+            .add_function_node("slow", |_state: &SharedState| {
+                Box::pin(async {
+                    tokio::time::sleep(Duration::from_secs(60)).await;
+                    Ok(())
+                })
+            })
+            .add_function_node("merge", |_state: &SharedState| Box::pin(async { Ok(()) }))
+            .set_entry("start")
+            .add_parallel_edge("start", vec!["broken".into(), "slow".into()], "merge")
+            .set_finish("merge")
+            .build()?;
+
+        let mut stream = graph.run_stream(SharedState::new()).await?;
+        let mut items = Vec::new();
+        while let Some(item) = stream.next().await {
+            items.push(item);
+        }
+
+        assert!(items.iter().any(|item| {
+            matches!(
+                item,
+                Ok(WorkflowEvent::NodeError { node_name, error })
+                    if node_name == "broken" && error.contains("branch failed")
+            )
+        }));
+        assert!(
+            matches!(items.last(), Some(Err(error)) if error.to_string().contains("branch failed"))
+        );
+        Ok(())
     }
 
     #[tokio::test]

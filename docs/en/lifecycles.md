@@ -196,30 +196,13 @@ Current behavior must be read from [MCP](./08-mcp.md),
 [Hooks](./23-hooks.md), [Skills](./07-skills.md), [Plugins](./32-plugin-system.md),
 and [LSP](./31-lsp-integration.md); this overview does not promise atomic hot reload.
 
-## SDK
+## SDK Consumer
 
-```text
-Rust public facade
-  -> deterministic inventory and scope classification
-  -> protocol schema and Host operations
-  -> TypeScript / Python / Java source SDK
-  -> contract, connection, and lifecycle tests
-```
-
-| Boundary | Contract |
-| --- | --- |
-| Trigger | Public Rust API change or explicit contract generation |
-| Admission | Inventory validates canonical identity, alias, feature, signature, and scope |
-| Authority | Rust source/facade owns behavior; parity manifest owns language scope; Host owns runtime dispatch |
-| Events and effects | ACP and namespaced operations transfer typed requests, streams, handles, and resources |
-| Cancellation and failure | Client/Host protocols preserve typed failure, cancellation, and close boundaries |
-| Terminal | Operation or stream terminal follows its protocol; connection EOF does not invent success |
-| Recovery and projection | Reconnect/resume follows protocol capability; generated catalogs remain reproducible projections |
-
-The inventory separates external contract, Host/Rust-only, language intrinsic,
-internal helper, and deferred backlog. Inventory size measures drift coverage,
-not project semantic completion. See [Source-first SDK ADR](../adr/0028-source-first-multilanguage-sdk-runtime.md)
-and [SDK Scope ADR](../adr/0032-sdk-contract-scope-classification.md).
+The multilingual SDK and its source-built ACP Host are maintained in the
+independent [echo-agent-sdk](https://github.com/EchoYue-lp/echo-agent-sdk)
+repository. It consumes this framework's Rust facade and runtime authorities;
+the framework does not own the SDK's language contracts, generated catalogs, or
+client lifecycle implementations.
 
 ## Failure And Terminal Matrix
 

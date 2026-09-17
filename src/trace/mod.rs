@@ -368,6 +368,10 @@ pub enum RunEvent {
         /// Checkpoint capture time.
         checkpoint_timestamp: DateTime<Utc>,
     },
+    /// Observation of transcript projection settlement; runtime state remains authoritative.
+    TranscriptProjectionSettlement {
+        settlement: crate::memory::TranscriptProjectionSettlement,
+    },
     /// A tool permission decision was made.
     PermissionDecision {
         /// Tool name.

@@ -40,6 +40,8 @@ challenges:
 
 Checkpoint/journal binding与diagnostic failure visibility继续由独立Finding追踪；#46已有repair Evidence但保持open。secret retention、InMemory audit成功丢写与tool terminal分歧分别由#103、#61、#102追踪。
 
+Checkpoint/Journal identity修复候选已改变本Audit检查过的源码与持久格式；focused测试和独立复审完成前，本Audit保持stale，原examined结论不得用于关闭Finding。
+
 ## 残余风险
 
 物理 Journal prefix prune 后错误 checkpoint更无法重建；FileEventJournal cursor 位于缓存尾部时未重新校验 live file identity，保留 residual。

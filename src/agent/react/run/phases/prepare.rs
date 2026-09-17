@@ -63,12 +63,23 @@ pub(crate) async fn prepare_turn(
         let registry = snap.tools.hook_registry.read().await.clone();
         let result = registry.run_lifecycle_hooks(&hook_ctx).await;
         if result.block {
+            let reason = result.block_reason.unwrap_or_default();
+            super::finalize::settle_terminal_projection(
+                snap,
+                context,
+                Some(format!("Blocked by UserPromptSubmit hook: {reason}")),
+                tx,
+            )
+            .await?;
+            snap.finalize_run(
+                crate::trace::RunStatus::Failed,
+                None,
+                Some(&format!("Blocked by UserPromptSubmit hook: {reason}")),
+            )
+            .await;
             yield_final_event_or!(
                 tx,
-                AgentEvent::FinalAnswer(format!(
-                    "Blocked by UserPromptSubmit hook: {}",
-                    result.block_reason.unwrap_or_default()
-                )),
+                AgentEvent::FinalAnswer(format!("Blocked by UserPromptSubmit hook: {}", reason)),
                 PrepareOutcome::BlockedAndDone
             );
             snap.fire_hook(crate::skills::hooks::HookEvent::SessionEnd, Some("blocked"))

@@ -78,24 +78,33 @@ trait、文件实现和可选 SQLite 实现位于 `echo-agent/src/state/mod.rs`�
 
 ## 历史投影：ConversationStore
 
-`ConversationStore` 是消息流的用户可见投影 —— 一行一条 `StoredMessage`，由 `run_core_loop` 收尾时自动写入。GUI/TUI 历史面板渲染的就是它。
+`ConversationStore` 是消息流的用户可见投影，一行一条 `StoredMessage`。框架在压缩前、工具、guard、hook 和终态安全点结算；GUI/TUI 历史面板渲染已提交的结果。
 
-- 以 `conversation_id` 为键（与 `RuntimeStateStore` 同键）
-- 与 `RuntimeStateStore` 独立 —— 可单独启用、同时启用、都不启用
+- 以稳定产品 `conversation_id` 为键；`RuntimeStateStore` 为每个 runtime generation
+  使用独立 key，并将它持久绑定回该稳定 scope
+- durable transcript projection 必须与 `RuntimeStateStore` 配对。可以只启用
+  checkpoint，也可以两者都不启用；但只配置 `ConversationStore`、没有支持 revision
+  的 `RuntimeStateStore` 时，会在 invocation 产生任何副作用前拒绝接纳。
 - 内置实现：无额外依赖的 `FileConversationStore`；启用 `sqlite` feature 后也可使用
   `SqliteConversationStore`。
+- `AgentConfig::persistence_settlement_timeout` 和
+  `ReactAgentBuilder::persistence_settlement_timeout` 配置每个 managed 安全点的总预算（默认 10 秒，
+  不允许零值）。同一 absolute deadline 传到两个 Store；后续恢复使用新预算，但不改变 durable operation identity。
 
 ```rust,no_run
 use echo_agent::memory::FileConversationStore;
 use echo_agent::prelude::*;
+use echo_agent::state::FileRuntimeStateStore;
 use std::sync::Arc;
 
 # async fn demo() -> echo_agent::error::Result<()> {
 let conv_store = Arc::new(FileConversationStore::new("./agent-data")?);
+let state_store = Arc::new(FileRuntimeStateStore::new("./agent-data")?);
 let agent = ReactAgentBuilder::new()
     .model("qwen3-max")
     .conversation_id("user-alice-conv-001")
     .conversation_store(conv_store)
+    .state_store(state_store)
     .build()?;
 # Ok(())
 # }
@@ -118,7 +127,14 @@ let agent = ReactAgentBuilder::new()
 使用进程级文件操作 owner。
 
 ownership 与并发设计见 [ADR 0004](../adr/0004-async-file-store-ownership.md)。
-SQLite 仍是框架可选且未改变的后端。
+SQLite 仍是框架可选后端，并与文件后端实现相同的原子投影、deadline 和 retirement 合同。
+
+投影不再使用 read-modify-replace，而是 prepare/apply/ack：runtime checkpoint 先保存
+完整 pending batch；`ConversationStore` 原子返回 `Applied` 或 `AlreadyApplied`；随后
+checkpoint CAS 推进 cursor 并清除 pending。dispatch 后 timeout 会保留 durable
+`Deferred` debt，warm admission 与 cold recovery 都必须在模型执行前结算。
+`TranscriptProjectionSettlement` 总是在 invocation terminal 前出现。详见
+[ADR 0056](../adr/0056-durable-transcript-projection-settlement.md)。
 
 ---
 

@@ -6,14 +6,14 @@ title: EventJournal、Checkpoint 与 DeliveryLedger
 asset_type: state_authority
 status: active
 risk: high
-observed_at: f1e9027246760661144786e9e35615cd46d580c6
+observed_at: source:eff0290e1aff3c3a56f0ba94f57460e220d08f8eb04d3023efde058982972f03
 boundary_refs: [boundary.observation-persistence-delivery]
-code_refs: [echo-state/src/journal/mod.rs, echo-state/src/journal/file.rs, echo-state/src/journal/segmented.rs, echo-state/src/delivery.rs]
+code_refs: [echo-state/src/journal/mod.rs, echo-state/src/journal/file.rs, echo-state/src/journal/segmented.rs, echo-state/src/delivery.rs, docs/adr/0055-checkpoint-journal-identity.md]
 consumer_refs: [src/state/mod.rs, echo-sdk-host/src/core_profile/persistence.rs]
 behavior_refs: [behavior.observation-persistence]
 rule_refs: [rule.fact-projection-separation]
-evidence_refs: [evidence.persistence-observation]
-finding_refs: []
+evidence_refs: [evidence.persistence-observation, evidence.checkpoint-journal-binding-repair, evidence.checkpoint-journal-binding-verification, evidence.checkpoint-journal-sdk-inventory]
+finding_refs: [finding.checkpoint-journal-binding]
 candidate_refs: []
 ---
 
@@ -29,7 +29,7 @@ Delivery、SDK persistence 和 framework consumers 使用 generic journal/checkp
 
 ## 生命周期
 
-Prepare/append batch、reconcile unknown outcome、reduce/checkpoint/recover、claim/effect/ack/drain/settle/prune。
+Allocate generation identity、prepare/append batch、reconcile unknown outcome、reduce/bound checkpoint/recover、claim/effect/ack/drain/settle/prune。
 
 ## 候选关系
 

@@ -8,10 +8,10 @@ risk: high
 primary_focus: failure_concurrency
 focus: [state_authority, time_lifecycle, result_side_effect, permission_external, data_durability]
 boundary: boundary.extension-lifecycle
-observed_at: 2eab1ac9923e0f99a70cc08d88de0ee64ea90ee6
+observed_at: source:eff0290e1aff3c3a56f0ba94f57460e220d08f8eb04d3023efde058982972f03
 code_refs: [echo-integration/src/mcp/mod.rs, echo-execution/src/skills/hooks.rs, echo-execution/src/skills/registry.rs, echo-core/src/plugin/registry.rs, src/plugin/prepared.rs, echo-integration/src/lsp/manager.rs]
 rule_refs: [rule.extension-generation-authority]
-evidence_refs: [evidence.effects-extensions, evidence.skill-activation-authority-repair, evidence.skill-activation-authority-verification, evidence.mcp-tool-local-classification-repair, evidence.mcp-tool-local-classification-verification, evidence.mcp-client-capability-advertisement-repair, evidence.mcp-client-capability-advertisement-verification, evidence.lsp-derived-handle-lifecycle-repair, evidence.lsp-derived-handle-lifecycle-verification]
+evidence_refs: [evidence.effects-extensions, evidence.skill-activation-authority-repair, evidence.skill-activation-authority-verification, evidence.mcp-tool-local-classification-repair, evidence.mcp-tool-local-classification-verification, evidence.mcp-client-capability-advertisement-repair, evidence.mcp-client-capability-advertisement-verification, evidence.lsp-derived-handle-lifecycle-repair, evidence.lsp-derived-handle-lifecycle-verification, evidence.plugin-component-preparation-repair, evidence.plugin-component-preparation-verification]
 finding_refs: [finding.skill-activation-authority, finding.hook-permission-precedence, finding.mcp-client-capability-advertisement, finding.mcp-tool-permission-classification, finding.plugin-mcp-owner-isolation, finding.plugin-failure-isolation-contract, finding.plugin-lifecycle-coordination, finding.lsp-runtime-state, finding.lsp-manager-derived-handle-resurrection, finding.extension-cleanup-settlement, finding.extension-credential-debug-redaction, finding.mcp-version-doc-drift]
 ---
 
@@ -27,7 +27,9 @@ McpManager管命名连接且client只广告已实现capability；HookRegistry管
 
 ## 期望行为
 
-同名、reload、部分失败、断连和撤销不得让一个 owner 删除另一个 owner 的资源，文档与实际 failure-isolation 合同一致。
+同名、reload、部分失败、断连和撤销不得让一个 owner 删除另一个 owner 的资源。Plugin
+prepare在组件边界排除无效输入并保留诊断，健康兄弟组件仍进入同一个不可变generation；
+代次级不变量失败时完整set拒绝发布。
 
 ## 触发、结果与副作用
 
@@ -43,4 +45,8 @@ Prepare/apply/rollback、transport close、pending call、LSP EOF/restart、Plug
 
 ## 裁决记录
 
-Skill activation、Hook permission precedence、MCP capability advertisement/local classification、LSP派生handle均已修复并独立复审；Plugin/MCP owner、Plugin failure isolation、LSP runtime status与异步cleanup仍为待审Finding。
+Skill activation、Hook permission precedence、MCP capability advertisement/local
+classification、LSP派生handle与ADR 0045 DU-71确认的Plugin component preparation isolation
+均已修复并独立复审。Plugin active generation、lifecycle coordination、reconcile overlap、
+MCP owner isolation、LSP runtime status与异步cleanup仍为open Finding，因此本Behavior继续
+保持needs_review。

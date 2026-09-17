@@ -168,7 +168,7 @@ Application / protocol surface
              |
   core contracts + execution + state + orchestration + integrations + tools
              |
-  SDK protocol / Host and executable learning consumers
+  external SDK protocol / Host consumer and executable learning consumers
 ```
 
 Start with [Framework Architecture](docs/en/architecture.md),
@@ -251,8 +251,6 @@ echo-agent/
 ├── echo-orchestration/  Workflow, human-loop, and DAG tasks
 ├── echo-integration/    LLM providers, MCP, and IM channels (QQ/Feishu)
 ├── echo-tools/          Domain tools: chart, data, database, git, media, web, rag
-├── echo-sdk-protocol/   Deterministic facade inventory, contracts, and code generation
-├── echo-sdk-host/       Runtime Host exposing echo_agent through ACP and namespaced operations
 ├── echo-agent-learning/ Non-published lessons, demos, composite examples, and facade contracts
 ├── src/                 Agent engine, re-exports, and facade layer
 └── docs/                Framework consumer documentation (en + zh)
@@ -273,7 +271,7 @@ The framework accepts typed `FrameworkConfig`, `AgentConfig`, `LlmConfig`, `Perm
 - **67 registered tools** — ReAct loop, data analysis, research papers, web, media, RAG, database, and more
 - **Runnable examples and a teaching crate** — framework acceptance and Rust lessons are maintained separately
 - **Comprehensive unit tests** — full coverage across all modules
-- **8 framework/runtime packages + 2 SDK packages + 1 learning package** — runtime, SDK, and executable consumer boundaries stay explicit
+- **8 framework/runtime packages + 1 learning package** — the multilingual SDK is maintained in the independent [echo-agent-sdk](https://github.com/EchoYue-lp/echo-agent-sdk) repository
 - **Multi-modal** — text, images (base64 & URL), and file attachments in a single message
 - **IM integration** — QQ Bot (WebSocket) & Feishu (Webhook) out of the box
 - **Declarative workflows** — define agent graphs in YAML/JSON, no Rust code required
@@ -346,7 +344,7 @@ Built-in data tools (feature `data`): Polars-powered read/filter/aggregate/stats
 
 - **Store**: Long-term key-value storage with namespace isolation (`InMemoryStore`, `FileStore`, `SqliteStore`)
 - **RuntimeStateStore**: Full runtime checkpoint (messages + plan + active skills + blocked reason) for crash recovery (`SqliteRuntimeStateStore`)
-- **ConversationStore**: User-visible transcript projection persisted automatically at run finalization
+- **ConversationStore**: User-visible transcript projection, atomically settled with a paired `RuntimeStateStore` before compaction or terminal publication
 
 One line to give your agent persistent memory — no manual tool wiring:
 
@@ -1088,44 +1086,15 @@ Any **OpenAI-compatible** API, plus native Anthropic and Ollama:
 | Code Search | [EN](docs/en/37-code-search.md) | [ZH](docs/zh/37-code-search.md) |
 | Agent Factory & Model Profiles | [EN](docs/en/38-factory-modes.md) | [ZH](docs/zh/38-factory-modes.md) |
 | Security | [EN](docs/en/security.md) | [ZH](docs/zh/security.md) |
-| Multilingual SDK (ACP Host available) | [EN](docs/sdk/README.md) | — |
+| Multilingual SDK | [echo-agent-sdk](https://github.com/EchoYue-lp/echo-agent-sdk) | — |
 
 ### SDK corner
 
-The source-built `echo-agent-sdk-host` passes the supported standard ACP v1
-profile through the official Client and stdio runtime, and — with the
-`sdk-core-profile` feature and an explicit state root — the negotiated
-`_echo_agent/*` core extension profile (Agent/Session/Run handles, full
-events with ACK/replay, restart recovery). The `sdk-facade-adapters` feature
-can independently serve the facade feature families — task/subagent/structured output,
-memory/workflow/state/delivery/trace/eval/improve, MCP/A2A/LSP/topology and
-the tool families — over the framework's own authorities, with canonical
-catalog routing, frozen feature semantics, advertised resource bounds and
-teardown cascades (see
-[docs/sdk/facade-feature-adapters.md](docs/sdk/facade-feature-adapters.md)).
-The `sdk-extension-bridge` feature includes those adapters and additionally
-serves the negotiated bidirectional extension bridge: host-language Tool,
-LlmClient, Store, HumanLoop, Hook, callback, intervention, factory and
-custom-Agent implementations register over the same connection and are
-reverse-invoked with lease, deadline, cancellation and stream-terminal
-semantics (see
-[docs/sdk/sdk-extension-bridge.md](docs/sdk/sdk-extension-bridge.md)).
-Plan 08 closes the Rust Host facade contract across canonical source
-operations, consumer traits and public streams. Workflow and A2A use real
-Host-issued pull streams rather than buffered pseudo-streams, and the strict
-facade review plus final validation passed.
-It uses the root
-`AcpAgentAdapter`, creates one framework Agent per Session, and accepts an
-explicit product-neutral JSON configuration. Build it with
-`cargo build -p echo-sdk-host --features sdk-facade-all --locked`; no binary
-or language runtime is bundled. Source-built TypeScript/Python/Java clients
-now cover the executable canonical facade routes and preserve the shared
-WireValue contract against a real Host. TypeScript/Python quickstarts and the
-Java example are part of the source gate; intrinsic mappings remain open
-before the SDK program can claim **Runnable** and **Parity complete**. Start at
-[docs/sdk/README.md](docs/sdk/README.md), the only SDK
-entry point; the core profile reference is
-[docs/sdk/sdk-core-profile.md](docs/sdk/sdk-core-profile.md).
+The multilingual SDK, source-built ACP Host, `_echo_agent/*` protocol, contract
+artifacts, and language clients are maintained in the independent
+[echo-agent-sdk](https://github.com/EchoYue-lp/echo-agent-sdk) repository.
+This framework repository remains the runtime authority consumed by that SDK;
+it does not build or publish the SDK product as a workspace member.
 
 ---
 

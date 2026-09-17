@@ -4,13 +4,13 @@ id: map.extension-lifecycle
 kind: capability_map
 title: MCP、Hook、Skill、Plugin 与 LSP 生命周期
 risk: high
-observed_at: 98a2e11cfb6e88e2f310ae2c2b40cd9e009534a4
+observed_at: source:eff0290e1aff3c3a56f0ba94f57460e220d08f8eb04d3023efde058982972f03
 boundary_refs: [boundary.extension-lifecycle]
 behavior_refs: [behavior.extension-publication]
 rule_refs: [rule.extension-generation-authority, rule.permission-effect-order]
-evidence_refs: [evidence.effects-extensions, evidence.high-risk-audit-frontier, evidence.framework-concept-navigation, evidence.extension-credential-debug-redaction-repair, evidence.extension-credential-debug-redaction-verification, evidence.skill-activation-authority-repair, evidence.skill-activation-authority-verification, evidence.mcp-tool-local-classification-repair, evidence.mcp-tool-local-classification-verification, evidence.mcp-client-capability-advertisement-repair, evidence.mcp-client-capability-advertisement-verification, evidence.mcp-protocol-negotiation-repair, evidence.mcp-protocol-negotiation-verification, evidence.lsp-derived-handle-lifecycle-repair, evidence.lsp-derived-handle-lifecycle-verification]
+evidence_refs: [evidence.effects-extensions, evidence.high-risk-audit-frontier, evidence.framework-concept-navigation, evidence.extension-credential-debug-redaction-repair, evidence.extension-credential-debug-redaction-verification, evidence.skill-activation-authority-repair, evidence.skill-activation-authority-verification, evidence.mcp-tool-local-classification-repair, evidence.mcp-tool-local-classification-verification, evidence.mcp-client-capability-advertisement-repair, evidence.mcp-client-capability-advertisement-verification, evidence.mcp-protocol-negotiation-repair, evidence.mcp-protocol-negotiation-verification, evidence.lsp-derived-handle-lifecycle-repair, evidence.lsp-derived-handle-lifecycle-verification, evidence.plugin-component-preparation-repair]
 finding_refs: [finding.skill-activation-authority, finding.hook-permission-precedence, finding.hook-protected-path, finding.hook-event-producer-contract, finding.mcp-client-capability-advertisement, finding.mcp-tool-permission-classification, finding.plugin-mcp-owner-isolation, finding.plugin-failure-isolation-contract, finding.plugin-lifecycle-coordination, finding.plugin-generation-publication-authority, finding.plugin-lifecycle-reconcile-overlap, finding.lsp-runtime-state, finding.lsp-manager-derived-handle-resurrection, finding.extension-cleanup-settlement, finding.extension-credential-debug-redaction, finding.mcp-version-doc-drift]
-audit_refs: [audit.extension-lifecycle.state-authority, audit.extension-lifecycle.time-lifecycle, audit.extension-lifecycle.permission-external, audit.extension-lifecycle.contract-evidence, audit.skill-activation-authority-rereview, audit.mcp-tool-local-classification-rereview, audit.mcp-client-capability-advertisement-rereview, audit.mcp-protocol-negotiation-rereview, audit.lsp-derived-handle-lifecycle-rereview]
+audit_refs: [audit.extension-lifecycle.state-authority, audit.extension-lifecycle.time-lifecycle, audit.extension-lifecycle.permission-external, audit.extension-lifecycle.contract-evidence, audit.skill-activation-authority-rereview, audit.mcp-tool-local-classification-rereview, audit.mcp-client-capability-advertisement-rereview, audit.mcp-protocol-negotiation-rereview, audit.lsp-derived-handle-lifecycle-rereview, audit.plugin-component-preparation-rereview]
 related_map_refs: [map.workspace-architecture, map.context-memory, map.tool-permission-sandbox, map.protocol-surfaces]
 scenarios:
   mcp-connect-discover-close:
@@ -34,6 +34,7 @@ scenarios:
     source_refs: [echo-core/src/plugin/registry.rs, echo-core/src/plugin/lifecycle.rs, src/plugin/prepared.rs]
     finding_refs: [finding.plugin-mcp-owner-isolation, finding.plugin-failure-isolation-contract, finding.plugin-lifecycle-coordination, finding.plugin-generation-publication-authority, finding.plugin-lifecycle-reconcile-overlap]
     rule_refs: [rule.extension-generation-authority]
+    evidence_refs: [evidence.plugin-component-preparation-repair]
   lsp-process-routing:
     status: mapped
     source_refs: [echo-core/src/lsp/client.rs, echo-integration/src/lsp/client.rs, echo-integration/src/lsp/manager.rs]
@@ -42,7 +43,7 @@ scenarios:
     audit_refs: [audit.lsp-derived-handle-lifecycle-rereview]
   host-production-coordination:
     status: needs_review
-    source_refs: [src/plugin/prepared.rs, echo-core/src/plugin/lifecycle.rs, echo-sdk-host/src/core_profile/facade/integrations.rs]
+    source_refs: [src/plugin/prepared.rs, echo-core/src/plugin/lifecycle.rs]
     unknown: Plugin registry/wiring/callback 与 LSP/MCP close 的统一生产编排者在 framework consumers 中不完整
     next_step: high-risk lifecycle audit 追踪 Host 与 embedding application 的实际调用顺序和 cleanup debt
   credential-debug-redaction:
@@ -88,7 +89,9 @@ Catalog/status/tool list 是 registry projection；仅可执行且当前 generat
 
 ## 场景处置清单
 
-五类生命周期和十六个 Finding 已映射；Skill activation authority已修复并通过独立复审，其余跨 Host 统一编排与需裁决合同保持 needs_review。
+五类生命周期和十六个Finding已映射；Skill activation authority与Plugin prepare failure
+isolation已修复并通过独立复审。跨Host统一编排、active generation、reconcile overlap与
+MCP owner结算保持needs_review。
 
 ## 未展开项
 

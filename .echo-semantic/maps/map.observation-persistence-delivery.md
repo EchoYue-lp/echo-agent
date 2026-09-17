@@ -4,13 +4,13 @@ id: map.observation-persistence-delivery
 kind: capability_map
 title: Observation、Persistence、Projection 与 Delivery
 risk: high
-observed_at: source:96384cfb5e0bbc3384493805d026d65c6b096b3d0c3a26fde0cc1c007378e2c5
+observed_at: source:eff0290e1aff3c3a56f0ba94f57460e220d08f8eb04d3023efde058982972f03
 boundary_refs: [boundary.observation-persistence-delivery]
 behavior_refs: [behavior.observation-persistence]
 rule_refs: [rule.fact-projection-separation]
-evidence_refs: [evidence.persistence-observation, evidence.high-risk-audit-frontier, evidence.eval-trace-correlation-repair, evidence.eval-trace-correlation-verification, evidence.framework-concept-navigation, evidence.diagnostic-persistence-failure-visibility-repair]
+evidence_refs: [evidence.persistence-observation, evidence.checkpoint-journal-binding-repair, evidence.checkpoint-journal-binding-verification, evidence.checkpoint-journal-sdk-inventory, evidence.high-risk-audit-frontier, evidence.eval-trace-correlation-repair, evidence.eval-trace-correlation-verification, evidence.framework-concept-navigation, evidence.transcript-projection-settlement-repair, evidence.transcript-projection-settlement-verification, evidence.diagnostic-persistence-failure-visibility-repair]
 finding_refs: [finding.trace-effect-event-producers, finding.eval-trace-identity, finding.trace-audit-secret-boundary, finding.turn-terminal-commit-projection-order, finding.checkpoint-journal-binding, finding.diagnostic-persistence-failure-visibility, finding.hook-event-producer-contract, finding.in-memory-audit-successful-drop]
-audit_refs: [audit.observation-persistence-delivery.state-authority, audit.observation-persistence-delivery.data-durability, audit.observation-persistence-delivery.contract-evidence]
+audit_refs: [audit.observation-persistence-delivery.state-authority, audit.observation-persistence-delivery.data-durability, audit.observation-persistence-delivery.contract-evidence, audit.checkpoint-journal-binding-rereview]
 related_map_refs: [map.agent-session-turn, map.context-memory, map.task-subagent-workflow, map.protocol-surfaces, map.eval-evolution]
 scenarios:
   versioned-agent-subagent-events:
@@ -19,18 +19,17 @@ scenarios:
     behavior_refs: [behavior.observation-persistence]
     rule_refs: [rule.fact-projection-separation]
   journal-checkpoint-recovery:
-    status: needs_review
+    status: mapped
     source_refs: [echo-state/src/journal/mod.rs, echo-state/src/journal/file.rs, echo-state/src/journal/segmented.rs]
     rule_refs: [rule.fact-projection-separation]
-    evidence_refs: [evidence.persistence-observation]
+    evidence_refs: [evidence.persistence-observation, evidence.checkpoint-journal-binding-repair, evidence.checkpoint-journal-binding-verification, evidence.checkpoint-journal-sdk-inventory]
     finding_refs: [finding.checkpoint-journal-binding]
-    unknown: checkpoint 未绑定来源 Journal identity，合法异源 state 可通过序号检查
-    next_step: repair checkpoint source/scope binding 并补异源恢复测试
   store-role-separation:
     status: mapped
     source_refs: [src/state/mod.rs, echo-core/src/memory/conversation.rs, echo-core/src/memory/store.rs, src/trace/mod.rs]
     behavior_refs: [behavior.observation-persistence]
     rule_refs: [rule.fact-projection-separation]
+    evidence_refs: [evidence.transcript-projection-settlement-repair, evidence.transcript-projection-settlement-verification]
   delivery-ledger:
     status: mapped
     source_refs: [echo-state/src/delivery.rs, docs/adr/0019-typed-delivery-ledger-api.md]
@@ -67,7 +66,7 @@ scenarios:
 
 ## 状态与数据流
 
-EventEnvelope保持identity/sequence；Journal先commit后reduce；checkpoint绑定applied sequence；DeliveryLedger归约typed lifecycle；RunStore以真实trace ID存储诊断Run，并保留product parent、turn和execution correlation。有界diagnostic dispatcher仅投递Trace/Audit failure fact与drop counter，不拥有业务或Agent终态。
+EventEnvelope保持identity/sequence；Journal先commit后reduce；checkpoint绑定Journal generation identity与applied sequence；DeliveryLedger归约typed lifecycle；RunStore以真实trace ID存储诊断Run，并保留product parent、turn和execution correlation。有界diagnostic dispatcher仅投递Trace/Audit failure fact与drop counter，不拥有业务或Agent终态。
 
 ## 策略来源与优先级
 

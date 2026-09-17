@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::fmt;
 
 /// Current schema version for the framework event transport contract.
-pub const AGENT_EVENT_SCHEMA_VERSION: u16 = 4;
+pub const AGENT_EVENT_SCHEMA_VERSION: u16 = 5;
 
 macro_rules! identity_id {
     ($name:ident, $label:literal) => {
