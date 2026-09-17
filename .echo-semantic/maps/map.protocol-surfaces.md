@@ -4,7 +4,7 @@ id: map.protocol-surfaces
 kind: capability_map
 title: ACP、A2A、Channels、Headless 与 SDK Surfaces
 risk: high
-observed_at: c5f7688212d45d5bdcdbf60342605e8bfb176cae
+observed_at: source:540d5deec89168d61324861902eb2e1dc8b9408add3b62af30de0f71a76baa6a
 boundary_refs: [boundary.protocol-surfaces]
 behavior_refs: [behavior.protocol-projection]
 rule_refs: [rule.protocol-role-separation, rule.sdk-rust-authority]
@@ -28,9 +28,9 @@ scenarios:
     status: needs_review
     source_refs: [echo-integration/src/channels/session.rs, echo-integration/src/channels/types.rs, src/channels.rs]
     finding_refs: [finding.channel-attachment-projection, finding.channel-reset-stale-generation-delivery, finding.turn-driver-entry-coverage, finding.agent-adapter-close-settlement]
-    evidence_refs: [evidence.provider-protocol-quality]
-    unknown: Channel session/incarnation 已映射，但 handler 丢弃 attachments、直接 raw chat、reset 旧输出无法 fence 且 close 不结算 Agent
-    next_step: semantic-decide multimodal/reset 合同，并分别 repair driven Turn projection、generation fencing 与 close owner
+    evidence_refs: [evidence.provider-protocol-quality, evidence.channel-generation-delivery-fence-repair, evidence.channel-generation-delivery-fence-verification]
+    unknown: Channel session/incarnation与reset delivery fence已映射，但handler仍丢弃attachments、直接raw chat且close不结算Agent
+    next_step: 分别repair attachment投影、driven Turn入口与close owner；reset generation fencing已闭合待交付
   headless-turn:
     status: mapped
     source_refs: [src/headless.rs, echo-orchestration/src/runtime/turn_driver.rs]
@@ -38,7 +38,7 @@ scenarios:
     rule_refs: [rule.turn-terminal-authority]
   sdk-host-and-language-clients:
     status: needs_review
-    source_refs: [echo-sdk-protocol/src/event.rs, echo-sdk-host/src/core_profile/events.rs, echo-sdk-host/tests/core_profile_e2e.rs, contracts/sdk/parity-manifest.json]
+    source_refs: [.echo-semantic/assets/asset.external-sdk-repository.md, docs/adr/0031-sdk-identity-governance-scope.md]
     behavior_refs: [behavior.sdk-facade-routing]
     rule_refs: [rule.sdk-rust-authority]
     evidence_refs: [evidence.sdk-contracts]
@@ -47,7 +47,7 @@ scenarios:
     next_step: Repair gap ACK后的单调resume watermark，不扩大到intrinsic identity门禁
   sdk-deferred-backlog:
     status: needs_review
-    source_refs: [contracts/sdk/parity-manifest.json, docs/adr/0031-sdk-identity-governance-scope.md, docs/adr/0032-sdk-contract-scope-classification.md]
+    source_refs: [.echo-semantic/assets/asset.external-sdk-repository.md, docs/adr/0031-sdk-identity-governance-scope.md, docs/adr/0032-sdk-contract-scope-classification.md]
     evidence_refs: [evidence.sdk-deferred-backlog-count-repair, evidence.sdk-deferred-backlog-count-verification]
     finding_refs: [finding.sdk-deferred-backlog-count-drift]
     audit_refs: [audit.semantic-governance-final-rereview]

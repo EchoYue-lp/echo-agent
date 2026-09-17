@@ -5,6 +5,8 @@ pub use echo_core::error::ChannelError;
 pub use echo_core::error::ReactError;
 use echo_core::error::Result;
 use futures::stream::{BoxStream, StreamExt};
+use std::sync::{Arc, Mutex, MutexGuard};
+use tokio::sync::Notify;
 
 // ── Chat Type ────────────────────────────────────────────────────────────────
 
@@ -175,6 +177,154 @@ impl InboundMessage {
 
 // ── Outbound Message ─────────────────────────────────────────────────────────
 
+struct ChannelDeliveryFenceState {
+    lifecycle: Mutex<ChannelDeliveryFenceLifecycle>,
+    settled: Notify,
+}
+
+struct ChannelDeliveryFenceLifecycle {
+    current_incarnation_id: Arc<str>,
+    retired: bool,
+    active_deliveries: usize,
+}
+
+/// Opaque process-local authority that fences one channel-session incarnation.
+///
+/// `SessionHandler` attaches this authority to its output. Built-in transports
+/// acquire a lease before queue or network admission, allowing reset to reject
+/// stale output and wait only for delivery that was already admitted.
+#[doc(hidden)]
+#[derive(Clone)]
+pub(super) struct ChannelDeliveryFence {
+    incarnation_id: Arc<str>,
+    state: Arc<ChannelDeliveryFenceState>,
+}
+
+impl std::fmt::Debug for ChannelDeliveryFence {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ChannelDeliveryFence")
+            .field("incarnation_id", &self.incarnation_id)
+            .field("retired", &self.is_retired())
+            .finish_non_exhaustive()
+    }
+}
+
+impl ChannelDeliveryFence {
+    pub(super) fn new(incarnation_id: String) -> Self {
+        let incarnation_id = Arc::from(incarnation_id);
+        Self {
+            incarnation_id: Arc::clone(&incarnation_id),
+            state: Arc::new(ChannelDeliveryFenceState {
+                lifecycle: Mutex::new(ChannelDeliveryFenceLifecycle {
+                    current_incarnation_id: incarnation_id,
+                    retired: false,
+                    active_deliveries: 0,
+                }),
+                settled: Notify::new(),
+            }),
+        }
+    }
+
+    fn lock_lifecycle(&self) -> MutexGuard<'_, ChannelDeliveryFenceLifecycle> {
+        match self.state.lifecycle.lock() {
+            Ok(lifecycle) => lifecycle,
+            Err(poisoned) => {
+                tracing::error!(
+                    incarnation_id = %self.incarnation_id,
+                    "channel delivery fence mutex was poisoned"
+                );
+                poisoned.into_inner()
+            }
+        }
+    }
+
+    /// Opaque incarnation identity owned by this fence.
+    pub(super) fn incarnation_id(&self) -> &str {
+        &self.incarnation_id
+    }
+
+    /// Whether this generation has stopped accepting new delivery.
+    pub(super) fn is_retired(&self) -> bool {
+        let lifecycle = self.lock_lifecycle();
+        lifecycle.retired || lifecycle.current_incarnation_id != self.incarnation_id
+    }
+
+    pub(super) fn rotate(&self, incarnation_id: String) -> Self {
+        let incarnation_id = Arc::from(incarnation_id);
+        self.lock_lifecycle().current_incarnation_id = Arc::clone(&incarnation_id);
+        Self {
+            incarnation_id,
+            state: Arc::clone(&self.state),
+        }
+    }
+
+    pub(super) fn has_active_deliveries(&self) -> bool {
+        self.lock_lifecycle().active_deliveries > 0
+    }
+
+    pub(super) fn begin_delivery(&self) -> Result<ChannelDeliveryPermit> {
+        let mut lifecycle = self.lock_lifecycle();
+        if lifecycle.retired || lifecycle.current_incarnation_id != self.incarnation_id {
+            return Err(ReactError::Channel(Box::new(ChannelError::StaleDelivery {
+                incarnation_id: self.incarnation_id().to_string(),
+            })));
+        }
+        lifecycle.active_deliveries =
+            lifecycle.active_deliveries.checked_add(1).ok_or_else(|| {
+                ReactError::Channel(Box::new(ChannelError::Other(
+                    "channel delivery lease capacity exhausted".to_string(),
+                )))
+            })?;
+        Ok(ChannelDeliveryPermit {
+            fence: self.clone(),
+        })
+    }
+
+    pub(super) fn retire(&self) {
+        self.lock_lifecycle().retired = true;
+    }
+
+    pub(super) async fn retire_and_wait(&self) {
+        self.retire();
+        loop {
+            let settled = self.state.settled.notified();
+            if !self.has_active_deliveries() {
+                return;
+            }
+            settled.await;
+        }
+    }
+}
+
+pub(crate) struct ChannelDeliveryPermit {
+    fence: ChannelDeliveryFence,
+}
+
+impl Drop for ChannelDeliveryPermit {
+    fn drop(&mut self) {
+        let settled = {
+            let mut lifecycle = self.fence.lock_lifecycle();
+            match lifecycle.active_deliveries.checked_sub(1) {
+                Some(active_deliveries) => {
+                    lifecycle.active_deliveries = active_deliveries;
+                    active_deliveries == 0
+                }
+                None => {
+                    tracing::error!(
+                        incarnation_id = %self.fence.incarnation_id(),
+                        "channel delivery lease counter underflow"
+                    );
+                    false
+                }
+            }
+        };
+        if settled {
+            self.fence.state.settled.notify_one();
+        }
+    }
+}
+
 /// Message to be sent to an IM platform
 #[derive(Debug, Clone)]
 pub struct OutboundMessage {
@@ -190,6 +340,9 @@ pub struct OutboundMessage {
     pub reply_to: Option<String>,
     /// Message attachments
     pub attachments: Vec<MessageAttachment>,
+    /// Process-local generation authority used by framework channel delivery.
+    #[doc(hidden)]
+    pub(super) delivery_fence: Option<ChannelDeliveryFence>,
 }
 
 impl OutboundMessage {
@@ -206,6 +359,7 @@ impl OutboundMessage {
             text: text.into(),
             reply_to: None,
             attachments: Vec::new(),
+            delivery_fence: None,
         }
     }
 
@@ -219,11 +373,21 @@ impl OutboundMessage {
         self.attachments = attachments;
         self
     }
+
+    pub(super) fn with_delivery_fence(mut self, fence: ChannelDeliveryFence) -> Self {
+        self.delivery_fence = Some(fence);
+        self
+    }
+
+    pub(super) fn begin_delivery(&self) -> Result<Option<ChannelDeliveryPermit>> {
+        self.delivery_fence
+            .as_ref()
+            .map(ChannelDeliveryFence::begin_delivery)
+            .transpose()
+    }
 }
 
 // ── ChannelPlugin Trait ─────────────────────────────────────────────────────
-
-use std::sync::Arc;
 
 /// Message handler — forwards IM messages to the Agent for processing
 #[async_trait]
@@ -346,5 +510,46 @@ mod tests {
 
         // 之后不再有(恰好 1 条)
         assert!(stream.next().await.is_none(), "default yields exactly one");
+    }
+
+    #[tokio::test]
+    async fn retired_delivery_fence_waits_for_lease_and_rejects_new_admission() -> Result<()> {
+        let fence = ChannelDeliveryFence::new("incarnation-a".to_string());
+        let permit = fence.begin_delivery()?;
+        let retiring_fence = fence.clone();
+        let retirement = tokio::spawn(async move {
+            retiring_fence.retire_and_wait().await;
+        });
+        tokio::task::yield_now().await;
+        if retirement.is_finished() {
+            return Err(ReactError::Other(
+                "delivery fence retired before its active lease settled".to_string(),
+            ));
+        }
+
+        drop(permit);
+        retirement.await.map_err(|error| {
+            ReactError::Other(format!("delivery fence retirement task failed: {error}"))
+        })?;
+        if !fence.is_retired() {
+            return Err(ReactError::Other(
+                "delivery fence did not retain its retired state".to_string(),
+            ));
+        }
+        if !matches!(
+            fence.begin_delivery(),
+            Err(ReactError::Channel(ref error))
+                if matches!(
+                    error.as_ref(),
+                    ChannelError::StaleDelivery { incarnation_id }
+                        if incarnation_id == "incarnation-a"
+                )
+        ) {
+            return Err(ReactError::Other(
+                "retired delivery fence did not return the typed stale-generation error"
+                    .to_string(),
+            ));
+        }
+        Ok(())
     }
 }

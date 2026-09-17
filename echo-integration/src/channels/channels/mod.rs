@@ -10,14 +10,20 @@ use tokio::sync::{mpsc, oneshot};
 pub(crate) struct DeliveryRequest {
     pub message: OutboundMessage,
     pub receipt: oneshot::Sender<Result<()>>,
+    pub delivery_permit: Option<ChannelDeliveryPermit>,
 }
 
 pub(crate) type DeliverySender = mpsc::Sender<DeliveryRequest>;
 
 async fn deliver(send_tx: &DeliverySender, message: OutboundMessage) -> Result<()> {
+    let delivery_permit = message.begin_delivery()?;
     let (receipt, delivered) = oneshot::channel();
     send_tx
-        .send(DeliveryRequest { message, receipt })
+        .send(DeliveryRequest {
+            message,
+            receipt,
+            delivery_permit,
+        })
         .await
         .map_err(|error| {
             ReactError::Channel(Box::new(ChannelError::SendError(format!(
@@ -71,10 +77,19 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use futures::stream::{BoxStream, StreamExt};
+    use std::sync::Arc;
+    use tokio::sync::Notify;
+    use tokio::time::{Duration, timeout};
+
+    use crate::channels::session::{ChannelSessionInstance, SessionConfig, SessionHandler};
 
     /// inner:override handle_stream 产 N 条分段
     struct ChunkInner {
         chunks: Vec<String>,
+    }
+
+    struct ParkAfterFirstChunk {
+        release: Arc<Notify>,
     }
     #[async_trait]
     impl MessageHandler for ChunkInner {
@@ -100,6 +115,46 @@ mod tests {
                 .map(|c| Ok(OutboundMessage::new(&ch, &to, ct, c)))
                 .collect();
             Ok(futures::stream::iter(items).boxed())
+        }
+    }
+
+    #[async_trait]
+    impl MessageHandler for ParkAfterFirstChunk {
+        async fn handle(&self, msg: InboundMessage) -> Result<OutboundMessage> {
+            Ok(OutboundMessage::new(
+                &msg.channel_id,
+                msg.reply_target(),
+                msg.chat_type,
+                "old-full",
+            ))
+        }
+
+        async fn reply(&self, _msg: OutboundMessage) -> Result<()> {
+            Ok(())
+        }
+
+        async fn handle_stream<'a>(
+            &'a self,
+            msg: InboundMessage,
+        ) -> Result<BoxStream<'a, Result<OutboundMessage>>> {
+            let release = Arc::clone(&self.release);
+            let (channel_id, to, chat_type) = (msg.channel_id, msg.chat_id, msg.chat_type);
+            Ok(async_stream::stream! {
+                yield Ok(OutboundMessage::new(
+                    &channel_id,
+                    &to,
+                    chat_type,
+                    "old-first",
+                ));
+                release.notified().await;
+                yield Ok(OutboundMessage::new(
+                    &channel_id,
+                    &to,
+                    chat_type,
+                    "old-second",
+                ));
+            }
+            .boxed())
         }
     }
 
@@ -150,5 +205,114 @@ mod tests {
         let ret = dispatch_stream_to_send_tx(&inner, &tx, msg).await.unwrap();
         assert_eq!(ret.text, "");
         assert!(rx.try_recv().is_err(), "no chunks → nothing sent");
+    }
+
+    #[tokio::test]
+    async fn reset_waits_for_admitted_delivery_and_fences_later_old_chunks() -> Result<()> {
+        let release = Arc::new(Notify::new());
+        let session_handler: Arc<dyn MessageHandler> = Arc::new(SessionHandler::new(
+            SessionConfig::default()
+                .with_reset_keywords(vec!["reset-now".to_string()])
+                .with_command_prefix(None),
+            {
+                let release = Arc::clone(&release);
+                move |_instance: &ChannelSessionInstance| {
+                    Box::new(ParkAfterFirstChunk {
+                        release: Arc::clone(&release),
+                    }) as Box<dyn MessageHandler>
+                }
+            },
+        ));
+        let (send_tx, mut send_rx) = mpsc::channel::<DeliveryRequest>(4);
+
+        let old_handler = Arc::clone(&session_handler);
+        let old_send_tx = send_tx.clone();
+        let old_delivery = tokio::spawn(async move {
+            dispatch_stream_to_send_tx(
+                &old_handler,
+                &old_send_tx,
+                InboundMessage::new(
+                    "qq",
+                    "sender",
+                    "conversation",
+                    ChatType::Direct,
+                    "old-turn",
+                    "old-message",
+                ),
+            )
+            .await
+        });
+        let admitted = timeout(Duration::from_secs(2), send_rx.recv())
+            .await
+            .map_err(|_| ReactError::Other("old delivery was not admitted".to_string()))?
+            .ok_or_else(|| ReactError::Other("delivery queue closed unexpectedly".to_string()))?;
+        let DeliveryRequest {
+            message,
+            receipt,
+            delivery_permit,
+        } = admitted;
+        if message.text != "old-first" {
+            return Err(ReactError::Other(
+                "unexpected first old-generation output".to_string(),
+            ));
+        }
+
+        let reset_started = Arc::new(Notify::new());
+        let reset_handler = Arc::clone(&session_handler);
+        let reset_started_task = Arc::clone(&reset_started);
+        let reset = tokio::spawn(async move {
+            reset_started_task.notify_one();
+            let mut stream = reset_handler
+                .handle_stream(InboundMessage::new(
+                    "qq",
+                    "sender",
+                    "conversation",
+                    ChatType::Direct,
+                    "reset-now",
+                    "reset-message",
+                ))
+                .await?;
+            stream.next().await.ok_or_else(|| {
+                ReactError::Other("reset stream closed without acknowledgement".to_string())
+            })?
+        });
+        reset_started.notified().await;
+        tokio::task::yield_now().await;
+        if reset.is_finished() {
+            return Err(ReactError::Other(
+                "reset acknowledged before admitted old delivery settled".to_string(),
+            ));
+        }
+
+        drop(delivery_permit);
+        receipt.send(Ok(())).map_err(|_| {
+            ReactError::Other("old delivery stopped waiting for its receipt".to_string())
+        })?;
+        let reset_reply = timeout(Duration::from_secs(2), reset)
+            .await
+            .map_err(|_| ReactError::Other("reset did not settle".to_string()))?
+            .map_err(|error| ReactError::Other(format!("reset task failed: {error}")))??;
+        if reset_reply.text != SessionConfig::default().reset_reply {
+            return Err(ReactError::Other(
+                "reset returned an unexpected acknowledgement".to_string(),
+            ));
+        }
+
+        release.notify_waiters();
+        let old_result = timeout(Duration::from_secs(2), old_delivery)
+            .await
+            .map_err(|_| ReactError::Other("retired stream did not stop".to_string()))?
+            .map_err(|error| ReactError::Other(format!("old delivery task failed: {error}")))??;
+        if !old_result.text.is_empty() {
+            return Err(ReactError::Other(
+                "retired stream did not return its delivery placeholder".to_string(),
+            ));
+        }
+        if send_rx.try_recv().is_ok() {
+            return Err(ReactError::Other(
+                "retired generation enqueued output after reset".to_string(),
+            ));
+        }
+        Ok(())
     }
 }

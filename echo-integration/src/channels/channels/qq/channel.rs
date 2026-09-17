@@ -126,20 +126,26 @@ impl ChannelPlugin for QqChannel {
         let token_manager_clone2 = token_manager.clone();
         let send_handle = tokio::spawn(async move {
             while let Some(request) = send_rx.recv().await {
+                let DeliveryRequest {
+                    message,
+                    receipt,
+                    delivery_permit,
+                } = request;
                 let result = async {
                     let token = token_manager_clone.get_token().await?;
                     send_qq_message(
                         &http_for_send,
                         &token,
-                        &request.message.to,
-                        &request.message.chat_type,
-                        &request.message.text,
-                        request.message.reply_to.as_deref(),
+                        &message.to,
+                        &message.chat_type,
+                        &message.text,
+                        message.reply_to.as_deref(),
                     )
                     .await
                 }
                 .await;
-                let _ = request.receipt.send(result);
+                drop(delivery_permit);
+                let _ = receipt.send(result);
             }
         });
         self.send_handle = Some(send_handle);
@@ -234,6 +240,7 @@ impl ChannelPlugin for QqChannel {
     }
 
     async fn send(&self, msg: OutboundMessage) -> Result<()> {
+        let _delivery_permit = msg.begin_delivery()?;
         let token_manager = self.token_manager.as_ref().ok_or_else(|| {
             ReactError::Channel(Box::new(ChannelError::SendError(
                 "QQ Bot channel not started".to_string(),
@@ -290,6 +297,7 @@ impl MessageHandler for QqMessageHandler {
 #[cfg(test)]
 mod config_tests {
     use super::*;
+    use crate::channels::types::ChannelDeliveryFence;
 
     #[test]
     fn debug_does_not_expose_client_secret() {
@@ -300,5 +308,32 @@ mod config_tests {
             !debug.contains("qq-client-secret"),
             "debug leaked client secret: {debug}"
         );
+    }
+
+    #[tokio::test]
+    async fn direct_send_rejects_retired_generation_before_channel_state() -> Result<()> {
+        let channel = QqChannel::new(QqConfig::new("app-id", "client-secret"))?;
+        let fence = ChannelDeliveryFence::new("retired-qq".to_string());
+        fence.retire();
+        let result = channel
+            .send(
+                OutboundMessage::new("qqbot", "recipient", ChatType::Direct, "stale")
+                    .with_delivery_fence(fence),
+            )
+            .await;
+        if !matches!(
+            result,
+            Err(ReactError::Channel(ref error))
+                if matches!(
+                    error.as_ref(),
+                    ChannelError::StaleDelivery { incarnation_id }
+                        if incarnation_id == "retired-qq"
+                )
+        ) {
+            return Err(ReactError::Other(
+                "QQ direct send did not reject the retired generation first".to_string(),
+            ));
+        }
+        Ok(())
     }
 }

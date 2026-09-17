@@ -8,10 +8,10 @@ risk: high
 primary_focus: contract_evidence
 focus: [state_authority, time_lifecycle, permission_external, failure_concurrency]
 boundary: boundary.protocol-surfaces
-observed_at: 2eab1ac9923e0f99a70cc08d88de0ee64ea90ee6
-code_refs: [src/acp/adapter.rs, src/acp/runtime.rs, src/a2a/server.rs, echo-integration/src/channels/manager.rs, echo-integration/src/lsp/manager.rs, src/channels.rs, src/headless.rs, echo-sdk-protocol/src/lib.rs, echo-sdk-host/src/lib.rs, echo-sdk-host/src/core_profile/facade/integrations.rs]
+observed_at: source:540d5deec89168d61324861902eb2e1dc8b9408add3b62af30de0f71a76baa6a
+code_refs: [src/acp/adapter.rs, src/acp/runtime.rs, src/a2a/server.rs, echo-integration/src/channels/manager.rs, echo-integration/src/lsp/manager.rs, src/channels.rs, src/headless.rs]
 rule_refs: [rule.protocol-role-separation, rule.sdk-rust-authority]
-evidence_refs: [evidence.provider-protocol-quality, evidence.sdk-contracts, evidence.lsp-derived-handle-lifecycle-repair, evidence.lsp-derived-handle-lifecycle-verification]
+evidence_refs: [evidence.provider-protocol-quality, evidence.sdk-contracts, evidence.lsp-derived-handle-lifecycle-repair, evidence.lsp-derived-handle-lifecycle-verification, evidence.channel-generation-delivery-fence-repair, evidence.channel-generation-delivery-fence-verification]
 finding_refs: [finding.a2a-terminal-authority, finding.a2a-stream-cleanup, finding.channel-attachment-projection, finding.turn-driver-entry-coverage, finding.lsp-manager-derived-handle-resurrection]
 ---
 
@@ -23,7 +23,7 @@ ACP 连接 Client 与 coding Agent，MCP 连接 Agent 与 tools/resources，A2A 
 
 ## 当前行为
 
-ACP Session/Prompt/update/cancel 投影同一 driven Agent Turn；A2A server 当前自持 task/terminal；Channels 路由外部消息但直接调用 raw Agent chat；Headless 聚合 driven Turn；SDK Host 以 ACP 和 `_echo_agent/*` 暴露 Rust authority。
+ACP Session/Prompt/update/cancel 投影同一 driven Agent Turn；A2A server 当前自持 task/terminal；Channels 路由外部消息、以generation fence阻止reset后的旧delivery，但仍直接调用raw Agent chat；Headless 聚合 driven Turn；SDK Host 以 ACP 和 `_echo_agent/*` 暴露 Rust authority。
 
 ## 期望行为
 
