@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.tool-terminal-observation-verification
 kind: evidence
-observed_at: source:PENDING
+observed_at: source:469a276a3666fa7b9f836bc4c5751516ca360fcdb16efae6cc81c2d66ffb2560
 source_refs:
   - src/agent/react/run/pipeline.rs
   - src/agent/snapshot.rs
@@ -32,7 +32,16 @@ limitations:
 - `pre_execution_block_does_not_emit_success_callback`：执行前拦截不伪造成功回调。
 - `failed_tool_result_routes_to_on_tool_error_not_on_tool_end`：失败 ToolResult 不再触发 on_tool_end。
 
+## 来源与范围
+
+实现位于既有 16-stage ToolExecutionPipeline、canonical caller `execute_tool_with_policy` 与
+AuditCallback 既有通道；回归测试位于 pipeline.rs 测试模块，从真实 caller 入口驱动。
+
 ## 覆盖范围
 
 覆盖 Agent 自动工具路径的执行后拦截与失败分流；不覆盖 streaming 多路复用细节与
 direct-user surface（excluded by map.tool-permission-sandbox）。
+
+## 已知缺口
+
+on_tool_error 事件粒度以 AuditLogger backend 为准；SDK 侧等价观察合同属于独立 SDK 仓库后续事项。

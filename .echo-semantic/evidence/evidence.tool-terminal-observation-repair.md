@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.tool-terminal-observation-repair
 kind: evidence
-observed_at: source:PENDING
+observed_at: source:469a276a3666fa7b9f836bc4c5751516ca360fcdb16efae6cc81c2d66ffb2560
 source_refs:
   - src/agent/react/run/pipeline.rs
   - src/agent/snapshot.rs

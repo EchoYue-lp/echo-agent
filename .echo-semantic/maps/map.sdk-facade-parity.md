@@ -4,7 +4,7 @@ id: map.sdk-facade-parity
 kind: capability_map
 title: 外部 SDK consumer 边界
 risk: high
-observed_at: source:eff0290e1aff3c3a56f0ba94f57460e220d08f8eb04d3023efde058982972f03
+observed_at: source:469a276a3666fa7b9f836bc4c5751516ca360fcdb16efae6cc81c2d66ffb2560
 boundary_refs: [boundary.sdk-facade-parity]
 behavior_refs: [behavior.protocol-projection, behavior.sdk-facade-routing]
 rule_refs: [rule.protocol-role-separation, rule.framework-layer-ownership, rule.sdk-rust-authority]
