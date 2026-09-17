@@ -1618,6 +1618,12 @@ impl SubagentExecutor {
                         lineage.parent_event_id = parent_event_id.clone();
                         lineage
                     });
+                let _claim = context
+                    .claim()
+                    .ok_or_else(|| "Team dispatch requires an exact TaskClaim".to_string())?;
+                let _task_id = context
+                    .task_id()
+                    .ok_or_else(|| "Team dispatch requires an exact task id".to_string())?;
                 executor
                     .dispatch_owned(DispatchRequest {
                         agent_name,
