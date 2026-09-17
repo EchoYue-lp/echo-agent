@@ -43,9 +43,9 @@ use echo_core::memory::conversation::{
     EnsureConversationProjectionRequest, ManagedConversationDelete,
     ManagedConversationDeleteReceipt, ManagedConversationDeleteStatus, ManagedConversationImport,
     ManagedConversationMetadataUpdate, ManagedConversationMetadataUpdateReceipt,
-    ManagedConversationMetadataUpdateStatus, NewConversation, StoredMessage,
-    TranscriptProjectionApplyReceipt, TranscriptProjectionApplyStatus, TranscriptProjectionBatch,
-    TranscriptProjectionConflictKind,
+    ManagedConversationMetadataUpdateStatus, NewConversation, PersistenceCallCapability,
+    PersistenceCallContext, StoredMessage, TranscriptProjectionApplyReceipt,
+    TranscriptProjectionApplyStatus, TranscriptProjectionBatch, TranscriptProjectionConflictKind,
 };
 use echo_core::utils::blocking::{
     BlockingFileOperationKey, BlockingFileOperationScope, run_keyed_file_operation,
@@ -312,6 +312,7 @@ struct ConversationCache {
 pub struct FileConversationStore {
     base: PathBuf,
     authority: Arc<FileConversationAuthority>,
+    persistence_call_context: Option<PersistenceCallContext>,
 }
 
 struct FileConversationAuthority {
@@ -353,7 +354,11 @@ impl FileConversationStore {
             MemoryError::IoError(format!("FileConversationStore registry poisoned: {error}"))
         })?;
         if let Some(authority) = registry.get(&base).and_then(Weak::upgrade) {
-            return Ok(Self { base, authority });
+            return Ok(Self {
+                base,
+                authority,
+                persistence_call_context: None,
+            });
         }
         let lease = try_exclusive_file_lease(&base).map_err(|error| {
             MemoryError::IoError(format!("acquire FileConversationStore lease: {error}"))
@@ -371,7 +376,26 @@ impl FileConversationStore {
             _lease: lease,
         });
         registry.insert(base.clone(), Arc::downgrade(&authority));
-        Ok(Self { base, authority })
+        Ok(Self {
+            base,
+            authority,
+            persistence_call_context: None,
+        })
+    }
+
+    fn with_persistence_call_context(&self, context: PersistenceCallContext) -> Self {
+        Self {
+            base: self.base.clone(),
+            authority: Arc::clone(&self.authority),
+            persistence_call_context: Some(context),
+        }
+    }
+
+    fn ensure_persistence_call_not_expired(&self) -> Result<()> {
+        if let Some(context) = self.persistence_call_context {
+            context.ensure_not_expired()?;
+        }
+        Ok(())
     }
 
     fn conversation_scope(conversation_id: impl Into<String>) -> BlockingFileOperationScope {
@@ -441,13 +465,16 @@ impl FileConversationStore {
         Box::pin(async move {
             let key =
                 BlockingFileOperationKey::new("conversation-store", store.base.clone(), scope);
-            run_keyed_file_operation(key, move || operation(store))
-                .await
-                .map_err(|error| {
-                    MemoryError::IoError(format!(
-                        "FileConversationStore blocking operation failed: {error}"
-                    ))
-                })?
+            run_keyed_file_operation(key, move || {
+                store.ensure_persistence_call_not_expired()?;
+                operation(store)
+            })
+            .await
+            .map_err(|error| {
+                MemoryError::IoError(format!(
+                    "FileConversationStore blocking operation failed: {error}"
+                ))
+            })?
         })
     }
 
@@ -1105,6 +1132,82 @@ impl ConversationStore for FileConversationStore {
         ConversationProjectionCapability::AtomicV1
     }
 
+    fn persistence_call_capability(&self) -> PersistenceCallCapability {
+        PersistenceCallCapability::AbsoluteDeadlineV1
+    }
+
+    fn ensure_projection_epoch_with_context<'a>(
+        &'a self,
+        context: PersistenceCallContext,
+        request: EnsureConversationProjectionRequest,
+    ) -> BoxFut<'a, ConversationProjectionEpochReceipt> {
+        let store = self.with_persistence_call_context(context);
+        Box::pin(async move {
+            context.ensure_not_expired()?;
+            store.ensure_projection_epoch(request).await
+        })
+    }
+
+    fn get_projection_authority_with_context<'a>(
+        &'a self,
+        context: PersistenceCallContext,
+        conversation_id: &'a str,
+    ) -> BoxFut<'a, Option<ConversationProjectionAuthority>> {
+        let store = self.with_persistence_call_context(context);
+        Box::pin(async move {
+            context.ensure_not_expired()?;
+            store.get_projection_authority(conversation_id).await
+        })
+    }
+
+    fn apply_transcript_projection_with_context<'a>(
+        &'a self,
+        context: PersistenceCallContext,
+        batch: TranscriptProjectionBatch,
+    ) -> BoxFut<'a, TranscriptProjectionApplyReceipt> {
+        let store = self.with_persistence_call_context(context);
+        Box::pin(async move {
+            context.ensure_not_expired()?;
+            store.apply_transcript_projection(batch).await
+        })
+    }
+
+    fn import_managed_messages_with_context<'a>(
+        &'a self,
+        context: PersistenceCallContext,
+        request: ManagedConversationImport,
+    ) -> BoxFut<'a, TranscriptProjectionApplyReceipt> {
+        let store = self.with_persistence_call_context(context);
+        Box::pin(async move {
+            context.ensure_not_expired()?;
+            store.import_managed_messages(request).await
+        })
+    }
+
+    fn update_managed_conversation_with_context<'a>(
+        &'a self,
+        context: PersistenceCallContext,
+        request: ManagedConversationMetadataUpdate,
+    ) -> BoxFut<'a, ManagedConversationMetadataUpdateReceipt> {
+        let store = self.with_persistence_call_context(context);
+        Box::pin(async move {
+            context.ensure_not_expired()?;
+            store.update_managed_conversation(request).await
+        })
+    }
+
+    fn delete_managed_conversation_with_context<'a>(
+        &'a self,
+        context: PersistenceCallContext,
+        request: ManagedConversationDelete,
+    ) -> BoxFut<'a, ManagedConversationDeleteReceipt> {
+        let store = self.with_persistence_call_context(context);
+        Box::pin(async move {
+            context.ensure_not_expired()?;
+            store.delete_managed_conversation(request).await
+        })
+    }
+
     fn create_conversation<'a>(&'a self, conv: NewConversation) -> BoxFut<'a, Conversation> {
         let scope = Self::conversation_scope(conv.conversation_id.clone());
         self.run_blocking(scope, move |store| {
@@ -1514,6 +1617,7 @@ impl ConversationStore for FileConversationStore {
                     .into());
                 }
                 let _conversation = store.authority.scan_barrier.read().map_err(poison)?;
+                store.ensure_persistence_call_not_expired()?;
                 let Some(mut record) = store.read_record(&conversation_id)? else {
                     let state = FileProjectionState::live();
                     if request.expected_tombstone_epoch.is_some() {
@@ -1616,6 +1720,7 @@ impl ConversationStore for FileConversationStore {
                     .into());
                 }
                 let _conversation = store.authority.scan_barrier.read().map_err(poison)?;
+                store.ensure_persistence_call_not_expired()?;
                 Ok(store
                     .read_manifest(&conversation_id)?
                     .and_then(|record| record.projection)
@@ -1635,6 +1740,7 @@ impl ConversationStore for FileConversationStore {
             move |store| {
                 validation?;
                 let _conversation = store.authority.scan_barrier.read().map_err(poison)?;
+                store.ensure_persistence_call_not_expired()?;
                 let mut record = store.read_record(&conversation_id)?.ok_or_else(|| {
                     MemoryError::NotFound(format!("conversation: {conversation_id}"))
                 })?;
@@ -1777,6 +1883,7 @@ impl ConversationStore for FileConversationStore {
             move |store| {
                 validation?;
                 let _conversation = store.authority.scan_barrier.read().map_err(poison)?;
+                store.ensure_persistence_call_not_expired()?;
                 let mut record = store.read_record(&conversation_id)?.ok_or_else(|| {
                     MemoryError::NotFound(format!("conversation: {conversation_id}"))
                 })?;
@@ -1865,6 +1972,7 @@ impl ConversationStore for FileConversationStore {
             move |store| {
                 validation?;
                 let _conversation = store.authority.scan_barrier.read().map_err(poison)?;
+                store.ensure_persistence_call_not_expired()?;
                 let mut record = store.read_record(&conversation_id)?.ok_or_else(|| {
                     MemoryError::NotFound(format!("conversation: {conversation_id}"))
                 })?;
@@ -1960,6 +2068,7 @@ impl ConversationStore for FileConversationStore {
             move |store| {
                 validation?;
                 let _conversation = store.authority.scan_barrier.read().map_err(poison)?;
+                store.ensure_persistence_call_not_expired()?;
                 let mut record = store.read_record(&conversation_id)?.ok_or_else(|| {
                     MemoryError::NotFound(format!("conversation: {conversation_id}"))
                 })?;
@@ -2284,6 +2393,14 @@ mod tests {
         )
     }
 
+    fn is_deadline_exceeded<T>(result: echo_core::error::Result<T>) -> bool {
+        matches!(
+            result,
+            Err(echo_core::error::ReactError::Memory(error))
+                if matches!(error.as_ref(), MemoryError::DeadlineExceeded(_))
+        )
+    }
+
     #[tokio::test]
     async fn projection_epoch_recreation_requires_a_matching_tombstone() -> TestResult {
         let base = tmp_base();
@@ -2602,6 +2719,138 @@ mod tests {
             }
         ));
         assert_eq!(store.count_messages("atomic").await?, 3);
+        std::fs::remove_dir_all(base)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn managed_projection_context_rejects_expired_deadlines() -> TestResult {
+        let base = tmp_base();
+        let store = FileConversationStore::new(&base)?;
+        assert_eq!(
+            store.persistence_call_capability(),
+            PersistenceCallCapability::AbsoluteDeadlineV1
+        );
+        let expired = PersistenceCallContext {
+            absolute_deadline_unix_ms: 0,
+        };
+
+        assert!(is_deadline_exceeded(
+            store
+                .ensure_projection_epoch_with_context(
+                    expired,
+                    ensure_projection_request("expired", None),
+                )
+                .await
+        ));
+        assert!(is_deadline_exceeded(
+            store
+                .get_projection_authority_with_context(expired, "expired")
+                .await
+        ));
+        assert!(is_deadline_exceeded(
+            store
+                .apply_transcript_projection_with_context(
+                    expired,
+                    projection_batch("expired", 1, "generation", 0, &["message"])?
+                )
+                .await
+        ));
+        assert!(is_deadline_exceeded(
+            store
+                .import_managed_messages_with_context(
+                    expired,
+                    managed_import("expired", 1, 0, &["message"])?
+                )
+                .await
+        ));
+        assert!(is_deadline_exceeded(
+            store
+                .update_managed_conversation_with_context(
+                    expired,
+                    managed_metadata_update("expired", 1, 0, "title", "summary", 1)?
+                )
+                .await
+        ));
+        assert!(is_deadline_exceeded(
+            store
+                .delete_managed_conversation_with_context(expired, managed_delete("expired", 1)?)
+                .await
+        ));
+        assert!(store.get_conversation("expired").await?.is_none());
+
+        let blocker_store = store.clone();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let blocker = tokio::spawn(async move {
+            blocker_store
+                .run_blocking(
+                    FileConversationStore::conversation_scope("queued-expiry"),
+                    move |_| {
+                        let _ignored = entered_tx.send(());
+                        release_rx
+                            .recv_timeout(Duration::from_secs(2))
+                            .map_err(|error| {
+                                MemoryError::IoError(format!(
+                                    "release deadline queue blocker: {error}"
+                                ))
+                            })?;
+                        Ok(())
+                    },
+                )
+                .await
+        });
+        entered_rx.await?;
+        let queued_context = PersistenceCallContext::with_timeout(Duration::from_millis(25))?;
+        let (queued_result, release_result) = tokio::join!(
+            store.ensure_projection_epoch_with_context(
+                queued_context,
+                ensure_projection_request("queued-expiry", None),
+            ),
+            async move {
+                tokio::time::sleep(Duration::from_millis(75)).await;
+                release_tx.send(())
+            }
+        );
+        release_result?;
+        blocker.await??;
+        assert!(is_deadline_exceeded(queued_result));
+        assert!(store.get_conversation("queued-expiry").await?.is_none());
+
+        let authority = Arc::clone(&store.authority);
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        let (unlock_tx, unlock_rx) = std::sync::mpsc::channel();
+        let lock_blocker = std::thread::spawn(move || -> echo_core::error::Result<()> {
+            let _scan = authority.scan_barrier.write().map_err(poison)?;
+            locked_tx.send(()).map_err(|error| {
+                MemoryError::IoError(format!("publish scan deadline blocker: {error}"))
+            })?;
+            unlock_rx
+                .recv_timeout(Duration::from_secs(2))
+                .map_err(|error| {
+                    MemoryError::IoError(format!("release scan deadline blocker: {error}"))
+                })?;
+            Ok(())
+        });
+        locked_rx.recv_timeout(Duration::from_secs(2))?;
+        let locked_context = PersistenceCallContext::with_timeout(Duration::from_millis(25))?;
+        let (locked_result, unlock_result) = tokio::join!(
+            store.ensure_projection_epoch_with_context(
+                locked_context,
+                ensure_projection_request("scan-expiry", None),
+            ),
+            async move {
+                tokio::time::sleep(Duration::from_millis(75)).await;
+                unlock_tx.send(())
+            }
+        );
+        unlock_result?;
+        lock_blocker
+            .join()
+            .map_err(|_| std::io::Error::other("scan deadline blocker panicked"))??;
+        assert!(is_deadline_exceeded(locked_result));
+        assert!(store.get_conversation("scan-expiry").await?.is_none());
+
         std::fs::remove_dir_all(base)?;
         Ok(())
     }

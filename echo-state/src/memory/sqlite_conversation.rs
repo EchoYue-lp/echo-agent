@@ -11,9 +11,9 @@ pub use echo_core::memory::conversation::{
     EnsureConversationProjectionRequest, ManagedConversationDelete,
     ManagedConversationDeleteReceipt, ManagedConversationDeleteStatus, ManagedConversationImport,
     ManagedConversationMetadataUpdate, ManagedConversationMetadataUpdateReceipt,
-    ManagedConversationMetadataUpdateStatus, NewConversation, StoredMessage,
-    TranscriptProjectionApplyReceipt, TranscriptProjectionApplyStatus, TranscriptProjectionBatch,
-    TranscriptProjectionConflictKind,
+    ManagedConversationMetadataUpdateStatus, NewConversation, PersistenceCallCapability,
+    PersistenceCallContext, StoredMessage, TranscriptProjectionApplyReceipt,
+    TranscriptProjectionApplyStatus, TranscriptProjectionBatch, TranscriptProjectionConflictKind,
 };
 use futures::future::BoxFuture;
 use rusqlite::{Connection, Transaction, TransactionBehavior, params};
@@ -58,6 +58,7 @@ impl SqliteProjectionState {
 /// SQLite conversation persistence Store
 pub struct SqliteConversationStore {
     conn: Arc<Mutex<Connection>>,
+    persistence_call_context: Option<PersistenceCallContext>,
 }
 
 impl SqliteConversationStore {
@@ -96,7 +97,15 @@ impl SqliteConversationStore {
 
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
+            persistence_call_context: None,
         })
+    }
+
+    fn with_persistence_call_context(&self, context: PersistenceCallContext) -> Self {
+        Self {
+            conn: Arc::clone(&self.conn),
+            persistence_call_context: Some(context),
+        }
     }
 
     async fn run_db<T, F>(&self, operation: F) -> Result<T>
@@ -105,12 +114,16 @@ impl SqliteConversationStore {
         F: FnOnce(&mut Connection) -> Result<T> + Send + 'static,
     {
         let conn = Arc::clone(&self.conn);
+        let context = self.persistence_call_context;
         tokio::task::spawn_blocking(move || {
             let mut guard = conn.lock().map_err(|error| {
                 echo_core::error::MemoryError::IoError(format!(
                     "SqliteConversationStore lock poisoned: {error}"
                 ))
             })?;
+            if let Some(context) = context {
+                context.ensure_not_expired()?;
+            }
             operation(&mut guard)
         })
         .await
@@ -322,6 +335,82 @@ impl SqliteConversationStore {
 impl ConversationStore for SqliteConversationStore {
     fn projection_capability(&self) -> ConversationProjectionCapability {
         ConversationProjectionCapability::AtomicV1
+    }
+
+    fn persistence_call_capability(&self) -> PersistenceCallCapability {
+        PersistenceCallCapability::AbsoluteDeadlineV1
+    }
+
+    fn ensure_projection_epoch_with_context<'a>(
+        &'a self,
+        context: PersistenceCallContext,
+        request: EnsureConversationProjectionRequest,
+    ) -> BoxFuture<'a, Result<ConversationProjectionEpochReceipt>> {
+        let store = self.with_persistence_call_context(context);
+        Box::pin(async move {
+            context.ensure_not_expired()?;
+            store.ensure_projection_epoch(request).await
+        })
+    }
+
+    fn get_projection_authority_with_context<'a>(
+        &'a self,
+        context: PersistenceCallContext,
+        conversation_id: &'a str,
+    ) -> BoxFuture<'a, Result<Option<ConversationProjectionAuthority>>> {
+        let store = self.with_persistence_call_context(context);
+        Box::pin(async move {
+            context.ensure_not_expired()?;
+            store.get_projection_authority(conversation_id).await
+        })
+    }
+
+    fn apply_transcript_projection_with_context<'a>(
+        &'a self,
+        context: PersistenceCallContext,
+        batch: TranscriptProjectionBatch,
+    ) -> BoxFuture<'a, Result<TranscriptProjectionApplyReceipt>> {
+        let store = self.with_persistence_call_context(context);
+        Box::pin(async move {
+            context.ensure_not_expired()?;
+            store.apply_transcript_projection(batch).await
+        })
+    }
+
+    fn import_managed_messages_with_context<'a>(
+        &'a self,
+        context: PersistenceCallContext,
+        request: ManagedConversationImport,
+    ) -> BoxFuture<'a, Result<TranscriptProjectionApplyReceipt>> {
+        let store = self.with_persistence_call_context(context);
+        Box::pin(async move {
+            context.ensure_not_expired()?;
+            store.import_managed_messages(request).await
+        })
+    }
+
+    fn update_managed_conversation_with_context<'a>(
+        &'a self,
+        context: PersistenceCallContext,
+        request: ManagedConversationMetadataUpdate,
+    ) -> BoxFuture<'a, Result<ManagedConversationMetadataUpdateReceipt>> {
+        let store = self.with_persistence_call_context(context);
+        Box::pin(async move {
+            context.ensure_not_expired()?;
+            store.update_managed_conversation(request).await
+        })
+    }
+
+    fn delete_managed_conversation_with_context<'a>(
+        &'a self,
+        context: PersistenceCallContext,
+        request: ManagedConversationDelete,
+    ) -> BoxFuture<'a, Result<ManagedConversationDeleteReceipt>> {
+        let store = self.with_persistence_call_context(context);
+        Box::pin(async move {
+            context.ensure_not_expired()?;
+            store.delete_managed_conversation(request).await
+        })
     }
 
     fn create_conversation<'a>(
@@ -758,12 +847,16 @@ impl ConversationStore for SqliteConversationStore {
                 )
                 .into());
             }
+            let context = self.persistence_call_context;
             self.run_db(move |conn| {
                 let tx = conn
                     .transaction_with_behavior(TransactionBehavior::Immediate)
                     .map_err(|error| {
                         memory_io_error("failed to begin projection epoch transaction", error)
                     })?;
+                if let Some(context) = context {
+                    context.ensure_not_expired()?;
+                }
                 if let Some(mut state) = Self::projection_state(&tx, &conversation_id)? {
                     if state.lifecycle == ConversationProjectionLifecycle::Live {
                         return Ok(ConversationProjectionEpochReceipt {
@@ -947,12 +1040,16 @@ impl ConversationStore for SqliteConversationStore {
     ) -> BoxFuture<'a, Result<TranscriptProjectionApplyReceipt>> {
         Box::pin(async move {
             batch.validate()?;
+            let context = self.persistence_call_context;
             self.run_db(move |conn| {
                 let tx = conn
                     .transaction_with_behavior(TransactionBehavior::Immediate)
                     .map_err(|error| {
                         memory_io_error("failed to begin transcript projection transaction", error)
                     })?;
+                if let Some(context) = context {
+                    context.ensure_not_expired()?;
+                }
                 let state = Self::projection_state(&tx, &batch.conversation_id)?
                     .ok_or_else(|| Self::managed_conversation_error(&batch.conversation_id))?;
                 let existing_operation = tx.query_row(
@@ -1193,12 +1290,16 @@ impl ConversationStore for SqliteConversationStore {
     ) -> BoxFuture<'a, Result<TranscriptProjectionApplyReceipt>> {
         Box::pin(async move {
             request.validate()?;
+            let context = self.persistence_call_context;
             self.run_db(move |conn| {
                 let tx = conn
                     .transaction_with_behavior(TransactionBehavior::Immediate)
                     .map_err(|error| {
                         memory_io_error("failed to begin managed import transaction", error)
                     })?;
+                if let Some(context) = context {
+                    context.ensure_not_expired()?;
+                }
                 let state = Self::projection_state(&tx, &request.conversation_id)?
                     .ok_or_else(|| Self::managed_conversation_error(&request.conversation_id))?;
                 let existing_operation = tx.query_row(
@@ -1339,12 +1440,16 @@ impl ConversationStore for SqliteConversationStore {
     ) -> BoxFuture<'a, Result<ManagedConversationMetadataUpdateReceipt>> {
         Box::pin(async move {
             request.validate()?;
+            let context = self.persistence_call_context;
             self.run_db(move |conn| {
                 let tx = conn
                     .transaction_with_behavior(TransactionBehavior::Immediate)
                     .map_err(|error| {
                         memory_io_error("failed to begin managed metadata transaction", error)
                     })?;
+                if let Some(context) = context {
+                    context.ensure_not_expired()?;
+                }
                 let state = Self::projection_state(&tx, &request.conversation_id)?
                     .ok_or_else(|| Self::managed_conversation_error(&request.conversation_id))?;
                 let existing_operation = tx.query_row(
@@ -1490,12 +1595,16 @@ impl ConversationStore for SqliteConversationStore {
     ) -> BoxFuture<'a, Result<ManagedConversationDeleteReceipt>> {
         Box::pin(async move {
             request.validate()?;
+            let context = self.persistence_call_context;
             self.run_db(move |conn| {
                 let tx = conn
                     .transaction_with_behavior(TransactionBehavior::Immediate)
                     .map_err(|error| {
                         memory_io_error("failed to begin managed delete transaction", error)
                     })?;
+                if let Some(context) = context {
+                    context.ensure_not_expired()?;
+                }
                 let state = Self::projection_state(&tx, &request.conversation_id)?
                     .ok_or_else(|| Self::managed_conversation_error(&request.conversation_id))?;
                 let existing_receipt = tx.query_row(
@@ -1934,6 +2043,14 @@ mod tests {
         )
     }
 
+    fn is_deadline_exceeded<T>(result: Result<T>) -> bool {
+        matches!(
+            result,
+            Err(echo_core::error::ReactError::Memory(error))
+                if matches!(error.as_ref(), MemoryError::DeadlineExceeded(_))
+        )
+    }
+
     fn execute_test_sql(store: &SqliteConversationStore, sql: &str) -> Result<()> {
         let guard = store.conn.lock().map_err(|error| {
             MemoryError::IoError(format!("lock SQLite test connection: {error}"))
@@ -2291,6 +2408,139 @@ mod tests {
             }
         ));
         assert_eq!(store.count_messages("atomic").await?, 3);
+        drop(store);
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn managed_projection_context_rejects_expired_deadlines() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!("echo-test-{}", uuid::Uuid::new_v4()));
+        let db_path = dir.join("conversations.db");
+        let store = SqliteConversationStore::new(&db_path)?;
+        assert_eq!(
+            store.persistence_call_capability(),
+            PersistenceCallCapability::AbsoluteDeadlineV1
+        );
+        let expired = PersistenceCallContext {
+            absolute_deadline_unix_ms: 0,
+        };
+
+        assert!(is_deadline_exceeded(
+            store
+                .ensure_projection_epoch_with_context(
+                    expired,
+                    ensure_projection_request("expired", None),
+                )
+                .await
+        ));
+        assert!(is_deadline_exceeded(
+            store
+                .get_projection_authority_with_context(expired, "expired")
+                .await
+        ));
+        assert!(is_deadline_exceeded(
+            store
+                .apply_transcript_projection_with_context(
+                    expired,
+                    projection_batch("expired", 1, "generation", 0, &["message"])?
+                )
+                .await
+        ));
+        assert!(is_deadline_exceeded(
+            store
+                .import_managed_messages_with_context(
+                    expired,
+                    managed_import("expired", 1, 0, &["message"])?
+                )
+                .await
+        ));
+        assert!(is_deadline_exceeded(
+            store
+                .update_managed_conversation_with_context(
+                    expired,
+                    managed_metadata_update("expired", 1, 0, "title", "summary", 1)?
+                )
+                .await
+        ));
+        assert!(is_deadline_exceeded(
+            store
+                .delete_managed_conversation_with_context(expired, managed_delete("expired", 1)?)
+                .await
+        ));
+        assert!(store.get_conversation("expired").await?.is_none());
+
+        let conn = Arc::clone(&store.conn);
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let blocker = std::thread::spawn(move || -> Result<()> {
+            let _guard = conn.lock().map_err(|error| {
+                MemoryError::IoError(format!("lock SQLite deadline blocker: {error}"))
+            })?;
+            locked_tx.send(()).map_err(|error| {
+                MemoryError::IoError(format!("publish SQLite deadline blocker: {error}"))
+            })?;
+            release_rx
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .map_err(|error| {
+                    MemoryError::IoError(format!("release SQLite deadline blocker: {error}"))
+                })?;
+            Ok(())
+        });
+        locked_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .map_err(|error| {
+                MemoryError::IoError(format!("wait for SQLite deadline blocker: {error}"))
+            })?;
+        let locked_context =
+            PersistenceCallContext::with_timeout(std::time::Duration::from_millis(25))?;
+        let (locked_result, release_result) = tokio::join!(
+            store.ensure_projection_epoch_with_context(
+                locked_context,
+                ensure_projection_request("locked-expiry", None),
+            ),
+            async move {
+                tokio::time::sleep(std::time::Duration::from_millis(75)).await;
+                release_tx.send(()).map_err(|error| {
+                    MemoryError::IoError(format!("release SQLite deadline blocker: {error}"))
+                })
+            }
+        );
+        release_result?;
+        blocker
+            .join()
+            .map_err(|_| MemoryError::IoError("SQLite deadline blocker panicked".to_string()))??;
+        assert!(is_deadline_exceeded(locked_result));
+        assert!(store.get_conversation("locked-expiry").await?.is_none());
+
+        let transaction_blocker = Connection::open(&db_path)
+            .map_err(|error| memory_io_error("open SQLite transaction blocker", error))?;
+        transaction_blocker
+            .execute_batch("PRAGMA busy_timeout=2000; BEGIN IMMEDIATE")
+            .map_err(|error| memory_io_error("begin SQLite transaction blocker", error))?;
+        let transaction_context =
+            PersistenceCallContext::with_timeout(std::time::Duration::from_millis(25))?;
+        let (transaction_result, release_result) = tokio::join!(
+            store.ensure_projection_epoch_with_context(
+                transaction_context,
+                ensure_projection_request("transaction-expiry", None),
+            ),
+            async move {
+                tokio::time::sleep(std::time::Duration::from_millis(75)).await;
+                transaction_blocker
+                    .execute_batch("ROLLBACK")
+                    .map_err(|error| memory_io_error("release SQLite transaction blocker", error))
+            }
+        );
+        release_result?;
+        assert!(is_deadline_exceeded(transaction_result));
+        assert!(
+            store
+                .get_conversation("transaction-expiry")
+                .await?
+                .is_none()
+        );
+
         drop(store);
         std::fs::remove_dir_all(dir)?;
         Ok(())

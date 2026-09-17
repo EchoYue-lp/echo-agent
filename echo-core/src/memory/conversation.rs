@@ -11,6 +11,73 @@ use sha2::{Digest, Sha256};
 
 const TRANSCRIPT_PROJECTION_SCHEMA_VERSION: u16 = 1;
 const TRANSCRIPT_PROJECTION_EPOCH_MAX: u64 = i64::MAX as u64;
+const TRANSCRIPT_PROJECTION_ORDINAL_MAX: u64 = i64::MAX as u64;
+
+/// Non-authoritative call metadata propagated through Host/extension adapters.
+///
+/// The deadline is excluded from operation digests so durable effects can be
+/// retried with a fresh bounded recovery budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersistenceCallContext {
+    pub absolute_deadline_unix_ms: i64,
+}
+
+impl PersistenceCallContext {
+    pub fn with_timeout(timeout: std::time::Duration) -> Result<Self> {
+        let deadline = std::time::SystemTime::now()
+            .checked_add(timeout)
+            .ok_or_else(|| projection_error("persistence deadline overflow"))?;
+        let since_epoch = deadline
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|error| projection_error(format!("invalid persistence deadline: {error}")))?;
+        let absolute_deadline_unix_ms =
+            i64::try_from(since_epoch.as_millis()).map_err(|error| {
+                projection_error(format!(
+                    "persistence deadline is outside i64 range: {error}"
+                ))
+            })?;
+        Ok(Self {
+            absolute_deadline_unix_ms,
+        })
+    }
+
+    /// Return the wall-clock budget remaining before this call expires.
+    pub fn remaining_duration(self) -> std::result::Result<std::time::Duration, MemoryError> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|error| {
+                MemoryError::SerializationError(format!("invalid system time: {error}"))
+            })?;
+        let now_unix_ms = i64::try_from(now.as_millis()).map_err(|error| {
+            MemoryError::SerializationError(format!("system time is outside i64 range: {error}"))
+        })?;
+        let remaining_ms = self
+            .absolute_deadline_unix_ms
+            .checked_sub(now_unix_ms)
+            .filter(|remaining| *remaining > 0)
+            .ok_or_else(|| {
+                MemoryError::DeadlineExceeded(format!(
+                    "deadline {}ms elapsed at {now_unix_ms}ms",
+                    self.absolute_deadline_unix_ms
+                ))
+            })?;
+        let remaining_ms = u64::try_from(remaining_ms).map_err(|error| {
+            MemoryError::SerializationError(format!(
+                "remaining deadline is outside u64 range: {error}"
+            ))
+        })?;
+        Ok(std::time::Duration::from_millis(remaining_ms))
+    }
+
+    /// Reject a managed persistence call before it begins durable work.
+    ///
+    /// Backends must not remap a completed durable operation to a deadline
+    /// error because that would obscure whether the operation committed.
+    pub fn ensure_not_expired(self) -> std::result::Result<(), MemoryError> {
+        self.remaining_duration().map(|_| ())
+    }
+}
+
 /// Parameters for creating a new conversation
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NewConversation {
@@ -91,6 +158,15 @@ pub struct StoredMessage {
 pub enum ConversationProjectionCapability {
     Unsupported,
     AtomicV1,
+}
+
+/// Deadline contract supported by managed persistence operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PersistenceCallCapability {
+    Unsupported,
+    /// Reject calls whose absolute deadline has elapsed before durable work begins.
+    AbsoluteDeadlineV1,
 }
 
 /// Durable lifecycle of a managed conversation transcript.
@@ -201,6 +277,11 @@ impl TranscriptProjectionBatch {
             let ordinal = first_ordinal
                 .checked_add(offset)
                 .ok_or_else(|| projection_error("transcript projection ordinal overflow"))?;
+            if ordinal > TRANSCRIPT_PROJECTION_ORDINAL_MAX {
+                return Err(projection_error(
+                    "transcript projection ordinal exceeds backend-compatible range",
+                ));
+            }
             let digest = digest_serialized(&message)?;
             items.push(TranscriptProjectionItem {
                 ordinal,
@@ -241,10 +322,17 @@ impl TranscriptProjectionBatch {
         }
         let mut previous: Option<u64> = None;
         for item in &self.items {
+            let contiguous = match previous {
+                Some(previous) => previous
+                    .checked_add(1)
+                    .is_some_and(|next| item.ordinal == next),
+                None => true,
+            };
             if item.message.id.is_some()
                 || item.message.conversation_id != self.conversation_id
                 || item.message.created_at.trim().is_empty()
-                || previous.is_some_and(|ordinal| item.ordinal != ordinal.saturating_add(1))
+                || item.ordinal > TRANSCRIPT_PROJECTION_ORDINAL_MAX
+                || !contiguous
                 || digest_serialized(&item.message)? != item.digest
             {
                 return Err(projection_error(
@@ -720,6 +808,11 @@ pub trait ConversationStore: Send + Sync {
         ConversationProjectionCapability::Unsupported
     }
 
+    /// Report managed persistence deadline support without performing I/O.
+    fn persistence_call_capability(&self) -> PersistenceCallCapability {
+        PersistenceCallCapability::Unsupported
+    }
+
     /// Create a new conversation
     fn create_conversation<'a>(
         &'a self,
@@ -794,6 +887,32 @@ pub trait ConversationStore: Send + Sync {
         })
     }
 
+    fn ensure_projection_epoch_with_context<'a>(
+        &'a self,
+        _context: PersistenceCallContext,
+        request: EnsureConversationProjectionRequest,
+    ) -> BoxFuture<'a, Result<ConversationProjectionEpochReceipt>> {
+        self.ensure_projection_epoch(request)
+    }
+
+    /// Read the managed conversation epoch/tombstone without creating data.
+    fn get_projection_authority<'a>(
+        &'a self,
+        _conversation_id: &'a str,
+    ) -> BoxFuture<'a, Result<Option<ConversationProjectionAuthority>>> {
+        Box::pin(async {
+            Err(MemoryError::Unsupported("managed conversation authority query".to_string()).into())
+        })
+    }
+
+    fn get_projection_authority_with_context<'a>(
+        &'a self,
+        _context: PersistenceCallContext,
+        conversation_id: &'a str,
+    ) -> BoxFuture<'a, Result<Option<ConversationProjectionAuthority>>> {
+        self.get_projection_authority(conversation_id)
+    }
+
     /// Atomically merge one canonical generation-scoped transcript batch.
     fn apply_transcript_projection<'a>(
         &'a self,
@@ -802,6 +921,14 @@ pub trait ConversationStore: Send + Sync {
         Box::pin(async {
             Err(MemoryError::Unsupported("atomic transcript projection apply".to_string()).into())
         })
+    }
+
+    fn apply_transcript_projection_with_context<'a>(
+        &'a self,
+        _context: PersistenceCallContext,
+        batch: TranscriptProjectionBatch,
+    ) -> BoxFuture<'a, Result<TranscriptProjectionApplyReceipt>> {
+        self.apply_transcript_projection(batch)
     }
 
     /// Replace a managed transcript only when epoch and revision still match.
@@ -814,6 +941,14 @@ pub trait ConversationStore: Send + Sync {
         })
     }
 
+    fn import_managed_messages_with_context<'a>(
+        &'a self,
+        _context: PersistenceCallContext,
+        request: ManagedConversationImport,
+    ) -> BoxFuture<'a, Result<TranscriptProjectionApplyReceipt>> {
+        self.import_managed_messages(request)
+    }
+
     /// Update managed metadata only when epoch and revision still match.
     fn update_managed_conversation<'a>(
         &'a self,
@@ -824,6 +959,14 @@ pub trait ConversationStore: Send + Sync {
         })
     }
 
+    fn update_managed_conversation_with_context<'a>(
+        &'a self,
+        _context: PersistenceCallContext,
+        request: ManagedConversationMetadataUpdate,
+    ) -> BoxFuture<'a, Result<ManagedConversationMetadataUpdateReceipt>> {
+        self.update_managed_conversation(request)
+    }
+
     /// Delete one managed incarnation behind an epoch fence and stable receipt.
     fn delete_managed_conversation<'a>(
         &'a self,
@@ -832,6 +975,14 @@ pub trait ConversationStore: Send + Sync {
         Box::pin(async {
             Err(MemoryError::Unsupported("managed conversation deletion".to_string()).into())
         })
+    }
+
+    fn delete_managed_conversation_with_context<'a>(
+        &'a self,
+        _context: PersistenceCallContext,
+        request: ManagedConversationDelete,
+    ) -> BoxFuture<'a, Result<ManagedConversationDeleteReceipt>> {
+        self.delete_managed_conversation(request)
     }
 
     /// Search conversations by query matching title and message content.
@@ -885,6 +1036,73 @@ pub trait ConversationStore: Send + Sync {
 mod transcript_projection_contract_tests {
     use super::*;
 
+    struct DefaultCapabilityStore;
+
+    fn unsupported_store_call<'a, T>() -> BoxFuture<'a, Result<T>> {
+        Box::pin(async {
+            Err(MemoryError::Unsupported("test conversation store".to_string()).into())
+        })
+    }
+
+    impl ConversationStore for DefaultCapabilityStore {
+        fn create_conversation<'a>(
+            &'a self,
+            _conv: NewConversation,
+        ) -> BoxFuture<'a, Result<Conversation>> {
+            unsupported_store_call()
+        }
+
+        fn get_conversation<'a>(
+            &'a self,
+            _conversation_id: &'a str,
+        ) -> BoxFuture<'a, Result<Option<Conversation>>> {
+            unsupported_store_call()
+        }
+
+        fn list_conversations<'a>(
+            &'a self,
+            _filter: ConversationFilter,
+        ) -> BoxFuture<'a, Result<Vec<ConversationMeta>>> {
+            unsupported_store_call()
+        }
+
+        fn update_conversation<'a>(
+            &'a self,
+            _conversation_id: &'a str,
+            _title: Option<&'a str>,
+            _summary: Option<&'a str>,
+            _compressed_before_id: Option<i64>,
+        ) -> BoxFuture<'a, Result<()>> {
+            unsupported_store_call()
+        }
+
+        fn delete_conversation<'a>(
+            &'a self,
+            _conversation_id: &'a str,
+        ) -> BoxFuture<'a, Result<()>> {
+            unsupported_store_call()
+        }
+
+        fn save_messages<'a>(
+            &'a self,
+            _conversation_id: &'a str,
+            _messages: &'a [StoredMessage],
+        ) -> BoxFuture<'a, Result<()>> {
+            unsupported_store_call()
+        }
+
+        fn get_messages<'a>(
+            &'a self,
+            _conversation_id: &'a str,
+        ) -> BoxFuture<'a, Result<Vec<StoredMessage>>> {
+            unsupported_store_call()
+        }
+
+        fn count_messages<'a>(&'a self, _conversation_id: &'a str) -> BoxFuture<'a, Result<usize>> {
+            unsupported_store_call()
+        }
+    }
+
     fn message(conversation_id: &str, created_at: &str) -> StoredMessage {
         StoredMessage {
             id: None,
@@ -896,6 +1114,30 @@ mod transcript_projection_contract_tests {
             tool_result_json: None,
             created_at: created_at.to_string(),
         }
+    }
+
+    #[test]
+    fn persistence_call_capability_requires_explicit_opt_in() {
+        assert_eq!(
+            DefaultCapabilityStore.persistence_call_capability(),
+            PersistenceCallCapability::Unsupported
+        );
+    }
+
+    #[test]
+    fn persistence_call_context_reports_future_budget_and_typed_expiration() -> Result<()> {
+        let remaining = PersistenceCallContext {
+            absolute_deadline_unix_ms: i64::MAX,
+        }
+        .remaining_duration()?;
+        assert!(remaining > std::time::Duration::ZERO);
+
+        let expired = PersistenceCallContext {
+            absolute_deadline_unix_ms: i64::MIN,
+        }
+        .remaining_duration();
+        assert!(matches!(expired, Err(MemoryError::DeadlineExceeded(_))));
+        Ok(())
     }
 
     #[test]
@@ -939,6 +1181,18 @@ mod transcript_projection_contract_tests {
             vec![message("conversation-b", "2026-09-16T00:00:00Z")],
         );
 
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn transcript_projection_batch_rejects_backend_incompatible_ordinals() {
+        let result = TranscriptProjectionBatch::prepare(
+            "conversation",
+            1,
+            "generation",
+            (i64::MAX as u64).saturating_add(1),
+            vec![message("conversation", "2026-09-16T00:00:00Z")],
+        );
         assert!(result.is_err());
     }
 

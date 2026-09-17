@@ -307,6 +307,12 @@ pub enum MemoryError {
     /// A managed conversation epoch cannot be advanced without overflow.
     #[error("Conversation projection epoch exhausted: {0}")]
     ProjectionEpochExhausted(String),
+    /// A retryable failure known to have happened before any durable commit.
+    #[error("Transient no-commit failure: {0}")]
+    TransientNoCommit(String),
+    /// A persistence call exhausted its shared absolute deadline.
+    #[error("Persistence deadline exceeded: {0}")]
+    DeadlineExceeded(String),
     /// A reviewed mutation proposal no longer matches current memory state.
     #[error("Stale proposal: {0}")]
     StaleProposal(String),
