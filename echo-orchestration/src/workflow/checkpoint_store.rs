@@ -1364,7 +1364,7 @@ mod tests {
         let temp_path =
             std::env::temp_dir().join(format!("echo_claim_renew_{}", uuid::Uuid::new_v4()));
         let store = FileCheckpointStore::new(&temp_path)
-            .with_claim_timing(Duration::from_millis(120), Duration::from_millis(30))?;
+            .with_claim_timing(Duration::from_secs(300), Duration::from_secs(60))?;
         let checkpoint = Checkpoint::new(
             "claim-renew".to_string(),
             "node".to_string(),
@@ -1382,9 +1382,20 @@ mod tests {
             echo_core::error::ReactError::Other("claim has no attempt identity".to_string())
         })?;
 
-        tokio::time::sleep(Duration::from_millis(80)).await;
+        // Backdate the original lease instead of relying on scheduler/fsync
+        // timing inside a 120ms window. Renewal must replace the expired time.
+        let expired_at = Utc::now()
+            .checked_sub_signed(chrono::Duration::seconds(600))
+            .ok_or_else(|| {
+                echo_core::error::ReactError::Other("claim timestamp underflow".to_string())
+            })?;
+        FileCheckpointStore::write_claim(
+            &store.claim_path(&id, &attempt_id)?,
+            &claimed,
+            expired_at,
+        )
+        .await?;
         store.renew_claim(&id, &attempt_id).await?;
-        tokio::time::sleep(Duration::from_millis(80)).await;
 
         assert!(store.claim(&id).await?.is_none());
         assert!(store.load(&id).await?.is_some_and(|checkpoint| {

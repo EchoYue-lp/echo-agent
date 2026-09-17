@@ -6,14 +6,14 @@ title: Trace Run 与 RunStore
 asset_type: state_authority
 status: active
 risk: medium
-observed_at: 81e2756cee9127fa23a9bb1023bd56aa8f954964
+observed_at: source:3c0637da3d2cd26a1e91ce8ffe034a0e7a4c890af40dbc49e05475c579118a37
 boundary_refs: [boundary.observation-persistence-delivery, boundary.eval-evolution]
-code_refs: [src/trace/mod.rs, src/trace/analyzer.rs, src/eval/runner.rs, src/agent/react/mod.rs, docs/adr/0038-eval-trace-correlation-identity.md]
+code_refs: [src/trace/mod.rs, src/trace/analyzer.rs, src/eval/runner.rs, src/agent/react/mod.rs, echo-state/src/audit/mod.rs, echo-state/src/audit/file.rs, docs/adr/0038-eval-trace-correlation-identity.md, docs/adr/0053-trace-audit-persistence-visibility.md]
 consumer_refs: [src/eval/runner.rs, src/improve/mod.rs, docs/en/27-tracing.md]
 behavior_refs: [behavior.observation-persistence, behavior.eval-evolution]
 rule_refs: [rule.fact-projection-separation, rule.quality-observation-boundary]
-evidence_refs: [evidence.persistence-observation, evidence.provider-protocol-quality, evidence.eval-trace-correlation-repair, evidence.eval-trace-correlation-verification]
-finding_refs: [finding.eval-trace-identity, finding.trace-effect-event-producers, finding.trace-audit-secret-boundary]
+evidence_refs: [evidence.persistence-observation, evidence.provider-protocol-quality, evidence.eval-trace-correlation-repair, evidence.eval-trace-correlation-verification, evidence.diagnostic-persistence-failure-visibility-repair]
+finding_refs: [finding.eval-trace-identity, finding.trace-effect-event-producers, finding.trace-audit-secret-boundary, finding.diagnostic-persistence-failure-visibility]
 candidate_refs: []
 ---
 
@@ -37,4 +37,4 @@ Trace Run ID与product run/Turn/TaskRun是不同身份；parent/turn/execution�
 
 ## 未知与限制
 
-Eval trace correlation已由repair、verification和独立rereview闭合；缺失event producers与原始输入retention继续由Findings追踪。
+Eval trace correlation已由repair、verification和独立rereview闭合；持久化失败可见性已有repair候选但等待工程验证，缺失event producers、InMemory audit成功丢写与原始输入retention继续由独立Findings追踪。

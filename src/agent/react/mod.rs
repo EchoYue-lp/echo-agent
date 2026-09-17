@@ -198,6 +198,11 @@ pub struct ReactAgent {
     /// with events, token usage, and timings.
     pub run_store: Option<Arc<dyn crate::trace::RunStore>>,
 
+    /// Observer for Trace and Audit persistence delivery failures. It is
+    /// deliberately separate from Agent execution settlement.
+    pub(crate) diagnostic_delivery_observer:
+        Option<Arc<dyn crate::audit::DiagnosticDeliveryObserver>>,
+
     /// Product/business run ID propagated into tools and projections.
     current_run_id: std::sync::Mutex<Option<String>>,
 
@@ -373,6 +378,7 @@ impl ReactAgent {
         mut config: AgentConfig,
         #[cfg(feature = "subagent")] provided_subagent_registry: Option<Arc<SubagentRegistry>>,
     ) -> Self {
+        let _ = crate::audit::initialize_diagnostic_delivery();
         if !config.token_limit_explicit
             && let Some(profile_window) = config
                 .model_profile
@@ -669,6 +675,7 @@ impl ReactAgent {
             thinking: None,
             turn_steer_mailbox: Arc::new(crate::agent::steer::TurnSteerMailbox::default()),
             run_store: None,
+            diagnostic_delivery_observer: None,
             current_run_id: std::sync::Mutex::new(None),
             current_trace_run_id: std::sync::Mutex::new(None),
             external_context_epoch: std::sync::Mutex::new(()),
@@ -1549,6 +1556,40 @@ impl ReactAgent {
         self.guard.audit_logger = Some(logger);
     }
 
+    /// Set the observer for Trace and Audit persistence delivery failures.
+    ///
+    /// The observer is notification-only. It cannot rewrite an Agent terminal;
+    /// callers that require a diagnostic write must call the Store/Logger API
+    /// directly and handle its `Result` at their own commit boundary.
+    pub fn set_diagnostic_delivery_observer(
+        &mut self,
+        observer: Arc<dyn crate::audit::DiagnosticDeliveryObserver>,
+    ) {
+        self.diagnostic_delivery_observer = Some(observer);
+    }
+
+    fn report_diagnostic_delivery_failure(&self, failure: crate::audit::DiagnosticDeliveryFailure) {
+        crate::audit::report_diagnostic_delivery_failure(
+            self.diagnostic_delivery_observer.clone(),
+            failure,
+        );
+    }
+
+    pub(crate) async fn record_audit_event(&self, event: crate::audit::AuditEvent) {
+        let Some(logger) = self.guard.audit_logger.as_ref() else {
+            return;
+        };
+        let record_id = event.trace_id.clone().or_else(|| event.session_id.clone());
+        if let Err(error) = logger.log(event).await {
+            self.report_diagnostic_delivery_failure(crate::audit::DiagnosticDeliveryFailure::new(
+                crate::audit::DiagnosticRecordKind::Audit,
+                crate::audit::DiagnosticDeliveryOperation::Record,
+                record_id,
+                error.to_string(),
+            ));
+        }
+    }
+
     // ── Snapshots & rollback ────────────────────────────────────────────────────
 
     /// Set the sandbox manager to provide secure isolation for skill script execution.
@@ -2182,7 +2223,12 @@ impl ReactAgent {
         if let (Some(store), Some(run_id)) = (&self.run_store, &run_id)
             && let Err(e) = store.append_event(run_id, event).await
         {
-            tracing::warn!(error = %e, run_id = %run_id, "Failed to append trace event");
+            self.report_diagnostic_delivery_failure(crate::audit::DiagnosticDeliveryFailure::new(
+                crate::audit::DiagnosticRecordKind::Trace,
+                crate::audit::DiagnosticDeliveryOperation::Append,
+                Some(run_id.clone()),
+                e.to_string(),
+            ));
         }
     }
 
@@ -2202,12 +2248,12 @@ impl ReactAgent {
                 legacy.turn_id.as_deref(),
                 legacy.execution_id.as_deref(),
             )
-            .await?;
+            .await;
         *self
             .current_trace_run_id
             .lock()
-            .unwrap_or_else(|error| error.into_inner()) = Some(trace_run_id.clone());
-        Some(trace_run_id)
+            .unwrap_or_else(|error| error.into_inner()) = trace_run_id.clone();
+        trace_run_id
     }
 
     /// Start a trace run without mutating the agent-wide product run id.
@@ -2248,7 +2294,13 @@ impl ReactAgent {
             finished_at: None,
         };
         if let Err(error) = store.save(run).await {
-            tracing::warn!(error = %error, "Failed to save scoped trace run on start");
+            self.report_diagnostic_delivery_failure(crate::audit::DiagnosticDeliveryFailure::new(
+                crate::audit::DiagnosticRecordKind::Trace,
+                crate::audit::DiagnosticDeliveryOperation::Start,
+                Some(run_id),
+                error.to_string(),
+            ));
+            return None;
         }
         Some(run_id)
     }

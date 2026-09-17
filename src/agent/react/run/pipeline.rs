@@ -483,7 +483,7 @@ impl PipelineStage for AuditStage {
         ctx: &mut ToolExecutionContext,
         snapshot: &crate::agent::snapshot::AgentRunSnapshot,
     ) -> Result<()> {
-        if let (Some(al), Some(result)) = (&snapshot.guard.audit_logger, &ctx.result) {
+        if let (Some(_), Some(result)) = (&snapshot.guard.audit_logger, &ctx.result) {
             // A post-use hook can reject an effect that has already happened.
             // Retain that output while reporting the final failure status.
             let output = if !result.success && result.output.is_empty() {
@@ -502,9 +502,7 @@ impl PipelineStage for AuditStage {
                     duration_ms: ctx.duration_ms,
                 },
             );
-            if let Err(e) = al.log(ev).await {
-                tracing::error!(error = %e, "audit log write failed — event dropped");
-            }
+            snapshot.record_audit_event(ev).await;
         }
         Ok(())
     }

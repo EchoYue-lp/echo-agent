@@ -25,6 +25,8 @@
 //! | [`AuditLogger`] | Trait for audit backends |
 //! | [`InMemoryAuditLogger`] | In-memory logger for testing |
 //! | [`FileAuditLogger`] | File-based logger for production |
+//! | [`DiagnosticDeliveryFailure`] | Trace/Audit persistence failure fact |
+//! | [`DiagnosticDeliveryObserver`] | Additional failure observer that cannot change execution |
 
 /// Direct re-exports from `echo_state::audit`.
 pub mod state {

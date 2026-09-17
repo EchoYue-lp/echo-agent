@@ -15,7 +15,7 @@ challenges:
   diagnostic-failure-visibility:
     revision: f1e9027246760661144786e9e35615cd46d580c6
     source_refs: [src/trace/mod.rs, src/agent/react/mod.rs, src/agent/snapshot.rs, echo-state/src/audit/mod.rs, echo-state/src/audit/file.rs]
-    evidence_refs: [evidence.persistence-observation, evidence.effects-extensions]
+    evidence_refs: [evidence.persistence-observation, evidence.effects-extensions, evidence.diagnostic-persistence-failure-visibility-repair]
   journal-delivery-recovery:
     revision: f1e9027246760661144786e9e35615cd46d580c6
     source_refs: [echo-state/src/journal/file.rs, echo-state/src/journal/segmented.rs, echo-state/src/delivery.rs]
@@ -34,11 +34,11 @@ challenges:
 
 ## 实际实现路径与证据
 
-CheckpointFrame 只有 sequence/state，文件摘要不绑定 Journal identity；recover 只检查序号范围，因此 Journal B 的同序号合法 checkpoint 可被 Journal A 接受。RunStore 默认 append 对缺失 run 返回成功，trace start save 失败仍返回 run ID，多条 trace/audit callback 丢弃 backend error；FileAuditLogger 只有 flush。File Journal ambiguous append、segmented retained floor 与 Delivery attempt/turn 校验在已审路径未发现新反例。
+原revision确认Checkpoint/Journal identity与diagnostic failure visibility缺口。当前未提交repair候选使RunStore missing append、trace start/append/load/finalize、Audit callback、observer liveness与FileAudit durable recovery进入新路径；该路径已通过独立静态反证，但工程验证和最终revision复审未完成，因此本Audit标记stale，不把候选结果写成examined事实。
 
 ## 问题记录
 
-新增 checkpoint/journal binding 与 diagnostic failure visibility 两个 Finding；secret retention Finding 保持 open 且与失败可见性分离。
+Checkpoint/journal binding与diagnostic failure visibility继续由独立Finding追踪；#46已有repair Evidence但保持open。secret retention、InMemory audit成功丢写与tool terminal分歧分别由#103、#61、#102追踪。
 
 Checkpoint/Journal identity修复候选已改变本Audit检查过的源码与持久格式；focused测试和独立复审完成前，本Audit保持stale，原examined结论不得用于关闭Finding。
 

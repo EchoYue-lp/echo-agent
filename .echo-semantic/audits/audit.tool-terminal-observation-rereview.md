@@ -5,15 +5,15 @@ kind: audit
 boundary_ref: boundary.tool-permission-sandbox
 lens: result_side_effect
 freshness: examined
-revision: source:e35a087894af8f5cca0ff6c6ac2887db78e8d7ed6748d0fdadae5d16509a2896
+revision: b71f03ba16fdbefa0a595b92fe82feee39f8e09e
 finding_refs: [finding.tool-terminal-observation-divergence]
 challenges:
   public-audit-terminal:
-    revision: source:e35a087894af8f5cca0ff6c6ac2887db78e8d7ed6748d0fdadae5d16509a2896
+    revision: b71f03ba16fdbefa0a595b92fe82feee39f8e09e
     source_refs: [src/agent/react/run/pipeline.rs, src/agent/snapshot.rs, src/agent/react/builder.rs]
     evidence_refs: [evidence.tool-terminal-observation-repair, evidence.tool-terminal-observation-verification]
   guarded-observation:
-    revision: source:e35a087894af8f5cca0ff6c6ac2887db78e8d7ed6748d0fdadae5d16509a2896
+    revision: b71f03ba16fdbefa0a595b92fe82feee39f8e09e
     source_refs: [src/agent/react/run/pipeline.rs, src/agent/snapshot.rs, echo-state/src/audit/memory.rs]
     evidence_refs: [evidence.tool-terminal-observation-verification]
 ---

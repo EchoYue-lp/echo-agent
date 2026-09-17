@@ -202,17 +202,60 @@ let agent = ReactAgentBuilder::new()
 ```
 1. start_trace_run(input)
    → 创建 Run { status: Running, run_id: "run_<uuid>" }
-   → 保存到 store
+   → 保存到 store；拒绝写入时不发布 trace run ID
 
 2. record_trace_event(event)   （多次调用）
    → 通过 store.append_event() 将事件追加到 Run
-   → 即发即忘（错误被静默丢弃）
+   → 报告被拒绝的投递，但不改变 Agent 执行结果
 
 3. finalize_trace_run(status, output, error)
    → 设置 status、final_output、finished_at
    → 保存最终状态到 store
-   → 清除 current_run_id
+   → 不修改产品/业务 current_run_id
 ```
+
+### 诊断投递失败
+
+Trace 与 Audit 持久化是 Agent 执行的观测结果，不是第二个执行终态。它们的
+Store/Logger 直接方法返回 `Result`，要求持久化的调用方必须处理该结果。Agent
+集成中的可选诊断写入失败时，producer 继续执行，同时向 observer 发送结构化的
+`DiagnosticDeliveryFailure`。
+
+Agent producer 只通过有界、非阻塞的 `try_send` 提交 failure。进程内诊断 dispatcher
+发送 tracing target `echo_agent::diagnostic_delivery`，包含稳定的 `record_kind`、
+`operation`、`record_id`、`occurred_at` 与 `error` 字段。应用还可以安装一个结构化 observer；
+它会从同一 dispatcher 收到 failure fact：
+
+```rust
+use echo_agent::audit::{DiagnosticDeliveryFailure, DiagnosticDeliveryObserver};
+use echo_agent::prelude::*;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+#[derive(Default)]
+struct DiagnosticCounter(AtomicUsize);
+
+impl DiagnosticDeliveryObserver for DiagnosticCounter {
+    fn on_failure(&self, _failure: DiagnosticDeliveryFailure) {
+        self.0.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+let diagnostic_failures = Arc::new(DiagnosticCounter::default());
+let agent = ReactAgentBuilder::new()
+    .model("qwen3-max")
+    .system_prompt("你是有帮助的助手")
+    .diagnostic_delivery_observer(diagnostic_failures.clone())
+    .build()?;
+# Ok::<(), echo_agent::error::ReactError>(())
+```
+
+observer 没有控制型返回值，也不在 Agent producer 上运行。队列饱和、断开、初始化
+失败、重入上报与 observer unwind 都会增加 `diagnostic_delivery_dropped_count()`。
+阻塞 observer 只会延迟后续诊断通知，不会延迟 Completed、Failed 或 Cancelled producer
+结算；进程 abort/termination 不属于进程内恢复范围。技能使用指标仍是独立的
+best-effort telemetry，不会被提升为 Trace/Audit 投递权威。失败策略与业界依据见
+[ADR 0053](../adr/0053-trace-audit-persistence-visibility.md)。
 
 ### 事件触发位置
 
