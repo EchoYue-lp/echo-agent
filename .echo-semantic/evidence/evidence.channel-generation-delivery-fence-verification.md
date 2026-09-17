@@ -13,7 +13,7 @@ source_refs:
   - docs/adr/0057-channel-generation-delivery-fence.md
 supports: [finding.channel-reset-stale-generation-delivery, behavior.protocol-projection, rule.protocol-role-separation]
 limitations:
-  - 当前记录focused验证与独立复审；最新main集成、17项feature矩阵、完整合并门禁和远端CI仍待PR交付阶段完成
+  - 最新main集成、17项feature矩阵和完整本地合并门禁已完成；远端CI仍待PR交付阶段核实
   - 测试使用可控本地delivery receipt，不对QQ或飞书真实远端的时序作等价声明
 ---
 
@@ -36,6 +36,11 @@ limitations:
 - QQ与飞书direct send retired-generation回归：2/2，均先返回typed stale而非not-started/network。
 - `cargo clippy -p echo_integration --all-targets --features channels --locked -- -D warnings`：exit 0。
 - `cargo check -p echo-agent-learning --example demo38_im_channels --features channels --locked`：exit 0。
+- 17项独立feature check：acp、a2a、mcp、lsp、sqlite、telemetry、topology、subagent、web、
+  media、data、statistics、channels、git、database、rag、chart，17次Finished、exit 0。
+- 完整合并门禁的原始六条命令全部exit 0：`cargo fmt --all`、fmt check、workspace
+  all-target/all-feature Clippy、lib/bins panic-policy Clippy、workspace all-target/all-feature tests、
+  workspace lib no-default check。全量测试82条result汇总：2819 passed、0 failed、3 ignored。
 
 ## 来源与范围
 
@@ -45,5 +50,9 @@ limitations:
 
 ## 已知缺口
 
-本Evidence在任务检查点commit `c6c9b04d`之后仅增加语义材料。合入最新main后的条件矩阵、
-完整workspace门禁与PR CI结果将在最终交付前回填；这些完成前Finding不应关闭。
+本Evidence在任务检查点commit `c6c9b04d`之后仅增加语义材料。远端main仍为
+`ab3ed7d2`，无需额外合并。矩阵日志为`issue41-feature-matrix-1789666763874.log`；完整门禁按
+磁盘边界逐项运行，并在高成本步骤间只清理本会话`CARGO_TARGET_DIR`：
+`issue41-final-{fmt,fmt-check,clippy-all-targets,clippy-panic-policy,tests-all-features,no-default}-*.log`。
+资源配置仅降低并发、incremental与debug symbols，不关闭测试、lint、feature或debug assertions。
+PR远端CI通过前不关闭GitHub Issue。

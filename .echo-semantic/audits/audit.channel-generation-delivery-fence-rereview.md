@@ -45,6 +45,8 @@ reviewer初审发现setup await未select cancellation；补red/green后消除。
 ## 问题记录
 
 三项Important实现/合同问题与一项direct-send覆盖缺口均已在本轮直接修复；最终复审未发现剩余阻断。
+主代理随后执行17项独立feature矩阵和完整本地合并门禁，全部exit 0；全量测试汇总为
+2819 passed、0 failed、3 ignored。门禁之后仅回填本Evidence与Finding状态，生产快照未变化。
 
 ## 残余风险
 
@@ -54,4 +56,5 @@ framework delivery API时不自动继承此保证。
 
 ## 未检查项
 
-reviewer未运行真实QQ/飞书网络请求；最终17-feature矩阵、完整workspace门禁和远端CI由主代理执行。
+reviewer未运行真实QQ/飞书网络请求；17-feature矩阵与完整workspace门禁由主代理完成，
+远端Linux/Windows CI仍由PR交付核实。
