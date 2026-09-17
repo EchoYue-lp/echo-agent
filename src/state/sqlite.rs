@@ -53,6 +53,7 @@ struct SqliteRuntimeTranscriptAckProof {
 #[derive(Clone)]
 pub struct SqliteRuntimeStateStore {
     path: std::path::PathBuf,
+    call_context: Option<crate::memory::PersistenceCallContext>,
 }
 
 impl SqliteRuntimeStateStore {
@@ -64,7 +65,10 @@ impl SqliteRuntimeStateStore {
                 RuntimeStateError::Io(format!("failed to create directory: {error}"))
             })?;
         }
-        let mut store = Self { path };
+        let mut store = Self {
+            path,
+            call_context: None,
+        };
         store.init_tables()?;
         store.path = std::fs::canonicalize(&store.path).map_err(|error| {
             RuntimeStateError::Io(format!("failed to canonicalize SQLite store: {error}"))
@@ -73,9 +77,17 @@ impl SqliteRuntimeStateStore {
     }
 
     fn open_conn(&self) -> Result<Connection> {
-        Connection::open(&self.path).map_err(|error| {
-            RuntimeStateError::Io(format!("failed to open SQLite connection: {error}")).into()
-        })
+        let connection = Connection::open(&self.path).map_err(|error| {
+            crate::error::ReactError::from(RuntimeStateError::Io(format!(
+                "failed to open SQLite connection: {error}"
+            )))
+        })?;
+        connection
+            .busy_timeout(std::time::Duration::from_secs(5))
+            .map_err(|error| {
+                RuntimeStateError::Io(format!("failed to configure SQLite busy timeout: {error}"))
+            })?;
+        Ok(connection)
     }
 
     /// Initialize the checkpoint table.
@@ -173,6 +185,33 @@ impl SqliteRuntimeStateStore {
         RuntimeStateError::ManagedStateRequiresCas(message.into()).into()
     }
 
+    fn with_call_context(&self, context: crate::memory::PersistenceCallContext) -> Self {
+        let mut store = self.clone();
+        store.call_context = Some(context);
+        store
+    }
+
+    fn ensure_call_deadline(
+        context: crate::memory::PersistenceCallContext,
+        operation: &str,
+    ) -> Result<()> {
+        context.ensure_not_expired().map_err(|error| match error {
+            echo_core::error::MemoryError::DeadlineExceeded(_) => {
+                RuntimeStateError::DeadlineExceeded(operation.to_string()).into()
+            }
+            other => RuntimeStateError::SerializationError(format!(
+                "invalid persistence deadline for {operation}: {other}"
+            ))
+            .into(),
+        })
+    }
+
+    fn ensure_active_deadline(&self, operation: &str) -> Result<()> {
+        self.call_context.map_or(Ok(()), |context| {
+            Self::ensure_call_deadline(context, operation)
+        })
+    }
+
     fn next_revision(current: u64, identity: &str) -> Result<u64> {
         current
             .checked_add(1)
@@ -200,6 +239,16 @@ impl SqliteRuntimeStateStore {
             ))
         })?;
         Ok(left == right)
+    }
+
+    fn validate_unmanaged_checkpoint(checkpoint: &AgentCheckpoint) -> Result<()> {
+        let payload = checkpoint.restore_managed_runtime_payload()?;
+        if payload.pending_transcript_projection.is_some() {
+            return Err(Self::managed_state_error(
+                "pending checkpoint payload requires compare-and-save",
+            ));
+        }
+        Ok(())
     }
 
     fn encode<T: Serialize>(value: &T, label: &str) -> Result<String> {
@@ -348,16 +397,16 @@ impl SqliteRuntimeStateStore {
                     && current_pending.cursor_after == next_pending.cursor_after
                     && next_pending.base_runtime_revision == resulting_revision
                     && current_pending.prepared_at == next_pending.prepared_at
-                    && current_pending
-                        .attempt
-                        .checked_add(1)
-                        .is_some_and(|attempt| next_pending.attempt == attempt)
-                    && next_pending.last_attempt_class.is_some()
-                    && next_pending
-                        .last_error
-                        .as_deref()
-                        .is_some_and(|error| !error.trim().is_empty())
+                    && Self::valid_pending_attempt_transition(current_pending, next_pending)
                     && messages_match
+                    && state.is_some_and(|state| {
+                        state.checkpoint.as_ref().is_some_and(|current_checkpoint| {
+                            current_checkpoint.current_plan == checkpoint.current_plan
+                                && current_checkpoint.active_skills == checkpoint.active_skills
+                                && current_checkpoint.blocked_reason == checkpoint.blocked_reason
+                                && current_checkpoint.working_dir == checkpoint.working_dir
+                        })
+                    })
                     && current.as_ref().is_some_and(|current| {
                         current.transcript_projection == next.transcript_projection
                     }) =>
@@ -368,6 +417,42 @@ impl SqliteRuntimeStateStore {
                 "pending transcript projection identity is immutable until acknowledgement",
             )),
         }
+    }
+
+    fn valid_pending_attempt_transition(
+        current: &super::PendingTranscriptProjection,
+        next: &super::PendingTranscriptProjection,
+    ) -> bool {
+        let next_has_failure = next.last_attempt_class.is_some()
+            && next
+                .last_error
+                .as_deref()
+                .is_some_and(|error| !error.trim().is_empty());
+        let same_attempt_failure = next.attempt == current.attempt
+            && current.last_attempt_class.is_none()
+            && current.last_error.is_none()
+            && next_has_failure;
+        let retry_dispatch = current
+            .attempt
+            .checked_add(1)
+            .is_some_and(|attempt| next.attempt == attempt)
+            && next.last_attempt_class.is_none()
+            && next.last_error.is_none()
+            && current
+                .last_attempt_class
+                .as_ref()
+                .is_none_or(Self::retryable_attempt_class);
+        same_attempt_failure || retry_dispatch
+    }
+
+    fn retryable_attempt_class(class: &super::TranscriptProjectionAttemptClass) -> bool {
+        matches!(
+            class,
+            super::TranscriptProjectionAttemptClass::OutcomeUnknown
+                | super::TranscriptProjectionAttemptClass::TransientNoCommit
+                | super::TranscriptProjectionAttemptClass::RevisionConflict
+                | super::TranscriptProjectionAttemptClass::DeadlineExceeded
+        )
     }
 
     fn validate_transcript_ack(
@@ -784,7 +869,7 @@ impl SqliteRuntimeStateStore {
             return Ok(None);
         };
         let scope_id = scope_id.unwrap_or_else(|| runtime_state_id.to_string());
-        Ok(Some(SqliteRuntimeStateRecord {
+        let record = SqliteRuntimeStateRecord {
             runtime_state_id: runtime_state_id.to_string(),
             scope_id,
             version: RuntimeStateVersion::Unmanaged {
@@ -797,7 +882,9 @@ impl SqliteRuntimeStateStore {
             cas_expected_scope_revision: 0,
             transcript_ack_proof: None,
             checkpoint: Some(checkpoint),
-        }))
+        };
+        Self::validate_state_record(&record)?;
+        Ok(Some(record))
     }
 
     fn save_state_record_on_connection(
@@ -866,6 +953,49 @@ impl SqliteRuntimeStateStore {
     }
 
     fn validate_state_record(record: &SqliteRuntimeStateRecord) -> Result<()> {
+        match &record.version {
+            RuntimeStateVersion::Unmanaged { .. } => {
+                let checkpoint = record.checkpoint.as_ref().ok_or_else(|| {
+                    RuntimeStateError::SerializationError(
+                        "unmanaged runtime state lost its checkpoint".to_string(),
+                    )
+                })?;
+                Self::validate_unmanaged_checkpoint(checkpoint)?;
+            }
+            RuntimeStateVersion::Managed { revision } => {
+                let checkpoint = record.checkpoint.as_ref().ok_or_else(|| {
+                    RuntimeStateError::SerializationError(
+                        "managed runtime state lost its checkpoint".to_string(),
+                    )
+                })?;
+                let payload = checkpoint.restore_managed_runtime_payload()?;
+                if payload
+                    .pending_transcript_projection
+                    .as_ref()
+                    .is_some_and(|pending| pending.base_runtime_revision != *revision)
+                {
+                    return Err(RuntimeStateError::SerializationError(
+                        "pending transcript base revision does not match managed state".to_string(),
+                    )
+                    .into());
+                }
+            }
+            RuntimeStateVersion::Retired { .. } => {
+                if record.checkpoint.is_some() || record.transcript_ack_proof.is_some() {
+                    return Err(RuntimeStateError::SerializationError(
+                        "retired runtime state retained checkpoint or acknowledgement proof"
+                            .to_string(),
+                    )
+                    .into());
+                }
+            }
+            RuntimeStateVersion::Absent => {
+                return Err(RuntimeStateError::SerializationError(
+                    "runtime state persisted an absent version".to_string(),
+                )
+                .into());
+            }
+        }
         if let Some(proof) = record.transcript_ack_proof.as_ref() {
             let payload = record
                 .checkpoint
@@ -876,10 +1006,16 @@ impl SqliteRuntimeStateStore {
                     )
                 })?
                 .restore_managed_runtime_payload()?;
-            if proof.operation_id.trim().is_empty()
-                || proof.payload_digest.trim().is_empty()
+            if proof.payload_digest.len() != 64
+                || !proof
+                    .payload_digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                || proof.operation_id
+                    != format!("transcript-projection-v1:{}", proof.payload_digest)
                 || !matches!(record.version, RuntimeStateVersion::Managed { .. })
                 || payload.pending_transcript_projection.is_some()
+                || payload.transcript_projection.is_none()
             {
                 return Err(RuntimeStateError::SerializationError(
                     "runtime transcript acknowledgement proof is corrupt".to_string(),
@@ -1050,7 +1186,6 @@ impl SqliteRuntimeStateStore {
             .find(|receipt| receipt.manifest.delete_operation_id == delete_operation_id)
             .cloned()
             .map(|mut receipt| {
-                receipt.scope = record.authority.clone();
                 receipt.retention_floor_epoch = retention_floor_epoch;
                 receipt.status =
                     if retention_floor_epoch >= receipt.manifest.expected_conversation_epoch {
@@ -1206,11 +1341,15 @@ impl SqliteRuntimeStateStore {
     {
         let store = self.clone();
         Box::pin(async move {
+            store.ensure_active_deadline("SQLite runtime-state admission")?;
             let key =
                 BlockingFileOperationKey::new("runtime-state-sqlite", store.path.clone(), scope);
-            run_keyed_file_operation(key, move || operation(store))
-                .await
-                .map_err(|error| RuntimeStateError::Io(error.to_string()))?
+            run_keyed_file_operation(key, move || {
+                store.ensure_active_deadline("SQLite runtime-state durable work")?;
+                operation(store)
+            })
+            .await
+            .map_err(|error| RuntimeStateError::Io(error.to_string()))?
         })
     }
 
@@ -1230,6 +1369,115 @@ impl RuntimeStateStore for SqliteRuntimeStateStore {
         RuntimeStateCapability::RevisionedV1
     }
 
+    fn persistence_call_capability(&self) -> crate::memory::PersistenceCallCapability {
+        crate::memory::PersistenceCallCapability::AbsoluteDeadlineV1
+    }
+
+    fn load_runtime_state_with_context<'a>(
+        &'a self,
+        context: crate::memory::PersistenceCallContext,
+        scope_id: &'a str,
+        runtime_state_id: &'a str,
+    ) -> BoxFuture<'a, Result<Option<ManagedRuntimeStateSnapshot>>> {
+        if let Err(error) = Self::ensure_call_deadline(context, "runtime-state load") {
+            return Box::pin(async move { Err(error) });
+        }
+        let store = self.with_call_context(context);
+        let scope_id = scope_id.to_string();
+        let runtime_state_id = runtime_state_id.to_string();
+        Box::pin(async move { store.load_runtime_state(&scope_id, &runtime_state_id).await })
+    }
+
+    fn load_scope_authority_with_context<'a>(
+        &'a self,
+        context: crate::memory::PersistenceCallContext,
+        scope_id: &'a str,
+    ) -> BoxFuture<'a, Result<Option<RuntimeScopeAuthority>>> {
+        if let Err(error) = Self::ensure_call_deadline(context, "runtime scope load") {
+            return Box::pin(async move { Err(error) });
+        }
+        let store = self.with_call_context(context);
+        let scope_id = scope_id.to_string();
+        Box::pin(async move { store.load_scope_authority(&scope_id).await })
+    }
+
+    fn compare_and_save_checkpoint_with_context<'a>(
+        &'a self,
+        context: crate::memory::PersistenceCallContext,
+        request: RuntimeCheckpointCasRequest,
+    ) -> BoxFuture<'a, Result<RuntimeCheckpointCasReceipt>> {
+        if let Err(error) = Self::ensure_call_deadline(context, "runtime checkpoint CAS") {
+            return Box::pin(async move { Err(error) });
+        }
+        let store = self.with_call_context(context);
+        Box::pin(async move { store.compare_and_save_checkpoint(request).await })
+    }
+
+    fn acknowledge_transcript_projection_with_context<'a>(
+        &'a self,
+        context: crate::memory::PersistenceCallContext,
+        request: RuntimeTranscriptAckRequest,
+    ) -> BoxFuture<'a, Result<RuntimeCheckpointCasReceipt>> {
+        if let Err(error) =
+            Self::ensure_call_deadline(context, "runtime transcript acknowledgement")
+        {
+            return Box::pin(async move { Err(error) });
+        }
+        let store = self.with_call_context(context);
+        Box::pin(async move { store.acknowledge_transcript_projection(request).await })
+    }
+
+    fn retire_runtime_generation_with_context<'a>(
+        &'a self,
+        context: crate::memory::PersistenceCallContext,
+        request: RuntimeGenerationRetireRequest,
+    ) -> BoxFuture<'a, Result<RuntimeGenerationRetireReceipt>> {
+        if let Err(error) = Self::ensure_call_deadline(context, "runtime generation retirement") {
+            return Box::pin(async move { Err(error) });
+        }
+        let store = self.with_call_context(context);
+        Box::pin(async move { store.retire_runtime_generation(request).await })
+    }
+
+    fn begin_scope_retirement_with_context<'a>(
+        &'a self,
+        context: crate::memory::PersistenceCallContext,
+        request: ScopeRetirementRequest,
+    ) -> BoxFuture<'a, Result<ScopeRetirementReceipt>> {
+        if let Err(error) = Self::ensure_call_deadline(context, "runtime scope retirement begin") {
+            return Box::pin(async move { Err(error) });
+        }
+        let store = self.with_call_context(context);
+        Box::pin(async move { store.begin_scope_retirement(request).await })
+    }
+
+    fn continue_scope_retirement_with_context<'a>(
+        &'a self,
+        context: crate::memory::PersistenceCallContext,
+        scope_id: &'a str,
+        delete_operation_id: &'a str,
+        expected_scope_revision: u64,
+        advance: ScopeRetirementAdvance,
+    ) -> BoxFuture<'a, Result<ScopeRetirementReceipt>> {
+        if let Err(error) = Self::ensure_call_deadline(context, "runtime scope retirement advance")
+        {
+            return Box::pin(async move { Err(error) });
+        }
+        let store = self.with_call_context(context);
+        let scope_id = scope_id.to_string();
+        let delete_operation_id = delete_operation_id.to_string();
+        Box::pin(async move {
+            store
+                .continue_scope_retirement(
+                    &scope_id,
+                    &delete_operation_id,
+                    expected_scope_revision,
+                    advance,
+                )
+                .await
+        })
+    }
+
     fn load_runtime_state<'a>(
         &'a self,
         scope_id: &'a str,
@@ -1239,7 +1487,9 @@ impl RuntimeStateStore for SqliteRuntimeStateStore {
         let runtime_state_id = runtime_state_id.to_string();
         self.run_blocking(Self::entity_scope(&runtime_state_id), move |store| {
             let mut conn = store.open_conn()?;
+            store.ensure_active_deadline("SQLite runtime-state load before transaction")?;
             let transaction = Self::immediate_transaction(&mut conn)?;
+            store.ensure_active_deadline("SQLite runtime-state load after transaction lock")?;
             let Some(state) =
                 Self::load_state_record_on_connection(&transaction, &runtime_state_id)?
             else {
@@ -1278,7 +1528,9 @@ impl RuntimeStateStore for SqliteRuntimeStateStore {
         let scope_id = scope_id.to_string();
         self.run_blocking(Self::collection_scope(&scope_id), move |store| {
             let mut conn = store.open_conn()?;
+            store.ensure_active_deadline("SQLite runtime scope load before transaction")?;
             let transaction = Self::immediate_transaction(&mut conn)?;
+            store.ensure_active_deadline("SQLite runtime scope load after transaction lock")?;
             let authority = if let Some(record) =
                 Self::load_scope_record_on_connection(&transaction, &scope_id)?
             {
@@ -1303,7 +1555,9 @@ impl RuntimeStateStore for SqliteRuntimeStateStore {
         }
         self.run_blocking(Self::collection_scope(&request.scope_id), move |store| {
             let mut conn = store.open_conn()?;
+            store.ensure_active_deadline("SQLite runtime checkpoint CAS before transaction")?;
             let transaction = Self::immediate_transaction(&mut conn)?;
+            store.ensure_active_deadline("SQLite runtime checkpoint CAS after transaction lock")?;
             let mut scope_record =
                 Self::load_scope_record_on_connection(&transaction, &request.scope_id)?;
             let state =
@@ -1437,7 +1691,13 @@ impl RuntimeStateStore for SqliteRuntimeStateStore {
         }
         self.run_blocking(Self::collection_scope(&request.scope_id), move |store| {
             let mut conn = store.open_conn()?;
+            store.ensure_active_deadline(
+                "SQLite runtime transcript acknowledgement before transaction",
+            )?;
             let transaction = Self::immediate_transaction(&mut conn)?;
+            store.ensure_active_deadline(
+                "SQLite runtime transcript acknowledgement after transaction lock",
+            )?;
             let mut scope_record =
                 Self::load_scope_record_on_connection(&transaction, &request.scope_id)?;
             let state =
@@ -1581,7 +1841,13 @@ impl RuntimeStateStore for SqliteRuntimeStateStore {
         }
         self.run_blocking(Self::collection_scope(&request.scope_id), move |store| {
             let mut conn = store.open_conn()?;
+            store.ensure_active_deadline(
+                "SQLite runtime generation retirement before transaction",
+            )?;
             let transaction = Self::immediate_transaction(&mut conn)?;
+            store.ensure_active_deadline(
+                "SQLite runtime generation retirement after transaction lock",
+            )?;
             let mut scope_record =
                 Self::load_scope_record_on_connection(&transaction, &request.scope_id)?;
             let state =
@@ -1702,7 +1968,9 @@ impl RuntimeStateStore for SqliteRuntimeStateStore {
         }
         self.run_blocking(Self::collection_scope(&request.scope_id), move |store| {
             let mut conn = store.open_conn()?;
+            store.ensure_active_deadline("SQLite scope retirement begin before transaction")?;
             let transaction = Self::immediate_transaction(&mut conn)?;
+            store.ensure_active_deadline("SQLite scope retirement begin after transaction lock")?;
             let mut record =
                 Self::load_scope_record_on_connection(&transaction, &request.scope_id)?;
             if let Some(record) = record.as_ref() {
@@ -1840,7 +2108,9 @@ impl RuntimeStateStore for SqliteRuntimeStateStore {
         let delete_operation_id = delete_operation_id.to_string();
         self.run_blocking(Self::collection_scope(&scope_id), move |store| {
             let mut conn = store.open_conn()?;
+            store.ensure_active_deadline("SQLite scope retirement advance before transaction")?;
             let transaction = Self::immediate_transaction(&mut conn)?;
+            store.ensure_active_deadline("SQLite scope retirement advance after transaction lock")?;
             let mut record = Self::load_scope_record_on_connection(&transaction, &scope_id)?
                 .ok_or_else(|| {
                     RuntimeStateError::NotFound(format!("runtime scope {scope_id} is absent"))
@@ -2096,7 +2366,10 @@ impl RuntimeStateStore for SqliteRuntimeStateStore {
         let conversation_id = conversation_id.to_string();
         self.run_blocking(Self::entity_scope(&conversation_id), move |store| {
             let conn = store.open_conn()?;
-            Self::load_checkpoint_on_connection(&conn, &conversation_id)
+            Ok(
+                Self::load_state_record_on_connection(&conn, &conversation_id)?
+                    .and_then(|record| record.checkpoint),
+            )
         })
     }
 
@@ -2109,6 +2382,9 @@ impl RuntimeStateStore for SqliteRuntimeStateStore {
         scope_id: &'a str,
         checkpoint: &'a AgentCheckpoint,
     ) -> BoxFuture<'a, Result<()>> {
+        if let Err(error) = Self::validate_unmanaged_checkpoint(checkpoint) {
+            return Box::pin(async move { Err(error) });
+        }
         let scope_id = scope_id.to_string();
         let checkpoint = checkpoint.clone();
         self.run_blocking(
@@ -2382,16 +2658,25 @@ mod tests {
     fn checkpoint(runtime_state_id: &str, marker: &str) -> Result<AgentCheckpoint> {
         Ok(AgentCheckpoint {
             conversation_id: runtime_state_id.to_string(),
-            messages_json: AgentCheckpoint::serialize_payload(
-                vec![crate::llm::types::Message::user(marker.to_string())],
-                None,
-            )?,
+            messages_json: serde_json::to_string(&vec![crate::llm::types::Message::user(
+                marker.to_string(),
+            )])
+            .map_err(|error| RuntimeStateError::SerializationError(error.to_string()))?,
             current_plan: None,
             active_skills: Vec::new(),
             blocked_reason: None,
             working_dir: None,
             timestamp: Utc::now(),
         })
+    }
+
+    fn managed_checkpoint(runtime_state_id: &str, marker: &str) -> Result<AgentCheckpoint> {
+        let mut checkpoint = checkpoint(runtime_state_id, marker)?;
+        checkpoint.messages_json = AgentCheckpoint::serialize_payload(
+            vec![crate::llm::types::Message::user(marker.to_string())],
+            None,
+        )?;
+        Ok(checkpoint)
     }
 
     fn pending_checkpoint(runtime_state_id: &str, scope_id: &str) -> Result<AgentCheckpoint> {
@@ -2417,17 +2702,20 @@ mod tests {
             next_ordinal: 0,
             projected: Vec::new(),
         };
+        let projected = batch
+            .items
+            .iter()
+            .map(|item| {
+                Ok(super::super::TranscriptProjectionMessage {
+                    ordinal: item.ordinal,
+                    digest: crate::memory::transcript_projection_message_digest(&item.message)?,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
         let cursor_after = super::super::TranscriptProjectionCheckpoint {
             generation_id: runtime_state_id.to_string(),
             next_ordinal: 1,
-            projected: batch
-                .items
-                .iter()
-                .map(|item| super::super::TranscriptProjectionMessage {
-                    ordinal: item.ordinal,
-                    digest: item.digest.clone(),
-                })
-                .collect(),
+            projected,
         };
         Ok(AgentCheckpoint {
             conversation_id: runtime_state_id.to_string(),
@@ -2494,6 +2782,25 @@ mod tests {
             },
             checkpoint: acknowledged,
         })
+    }
+
+    fn update_pending_checkpoint(
+        checkpoint: &AgentCheckpoint,
+        update: impl FnOnce(&mut super::super::PendingTranscriptProjection),
+    ) -> Result<AgentCheckpoint> {
+        let payload = checkpoint.restore_managed_runtime_payload()?;
+        let mut pending = payload
+            .pending_transcript_projection
+            .ok_or_else(|| RuntimeStateError::NotFound("pending debt".to_string()))?;
+        update(&mut pending);
+        let mut updated = checkpoint.clone();
+        updated.messages_json = AgentCheckpoint::serialize_managed_payload(
+            payload.messages,
+            payload.transcript_projection,
+            Some(pending),
+        )?;
+        updated.timestamp = Utc::now();
+        Ok(updated)
     }
 
     fn retirement_manifest(scope_id: &str, epoch: u64) -> Result<ScopeRetirementManifest> {
@@ -2806,23 +3113,119 @@ mod tests {
                 .await
                 .is_err()
         );
-        retry_debt.attempt = 2;
         retry_debt.last_attempt_class =
             Some(super::super::TranscriptProjectionAttemptClass::TransientNoCommit);
         retry_debt.last_error = Some("retryable".to_string());
-        let mut retried = pending.clone();
-        retried.messages_json = AgentCheckpoint::serialize_managed_payload(
-            payload.messages,
+        let mut recorded = pending.clone();
+        recorded.messages_json = AgentCheckpoint::serialize_managed_payload(
+            payload.messages.clone(),
             Some(retry_debt.cursor_before.clone()),
-            Some(retry_debt),
+            Some(retry_debt.clone()),
         )?;
-        let retry = store
+        recorded.timestamp = Utc::now();
+        let mut jumped = recorded.clone();
+        let mut jumped_debt = retry_debt.clone();
+        jumped_debt.attempt = 3;
+        jumped.messages_json = AgentCheckpoint::serialize_managed_payload(
+            payload.messages.clone(),
+            Some(jumped_debt.cursor_before.clone()),
+            Some(jumped_debt),
+        )?;
+        assert!(
+            store
+                .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                    scope_id: "scope-pending".to_string(),
+                    runtime_state_id: "runtime-pending".to_string(),
+                    conversation_epoch: Some(1),
+                    expected_scope_revision: created.scope.revision,
+                    expected_state_version: RuntimeStateExpectedVersion::Managed { revision: 1 },
+                    checkpoint: jumped,
+                })
+                .await
+                .is_err()
+        );
+        let mut metadata_rewrites = Vec::new();
+        let mut changed_plan = recorded.clone();
+        changed_plan.current_plan = Some("forged plan".to_string());
+        metadata_rewrites.push(changed_plan);
+        let mut changed_skills = recorded.clone();
+        changed_skills.active_skills = vec!["forged-skill".to_string()];
+        metadata_rewrites.push(changed_skills);
+        let mut changed_block = recorded.clone();
+        changed_block.blocked_reason = Some("forged block".to_string());
+        metadata_rewrites.push(changed_block);
+        let mut changed_workdir = recorded.clone();
+        changed_workdir.working_dir = Some(std::path::PathBuf::from("/forged"));
+        metadata_rewrites.push(changed_workdir);
+        for checkpoint in metadata_rewrites {
+            assert!(
+                store
+                    .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                        scope_id: "scope-pending".to_string(),
+                        runtime_state_id: "runtime-pending".to_string(),
+                        conversation_epoch: Some(1),
+                        expected_scope_revision: created.scope.revision,
+                        expected_state_version: RuntimeStateExpectedVersion::Managed {
+                            revision: 1,
+                        },
+                        checkpoint,
+                    })
+                    .await
+                    .is_err()
+            );
+        }
+        let failure = store
             .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
                 scope_id: "scope-pending".to_string(),
                 runtime_state_id: "runtime-pending".to_string(),
                 conversation_epoch: Some(1),
                 expected_scope_revision: created.scope.revision,
                 expected_state_version: RuntimeStateExpectedVersion::Managed { revision: 1 },
+                checkpoint: recorded.clone(),
+            })
+            .await?;
+        assert_eq!(failure.status, RuntimeCheckpointCasStatus::Applied);
+        let recorded_payload = recorded.restore_managed_runtime_payload()?;
+        let mut dispatch_debt = recorded_payload
+            .pending_transcript_projection
+            .ok_or_else(|| RuntimeStateError::NotFound("recorded debt".to_string()))?;
+        dispatch_debt.attempt = 2;
+        dispatch_debt.base_runtime_revision = 3;
+        let mut carried = recorded.clone();
+        carried.messages_json = AgentCheckpoint::serialize_managed_payload(
+            recorded_payload.messages.clone(),
+            Some(dispatch_debt.cursor_before.clone()),
+            Some(dispatch_debt.clone()),
+        )?;
+        assert!(
+            store
+                .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                    scope_id: "scope-pending".to_string(),
+                    runtime_state_id: "runtime-pending".to_string(),
+                    conversation_epoch: Some(1),
+                    expected_scope_revision: failure.scope.revision,
+                    expected_state_version: RuntimeStateExpectedVersion::Managed { revision: 2 },
+                    checkpoint: carried,
+                })
+                .await
+                .is_err()
+        );
+        dispatch_debt.last_attempt_class = None;
+        dispatch_debt.last_error = None;
+        let mut retried = recorded;
+        retried.messages_json = AgentCheckpoint::serialize_managed_payload(
+            recorded_payload.messages,
+            Some(dispatch_debt.cursor_before.clone()),
+            Some(dispatch_debt),
+        )?;
+        retried.timestamp = Utc::now();
+        let retry = store
+            .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                scope_id: "scope-pending".to_string(),
+                runtime_state_id: "runtime-pending".to_string(),
+                conversation_epoch: Some(1),
+                expected_scope_revision: failure.scope.revision,
+                expected_state_version: RuntimeStateExpectedVersion::Managed { revision: 2 },
                 checkpoint: retried.clone(),
             })
             .await?;
@@ -2831,7 +3234,7 @@ mod tests {
         let mut forged = transcript_ack_request(
             &retried,
             retry.scope.revision,
-            2,
+            3,
             crate::memory::TranscriptProjectionApplyStatus::Applied,
         )?;
         forged.projection_receipt.payload_digest = "forged".to_string();
@@ -2847,7 +3250,7 @@ mod tests {
             .ok_or_else(|| RuntimeStateError::NotFound("runtime-pending".to_string()))?;
         assert_eq!(
             unchanged.version,
-            RuntimeStateVersion::Managed { revision: 2 }
+            RuntimeStateVersion::Managed { revision: 3 }
         );
         assert!(
             unchanged
@@ -2864,7 +3267,7 @@ mod tests {
         let ack = transcript_ack_request(
             &retried,
             retry.scope.revision,
-            2,
+            3,
             crate::memory::TranscriptProjectionApplyStatus::Applied,
         )?;
         let mut forged_replay = ack.clone();
@@ -2930,6 +3333,413 @@ mod tests {
             .await?;
         assert_eq!(already_applied.status, RuntimeCheckpointCasStatus::Applied);
 
+        let connection = store.open_conn()?;
+        let proof_json = connection
+            .query_row(
+                "SELECT transcript_ack_proof_json FROM runtime_state_versions
+                 WHERE runtime_state_id = ?1",
+                params!["runtime-pending"],
+                |row| row.get::<_, String>(0),
+            )
+            .map_err(|error| RuntimeStateError::Io(error.to_string()))?;
+        let mut proof: SqliteRuntimeTranscriptAckProof =
+            SqliteRuntimeStateStore::decode(&proof_json, "test acknowledgement proof")?;
+        let original_proof = proof.clone();
+        proof.payload_digest = proof.payload_digest.to_ascii_uppercase();
+        proof.operation_id = format!("transcript-projection-v1:{}", proof.payload_digest);
+        connection
+            .execute(
+                "UPDATE runtime_state_versions SET transcript_ack_proof_json = ?1
+                 WHERE runtime_state_id = ?2",
+                params![
+                    SqliteRuntimeStateStore::encode(&proof, "test acknowledgement proof")?,
+                    "runtime-pending"
+                ],
+            )
+            .map_err(|error| RuntimeStateError::Io(error.to_string()))?;
+        assert!(
+            store
+                .load_runtime_state("scope-pending", "runtime-pending")
+                .await
+                .is_err()
+        );
+        connection
+            .execute(
+                "UPDATE runtime_state_versions
+                 SET state_version_json = ?1, transcript_ack_proof_json = ?2
+                 WHERE runtime_state_id = ?3",
+                params![
+                    SqliteRuntimeStateStore::encode(
+                        &RuntimeStateVersion::Unmanaged {
+                            digest: "legacy".to_string()
+                        },
+                        "test unmanaged version"
+                    )?,
+                    SqliteRuntimeStateStore::encode(&original_proof, "test acknowledgement proof")?,
+                    "runtime-pending"
+                ],
+            )
+            .map_err(|error| RuntimeStateError::Io(error.to_string()))?;
+        assert!(
+            store
+                .load_runtime_state("scope-pending", "runtime-pending")
+                .await
+                .is_err()
+        );
+
+        let _ = std::fs::remove_file(path);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn legacy_raw_pending_is_rejected_without_side_effects() -> Result<()> {
+        let path = std::env::temp_dir().join(format!(
+            "echo-state-legacy-pending-{}-{}.sqlite",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let store = SqliteRuntimeStateStore::new(&path)?;
+        let pending = pending_checkpoint("legacy-pending", "legacy-scope")?;
+        assert!(
+            store
+                .save_checkpoint_for_scope("legacy-scope", &pending)
+                .await
+                .is_err()
+        );
+        let checkpoint_only = managed_checkpoint("legacy-v2", "managed")?;
+        store.save_checkpoint(&checkpoint_only).await?;
+        assert!(store.get_checkpoint("legacy-pending").await?.is_none());
+        let restored = store
+            .get_checkpoint("legacy-v2")
+            .await?
+            .ok_or_else(|| RuntimeStateError::NotFound("legacy-v2".to_string()))?
+            .restore_messages()?;
+        assert!(SqliteRuntimeStateStore::serialized_eq(
+            &restored,
+            &checkpoint_only.restore_messages()?
+        )?);
+        let cursor = super::super::TranscriptProjectionCheckpoint {
+            generation_id: "legacy-cursor".to_string(),
+            next_ordinal: 0,
+            projected: Vec::new(),
+        };
+        let mut cursor_checkpoint = checkpoint("legacy-cursor", "cursor")?;
+        cursor_checkpoint.messages_json = AgentCheckpoint::serialize_payload(
+            vec![crate::llm::types::Message::user("cursor".to_string())],
+            Some(cursor.clone()),
+        )?;
+        store.save_checkpoint(&cursor_checkpoint).await?;
+        assert_eq!(
+            store
+                .get_checkpoint("legacy-cursor")
+                .await?
+                .ok_or_else(|| RuntimeStateError::NotFound("legacy-cursor".to_string()))?
+                .restore_transcript_projection()?,
+            Some(cursor)
+        );
+        assert!(store.runtime_state_ids("legacy-scope").await?.is_empty());
+        let _ = std::fs::remove_file(path);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn corrupt_pending_base_revision_fails_closed() -> Result<()> {
+        let path = std::env::temp_dir().join(format!(
+            "echo-state-base-corrupt-{}-{}.sqlite",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let store = SqliteRuntimeStateStore::new(&path)?;
+        let pending = pending_checkpoint("runtime-base-corrupt", "scope-base-corrupt")?;
+        store
+            .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                scope_id: "scope-base-corrupt".to_string(),
+                runtime_state_id: "runtime-base-corrupt".to_string(),
+                conversation_epoch: Some(1),
+                expected_scope_revision: 0,
+                expected_state_version: RuntimeStateExpectedVersion::Absent,
+                checkpoint: pending.clone(),
+            })
+            .await?;
+        let payload = pending.restore_managed_runtime_payload()?;
+        let mut debt = payload
+            .pending_transcript_projection
+            .ok_or_else(|| RuntimeStateError::NotFound("pending debt".to_string()))?;
+        debt.base_runtime_revision = 99;
+        let tampered = AgentCheckpoint::serialize_managed_payload(
+            payload.messages,
+            payload.transcript_projection,
+            Some(debt),
+        )?;
+        let connection = store.open_conn()?;
+        connection
+            .execute(
+                "UPDATE agent_checkpoints SET messages_json = ?1 WHERE conversation_id = ?2",
+                params![tampered, "runtime-base-corrupt"],
+            )
+            .map_err(|error| RuntimeStateError::Io(error.to_string()))?;
+        assert!(
+            store
+                .load_runtime_state("scope-base-corrupt", "runtime-base-corrupt")
+                .await
+                .is_err()
+        );
+        assert!(store.get_checkpoint("runtime-base-corrupt").await.is_err());
+        let persisted = connection
+            .query_row(
+                "SELECT messages_json FROM agent_checkpoints WHERE conversation_id = ?1",
+                params!["runtime-base-corrupt"],
+                |row| row.get::<_, String>(0),
+            )
+            .map_err(|error| RuntimeStateError::Io(error.to_string()))?;
+        assert_eq!(persisted, tampered);
+        let _ = std::fs::remove_file(path);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn retry_terminal_failure_remains_durably_blocked() -> Result<()> {
+        let path = std::env::temp_dir().join(format!(
+            "echo-state-terminal-retry-{}-{}.sqlite",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let store = SqliteRuntimeStateStore::new(&path)?;
+        let initial = pending_checkpoint("runtime-terminal", "scope-terminal")?;
+        let created = store
+            .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                scope_id: "scope-terminal".to_string(),
+                runtime_state_id: "runtime-terminal".to_string(),
+                conversation_epoch: Some(1),
+                expected_scope_revision: 0,
+                expected_state_version: RuntimeStateExpectedVersion::Absent,
+                checkpoint: initial.clone(),
+            })
+            .await?;
+        let failure = update_pending_checkpoint(&initial, |pending| {
+            pending.base_runtime_revision = 2;
+            pending.last_attempt_class =
+                Some(super::super::TranscriptProjectionAttemptClass::DeadlineExceeded);
+            pending.last_error = Some("attempt one deadline".to_string());
+        })?;
+        let failed = store
+            .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                scope_id: "scope-terminal".to_string(),
+                runtime_state_id: "runtime-terminal".to_string(),
+                conversation_epoch: Some(1),
+                expected_scope_revision: created.scope.revision,
+                expected_state_version: RuntimeStateExpectedVersion::Managed { revision: 1 },
+                checkpoint: failure.clone(),
+            })
+            .await?;
+        let dispatch = update_pending_checkpoint(&failure, |pending| {
+            pending.attempt = 2;
+            pending.base_runtime_revision = 3;
+            pending.last_attempt_class = None;
+            pending.last_error = None;
+        })?;
+        let dispatched = store
+            .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                scope_id: "scope-terminal".to_string(),
+                runtime_state_id: "runtime-terminal".to_string(),
+                conversation_epoch: Some(1),
+                expected_scope_revision: failed.scope.revision,
+                expected_state_version: RuntimeStateExpectedVersion::Managed { revision: 2 },
+                checkpoint: dispatch.clone(),
+            })
+            .await?;
+        let terminal = update_pending_checkpoint(&dispatch, |pending| {
+            pending.base_runtime_revision = 4;
+            pending.last_attempt_class =
+                Some(super::super::TranscriptProjectionAttemptClass::SemanticConflict);
+            pending.last_error = Some("attempt two semantic conflict".to_string());
+        })?;
+        let terminal_receipt = store
+            .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                scope_id: "scope-terminal".to_string(),
+                runtime_state_id: "runtime-terminal".to_string(),
+                conversation_epoch: Some(1),
+                expected_scope_revision: dispatched.scope.revision,
+                expected_state_version: RuntimeStateExpectedVersion::Managed { revision: 3 },
+                checkpoint: terminal.clone(),
+            })
+            .await?;
+        let loaded = store
+            .load_runtime_state("scope-terminal", "runtime-terminal")
+            .await?
+            .ok_or_else(|| RuntimeStateError::NotFound("runtime-terminal".to_string()))?;
+        let debt = loaded
+            .checkpoint
+            .ok_or_else(|| RuntimeStateError::NotFound("runtime-terminal checkpoint".to_string()))?
+            .restore_managed_runtime_payload()?
+            .pending_transcript_projection
+            .ok_or_else(|| RuntimeStateError::NotFound("terminal debt".to_string()))?;
+        assert_eq!(debt.attempt, 2);
+        assert_eq!(
+            debt.last_attempt_class,
+            Some(super::super::TranscriptProjectionAttemptClass::SemanticConflict)
+        );
+        let retry = update_pending_checkpoint(&terminal, |pending| {
+            pending.attempt = 3;
+            pending.base_runtime_revision = 5;
+            pending.last_attempt_class = None;
+            pending.last_error = None;
+        })?;
+        assert!(
+            store
+                .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                    scope_id: "scope-terminal".to_string(),
+                    runtime_state_id: "runtime-terminal".to_string(),
+                    conversation_epoch: Some(1),
+                    expected_scope_revision: terminal_receipt.scope.revision,
+                    expected_state_version: RuntimeStateExpectedVersion::Managed { revision: 4 },
+                    checkpoint: retry,
+                })
+                .await
+                .is_err()
+        );
+        let _ = std::fs::remove_file(path);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn managed_deadline_expires_in_queue_without_side_effects() -> Result<()> {
+        let path = std::env::temp_dir().join(format!(
+            "echo-state-deadline-{}-{}.sqlite",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let store = SqliteRuntimeStateStore::new(&path)?;
+        assert_eq!(
+            store.persistence_call_capability(),
+            crate::memory::PersistenceCallCapability::AbsoluteDeadlineV1
+        );
+        let blocker_store = store.clone();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let blocker = tokio::spawn(async move {
+            blocker_store
+                .run_blocking(
+                    SqliteRuntimeStateStore::collection_scope("deadline-scope"),
+                    move |_store| {
+                        let _ignored = entered_tx.send(());
+                        release_rx
+                            .recv_timeout(std::time::Duration::from_secs(2))
+                            .map_err(|error| RuntimeStateError::Io(error.to_string()))?;
+                        Ok(())
+                    },
+                )
+                .await
+        });
+        entered_rx
+            .await
+            .map_err(|error| RuntimeStateError::Io(error.to_string()))?;
+        let context = crate::memory::PersistenceCallContext::with_timeout(
+            std::time::Duration::from_millis(25),
+        )?;
+        let queued_store = store.clone();
+        let queued = tokio::spawn(async move {
+            queued_store
+                .compare_and_save_checkpoint_with_context(
+                    context,
+                    RuntimeCheckpointCasRequest {
+                        scope_id: "deadline-scope".to_string(),
+                        runtime_state_id: "deadline-runtime".to_string(),
+                        conversation_epoch: Some(1),
+                        expected_scope_revision: 0,
+                        expected_state_version: RuntimeStateExpectedVersion::Absent,
+                        checkpoint: managed_checkpoint("deadline-runtime", "deadline")?,
+                    },
+                )
+                .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+        release_tx
+            .send(())
+            .map_err(|error| RuntimeStateError::Io(error.to_string()))?;
+        blocker
+            .await
+            .map_err(|error| RuntimeStateError::Io(error.to_string()))??;
+        let error = queued
+            .await
+            .map_err(|error| RuntimeStateError::Io(error.to_string()))?
+            .err()
+            .ok_or_else(|| {
+                RuntimeStateError::SerializationError(
+                    "expired runtime write was accepted".to_string(),
+                )
+            })?;
+        assert!(matches!(
+            error,
+            crate::error::ReactError::RuntimeState(error)
+                if matches!(error.as_ref(), RuntimeStateError::DeadlineExceeded(_))
+        ));
+        assert!(
+            store
+                .load_runtime_state("deadline-scope", "deadline-runtime")
+                .await?
+                .is_none()
+        );
+        let _ = std::fs::remove_file(path);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn managed_deadline_expires_while_waiting_for_sqlite_writer() -> Result<()> {
+        let path = std::env::temp_dir().join(format!(
+            "echo-state-deadline-writer-{}-{}.sqlite",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let store = SqliteRuntimeStateStore::new(&path)?;
+        let writer = store.open_conn()?;
+        writer
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(|error| RuntimeStateError::Io(error.to_string()))?;
+        let context = crate::memory::PersistenceCallContext::with_timeout(
+            std::time::Duration::from_millis(25),
+        )?;
+        let queued_store = store.clone();
+        let queued = tokio::spawn(async move {
+            queued_store
+                .compare_and_save_checkpoint_with_context(
+                    context,
+                    RuntimeCheckpointCasRequest {
+                        scope_id: "deadline-writer-scope".to_string(),
+                        runtime_state_id: "deadline-writer-runtime".to_string(),
+                        conversation_epoch: Some(1),
+                        expected_scope_revision: 0,
+                        expected_state_version: RuntimeStateExpectedVersion::Absent,
+                        checkpoint: managed_checkpoint("deadline-writer-runtime", "deadline")?,
+                    },
+                )
+                .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+        writer
+            .execute_batch("ROLLBACK")
+            .map_err(|error| RuntimeStateError::Io(error.to_string()))?;
+        drop(writer);
+        let error = queued
+            .await
+            .map_err(|error| RuntimeStateError::Io(error.to_string()))?
+            .err()
+            .ok_or_else(|| {
+                RuntimeStateError::SerializationError(
+                    "expired writer-blocked runtime write was accepted".to_string(),
+                )
+            })?;
+        assert!(matches!(
+            error,
+            crate::error::ReactError::RuntimeState(error)
+                if matches!(error.as_ref(), RuntimeStateError::DeadlineExceeded(_))
+        ));
+        assert!(
+            store
+                .load_runtime_state("deadline-writer-scope", "deadline-writer-runtime")
+                .await?
+                .is_none()
+        );
         let _ = std::fs::remove_file(path);
         Ok(())
     }
@@ -3410,10 +4220,10 @@ mod tests {
             })
             .await?;
         assert_eq!(next.scope.conversation_epoch, Some(11));
-        assert_eq!(
-            store.begin_scope_retirement(request.clone()).await?.status,
-            ScopeRetirementStatus::AlreadyCompleted
-        );
+        let lost_ack = store.begin_scope_retirement(request.clone()).await?;
+        assert_eq!(lost_ack.status, ScopeRetirementStatus::AlreadyCompleted);
+        assert_eq!(lost_ack.scope, completed.scope);
+        lost_ack.validate()?;
 
         let second_delete = crate::memory::ManagedConversationDelete::prepare("scope-a", 11)?;
         let second_request =
@@ -3467,7 +4277,8 @@ mod tests {
             ScopeRetirementStatus::ReceiptExpired
         );
         assert_eq!(expired_old_receipt.retention_floor_epoch, 10);
-        assert_eq!(expired_old_receipt.scope, authority_before_old_replay);
+        assert_eq!(expired_old_receipt.scope, completed.scope);
+        expired_old_receipt.validate()?;
         assert_eq!(
             store.load_scope_authority("scope-a").await?,
             Some(authority_before_old_replay.clone())

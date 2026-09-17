@@ -145,6 +145,7 @@ fn runtime_state_authorities() -> &'static Mutex<HashMap<PathBuf, Weak<FileRunti
 pub struct FileRuntimeStateStore {
     base: PathBuf,
     authority: Arc<FileRuntimeStateAuthority>,
+    call_context: Option<crate::memory::PersistenceCallContext>,
 }
 
 impl FileRuntimeStateStore {
@@ -177,7 +178,11 @@ impl FileRuntimeStateStore {
                 authority
             }
         };
-        Ok(Self { base, authority })
+        Ok(Self {
+            base,
+            authority,
+            call_context: None,
+        })
     }
 
     #[cfg(test)]
@@ -260,6 +265,32 @@ impl FileRuntimeStateStore {
         echo_core::error::RuntimeStateError::RevisionExhausted(message.into()).into()
     }
 
+    fn with_call_context(&self, context: crate::memory::PersistenceCallContext) -> Self {
+        let mut store = self.clone();
+        store.call_context = Some(context);
+        store
+    }
+
+    fn ensure_call_deadline(
+        context: crate::memory::PersistenceCallContext,
+        operation: &str,
+    ) -> crate::error::Result<()> {
+        context.ensure_not_expired().map_err(|error| match error {
+            echo_core::error::MemoryError::DeadlineExceeded(_) => {
+                echo_core::error::RuntimeStateError::DeadlineExceeded(operation.to_string()).into()
+            }
+            other => Self::invalid_state(format!(
+                "invalid persistence deadline for {operation}: {other}"
+            )),
+        })
+    }
+
+    fn ensure_active_deadline(&self, operation: &str) -> crate::error::Result<()> {
+        self.call_context.map_or(Ok(()), |context| {
+            Self::ensure_call_deadline(context, operation)
+        })
+    }
+
     fn next_revision(current: u64, identity: &str) -> crate::error::Result<u64> {
         current
             .checked_add(1)
@@ -283,6 +314,84 @@ impl FileRuntimeStateStore {
             Self::invalid_state(format!("failed to serialize runtime payload: {error}"))
         })?;
         Ok(left == right)
+    }
+
+    fn validate_unmanaged_checkpoint(checkpoint: &AgentCheckpoint) -> crate::error::Result<()> {
+        let payload = checkpoint.restore_managed_runtime_payload()?;
+        if payload.pending_transcript_projection.is_some() {
+            return Err(Self::managed_state_error(
+                "pending checkpoint payload requires compare-and-save",
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_runtime_owner_payload(owner: &RuntimeStateOwner) -> crate::error::Result<()> {
+        match owner.state_version.as_ref() {
+            None | Some(RuntimeStateVersion::Unmanaged { .. }) => {
+                if let Some(checkpoint) = owner.checkpoint.as_ref() {
+                    Self::validate_unmanaged_checkpoint(checkpoint)?;
+                }
+            }
+            Some(RuntimeStateVersion::Managed { revision }) => {
+                let checkpoint = owner.checkpoint.as_ref().ok_or_else(|| {
+                    Self::invalid_state(format!(
+                        "managed runtime state {} lost its checkpoint",
+                        owner.runtime_state_id
+                    ))
+                })?;
+                let payload = checkpoint.restore_managed_runtime_payload()?;
+                if payload
+                    .pending_transcript_projection
+                    .as_ref()
+                    .is_some_and(|pending| pending.base_runtime_revision != *revision)
+                {
+                    return Err(Self::invalid_state(
+                        "pending transcript base revision does not match managed state",
+                    ));
+                }
+            }
+            Some(RuntimeStateVersion::Retired { .. }) => {
+                if owner.checkpoint.is_some() || owner.transcript_ack_proof.is_some() {
+                    return Err(Self::invalid_state(
+                        "retired runtime state retained checkpoint or acknowledgement proof",
+                    ));
+                }
+            }
+            Some(RuntimeStateVersion::Absent) => {
+                return Err(Self::invalid_state(
+                    "runtime state persisted an absent version",
+                ));
+            }
+        }
+        if let Some(proof) = owner.transcript_ack_proof.as_ref() {
+            let payload = owner
+                .checkpoint
+                .as_ref()
+                .ok_or_else(|| {
+                    Self::invalid_state("acknowledged runtime state is missing checkpoint")
+                })?
+                .restore_managed_runtime_payload()?;
+            if proof.payload_digest.len() != 64
+                || !proof
+                    .payload_digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                || proof.operation_id
+                    != format!("transcript-projection-v1:{}", proof.payload_digest)
+                || !matches!(
+                    owner.state_version,
+                    Some(RuntimeStateVersion::Managed { .. })
+                )
+                || payload.pending_transcript_projection.is_some()
+                || payload.transcript_projection.is_none()
+            {
+                return Err(Self::invalid_state(
+                    "runtime transcript acknowledgement proof is corrupt",
+                ));
+            }
+        }
+        Ok(())
     }
 
     fn owner_state_version(owner: &RuntimeStateOwner) -> crate::error::Result<RuntimeStateVersion> {
@@ -436,16 +545,16 @@ impl FileRuntimeStateStore {
                     && current_pending.cursor_after == next_pending.cursor_after
                     && next_pending.base_runtime_revision == resulting_revision
                     && current_pending.prepared_at == next_pending.prepared_at
-                    && current_pending
-                        .attempt
-                        .checked_add(1)
-                        .is_some_and(|attempt| next_pending.attempt == attempt)
-                    && next_pending.last_attempt_class.is_some()
-                    && next_pending
-                        .last_error
-                        .as_deref()
-                        .is_some_and(|error| !error.trim().is_empty())
+                    && Self::valid_pending_attempt_transition(current_pending, next_pending)
                     && messages_match
+                    && owner.is_some_and(|owner| {
+                        owner.checkpoint.as_ref().is_some_and(|current_checkpoint| {
+                            current_checkpoint.current_plan == checkpoint.current_plan
+                                && current_checkpoint.active_skills == checkpoint.active_skills
+                                && current_checkpoint.blocked_reason == checkpoint.blocked_reason
+                                && current_checkpoint.working_dir == checkpoint.working_dir
+                        })
+                    })
                     && current.as_ref().is_some_and(|current| {
                         current.transcript_projection == next.transcript_projection
                     }) =>
@@ -456,6 +565,42 @@ impl FileRuntimeStateStore {
                 "pending transcript projection identity is immutable until acknowledgement",
             )),
         }
+    }
+
+    fn valid_pending_attempt_transition(
+        current: &super::PendingTranscriptProjection,
+        next: &super::PendingTranscriptProjection,
+    ) -> bool {
+        let next_has_failure = next.last_attempt_class.is_some()
+            && next
+                .last_error
+                .as_deref()
+                .is_some_and(|error| !error.trim().is_empty());
+        let same_attempt_failure = next.attempt == current.attempt
+            && current.last_attempt_class.is_none()
+            && current.last_error.is_none()
+            && next_has_failure;
+        let retry_dispatch = current
+            .attempt
+            .checked_add(1)
+            .is_some_and(|attempt| next.attempt == attempt)
+            && next.last_attempt_class.is_none()
+            && next.last_error.is_none()
+            && current
+                .last_attempt_class
+                .as_ref()
+                .is_none_or(Self::retryable_attempt_class);
+        same_attempt_failure || retry_dispatch
+    }
+
+    fn retryable_attempt_class(class: &super::TranscriptProjectionAttemptClass) -> bool {
+        matches!(
+            class,
+            super::TranscriptProjectionAttemptClass::OutcomeUnknown
+                | super::TranscriptProjectionAttemptClass::TransientNoCommit
+                | super::TranscriptProjectionAttemptClass::RevisionConflict
+                | super::TranscriptProjectionAttemptClass::DeadlineExceeded
+        )
     }
 
     fn validate_transcript_ack(
@@ -881,6 +1026,7 @@ impl FileRuntimeStateStore {
                 }
             }
         }
+        Self::validate_runtime_owner_payload(&owner)?;
         Ok(Some(owner))
     }
 
@@ -901,27 +1047,7 @@ impl FileRuntimeStateStore {
     }
 
     fn write_runtime_owner_sync(&self, owner: &RuntimeStateOwner) -> crate::error::Result<()> {
-        if let Some(proof) = owner.transcript_ack_proof.as_ref() {
-            let payload = owner
-                .checkpoint
-                .as_ref()
-                .ok_or_else(|| {
-                    Self::invalid_state("acknowledged runtime state is missing checkpoint")
-                })?
-                .restore_managed_runtime_payload()?;
-            if proof.operation_id.trim().is_empty()
-                || proof.payload_digest.trim().is_empty()
-                || !matches!(
-                    owner.state_version,
-                    Some(RuntimeStateVersion::Managed { .. })
-                )
-                || payload.pending_transcript_projection.is_some()
-            {
-                return Err(Self::invalid_state(
-                    "runtime transcript acknowledgement proof is corrupt",
-                ));
-            }
-        }
+        Self::validate_runtime_owner_payload(owner)?;
         let _safe_scope = safe_segment(&owner.scope_id)?;
         let path = self.runtime_owner_path(&owner.runtime_state_id)?;
         let parent = path
@@ -1132,7 +1258,6 @@ impl FileRuntimeStateStore {
             .find(|receipt| receipt.manifest.delete_operation_id == delete_operation_id)
             .cloned()
             .map(|mut receipt| {
-                receipt.scope = record.authority.clone();
                 receipt.retention_floor_epoch = retention_floor_epoch;
                 receipt.status =
                     if retention_floor_epoch >= receipt.manifest.expected_conversation_epoch {
@@ -1194,15 +1319,19 @@ impl FileRuntimeStateStore {
     {
         let store = self.clone();
         Box::pin(async move {
+            store.ensure_active_deadline("runtime-state entity admission")?;
             let safe = safe_segment(&conversation_id)?;
             let key = BlockingFileOperationKey::new(
                 "runtime-state",
                 store.base.clone(),
                 BlockingFileOperationScope::Entity(safe),
             );
-            run_keyed_file_operation(key, move || operation(store, conversation_id))
-                .await
-                .map_err(Self::to_react_err)?
+            run_keyed_file_operation(key, move || {
+                store.ensure_active_deadline("runtime-state entity durable work")?;
+                operation(store, conversation_id)
+            })
+            .await
+            .map_err(Self::to_react_err)?
         })
     }
 
@@ -1217,15 +1346,19 @@ impl FileRuntimeStateStore {
     {
         let store = self.clone();
         Box::pin(async move {
+            store.ensure_active_deadline("runtime-state scope admission")?;
             let safe = safe_segment(&scope_id)?;
             let key = BlockingFileOperationKey::new(
                 "runtime-state",
                 store.base.clone(),
                 BlockingFileOperationScope::Collection(safe),
             );
-            run_keyed_file_operation(key, move || operation(store, scope_id))
-                .await
-                .map_err(Self::to_react_err)?
+            run_keyed_file_operation(key, move || {
+                store.ensure_active_deadline("runtime-state scope durable work")?;
+                operation(store, scope_id)
+            })
+            .await
+            .map_err(Self::to_react_err)?
         })
     }
 }
@@ -1233,6 +1366,115 @@ impl FileRuntimeStateStore {
 impl RuntimeStateStore for FileRuntimeStateStore {
     fn runtime_state_capability(&self) -> RuntimeStateCapability {
         RuntimeStateCapability::RevisionedV1
+    }
+
+    fn persistence_call_capability(&self) -> crate::memory::PersistenceCallCapability {
+        crate::memory::PersistenceCallCapability::AbsoluteDeadlineV1
+    }
+
+    fn load_runtime_state_with_context<'a>(
+        &'a self,
+        context: crate::memory::PersistenceCallContext,
+        scope_id: &'a str,
+        runtime_state_id: &'a str,
+    ) -> BoxFuture<'a, crate::error::Result<Option<ManagedRuntimeStateSnapshot>>> {
+        if let Err(error) = Self::ensure_call_deadline(context, "runtime-state load") {
+            return Box::pin(async move { Err(error) });
+        }
+        let store = self.with_call_context(context);
+        let scope_id = scope_id.to_string();
+        let runtime_state_id = runtime_state_id.to_string();
+        Box::pin(async move { store.load_runtime_state(&scope_id, &runtime_state_id).await })
+    }
+
+    fn load_scope_authority_with_context<'a>(
+        &'a self,
+        context: crate::memory::PersistenceCallContext,
+        scope_id: &'a str,
+    ) -> BoxFuture<'a, crate::error::Result<Option<RuntimeScopeAuthority>>> {
+        if let Err(error) = Self::ensure_call_deadline(context, "runtime scope load") {
+            return Box::pin(async move { Err(error) });
+        }
+        let store = self.with_call_context(context);
+        let scope_id = scope_id.to_string();
+        Box::pin(async move { store.load_scope_authority(&scope_id).await })
+    }
+
+    fn compare_and_save_checkpoint_with_context<'a>(
+        &'a self,
+        context: crate::memory::PersistenceCallContext,
+        request: RuntimeCheckpointCasRequest,
+    ) -> BoxFuture<'a, crate::error::Result<RuntimeCheckpointCasReceipt>> {
+        if let Err(error) = Self::ensure_call_deadline(context, "runtime checkpoint CAS") {
+            return Box::pin(async move { Err(error) });
+        }
+        let store = self.with_call_context(context);
+        Box::pin(async move { store.compare_and_save_checkpoint(request).await })
+    }
+
+    fn acknowledge_transcript_projection_with_context<'a>(
+        &'a self,
+        context: crate::memory::PersistenceCallContext,
+        request: RuntimeTranscriptAckRequest,
+    ) -> BoxFuture<'a, crate::error::Result<RuntimeCheckpointCasReceipt>> {
+        if let Err(error) =
+            Self::ensure_call_deadline(context, "runtime transcript acknowledgement")
+        {
+            return Box::pin(async move { Err(error) });
+        }
+        let store = self.with_call_context(context);
+        Box::pin(async move { store.acknowledge_transcript_projection(request).await })
+    }
+
+    fn retire_runtime_generation_with_context<'a>(
+        &'a self,
+        context: crate::memory::PersistenceCallContext,
+        request: RuntimeGenerationRetireRequest,
+    ) -> BoxFuture<'a, crate::error::Result<RuntimeGenerationRetireReceipt>> {
+        if let Err(error) = Self::ensure_call_deadline(context, "runtime generation retirement") {
+            return Box::pin(async move { Err(error) });
+        }
+        let store = self.with_call_context(context);
+        Box::pin(async move { store.retire_runtime_generation(request).await })
+    }
+
+    fn begin_scope_retirement_with_context<'a>(
+        &'a self,
+        context: crate::memory::PersistenceCallContext,
+        request: ScopeRetirementRequest,
+    ) -> BoxFuture<'a, crate::error::Result<ScopeRetirementReceipt>> {
+        if let Err(error) = Self::ensure_call_deadline(context, "runtime scope retirement begin") {
+            return Box::pin(async move { Err(error) });
+        }
+        let store = self.with_call_context(context);
+        Box::pin(async move { store.begin_scope_retirement(request).await })
+    }
+
+    fn continue_scope_retirement_with_context<'a>(
+        &'a self,
+        context: crate::memory::PersistenceCallContext,
+        scope_id: &'a str,
+        delete_operation_id: &'a str,
+        expected_scope_revision: u64,
+        advance: ScopeRetirementAdvance,
+    ) -> BoxFuture<'a, crate::error::Result<ScopeRetirementReceipt>> {
+        if let Err(error) = Self::ensure_call_deadline(context, "runtime scope retirement advance")
+        {
+            return Box::pin(async move { Err(error) });
+        }
+        let store = self.with_call_context(context);
+        let scope_id = scope_id.to_string();
+        let delete_operation_id = delete_operation_id.to_string();
+        Box::pin(async move {
+            store
+                .continue_scope_retirement(
+                    &scope_id,
+                    &delete_operation_id,
+                    expected_scope_revision,
+                    advance,
+                )
+                .await
+        })
     }
 
     fn load_runtime_state<'a>(
@@ -1245,6 +1487,7 @@ impl RuntimeStateStore for FileRuntimeStateStore {
         self.run_blocking(runtime_state_id, move |store, runtime_state_id| {
             let _scope = store.lock_scope(&scope_id)?;
             let _runtime = store.lock_runtime(&runtime_state_id)?;
+            store.ensure_active_deadline("runtime-state load after lock")?;
             let scope_record = store.reconcile_scope_owner_sync(&scope_id)?;
             let Some(owner) = store.read_live_runtime_owner_sync(&runtime_state_id)? else {
                 return Ok(None);
@@ -1273,6 +1516,7 @@ impl RuntimeStateStore for FileRuntimeStateStore {
     ) -> BoxFuture<'a, crate::error::Result<Option<RuntimeScopeAuthority>>> {
         self.run_scope_blocking(scope_id.to_string(), move |store, scope_id| {
             let _scope = store.lock_scope(&scope_id)?;
+            store.ensure_active_deadline("runtime scope load after lock")?;
             let record = store.reconcile_scope_owner_sync(&scope_id)?;
             if let Some(record) = record {
                 return Ok(Some(record.authority));
@@ -1293,6 +1537,7 @@ impl RuntimeStateStore for FileRuntimeStateStore {
         self.run_blocking(runtime_state_id, move |store, runtime_state_id| {
             let _scope = store.lock_scope(&request.scope_id)?;
             let _runtime = store.lock_runtime(&runtime_state_id)?;
+            store.ensure_active_deadline("runtime checkpoint CAS after lock")?;
             let mut scope_record = store.reconcile_scope_owner_sync(&request.scope_id)?;
             let owner = store.read_live_runtime_owner_sync(&runtime_state_id)?;
             if let Some(owner) = owner.as_ref()
@@ -1423,6 +1668,7 @@ impl RuntimeStateStore for FileRuntimeStateStore {
         self.run_blocking(runtime_state_id, move |store, runtime_state_id| {
             let _scope = store.lock_scope(&request.scope_id)?;
             let _runtime = store.lock_runtime(&runtime_state_id)?;
+            store.ensure_active_deadline("runtime transcript acknowledgement after lock")?;
             let mut scope_record = store.reconcile_scope_owner_sync(&request.scope_id)?;
             let owner = store.read_live_runtime_owner_sync(&runtime_state_id)?;
             if let Some(owner) = owner.as_ref()
@@ -1561,6 +1807,7 @@ impl RuntimeStateStore for FileRuntimeStateStore {
             let _safe_scope = safe_segment(&request.scope_id)?;
             let _scope = store.lock_scope(&request.scope_id)?;
             let _runtime = store.lock_runtime(&runtime_state_id)?;
+            store.ensure_active_deadline("runtime generation retirement after lock")?;
             let mut scope_record = store.reconcile_scope_owner_sync(&request.scope_id)?;
             let owner = store.read_live_runtime_owner_sync(&runtime_state_id)?;
             if let Some(owner) = owner.as_ref()
@@ -1681,6 +1928,7 @@ impl RuntimeStateStore for FileRuntimeStateStore {
         self.run_scope_blocking(request.scope_id.clone(), move |store, scope_id| {
             let _scope = store.lock_scope(&scope_id)?;
             let _runtime_shards = store.lock_all_runtime_shards()?;
+            store.ensure_active_deadline("runtime scope retirement begin after lock")?;
             let mut record = store.reconcile_scope_owner_sync(&scope_id)?;
             if let Some(record) = record.as_ref() {
                 if let Some(mut receipt) =
@@ -1818,6 +2066,7 @@ impl RuntimeStateStore for FileRuntimeStateStore {
         self.run_scope_blocking(scope_id, move |store, scope_id| {
             let _scope = store.lock_scope(&scope_id)?;
             let _runtime_shards = store.lock_all_runtime_shards()?;
+            store.ensure_active_deadline("runtime scope retirement advance after lock")?;
             let mut record = store
                 .reconcile_scope_owner_sync(&scope_id)?
                 .ok_or_else(|| {
@@ -2108,6 +2357,9 @@ impl RuntimeStateStore for FileRuntimeStateStore {
         scope_id: &'a str,
         checkpoint: &'a AgentCheckpoint,
     ) -> BoxFuture<'a, crate::error::Result<()>> {
+        if let Err(error) = Self::validate_unmanaged_checkpoint(checkpoint) {
+            return Box::pin(async move { Err(error) });
+        }
         let checkpoint = checkpoint.clone();
         let runtime_state_id = checkpoint.conversation_id.clone();
         let scope_id = scope_id.to_string();
@@ -2282,7 +2534,7 @@ mod tests {
     fn checkpoint(runtime_state_id: &str, marker: &str) -> AgentCheckpoint {
         AgentCheckpoint {
             conversation_id: runtime_state_id.to_string(),
-            messages_json: format!(r#"["{marker}"]"#),
+            messages_json: serde_json::json!([{"role": "user", "content": marker}]).to_string(),
             current_plan: None,
             active_skills: Vec::new(),
             blocked_reason: None,
@@ -2329,17 +2581,20 @@ mod tests {
             next_ordinal: 0,
             projected: Vec::new(),
         };
+        let projected = batch
+            .items
+            .iter()
+            .map(|item| {
+                Ok(super::super::TranscriptProjectionMessage {
+                    ordinal: item.ordinal,
+                    digest: crate::memory::transcript_projection_message_digest(&item.message)?,
+                })
+            })
+            .collect::<crate::error::Result<Vec<_>>>()?;
         let cursor_after = super::super::TranscriptProjectionCheckpoint {
             generation_id: runtime_state_id.to_string(),
             next_ordinal: 1,
-            projected: batch
-                .items
-                .iter()
-                .map(|item| super::super::TranscriptProjectionMessage {
-                    ordinal: item.ordinal,
-                    digest: item.digest.clone(),
-                })
-                .collect(),
+            projected,
         };
         Ok(AgentCheckpoint {
             conversation_id: runtime_state_id.to_string(),
@@ -2406,6 +2661,25 @@ mod tests {
             },
             checkpoint: acknowledged,
         })
+    }
+
+    fn update_pending_checkpoint(
+        checkpoint: &AgentCheckpoint,
+        update: impl FnOnce(&mut super::super::PendingTranscriptProjection),
+    ) -> crate::error::Result<AgentCheckpoint> {
+        let payload = checkpoint.restore_managed_runtime_payload()?;
+        let mut pending = payload.pending_transcript_projection.ok_or_else(|| {
+            echo_core::error::RuntimeStateError::NotFound("pending debt".to_string())
+        })?;
+        update(&mut pending);
+        let mut updated = checkpoint.clone();
+        updated.messages_json = AgentCheckpoint::serialize_managed_payload(
+            payload.messages,
+            payload.transcript_projection,
+            Some(pending),
+        )?;
+        updated.timestamp = Utc::now();
+        Ok(updated)
     }
 
     fn retirement_manifest(
@@ -2677,23 +2951,122 @@ mod tests {
                 .await
                 .is_err()
         );
-        retry_debt.attempt = 2;
         retry_debt.last_attempt_class =
             Some(super::super::TranscriptProjectionAttemptClass::TransientNoCommit);
         retry_debt.last_error = Some("retryable".to_string());
-        let mut retried = pending.clone();
-        retried.messages_json = AgentCheckpoint::serialize_managed_payload(
-            payload.messages,
+        let mut recorded = pending.clone();
+        recorded.messages_json = AgentCheckpoint::serialize_managed_payload(
+            payload.messages.clone(),
             Some(retry_debt.cursor_before.clone()),
-            Some(retry_debt),
+            Some(retry_debt.clone()),
         )?;
-        let retry = store
+        recorded.timestamp = Utc::now();
+        let mut jumped = recorded.clone();
+        let mut jumped_debt = retry_debt.clone();
+        jumped_debt.attempt = 3;
+        jumped.messages_json = AgentCheckpoint::serialize_managed_payload(
+            payload.messages.clone(),
+            Some(jumped_debt.cursor_before.clone()),
+            Some(jumped_debt),
+        )?;
+        assert!(
+            store
+                .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                    scope_id: "scope-pending".to_string(),
+                    runtime_state_id: "runtime-pending".to_string(),
+                    conversation_epoch: Some(1),
+                    expected_scope_revision: created.scope.revision,
+                    expected_state_version: RuntimeStateExpectedVersion::Managed { revision: 1 },
+                    checkpoint: jumped,
+                })
+                .await
+                .is_err()
+        );
+        let mut metadata_rewrites = Vec::new();
+        let mut changed_plan = recorded.clone();
+        changed_plan.current_plan = Some("forged plan".to_string());
+        metadata_rewrites.push(changed_plan);
+        let mut changed_skills = recorded.clone();
+        changed_skills.active_skills = vec!["forged-skill".to_string()];
+        metadata_rewrites.push(changed_skills);
+        let mut changed_block = recorded.clone();
+        changed_block.blocked_reason = Some("forged block".to_string());
+        metadata_rewrites.push(changed_block);
+        let mut changed_workdir = recorded.clone();
+        changed_workdir.working_dir = Some(PathBuf::from("/forged"));
+        metadata_rewrites.push(changed_workdir);
+        for checkpoint in metadata_rewrites {
+            assert!(
+                store
+                    .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                        scope_id: "scope-pending".to_string(),
+                        runtime_state_id: "runtime-pending".to_string(),
+                        conversation_epoch: Some(1),
+                        expected_scope_revision: created.scope.revision,
+                        expected_state_version: RuntimeStateExpectedVersion::Managed {
+                            revision: 1,
+                        },
+                        checkpoint,
+                    })
+                    .await
+                    .is_err()
+            );
+        }
+        let failure = store
             .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
                 scope_id: "scope-pending".to_string(),
                 runtime_state_id: "runtime-pending".to_string(),
                 conversation_epoch: Some(1),
                 expected_scope_revision: created.scope.revision,
                 expected_state_version: RuntimeStateExpectedVersion::Managed { revision: 1 },
+                checkpoint: recorded.clone(),
+            })
+            .await?;
+        assert_eq!(failure.status, RuntimeCheckpointCasStatus::Applied);
+        let recorded_payload = recorded.restore_managed_runtime_payload()?;
+        let mut dispatch_debt =
+            recorded_payload
+                .pending_transcript_projection
+                .ok_or_else(|| {
+                    echo_core::error::RuntimeStateError::NotFound("recorded debt".to_string())
+                })?;
+        dispatch_debt.attempt = 2;
+        dispatch_debt.base_runtime_revision = 3;
+        let mut carried = recorded.clone();
+        carried.messages_json = AgentCheckpoint::serialize_managed_payload(
+            recorded_payload.messages.clone(),
+            Some(dispatch_debt.cursor_before.clone()),
+            Some(dispatch_debt.clone()),
+        )?;
+        assert!(
+            store
+                .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                    scope_id: "scope-pending".to_string(),
+                    runtime_state_id: "runtime-pending".to_string(),
+                    conversation_epoch: Some(1),
+                    expected_scope_revision: failure.scope.revision,
+                    expected_state_version: RuntimeStateExpectedVersion::Managed { revision: 2 },
+                    checkpoint: carried,
+                })
+                .await
+                .is_err()
+        );
+        dispatch_debt.last_attempt_class = None;
+        dispatch_debt.last_error = None;
+        let mut retried = recorded;
+        retried.messages_json = AgentCheckpoint::serialize_managed_payload(
+            recorded_payload.messages,
+            Some(dispatch_debt.cursor_before.clone()),
+            Some(dispatch_debt),
+        )?;
+        retried.timestamp = Utc::now();
+        let retry = store
+            .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                scope_id: "scope-pending".to_string(),
+                runtime_state_id: "runtime-pending".to_string(),
+                conversation_epoch: Some(1),
+                expected_scope_revision: failure.scope.revision,
+                expected_state_version: RuntimeStateExpectedVersion::Managed { revision: 2 },
                 checkpoint: retried.clone(),
             })
             .await?;
@@ -2702,7 +3075,7 @@ mod tests {
         let mut forged = transcript_ack_request(
             &retried,
             retry.scope.revision,
-            2,
+            3,
             crate::memory::TranscriptProjectionApplyStatus::Applied,
         )?;
         forged.projection_receipt.payload_digest = "forged".to_string();
@@ -2720,7 +3093,7 @@ mod tests {
             })?;
         assert_eq!(
             unchanged.version,
-            RuntimeStateVersion::Managed { revision: 2 }
+            RuntimeStateVersion::Managed { revision: 3 }
         );
         assert!(
             unchanged
@@ -2739,7 +3112,7 @@ mod tests {
         let ack = transcript_ack_request(
             &retried,
             retry.scope.revision,
-            2,
+            3,
             crate::memory::TranscriptProjectionApplyStatus::Applied,
         )?;
         let mut forged_replay = ack.clone();
@@ -2805,6 +3178,337 @@ mod tests {
             .await?;
         assert_eq!(already_applied.status, RuntimeCheckpointCasStatus::Applied);
 
+        let owner = store
+            .read_runtime_owner_sync("runtime-pending")?
+            .ok_or_else(|| {
+                echo_core::error::RuntimeStateError::NotFound("runtime-pending".to_string())
+            })?;
+        let mut unmanaged_proof = owner.clone();
+        unmanaged_proof.state_version = Some(RuntimeStateVersion::Unmanaged {
+            digest: "legacy".to_string(),
+        });
+        assert!(store.write_runtime_owner_sync(&unmanaged_proof).is_err());
+        let mut uppercase_proof = owner;
+        let proof = uppercase_proof
+            .transcript_ack_proof
+            .as_mut()
+            .ok_or_else(|| {
+                echo_core::error::RuntimeStateError::NotFound(
+                    "runtime transcript acknowledgement proof".to_string(),
+                )
+            })?;
+        proof.payload_digest = proof.payload_digest.to_ascii_uppercase();
+        proof.operation_id = format!("transcript-projection-v1:{}", proof.payload_digest);
+        let path = store.runtime_owner_path("runtime-pending")?;
+        let raw = serde_json::to_vec_pretty(&uppercase_proof)
+            .map_err(|error| FileRuntimeStateStore::invalid_state(error.to_string()))?;
+        echo_core::utils::fs::atomic_write(&path, &raw)
+            .map_err(FileRuntimeStateStore::to_react_err)?;
+        assert!(
+            store
+                .load_runtime_state("scope-pending", "runtime-pending")
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            std::fs::read(path).map_err(FileRuntimeStateStore::to_react_err)?,
+            raw
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn legacy_raw_pending_is_rejected_without_side_effects() -> crate::error::Result<()> {
+        let tmp = tmp_base();
+        let store = FileRuntimeStateStore::new(&tmp)?;
+        let pending = pending_checkpoint("legacy-pending", "legacy-scope")?;
+        assert!(
+            store
+                .save_checkpoint_for_scope("legacy-scope", &pending)
+                .await
+                .is_err()
+        );
+        let checkpoint_only = managed_checkpoint("legacy-v2", "managed")?;
+        store.save_checkpoint(&checkpoint_only).await?;
+        assert!(!store.runtime_owner_path("legacy-pending")?.exists());
+        let restored = store
+            .get_checkpoint("legacy-v2")
+            .await?
+            .ok_or_else(|| echo_core::error::RuntimeStateError::NotFound("legacy-v2".to_string()))?
+            .restore_messages()?;
+        assert!(FileRuntimeStateStore::serialized_eq(
+            &restored,
+            &checkpoint_only.restore_messages()?
+        )?);
+        let cursor = super::super::TranscriptProjectionCheckpoint {
+            generation_id: "legacy-cursor".to_string(),
+            next_ordinal: 0,
+            projected: Vec::new(),
+        };
+        let mut cursor_checkpoint = checkpoint("legacy-cursor", "cursor");
+        cursor_checkpoint.messages_json = AgentCheckpoint::serialize_payload(
+            vec![crate::llm::types::Message::user("cursor".to_string())],
+            Some(cursor.clone()),
+        )?;
+        store.save_checkpoint(&cursor_checkpoint).await?;
+        assert_eq!(
+            store
+                .get_checkpoint("legacy-cursor")
+                .await?
+                .ok_or_else(|| {
+                    echo_core::error::RuntimeStateError::NotFound("legacy-cursor".to_string())
+                })?
+                .restore_transcript_projection()?,
+            Some(cursor)
+        );
+        assert!(store.runtime_state_ids("legacy-scope").await?.is_empty());
+        let _ = std::fs::remove_dir_all(&tmp);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn corrupt_pending_base_revision_fails_closed() -> crate::error::Result<()> {
+        let tmp = tmp_base();
+        let store = FileRuntimeStateStore::new(&tmp)?;
+        let pending = pending_checkpoint("runtime-base-corrupt", "scope-base-corrupt")?;
+        store
+            .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                scope_id: "scope-base-corrupt".to_string(),
+                runtime_state_id: "runtime-base-corrupt".to_string(),
+                conversation_epoch: Some(1),
+                expected_scope_revision: 0,
+                expected_state_version: RuntimeStateExpectedVersion::Absent,
+                checkpoint: pending,
+            })
+            .await?;
+        let mut owner = store
+            .read_runtime_owner_sync("runtime-base-corrupt")?
+            .ok_or_else(|| {
+                echo_core::error::RuntimeStateError::NotFound("runtime-base-corrupt".to_string())
+            })?;
+        let checkpoint = owner.checkpoint.as_mut().ok_or_else(|| {
+            echo_core::error::RuntimeStateError::NotFound(
+                "runtime-base-corrupt checkpoint".to_string(),
+            )
+        })?;
+        let payload = checkpoint.restore_managed_runtime_payload()?;
+        let mut debt = payload.pending_transcript_projection.ok_or_else(|| {
+            echo_core::error::RuntimeStateError::NotFound("pending debt".to_string())
+        })?;
+        debt.base_runtime_revision = 99;
+        checkpoint.messages_json = AgentCheckpoint::serialize_managed_payload(
+            payload.messages,
+            payload.transcript_projection,
+            Some(debt),
+        )?;
+        let path = store.runtime_owner_path("runtime-base-corrupt")?;
+        let raw = serde_json::to_vec_pretty(&owner)
+            .map_err(|error| FileRuntimeStateStore::invalid_state(error.to_string()))?;
+        echo_core::utils::fs::atomic_write(&path, &raw)
+            .map_err(FileRuntimeStateStore::to_react_err)?;
+        assert!(
+            store
+                .load_runtime_state("scope-base-corrupt", "runtime-base-corrupt")
+                .await
+                .is_err()
+        );
+        assert!(store.get_checkpoint("runtime-base-corrupt").await.is_err());
+        assert!(
+            store
+                .load_scope_authority("scope-base-corrupt")
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            std::fs::read(&path).map_err(FileRuntimeStateStore::to_react_err)?,
+            raw
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn retry_terminal_failure_remains_durably_blocked() -> crate::error::Result<()> {
+        let tmp = tmp_base();
+        let store = FileRuntimeStateStore::new(&tmp)?;
+        let initial = pending_checkpoint("runtime-terminal", "scope-terminal")?;
+        let created = store
+            .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                scope_id: "scope-terminal".to_string(),
+                runtime_state_id: "runtime-terminal".to_string(),
+                conversation_epoch: Some(1),
+                expected_scope_revision: 0,
+                expected_state_version: RuntimeStateExpectedVersion::Absent,
+                checkpoint: initial.clone(),
+            })
+            .await?;
+        let failure = update_pending_checkpoint(&initial, |pending| {
+            pending.base_runtime_revision = 2;
+            pending.last_attempt_class =
+                Some(super::super::TranscriptProjectionAttemptClass::DeadlineExceeded);
+            pending.last_error = Some("attempt one deadline".to_string());
+        })?;
+        let failed = store
+            .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                scope_id: "scope-terminal".to_string(),
+                runtime_state_id: "runtime-terminal".to_string(),
+                conversation_epoch: Some(1),
+                expected_scope_revision: created.scope.revision,
+                expected_state_version: RuntimeStateExpectedVersion::Managed { revision: 1 },
+                checkpoint: failure.clone(),
+            })
+            .await?;
+        let dispatch = update_pending_checkpoint(&failure, |pending| {
+            pending.attempt = 2;
+            pending.base_runtime_revision = 3;
+            pending.last_attempt_class = None;
+            pending.last_error = None;
+        })?;
+        let dispatched = store
+            .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                scope_id: "scope-terminal".to_string(),
+                runtime_state_id: "runtime-terminal".to_string(),
+                conversation_epoch: Some(1),
+                expected_scope_revision: failed.scope.revision,
+                expected_state_version: RuntimeStateExpectedVersion::Managed { revision: 2 },
+                checkpoint: dispatch.clone(),
+            })
+            .await?;
+        let terminal = update_pending_checkpoint(&dispatch, |pending| {
+            pending.base_runtime_revision = 4;
+            pending.last_attempt_class =
+                Some(super::super::TranscriptProjectionAttemptClass::SemanticConflict);
+            pending.last_error = Some("attempt two semantic conflict".to_string());
+        })?;
+        let terminal_receipt = store
+            .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                scope_id: "scope-terminal".to_string(),
+                runtime_state_id: "runtime-terminal".to_string(),
+                conversation_epoch: Some(1),
+                expected_scope_revision: dispatched.scope.revision,
+                expected_state_version: RuntimeStateExpectedVersion::Managed { revision: 3 },
+                checkpoint: terminal.clone(),
+            })
+            .await?;
+        let loaded = store
+            .load_runtime_state("scope-terminal", "runtime-terminal")
+            .await?
+            .ok_or_else(|| {
+                echo_core::error::RuntimeStateError::NotFound("runtime-terminal".to_string())
+            })?;
+        let debt = loaded
+            .checkpoint
+            .ok_or_else(|| {
+                echo_core::error::RuntimeStateError::NotFound(
+                    "runtime-terminal checkpoint".to_string(),
+                )
+            })?
+            .restore_managed_runtime_payload()?
+            .pending_transcript_projection
+            .ok_or_else(|| {
+                echo_core::error::RuntimeStateError::NotFound("terminal debt".to_string())
+            })?;
+        assert_eq!(debt.attempt, 2);
+        assert_eq!(
+            debt.last_attempt_class,
+            Some(super::super::TranscriptProjectionAttemptClass::SemanticConflict)
+        );
+        let retry = update_pending_checkpoint(&terminal, |pending| {
+            pending.attempt = 3;
+            pending.base_runtime_revision = 5;
+            pending.last_attempt_class = None;
+            pending.last_error = None;
+        })?;
+        assert!(
+            store
+                .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                    scope_id: "scope-terminal".to_string(),
+                    runtime_state_id: "runtime-terminal".to_string(),
+                    conversation_epoch: Some(1),
+                    expected_scope_revision: terminal_receipt.scope.revision,
+                    expected_state_version: RuntimeStateExpectedVersion::Managed { revision: 4 },
+                    checkpoint: retry,
+                })
+                .await
+                .is_err()
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn managed_deadline_expires_in_queue_without_side_effects() -> crate::error::Result<()> {
+        let tmp = tmp_base();
+        let store = FileRuntimeStateStore::new(&tmp)?;
+        assert_eq!(
+            store.persistence_call_capability(),
+            crate::memory::PersistenceCallCapability::AbsoluteDeadlineV1
+        );
+        let blocker_store = store.clone();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let blocker = tokio::spawn(async move {
+            blocker_store
+                .run_blocking("deadline-runtime".to_string(), move |_store, _| {
+                    let _ignored = entered_tx.send(());
+                    release_rx
+                        .recv_timeout(Duration::from_secs(2))
+                        .map_err(FileRuntimeStateStore::to_react_err)?;
+                    Ok(())
+                })
+                .await
+        });
+        entered_rx
+            .await
+            .map_err(FileRuntimeStateStore::to_react_err)?;
+        let context =
+            crate::memory::PersistenceCallContext::with_timeout(Duration::from_millis(25))?;
+        let queued_store = store.clone();
+        let queued = tokio::spawn(async move {
+            queued_store
+                .compare_and_save_checkpoint_with_context(
+                    context,
+                    RuntimeCheckpointCasRequest {
+                        scope_id: "deadline-scope".to_string(),
+                        runtime_state_id: "deadline-runtime".to_string(),
+                        conversation_epoch: Some(1),
+                        expected_scope_revision: 0,
+                        expected_state_version: RuntimeStateExpectedVersion::Absent,
+                        checkpoint: managed_checkpoint("deadline-runtime", "deadline")?,
+                    },
+                )
+                .await
+        });
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        release_tx
+            .send(())
+            .map_err(FileRuntimeStateStore::to_react_err)?;
+        blocker
+            .await
+            .map_err(FileRuntimeStateStore::to_react_err)??;
+        let error = queued
+            .await
+            .map_err(FileRuntimeStateStore::to_react_err)?
+            .err()
+            .ok_or_else(|| {
+                FileRuntimeStateStore::invalid_state("expired runtime write was accepted")
+            })?;
+        assert!(matches!(
+            error,
+            ReactError::RuntimeState(error)
+                if matches!(
+                    error.as_ref(),
+                    echo_core::error::RuntimeStateError::DeadlineExceeded(_)
+                )
+        ));
+        assert!(
+            store
+                .load_runtime_state("deadline-scope", "deadline-runtime")
+                .await?
+                .is_none()
+        );
         let _ = std::fs::remove_dir_all(&tmp);
         Ok(())
     }
@@ -3293,6 +3997,8 @@ mod tests {
         assert_eq!(next.scope.conversation_epoch, Some(11));
         let lost_ack = store.begin_scope_retirement(request.clone()).await?;
         assert_eq!(lost_ack.status, ScopeRetirementStatus::AlreadyCompleted);
+        assert_eq!(lost_ack.scope, completed.scope);
+        lost_ack.validate()?;
 
         let second_delete = crate::memory::ManagedConversationDelete::prepare("scope-a", 11)?;
         let second_request =
@@ -3346,7 +4052,8 @@ mod tests {
             ScopeRetirementStatus::ReceiptExpired
         );
         assert_eq!(expired_old_receipt.retention_floor_epoch, 10);
-        assert_eq!(expired_old_receipt.scope, authority_before_old_replay);
+        assert_eq!(expired_old_receipt.scope, completed.scope);
+        expired_old_receipt.validate()?;
         assert_eq!(
             store.load_scope_authority("scope-a").await?,
             Some(authority_before_old_replay.clone())
@@ -3492,7 +4199,7 @@ mod tests {
                 .get_checkpoint("shared")
                 .await?
                 .map(|checkpoint| checkpoint.messages_json),
-            Some(r#"["reclaimed"]"#.to_string())
+            Some(checkpoint("shared", "reclaimed").messages_json)
         );
         let _ = std::fs::remove_dir_all(&tmp);
         Ok(())
@@ -3695,7 +4402,7 @@ mod tests {
                 .get_checkpoint("alice-2")
                 .await?
                 .map(|checkpoint| checkpoint.messages_json),
-            Some(r#"["alice two"]"#.to_string())
+            Some(checkpoint("alice-2", "alice two").messages_json)
         );
         assert!(restarted.get_checkpoint("bob-1").await?.is_some());
         assert_eq!(
@@ -3765,7 +4472,10 @@ mod tests {
     #[tokio::test]
     async fn reset_keeps_transcript_and_product_delete_retires_all_incarnations()
     -> crate::error::Result<()> {
-        use crate::memory::{ConversationStore, FileConversationStore, NewConversation};
+        use crate::memory::{
+            ConversationStore, EnsureConversationProjectionRequest, FileConversationStore,
+            NewConversation,
+        };
 
         let tmp = tmp_base();
         let runtime = FileRuntimeStateStore::new(&tmp)?;
@@ -3790,13 +4500,13 @@ mod tests {
                 .await?;
         }
         runtime
-            .save_checkpoint_for_scope("alice", &managed_checkpoint("alice-1", "one")?)
+            .save_checkpoint_for_scope("alice", &checkpoint("alice-1", "one"))
             .await?;
         runtime
-            .save_checkpoint_for_scope("alice", &managed_checkpoint("alice-2", "two")?)
+            .save_checkpoint_for_scope("alice", &checkpoint("alice-2", "two"))
             .await?;
         runtime
-            .save_checkpoint_for_scope("bob", &managed_checkpoint("bob-1", "bob")?)
+            .save_checkpoint_for_scope("bob", &checkpoint("bob-1", "bob"))
             .await?;
 
         for runtime_state_id in ["alice-1", "bob-1"] {
@@ -3841,8 +4551,22 @@ mod tests {
         assert_eq!(conversations.count_messages("alice").await?, 1);
         assert!(conversations.get_conversation("alice-1").await?.is_none());
 
+        let authority = conversations
+            .ensure_projection_epoch(EnsureConversationProjectionRequest {
+                conversation: NewConversation {
+                    conversation_id: "alice".to_string(),
+                    user_id: "default".to_string(),
+                    agent_type: None,
+                    title: None,
+                },
+                expected_tombstone_epoch: None,
+            })
+            .await?;
+        let delete =
+            crate::memory::ManagedConversationDelete::prepare("alice", authority.authority.epoch)?;
         let deleted =
-            super::super::delete_persisted_conversation(&conversations, &runtime, "alice").await?;
+            super::super::delete_persisted_conversation_managed(&conversations, &runtime, delete)
+                .await?;
         assert_eq!(deleted.runtime_state_ids, vec!["alice-2".to_string()]);
         assert!(conversations.get_conversation("alice").await?.is_none());
         assert!(runtime.get_checkpoint("alice-1").await?.is_none());
@@ -4070,30 +4794,10 @@ mod tests {
     async fn exact_utf8_ids_do_not_alias_on_case_folding_filesystems() -> crate::error::Result<()> {
         let tmp = tmp_base();
         let store = FileRuntimeStateStore::new(&tmp)?;
-        let upper = AgentCheckpoint {
-            conversation_id: "A".to_string(),
-            messages_json: "[\"upper\"]".to_string(),
-            current_plan: None,
-            active_skills: Vec::new(),
-            blocked_reason: None,
-            working_dir: None,
-            timestamp: Utc::now(),
-        };
-        let lower = AgentCheckpoint {
-            conversation_id: "a".to_string(),
-            messages_json: "[\"lower\"]".to_string(),
-            ..upper.clone()
-        };
-        let composed = AgentCheckpoint {
-            conversation_id: "é".to_string(),
-            messages_json: "[\"composed\"]".to_string(),
-            ..upper.clone()
-        };
-        let decomposed = AgentCheckpoint {
-            conversation_id: "e\u{301}".to_string(),
-            messages_json: "[\"decomposed\"]".to_string(),
-            ..upper.clone()
-        };
+        let upper = checkpoint("A", "upper");
+        let lower = checkpoint("a", "lower");
+        let composed = checkpoint("é", "composed");
+        let decomposed = checkpoint("e\u{301}", "decomposed");
         let paths = [
             store.checkpoint_path(&upper.conversation_id)?,
             store.checkpoint_path(&lower.conversation_id)?,
@@ -4127,15 +4831,7 @@ mod tests {
         let tmp = tmp_base();
         let store = FileRuntimeStateStore::new(&tmp)?;
         let caller_store = store.clone();
-        let checkpoint = AgentCheckpoint {
-            conversation_id: "abort".to_string(),
-            messages_json: "[\"committed\"]".to_string(),
-            current_plan: None,
-            active_skills: Vec::new(),
-            blocked_reason: None,
-            working_dir: None,
-            timestamp: Utc::now(),
-        };
+        let checkpoint = checkpoint("abort", "committed");
         let checkpoint_for_write = checkpoint.clone();
         let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
@@ -4176,20 +4872,8 @@ mod tests {
     async fn save_clear_save_preserves_exact_fifo_after_caller_abort() -> crate::error::Result<()> {
         let tmp = tmp_base();
         let store = FileRuntimeStateStore::new(&tmp)?;
-        let first_checkpoint = AgentCheckpoint {
-            conversation_id: "aba".to_string(),
-            messages_json: "[\"first\"]".to_string(),
-            current_plan: None,
-            active_skills: Vec::new(),
-            blocked_reason: None,
-            working_dir: None,
-            timestamp: Utc::now(),
-        };
-        let final_checkpoint = AgentCheckpoint {
-            messages_json: "[\"final\"]".to_string(),
-            timestamp: Utc::now(),
-            ..first_checkpoint.clone()
-        };
+        let first_checkpoint = checkpoint("aba", "first");
+        let final_checkpoint = checkpoint("aba", "final");
         let first_store = store.clone();
         let first_for_operation = first_checkpoint.clone();
         let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
