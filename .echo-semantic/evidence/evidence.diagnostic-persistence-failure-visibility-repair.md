@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.diagnostic-persistence-failure-visibility-repair
 kind: evidence
-observed_at: source:3c0637da3d2cd26a1e91ce8ffe034a0e7a4c890af40dbc49e05475c579118a37
+observed_at: ab3ed7d23f0a3fbe2bb859a7537df2546531239e
 source_refs:
   - src/trace/mod.rs
   - src/audit.rs
