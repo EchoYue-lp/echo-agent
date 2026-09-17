@@ -1540,7 +1540,7 @@ async fn settle_loaded_pending_transcript_projection_with_budget(
                     state,
                     messages,
                     pending,
-                } => (state, messages, pending),
+                } => (state, messages, *pending),
                 TranscriptProjectionDispatchPreparation::Terminal(settlement) => {
                     return Ok(transcript_settlement_outcome(settlement));
                 }
@@ -1562,7 +1562,7 @@ enum TranscriptProjectionDispatchPreparation {
     Ready {
         state: ManagedRuntimeStateSnapshot,
         messages: Vec<crate::llm::types::Message>,
-        pending: PendingTranscriptProjection,
+        pending: Box<PendingTranscriptProjection>,
     },
     Terminal(crate::memory::TranscriptProjectionSettlement),
 }
@@ -1671,7 +1671,7 @@ async fn prepare_transcript_projection_retry(
                     checkpoint: Some(checkpoint),
                 },
                 messages,
-                pending,
+                pending: Box::new(pending),
             })
         }
         RuntimeCheckpointCasStatus::RevisionConflict => Ok(
@@ -1728,9 +1728,11 @@ async fn dispatch_transcript_projection(
                 &state,
                 &messages,
                 &pending,
-                crate::memory::TranscriptProjectionSettlementStatus::Deferred,
-                crate::memory::TranscriptProjectionErrorClass::DeadlineExceeded,
-                detail,
+                TranscriptProjectionFailure {
+                    status: crate::memory::TranscriptProjectionSettlementStatus::Deferred,
+                    error_class: crate::memory::TranscriptProjectionErrorClass::DeadlineExceeded,
+                    detail,
+                },
                 budget,
             )
             .await;
@@ -1744,9 +1746,11 @@ async fn dispatch_transcript_projection(
                 &state,
                 &messages,
                 &pending,
-                status,
-                error_class,
-                &detail,
+                TranscriptProjectionFailure {
+                    status,
+                    error_class,
+                    detail: &detail,
+                },
                 budget,
             )
             .await;
@@ -1765,9 +1769,11 @@ async fn dispatch_transcript_projection(
             &state,
             &messages,
             &pending,
-            crate::memory::TranscriptProjectionSettlementStatus::Conflict,
-            crate::memory::TranscriptProjectionErrorClass::SemanticConflict,
-            detail,
+            TranscriptProjectionFailure {
+                status: crate::memory::TranscriptProjectionSettlementStatus::Conflict,
+                error_class: crate::memory::TranscriptProjectionErrorClass::SemanticConflict,
+                detail,
+            },
             budget,
         )
         .await;
@@ -1782,9 +1788,11 @@ async fn dispatch_transcript_projection(
             &state,
             &messages,
             &pending,
-            crate::memory::TranscriptProjectionSettlementStatus::Conflict,
-            crate::memory::TranscriptProjectionErrorClass::SemanticConflict,
-            detail,
+            TranscriptProjectionFailure {
+                status: crate::memory::TranscriptProjectionSettlementStatus::Conflict,
+                error_class: crate::memory::TranscriptProjectionErrorClass::SemanticConflict,
+                detail,
+            },
             budget,
         )
         .await;
@@ -1844,9 +1852,11 @@ async fn dispatch_transcript_projection(
                 &state,
                 &messages,
                 &pending,
-                crate::memory::TranscriptProjectionSettlementStatus::Deferred,
-                crate::memory::TranscriptProjectionErrorClass::DeadlineExceeded,
-                detail,
+                TranscriptProjectionFailure {
+                    status: crate::memory::TranscriptProjectionSettlementStatus::Deferred,
+                    error_class: crate::memory::TranscriptProjectionErrorClass::DeadlineExceeded,
+                    detail,
+                },
                 budget,
             )
             .await;
@@ -1860,9 +1870,11 @@ async fn dispatch_transcript_projection(
                 &state,
                 &messages,
                 &pending,
-                status,
-                error_class,
-                &detail,
+                TranscriptProjectionFailure {
+                    status,
+                    error_class,
+                    detail: &detail,
+                },
                 budget,
             )
             .await;
@@ -1893,9 +1905,11 @@ async fn dispatch_transcript_projection(
                 &state,
                 &messages,
                 &pending,
-                crate::memory::TranscriptProjectionSettlementStatus::Deferred,
-                crate::memory::TranscriptProjectionErrorClass::RevisionConflict,
-                detail,
+                TranscriptProjectionFailure {
+                    status: crate::memory::TranscriptProjectionSettlementStatus::Deferred,
+                    error_class: crate::memory::TranscriptProjectionErrorClass::RevisionConflict,
+                    detail,
+                },
                 budget,
             )
             .await;
@@ -1908,9 +1922,11 @@ async fn dispatch_transcript_projection(
                 &state,
                 &messages,
                 &pending,
-                crate::memory::TranscriptProjectionSettlementStatus::Conflict,
-                crate::memory::TranscriptProjectionErrorClass::SemanticConflict,
-                &detail,
+                TranscriptProjectionFailure {
+                    status: crate::memory::TranscriptProjectionSettlementStatus::Conflict,
+                    error_class: crate::memory::TranscriptProjectionErrorClass::SemanticConflict,
+                    detail: &detail,
+                },
                 budget,
             )
             .await;
@@ -1919,17 +1935,21 @@ async fn dispatch_transcript_projection(
     }
 }
 
+struct TranscriptProjectionFailure<'a> {
+    status: crate::memory::TranscriptProjectionSettlementStatus,
+    error_class: crate::memory::TranscriptProjectionErrorClass,
+    detail: &'a str,
+}
+
 async fn recorded_transcript_failure_settlement(
     runtime_state_store: &dyn RuntimeStateStore,
     state: &ManagedRuntimeStateSnapshot,
     messages: &[crate::llm::types::Message],
     pending: &PendingTranscriptProjection,
-    status: crate::memory::TranscriptProjectionSettlementStatus,
-    error_class: crate::memory::TranscriptProjectionErrorClass,
-    detail: &str,
+    failure: TranscriptProjectionFailure<'_>,
     budget: PersistenceOperationDeadline,
 ) -> crate::memory::TranscriptProjectionSettlement {
-    let attempt_class = transcript_error_attempt_class(error_class);
+    let attempt_class = transcript_error_attempt_class(failure.error_class);
     let retryable = transcript_attempt_is_retryable(&attempt_class);
     if persist_transcript_attempt_failure(
         runtime_state_store,
@@ -1937,22 +1957,30 @@ async fn recorded_transcript_failure_settlement(
         messages,
         pending,
         attempt_class,
-        detail,
+        failure.detail,
         budget,
     )
     .await
     {
-        pending_settlement(pending, status, error_class, detail.to_string())
+        pending_settlement(
+            pending,
+            failure.status,
+            failure.error_class,
+            failure.detail.to_string(),
+        )
     } else {
         pending_settlement(
             pending,
             if retryable {
                 crate::memory::TranscriptProjectionSettlementStatus::Deferred
             } else {
-                status
+                failure.status
             },
             crate::memory::TranscriptProjectionErrorClass::OutcomeUnknown,
-            format!("failure classification is not durable; recovery must re-prove it: {detail}"),
+            format!(
+                "failure classification is not durable; recovery must re-prove it: {}",
+                failure.detail
+            ),
         )
     }
 }
@@ -3951,9 +3979,11 @@ mod checkpoint_tests {
             &durable,
             &payload.messages,
             &pending,
-            crate::memory::TranscriptProjectionSettlementStatus::Blocked,
-            TranscriptProjectionErrorClass::Unsupported,
-            "injected unsupported apply",
+            TranscriptProjectionFailure {
+                status: crate::memory::TranscriptProjectionSettlementStatus::Blocked,
+                error_class: TranscriptProjectionErrorClass::Unsupported,
+                detail: "injected unsupported apply",
+            },
             PersistenceOperationDeadline::new()?,
         )
         .await;

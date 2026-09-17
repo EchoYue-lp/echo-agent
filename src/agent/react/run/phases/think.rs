@@ -135,6 +135,26 @@ pub(crate) async fn run_think(
     let mut llm_stream = match create_llm_stream(snap, messages.clone(), final_only).await {
         Ok(stream) => Box::pin(stream),
         Err(error) => {
+            if snap
+                .cancel_token
+                .as_ref()
+                .is_some_and(crate::agent::CancellationToken::is_cancelled)
+            {
+                let reason = "Agent execution cancelled before model response";
+                super::finalize::settle_terminal_projection(
+                    snap,
+                    context,
+                    Some(reason.to_string()),
+                    tx,
+                )
+                .await?;
+                snap.finalize_run(crate::trace::RunStatus::Cancelled, None, Some(reason))
+                    .await;
+                let _ = tx.send(Ok(AgentEvent::Cancelled)).await;
+                return Ok(ThinkOutcome::TerminalSettled {
+                    outcome: crate::agent::AgentSteerTurnOutcome::Cancelled,
+                });
+            }
             super::finalize::settle_terminal_projection(snap, context, Some(error.to_string()), tx)
                 .await?;
             snap.finalize_run(

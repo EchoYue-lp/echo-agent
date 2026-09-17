@@ -1173,7 +1173,7 @@ impl<'a> AgentPersistenceCoordinator<'a> {
                             .record_checkpoint_event(runtime_state_id)
                             .await;
                     }
-                    return Ok(outcome.settlement);
+                    Ok(outcome.settlement)
                 }
                 crate::state::RuntimeCheckpointCasStatus::RevisionConflict => {
                     let (_, _, new_current) = self

@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.transcript-projection-settlement-verification
 kind: evidence
-observed_at: source:bfa5b4590c617d8286f2b80571d5c450622d47c7425d6f1ecb1978bf85743352
+observed_at: source:df3909bab5e6d047cac27c29ce098a331020e28886a022e3daa383ac12e985f1
 source_refs:
   - echo-core/src/error.rs
   - echo-core/src/memory/conversation.rs
@@ -18,7 +18,6 @@ source_refs:
   - docs/adr/0056-durable-transcript-projection-settlement.md
 supports: [finding.transcript-projection-settlement, behavior.context-memory-lifecycle, behavior.observation-persistence, rule.context-persistence-separation, rule.fact-projection-separation]
 limitations:
-  - Full workspace merge gate and public feature matrix run after the branch merges latest main
   - Remote Linux and Windows CI remain pending until the pull request is opened
   - SDK verification is explicitly outside this framework evidence
 command_results:
@@ -28,6 +27,8 @@ command_results:
   - { command: "cargo check -p echo_agent --lib --locked", exit_code: 0 }
   - { command: "cargo fmt --all -- --check", exit_code: 0 }
   - { command: "git diff --check", exit_code: 0 }
+  - { command: "./scripts/verify.sh", exit_code: 0 }
+  - { command: "cargo check -p echo_agent --no-default-features --features <each of acp,a2a,mcp,lsp,sqlite,telemetry,topology,subagent,web,media,data,statistics,channels,git,database,rag,chart> --locked", exit_code: 0 }
 ---
 
 # Transcript projection durable settlement verification
@@ -46,9 +47,10 @@ force checkpoint、max iteration hook ordering、settlement-before-terminal 与 
 
 ## 来源与范围
 
-验证在 `fix/Echoyue/transcript-projection-settlement` framework worktree 执行；formatter、focused tests、
-root lib check 与 diff check 全部退出 0。完整 workspace/all-feature/no-default/feature matrix 在合入最新
-main 后只运行一次，并将在最终交付前追加到本 Evidence。
+验证在 `fix/Echoyue/transcript-projection-settlement` framework worktree 执行；分支已包含最新
+`origin/main@99b9abd6`。`./scripts/verify.sh` 覆盖 formatter、两档 Clippy、workspace all-target/
+all-feature tests、examples/learning contracts 与 no-default lib check，最终退出 0；root lib tests
+896/896 通过。17 个独立 public feature checks 全部退出 0。
 
 ## 已知缺口
 

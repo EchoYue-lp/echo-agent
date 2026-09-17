@@ -5,11 +5,11 @@ kind: audit
 boundary_ref: boundary.workspace-architecture
 lens: contract_evidence
 freshness: stale
-revision: source:bfa5b4590c617d8286f2b80571d5c450622d47c7425d6f1ecb1978bf85743352
+revision: source:df3909bab5e6d047cac27c29ce098a331020e28886a022e3daa383ac12e985f1
 finding_refs: [finding.sdk-repository-extraction]
 challenges:
   source-ownership:
-    revision: source:bfa5b4590c617d8286f2b80571d5c450622d47c7425d6f1ecb1978bf85743352
+    revision: source:df3909bab5e6d047cac27c29ce098a331020e28886a022e3daa383ac12e985f1
     source_refs: [Cargo.toml, README.md, README.zh.md, .github/workflows/rust-ci.yml]
     evidence_refs: [evidence.sdk-repository-extraction-equivalence, evidence.sdk-repository-extraction-verification]
     finding_refs: [finding.sdk-repository-extraction]

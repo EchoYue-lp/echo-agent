@@ -6,7 +6,7 @@ title: Framework 正式文档与 ADR
 asset_type: document
 status: needs_review
 risk: medium
-observed_at: source:bfa5b4590c617d8286f2b80571d5c450622d47c7425d6f1ecb1978bf85743352
+observed_at: source:df3909bab5e6d047cac27c29ce098a331020e28886a022e3daa383ac12e985f1
 boundary_refs: [boundary.workspace-architecture]
 code_refs: [README.md, README.zh.md, docs/en/README.md, docs/zh/README.md, docs/en/architecture.md, docs/zh/architecture.md, docs/en/concepts.md, docs/zh/concepts.md, docs/en/lifecycles.md, docs/zh/lifecycles.md, docs/en/24-eval-system.md, docs/zh/24-eval-system.md, docs/en/29-long-running-tasks.md, docs/zh/29-long-running-tasks.md, docs/adr/0014-framework-capability-placement.md, docs/adr/0033-subagent-factory-singleflight-publication.md, docs/adr/0034-context-scoped-tool-result-cache.md, docs/adr/0035-owned-tool-registry-handles.md, docs/adr/0036-eval-workspace-generation-lifecycle.md, docs/adr/0037-eval-timeout-turn-settlement.md, docs/adr/0038-eval-trace-correlation-identity.md, docs/adr/0039-background-task-terminal-authority.md, docs/adr/0040-framework-concept-documentation-authority.md, docs/adr/0041-semantic-governance-continuity.md]
 consumer_refs: [echo-agent-learning/tests/documentation_contract.rs]
