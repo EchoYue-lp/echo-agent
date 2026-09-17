@@ -2219,8 +2219,7 @@ impl RuntimeStateStore for SqliteRuntimeStateStore {
 
             let completing = matches!(&advance, ScopeRetirementAdvance::Complete);
             let mut changed_state: Option<SqliteRuntimeStateRecord> = None;
-            let can_complete;
-            match advance {
+            let can_complete = match advance {
                 ScopeRetirementAdvance::ConversationDeleted { receipt } => {
                     if receipt.operation_id != manifest.delete_operation_id
                         || receipt.payload_digest != manifest.payload_digest
@@ -2243,7 +2242,7 @@ impl RuntimeStateStore for SqliteRuntimeStateStore {
                         ));
                     }
                     manifest.conversation_delete_receipt = Some(receipt);
-                    can_complete = false;
+                    false
                 }
                 ScopeRetirementAdvance::GenerationDropped {
                     runtime_state_id,
@@ -2307,15 +2306,15 @@ impl RuntimeStateStore for SqliteRuntimeStateStore {
                         checkpoint: None,
                     });
                     item.status = ScopeRetirementItemStatus::DroppedByDelete;
-                    can_complete = false;
+                    false
                 }
                 ScopeRetirementAdvance::Complete => {
-                    can_complete = manifest.conversation_delete_receipt.is_some()
+                    manifest.conversation_delete_receipt.is_some()
                         && manifest.items.iter().all(|item| {
                             item.status == ScopeRetirementItemStatus::DroppedByDelete
-                        });
+                        })
                 }
-            }
+            };
             if completing && !can_complete {
                 return Ok(Self::retirement_receipt(
                     record.authority,

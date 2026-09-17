@@ -6,7 +6,7 @@ title: External echo-agent SDK repository owner
 asset_type: protocol
 status: active
 risk: high
-observed_at: source:df3909bab5e6d047cac27c29ce098a331020e28886a022e3daa383ac12e985f1
+observed_at: source:eff0290e1aff3c3a56f0ba94f57460e220d08f8eb04d3023efde058982972f03
 boundary_refs: [boundary.workspace-architecture]
 code_refs: [README.md, README.zh.md, docs/adr/0051-extract-sdk-repository.md]
 consumer_refs: [https://github.com/EchoYue-lp/echo-agent-sdk/tree/refactor/Echoyue/sdk-source-continuity]

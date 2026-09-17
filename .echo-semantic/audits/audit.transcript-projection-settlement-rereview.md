@@ -5,23 +5,23 @@ kind: audit
 boundary_ref: boundary.context-memory
 lens: data_durability
 freshness: examined
-revision: source:df3909bab5e6d047cac27c29ce098a331020e28886a022e3daa383ac12e985f1
+revision: source:eff0290e1aff3c3a56f0ba94f57460e220d08f8eb04d3023efde058982972f03
 finding_refs: [finding.transcript-projection-settlement]
 challenges:
   authority-and-attempt:
-    revision: source:df3909bab5e6d047cac27c29ce098a331020e28886a022e3daa383ac12e985f1
+    revision: source:eff0290e1aff3c3a56f0ba94f57460e220d08f8eb04d3023efde058982972f03
     source_refs: [src/state/mod.rs, src/state/file.rs, src/state/sqlite.rs, src/agent/snapshot.rs]
     evidence_refs: [evidence.transcript-projection-settlement-repair, evidence.transcript-projection-settlement-verification]
   deadline-and-recovery:
-    revision: source:df3909bab5e6d047cac27c29ce098a331020e28886a022e3daa383ac12e985f1
+    revision: source:eff0290e1aff3c3a56f0ba94f57460e220d08f8eb04d3023efde058982972f03
     source_refs: [echo-core/src/memory/conversation.rs, echo-state/src/memory/file_conversation.rs, echo-state/src/memory/sqlite_conversation.rs, src/state/mod.rs]
     evidence_refs: [evidence.transcript-projection-settlement-repair, evidence.transcript-projection-settlement-verification]
   terminal-and-observation:
-    revision: source:df3909bab5e6d047cac27c29ce098a331020e28886a022e3daa383ac12e985f1
+    revision: source:eff0290e1aff3c3a56f0ba94f57460e220d08f8eb04d3023efde058982972f03
     source_refs: [src/agent/react/run/stream_channel.rs, src/agent/react/run/react_loop.rs, src/agent/react/run/phases/compact.rs, src/agent/react/run/phases/tools.rs, src/agent/react/run/phases/finalize.rs]
     evidence_refs: [evidence.transcript-projection-settlement-repair, evidence.transcript-projection-settlement-verification]
   clear-delete-recreate:
-    revision: source:df3909bab5e6d047cac27c29ce098a331020e28886a022e3daa383ac12e985f1
+    revision: source:eff0290e1aff3c3a56f0ba94f57460e220d08f8eb04d3023efde058982972f03
     source_refs: [src/state/mod.rs, src/state/file.rs, src/state/sqlite.rs, docs/adr/0056-durable-transcript-projection-settlement.md]
     evidence_refs: [evidence.transcript-projection-settlement-repair, evidence.transcript-projection-settlement-verification]
 ---
