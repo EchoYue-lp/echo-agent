@@ -5,7 +5,7 @@
 //! Applications provide persistence, dispatch, review, and product policy
 //! through [`RuntimeDagController`].
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -14,7 +14,7 @@ use echo_core::agent::ExecutionAdmission;
 use echo_core::error::{ReactError, Result};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
-use tokio::task::JoinSet;
+use tokio::task::{AbortHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
 
 use super::runtime::{
@@ -319,9 +319,28 @@ impl Default for RuntimeTaskServiceConfig {
 /// The framework's executor for revisioned dynamic Agent plans.
 pub(crate) struct RuntimeDagExecutor<C: RuntimeDagController> {
     pub(crate) controller: Arc<C>,
-    config: RuntimeTaskServiceConfig,
+    pub(crate) config: RuntimeTaskServiceConfig,
     validator: PlanValidator,
     pub(crate) attempt_cancellations: Arc<Mutex<HashMap<String, CancellationToken>>>,
+    pub(crate) attempt_abort_handles: Arc<Mutex<HashMap<String, AbortHandle>>>,
+    pub(crate) forced_aborts: Arc<Mutex<VecDeque<String>>>,
+}
+
+struct ForcedAbortGuard {
+    execution_id: String,
+    forced_aborts: Arc<Mutex<VecDeque<String>>>,
+    completed: bool,
+}
+
+impl Drop for ForcedAbortGuard {
+    fn drop(&mut self) {
+        if self.completed || std::thread::panicking() {
+            return;
+        }
+        if let Ok(mut forced) = self.forced_aborts.lock() {
+            forced.push_back(self.execution_id.clone());
+        }
+    }
 }
 
 enum InterruptionBoundary {
@@ -337,6 +356,8 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
             config,
             validator: PlanValidator::default(),
             attempt_cancellations: Arc::new(Mutex::new(HashMap::new())),
+            attempt_abort_handles: Arc::new(Mutex::new(HashMap::new())),
+            forced_aborts: Arc::new(Mutex::new(VecDeque::new())),
         }
     }
 
@@ -661,7 +682,14 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
                     continue;
                 }
                 outstanding_claims.insert(claim_id.clone(), (task.clone(), claim.clone()));
-                join_set.spawn(async move {
+                let abort_execution_id = execution_id.clone();
+                let forced_aborts = Arc::clone(&self.forced_aborts);
+                let abort_handle = join_set.spawn(async move {
+                    let mut abort_guard = ForcedAbortGuard {
+                        execution_id: execution_id.clone(),
+                        forced_aborts,
+                        completed: false,
+                    };
                     let dispatch = if let Some(admission) = shared_admission {
                         let lease = tokio::select! {
                             _ = task_cancel.cancelled() => {
@@ -704,8 +732,12 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
                     if let Ok(mut controls) = attempt_cancellations.lock() {
                         controls.remove(&execution_id);
                     }
+                    abort_guard.completed = true;
                     (claim_id, dispatch)
                 });
+                if let Ok(mut handles) = self.attempt_abort_handles.lock() {
+                    handles.insert(abort_execution_id, abort_handle);
+                }
             }
 
             let mut wave_results = Vec::new();
@@ -717,14 +749,59 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
                     biased;
                     joined = join_set.join_next() => {
                         match joined {
-                            Some(Ok(result)) => wave_results.push((
-                                result,
-                                !cancellation_observed && !cancel.is_cancelled(),
-                            )),
-                            Some(Err(error)) => {
-                                wave_errors.push(format!(
-                                    "Subagent dispatch task failed to join: {error}"
+                            Some(Ok(result)) => {
+                                if let Some((task, claim)) = outstanding_claims.get(&result.0) {
+                                    let execution_id = claim.execution_id(run_id, &task.spec.id);
+                                    if let Ok(mut handles) = self.attempt_abort_handles.lock() {
+                                        handles.remove(&execution_id);
+                                    }
+                                    if let Ok(mut forced) = self.forced_aborts.lock() {
+                                        forced.retain(|forced_id| forced_id != &execution_id);
+                                    }
+                                }
+                                wave_results.push((
+                                    result,
+                                    !cancellation_observed && !cancel.is_cancelled(),
                                 ));
+                            }
+                            Some(Err(error)) => {
+                                let forced_execution_id = self
+                                    .forced_aborts
+                                    .lock()
+                                    .ok()
+                                    .and_then(|mut forced| forced.pop_front());
+                                if let Some(execution_id) = forced_execution_id {
+                                    if let Ok(mut handles) = self.attempt_abort_handles.lock() {
+                                        handles.remove(&execution_id);
+                                    }
+                                    let claim_id = outstanding_claims
+                                        .iter()
+                                        .find(|(_, (task, claim))| {
+                                            claim.execution_id(run_id, &task.spec.id) == execution_id
+                                        })
+                                        .map(|(claim_id, _)| claim_id.clone());
+                                    if let Some(claim_id) = claim_id {
+                                        wave_results.push((
+                                            (
+                                                claim_id,
+                                                Err(ReactError::Agent(Box::new(
+                                                    echo_core::error::AgentError::Cancelled(
+                                                        "exact attempt aborted after cancellation grace period".to_string(),
+                                                    ),
+                                                ))),
+                                            ),
+                                            false,
+                                        ));
+                                    } else {
+                                        wave_errors.push(format!(
+                                            "forced exact attempt '{execution_id}' was not outstanding"
+                                        ));
+                                    }
+                                } else {
+                                    wave_errors.push(format!(
+                                        "Subagent dispatch task failed to join: {error}"
+                                    ));
+                                }
                             }
                             None => {}
                         }
@@ -759,6 +836,12 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
                 for (task, claim) in outstanding_claims.values() {
                     let execution_id = claim.execution_id(run_id, &task.spec.id);
                     controls.remove(&execution_id);
+                }
+            }
+            if let Ok(mut handles) = self.attempt_abort_handles.lock() {
+                for (task, claim) in outstanding_claims.values() {
+                    let execution_id = claim.execution_id(run_id, &task.spec.id);
+                    handles.remove(&execution_id);
                 }
             }
 
@@ -2109,6 +2192,73 @@ mod tests {
         assert_eq!(outcome, RuntimeDagOutcome::Cancelled);
         assert_eq!(
             controller.statuses().get("slow"),
+            Some(&TaskStatus::Cancelled)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn exact_interrupt_aborts_non_cooperative_attempt_after_grace() -> Result<()> {
+        let controller = Arc::new(ScriptedController::with_tasks(vec![runtime_task(
+            "stuck",
+            TaskStatus::Pending,
+            &[],
+        )]));
+        let claim_ready = Arc::new(tokio::sync::Notify::new());
+        *controller
+            .claim_ready
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(claim_ready.clone());
+        controller
+            .ignore_cancel
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert("stuck".to_string());
+        let runtime_tasks = Arc::new(super::super::RuntimeTaskService::new(
+            controller.clone(),
+            RuntimeTaskServiceConfig {
+                cancellation_grace_period: Duration::from_millis(20),
+                ..RuntimeTaskServiceConfig::default()
+            },
+        ));
+        let execution = tokio::spawn({
+            let runtime_tasks = Arc::clone(&runtime_tasks);
+            async move {
+                runtime_tasks
+                    .execute("forced-interrupt", CancellationToken::new())
+                    .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(2), claim_ready.notified())
+            .await
+            .map_err(|_| ReactError::Other("claim was not admitted".to_string()))?;
+        let claim = controller
+            .snapshot
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .and_then(|snapshot| snapshot.tasks.first())
+            .and_then(|task| task.execution.claim.clone())
+            .ok_or_else(|| ReactError::Other("claimed task was not persisted".to_string()))?;
+        let mut receipt = None;
+        for _ in 0..100 {
+            let candidate = runtime_tasks
+                .request_attempt_interrupt("forced-interrupt", "stuck", &claim)
+                .await?;
+            if candidate.requested {
+                receipt = Some(candidate);
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(receipt.is_some());
+        let outcome = tokio::time::timeout(Duration::from_secs(2), execution)
+            .await
+            .map_err(|_| ReactError::Other("non-cooperative interrupt did not settle".to_string()))?
+            .map_err(|error| ReactError::Other(format!("runtime task panicked: {error}")))??;
+        assert_eq!(outcome, RuntimeDagOutcome::Cancelled);
+        assert_eq!(
+            controller.statuses().get("stuck"),
             Some(&TaskStatus::Cancelled)
         );
         Ok(())

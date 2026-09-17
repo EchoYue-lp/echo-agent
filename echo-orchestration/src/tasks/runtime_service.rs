@@ -216,6 +216,21 @@ impl<C: RuntimeDagController> RuntimeTaskService<C> {
                     .to_string(),
             ));
         }
+        if requested {
+            let abort_handles = Arc::clone(&self.executor.attempt_abort_handles);
+            let grace_period = self.executor.config.cancellation_grace_period;
+            let abort_execution_id = execution_id.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(grace_period).await;
+                let handle = abort_handles
+                    .lock()
+                    .ok()
+                    .and_then(|handles| handles.get(&abort_execution_id).cloned());
+                if let Some(handle) = handle.filter(|handle| !handle.is_finished()) {
+                    handle.abort();
+                }
+            });
+        }
         Ok(RuntimeTaskAttemptInterruptReceipt {
             run_id: run_id.to_string(),
             task_id: task_id.to_string(),
