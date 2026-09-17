@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.diagnostic-persistence-failure-visibility-repair
 kind: evidence
-observed_at: source:bf238428c29cc216d36371bcd99d11ad53bb311e20c09ea5cbdf05bd1a8b0db9
+observed_at: source:3c0637da3d2cd26a1e91ce8ffe034a0e7a4c890af40dbc49e05475c579118a37
 source_refs:
   - src/trace/mod.rs
   - src/audit.rs
@@ -21,8 +21,8 @@ source_refs:
   - docs/zh/27-tracing.md
 supports: [behavior.observation-persistence, rule.fact-projection-separation]
 limitations:
-  - 修正后的focused tests与cargo check已完成；最终主线集成、feature矩阵、完整门禁与revision-bound rereview尚待完成
-  - Finding保持open，完整verification与最终rereview未闭合，本证据不代表main-ready
+  - 修正后的focused tests、main集成、17项feature矩阵、完整门禁与revision-bound rereview已完成，结果见verification evidence
+  - Finding因外部SDK inventory未刷新而保持open；框架修复不代表跨仓库全部交付
   - InMemoryAuditLogger poisoned lock成功丢写继续由finding.in-memory-audit-successful-drop追踪
   - Trace/Audit backend error文本脱敏继续由finding.trace-audit-secret-boundary追踪
 ---
@@ -53,4 +53,4 @@ identity/durable append原语。ADR 0053记录OpenTelemetry与tracing-appender�
 ## 已知缺口
 
 真实断电/`sync_data`故障、`panic=abort`、进程退出、永久阻塞subscriber、同inode等长外部
-改写与非配合进程不属于本轮可确定运行证据。完整验证和最终复审完成前Finding不得关闭。
+改写与非配合进程不属于本轮可确定运行证据。外部SDK inventory刷新和分类完成前Finding不得关闭。

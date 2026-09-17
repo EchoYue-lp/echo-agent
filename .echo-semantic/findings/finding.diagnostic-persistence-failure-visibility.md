@@ -15,7 +15,7 @@ audit_refs: [audit.observation-persistence-delivery.data-durability]
 decision_refs: []
 repair_evidence_refs: [evidence.diagnostic-persistence-failure-visibility-repair]
 verification_evidence_refs: [evidence.diagnostic-persistence-failure-visibility-verification]
-rereview_audit_refs: []
+rereview_audit_refs: [audit.diagnostic-persistence-failure-visibility-rereview]
 discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 ---
 
@@ -42,5 +42,6 @@ RunStore 默认 append 对缺失 run 返回成功，trace 初始 save 失败仍�
 Data-durability Audit 确认；本 Finding 与secret retention、InMemory audit成功丢写和tool terminal authority分离。
 当前repair候选明确direct Store/Logger Result、diagnostic delivery与best-effort telemetry三层，
 独立源码复审未发现阻断；类型修正和canonical finalizer测试已通过focused验证与cargo check。
-最终主线集成、feature/全量门禁、revision-bound rereview尚待完成；外部SDK inventory仍未刷新，
+main b71f03ba集成、17项feature矩阵、完整门禁（exit 0，2813 passed、0 failed、3 ignored）
+与revision-bound独立复审已完成，框架切片可进入PR交付。外部SDK inventory仍未刷新，
 因此Finding与Issue保持open，不把责任迁出当作完成。

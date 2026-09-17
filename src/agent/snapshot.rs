@@ -1664,15 +1664,14 @@ impl AgentRunSnapshot {
     pub async fn record_event(&self, event: RunEvent) {
         if let Some(ref store) = self.run_store
             && let Some(ref run_id) = self.trace_run_id
+            && let Err(error) = store.append_event(run_id, event).await
         {
-            if let Err(error) = store.append_event(run_id, event).await {
-                self.report_diagnostic_delivery_failure(DiagnosticDeliveryFailure::new(
-                    DiagnosticRecordKind::Trace,
-                    DiagnosticDeliveryOperation::Append,
-                    Some(run_id.clone()),
-                    error.to_string(),
-                ));
-            }
+            self.report_diagnostic_delivery_failure(DiagnosticDeliveryFailure::new(
+                DiagnosticRecordKind::Trace,
+                DiagnosticDeliveryOperation::Append,
+                Some(run_id.clone()),
+                error.to_string(),
+            ));
         }
     }
 

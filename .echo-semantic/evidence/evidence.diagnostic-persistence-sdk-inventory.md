@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.diagnostic-persistence-sdk-inventory
 kind: evidence
-observed_at: source:bf238428c29cc216d36371bcd99d11ad53bb311e20c09ea5cbdf05bd1a8b0db9
+observed_at: source:3c0637da3d2cd26a1e91ce8ffe034a0e7a4c890af40dbc49e05475c579118a37
 source_refs:
   - src/audit.rs
   - echo-state/src/audit/mod.rs
