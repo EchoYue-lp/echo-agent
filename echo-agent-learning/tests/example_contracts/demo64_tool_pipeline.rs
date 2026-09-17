@@ -2,21 +2,24 @@
 //!
 //! 展示工具执行管线的完整架构：
 //!
-//! **ToolExecutionPipeline 的 13 个阶段**（按执行顺序）：
+//! **ToolExecutionPipeline 的 16 个阶段**（按执行顺序）：
 //!
 //!  1. `InterventionStage`    — 干预回调（block / cancel / redirect / modify）
-//!  2. `ParseValidateStage`   — 参数解析和类型校验
+//!  2. `ToolVisibilityStage`  — 工具可见性检查
 //!  3. `PlanModeStage`        — 计划模式：阻止写操作
 //!  4. `PreToolUseHookStage`  — PreToolUse 钩子
 //!  5. `PermissionStage`      — 权限检查（PermissionService）
 //!  6. `ReadBeforeEditStage`  — 编辑前必须读取文件
-//!  7. `CallbackStage(Start)` — on_tool_start 回调
-//!  8. `ExecuteStage`         — 实际工具执行
-//!  9. `TraceRecordingStage`  — 记录 Trace 事件
-//! 10. `PostToolUseHookStage` — PostToolUse 钩子
-//! 11. `OutputGuardStage`    — 输出内容守卫检查
-//! 12. `TruncationStage`     — 输出截断（token 预算）
-//! 13. `CallbackStage(End)`   — on_tool_end 回调
+//!  7. `SkillPermissionStage` — 激活技能的工具权限
+//!  8. `InvocationStage`      — 发布 canonical invocation
+//!  9. `CallbackStage(Start)` — on_tool_start 回调
+//! 10. `ExecuteStage`         — ToolManager 校验并执行工具
+//! 11. `PostToolUseHookStage` — 成功/失败后置钩子
+//! 12. `OutputGuardStage`    — 输出与审计错误投影的守卫
+//! 13. `TruncationStage`     — 输出预算与 artifact 处理
+//! 14. `TraceRecordingStage` — ToolResult / ToolError
+//! 15. `AuditStage`          — 结算后工具终态审计
+//! 16. `CallbackStage(End)`  — on_tool_end / on_tool_error 分流
 //!
 //! Contract test: `contract_demo64_tool_pipeline`.
 
@@ -55,7 +58,7 @@ async fn contract_demo64_tool_pipeline() -> echo_agent::error::Result<()> {
     print_banner();
 
     // ── Part 1: Pipeline 阶段总览 ────────────────────────────────────────────
-    separator("Part 1: ToolExecutionPipeline 13 阶段总览");
+    separator("Part 1: ToolExecutionPipeline 16 阶段总览");
     demo_pipeline_stages();
 
     // ── Part 2: InterventionCallback — 第一阶段拦截 ──────────────────────────
@@ -87,8 +90,8 @@ fn demo_pipeline_stages() {
         ),
         (
             " 2",
-            "ParseValidateStage",
-            "参数解析与类型校验（path, command 等必填字段）",
+            "ToolVisibilityStage",
+            "工具可见性检查：阻止不可见的工具",
         ),
         (
             " 3",
@@ -108,34 +111,41 @@ fn demo_pipeline_stages() {
         ),
         (
             " 7",
-            "CallbackStage(Start)",
-            "on_tool_start 回调：通知观察者工具即将执行",
+            "SkillPermissionStage",
+            "激活技能的 allowed_tools 检查",
         ),
         (
             " 8",
-            "ExecuteStage",
-            "核心执行：调用 ToolManager.execute_tool()",
+            "InvocationStage",
+            "发布 requested/effective canonical invocation",
         ),
         (
             " 9",
-            "TraceRecordingStage",
-            "Trace 记录：ToolResult / ToolError 审计事件",
+            "CallbackStage(Start)",
+            "on_tool_start 回调：通知观察者工具即将执行",
         ),
+        ("10", "ExecuteStage", "核心执行：ToolManager 校验并执行工具"),
         (
-            "10",
+            "11",
             "PostToolUseHookStage",
             "PostToolUse 钩子：检查输出或注入额外信息",
         ),
-        ("11", "OutputGuardStage", "输出守卫：检查内容安全性"),
+        ("12", "OutputGuardStage", "输出与审计错误投影的内容守卫"),
         (
-            "12",
+            "13",
             "TruncationStage",
             "输出截断：根据 token 预算截断过长输出",
         ),
         (
-            "13",
+            "14",
+            "TraceRecordingStage",
+            "Trace 记录：结算后的 ToolResult / ToolError",
+        ),
+        ("15", "AuditStage", "记录结算后的工具终态与处理后输出"),
+        (
+            "16",
             "CallbackStage(End)",
-            "on_tool_end 回调：通知观察者工具执行完成",
+            "成功走 on_tool_end，失败走 on_tool_error",
         ),
     ];
 
@@ -145,8 +155,8 @@ fn demo_pipeline_stages() {
     }
 
     println!("\n  关键设计:");
-    println!("    • 任何阶段设置 ctx.blocked = true 将短路后续所有阶段");
-    println!("    • InterventionStage 是最高优先级决策点（在参数校验之前）");
+    println!("    • 执行前 block 短路；执行后 block 仍完成输出处理、trace、audit 与终态回调");
+    println!("    • InterventionStage 是最高优先级决策点（在工具执行之前）");
     println!("    • ExecuteStage 的错误被转化为 ToolResult {{ success: false }}");
     println!("      而非 Err，确保 Trace / Callback 等后续阶段仍然执行");
     println!("    • PlanModeStage 阻止 shell / apply_patch 等写工具");
@@ -383,9 +393,8 @@ async fn demo_agent_callback() -> echo_agent::error::Result<()> {
     assert_eq!(add_ends, 1, "add should trigger one end callback");
 
     println!("\n  回调触发的管线阶段:");
-    println!("    on_tool_start → 阶段 7: CallbackStage(Start)");
-    println!("    on_tool_end   → 阶段 13: CallbackStage(End)");
-    println!("    on_tool_error → 在 ExecuteStage 失败后触发");
+    println!("    on_tool_start → 阶段 9: CallbackStage(Start)");
+    println!("    on_tool_end / on_tool_error → 阶段 16: CallbackStage(End)");
     println!("    on_final_answer → 最终答案输出时触发");
     println!("    on_iteration → 每轮 ReAct 循环结束时触发");
 
@@ -467,10 +476,11 @@ fn demo_execution_config() -> echo_agent::error::Result<()> {
     // ── 6e. 管线短路场景总结 ──
     println!("\n  管线短路场景（ctx.blocked = true）:");
     println!("    • InterventionStage  → 干预回调 block=true");
-    println!("    • ParseValidateStage → 缺少必填参数（path, command）");
+    println!("    • ToolVisibilityStage→ 工具不可见或不在当前执行面");
     println!("    • PlanModeStage      → 计划模式下调用写操作工具");
     println!("    • PreToolUseHookStage→ Hook 阻止执行");
     println!("    • ReadBeforeEditStage→ 编辑文件前未先读取");
+    println!("    • PostToolUseHookStage 的执行后 block 仍完成输出处理与终态观察");
 
     println!("  → ToolExecutionConfig ✓");
     Ok(())

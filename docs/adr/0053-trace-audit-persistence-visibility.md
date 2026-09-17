@@ -139,6 +139,10 @@ the initial save and subsequent load succeed, while the terminal save fails.
 `FinalizeSaveFailingRunStore` is a private test injector with a bounded save
 counter, not a second production persistence or execution authority. The test
 observes a Finalize delivery failure without changing the producer terminal.
+The real stream driver also uses a private in-memory wrapper that accepts the
+initial save and running appends but rejects the terminal save. It returns the
+producer final answer and emits exactly one Finalize delivery failure. Both
+injectors remain test-only; neither owns a production execution terminal.
 
 The public inventory generation and review now belong to the independent
 `echo-agent-sdk` repository. Framework verification does not complete that

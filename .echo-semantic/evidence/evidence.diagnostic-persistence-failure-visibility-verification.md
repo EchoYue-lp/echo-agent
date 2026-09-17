@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.diagnostic-persistence-failure-visibility-verification
 kind: evidence
-observed_at: source:cbbde65a0aed106aa28d69d4e514afd4038ce9eb4b407629ece1451cbf45279e
+observed_at: source:bf238428c29cc216d36371bcd99d11ad53bb311e20c09ea5cbdf05bd1a8b0db9
 source_refs:
   - src/trace/mod.rs
   - src/agent/snapshot.rs
@@ -35,6 +35,9 @@ limitations:
 
 最终 save 失败回归从 canonical `AgentRunSnapshot::finalize_run` 驱动：首次 save 成功、load
 成功、最后 save 失败，observer 得到带 run identity 的 Finalize delivery failure。
+主线集成后新增真实stream回归 `final_trace_save_failure_does_not_replace_stream_final_answer`：
+1/1 exit 0，初始save与running append成功，终态save失败，最后事件仍为producer final answer，
+observer只收到一条带identity的Finalize失败。
 真实 stream 测试确认 delivery/backend 失败不会替换 producer 的 final answer，阻塞 observer
 不会阻塞 producer；FileAuditLogger durability/recovery/lease 与 callback failure 测试通过。
 

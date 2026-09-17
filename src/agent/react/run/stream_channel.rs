@@ -2215,6 +2215,34 @@ mod tests {
 
     struct RejectingAuditLogger;
 
+    struct FinalSaveRejectingRunStore {
+        inner: crate::trace::InMemoryRunStore,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::trace::RunStore for FinalSaveRejectingRunStore {
+        async fn save(&self, run: crate::trace::Run) -> Result<()> {
+            if !matches!(&run.status, crate::trace::RunStatus::Running) {
+                return Err(ReactError::Other(
+                    "injected terminal trace save failure".to_string(),
+                ));
+            }
+            crate::trace::RunStore::save(&self.inner, run).await
+        }
+
+        async fn load(&self, run_id: &str) -> Result<Option<crate::trace::Run>> {
+            crate::trace::RunStore::load(&self.inner, run_id).await
+        }
+
+        async fn list_by_session(&self, session_id: &str) -> Result<Vec<crate::trace::RunSummary>> {
+            crate::trace::RunStore::list_by_session(&self.inner, session_id).await
+        }
+
+        async fn list_all(&self, limit: usize) -> Result<Vec<crate::trace::RunSummary>> {
+            crate::trace::RunStore::list_all(&self.inner, limit).await
+        }
+    }
+
     impl crate::audit::AuditLogger for RejectingAuditLogger {
         fn log<'a>(&'a self, _event: crate::audit::AuditEvent) -> BoxFuture<'a, Result<()>> {
             Box::pin(async {
@@ -3094,6 +3122,46 @@ mod tests {
             failure.record_kind == crate::audit::DiagnosticRecordKind::Audit
                 && failure.operation == crate::audit::DiagnosticDeliveryOperation::Record
         }));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn final_trace_save_failure_does_not_replace_stream_final_answer() -> Result<()> {
+        let observer = Arc::new(RecordingDiagnosticObserver::default());
+        let agent = ReactAgentBuilder::new()
+            .llm_client(Arc::new(
+                MockLlmClient::new().with_response("producer answer"),
+            ))
+            .system_prompt("You are a test assistant.")
+            .with_run_store(Arc::new(FinalSaveRejectingRunStore {
+                inner: crate::trace::InMemoryRunStore::new(),
+            }))
+            .diagnostic_delivery_observer(observer.clone())
+            .build()?;
+
+        let events = collect_events_result(&agent, "input").await?;
+        assert!(
+            matches!(events.last(), Some(AgentEvent::FinalAnswer(answer)) if answer == "producer answer")
+        );
+        let failures = observer.wait_for_count(1)?;
+        assert_eq!(failures.len(), 1);
+        let failure = failures
+            .first()
+            .ok_or_else(|| ReactError::Other("missing final-save failure".to_string()))?;
+        assert_eq!(
+            failure.record_kind,
+            crate::audit::DiagnosticRecordKind::Trace
+        );
+        assert_eq!(
+            failure.operation,
+            crate::audit::DiagnosticDeliveryOperation::Finalize
+        );
+        assert!(failure.record_id.is_some());
+        assert!(
+            failure
+                .error
+                .contains("injected terminal trace save failure")
+        );
         Ok(())
     }
 

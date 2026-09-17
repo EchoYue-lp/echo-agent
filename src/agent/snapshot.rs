@@ -2436,6 +2436,7 @@ impl AgentRunSnapshot {
                 hook_messages: crate::agent::react::run::context::HookMessageBatches::default(),
                 result: None,
                 output: None,
+                audit_error_output: None,
                 blocked: false,
                 block_reason: None,
                 block_failure: None,
@@ -2475,8 +2476,13 @@ impl AgentRunSnapshot {
                         let failure = ctx.block_failure.unwrap_or_else(|| {
                             ToolFailure::new(crate::tools::ToolFailureCategory::Permanent)
                         });
-                        let result = ToolResult::failure(failure.category, reason.clone())
-                            .with_failure(failure);
+                        let mut result = ctx.result.unwrap_or_else(|| {
+                            ToolResult::failure(failure.category, reason.clone())
+                                .with_failure(failure)
+                        });
+                        if let Some(output) = ctx.output {
+                            result.output = output;
+                        }
                         self.record_skill_telemetry(
                             tool_name,
                             ctx.duration_ms,
@@ -2496,10 +2502,10 @@ impl AgentRunSnapshot {
 
                     // Return the complete result after guard and output budgeting.
                     if let Some(mut result) = ctx.result {
+                        if let Some(output) = ctx.output {
+                            result.output = output;
+                        }
                         if result.success {
-                            if let Some(output) = ctx.output {
-                                result.output = output;
-                            }
                             let telemetry_tool_name = ctx.tool_name.clone();
                             self.record_skill_telemetry(
                                 &telemetry_tool_name,

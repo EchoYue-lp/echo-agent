@@ -200,6 +200,12 @@ check(tool, input) → check_with_permissions(tool, input, permissions):
 
 ### Agent Integration
 
+When an `AuditLogger` is configured through `ReactAgentBuilder::audit_logger`, its
+`ToolCall` entry records the settled tool result, including duration and the
+processed output. A PostToolUse rejection after execution is recorded as a
+failure while retaining the tool's output; a pre-execution rejection does not
+produce a tool-result audit entry.
+
 ```rust
 let agent = ReactAgentBuilder::new()
     .model("qwen3.6-plus")
