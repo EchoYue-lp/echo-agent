@@ -2415,8 +2415,13 @@ impl AgentRunSnapshot {
                         let failure = ctx.block_failure.unwrap_or_else(|| {
                             ToolFailure::new(crate::tools::ToolFailureCategory::Permanent)
                         });
-                        let result = ToolResult::failure(failure.category, reason.clone())
-                            .with_failure(failure);
+                        let mut result = ctx.result.unwrap_or_else(|| {
+                            ToolResult::failure(failure.category, reason.clone())
+                                .with_failure(failure)
+                        });
+                        if let Some(output) = ctx.output {
+                            result.output = output;
+                        }
                         self.record_skill_telemetry(
                             tool_name,
                             ctx.duration_ms,

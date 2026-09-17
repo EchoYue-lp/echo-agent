@@ -140,6 +140,15 @@ pub(crate) trait PipelineStage: Send + Sync {
         ctx: &mut ToolExecutionContext,
         snapshot: &crate::agent::snapshot::AgentRunSnapshot,
     ) -> Result<()>;
+
+    /// Whether this stage must still run after `ctx.blocked` is set.
+    ///
+    /// Execution-gating stages stop the pipeline as before, but observation
+    /// stages that record what already happened (trace, terminal callbacks)
+    /// opt in so a blocked call still leaves a faithful record (#102).
+    fn runs_after_block(&self) -> bool {
+        false
+    }
 }
 
 // ── Stage implementations ──────────────────────────────────────────
@@ -768,7 +777,24 @@ impl PipelineStage for PostToolUseHookStage {
             let reason = post_result.block_reason.unwrap_or_else(|| {
                 format!("Tool {} output blocked by post-use hook", ctx.tool_name)
             });
-            ctx.block(crate::tools::ToolFailureCategory::PartialSideEffect, reason);
+            // The policy rejected an already executed call, not the execution
+            // itself. Keep its output/artifact and recovery facts for settlement.
+            let mut failure = tool_result.failure.clone().unwrap_or_else(|| {
+                crate::tools::ToolFailure::new(crate::tools::ToolFailureCategory::PartialSideEffect)
+            });
+            if tool_result.success {
+                failure = failure.with_postcondition(
+                    "Tool execution succeeded before the post-use hook rejected the result",
+                );
+            }
+            ctx.blocked = true;
+            ctx.block_reason = Some(reason.clone());
+            ctx.block_failure = Some(failure.clone());
+            if let Some(result) = ctx.result.as_mut() {
+                result.success = false;
+                result.error = Some(reason);
+                result.failure = Some(failure);
+            }
         }
         Ok(())
     }
@@ -783,13 +809,17 @@ impl PipelineStage for OutputGuardStage {
         "output_guard"
     }
 
+    fn runs_after_block(&self) -> bool {
+        true
+    }
+
     async fn run(
         &self,
         ctx: &mut ToolExecutionContext,
         snapshot: &crate::agent::snapshot::AgentRunSnapshot,
     ) -> Result<()> {
         if let Some(ref result) = ctx.result
-            && result.success
+            && (result.success || ctx.blocked)
             && let Some(guarded) = snapshot.check_tool_output_guard(&result.output).await
         {
             ctx.output = Some(guarded);
@@ -805,6 +835,10 @@ pub struct TruncationStage;
 impl PipelineStage for TruncationStage {
     fn name(&self) -> &str {
         "truncation"
+    }
+
+    fn runs_after_block(&self) -> bool {
+        true
     }
 
     async fn run(
@@ -871,6 +905,12 @@ impl PipelineStage for CallbackStage {
         }
     }
 
+    // CallbackEnd is the caller's terminal observation: it must fire with the
+    // real outcome even when a post-effect block occurred (#102).
+    fn runs_after_block(&self) -> bool {
+        matches!(self.phase, CallbackPhase::End)
+    }
+
     async fn run(
         &self,
         ctx: &mut ToolExecutionContext,
@@ -889,7 +929,18 @@ impl PipelineStage for CallbackStage {
                         .as_deref()
                         .or_else(|| ctx.result.as_ref().map(|r| r.output.as_str()))
                         .unwrap_or("");
-                    cb.on_tool_end(agent_name, &ctx.tool_name, output).await;
+                    // #102: the caller terminal must match the real tool
+                    // outcome — failures route to on_tool_error instead of
+                    // being reported as a successful on_tool_end.
+                    let failure = ctx.result.as_ref().filter(|result| !result.success);
+                    if let Some(result) = failure {
+                        let error = ReactError::Other(
+                            result.error.clone().unwrap_or_else(|| output.to_string()),
+                        );
+                        cb.on_tool_error(agent_name, &ctx.tool_name, &error).await;
+                    } else {
+                        cb.on_tool_end(agent_name, &ctx.tool_name, output).await;
+                    }
                 }
             }
         }
@@ -904,6 +955,12 @@ pub struct TraceRecordingStage;
 impl PipelineStage for TraceRecordingStage {
     fn name(&self) -> &str {
         "trace_recording"
+    }
+
+    // A blocked call may already have produced an external effect; the trace
+    // must still record the actual result (and ToolError for failures).
+    fn runs_after_block(&self) -> bool {
+        true
     }
 
     async fn run(
@@ -1022,7 +1079,7 @@ impl ToolExecutionPipeline {
         snapshot: &crate::agent::snapshot::AgentRunSnapshot,
     ) -> Result<()> {
         for stage in &self.stages {
-            if ctx.blocked {
+            if ctx.blocked && !stage.runs_after_block() {
                 ctx.emit_invocation().await?;
                 debug!(
                     agent = %snapshot.config.agent_name,
@@ -1030,7 +1087,10 @@ impl ToolExecutionPipeline {
                     reason = ?ctx.block_reason,
                     "Pipeline stage skipped (blocked)"
                 );
-                break;
+                if ctx.result.is_none() {
+                    break;
+                }
+                continue;
             }
             debug!(
                 agent = %snapshot.config.agent_name,
@@ -1930,6 +1990,271 @@ mod tests {
             .collect();
         assert_eq!(terminal_ids, vec!["call-b", "call-a"]);
         assert!(matches!(events.last(), Some(AgentEvent::ToolBatchEnd)));
+        Ok(())
+    }
+
+    /// Records which terminal callback methods fire for one pipeline run.
+    #[derive(Default)]
+    struct RecordingCallback {
+        tool_end_calls: std::sync::atomic::AtomicUsize,
+        tool_error_calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl echo_core::agent::AgentCallback for RecordingCallback {
+        fn on_tool_end<'a>(
+            &'a self,
+            _agent: &'a str,
+            _tool: &'a str,
+            _result: &'a str,
+        ) -> futures::future::BoxFuture<'a, ()> {
+            Box::pin(async {
+                self.tool_end_calls
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            })
+        }
+
+        fn on_tool_error<'a>(
+            &'a self,
+            _agent: &'a str,
+            _tool: &'a str,
+            _err: &'a ReactError,
+        ) -> futures::future::BoxFuture<'a, ()> {
+            Box::pin(async {
+                self.tool_error_calls
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            })
+        }
+    }
+
+    fn snapshot_with_callback(
+        callback: Arc<dyn echo_core::agent::AgentCallback>,
+    ) -> crate::error::Result<crate::agent::snapshot::AgentRunSnapshot> {
+        let agent = crate::agent::ReactAgentBuilder::new()
+            .model("test-model")
+            .callback(callback)
+            .tool(Box::new(EffectTool))
+            .build()?;
+        Ok(crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent))
+    }
+
+    /// Deterministic success tool so the pipeline exercises the success
+    /// PostToolUse path without touching the filesystem or shell.
+    struct EffectTool;
+
+    impl Tool for EffectTool {
+        fn name(&self) -> &str {
+            "shell"
+        }
+
+        fn description(&self) -> &str {
+            "test stub producing a successful effect result"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        fn execute<'a>(
+            &'a self,
+            _parameters: ToolParameters,
+        ) -> futures::future::BoxFuture<'a, crate::error::Result<ToolResult>> {
+            Box::pin(async { Ok(ToolResult::success("real effect")) })
+        }
+    }
+
+    #[tokio::test]
+    async fn pre_execution_block_does_not_emit_success_callback() -> Result<()> {
+        let callback = Arc::new(RecordingCallback::default());
+        let snapshot = snapshot_with_callback(callback.clone())?;
+        let mut ctx = completed_context(String::new());
+        ctx.result = None;
+        ctx.block(
+            crate::tools::ToolFailureCategory::Permanent,
+            "denied".to_string(),
+        );
+        ToolExecutionPipeline::default_pipeline()
+            .run(&mut ctx, &snapshot)
+            .await?;
+        assert!(ctx.result.is_none());
+        assert_eq!(
+            callback
+                .tool_end_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        assert_eq!(
+            callback
+                .tool_error_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        Ok(())
+    }
+
+    /// #102: a failed ToolResult must reach on_tool_error, not on_tool_end.
+    #[tokio::test]
+    async fn failed_tool_result_routes_to_on_tool_error_not_on_tool_end() -> Result<()> {
+        let callback = Arc::new(RecordingCallback::default());
+
+        let agent = crate::agent::ReactAgentBuilder::new()
+            .model("test-model")
+            .callback(callback.clone())
+            .tool(Box::new(InvalidResultTool))
+            .build()?;
+        let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+        let mut ctx = completed_context(String::new());
+        ctx.result = None;
+        ctx.tool_name = "invalid_result".to_string();
+        ToolExecutionPipeline::default_pipeline()
+            .run(&mut ctx, &snapshot)
+            .await?;
+
+        assert_eq!(
+            callback
+                .tool_error_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "failure must reach on_tool_error"
+        );
+        assert_eq!(
+            callback
+                .tool_end_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "failure must not be reported as on_tool_end success"
+        );
+        Ok(())
+    }
+
+    /// #102: a PostToolUse block after a real effect must not short-circuit
+    /// the remaining observation stages (OutputGuard/Truncation/Trace/End).
+    /// Uses the exit-code-2 block convention implemented in hooks.rs:1428.
+    #[tokio::test]
+    async fn post_hook_block_after_effect_still_records_full_observations() -> Result<()> {
+        use crate::skills::hooks::{HookAction, HookEvent, HookRule, HooksDefinition};
+
+        use crate::trace::{InMemoryRunStore, Run, RunStatus, RunStore};
+
+        let callback = Arc::new(RecordingCallback::default());
+        let audit = Arc::new(crate::audit::InMemoryAuditLogger::new());
+        let store = Arc::new(InMemoryRunStore::new());
+        store
+            .save(Run {
+                run_id: "post-block".to_string(),
+                parent_run_id: None,
+                agent_name: "test".to_string(),
+                model: "test-model".to_string(),
+                provider: None,
+                turn_id: None,
+                execution_id: None,
+                session_id: "test".to_string(),
+                status: RunStatus::Running,
+                input: String::new(),
+                events: Vec::new(),
+                final_output: None,
+                error: None,
+                token_usage: Default::default(),
+                timings: Default::default(),
+                started_at: chrono::Utc::now(),
+                finished_at: None,
+            })
+            .await?;
+        let agent = crate::agent::ReactAgentBuilder::new()
+            .model("test-model")
+            .callback(callback.clone())
+            .callback(Arc::new(crate::audit::AuditCallback::new(
+                audit.clone(),
+                "test",
+                None,
+            )))
+            .with_run_store(store.clone())
+            .tool(Box::new(EffectTool))
+            .build()?;
+        let mut snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+        snapshot.trace_run_id = Some("post-block".to_string());
+        let mut definition = HooksDefinition::default();
+        definition.add_rules(
+            HookEvent::PostToolUse,
+            vec![HookRule {
+                matcher: "shell".to_string(),
+                hooks: vec![HookAction::Command {
+                    command: "exit 2".to_string(),
+                    shell: None,
+                    timeout: 10,
+                }],
+            }],
+        );
+        snapshot
+            .tools
+            .hook_registry
+            .write()
+            .await
+            .register_user_hooks(definition);
+
+        let outcome = snapshot
+            .execute_tool_with_policy(
+                "call-post-block".to_string(),
+                "shell",
+                &ToolParameters::new(),
+                &serde_json::json!({}),
+                None,
+            )
+            .await;
+        let failure = outcome.err().ok_or_else(|| {
+            ReactError::Other("post-use rejection incorrectly returned success".to_string())
+        })?;
+        let result = failure.result;
+        assert!(!result.success);
+        assert!(
+            result
+                .failure
+                .as_ref()
+                .is_some_and(|failure| failure.category
+                    == crate::tools::ToolFailureCategory::PartialSideEffect
+                    && failure.postcondition.is_some())
+        );
+        assert_eq!(
+            callback
+                .tool_error_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "post-effect policy failure must fire on_tool_error exactly once"
+        );
+        assert_eq!(
+            callback
+                .tool_end_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        assert_eq!(result.output, "real effect");
+        assert!(result.metadata.contains_key("returned_bytes"));
+        let run = store
+            .load("post-block")
+            .await?
+            .ok_or_else(|| ReactError::Other("missing trace run".to_string()))?;
+        let terminals: Vec<_> = run
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                crate::trace::RunEvent::ToolResult {
+                    call_id, success, ..
+                } => Some((call_id.as_str(), *success)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(terminals, vec![("call-post-block", false)]);
+        assert!(run.events.iter().any(|event| matches!(event,
+            crate::trace::RunEvent::ToolError { failure, .. } if failure == &result.failure
+        )));
+        let audit_events = audit.snapshot();
+        let audit_terminals: Vec<_> = audit_events
+            .iter()
+            .filter_map(|event| match &event.event_type {
+                crate::audit::AuditEventType::ToolCall { success, .. } => Some(*success),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(audit_terminals, vec![false]);
         Ok(())
     }
 }
