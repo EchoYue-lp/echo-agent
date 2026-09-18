@@ -232,18 +232,19 @@ pub struct Task {
 /// Product-neutral context passed to a task Subagent.
 #[derive(Debug, Clone)]
 pub struct TaskSubagentContext {
-    pub run_id: String,
-    pub cancel: CancellationToken,
-    pub delegation_policy: NestedDelegationPolicy,
+    run_id: String,
+    cancel: CancellationToken,
+    delegation_policy: NestedDelegationPolicy,
     /// Dependencies explicitly waived by a Skipped lifecycle rather than a
     /// reusable successful output.
-    pub waived_dependency_ids: Vec<TaskId>,
+    waived_dependency_ids: Vec<TaskId>,
     task_id: Option<TaskId>,
     claim: Option<TaskClaim>,
 }
 
 impl TaskSubagentContext {
-    pub fn new(run_id: impl Into<String>) -> Self {
+    #[cfg(test)]
+    pub(crate) fn new(run_id: impl Into<String>) -> Self {
         Self {
             run_id: run_id.into(),
             cancel: CancellationToken::new(),
@@ -255,7 +256,7 @@ impl TaskSubagentContext {
     }
 
     /// Construct a runtime-bound context from one exact durable claim.
-    pub fn from_claim(
+    pub(crate) fn from_claim(
         run_id: impl Into<String>,
         task_id: impl Into<TaskId>,
         claim: TaskClaim,
@@ -294,10 +295,29 @@ impl TaskSubagentContext {
     }
 
     /// Return the stable execution identity derived from this context claim.
-    pub fn execution_id(&self, task_id: &str) -> Option<String> {
+    pub fn run_id(&self) -> &str {
+        &self.run_id
+    }
+
+    pub fn cancellation_token(&self) -> &CancellationToken {
+        &self.cancel
+    }
+
+    pub fn delegation_policy(&self) -> NestedDelegationPolicy {
+        self.delegation_policy
+    }
+
+    pub fn waived_dependency_ids(&self) -> &[TaskId] {
+        &self.waived_dependency_ids
+    }
+
+    /// Return the stable execution identity derived from the bound task and
+    /// claim. Callers cannot substitute a different task ID.
+    pub fn execution_id(&self) -> Option<String> {
         self.claim
             .as_ref()
-            .map(|claim| claim.execution_id(&self.run_id, task_id))
+            .zip(self.task_id.as_deref())
+            .map(|(claim, task_id)| claim.execution_id(&self.run_id, task_id))
     }
 
     /// Convert the exact context into the framework's existing runtime lineage
@@ -332,17 +352,12 @@ impl TaskSubagentContext {
         }
     }
 
-    pub fn with_cancel(mut self, cancel: CancellationToken) -> Self {
-        self.cancel = cancel;
-        self
-    }
-
-    pub fn with_delegation_policy(mut self, policy: NestedDelegationPolicy) -> Self {
+    pub(crate) fn with_delegation_policy(mut self, policy: NestedDelegationPolicy) -> Self {
         self.delegation_policy = policy;
         self
     }
 
-    pub fn with_waived_dependencies(mut self, dependency_ids: Vec<TaskId>) -> Self {
+    pub(crate) fn with_waived_dependencies(mut self, dependency_ids: Vec<TaskId>) -> Self {
         self.waived_dependency_ids = dependency_ids;
         self
     }
@@ -710,11 +725,12 @@ pub struct DagRefresh {
 #[cfg(test)]
 mod tests {
     use super::{
-        DagDependencyState, NestedDelegationPolicy, TaskExecution, TaskExecutionSummary, TaskSpec,
-        TaskStatus, TaskSubagentContext,
+        DagDependencyState, NestedDelegationPolicy, TaskClaim, TaskExecution, TaskExecutionSummary,
+        TaskSpec, TaskStatus, TaskSubagentContext,
     };
     use crate::tasks::runtime::{DagExecutionState, Task};
     use serde::{Deserialize, Serialize};
+    use tokio_util::sync::CancellationToken;
 
     #[test]
     fn terminal_statuses_are_classified() {
@@ -755,6 +771,28 @@ mod tests {
         assert_eq!(child.run_id, "run-1");
         assert_eq!(child.delegation_policy.delegate_depth, 1);
         assert!(!child.delegation_policy.can_delegate());
+    }
+
+    #[test]
+    fn task_claim_context_preserves_exact_lineage() -> Result<(), String> {
+        let claim = TaskClaim::new(9, 4, "spec-hash".to_string());
+        let context = TaskSubagentContext::from_claim(
+            "run-team",
+            "research-task",
+            claim.clone(),
+            CancellationToken::new(),
+        )?;
+        let runtime = context.runtime_context();
+        let lineage = runtime.subagent_lineage.clone().unwrap_or_default();
+        assert_eq!(lineage.task_id.as_deref(), Some("research-task"));
+        assert_eq!(lineage.attempt, Some(4));
+        assert_eq!(lineage.plan_revision, Some(9));
+        assert_eq!(
+            runtime.execution_id.as_deref(),
+            Some(claim.execution_id("run-team", "research-task").as_str())
+        );
+        assert_eq!(context.execution_id(), runtime.execution_id);
+        Ok(())
     }
 
     #[test]

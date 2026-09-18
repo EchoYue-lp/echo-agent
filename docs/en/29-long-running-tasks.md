@@ -79,6 +79,51 @@ selection in the controller. A controller returns committed snapshots and uses
 compare-and-set operations for claims and results; it does not duplicate the
 DAG loop.
 
+### Exact Attempt Control
+
+Every claimed task derives its Subagent execution identity from
+`TaskClaim::execution_id(run_id, task_id)`. The runtime reserves that identity
+before capacity admission and passes one task-child cancellation token through
+dispatch, events, terminal settlement, and live control. Cancelling the run
+propagates to every child; `request_attempt_interrupt` cancels only the exact
+claim and rechecks the durable claim after projecting the request.
+
+`TeamRuntimeHandle` retains one Team run ID, task store, `RuntimeTaskService`,
+and Subagent control registry. Keep the handle when execution needs concurrent
+snapshot inspection or exact interruption:
+
+```rust,ignore
+let handle = team.runtime_handle().await?;
+let execution = team.execute("review the repository");
+
+let snapshot = handle.snapshot().await?;
+let task = snapshot.tasks.iter().find(|task| task.execution.claim.is_some())?;
+let claim = task.execution.claim.as_ref()?;
+handle
+    .request_attempt_interrupt(&task.spec.id, claim)
+    .await?;
+```
+
+Live pending/reserved/active/settled entries are process-local projections.
+`RuntimeTaskService::reconcile_attempt_control` rebuilds their validity from
+durable TaskClaims during recovery. Durable command replay belongs to the Host;
+it must replay the exact claim identity rather than an execution name alone.
+If a joined attempt cannot prove its durable terminal, waiters receive a typed
+authority error instead of waiting indefinitely. Recovery publishes the
+durable supersede to stale joined waiters and retires local supervisor state
+before waiting for best-effort live-controller cleanup; active attempts remain
+bound until their targeted abort and canonical join complete.
+Custom Team integrations implement `TeamDispatchController`, which keeps
+dispatch, reservation, interrupt, cleanup, and reconciliation on one live
+control scope. Each retained runtime has a unique `handle_id`; one business run
+may therefore expose multiple handles without overwriting control authority.
+Active handles are retained regardless of the history limit; only settled
+handles enter the bounded 64-entry retention set.
+Caller-supplied runtimes that need concurrent control construct one
+`TeamRuntimeServiceHandle<R>` and pass it to `execute_team_on_runtime_service`;
+the binding prevents graph/output authority and execution/CAS authority from
+coming from different runtime instances.
+
 ## Progress
 
 `PhasePlan` and `ProgressReporter` provide structured progress within one task.
