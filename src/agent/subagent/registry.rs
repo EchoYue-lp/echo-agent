@@ -281,17 +281,16 @@ impl SubagentRegistry {
 
     /// Register a **definition only** — no agent instance and no factory.
     ///
-    /// This is a low-level late-binding path for runtimes that can guarantee
-    /// later hydration: the definition becomes discoverable
-    /// (`list_available`, `agent_names`, dispatch catalog) before any
-    /// executable instance exists. A later call to
+    /// This is a low-level late-binding path: `get` and `contains` can inspect
+    /// the pending definition, but `list_available`, `list_by_tag`, `agent_names`,
+    /// and the model-facing dispatch catalog include only definitions backed
+    /// by an instance or factory. A later call to
     /// [`register`](Self::register) / [`register_sync`](Self::register_sync)
     /// / [`register_factory`](Self::register_factory) under the same name
     /// supplies (or lazily produces) the instance, overwriting the definition.
     ///
-    /// Dispatching a definition registered this way **without** subsequently
-    /// providing an instance will fail at execution time (no agent to run) —
-    /// this is intentional, so callers cannot silently get a no-op agent.
+    /// Explicit programmatic dispatch before hydration fails because there is
+    /// no agent to run. The model-facing catalog does not offer that target.
     ///
     /// Returns `true` if inserted (always, under uncontended locks).
     pub async fn register_definition(&self, def: SubagentDefinition) -> bool {
@@ -472,7 +471,7 @@ impl SubagentRegistry {
         self.state.read().await.entries.contains_key(name)
     }
 
-    /// List all available subagent definitions.
+    /// List definitions backed by a pre-built instance or a factory.
     pub async fn list_available(&self) -> Vec<SubagentDefinition> {
         let state = self.state.read().await;
         state
@@ -483,7 +482,7 @@ impl SubagentRegistry {
             .collect()
     }
 
-    /// List subagent definitions matching a tag.
+    /// List executable definitions matching a tag.
     pub async fn list_by_tag(&self, tag: &str) -> Vec<SubagentDefinition> {
         let state = self.state.read().await;
         state
@@ -496,7 +495,7 @@ impl SubagentRegistry {
             .collect()
     }
 
-    /// Get agent names for tool description (convenience).
+    /// Get executable agent names for tool descriptions (convenience).
     pub async fn agent_names(&self) -> Vec<String> {
         let state = self.state.read().await;
         state
@@ -653,7 +652,8 @@ mod tests {
     #[tokio::test]
     async fn test_register_definition_only_is_not_advertised_as_executable() {
         let registry = SubagentRegistry::new();
-        let def = SubagentDefinition::new("plugin_agent", "Plugin-defined agent");
+        let mut def = SubagentDefinition::new("plugin_agent", "Plugin-defined agent");
+        def.tags.push("plugin".to_string());
 
         let inserted = registry.register_definition(def).await;
         assert!(inserted);
@@ -661,7 +661,14 @@ mod tests {
         assert!(registry.contains("plugin_agent").await);
         let available = registry.list_available().await;
         assert!(!available.iter().any(|d| d.name == "plugin_agent"));
+        assert!(registry.list_by_tag("plugin").await.is_empty());
         assert!(registry.agent_names().await.is_empty());
+        assert!(
+            registry
+                .executable_catalog_handle()
+                .read()
+                .is_ok_and(|catalog| catalog.is_empty())
+        );
 
         // No instance: get_agent must return None (no factory to invoke).
         let registered = registry.get("plugin_agent").await.unwrap();

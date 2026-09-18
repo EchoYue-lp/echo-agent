@@ -15,6 +15,12 @@ Subagent 使用 `Sync`、`Fork` 或 `Teammate`；需要声明式协作时使用
 所有模式都通过 `SubagentRegistry` 解析目标并由 `SubagentExecutor` 执行。
 因此工具调用与程序化调度共享 hook、取消、prompt 编译、隔离和 typed event。
 
+`register_definition`（或 `ReactAgent::register_subagent_definition`）只保存待装配的定义。
+`get` 和 `contains` 可以查询它，但 `list_available`、`list_by_tag`、`agent_names`
+及模型可见的 `agent_tool` catalog 只展示已绑定 Agent 实例或 factory 的定义。同名定义
+补齐实例或 factory 后进入这些可执行视图；移除后从视图退出。装配前显式程序化调度会因
+没有可运行的 Agent 而失败。
+
 Active Subagent 消息使用 `SubagentExecutor::send_message_tracked`。返回的
 `SubagentMessageReceipt` 只携带 exact attempt identity 与嵌套的
 `AgentSteerReceipt`；mailbox 接收、上下文 drain 和所属 turn 结算只由嵌套

@@ -66,6 +66,10 @@ Choose option 3.
 - Factory registration already publishes the executable definition. Filling
   its cached cell does not change that definition or increment the executable
   catalog revision; `get` reads `has_instance` directly from the cell.
+- Definition-only registration is inspectable with `get` and `contains`, but
+  remains absent from executable lists and the model-facing catalog until an
+  instance or factory replaces the pending entry. Explicit dispatch before
+  hydration has no executable to resolve.
 
 ## Consequences
 
