@@ -10,11 +10,11 @@ focus: [time_lifecycle, contract_evidence]
 boundary_ref: boundary.llm-provider-runtime
 behavior_refs: [behavior.llm-provider-execution]
 rule_refs: [rule.provider-protocol-boundary]
-evidence_refs: [evidence.provider-protocol-quality]
+evidence_refs: [evidence.provider-protocol-quality, evidence.provider-stream-terminal-parity-repair, evidence.provider-stream-terminal-parity-verification]
 audit_refs: [audit.llm-provider-runtime.failure-concurrency, audit.llm-provider-runtime.time-lifecycle]
 decision_refs: []
-repair_evidence_refs: []
-verification_evidence_refs: []
+repair_evidence_refs: [evidence.provider-stream-terminal-parity-repair]
+verification_evidence_refs: [evidence.provider-stream-terminal-parity-verification]
 rereview_audit_refs: []
 discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 ---
@@ -40,3 +40,6 @@ Responses/OpenAI/Anthropic adapters、共享 transport 与 ReAct think terminal 
 ## 处理记录
 
 Failure/Time Audit 确认；后续 repair 为每个 provider 建立 explicit semantic terminal contract 与 EOF tests。
+
+候选实现与本地SSE fixture证据已落盘；独立rereview、完整合并门禁与远端main交付
+尚未完成，本Finding保持open。

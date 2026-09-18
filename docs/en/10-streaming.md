@@ -256,6 +256,14 @@ transport for request startup, cancellation, UTF-8-safe decoding, first/idle/
 overall timeouts, and truncated-event rejection. Provider adapters only
 translate semantic JSON events into `ChatChunk` values.
 
+Each provider also validates its own completion signal before publishing a
+successful finish reason or usage: Chat Completions requires a successful choice
+finish reason followed by `[DONE]`; Responses requires `response.completed`;
+Anthropic Messages requires a successful `message_delta` followed by
+`message_stop`. An EOF before these signals, a non-success stop reason, or a
+malformed final event returns a typed `InvalidResponse`. Partial deltas remain
+available to a live caller, but they are not a completed model response.
+
 This separation is intentional: a healthy long stream can exceed the
 non-streaming request timeout, while a stalled stream still fails at its first
 chunk or idle boundary. Timeout failures remain typed LLM network errors and

@@ -251,6 +251,12 @@ Responses 和 Anthropic Messages 共用同一条 SSE transport，统一负责请
 UTF-8 安全解码、first/idle/overall 超时以及截断 event 拒绝。provider adapter 只把
 语义 JSON event 翻译为 `ChatChunk`。
 
+各 provider 还会在发布成功的 finish reason 和 usage 前验证自身的语义终态：Chat
+Completions 要求成功的 choice finish reason 后再收到 `[DONE]`；Responses 要求
+`response.completed`；Anthropic Messages 要求成功的 `message_delta` 后再收到
+`message_stop`。这些信号之前的 EOF、非成功 stop reason 或损坏的最终事件都会返回
+typed `InvalidResponse`。调用者仍可看到之前的部分 delta，但不能把它们当作已完成响应。
+
 完整请求和 stream timeout 分开是有意设计：健康的长 stream 可以超过非流式请求
 超时，而停滞的 stream 仍会在 first chunk 或 idle 边界失败。超时继续作为 typed LLM
 network error 进入既有 retry policy。
