@@ -3,7 +3,7 @@ schema_version: 1
 id: finding.workflow-dag-authority
 kind: finding
 type: consolidation_candidate
-status: open
+status: resolved
 severity: medium
 primary_focus: state_authority
 focus: [contract_evidence, failure_concurrency]
@@ -43,5 +43,5 @@ Revisioned Task graph、Workflow Graph 与 DagWorkflow 各自拥有节点、边�
 
 Failure-concurrency Audit 已确认三者合同不同，不支持直接归并。ADR 0059 决定
 keep-separate：Task graph 持有 revision/claim，Graph 持有条件路由与 checkpoint，
-DagWorkflow 持有静态管道执行。双语文档及定向合同测试已同步；本 Finding 继续
-保持 open，等待独立复审、严格语义验证和远端 main 交付后再关闭。
+DagWorkflow 持有静态管道执行。双语文档、定向合同、独立复审、严格语义验证与完整
+本地合并门禁均已通过；外部Issue只在同一快照进入远端main后关闭。

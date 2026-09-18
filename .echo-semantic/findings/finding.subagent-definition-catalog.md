@@ -3,7 +3,7 @@ schema_version: 1
 id: finding.subagent-definition-catalog
 kind: finding
 type: intent_gap
-status: open
+status: resolved
 severity: medium
 primary_focus: contract_evidence
 focus: [trigger_input, state_authority]
@@ -40,6 +40,6 @@ Plugin 或配置只注册 definition 时，调用方可能看到与文档不同�
 ## 处理记录
 
 修复采用 hidden-until-resolvable：低层定义仍可通过 `get`/`contains` 检查，模型可见
-catalog 和可用列表只展示已绑定实例或 factory 的定义。源码注释、双语文档和测试已在
-`9e9b0191220aa0899fc1e8849ff8745ee78abe63` 对齐；待独立复审、完整门禁和远端
-main 交付后再关闭本 Finding 与 Issue。
+catalog 和可用列表只展示已绑定实例或 factory 的定义。源码注释、双语文档、测试、
+独立复审、严格语义验证与完整本地合并门禁均已闭合；外部Issue只在同一快照进入远端
+main后关闭。

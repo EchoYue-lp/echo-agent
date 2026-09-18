@@ -3,7 +3,7 @@ schema_version: 1
 id: finding.provider-stream-terminal-parity
 kind: finding
 type: implementation_bug
-status: open
+status: resolved
 severity: high
 primary_focus: failure_concurrency
 focus: [time_lifecycle, contract_evidence]
@@ -41,5 +41,5 @@ Responses/OpenAI/Anthropic adapters、共享 transport 与 ReAct think terminal 
 
 Failure/Time Audit 确认；后续 repair 为每个 provider 建立 explicit semantic terminal contract 与 EOF tests。
 
-候选实现与本地SSE fixture证据已落盘；独立rereview、完整合并门禁与远端main交付
-尚未完成，本Finding保持open。
+Provider-specific terminal合同、focused fixtures、独立rereview、严格语义验证与完整本地
+合并门禁均已闭合；外部Issue只在同一快照进入远端main后关闭。

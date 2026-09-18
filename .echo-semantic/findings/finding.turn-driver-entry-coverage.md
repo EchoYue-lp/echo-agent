@@ -3,7 +3,7 @@ schema_version: 1
 id: finding.turn-driver-entry-coverage
 kind: finding
 type: authority_conflict
-status: open
+status: resolved
 severity: high
 primary_focus: state_authority
 focus: [time_lifecycle, failure_concurrency, contract_evidence]
@@ -45,6 +45,7 @@ Channel invocation 遇到 EOF、sink failure、cancel、usage accounting 或 clo
 标准回复仅接受 `Completed + Delivered + final_answer`。EKO 应用 channel 自有 handler
 通过 `drive_foreground_pooled_chat_turn` 进入同一个框架 driver，本 Finding 不修改其产品
 投影。Session reset 现在向 driven handler 传播 generation cancel，并等待 active driven
-setup 释放 receipt 后才确认替换。当前保留 open：`ChannelManager::stop_all` 的
-QQ/飞书 adapter close 结算属于 Finding #36，待该依赖、独立复审、完整门禁和远端 main
-交付均闭合后再关闭。
+setup 释放 receipt 后才确认替换。独立复审、严格语义验证与完整本地合并门禁均已通过。
+`ChannelManager::stop_all` 与 QQ/飞书 adapter task close 结算仍由独立 Finding #36
+追踪，不会重新建立本 Finding 已修复的 Channel entry authority；外部Issue只在同一
+快照进入远端main后关闭。
