@@ -16,6 +16,14 @@ Every mode resolves the target through `SubagentRegistry` and executes through
 `SubagentExecutor`. Direct tool dispatch and programmatic dispatch therefore
 share hooks, cancellation, prompt compilation, isolation, and typed events.
 
+`register_definition` (or `ReactAgent::register_subagent_definition`) stores a
+pending definition for late binding. `get` and `contains` can inspect it, but
+`list_available`, `list_by_tag`, `agent_names`, and the model-facing `agent_tool`
+catalog include only definitions backed by an Agent instance or factory. Once
+the same name is registered with an instance or factory, it enters those
+executable views; removing it clears the views. An explicit programmatic
+dispatch before hydration fails because no Agent exists to run.
+
 Active Subagent messages use `SubagentExecutor::send_message_tracked`. Its
 `SubagentMessageReceipt` contains the exact attempt identity and the nested
 `AgentSteerReceipt`; the nested receipt is the only authority for mailbox

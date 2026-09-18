@@ -280,7 +280,7 @@ let mut manager = LspManager::new();
 
 // Load from .lsp.yaml
 let config = LspConfig::from_file(Path::new(".lsp.yaml"))?;
-manager.load_config(&config);
+manager.load_config(&config)?;
 
 // Set the workspace root (used as rootUri during initialize)
 manager.set_project_root(Path::new("/home/user/project"));
@@ -304,11 +304,12 @@ manager.start_server("rust").await?;
 │  clients: { "rust" → Arc<RwLock<StdioLspClient>>, ... }      │
 │                                                              │
 │  Operations:                                                 │
-│    load_config()       — parse .lsp.yaml                     │
+│    load_config()       — merge cold configuration            │
+│    reload_config()     — await teardown, replace config     │
 │    set_project_root()  — set workspace root URI              │
 │    start_server(lang)  — spawn + initialize one server       │
 │    stop_server(lang)   — graceful shutdown of one server     │
-│    restart_server(lang) — stop + start                       │
+│    restart_server(lang) — bounded explicit retry            │
 │    get_client_for_file(path) — route by extension            │
 │    status_all()        — status of every configured server   │
 │    shutdown_all()      — stop all running servers            │
@@ -337,6 +338,18 @@ immediately. A stale handle returns the typed `NotInitialized` lifecycle error
 from `initialize` or another I/O operation and cannot spawn a replacement
 process. Open a new `LspManager` to start a new lifecycle; a retained client
 handle is never an independent process owner.
+
+`load_config` rejects changes while this manager owns any client. Use
+`reload_config(&config).await?` to stop all old clients, replace the complete
+configuration and extension routes, then explicitly start desired servers.
+After stdout EOF, stdin write failure, or a framing failure, status reports `running: false`,
+`initialized: false`, no PID and the last transport error; pending calls and
+cached diagnostics are cleared atomically with request admission. `restart_server` counts each explicit attempt
+against that language's `max_restarts`, including a failed start. An exhausted
+budget rejects further attempts. No background restart is scheduled. Initial
+`start_server` and deliberate replacement via `start_server` do not consume
+the retry budget. `shutdown_all` permanently closes the manager; create a new
+manager for a new lifecycle.
 
 ---
 
@@ -386,7 +399,7 @@ async fn main() -> echo_agent::error::Result<()> {
     // Set up LspManager
     let mut manager = LspManager::new();
     let config = LspConfig::from_file(std::path::Path::new(".lsp.yaml")).unwrap();
-    manager.load_config(&config);
+    manager.load_config(&config)?;
     manager.set_project_root(std::path::Path::new("/home/user/project"));
 
     // Start rust-analyzer

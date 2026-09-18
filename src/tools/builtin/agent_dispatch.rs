@@ -818,6 +818,22 @@ mod tests {
         assert!(initial_schema.is_some());
 
         registry
+            .register_definition(SubagentDefinition::new("researcher", "Pending role"))
+            .await;
+        let pending_schema = manager.get_tool_definitions();
+        let pending = pending_schema
+            .iter()
+            .find(|definition| definition.function.name == "agent_tool")
+            .map(|definition| &definition.function.parameters);
+        assert!(pending.is_some_and(|parameters| {
+            parameters.pointer("/properties/agent_name/enum").is_none()
+                && parameters
+                    .pointer("/properties/agent_name/description")
+                    .and_then(Value::as_str)
+                    .is_some_and(|description| !description.contains("researcher"))
+        }));
+
+        registry
             .register(
                 SubagentDefinition::new("researcher", "Research role"),
                 Box::new(MockAgent::new("researcher")),
@@ -838,6 +854,20 @@ mod tests {
             .cloned()
             .unwrap_or_default();
         assert_eq!(names, vec![Value::String("researcher".to_string())]);
+
+        registry.remove("researcher").await;
+        let removed_schema = manager.get_tool_definitions();
+        let removed = removed_schema
+            .iter()
+            .find(|definition| definition.function.name == "agent_tool")
+            .map(|definition| &definition.function.parameters);
+        assert!(removed.is_some_and(|parameters| {
+            parameters.pointer("/properties/agent_name/enum").is_none()
+                && parameters
+                    .pointer("/properties/agent_name/description")
+                    .and_then(Value::as_str)
+                    .is_some_and(|description| !description.contains("researcher"))
+        }));
         Ok(())
     }
 

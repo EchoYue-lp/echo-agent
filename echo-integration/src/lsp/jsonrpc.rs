@@ -89,11 +89,10 @@ pub fn encode_message(msg: &impl Serialize) -> Result<Vec<u8>, serde_json::Error
 /// Parse a Content-Length header value from a header line.
 pub fn parse_content_length(line: &str) -> Option<usize> {
     let line = line.trim();
-    if line.to_lowercase().starts_with("content-length:") {
-        line["content-length:".len()..].trim().parse().ok()
-    } else {
-        None
-    }
+    let (name, value) = line.split_once(':')?;
+    name.eq_ignore_ascii_case("content-length")
+        .then(|| value.trim().parse().ok())
+        .flatten()
 }
 
 #[cfg(test)]
@@ -101,12 +100,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_encode_message() {
+    fn test_encode_message() -> Result<(), String> {
         let req = JsonRpcRequest::new(1, "initialize", None);
-        let bytes = encode_message(&req).unwrap();
-        let msg = String::from_utf8(bytes).unwrap();
+        let bytes = encode_message(&req).map_err(|error| error.to_string())?;
+        let msg = String::from_utf8(bytes).map_err(|error| error.to_string())?;
         assert!(msg.starts_with("Content-Length:"));
         assert!(msg.contains("\"method\":\"initialize\""));
+        Ok(())
     }
 
     #[test]
@@ -114,23 +114,29 @@ mod tests {
         assert_eq!(parse_content_length("Content-Length: 42"), Some(42));
         assert_eq!(parse_content_length("content-length: 100"), Some(100));
         assert_eq!(parse_content_length("Other-Header: foo"), None);
+        assert_eq!(parse_content_length("Content-Length: 中文"), None);
+        assert_eq!(parse_content_length("Ｃontent-Length: 4"), None);
     }
 
     #[test]
-    fn test_parse_response() {
+    fn test_parse_response() -> Result<(), String> {
         let json = r#"{"jsonrpc":"2.0","id":1,"result":{"capabilities":{}}}"#;
-        let resp: JsonRpcResponse = serde_json::from_str(json).unwrap();
+        let resp: JsonRpcResponse =
+            serde_json::from_str(json).map_err(|error| error.to_string())?;
         assert_eq!(resp.id, Some(1));
         assert!(resp.result.is_some());
         assert!(resp.error.is_none());
+        Ok(())
     }
 
     #[test]
-    fn test_parse_error_response() {
+    fn test_parse_error_response() -> Result<(), String> {
         let json =
             r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"Method not found"}}"#;
-        let resp: JsonRpcResponse = serde_json::from_str(json).unwrap();
+        let resp: JsonRpcResponse =
+            serde_json::from_str(json).map_err(|error| error.to_string())?;
         assert!(resp.error.is_some());
-        assert_eq!(resp.error.unwrap().code, -32601);
+        assert_eq!(resp.error.map(|error| error.code), Some(-32601));
+        Ok(())
     }
 }

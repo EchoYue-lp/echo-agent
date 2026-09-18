@@ -280,7 +280,7 @@ let mut manager = LspManager::new();
 
 // 从 .lsp.yaml 加载
 let config = LspConfig::from_file(Path::new(".lsp.yaml"))?;
-manager.load_config(&config);
+manager.load_config(&config)?;
 
 // 设置工作区根目录（作为 initialize 时的 rootUri）
 manager.set_project_root(Path::new("/home/user/project"));
@@ -304,11 +304,12 @@ manager.start_server("rust").await?;
 │  clients: { "rust" → Arc<RwLock<StdioLspClient>>, ... }      │
 │                                                              │
 │  操作:                                                        │
-│    load_config()       — 解析 .lsp.yaml                      │
+│    load_config()       — 合并尚未启动的配置                   │
+│    reload_config()     — 等待旧进程退出并替换配置             │
 │    set_project_root()  — 设置工作区根 URI                    │
 │    start_server(lang)  — 启动 + 初始化一个服务端             │
 │    stop_server(lang)   — 优雅关闭一个服务端                  │
-│    restart_server(lang) — 停止 + 启动                        │
+│    restart_server(lang) — 有配额的显式重试                   │
 │    get_client_for_file(path) — 按扩展名路由                  │
 │    status_all()        — 所有已配置服务端状态                │
 │    shutdown_all()      — 停止所有运行中的服务端              │
@@ -336,6 +337,15 @@ handle 会立即变为 stale。stale handle 调用 `initialize` 或其它 I/O �
 返回类型化的 `NotInitialized` 生命周期错误，不能重新启动脱离管理器的子
 进程。需要新生命周期时应创建新的 `LspManager`；旧 client handle 永远不
 会成为独立的进程 owner。
+
+管理器仍持有 client 时，`load_config` 拒绝配置变更。调用
+`reload_config(&config).await?` 会等待旧 client 全部关闭，替换完整配置和
+扩展名路由；之后需显式启动所需服务端。stdout EOF、stdin 写入失败或消息帧错误使状态变为
+`running: false`、`initialized: false`、无 PID，并保留最后的 transport 错误；
+pending 调用与诊断缓存会和请求准入在同一原子边界内清理。每次显式 `restart_server` 都消耗该语言
+`max_restarts` 配额，启动失败也计入；耗尽时拒绝继续重试，不安排后台自动
+重启。初次 `start_server` 和主动重复启动不占用重试配额。`shutdown_all` 永久
+关闭当前 manager，新生命周期应新建 manager。
 
 ---
 
@@ -385,7 +395,7 @@ async fn main() -> echo_agent::error::Result<()> {
     // 配置 LspManager
     let mut manager = LspManager::new();
     let config = LspConfig::from_file(std::path::Path::new(".lsp.yaml")).unwrap();
-    manager.load_config(&config);
+    manager.load_config(&config)?;
     manager.set_project_root(std::path::Path::new("/home/user/project"));
 
     // 启动 rust-analyzer

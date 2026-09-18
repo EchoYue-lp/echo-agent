@@ -3,22 +3,22 @@ schema_version: 1
 id: finding.workflow-dag-authority
 kind: finding
 type: consolidation_candidate
-status: open
+status: resolved
 severity: medium
 primary_focus: state_authority
 focus: [contract_evidence, failure_concurrency]
 boundary_ref: boundary.task-subagent-workflow
 behavior_refs: [behavior.task-subagent-execution]
 rule_refs: [rule.task-subagent-authority]
-evidence_refs: [evidence.task-subagent-workflow]
-audit_refs: [audit.task-subagent-workflow.failure-concurrency]
+evidence_refs: [evidence.task-subagent-workflow, evidence.workflow-dag-authority-repair, evidence.workflow-dag-authority-verification]
+audit_refs: [audit.task-subagent-workflow.failure-concurrency, audit.workflow-dag-authority-rereview]
 decision_refs: []
-repair_evidence_refs: []
-verification_evidence_refs: []
-rereview_audit_refs: []
+repair_evidence_refs: [evidence.workflow-dag-authority-repair]
+verification_evidence_refs: [evidence.workflow-dag-authority-verification]
+rereview_audit_refs: [audit.workflow-dag-authority-rereview]
 discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 candidate_asset_refs: [asset.task-graph-authority, asset.workflow-runtime]
-decision: defer
+decision: keep
 ---
 
 # Task DAG 与 Workflow DAG 平行实现候选
@@ -41,4 +41,7 @@ Revisioned Task graph、Workflow Graph 与 DagWorkflow 各自拥有节点、边�
 
 ## 处理记录
 
-Failure-concurrency Audit 已确认三者合同不同，不支持直接归并；下一步以 ADR 决定 keep-separate，并仅审查可共享的纯算法，不据当前采用量删除。
+Failure-concurrency Audit 已确认三者合同不同，不支持直接归并。ADR 0059 决定
+keep-separate：Task graph 持有 revision/claim，Graph 持有条件路由与 checkpoint，
+DagWorkflow 持有静态管道执行。双语文档、定向合同、独立复审、严格语义验证与完整
+本地合并门禁均已通过；外部Issue只在同一快照进入远端main后关闭。

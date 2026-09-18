@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.task-subagent-external-control-handle-verification
 kind: evidence
-observed_at: source:a8b11a40111a41cb6dc345b3798947d426bbdf0318f641868b819c0d5f58a88b
+observed_at: 0415ba15eb8d348f357fe55df4448897677e6960
 source_refs:
   - src/agent/subagent/executor.rs
   - src/agent/subagent/team/mod.rs

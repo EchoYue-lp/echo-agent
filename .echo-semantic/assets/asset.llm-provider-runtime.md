@@ -6,14 +6,14 @@ title: LLM Provider 与 Harness Contract
 asset_type: protocol
 status: needs_review
 risk: high
-observed_at: f1e9027246760661144786e9e35615cd46d580c6
+observed_at: 2f4da65cd5b83daa07d6c0f36d47bb50fd259c91
 boundary_refs: [boundary.llm-provider-runtime]
 code_refs: [echo-core/src/llm/mod.rs, echo-core/src/llm/capabilities.rs, echo-core/src/budget.rs, echo-core/src/tokenizer.rs, echo-integration/src/providers/config.rs, echo-integration/src/providers/client.rs]
 consumer_refs: [src/agent/react/run/phases/think.rs, echo-state/src/compression/compressor/summary.rs]
 behavior_refs: [behavior.llm-provider-execution]
 rule_refs: [rule.provider-protocol-boundary]
-evidence_refs: [evidence.provider-protocol-quality]
-finding_refs: [finding.structured-output-main-path, finding.provider-capability-authority, finding.nonstream-cancellation-parity]
+evidence_refs: [evidence.provider-protocol-quality, evidence.provider-stream-terminal-parity-repair, evidence.provider-stream-terminal-parity-verification]
+finding_refs: [finding.structured-output-main-path, finding.provider-capability-authority, finding.nonstream-cancellation-parity, finding.provider-stream-terminal-parity]
 candidate_refs: []
 ---
 

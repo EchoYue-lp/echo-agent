@@ -151,7 +151,7 @@ languages:
     extensions: [".rs"]
 "#;
         let config = LspConfig::from_yaml(yaml)?;
-        manager.load_config(&config);
+        manager.load_config(&config)?;
         println!("  Loaded rust-analyzer config");
 
         // Set project root

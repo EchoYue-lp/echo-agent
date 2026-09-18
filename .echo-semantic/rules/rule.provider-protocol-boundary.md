@@ -7,11 +7,11 @@ expectation: inferred
 risk: high
 primary_focus: contract_evidence
 focus: [failure_concurrency, time_lifecycle, trigger_input]
-observed_at: e842d87bb787fb0b1fd39afbc04f834df07aec84
+observed_at: 2f4da65cd5b83daa07d6c0f36d47bb50fd259c91
 behavior_refs: [behavior.llm-provider-execution]
-code_refs: [echo-core/src/llm/mod.rs, echo-core/src/llm/capabilities.rs, echo-integration/src/providers/config.rs, echo-integration/src/providers/client.rs, docs/adr/0022-typed-llm-timeouts.md]
-evidence_refs: [evidence.provider-protocol-quality, evidence.sse-eof-framing-acceptance-repair, evidence.sse-eof-framing-acceptance-verification]
-finding_refs: [finding.structured-output-main-path, finding.provider-capability-authority, finding.nonstream-cancellation-parity, finding.sse-eof-framing-acceptance]
+code_refs: [echo-core/src/llm/mod.rs, echo-core/src/llm/capabilities.rs, echo-integration/src/providers/config.rs, echo-integration/src/providers/client.rs, echo-integration/src/providers/anthropic.rs, echo-integration/src/providers/responses.rs, docs/adr/0022-typed-llm-timeouts.md, docs/adr/0064-provider-stream-semantic-terminal.md]
+evidence_refs: [evidence.provider-protocol-quality, evidence.sse-eof-framing-acceptance-repair, evidence.sse-eof-framing-acceptance-verification, evidence.provider-stream-terminal-parity-repair, evidence.provider-stream-terminal-parity-verification]
+finding_refs: [finding.structured-output-main-path, finding.provider-capability-authority, finding.nonstream-cancellation-parity, finding.sse-eof-framing-acceptance, finding.provider-stream-terminal-parity]
 ---
 
 # Provider Wire 与 Harness Policy 分离
@@ -26,7 +26,7 @@ LlmClient/ChatRequest 定义 provider-neutral 合同，provider adapter 只翻�
 
 ## 当前实现
 
-Typed config构造concrete client，共享SSE transport处理stream并拒绝未以空行完成framing的EOF残余；ModelProfileResolver是独立可注入policy。
+Typed config构造concrete client，共享SSE transport处理stream并拒绝未以空行完成framing的EOF残余；各adapter各自确认协议语义终态后才发布finish/usage。ModelProfileResolver是独立可注入policy。
 
 ## 期望行为
 

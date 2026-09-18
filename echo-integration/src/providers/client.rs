@@ -377,6 +377,7 @@ where
 ///
 /// `cancel_token` enables aborting the stream: the cancellation signal is checked
 /// between each SSE chunk, and iteration stops immediately once cancelled.
+/// A choice finish reason and usage are withheld until the final `[DONE]` marker.
 #[tracing::instrument(skip(client, request_body, header_map, url, cancel_token), fields(model = %request_body.model))]
 pub(crate) async fn stream_post(
     client: Arc<Client>,
@@ -392,17 +393,65 @@ pub(crate) async fn stream_post(
     let request = client.post(url).headers(header_map).json(&body);
     let raw_stream = stream_json_sse(request, model, timeouts, cancel_token).await?;
     Ok(async_stream::try_stream! {
+        let mut terminal: Option<ChatCompletionChunk> = None;
+        let mut stream_usage = None;
         futures::pin_mut!(raw_stream);
         while let Some(event) = raw_stream.next().await {
             match event? {
-                JsonSseEvent::Done => return,
+                JsonSseEvent::Done => {
+                    let mut completed = terminal.ok_or_else(|| LlmError::InvalidResponse(
+                        "Chat Completions stream ended with [DONE] before a finish reason".to_string()
+                    ))?;
+                    completed.usage = stream_usage.or(completed.usage);
+                    yield completed;
+                    return;
+                }
                 JsonSseEvent::Data(value) => {
-                    let chunk = serde_json::from_value::<ChatCompletionChunk>(value)
+                    let mut chunk = serde_json::from_value::<ChatCompletionChunk>(value)
                         .map_err(|error| LlmError::InvalidResponse(format!("invalid Chat Completions SSE event: {error}")))?;
-                    yield chunk;
+                    if let Some(usage) = chunk.usage.take() {
+                        stream_usage = Some(usage);
+                    }
+                    if terminal.is_some() {
+                        if !chunk.choices.is_empty() {
+                            Err(LlmError::InvalidResponse("Chat Completions emitted choices after its finish reason".to_string()))?;
+                        }
+                        continue;
+                    }
+                    let finish = chunk.choices.first().and_then(|choice| choice.finish_reason.as_deref());
+                    if let Some(reason) = finish {
+                        if !matches!(reason, "stop" | "tool_calls" | "function_call") {
+                            Err(LlmError::InvalidResponse(format!(
+                                "Chat Completions stream ended with non-success finish reason '{reason}'"
+                            )))?;
+                        }
+                        let has_delta = chunk.choices.first().is_some_and(|choice| {
+                            let delta = &choice.delta;
+                            delta.role.is_some() || delta.content.is_some()
+                                || delta.reasoning_content.is_some()
+                                || delta.reasoning_blocks.is_some() || delta.tool_calls.is_some()
+                        });
+                        if has_delta {
+                            let mut progress = chunk.clone();
+                            if let Some(choice) = progress.choices.first_mut() {
+                                choice.finish_reason = None;
+                            }
+                            progress.usage = None;
+                            yield progress;
+                        }
+                        if let Some(choice) = chunk.choices.first_mut() {
+                            choice.delta = Default::default();
+                        }
+                        terminal = Some(chunk);
+                    } else if !chunk.choices.is_empty() {
+                        yield chunk;
+                    }
                 }
             }
         }
+        Err(LlmError::InvalidResponse(
+            "Chat Completions stream reached SSE EOF before [DONE] and a finish reason".to_string()
+        ))?;
     })
 }
 
@@ -865,6 +914,240 @@ mod tests {
                     .with_timeouts(timeouts),
             )),
         }
+    }
+
+    async fn collect_provider_sse(
+        provider: TestProvider,
+        events: &[&str],
+    ) -> Result<Vec<Result<echo_core::llm::ChatChunk>>> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let body = events
+            .iter()
+            .map(|event| format!("data: {event}\n\n"))
+            .collect::<String>();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await?;
+            let mut request = vec![0_u8; 8192];
+            let _request_bytes = socket.read(&mut request).await?;
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            socket.write_all(headers.as_bytes()).await?;
+            socket.write_all(body.as_bytes()).await?;
+            socket.flush().await
+        });
+        let client = test_provider_client(provider, format!("http://{address}"))?;
+        let stream = client
+            .chat_stream(ChatRequest {
+                messages: vec![Message::user("hello".to_string())],
+                ..Default::default()
+            })
+            .await?;
+        let items = tokio::time::timeout(Duration::from_secs(2), stream.collect::<Vec<_>>())
+            .await
+            .map_err(|_| LlmError::NetworkError("provider fixture timed out".to_string()))?;
+        server
+            .await
+            .map_err(|error| LlmError::NetworkError(format!("fixture failed: {error}")))??;
+        Ok(items)
+    }
+
+    #[tokio::test]
+    async fn provider_streams_require_semantic_completion_after_partial_output() -> Result<()> {
+        let cases: &[(TestProvider, &[&str])] = &[
+            (
+                TestProvider::OpenAi,
+                &[r#"{"choices":[{"delta":{"content":"partial"},"index":0}]}"#],
+            ),
+            (
+                TestProvider::OpenAi,
+                &[
+                    r#"{"choices":[{"delta":{"content":"partial"},"index":0}]}"#,
+                    r#"{"choices":[{"delta":null,"index":0,"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}}"#,
+                ],
+            ),
+            (
+                TestProvider::Anthropic,
+                &[
+                    r#"{"type":"message_start","message":{"usage":{"input_tokens":2,"output_tokens":0}}}"#,
+                    r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"partial"}}"#,
+                    r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}"#,
+                ],
+            ),
+            (
+                TestProvider::Responses,
+                &[
+                    r#"{"type":"response.output_text.delta","item_id":"msg_1","output_index":0,"content_index":0,"delta":"partial"}"#,
+                ],
+            ),
+        ];
+        for (provider, events) in cases {
+            let items = collect_provider_sse(*provider, events).await?;
+            assert!(
+                items.iter().any(|item| item
+                    .as_ref()
+                    .ok()
+                    .and_then(|chunk| chunk.delta.content.as_ref())
+                    .is_some()),
+                "{} lost partial output",
+                provider.name()
+            );
+            assert!(items.iter().any(|item| matches!(item, Err(echo_core::error::ReactError::Llm(error)) if matches!(error.as_ref(), LlmError::InvalidResponse(_)))), "{} accepted missing semantic terminal", provider.name());
+            assert!(
+                !items.iter().any(|item| item
+                    .as_ref()
+                    .ok()
+                    .and_then(|chunk| chunk.finish_reason.as_ref())
+                    .is_some()),
+                "{} published a finish before semantic terminal",
+                provider.name()
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn provider_streams_complete_with_one_terminal_and_usage() -> Result<()> {
+        let cases: &[(TestProvider, &[&str])] = &[
+            (
+                TestProvider::OpenAi,
+                &[
+                    r#"{"choices":[{"delta":{"content":"done"},"index":0}]}"#,
+                    r#"{"choices":[{"delta":null,"index":0,"finish_reason":"stop"}]}"#,
+                    r#"{"choices":[],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}}"#,
+                    "[DONE]",
+                ],
+            ),
+            (
+                TestProvider::Anthropic,
+                &[
+                    r#"{"type":"message_start","message":{"usage":{"input_tokens":2,"output_tokens":0}}}"#,
+                    r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"done"}}"#,
+                    r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}"#,
+                    r#"{"type":"message_stop"}"#,
+                ],
+            ),
+            (
+                TestProvider::Responses,
+                &[
+                    r#"{"type":"response.output_text.delta","item_id":"msg_1","output_index":0,"content_index":0,"delta":"done"}"#,
+                    r#"{"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[],"usage":{"input_tokens":2,"output_tokens":1,"total_tokens":3}}}"#,
+                ],
+            ),
+        ];
+        for (provider, events) in cases {
+            let items = collect_provider_sse(*provider, events).await?;
+            assert!(
+                items.iter().all(Result::is_ok),
+                "{} rejected a completed stream",
+                provider.name()
+            );
+            let terminals = items
+                .iter()
+                .filter_map(|item| item.as_ref().ok())
+                .filter(|chunk| chunk.finish_reason.is_some())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                terminals.len(),
+                1,
+                "{} must emit one terminal",
+                provider.name()
+            );
+            assert_eq!(
+                terminals
+                    .first()
+                    .and_then(|chunk| chunk.finish_reason.as_deref()),
+                Some("stop")
+            );
+            assert_eq!(
+                terminals
+                    .first()
+                    .and_then(|chunk| chunk.usage.as_ref())
+                    .and_then(|usage| usage.total_tokens),
+                Some(3)
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn provider_streams_reject_incomplete_or_invalid_terminal_signals() -> Result<()> {
+        let cases: &[(TestProvider, &[&str])] = &[
+            (
+                TestProvider::OpenAi,
+                &[
+                    r#"{"choices":[{"delta":{"content":"partial"},"index":0}]}"#,
+                    "[DONE]",
+                ],
+            ),
+            (
+                TestProvider::OpenAi,
+                &[
+                    r#"{"choices":[{"delta":{"content":"partial"},"index":0}]}"#,
+                    r#"{"choices":[{"delta":null,"index":0,"finish_reason":"length"}]}"#,
+                    "[DONE]",
+                ],
+            ),
+            (
+                TestProvider::OpenAi,
+                &[
+                    r#"{"choices":[{"delta":null,"index":0,"finish_reason":"stop"}]}"#,
+                    r#"{"choices":[{"delta":{"content":"late"},"index":0}]}"#,
+                    "[DONE]",
+                ],
+            ),
+            (
+                TestProvider::Anthropic,
+                &[
+                    r#"{"type":"message_start","message":{"usage":{"input_tokens":2,"output_tokens":0}}}"#,
+                    r#"{"type":"message_stop"}"#,
+                ],
+            ),
+            (
+                TestProvider::Anthropic,
+                &[
+                    r#"{"type":"message_start","message":{"usage":{"input_tokens":2,"output_tokens":0}}}"#,
+                    r#"{"type":"message_delta","delta":{"stop_reason":"max_tokens"},"usage":{"output_tokens":1}}"#,
+                    r#"{"type":"message_stop"}"#,
+                ],
+            ),
+            (TestProvider::Responses, &["[DONE]"]),
+        ];
+        for (provider, events) in cases {
+            let items = collect_provider_sse(*provider, events).await?;
+            assert!(items.iter().any(|item| matches!(item, Err(echo_core::error::ReactError::Llm(error)) if matches!(error.as_ref(), LlmError::InvalidResponse(_)))), "{} accepted an invalid semantic terminal", provider.name());
+            assert!(
+                !items.iter().any(|item| item
+                    .as_ref()
+                    .ok()
+                    .and_then(|chunk| chunk.finish_reason.as_ref())
+                    .is_some()),
+                "{} published a successful finish for an invalid terminal",
+                provider.name()
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn openai_usage_before_done_is_not_published_on_truncated_stream() -> Result<()> {
+        let items = collect_provider_sse(
+            TestProvider::OpenAi,
+            &[
+                r#"{"choices":[{"delta":{"content":"partial"},"index":0}]}"#,
+                r#"{"choices":[{"delta":null,"index":0,"finish_reason":"stop"}]}"#,
+                r#"{"choices":[],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}}"#,
+            ],
+        ).await?;
+        assert!(items.iter().any(Result::is_err));
+        assert!(!items.iter().any(|item| {
+            item.as_ref()
+                .ok()
+                .is_some_and(|chunk| chunk.finish_reason.is_some() || chunk.usage.is_some())
+        }));
+        Ok(())
     }
 
     async fn assert_provider_cancels_while_stalled(

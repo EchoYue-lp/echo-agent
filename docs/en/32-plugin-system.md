@@ -137,6 +137,17 @@ The set remains applicable when a component diagnostic is present. It is rejecte
 generation-wide invariant, such as dependency ordering or generation allocation, prevents building
 the complete immutable snapshot.
 
+`PluginLifecycleManager` owns callback cleanup separately from component wiring. A failed
+`deactivate`, `init`, or `activate` retains cleanup debt and blocks further callback activation
+through `reconcile`, `activate_enabled`, and direct `activate`. The failed registration remains
+available for a cleanup retry; successful deactivation settles its deactivation debt, while
+failed initialization requires shutdown but not deactivation, and failed activation requires
+successful `unregister` cleanup. A failed callback is
+not treated as withdrawn merely because the desired enabled set changed. Failed `shutdown` remains
+unsettled even if a later `deactivate` succeeds, and must be retried through `unregister`. See
+[ADR 0060](../adr/0060-plugin-lifecycle-reconcile-settlement.md). Registry and component wiring
+still require host-level coordination for a complete reload transaction.
+
 ## API
 
 ```rust,no_run

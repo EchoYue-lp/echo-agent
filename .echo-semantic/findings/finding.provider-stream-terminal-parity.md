@@ -3,19 +3,19 @@ schema_version: 1
 id: finding.provider-stream-terminal-parity
 kind: finding
 type: implementation_bug
-status: open
+status: resolved
 severity: high
 primary_focus: failure_concurrency
 focus: [time_lifecycle, contract_evidence]
 boundary_ref: boundary.llm-provider-runtime
 behavior_refs: [behavior.llm-provider-execution]
 rule_refs: [rule.provider-protocol-boundary]
-evidence_refs: [evidence.provider-protocol-quality]
-audit_refs: [audit.llm-provider-runtime.failure-concurrency, audit.llm-provider-runtime.time-lifecycle]
+evidence_refs: [evidence.provider-protocol-quality, evidence.provider-stream-terminal-parity-repair, evidence.provider-stream-terminal-parity-verification]
+audit_refs: [audit.llm-provider-runtime.failure-concurrency, audit.llm-provider-runtime.time-lifecycle, audit.provider-stream-terminal-parity-rereview]
 decision_refs: []
-repair_evidence_refs: []
-verification_evidence_refs: []
-rereview_audit_refs: []
+repair_evidence_refs: [evidence.provider-stream-terminal-parity-repair]
+verification_evidence_refs: [evidence.provider-stream-terminal-parity-verification]
+rereview_audit_refs: [audit.provider-stream-terminal-parity-rereview]
 discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 ---
 
@@ -40,3 +40,6 @@ Responses/OpenAI/Anthropic adapters、共享 transport 与 ReAct think terminal 
 ## 处理记录
 
 Failure/Time Audit 确认；后续 repair 为每个 provider 建立 explicit semantic terminal contract 与 EOF tests。
+
+Provider-specific terminal合同、focused fixtures、独立rereview、严格语义验证与完整本地
+合并门禁均已闭合；外部Issue只在同一快照进入远端main后关闭。

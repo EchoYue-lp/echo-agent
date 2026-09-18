@@ -23,6 +23,8 @@ static NEXT_MANAGER_GENERATION: AtomicU64 = AtomicU64::new(1);
 pub struct LspManager {
     /// Active clients, keyed by language name.
     clients: HashMap<String, Arc<RwLock<StdioLspClient>>>,
+    /// Last known status survives removal of an owned client.
+    settled: HashMap<String, LspServerStatus>,
     /// Configuration for each language.
     configs: HashMap<String, LspServerConfig>,
     /// Extension → language mapping.
@@ -43,6 +45,7 @@ impl LspManager {
             .unwrap_or(1);
         Self {
             clients: HashMap::new(),
+            settled: HashMap::new(),
             configs: HashMap::new(),
             extension_map: HashMap::new(),
             project_root_uri: None,
@@ -51,9 +54,40 @@ impl LspManager {
     }
 
     /// Load configuration from an `LspConfig`.
-    pub fn load_config(&mut self, config: &LspConfig) {
+    pub fn load_config(&mut self, config: &LspConfig) -> Result<(), String> {
+        if !self.lifecycle.is_live(self.lifecycle.generation) {
+            return Err("LSP manager is closed".to_string());
+        }
+        if !self.clients.is_empty() {
+            return Err(
+                "Stop servers or use reload_config before changing LSP configuration".to_string(),
+            );
+        }
         for (lang, server_config) in &config.servers {
             self.configs.insert(lang.clone(), server_config.clone());
+        }
+        self.rebuild_extensions();
+        Ok(())
+    }
+
+    /// Replace the complete configuration after awaiting teardown of old children.
+    pub async fn reload_config(&mut self, config: &LspConfig) -> Result<(), String> {
+        if !self.lifecycle.is_live(self.lifecycle.generation) {
+            return Err("LSP manager is closed".to_string());
+        }
+        let languages: Vec<String> = self.clients.keys().cloned().collect();
+        for language in languages {
+            self.stop_server(&language).await?;
+        }
+        self.configs = config.servers.clone();
+        self.settled.clear();
+        self.rebuild_extensions();
+        Ok(())
+    }
+
+    fn rebuild_extensions(&mut self) {
+        self.extension_map.clear();
+        for (lang, server_config) in &self.configs {
             for ext in &server_config.extensions {
                 let ext = if ext.starts_with('.') {
                     ext.clone()
@@ -95,17 +129,36 @@ impl LspManager {
             Arc::clone(&self.lifecycle),
             self.lifecycle.generation,
         );
+        if let Some(status) = self.settled.get(language) {
+            client.set_restart_count(status.restart_count);
+        }
 
         // Initialize with project root
         let root_uri = self.project_root_uri.as_deref().unwrap_or("file:///");
 
-        tokio::time::timeout(
+        let result = tokio::time::timeout(
             std::time::Duration::from_secs(15),
             client.initialize(root_uri),
         )
         .await
-        .map_err(|_| format!("Timed out initializing {language} server"))?
-        .map_err(|e| format!("Failed to initialize {language} server: {e}"))?;
+        .map_err(|_| format!("Timed out initializing {language} server"))
+        .and_then(|result| {
+            result.map_err(|e| format!("Failed to initialize {language} server: {e}"))
+        });
+        if let Err(error) = result {
+            // A timed-out initialize future is cancelled, so settle its child
+            // and I/O tasks before publishing the failed status.
+            let _ = client.shutdown().await;
+            let mut status = client.status();
+            status.running = false;
+            status.initialized = false;
+            status.pid = None;
+            status.last_error = Some(error.clone());
+            self.settled.insert(language.to_string(), status);
+            return Err(error);
+        }
+
+        self.settled.remove(language);
 
         self.clients
             .insert(language.to_string(), Arc::new(RwLock::new(client)));
@@ -118,18 +171,50 @@ impl LspManager {
     pub async fn stop_server(&mut self, language: &str) -> Result<(), String> {
         if let Some(client) = self.clients.remove(language) {
             let mut client = client.write().await;
-            client
+            let result = client
                 .shutdown()
                 .await
-                .map_err(|e| format!("Failed to shutdown {language} server: {e}"))?;
+                .map_err(|e| format!("Failed to shutdown {language} server: {e}"));
+            let mut status = client.status();
+            status.running = false;
+            status.initialized = false;
+            status.pid = None;
+            if let Err(error) = &result {
+                status.last_error = Some(error.clone());
+            }
+            self.settled.insert(language.to_string(), status);
             tracing::info!("LSP server stopped for language: {language}");
+            result?;
         }
         Ok(())
     }
 
     /// Restart a language server.
     pub async fn restart_server(&mut self, language: &str) -> Result<(), String> {
-        self.stop_server(language).await.ok();
+        if !self.lifecycle.is_live(self.lifecycle.generation) {
+            return Err("LSP manager is closed".to_string());
+        }
+        let limit = self
+            .configs
+            .get(language)
+            .ok_or_else(|| format!("No configuration for language: {language}"))?
+            .max_restarts;
+        let status = if let Some(client) = self.clients.get(language) {
+            client.read().await.status()
+        } else {
+            self.settled
+                .get(language)
+                .cloned()
+                .unwrap_or_else(|| self.empty_status(language))
+        };
+        if status.restart_count >= limit {
+            return Err(format!("Restart limit reached for {language}: {limit}"));
+        }
+        let next = status.restart_count.saturating_add(1);
+        self.stop_server(language).await?;
+        let mut settled = self.settled.remove(language).unwrap_or(status);
+        settled.restart_count = next;
+        self.settled.insert(language.to_string(), settled);
         self.start_server(language).await
     }
 
@@ -148,6 +233,9 @@ impl LspManager {
 
         let language = self.extension_map.get(&ext)?;
         let client = self.clients.get(language)?;
+        if !client.read().await.is_initialized() {
+            return None;
+        }
         Some((language.clone(), client.clone()))
     }
 
@@ -166,7 +254,27 @@ impl LspManager {
 
     /// List all running servers.
     pub fn running_servers(&self) -> Vec<&str> {
-        self.clients.keys().map(|s| s.as_str()).collect()
+        self.clients
+            .iter()
+            .filter_map(|(language, client)| {
+                client
+                    .try_read()
+                    .ok()
+                    .filter(|client| client.is_running())
+                    .map(|_| language.as_str())
+            })
+            .collect()
+    }
+
+    fn empty_status(&self, language: &str) -> LspServerStatus {
+        LspServerStatus {
+            language: language.to_string(),
+            running: false,
+            initialized: false,
+            restart_count: 0,
+            last_error: None,
+            pid: None,
+        }
     }
 
     /// Get status of all servers.
@@ -182,14 +290,12 @@ impl LspManager {
         // Configured but not running
         for lang in self.configs.keys() {
             if !self.clients.contains_key(lang) {
-                statuses.push(LspServerStatus {
-                    language: lang.clone(),
-                    running: false,
-                    initialized: false,
-                    restart_count: 0,
-                    last_error: None,
-                    pid: None,
-                });
+                statuses.push(
+                    self.settled
+                        .get(lang)
+                        .cloned()
+                        .unwrap_or_else(|| self.empty_status(lang)),
+                );
             }
         }
 
@@ -218,6 +324,428 @@ impl Default for LspManager {
 mod tests {
     use super::*;
     use std::fs;
+
+    const MOCK_LSP: &str = r#"
+import json, os, sys, time
+mode = sys.argv[1]
+while True:
+    line = sys.stdin.buffer.readline()
+    if not line:
+        break
+    if not line.lower().startswith(b'content-length:'):
+        continue
+    size = int(line.split(b':', 1)[1].strip())
+    sys.stdin.buffer.readline()
+    message = json.loads(sys.stdin.buffer.read(size))
+    method = message.get('method')
+    close_stdin_after_write = False
+    if method == 'initialize':
+        body = json.dumps({'jsonrpc':'2.0','id':message['id'],'result':{'capabilities':{}}}).encode()
+    elif method == 'shutdown':
+        body = json.dumps({'jsonrpc':'2.0','id':message['id'],'result':{}}).encode()
+    elif mode == 'eof' and method == 'initialized':
+        break
+    elif mode == 'request_eof' and method == 'textDocument/definition':
+        break
+    elif mode == 'writer_fail' and method == 'textDocument/hover':
+        body = json.dumps({'jsonrpc':'2.0','id':message['id'],'result':{'contents':'ready'}}).encode()
+        close_stdin_after_write = True
+    elif mode == 'malformed_header' and method == 'initialized':
+        sys.stdout.buffer.write(b'Broken-Header\r\n\r\nbody')
+        sys.stdout.buffer.flush()
+        time.sleep(60)
+        break
+    elif mode == 'missing_length' and method == 'initialized':
+        sys.stdout.buffer.write(b'X-Test: value\r\n\r\nbody')
+        sys.stdout.buffer.flush()
+        time.sleep(60)
+        break
+    else:
+        continue
+    sys.stdout.buffer.write(b'Content-Length: %d\r\n\r\n' % len(body) + body)
+    sys.stdout.buffer.flush()
+    if close_stdin_after_write:
+        os.close(0)
+        time.sleep(60)
+        break
+"#;
+
+    fn mock_config(language: &str, mode: &str, max_restarts: u32) -> LspServerConfig {
+        LspServerConfig {
+            language: language.to_string(),
+            command: "python3".to_string(),
+            args: vec![
+                "-u".to_string(),
+                "-c".to_string(),
+                MOCK_LSP.to_string(),
+                mode.to_string(),
+            ],
+            extensions: vec![".test".to_string()],
+            env: HashMap::new(),
+            initialization_options: None,
+            max_restarts,
+        }
+    }
+
+    async fn wait_for_exit(
+        manager: &LspManager,
+        language: &str,
+    ) -> Result<LspServerStatus, String> {
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                if let Some(status) = manager
+                    .status_all()
+                    .await
+                    .into_iter()
+                    .find(|status| status.language == language)
+                    && !status.running
+                {
+                    return status;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .map_err(|_| "language server did not reach EOF".to_string())
+    }
+
+    #[tokio::test]
+    async fn eof_clears_runtime_and_restart_exhaustion_preserves_error() -> Result<(), String> {
+        let mut manager = LspManager::new();
+        let language = "test";
+        manager.load_config(&LspConfig {
+            servers: [(language.to_string(), mock_config(language, "eof", 1))]
+                .into_iter()
+                .collect(),
+        })?;
+        manager.start_server(language).await?;
+        let old = manager.get_client(language).ok_or("missing first client")?;
+        let exited = wait_for_exit(&manager, language).await?;
+        if exited.initialized || exited.pid.is_some() || exited.last_error.is_none() {
+            return Err(format!("EOF did not settle status: {exited:?}"));
+        }
+        if !old.read().await.process_has_exited().await {
+            return Err("EOF published terminal status before child exit".to_string());
+        }
+        if old
+            .read()
+            .await
+            .diagnostics("file:///example.test")
+            .await
+            .is_ok()
+        {
+            return Err("EOF retained diagnostics access".to_string());
+        }
+        let eof_error = exited.last_error.clone();
+        manager.stop_server(language).await?;
+        let stopped = manager
+            .status_all()
+            .await
+            .into_iter()
+            .find(|status| status.language == language)
+            .ok_or("missing stopped EOF status")?;
+        if stopped.last_error != eof_error {
+            return Err("explicit stop erased the prior EOF failure".to_string());
+        }
+        manager.restart_server(language).await?;
+        let restarted = wait_for_exit(&manager, language).await?;
+        if restarted.restart_count != 1 || restarted.last_error.is_none() {
+            return Err(format!("restart status lost attempt/error: {restarted:?}"));
+        }
+        if manager.restart_server(language).await.is_ok() {
+            return Err("restart exceeded configured limit".to_string());
+        }
+        manager.shutdown_all().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn writer_failure_settles_status_and_pending_without_stdout_eof() -> Result<(), String> {
+        let mut manager = LspManager::new();
+        let language = "test";
+        manager.load_config(&LspConfig {
+            servers: [(
+                language.to_string(),
+                mock_config(language, "writer_fail", 1),
+            )]
+            .into_iter()
+            .collect(),
+        })?;
+        manager.start_server(language).await?;
+        let client = manager.get_client(language).ok_or("missing client")?;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            client.read().await.hover(
+                "file:///writer-ready.test",
+                echo_core::lsp::Position {
+                    line: 0,
+                    character: 0,
+                },
+            ),
+        )
+        .await
+        .map_err(|_| "writer failure fixture did not close stdin".to_string())?
+        .map_err(|error| error.to_string())?;
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while client.read().await.is_running() {
+                let _ = client
+                    .read()
+                    .await
+                    .did_save("file:///writer-ready.test")
+                    .await;
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .map_err(|_| "writer task did not observe the closed stdin".to_string())?;
+        let request = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            client
+                .read()
+                .await
+                .goto_definition(
+                    "file:///example.test",
+                    echo_core::lsp::Position {
+                        line: 0,
+                        character: 0,
+                    },
+                )
+                .await
+        })
+        .await
+        .map_err(|_| "writer failure left a pending request".to_string())?;
+        let status = wait_for_exit(&manager, language).await?;
+        if request.is_ok()
+            || !status
+                .last_error
+                .as_deref()
+                .is_some_and(|error| error.contains("stdin write failed"))
+        {
+            return Err(format!("writer failure was not authoritative: {status:?}"));
+        }
+        if !client.read().await.process_has_exited().await {
+            return Err("writer failure published terminal status before child exit".to_string());
+        }
+        manager.shutdown_all().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn malformed_or_missing_content_length_settles_runtime() -> Result<(), String> {
+        for (mode, expected) in [
+            ("malformed_header", "Malformed LSP header"),
+            ("missing_length", "Missing LSP Content-Length header"),
+        ] {
+            let mut manager = LspManager::new();
+            let language = "test";
+            manager.load_config(&LspConfig {
+                servers: [(language.to_string(), mock_config(language, mode, 1))]
+                    .into_iter()
+                    .collect(),
+            })?;
+            manager.start_server(language).await?;
+            let client = manager
+                .get_client(language)
+                .ok_or("missing malformed client")?;
+            let status = wait_for_exit(&manager, language).await?;
+            if !status
+                .last_error
+                .as_deref()
+                .is_some_and(|error| error.contains(expected))
+            {
+                return Err(format!("{mode} did not settle with {expected}: {status:?}"));
+            }
+            if !client.read().await.process_has_exited().await {
+                return Err(format!(
+                    "{mode} published terminal status before child exit"
+                ));
+            }
+            manager.shutdown_all().await;
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn clean_stop_does_not_invent_a_transport_error() -> Result<(), String> {
+        let mut manager = LspManager::new();
+        let language = "test";
+        manager.load_config(&LspConfig {
+            servers: [(language.to_string(), mock_config(language, "stable", 1))]
+                .into_iter()
+                .collect(),
+        })?;
+        manager.start_server(language).await?;
+        manager.stop_server(language).await?;
+        let status = manager
+            .status_all()
+            .await
+            .into_iter()
+            .find(|status| status.language == language)
+            .ok_or("missing clean stop status")?;
+        if status.running
+            || status.initialized
+            || status.pid.is_some()
+            || status.last_error.is_some()
+        {
+            return Err(format!("clean stop invented a failure: {status:?}"));
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pending_request_settles_when_server_closes_stdout() -> Result<(), String> {
+        let mut manager = LspManager::new();
+        let language = "test";
+        manager.load_config(&LspConfig {
+            servers: [(
+                language.to_string(),
+                mock_config(language, "request_eof", 1),
+            )]
+            .into_iter()
+            .collect(),
+        })?;
+        manager.start_server(language).await?;
+        let client = manager.get_client(language).ok_or("missing client")?;
+        let result = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            client
+                .read()
+                .await
+                .goto_definition(
+                    "file:///example.test",
+                    echo_core::lsp::Position {
+                        line: 0,
+                        character: 0,
+                    },
+                )
+                .await
+        })
+        .await
+        .map_err(|_| "pending request waited for the full request timeout".to_string())?;
+        if result.is_ok()
+            || wait_for_exit(&manager, language)
+                .await?
+                .last_error
+                .is_none()
+        {
+            return Err("EOF did not fail pending request and status".to_string());
+        }
+        manager.shutdown_all().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reload_waits_for_old_owner_and_replaces_routes() -> Result<(), String> {
+        let mut manager = LspManager::new();
+        let language = "test";
+        manager.load_config(&LspConfig {
+            servers: [(language.to_string(), mock_config(language, "stable", 2))]
+                .into_iter()
+                .collect(),
+        })?;
+        manager.start_server(language).await?;
+        let old = manager.get_client(language).ok_or("missing old client")?;
+        let mut next = mock_config("next", "stable", 2);
+        next.extensions = vec![".next".to_string()];
+        let replacement = LspConfig {
+            servers: [("next".to_string(), next)].into_iter().collect(),
+        };
+        if manager.load_config(&replacement).is_ok() {
+            return Err("synchronous load changed a running configuration".to_string());
+        }
+        if manager.get_client_for_file("example.test").await.is_none() {
+            return Err("rejected load changed extension routing".to_string());
+        }
+        manager.reload_config(&replacement).await?;
+        if manager.get_client_for_file("example.test").await.is_some()
+            || manager.configured_languages() != ["next"]
+            || old.read().await.is_running()
+        {
+            return Err("reload retained old route or process".to_string());
+        }
+        let error = old
+            .write()
+            .await
+            .initialize("file:///")
+            .await
+            .err()
+            .ok_or("old handle revived")?;
+        if !matches!(error, echo_core::lsp::LspError::NotInitialized) {
+            return Err(format!("old handle returned wrong error: {error}"));
+        }
+        manager.start_server("next").await?;
+        if manager.get_client_for_file("example.next").await.is_none() {
+            return Err("new extension was not routed".to_string());
+        }
+        manager.shutdown_all().await;
+        if manager.load_config(&replacement).is_ok()
+            || manager.reload_config(&replacement).await.is_ok()
+            || manager.restart_server("next").await.is_ok()
+        {
+            return Err("closed manager accepted a new lifecycle".to_string());
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn failed_start_and_repeated_start_leave_honest_status() -> Result<(), String> {
+        let mut manager = LspManager::new();
+        let language = "test";
+        let mut broken = test_config(language);
+        broken.max_restarts = 1;
+        manager.load_config(&LspConfig {
+            servers: [(language.to_string(), broken)].into_iter().collect(),
+        })?;
+        let error = manager
+            .start_server(language)
+            .await
+            .err()
+            .ok_or("invalid command started")?;
+        let status = manager
+            .status_all()
+            .await
+            .into_iter()
+            .find(|status| status.language == language)
+            .ok_or("missing failed status")?;
+        if status.running
+            || status.pid.is_some()
+            || status.last_error.as_deref() != Some(error.as_str())
+        {
+            return Err(format!("failed spawn status is inconsistent: {status:?}"));
+        }
+        let retry_error = manager
+            .restart_server(language)
+            .await
+            .err()
+            .ok_or("broken restart unexpectedly succeeded")?;
+        let retry_status = manager
+            .status_all()
+            .await
+            .into_iter()
+            .find(|status| status.language == language)
+            .ok_or("missing failed retry status")?;
+        if retry_status.restart_count != 1
+            || retry_status.last_error.as_deref() != Some(retry_error.as_str())
+            || manager.restart_server(language).await.is_ok()
+        {
+            return Err(format!(
+                "failed retry budget/status drifted: {retry_status:?}"
+            ));
+        }
+        manager
+            .reload_config(&LspConfig {
+                servers: [(language.to_string(), mock_config(language, "stable", 2))]
+                    .into_iter()
+                    .collect(),
+            })
+            .await?;
+        manager.start_server(language).await?;
+        let old = manager.get_client(language).ok_or("missing old client")?;
+        manager.start_server(language).await?;
+        if old.read().await.is_running() || manager.running_servers() != [language] {
+            return Err("repeated start retained the prior owner".to_string());
+        }
+        manager.shutdown_all().await;
+        Ok(())
+    }
 
     fn test_config(language: &str) -> LspServerConfig {
         LspServerConfig {
@@ -268,6 +796,12 @@ mod tests {
     async fn replacing_language_client_closes_retained_handle() -> Result<(), String> {
         let mut manager = LspManager::new();
         let language = "test";
+        let config = LspConfig {
+            servers: [(language.to_string(), test_config(language))]
+                .into_iter()
+                .collect(),
+        };
+        manager.load_config(&config)?;
         let client = StdioLspClient::new_bound(
             test_config(language),
             Arc::clone(&manager.lifecycle),
@@ -280,12 +814,6 @@ mod tests {
             .get_client(language)
             .ok_or_else(|| "test client was not registered".to_string())?;
 
-        let config = LspConfig {
-            servers: [(language.to_string(), test_config(language))]
-                .into_iter()
-                .collect(),
-        };
-        manager.load_config(&config);
         let error = manager
             .start_server(language)
             .await
@@ -326,7 +854,7 @@ languages:
 "#,
         )?;
 
-        manager.load_config(&config);
+        manager.load_config(&config)?;
         assert_eq!(manager.configured_languages().len(), 2);
         assert!(manager.configured_languages().contains(&"python"));
         assert!(manager.configured_languages().contains(&"rust"));
@@ -347,7 +875,7 @@ languages:
 "#,
         )?;
 
-        manager.load_config(&config);
+        manager.load_config(&config)?;
         assert_eq!(
             manager.extension_map.get(".py"),
             Some(&"python".to_string())
@@ -403,7 +931,7 @@ languages:
             return Err("no supported language server was found on PATH".to_string());
         }
         let mut manager = LspManager::new();
-        manager.load_config(&config);
+        manager.load_config(&config)?;
         manager.set_project_root(project.path());
         let languages = manager
             .configured_languages()

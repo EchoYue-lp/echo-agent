@@ -42,6 +42,23 @@ Completed while the returned receipt says Failed.
    fields, delivery/error pairing, and committed-versus-observed watermarks as
    one settlement record. A corrupt combination fails recovery instead of
    recreating conflicting terminal authorities.
+8. `AgentChannelHandler` is also a driven Turn consumer. It creates a fresh
+   transport stream/Turn identity for each inbound message, scopes the
+   conversation by channel, conversation, and sender, and exposes the
+   `TurnReceipt` through `drive_turn`. Its standard `MessageHandler` path
+   produces an outbound reply only for `Completed + Delivered` with a final
+   answer. The channel sink accepts envelopes without inventing a second
+   terminal reducer; `SessionHandler` still owns session generation and the
+   transport delivery fence. The raw Rust `Agent::chat` and stream APIs remain
+   valid low-level contracts for callers without a driven Turn promise.
+9. Channel session reset passes the generation cancellation token into handlers
+   that declare driven settlement. For those handlers, reset retires delivery,
+   requests cancellation, and waits for the active driven setup to release its
+   receipt before acknowledging replacement. Legacy/custom handlers keep the
+   earlier drop-on-cancel behavior unless they opt into the settlement method.
+   `drive_turn_with_sink` lets adapters attach a real Journal/projection sink;
+   the default sink only records in-process event acceptance and is never
+   described as remote QQ/Feishu delivery.
 
 ## Alternatives rejected
 
@@ -54,6 +71,8 @@ Completed while the returned receipt says Failed.
 - Introducing an asynchronous outbox here would also require new retry,
   retention, ACK, and cleanup policy. Those remain separate delivery-ledger
   work when a concrete consumer needs them.
+- Treating a channel's returned text or raw stream EOF as a Turn terminal
+  leaves cancellation, producer failure, and usage without a receipt.
 
 ## Consequences
 
@@ -66,6 +85,26 @@ recoverable delivery condition rather than a second execution terminal.
 The driver watermark (`TurnReceipt.last_event_sequence`) is the last envelope
 observed by the driver. The ACP Ledger watermark is the last envelope accepted
 by that ledger; Journal or projection failure may make these watermarks differ.
+Channel receipt delivery refers to the channel event sink, not a remote QQ or
+Feishu delivery ACK. The transport's generation fence remains responsible for
+local queue/network admission and reset ordering; a remote send failure cannot
+retroactively change the Agent's producer terminal.
+`ChannelManager::stop_all` and QQ/Feishu task shutdown still require the
+adapter-close resource settlement owned by Finding #36. This decision does not
+add a competing channel-close coordinator, and Finding #107 cannot be closed
+until that dependency is verifiable on remote main.
+
+## Industry Basis for Channel Adoption
+
+Codex exposes a finite Turn completion result and separate progress/usage
+notifications; Claude Agent SDK reports a final ResultMessage after streamed
+progress. Both keep the terminal independent of merely observing output or EOF
+([Codex app-server protocol](https://github.com/openai/codex/tree/main/codex-rs/app-server-protocol/schema/json/v2),
+[Claude Agent SDK streaming output](https://platform.claude.com/docs/en/agent-sdk/streaming-output)).
+Tokio's graceful-shutdown model separates signalling cancellation from waiting
+for tasks to finish ([Tokio graceful shutdown](https://tokio.rs/tokio/topics/shutdown)).
+The channel adapter applies these existing framework principles by awaiting
+one `TurnReceipt`; it does not introduce another lifecycle authority.
 
 ## Verification
 
@@ -75,3 +114,6 @@ tests in this repository and external SDK Host tests cover Journal/observer
 failure, wire validation, persistence, and legacy receipt decoding. Full
 framework and independent SDK gates remain required before closing Finding
 #108.
+Channel adapter tests additionally cover a real driven receipt with identity
+and usage, standard reply projection, producer failure, cancellation, custom
+sink failure, and Session reset waiting for a real cancelled Turn to settle.

@@ -529,18 +529,17 @@ impl ReactAgent {
 
     /// Register a subagent **definition only** — no instance and no factory.
     ///
-    /// This is a low-level discovery / late-binding entry point for runtimes
-    /// that can guarantee later hydration: a definition becomes visible to
-    /// `list_available`, `agent_names`, and the dispatch catalog before any
-    /// executable instance exists. The application layer (which owns the
-    /// prompt-compiler / tool-filter / sandbox wiring needed to build a real
-    /// `ReactAgent` instance) later supplies the instance via
+    /// This is a low-level late-binding entry point. The pending definition is
+    /// visible through the registry's `get` and `contains`, but is excluded
+    /// from `list_available`, `agent_names`, and the model-facing dispatch
+    /// catalog until an instance or factory is supplied. The application layer
+    /// (which owns the prompt-compiler / tool-filter / sandbox wiring needed
+    /// to build a real `ReactAgent` instance) later supplies the instance via
     /// [`register_subagent_with_definition`](Self::register_subagent_with_definition)
     /// or [`register_subagent_factory`](Self::register_subagent_factory)
     /// under the same name, overwriting the definition.
     ///
-    /// Dispatching a definition registered this way **without** subsequently
-    /// providing an instance will fail at execution time (no agent to run).
+    /// Explicit programmatic dispatch before hydration fails (no agent to run).
     #[cfg(feature = "subagent")]
     pub fn register_subagent_definition(&mut self, def: SubagentDefinition) {
         let name = def.name.clone();

@@ -5,15 +5,15 @@ kind: audit
 boundary_ref: boundary.task-subagent-workflow
 lens: state_authority
 freshness: examined
-revision: source:a8b11a40111a41cb6dc345b3798947d426bbdf0318f641868b819c0d5f58a88b
+revision: 0415ba15eb8d348f357fe55df4448897677e6960
 finding_refs: [finding.task-subagent-attempt-link]
 challenges:
   scope-bound-live-authority:
-    revision: source:a8b11a40111a41cb6dc345b3798947d426bbdf0318f641868b819c0d5f58a88b
+    revision: 0415ba15eb8d348f357fe55df4448897677e6960
     source_refs: [src/agent/subagent/control.rs, src/agent/subagent/executor.rs, src/agent/subagent/team/mod.rs]
     evidence_refs: [evidence.task-subagent-external-control-handle-repair, evidence.task-subagent-external-control-handle-verification]
   external-context-preservation:
-    revision: source:a8b11a40111a41cb6dc345b3798947d426bbdf0318f641868b819c0d5f58a88b
+    revision: 0415ba15eb8d348f357fe55df4448897677e6960
     source_refs: [src/agent/subagent/executor.rs, tests/facade_smoke.rs]
     evidence_refs: [evidence.task-subagent-external-control-handle-verification]
 ---

@@ -538,10 +538,14 @@ impl LlmClient for AnthropicClient {
             let mut stream_cache_read_input_tokens: Option<u32> = None;
 
             let stream = async_stream::stream! {
+                let mut pending_terminal: Option<ChatChunk> = None;
                 futures::pin_mut!(raw_stream);
                 while let Some(event) = raw_stream.next().await {
                     let event = match event {
-                        Ok(JsonSseEvent::Done) => return,
+                        Ok(JsonSseEvent::Done) => {
+                            yield Err(LlmError::InvalidResponse("Anthropic stream reached [DONE] before message_stop".to_string()).into());
+                            return;
+                        }
                         Ok(JsonSseEvent::Data(value)) => {
                             match serde_json::from_value::<AnthropicStreamEvent>(value) {
                                 Ok(event) => event,
@@ -558,6 +562,10 @@ impl LlmClient for AnthropicClient {
                             return;
                         }
                     };
+                    if pending_terminal.is_some() && !matches!(event, AnthropicStreamEvent::MessageStop | AnthropicStreamEvent::Other | AnthropicStreamEvent::Error { .. }) {
+                        yield Err(LlmError::InvalidResponse("Anthropic stream emitted content after message_delta".to_string()).into());
+                        return;
+                    }
                                 match event {
                                     AnthropicStreamEvent::MessageStart { message } => {
                                         // Capture initial usage (input_tokens) from message_start
@@ -689,7 +697,7 @@ impl LlmClient for AnthropicClient {
                                             Some("tool_use") => Some("tool_calls".to_string()),
                                             other => other.map(String::from),
                                         };
-                                        // Emit final chunk with accumulated usage
+                                        // The delta is provisional until message_stop confirms completion.
                                         let usage = if stream_input_tokens > 0 || stream_output_tokens > 0 {
                                             Some(Usage {
                                                 prompt_tokens: Some(stream_input_tokens),
@@ -702,7 +710,7 @@ impl LlmClient for AnthropicClient {
                                         } else {
                                             None
                                         };
-                                        yield Ok(ChatChunk {
+                                        pending_terminal = Some(ChatChunk {
                                             delta: DeltaMessage {
                                                 role: None,
                                                 content: None,
@@ -714,6 +722,24 @@ impl LlmClient for AnthropicClient {
                                             usage,
                                         });
                                     }
+                                    AnthropicStreamEvent::MessageStop => {
+                                        let Some(terminal) = pending_terminal.take() else {
+                                            yield Err(LlmError::InvalidResponse("Anthropic message_stop preceded message_delta".to_string()).into());
+                                            return;
+                                        };
+                                        let Some(reason) = terminal.finish_reason.as_deref() else {
+                                            yield Err(LlmError::InvalidResponse("Anthropic message_stop omitted a stop reason".to_string()).into());
+                                            return;
+                                        };
+                                        if !matches!(reason, "stop" | "tool_calls") || !tool_call_args.is_empty() || !reasoning_blocks.is_empty() {
+                                            yield Err(LlmError::InvalidResponse(format!(
+                                                "Anthropic message_stop has non-success or unfinished content: '{reason}'"
+                                            )).into());
+                                            return;
+                                        }
+                                        yield Ok(terminal);
+                                        return;
+                                    }
                                     AnthropicStreamEvent::Error { error } => {
                                         yield Err(LlmError::InvalidResponse(format!(
                                             "Anthropic stream error: {}",
@@ -724,6 +750,7 @@ impl LlmClient for AnthropicClient {
                                     AnthropicStreamEvent::Other => {}
                                 }
                 }
+                yield Err(LlmError::InvalidResponse("Anthropic stream reached SSE EOF before message_stop".to_string()).into());
             };
 
             Ok(Box::pin(stream) as BoxStream<'_, Result<ChatChunk>>)
@@ -1196,6 +1223,8 @@ enum AnthropicStreamEvent {
         #[serde(default)]
         usage: Option<AnthropicDeltaUsage>,
     },
+    #[serde(rename = "message_stop")]
+    MessageStop,
     #[serde(rename = "error")]
     Error { error: AnthropicStreamError },
     #[serde(other)]

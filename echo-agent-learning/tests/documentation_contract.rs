@@ -741,6 +741,83 @@ fn foundational_structure_contract_rejects_symmetric_deletion_and_navigation_reo
 }
 
 #[test]
+fn task_and_workflow_authorities_are_documented_against_public_entries()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .ok_or_else(|| std::io::Error::other("learning package has no workspace root"))?;
+    let entry_contracts = [
+        (
+            "echo-orchestration/src/tasks/revisioned.rs",
+            [
+                "pub struct RevisionedTaskGraph",
+                "pub struct TaskRevisionService",
+            ]
+            .as_slice(),
+        ),
+        (
+            "echo-orchestration/src/tasks/runtime_service.rs",
+            ["pub struct RuntimeTaskService"].as_slice(),
+        ),
+        (
+            "echo-orchestration/src/workflow/graph.rs",
+            ["pub struct Graph", "async fn execute_loop"].as_slice(),
+        ),
+        (
+            "echo-orchestration/src/workflow/dag.rs",
+            ["pub struct DagWorkflow", "impl Workflow for DagWorkflow"].as_slice(),
+        ),
+    ];
+    let mut violations = Vec::new();
+    for (path, markers) in entry_contracts {
+        let source = std::fs::read_to_string(root.join(path))?;
+        for marker in markers {
+            if !source.contains(marker) {
+                violations.push(format!("{path} no longer defines {marker}"));
+            }
+        }
+    }
+
+    let adr_path = "docs/adr/0059-task-workflow-dag-authority.md";
+    let adr = std::fs::read_to_string(root.join(adr_path))?;
+    for marker in [
+        "RevisionedTaskGraph",
+        "TaskRevisionService",
+        "RuntimeTaskService",
+        "Graph::execute_loop",
+        "DagWorkflow::run",
+        "CheckpointStore",
+    ] {
+        if !adr.contains(marker) {
+            violations.push(format!("{adr_path} omits public authority {marker}"));
+        }
+    }
+    let mut docs = Vec::new();
+    for language in ["en", "zh"] {
+        for chapter in ["09-tasks", "17-graph-workflow"] {
+            let path = root.join(format!("docs/{language}/{chapter}.md"));
+            let content = std::fs::read_to_string(&path)?;
+            if !content.contains("../adr/0059-task-workflow-dag-authority.md") {
+                violations.push(format!("{} does not link {adr_path}", path.display()));
+            }
+            docs.push(path);
+        }
+    }
+    docs.push(root.join(adr_path));
+    violations.extend(unresolved_local_links(root, &docs)?);
+
+    if violations.is_empty() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(format!(
+            "Task/Workflow authority documentation drift:\n{}",
+            violations.join("\n")
+        ))
+        .into())
+    }
+}
+
+#[test]
 fn learning_markdown_has_resolvable_local_links() -> Result<(), Box<dyn std::error::Error>> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut files = Vec::new();
