@@ -39,6 +39,7 @@ design_sections:
     digest: sha256:728be4be29dca2b78d919d748087e9c39e071c7eac4314340be92753fc87ca38
   - ref: design.md § 验收标准
     digest: sha256:4c5586d55ce31464780b206097f047340c49928fa6a6bf5edcc69b101fb1cc32
+delivery_ref: docs/supreme/specs/2026-09-18-task-claim-subagent-attempt-link/plans/delivery-map.md#framework-exact-attempt-control
 todos:
   - id: exact-context-and-team-contract
     summary: Make TaskClaim-derived exact context and structured
@@ -111,5 +112,5 @@ todos:
       - "Issue #99 remains open until the independent SDK phase is delivered and
         reverified."
 artifact_id: plan:7d0aeb48-0dd2-4918-b082-b46884f463c5
-lifecycle: ready
+lifecycle: completed
 ---

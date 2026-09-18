@@ -20,7 +20,8 @@ use tracing::{info, warn};
 use super::context::SubagentContext;
 use super::control::{
     SubagentAttemptBinding, SubagentAttemptIdentity, SubagentControlError, SubagentControlRegistry,
-    SubagentGuidanceQueueReceipt, SubagentInterruptOutcome, SubagentMessageReceipt,
+    SubagentGuidanceQueueReceipt, SubagentInterruptOutcome, SubagentInterruptRequestDisposition,
+    SubagentMessageReceipt,
 };
 use super::events::{SubagentEvent, SubagentEventPublisher, SubagentInvocationIdentity};
 use super::hooks::{SubagentHookContext, SubagentHookRegistry};
@@ -33,7 +34,11 @@ use super::types::{
     ExecutionMode, ObservedIsolation, SubagentArtifact, SubagentEvidence, SubagentEvidenceSource,
     SubagentOutcome, SubagentResult, SubagentStatus,
 };
-use crate::tasks::NestedDelegationPolicy;
+use crate::tasks::{
+    NestedDelegationPolicy, RuntimeAttemptControlCleanupReceipt,
+    RuntimeTaskAttemptInterruptDisposition, RuntimeTaskAttemptInterruptProjectionError, Task,
+    TaskClaim, TaskSubagentContext,
+};
 
 // ── Dispatch Request ──────────────────────────────────────────────────────────
 
@@ -165,6 +170,144 @@ mod typed_error_mapping_tests {
         let error = ReactError::Other("cancelled timeout are ordinary words here".to_string());
         assert_eq!(subagent_status_from_error(&error), SubagentStatus::Failed);
     }
+
+    #[test]
+    fn attempt_control_projection_preserves_capacity_and_identity_conflict() {
+        assert_eq!(
+            runtime_interrupt_projection_error(SubagentControlError::PendingCapacityExceeded {
+                limit: 17
+            }),
+            RuntimeTaskAttemptInterruptProjectionError::PendingCapacityExceeded { limit: 17 }
+        );
+        assert_eq!(
+            runtime_interrupt_projection_error(SubagentControlError::IdentityConflict {
+                task_id: "task".to_string(),
+                attempt: 2,
+                expected_execution_id: "expected".to_string(),
+                actual_execution_id: "actual".to_string(),
+            }),
+            RuntimeTaskAttemptInterruptProjectionError::IdentityConflict {
+                task_id: "task".to_string(),
+                attempt: 2,
+                expected_execution_id: "expected".to_string(),
+                actual_execution_id: "actual".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn exact_dispatch_context_preserves_resources_and_rejects_identity_conflicts()
+    -> std::result::Result<(), String> {
+        let trace_sink: echo_core::tools::TraceSinkFn = Arc::new(|_| {});
+        let uplink: echo_core::tools::SubagentUplinkFn = Arc::new(|_| {
+            Box::pin(async {
+                echo_core::tools::SubagentUplinkReceipt {
+                    accepted: true,
+                    status: "test".to_string(),
+                    detail: String::new(),
+                }
+            })
+        });
+        let initial_cancel = CancellationToken::new();
+        let exact_cancel = CancellationToken::new();
+        let exact = ExactTaskDispatchContext {
+            run_id: "run".to_string(),
+            execution_id: "execution".to_string(),
+            task_id: "task".to_string(),
+            attempt: 3,
+            plan_revision: 9,
+            cancel: exact_cancel.clone(),
+            delegation_policy: NestedDelegationPolicy {
+                can_spawn_subagents: true,
+                delegate_depth: 1,
+                max_delegate_depth: 4,
+            },
+        };
+        let mut request = DispatchRequest {
+            agent_name: "reviewer".to_string(),
+            task: "review".to_string(),
+            mode_override: None,
+            cancel: initial_cancel,
+            parent_agent: "parent".to_string(),
+            parent_context: None,
+            delegation_policy: NestedDelegationPolicy::default(),
+            runtime_context: Some(echo_core::tools::ExternalRunContext {
+                conversation_id: Some("conversation".to_string()),
+                turn_id: Some("turn".to_string()),
+                isolation_id: Some("isolation".to_string()),
+                message_id: Some("message".to_string()),
+                trace_sink: Some(trace_sink.clone()),
+                resource_guards: vec![echo_core::tools::InvocationResourceGuard::new_identified(
+                    "guard".to_string(),
+                    7_u64,
+                )],
+                subagent_lineage: Some(echo_core::tools::SubagentLineage {
+                    agent_name: Some("reviewer".to_string()),
+                    parent_agent: Some("parent".to_string()),
+                    ..Default::default()
+                }),
+                uplink: Some(uplink.clone()),
+                ..Default::default()
+            }),
+            message: None,
+            prompt_payload: None,
+            prompt_context: None,
+            constraints: Vec::new(),
+            background: false,
+        };
+
+        bind_exact_dispatch_context(&mut request, &exact).map_err(|error| error.to_string())?;
+        let runtime = request
+            .runtime_context
+            .as_ref()
+            .ok_or_else(|| "runtime context missing".to_string())?;
+        assert_eq!(runtime.conversation_id.as_deref(), Some("conversation"));
+        assert_eq!(runtime.turn_id.as_deref(), Some("turn"));
+        assert_eq!(runtime.isolation_id.as_deref(), Some("isolation"));
+        assert_eq!(runtime.message_id.as_deref(), Some("message"));
+        assert_eq!(runtime.resource_guards.len(), 1);
+        assert!(
+            runtime
+                .trace_sink
+                .as_ref()
+                .is_some_and(|value| { Arc::ptr_eq(value, &trace_sink) })
+        );
+        assert!(
+            runtime
+                .uplink
+                .as_ref()
+                .is_some_and(|value| { Arc::ptr_eq(value, &uplink) })
+        );
+        let lineage = runtime
+            .subagent_lineage
+            .as_ref()
+            .ok_or_else(|| "subagent lineage missing".to_string())?;
+        assert_eq!(lineage.agent_name.as_deref(), Some("reviewer"));
+        assert_eq!(lineage.run_id.as_deref(), Some("run"));
+        assert_eq!(lineage.task_id.as_deref(), Some("task"));
+        assert_eq!(lineage.execution_id.as_deref(), Some("execution"));
+        assert_eq!(lineage.attempt, Some(3));
+        assert_eq!(lineage.plan_revision, Some(9));
+        exact_cancel.cancel();
+        assert!(request.cancel.is_cancelled());
+        assert!(
+            runtime
+                .cancel
+                .as_ref()
+                .is_some_and(|cancel| cancel.is_cancelled())
+        );
+        assert_eq!(request.delegation_policy, exact.delegation_policy);
+
+        let mut conflicting = request.clone();
+        if let Some(runtime) = conflicting.runtime_context.as_mut() {
+            runtime.run_id = Some("other-run".to_string());
+        }
+        assert!(
+            bind_exact_dispatch_context(&mut conflicting, &exact)
+                .is_err_and(|error| error.to_string().contains("run_id mismatch"))
+        );
+        Ok(())
+    }
 }
 
 fn hook_stop_status(status: SubagentStatus) -> echo_core::hooks::SubagentStopStatus {
@@ -248,6 +391,34 @@ pub struct BackgroundSubagentHandle {
     pub agent_name: String,
     cancel: CancellationToken,
     join_handle: Arc<Mutex<Option<tokio::task::JoinHandle<Result<SubagentResult>>>>>,
+}
+
+/// Scope-bound live control for TaskClaim-derived Subagent attempts.
+///
+/// Durable claim validation and Task terminal settlement remain owned by
+/// [`crate::tasks::RuntimeTaskService`]. This handle only projects a controller's
+/// already-validated claim into the same process-local registry used by dispatch.
+pub struct SubagentAttemptControlHandle {
+    executor: SubagentExecutor,
+    control_scope_id: String,
+}
+
+impl Clone for SubagentAttemptControlHandle {
+    fn clone(&self) -> Self {
+        Self {
+            executor: self.executor.clone_for_spawn(),
+            control_scope_id: self.control_scope_id.clone(),
+        }
+    }
+}
+
+impl std::fmt::Debug for SubagentAttemptControlHandle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SubagentAttemptControlHandle")
+            .field("control_scope_id", &self.control_scope_id)
+            .finish_non_exhaustive()
+    }
 }
 
 impl BackgroundSubagentHandle {
@@ -537,6 +708,292 @@ pub fn default_uplink_sink(registry: Arc<SubagentRegistry>) -> echo_core::tools:
     })
 }
 
+impl SubagentAttemptControlHandle {
+    pub fn control_scope_id(&self) -> &str {
+        &self.control_scope_id
+    }
+
+    fn identity_from_context(
+        &self,
+        context: &TaskSubagentContext,
+    ) -> std::result::Result<SubagentAttemptIdentity, SubagentControlError> {
+        let claim = context
+            .claim()
+            .ok_or(SubagentControlError::InvalidIdentity { field: "claim" })?;
+        let task_id = context
+            .task_id()
+            .ok_or(SubagentControlError::InvalidIdentity { field: "task_id" })?;
+        SubagentAttemptIdentity::for_runtime_scope(
+            self.control_scope_id.clone(),
+            context.run_id().to_string(),
+            task_id.to_string(),
+            claim.execution_id(context.run_id(), task_id),
+            claim.attempt,
+        )
+    }
+
+    fn identity_from_claim(
+        &self,
+        run_id: &str,
+        task_id: &str,
+        claim: &TaskClaim,
+    ) -> std::result::Result<SubagentAttemptIdentity, SubagentControlError> {
+        SubagentAttemptIdentity::for_runtime_scope(
+            self.control_scope_id.clone(),
+            run_id.to_string(),
+            task_id.to_string(),
+            claim.execution_id(run_id, task_id),
+            claim.attempt,
+        )
+    }
+
+    /// Reserve one exact TaskClaim attempt before it waits for admission.
+    pub fn reserve(
+        &self,
+        context: &TaskSubagentContext,
+    ) -> std::result::Result<(), SubagentControlError> {
+        let identity = self.identity_from_context(context)?;
+        self.executor
+            .reserve_attempt(identity, context.cancellation_token().clone())
+    }
+
+    /// Dispatch one exact TaskClaim attempt through this handle's registry.
+    pub async fn dispatch(
+        &self,
+        mut request: DispatchRequest,
+        context: TaskSubagentContext,
+    ) -> Result<SubagentResult> {
+        let identity = self
+            .identity_from_context(&context)
+            .map_err(SubagentExecutor::control_react_error)?;
+        bind_task_dispatch_context(&mut request, &context)?;
+        self.executor.dispatch_attempt(request, identity).await
+    }
+
+    /// Project an interrupt that has already passed durable TaskClaim checks.
+    ///
+    /// Durable callers must invoke this only from
+    /// [`crate::tasks::RuntimeDagController::request_live_interrupt`].
+    pub fn project_interrupt(
+        &self,
+        run_id: &str,
+        task_id: &str,
+        claim: &TaskClaim,
+    ) -> std::result::Result<
+        RuntimeTaskAttemptInterruptDisposition,
+        RuntimeTaskAttemptInterruptProjectionError,
+    > {
+        let identity = self
+            .identity_from_claim(run_id, task_id, claim)
+            .map_err(runtime_interrupt_projection_error)?;
+        self.executor
+            .request_interrupt(identity)
+            .map(|receipt| runtime_interrupt_disposition(receipt.disposition))
+            .map_err(runtime_interrupt_projection_error)
+    }
+
+    /// Retire one live projection after its durable claim has advanced.
+    pub fn retire(
+        &self,
+        run_id: &str,
+        task: &Task,
+        claim: &TaskClaim,
+    ) -> RuntimeAttemptControlCleanupReceipt {
+        let identity = match self.identity_from_claim(run_id, &task.spec.id, claim) {
+            Ok(identity) => identity,
+            Err(error) => {
+                return RuntimeAttemptControlCleanupReceipt::RetryableFailure {
+                    error: error.to_string(),
+                };
+            }
+        };
+        match self.executor.retire_attempt_control(&identity) {
+            Ok(true) => RuntimeAttemptControlCleanupReceipt::Retired,
+            Ok(false) => RuntimeAttemptControlCleanupReceipt::AlreadyConsumed,
+            Err(error) => RuntimeAttemptControlCleanupReceipt::RetryableFailure {
+                error: error.to_string(),
+            },
+        }
+    }
+
+    /// Reconcile only this handle's fixed control scope.
+    pub fn reconcile(
+        &self,
+        run_id: &str,
+        current_execution_ids: &HashSet<String>,
+    ) -> std::result::Result<(), SubagentControlError> {
+        self.executor.reconcile_attempt_control(
+            &self.control_scope_id,
+            run_id,
+            current_execution_ids,
+        )
+    }
+}
+
+fn bind_task_dispatch_context(
+    request: &mut DispatchRequest,
+    context: &TaskSubagentContext,
+) -> Result<()> {
+    let exact = ExactTaskDispatchContext::from_task_context(context)?;
+    bind_exact_dispatch_context(request, &exact)
+}
+
+struct ExactTaskDispatchContext {
+    run_id: String,
+    execution_id: String,
+    task_id: String,
+    attempt: u32,
+    plan_revision: u64,
+    cancel: CancellationToken,
+    delegation_policy: NestedDelegationPolicy,
+}
+
+impl ExactTaskDispatchContext {
+    fn from_task_context(context: &TaskSubagentContext) -> Result<Self> {
+        let execution_id = context.execution_id().ok_or_else(|| {
+            ReactError::Other("exact task dispatch requires an execution identity".to_string())
+        })?;
+        let task_id = context.task_id().ok_or_else(|| {
+            ReactError::Other("exact task dispatch requires a task identity".to_string())
+        })?;
+        let claim = context.claim().ok_or_else(|| {
+            ReactError::Other("exact task dispatch requires a TaskClaim".to_string())
+        })?;
+        Ok(Self {
+            run_id: context.run_id().to_string(),
+            execution_id,
+            task_id: task_id.to_string(),
+            attempt: claim.attempt,
+            plan_revision: claim.revision,
+            cancel: context.cancellation_token().clone(),
+            delegation_policy: context.delegation_policy(),
+        })
+    }
+}
+
+fn bind_exact_dispatch_context(
+    request: &mut DispatchRequest,
+    exact: &ExactTaskDispatchContext,
+) -> Result<()> {
+    let runtime = request
+        .runtime_context
+        .get_or_insert_with(echo_core::tools::ExternalRunContext::default);
+    ensure_string_identity("run_id", runtime.run_id.as_deref(), &exact.run_id)?;
+    ensure_string_identity(
+        "execution_id",
+        runtime.execution_id.as_deref(),
+        &exact.execution_id,
+    )?;
+    runtime.run_id = Some(exact.run_id.clone());
+    runtime.execution_id = Some(exact.execution_id.clone());
+    if runtime.turn_id.is_none() {
+        runtime.turn_id = Some(exact.execution_id.clone());
+    }
+    runtime.cancel = Some(Arc::new(exact.cancel.clone()));
+    runtime.delegation_policy = Some(exact.delegation_policy);
+    let lineage = runtime
+        .subagent_lineage
+        .get_or_insert_with(Default::default);
+    ensure_string_identity("lineage.run_id", lineage.run_id.as_deref(), &exact.run_id)?;
+    ensure_string_identity(
+        "lineage.task_id",
+        lineage.task_id.as_deref(),
+        &exact.task_id,
+    )?;
+    ensure_string_identity(
+        "lineage.execution_id",
+        lineage.execution_id.as_deref(),
+        &exact.execution_id,
+    )?;
+    ensure_numeric_identity("lineage.attempt", lineage.attempt, exact.attempt)?;
+    ensure_numeric_identity(
+        "lineage.plan_revision",
+        lineage.plan_revision,
+        exact.plan_revision,
+    )?;
+    lineage.run_id = Some(exact.run_id.clone());
+    lineage.task_id = Some(exact.task_id.clone());
+    lineage.execution_id = Some(exact.execution_id.clone());
+    lineage.attempt = Some(exact.attempt);
+    lineage.plan_revision = Some(exact.plan_revision);
+    request.cancel = exact.cancel.clone();
+    request.delegation_policy = exact.delegation_policy;
+    Ok(())
+}
+
+fn ensure_string_identity(field: &str, actual: Option<&str>, expected: &str) -> Result<()> {
+    if let Some(actual) = actual
+        && actual != expected
+    {
+        return Err(ReactError::Other(format!(
+            "Subagent {field} mismatch: expected {expected}, actual {actual}"
+        )));
+    }
+    Ok(())
+}
+
+fn ensure_numeric_identity<T>(field: &str, actual: Option<T>, expected: T) -> Result<()>
+where
+    T: Copy + PartialEq + std::fmt::Display,
+{
+    if let Some(actual) = actual
+        && actual != expected
+    {
+        return Err(ReactError::Other(format!(
+            "Subagent {field} mismatch: expected {expected}, actual {actual}"
+        )));
+    }
+    Ok(())
+}
+
+fn runtime_interrupt_disposition(
+    disposition: SubagentInterruptRequestDisposition,
+) -> RuntimeTaskAttemptInterruptDisposition {
+    match disposition {
+        SubagentInterruptRequestDisposition::QueuedBeforeAdmission => {
+            RuntimeTaskAttemptInterruptDisposition::QueuedBeforeReservation
+        }
+        SubagentInterruptRequestDisposition::ReservedRequested => {
+            RuntimeTaskAttemptInterruptDisposition::ReservedRequested
+        }
+        SubagentInterruptRequestDisposition::ActiveRequested => {
+            RuntimeTaskAttemptInterruptDisposition::ActiveRequested
+        }
+        SubagentInterruptRequestDisposition::ActiveAlreadyRequested => {
+            RuntimeTaskAttemptInterruptDisposition::ActiveAlreadyRequested
+        }
+        SubagentInterruptRequestDisposition::AlreadySettled(status) => {
+            RuntimeTaskAttemptInterruptDisposition::AlreadySettled {
+                status: status.as_str().to_string(),
+            }
+        }
+    }
+}
+
+fn runtime_interrupt_projection_error(
+    error: SubagentControlError,
+) -> RuntimeTaskAttemptInterruptProjectionError {
+    match error {
+        SubagentControlError::PendingCapacityExceeded { limit } => {
+            RuntimeTaskAttemptInterruptProjectionError::PendingCapacityExceeded { limit }
+        }
+        SubagentControlError::IdentityConflict {
+            task_id,
+            attempt,
+            expected_execution_id,
+            actual_execution_id,
+        } => RuntimeTaskAttemptInterruptProjectionError::IdentityConflict {
+            task_id,
+            attempt,
+            expected_execution_id,
+            actual_execution_id,
+        },
+        error => RuntimeTaskAttemptInterruptProjectionError::Unavailable {
+            message: error.to_string(),
+        },
+    }
+}
+
 impl SubagentExecutor {
     /// Create a new executor backed by the given registry.
     pub fn new(registry: Arc<SubagentRegistry>, config: SubagentExecutorConfig) -> Self {
@@ -580,6 +1037,23 @@ impl SubagentExecutor {
     /// Shared registry handle (for callers that need definition lookups).
     pub fn registry(&self) -> &Arc<SubagentRegistry> {
         &self.registry
+    }
+
+    /// Create one complete live-control capability for an external task adapter.
+    pub fn attempt_control_handle(
+        &self,
+        control_scope_id: impl Into<String>,
+    ) -> std::result::Result<SubagentAttemptControlHandle, SubagentControlError> {
+        let control_scope_id = control_scope_id.into();
+        if control_scope_id.trim().is_empty() {
+            return Err(SubagentControlError::InvalidIdentity {
+                field: "control_scope_id",
+            });
+        }
+        Ok(SubagentAttemptControlHandle {
+            executor: self.clone_for_spawn(),
+            control_scope_id,
+        })
     }
 
     /// Return one retained Team runtime by its unique handle identity.
@@ -751,10 +1225,11 @@ impl SubagentExecutor {
     pub(crate) fn reconcile_attempt_control(
         &self,
         control_scope_id: &str,
+        run_id: &str,
         current_execution_ids: &HashSet<String>,
     ) -> std::result::Result<(), SubagentControlError> {
         self.control_registry
-            .reconcile_scope(control_scope_id, current_execution_ids)
+            .reconcile_scope(control_scope_id, run_id, current_execution_ids)
     }
 
     /// Stamp identity/lineage basics and install the default uplink sink on a
@@ -1721,94 +2196,38 @@ impl SubagentExecutor {
                 .map(str::to_string)
                 .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
         );
-        let spawned = self.clone_for_spawn();
-        let control_executor = self.clone_for_spawn();
-        let interrupt_executor = self.clone_for_spawn();
-        let cleanup_executor = self.clone_for_spawn();
-        let reconcile_executor = self.clone_for_spawn();
-        let reserve_scope_id = control_scope_id.clone();
+        let attempt_control = Arc::new(
+            self.attempt_control_handle(control_scope_id)
+                .map_err(Self::control_react_error)?,
+        );
+        let reserve_control = Arc::clone(&attempt_control);
         let reserve_attempt: super::team::TeamReserveAttemptFn = Arc::new(move |context| {
-            let claim = context
-                .claim()
-                .ok_or_else(|| "Team reservation requires an exact TaskClaim".to_string())?;
-            let task_id = context
-                .task_id()
-                .ok_or_else(|| "Team reservation requires an exact task id".to_string())?;
-            let identity = SubagentAttemptIdentity::for_runtime_scope(
-                reserve_scope_id.clone(),
-                context.run_id().to_string(),
-                task_id.to_string(),
-                claim.execution_id(context.run_id(), task_id),
-                claim.attempt,
-            )
-            .map_err(|error| error.to_string())?;
-            control_executor
-                .reserve_attempt(identity, context.cancellation_token().clone())
+            reserve_control
+                .reserve(&context)
                 .map_err(|error| error.to_string())
         });
-        let interrupt_scope_id = control_scope_id.clone();
+        let interrupt_control = Arc::clone(&attempt_control);
         let request_interrupt: super::team::TeamRequestInterruptFn =
             Arc::new(move |run_id, task_id, claim| {
-                let execution_id = claim.execution_id(&run_id, &task_id);
-                let identity = SubagentAttemptIdentity::for_runtime_scope(
-                    interrupt_scope_id.clone(),
-                    run_id,
-                    task_id,
-                    execution_id,
-                    claim.attempt,
-                )
-                .map_err(super::team::runtime_interrupt_projection_error)?;
-                interrupt_executor
-                    .request_interrupt(identity)
-                    .map(|receipt| {
-                        Some(super::team::runtime_interrupt_disposition(
-                            receipt.disposition,
-                        ))
-                    })
-                    .map_err(super::team::runtime_interrupt_projection_error)
+                interrupt_control
+                    .project_interrupt(&run_id, &task_id, &claim)
+                    .map(Some)
             });
-        let cleanup_scope_id = control_scope_id.clone();
-        let retire_attempt: super::team::TeamRetireAttemptFn = Arc::new(
-            move |run_id, task, claim| {
-                let cleanup_executor = cleanup_executor.clone_for_spawn();
-                let control_scope_id = cleanup_scope_id.clone();
-                Box::pin(async move {
-                    let task_id = task.spec.id.clone();
-                    let execution_id = claim.execution_id(&run_id, &task_id);
-                    let identity = match SubagentAttemptIdentity::for_runtime_scope(
-                        control_scope_id,
-                        run_id,
-                        task_id,
-                        execution_id,
-                        claim.attempt,
-                    ) {
-                        Ok(identity) => identity,
-                        Err(error) => {
-                            return echo_orchestration::tasks::RuntimeAttemptControlCleanupReceipt::RetryableFailure {
-                                error: error.to_string(),
-                            };
-                        }
-                    };
-                    match cleanup_executor.retire_attempt_control(&identity) {
-                        Ok(true) => {
-                            echo_orchestration::tasks::RuntimeAttemptControlCleanupReceipt::Retired
-                        }
-                        Ok(false) => echo_orchestration::tasks::RuntimeAttemptControlCleanupReceipt::AlreadyConsumed,
-                        Err(error) => echo_orchestration::tasks::RuntimeAttemptControlCleanupReceipt::RetryableFailure {
-                            error: error.to_string(),
-                        },
-                    }
-                })
-            },
-        );
-        let reconcile_scope_id = control_scope_id.clone();
+        let cleanup_control = Arc::clone(&attempt_control);
+        let retire_attempt: super::team::TeamRetireAttemptFn =
+            Arc::new(move |run_id, task, claim| {
+                let cleanup_control = Arc::clone(&cleanup_control);
+                Box::pin(async move { cleanup_control.retire(&run_id, &task, &claim) })
+            });
+        let reconcile_control = Arc::clone(&attempt_control);
         let reconcile_attempts: super::team::TeamReconcileAttemptFn =
-            Arc::new(move |_run_id, current_execution_ids| {
-                reconcile_executor
-                    .reconcile_attempt_control(&reconcile_scope_id, &current_execution_ids)
+            Arc::new(move |run_id, current_execution_ids| {
+                reconcile_control
+                    .reconcile(&run_id, &current_execution_ids)
                     .map_err(|error| error.to_string())
             });
-        let dispatch_scope_id = control_scope_id;
+        let spawned = self.clone_for_spawn();
+        let dispatch_control = attempt_control;
         let dispatch: super::team::TeamDispatchFn = Arc::new(move |request| {
             let super::team::TeamDispatchRequest {
                 member: agent_name,
@@ -1816,6 +2235,7 @@ impl SubagentExecutor {
                 context,
             } = request;
             let executor = spawned.clone_for_spawn();
+            let attempt_control = Arc::clone(&dispatch_control);
             let parent_agent = parent_agent.clone();
             let parent_context = inherited_history.clone();
             let prompt_payload = team_prompt_payload.clone();
@@ -1826,7 +2246,6 @@ impl SubagentExecutor {
             }
             let constraints = team_constraints.clone();
             let parent_event_id = team_parent_event_id.clone();
-            let control_scope_id = dispatch_scope_id.clone();
             Box::pin(async move {
                 let member = executor.registry.get(&agent_name).await.ok_or_else(|| {
                     ReactError::Other(format!("Team Subagent '{agent_name}' not registered"))
@@ -1844,22 +2263,8 @@ impl SubagentExecutor {
                         lineage.parent_event_id = parent_event_id.clone();
                         lineage
                     });
-                let claim = context.claim().ok_or_else(|| {
-                    ReactError::Other("Team dispatch requires an exact TaskClaim".to_string())
-                })?;
-                let task_id = context.task_id().ok_or_else(|| {
-                    ReactError::Other("Team dispatch requires an exact task id".to_string())
-                })?;
-                let identity = SubagentAttemptIdentity::for_runtime_scope(
-                    control_scope_id,
-                    context.run_id().to_string(),
-                    task_id.to_string(),
-                    claim.execution_id(context.run_id(), task_id),
-                    claim.attempt,
-                )
-                .map_err(|error| ReactError::Other(error.to_string()))?;
-                executor
-                    .dispatch_attempt(
+                attempt_control
+                    .dispatch(
                         DispatchRequest {
                             agent_name,
                             task,
@@ -1867,7 +2272,7 @@ impl SubagentExecutor {
                             cancel: context.cancellation_token().clone(),
                             parent_agent,
                             parent_context,
-                            delegation_policy,
+                            delegation_policy: NestedDelegationPolicy::default(),
                             runtime_context: Some(runtime_context),
                             message,
                             prompt_payload,
@@ -1875,7 +2280,7 @@ impl SubagentExecutor {
                             constraints,
                             background: false,
                         },
-                        identity,
+                        context,
                     )
                     .await
             })
@@ -1893,6 +2298,7 @@ impl SubagentExecutor {
             dispatch_controller,
             echo_orchestration::tasks::RuntimeTaskServiceConfig {
                 max_concurrent_subagents: spec.config.max_concurrent.max(1),
+                delegation_policy,
                 ..echo_orchestration::tasks::RuntimeTaskServiceConfig::default()
             },
         );

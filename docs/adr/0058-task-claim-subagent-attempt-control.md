@@ -104,6 +104,11 @@ Option 4 is adopted.
   retention applies only after execution settles.
 - Custom Team execution implements the complete `TeamDispatchController`
   contract. A bare callback cannot be attached to a stable control handle.
+- External `RuntimeDagController` adapters obtain one
+  `SubagentAttemptControlHandle` from `SubagentExecutor`. The handle fixes one
+  control scope and keeps reservation, claim-derived dispatch, live interrupt
+  projection, retirement, and reconciliation on the same registry. Raw
+  registry mutation remains crate-private.
 - Caller-supplied runtimes use `TeamRuntimeServiceHandle<R>`, which constructs
   the service from and stores the same `Arc<R>`; APIs never accept an unrelated
   runtime and service as separate arguments.
@@ -121,9 +126,10 @@ effect contract; cancellation cannot retract an external side effect.
 
 `RuntimeDagController` gains default control hooks, so existing adapters remain
 source compatible while adapters that promise exact control can bind their live
-registry. Team runtime APIs expose a stable handle. SDK adapters must pin the
-framework revision and preserve this identity rather than implementing another
-attempt mapping.
+registry. Team runtime APIs expose a stable handle. External handles are only
+live capability objects: `RuntimeTaskService` still owns durable claim checks
+and terminal settlement. SDK adapters must pin the framework revision and
+preserve this identity rather than implementing another attempt mapping.
 
 ## Verification
 

@@ -32,8 +32,9 @@ pub use events::{
     SubagentEventPublisher, SubagentEventReplay, SubagentInvocationIdentity,
 };
 pub use executor::{
-    BackgroundSubagentHandle, DispatchRequest, SubagentExecutor, SubagentExecutorConfig,
-    TeammateHandle, default_uplink_sink, merge_observed_evidence, subagent_status_from_error,
+    BackgroundSubagentHandle, DispatchRequest, SubagentAttemptControlHandle, SubagentExecutor,
+    SubagentExecutorConfig, TeammateHandle, default_uplink_sink, merge_observed_evidence,
+    subagent_status_from_error,
 };
 pub use hooks::{SubagentHookContext, SubagentHookRegistry, SubagentHooks, SubagentRetryDecision};
 pub use isolation::{
