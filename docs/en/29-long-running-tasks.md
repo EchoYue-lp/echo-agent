@@ -124,6 +124,14 @@ Caller-supplied runtimes that need concurrent control construct one
 the binding prevents graph/output authority and execution/CAS authority from
 coming from different runtime instances.
 
+Non-Team `RuntimeDagController` adapters use
+`SubagentExecutor::attempt_control_handle` to bind reservation, dispatch,
+interrupt projection, cleanup, and reconciliation to one process scope. The
+handle derives identity only from `TaskSubagentContext` or `TaskClaim`; it does
+not load a task store or validate claim currency. Public commands must still
+enter through the same `RuntimeTaskService`, which performs the durable
+precondition before invoking the controller's live hook.
+
 ## Progress
 
 `PhasePlan` and `ProgressReporter` provide structured progress within one task.

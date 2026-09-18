@@ -110,6 +110,13 @@ interrupt、cleanup 与 reconciliation 共用一个 live control scope。每个�
 `TeamRuntimeServiceHandle<R>` 并传给 `execute_team_on_runtime_service`，从类型上阻止
 graph/output authority 与 execution/CAS authority 来自不同 runtime 实例。
 
+非 Team 的 `RuntimeDagController` adapter 使用
+`SubagentExecutor::attempt_control_handle`，把 reservation、dispatch、interrupt 投影、
+cleanup 与 reconciliation 绑定到同一个进程 scope。handle 只从
+`TaskSubagentContext` 或 `TaskClaim` 派生 identity，不加载任务 store，也不判断 claim
+是否 current。公开 command 仍必须进入同一个 `RuntimeTaskService`，由它完成持久
+precondition 后再调用 controller 的 live hook。
+
 ## 进度
 
 `PhasePlan` 和 `ProgressReporter` 提供任务内结构化进度。`ProgressBridge` 可将

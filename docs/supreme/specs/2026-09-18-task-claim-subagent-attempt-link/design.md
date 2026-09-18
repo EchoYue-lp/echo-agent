@@ -85,6 +85,18 @@ Host负责command durable replay与wire receipt，framework `RuntimeTaskService`
 控制投影到live reservation/attempt。SDK阶段必须基于已合入的framework SHA，不能在两个仓库各实现
 一套attempt identity，也不能绕过TaskClaim precondition直接调用process registry。
 
+framework提供一个由`SubagentExecutor`创建、绑定不可变`control_scope_id`与同一control registry的
+`SubagentAttemptControlHandle`。handle只接受`TaskSubagentContext`或`run/task/TaskClaim`，内部派生
+`SubagentAttemptIdentity`，不接受调用方拼接execution ID，也不暴露raw registry。SDK的
+`_echo_agent/task/control`继续是唯一wire入口：先由`RuntimeTaskService`验证durable claim，再通过
+controller hook调用handle的live projection；语言Client不能直接调用handle或registry。
+
+Host当前只有`InMemoryRevisionedTaskStore`且没有durable command ledger，不能宣称跨进程恢复。完整SDK
+阶段使用SDK data root下的持久Task graph adapter和append-only command journal：caller提供
+`command_id`，同一ID与相同payload返回语义等价receipt，同一ID与不同payload显式冲突。command先
+durably accepted，再投影到framework；crash后重建Task graph、调用`reconcile_attempt_control`并只
+重放未结算command。DeliveryLedger只负责delivery，禁止复用为Task command authority。
+
 ## 核心结构与数据流
 
 ### Exact Task Context
@@ -122,6 +134,74 @@ executor内部保留原claim用于`resolve_dispatch`、CAS settlement和abandonm
 不保留旧三参数closure adapter。默认Team controller与React controller都持有同一个
 `SubagentExecutor`/control registry；`TeamAgent`将exact control转发给该controller。自定义controller
 必须实现完整trait，不能声明支持exact control却只执行dispatch。
+
+### External Task Adapter Control Contract
+
+`SubagentAttemptControlHandle`是framework到外部`RuntimeDagController` adapter的完整process-local能力，
+与Team内部controller复用同一个registry语义：
+
+- `reserve(context)`在共享admission前登记exact child token；
+- `dispatch(request, context)`从context派生identity并消费同一reservation；
+- `project_interrupt(run_id, task_id, claim)`只执行已经由`RuntimeTaskService`验证的live投影；
+- `retire(run_id, task, claim)`在durable CAS后返回cleanup receipt；
+- `reconcile(run_id, current_execution_ids)`只清理该handle固定scope与指定run中的projection。
+
+handle的scope构造时必须非空，之后不可改；每个方法都拒绝scope/claim/context不完整或冲突。它不加载
+Task store、不判断claim是否current、不保存Task terminal，也不提供durable command API。raw
+reserve/retire/reconcile继续保持crate-private，外部consumer只能使用完整handle，防止dispatch和cleanup
+落到不同registry。
+
+### SDK Durable Command Flow
+
+```text
+TaskControlRequest(command_id, run, task, exact_claim, action)
+                    |
+                    v
+Host command journal: Accepted(command_id, canonical payload digest)
+                    |
+                    v
+rehydrated RuntimeTaskService + durable Task graph precondition
+                    |
+                    v
+SubagentAttemptControlHandle live projection
+                    |
+                    v
+Host command journal: Settled(typed receipt/error)
+```
+
+Task graph adapter在一个per-run原子事务中读取snapshot、调用framework公开的pure transition函数并持久
+替换结果，不复制claim/retry/terminal算法。command journal复用现有`EventJournal` append/replay能力；
+Accepted已写但Settled缺失时允许安全重放。若第一次投影已生效但response或Settled写入丢失，重放由
+相同`command_id + exact claim`得到`ActiveAlreadyRequested`、`AlreadySettled`或
+`StaleOrSettledClaim`，不得生成新intent或作用于新claim。
+
+Host启动时先取得SDK data root的独占writer lease；没有lease不得接纳Task execute/control。新Host进程
+在开放admission前扫描持久图，将仍为`Running + TaskClaim`的旧进程claim通过exact CAS结算为
+`Paused("host restarted before attempt terminal")`并移除claim，不消耗retry。旧command随后只可结算
+stale；显式resume把Paused转为Pending，下一次claim必须获得新的`claim_id/execution_id`。因此不需要把
+process generation塞进TaskClaim，也不会把旧cancel intent迁移到新physical attempt。
+
+每个command使用确定性journal batch identity `task-control/<scope-digest>/<command-id>/accepted`；payload
+是字段顺序固定的typed value，包含command ID、run/task、action、exact claim或expected graph revision，
+并计算canonical SHA-256。`PreparedJournalBatch::with_identity`保证相同identity+payload幂等，identity相同
+但digest不同在任何CAS/live投影前冲突。唯一command reducer只允许
+`Absent -> Accepted -> Settled`；Host内per-command singleflight保证一个owner执行，followers等待并读取
+同一Settled。重启时独占writer lease下只有replay coordinator执行Accepted未Settled集合。
+
+Task summary向Client投影完整exact claim precondition（`claim_id/revision/attempt/spec_hash`）。作用于live
+physical attempt的pause/cancel必须携带该precondition；resume只接受durably Paused task和对应graph
+revision。physical Subagent cancellation与product Task Paused是不同层，pause策略不得通过取消整个
+TaskRun root token实现。
+
+三种action的提交顺序固定：
+
+- Cancel：Accepted后调用`RuntimeTaskService::request_attempt_interrupt`；Task terminal只由canonical
+  dispatch/claim settlement写成Cancelled，command在观察到typed receipt/terminal后Settled。
+- Pause：Accepted后先以exact claim CAS把Task提交为Paused，再调用
+  `RuntimeTaskService::reconcile_attempt_control`从新durable snapshot取消/定向abort旧live attempt；旧future
+  的晚到terminal只能得到Superseded，不能把Paused覆盖为Cancelled。
+- Resume：Accepted后只对exact Paused task与expected graph revision调用framework resume transition；不
+  触碰live registry。后续execute产生新claim和新execution ID。
 
 ### Live Interrupt Admission
 
@@ -237,6 +317,22 @@ TaskClaim CAS产生一次，exact timer不另行提交terminal。
 - 不配合取消的exact target：唯一wave supervisor定向abort该handle、等待join并settle；sibling
   正常完成。已经提交给外部系统的in-flight effect仍需由原effect合同判断，不能声称token能撤回。
 - crash：process-local pending intent会丢失；durable Host必须依据command ledger重放，framework不得声称恢复完成。
+- command journal写入Accepted后crash：恢复先重建durable Task graph与同源service，reconcile live projection，
+  再按原command ID和exact claim重放；不得从当前task状态猜一个新claim。
+- live投影成功但Settled receipt写失败：command保持unsettled，重放返回语义等价typed outcome；不得因
+  response丢失再次取消sibling或增加retry计数。
+- 相同command ID携带不同run/task/claim/action：返回identity/payload conflict，不以后到请求覆盖首个意图。
+- Host只有InMemory task store：extended task execution可用于同进程测试，但不得advertise durable
+  recovery capability或关闭#99。
+- restart发现旧Running claim：在独占writer lease下exact CAS为Paused并移除claim；CAS丢失响应时reload
+  验证Paused/claim absent，未知结果保持admission关闭。旧cancel/pause command结算stale，不迁移到resume
+  后的新claim。
+- 两个并发相同command ID：singleflight只有一个owner执行；相同payload follower读取相同Settled，不同
+  payload在Accepted/CAS/live投影前冲突。进程crash后只有replay coordinator恢复owner资格。
+- Pause的Paused CAS成功、reconcile前crash：durable Paused保持权威；重启无旧live future，replay只补
+  reconciliation/Settled。CAS响应丢失时reload证明Paused即语义成功；其它terminal返回superseded。
+- Cancel的live投影后、Task terminal前crash：restart recovery将遗留Running claim转Paused，原cancel
+  command结算stale/recovery-paused；不得猜测Cancelled，也不得将intent应用到新claim。
 - stale graph revision/spec hash：TaskClaim CAS继续拒绝，live registry不能覆盖持久化结果。
 - adapter传入不一致lineage：dispatch前拒绝，不回退随机identity。
 - public callback迁移：编译失败作为显式迁移信号，不保留旧三参数callback与新request的双实现。
@@ -281,6 +377,21 @@ current-claim检查需要同一个Task store，仅有control registry无法判�
 controller/store与RuntimeTaskService绑定为执行期能力；TeamAgent、React Team和外部runtime只传递该引用，
 不复制claim或terminal状态。
 
+### 选择scope-bound adapter handle，而不是公开raw registry方法
+
+外部SDK controller与Team一样需要reservation、dispatch、interrupt、retire和reconcile全生命周期。逐个
+公开`SubagentExecutor`内部helper会允许consumer混用scope、registry或调用顺序。绑定scope的handle把这些
+操作作为一个不可拆能力提供，同时把durable precondition留在`RuntimeTaskService`。
+
+### 选择caller command ID与append-only journal，而不是参数哈希或DeliveryLedger
+
+AWS的idempotent API实践使用caller-provided request identifier表达重试意图，并对相同ID不同参数报错；
+Temporal以durable append-only Event History记录command产生的事件并在crash后replay。本项目复用这两个
+模式：`command_id`区分意图，EventJournal保存Accepted/Settled，TaskClaim提供stale precondition。
+DeliveryLedger的事实是外部delivery，不具备Task command payload conflict、claim fencing或重放权威。
+确定性PreparedJournalBatch identity负责durable去重，per-command singleflight负责同进程唯一执行；两者
+缺一不可。Accepted与Task CAS不要求跨文件原子提交，因为Accepted未Settled本身就是可重放outbox事实。
+
 ## 业界依据
 
 - [Cursor Plan Mode](https://cursor.com/docs/agent/plan-mode)与
@@ -291,6 +402,10 @@ controller/store与RuntimeTaskService绑定为执行期能力；TeamAgent、Reac
 - [Kubernetes resource versions](https://kubernetes.io/docs/reference/using-api/api-concepts/#resource-versions)与
   [HTTP If-Match](https://www.rfc-editor.org/rfc/rfc9110.html#name-if-match)：stale revision必须显式失败，
   不能由live控制投影覆盖持久化authority。
+- [AWS Making retries safe with idempotent APIs](https://aws.amazon.com/builders-library/making-retries-safe-with-idempotent-APIs/)：
+  caller request ID表达重试意图；相同ID不同参数显式冲突，重复请求返回语义等价结果。
+- [Temporal Events and Event History](https://docs.temporal.io/workflow-execution/event)：durable append-only
+  history记录command引发的事件，用于crash恢复、replay与cancel requested/terminal区分。
 
 ## 复用与实现约束
 
@@ -301,6 +416,8 @@ bounded map/order，因为guidance可累积而cancel intent是单个幂等事实
 - Team adapter只做prompt/metadata转换，不拥有claim、control registry或settlement。
 - default Team、React Team和custom Team都实现同一`TeamDispatchController`；没有隐藏的无control路径。
 - public exact interrupt只通过`RuntimeTaskService`；registry pending API保持crate-internal。
+- 外部`RuntimeDagController`只通过scope-bound`SubagentAttemptControlHandle`接入live lifecycle；raw
+  registry与单独reserve/retire/reconcile helper保持crate-internal。
 - `settle_resolution`/`abandon_claim`只做durable CAS；post-CAS live cleanup由executor单独结算并诊断。
 - JoinSet/AbortHandle只由canonical RuntimeDagExecutor持有；supervisor index不成为新调度器或terminal权威。
 - Team control必须经同源`TeamRuntimeHandle`；不能只暴露registry或临时构造另一个in-memory store。
@@ -308,6 +425,10 @@ bounded map/order，因为guidance可累积而cancel intent是单个幂等事实
 - 迁移阶段每个提交必须切换真实Team主路径，不保留长期平行callback。
 - 所有新增文本截断必须UTF-8安全；不得使用panic API或越界索引。
 - 框架先合入；SDK在独立worktree pin该SHA后迁移。SDK未合入前Finding与Issue保持open。
+- SDK durable Task store只实现持久化与原子事务，所有transition调用framework pure functions；command
+  journal复用EventJournal并以caller command ID做幂等，不复用DeliveryLedger。
+- SDK Host启动与command replay受独占data-root writer lease约束；command reducer只有
+  Absent/Accepted/Settled，确定性batch identity和singleflight共同防止重复执行。
 
 ## 验收标准
 
@@ -333,3 +454,15 @@ bounded map/order，因为guidance可累积而cancel intent是单个幂等事实
 12. SDK Host在后续阶段使用相同context/control API，并通过command replay E2E；不产生第二identity算法。
 13. framework focused tests、公共API 17-feature矩阵、完整合并门禁、独立review与strict semantic gate全绿。
 14. SDK阶段完成前#99保持open，并在外部Issue记录已交付framework SHA与剩余边界。
+15. 外部framework consumer可从`SubagentExecutor`创建一个scope-bound attempt-control handle，完成
+    reserve -> dispatch -> exact interrupt -> durable settle后retire与recovery reconcile；所有identity均从
+    `TaskSubagentContext/TaskClaim`派生，public facade test证明无需访问crate-private API。
+16. SDK同一TaskRun的execute/control/recovery持有同一个service/controller/control handle；并行sibling中
+    exact cancel只终止目标，pause不取消root，stale/conflicting command得到typed error。
+17. Host重启后从durable Task graph与command journal重放Accepted未Settled命令；相同command ID不产生
+    第二side effect，相同ID不同payload被拒绝，TaskClaim已前进时结算stale而不作用于新attempt。
+18. 注入Host在Accepted后、Cancel live投影后、Pause CAS响应丢失后与Pause CAS后/reconcile前crash：
+    restart claim recovery、singleflight replay与typed command receipt均闭合，admission不会在authority
+    unknown时开放。
+19. Pause durable terminal只由exact Paused CAS提交，live reconciliation不能覆盖它；Cancel terminal只由
+    runtime dispatch settlement提交；Resume只从Paused+expected revision产生Pending和后续新claim。

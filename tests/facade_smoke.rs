@@ -78,11 +78,12 @@ fn llm_timeouts_are_available_from_client_and_request_facades() {
 
 #[cfg(feature = "subagent")]
 #[test]
-fn subagent_facade_exposes_receipts_and_usage_contract() {
+fn subagent_facade_exposes_receipts_and_usage_contract() -> Result<(), Box<dyn std::error::Error>> {
     fn public_type<T>() {}
 
     public_type::<echo_agent::subagent::SubagentResult>();
     public_type::<echo_agent::subagent::SubagentOutcome>();
+    public_type::<echo_agent::subagent::SubagentAttemptControlHandle>();
     public_type::<echo_agent::subagent::TeamRuntimeHandle>();
     public_type::<std::sync::Arc<dyn echo_agent::subagent::TeamDispatchController>>();
     public_type::<echo_agent::tasks::RuntimeTaskAttemptInterruptReceipt>();
@@ -97,6 +98,22 @@ fn subagent_facade_exposes_receipts_and_usage_contract() {
     ) -> echo_agent::runtime::ExecutionUsage = echo_agent::subagent::SubagentResult::usage;
     let _turn_usage: fn(&echo_agent::runtime::TurnReceipt) -> echo_agent::runtime::ExecutionUsage =
         echo_agent::runtime::TurnReceipt::usage;
+
+    let registry = std::sync::Arc::new(echo_agent::subagent::SubagentRegistry::new());
+    let executor = echo_agent::subagent::SubagentExecutor::new(
+        registry,
+        echo_agent::subagent::SubagentExecutorConfig::default(),
+    );
+    let handle = executor.attempt_control_handle("external-adapter")?;
+    assert_eq!(handle.control_scope_id(), "external-adapter");
+    assert!(executor.attempt_control_handle(" ").is_err());
+    let claim = echo_agent::tasks::TaskClaim::new(7, 2, "spec".to_string());
+    assert_eq!(
+        handle.project_interrupt("run", "task", &claim)?,
+        echo_agent::tasks::RuntimeTaskAttemptInterruptDisposition::QueuedBeforeReservation
+    );
+    handle.reconcile("run", &std::collections::HashSet::new())?;
+    Ok(())
 }
 
 #[test]

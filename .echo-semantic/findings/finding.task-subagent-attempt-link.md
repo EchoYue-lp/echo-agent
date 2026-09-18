@@ -13,9 +13,9 @@ rule_refs: [rule.task-subagent-authority]
 evidence_refs: [evidence.task-subagent-workflow]
 audit_refs: [audit.task-subagent-workflow.state-authority]
 decision_refs: []
-repair_evidence_refs: [evidence.task-subagent-attempt-link-repair]
-verification_evidence_refs: [evidence.task-subagent-attempt-link-verification]
-rereview_audit_refs: [audit.task-subagent-attempt-link-rereview]
+repair_evidence_refs: [evidence.task-subagent-attempt-link-repair, evidence.task-subagent-external-control-handle-repair]
+verification_evidence_refs: [evidence.task-subagent-attempt-link-verification, evidence.task-subagent-external-control-handle-verification]
+rereview_audit_refs: [audit.task-subagent-attempt-link-rereview, audit.task-subagent-external-control-handle-rereview]
 discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 ---
 
@@ -46,3 +46,9 @@ join-to-CAS observation 与 recovery reconciliation 共享同一权威链。live
 
 Finding 保持 open：独立 `echo-agent-sdk` Host adapter、durable command replay、framework pin、
 inventory 与端到端合同仍未交付。Issue #99 只能在该第二阶段完成并重新验证后关闭。
+
+后续 framework public-adapter 切片在 source snapshot
+`a8b11a40111a41cb6dc345b3798947d426bbdf0318f641868b819c0d5f58a88b` 增加
+scope-bound `SubagentAttemptControlHandle`，并让 Team 与外部 adapter 共享 reservation、dispatch、
+interrupt projection、retire 与 reconcile 实现。该切片不新增 durable authority；SDK pin、持久 Task
+graph、command journal/replay 与 crash E2E 继续保持 open。

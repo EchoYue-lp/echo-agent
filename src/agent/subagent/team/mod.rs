@@ -32,9 +32,6 @@ use echo_orchestration::tasks::{
     TaskSpec, TaskStatus, TaskSubagentContext,
 };
 
-use super::control::{
-    SubagentAttemptIdentity, SubagentControlError, SubagentInterruptRequestDisposition,
-};
 use super::executor::{DispatchRequest, SubagentExecutor, SubagentExecutorConfig};
 use super::registry::SubagentRegistry;
 use super::types::{ExecutionMode, SubagentDefinition, SubagentResult, SubagentStatus};
@@ -278,7 +275,9 @@ impl Team {
         Ok(spec)
     }
 
-    async fn dispatch_controller(&self) -> Arc<dyn TeamDispatchController> {
+    async fn dispatch_controller(
+        &self,
+    ) -> std::result::Result<Arc<dyn TeamDispatchController>, String> {
         let members = self.members.clone();
         let registry = Arc::new(SubagentRegistry::new());
         for member in members.values() {
@@ -295,9 +294,13 @@ impl Team {
             },
         ));
         let control_scope_id = format!("team-control-{}", uuid::Uuid::new_v4().as_simple());
+        let attempt_control = Arc::new(
+            executor
+                .attempt_control_handle(control_scope_id)
+                .map_err(|error| error.to_string())?,
+        );
         let parent_agent = self.name.clone();
-        let dispatch_executor = Arc::clone(&executor);
-        let dispatch_scope_id = control_scope_id.clone();
+        let dispatch_control = Arc::clone(&attempt_control);
         let dispatch: TeamDispatchFn = Arc::new(move |request| {
             let TeamDispatchRequest {
                 member: name,
@@ -305,29 +308,14 @@ impl Team {
                 context,
             } = request;
             let member = members.get(&name).cloned();
-            let executor = Arc::clone(&dispatch_executor);
+            let attempt_control = Arc::clone(&dispatch_control);
             let parent_agent = parent_agent.clone();
-            let control_scope_id = dispatch_scope_id.clone();
             Box::pin(async move {
                 let member = member
                     .ok_or_else(|| ReactError::Other(format!("Team member '{name}' not found")))?;
                 let _execution = member.execution_gate.lock().await;
-                let claim = context.claim().ok_or_else(|| {
-                    ReactError::Other("Team member dispatch requires an exact claim".to_string())
-                })?;
-                let task_id = context.task_id().ok_or_else(|| {
-                    ReactError::Other("Team member dispatch requires an exact task id".to_string())
-                })?;
-                let identity = SubagentAttemptIdentity::for_runtime_scope(
-                    control_scope_id,
-                    context.run_id().to_string(),
-                    task_id.to_string(),
-                    claim.execution_id(context.run_id(), task_id),
-                    claim.attempt,
-                )
-                .map_err(|error| ReactError::Other(error.to_string()))?;
-                executor
-                    .dispatch_attempt(
+                attempt_control
+                    .dispatch(
                         DispatchRequest {
                             agent_name: name,
                             task,
@@ -343,74 +331,36 @@ impl Team {
                             constraints: Vec::new(),
                             background: false,
                         },
-                        identity,
+                        context,
                     )
                     .await
             })
         });
-        let reserve_executor = Arc::clone(&executor);
-        let reserve_scope_id = control_scope_id.clone();
+        let reserve_control = Arc::clone(&attempt_control);
         let reserve_attempt: TeamReserveAttemptFn = Arc::new(move |context| {
-            let identity = identity_from_context(&context, &reserve_scope_id, "Team reservation")?;
-            reserve_executor
-                .reserve_attempt(identity, context.cancellation_token().clone())
+            reserve_control
+                .reserve(&context)
                 .map_err(|error| error.to_string())
         });
-        let interrupt_executor = Arc::clone(&executor);
-        let interrupt_scope_id = control_scope_id.clone();
+        let interrupt_control = Arc::clone(&attempt_control);
         let request_interrupt: TeamRequestInterruptFn = Arc::new(move |run_id, task_id, claim| {
-            let identity = SubagentAttemptIdentity::for_runtime_scope(
-                interrupt_scope_id.clone(),
-                run_id.clone(),
-                task_id.clone(),
-                claim.execution_id(&run_id, &task_id),
-                claim.attempt,
-            )
-            .map_err(runtime_interrupt_projection_error)?;
-            interrupt_executor
-                .request_interrupt(identity)
-                .map(|receipt| Some(runtime_interrupt_disposition(receipt.disposition)))
-                .map_err(runtime_interrupt_projection_error)
+            interrupt_control
+                .project_interrupt(&run_id, &task_id, &claim)
+                .map(Some)
         });
-        let reconcile_executor = Arc::clone(&executor);
-        let reconcile_scope_id = control_scope_id.clone();
+        let reconcile_control = Arc::clone(&attempt_control);
         let reconcile_attempts: TeamReconcileAttemptFn =
-            Arc::new(move |_run_id, current_execution_ids| {
-                reconcile_executor
-                    .reconcile_attempt_control(&reconcile_scope_id, &current_execution_ids)
+            Arc::new(move |run_id, current_execution_ids| {
+                reconcile_control
+                    .reconcile(&run_id, &current_execution_ids)
                     .map_err(|error| error.to_string())
             });
-        let cleanup_executor = executor;
-        let cleanup_scope_id = control_scope_id;
+        let cleanup_control = attempt_control;
         let retire_attempt: TeamRetireAttemptFn = Arc::new(move |run_id, task, claim| {
-            let cleanup_executor = Arc::clone(&cleanup_executor);
-            let control_scope_id = cleanup_scope_id.clone();
-            Box::pin(async move {
-                let task_id = task.spec.id.clone();
-                let identity = match SubagentAttemptIdentity::for_runtime_scope(
-                    control_scope_id,
-                    run_id.clone(),
-                    task_id.clone(),
-                    claim.execution_id(&run_id, &task_id),
-                    claim.attempt,
-                ) {
-                    Ok(identity) => identity,
-                    Err(error) => {
-                        return RuntimeAttemptControlCleanupReceipt::RetryableFailure {
-                            error: error.to_string(),
-                        };
-                    }
-                };
-                match cleanup_executor.retire_attempt_control(&identity) {
-                    Ok(true) => RuntimeAttemptControlCleanupReceipt::Retired,
-                    Ok(false) => RuntimeAttemptControlCleanupReceipt::AlreadyConsumed,
-                    Err(error) => RuntimeAttemptControlCleanupReceipt::RetryableFailure {
-                        error: error.to_string(),
-                    },
-                }
-            })
+            let cleanup_control = Arc::clone(&cleanup_control);
+            Box::pin(async move { cleanup_control.retire(&run_id, &task, &claim) })
         });
-        closure_dispatch_controller(
+        Ok(closure_dispatch_controller(
             dispatch,
             TeamDispatchControl {
                 reserve_attempt,
@@ -418,7 +368,7 @@ impl Team {
                 retire_attempt,
                 reconcile_attempts,
             },
-        )
+        ))
     }
 }
 
@@ -636,7 +586,7 @@ impl TeamAgent {
                     .unwrap_or_else(|| format!("team-{}", uuid::Uuid::new_v4().as_simple()));
                 let dispatch_controller = match self.member_controller.clone() {
                     Some(controller) => controller,
-                    None => self.team.dispatch_controller().await,
+                    None => self.team.dispatch_controller().await?,
                 };
                 Ok::<Arc<TeamRuntimeHandle>, String>(runtime_handle_for_controller(
                     run_id,
@@ -803,75 +753,6 @@ pub struct TeamDispatchRequest {
     pub member: String,
     pub task: String,
     pub context: TaskSubagentContext,
-}
-
-fn identity_from_context(
-    context: &TaskSubagentContext,
-    control_scope_id: &str,
-    operation: &str,
-) -> std::result::Result<SubagentAttemptIdentity, String> {
-    let claim = context
-        .claim()
-        .ok_or_else(|| format!("{operation} requires an exact TaskClaim"))?;
-    let task_id = context
-        .task_id()
-        .ok_or_else(|| format!("{operation} requires an exact task id"))?;
-    SubagentAttemptIdentity::for_runtime_scope(
-        control_scope_id.to_string(),
-        context.run_id().to_string(),
-        task_id.to_string(),
-        claim.execution_id(context.run_id(), task_id),
-        claim.attempt,
-    )
-    .map_err(|error| error.to_string())
-}
-
-pub(super) fn runtime_interrupt_disposition(
-    disposition: SubagentInterruptRequestDisposition,
-) -> RuntimeTaskAttemptInterruptDisposition {
-    match disposition {
-        SubagentInterruptRequestDisposition::QueuedBeforeAdmission => {
-            RuntimeTaskAttemptInterruptDisposition::QueuedBeforeReservation
-        }
-        SubagentInterruptRequestDisposition::ReservedRequested => {
-            RuntimeTaskAttemptInterruptDisposition::ReservedRequested
-        }
-        SubagentInterruptRequestDisposition::ActiveRequested => {
-            RuntimeTaskAttemptInterruptDisposition::ActiveRequested
-        }
-        SubagentInterruptRequestDisposition::ActiveAlreadyRequested => {
-            RuntimeTaskAttemptInterruptDisposition::ActiveAlreadyRequested
-        }
-        SubagentInterruptRequestDisposition::AlreadySettled(status) => {
-            RuntimeTaskAttemptInterruptDisposition::AlreadySettled {
-                status: status.as_str().to_string(),
-            }
-        }
-    }
-}
-
-pub(super) fn runtime_interrupt_projection_error(
-    error: SubagentControlError,
-) -> RuntimeTaskAttemptInterruptProjectionError {
-    match error {
-        SubagentControlError::PendingCapacityExceeded { limit } => {
-            RuntimeTaskAttemptInterruptProjectionError::PendingCapacityExceeded { limit }
-        }
-        SubagentControlError::IdentityConflict {
-            task_id,
-            attempt,
-            expected_execution_id,
-            actual_execution_id,
-        } => RuntimeTaskAttemptInterruptProjectionError::IdentityConflict {
-            task_id,
-            attempt,
-            expected_execution_id,
-            actual_execution_id,
-        },
-        error => RuntimeTaskAttemptInterruptProjectionError::Unavailable {
-            message: error.to_string(),
-        },
-    }
 }
 
 /// Canonical member execution adapter supplied by [`super::SubagentExecutor`].
@@ -2742,30 +2623,6 @@ mod tests {
         )
         .err();
         assert!(error.is_some_and(|error| error.to_string().contains("at least one")));
-    }
-
-    #[test]
-    fn interrupt_projection_preserves_capacity_and_identity_conflict() {
-        assert_eq!(
-            runtime_interrupt_projection_error(SubagentControlError::PendingCapacityExceeded {
-                limit: 17
-            }),
-            RuntimeTaskAttemptInterruptProjectionError::PendingCapacityExceeded { limit: 17 }
-        );
-        assert_eq!(
-            runtime_interrupt_projection_error(SubagentControlError::IdentityConflict {
-                task_id: "task".to_string(),
-                attempt: 2,
-                expected_execution_id: "expected".to_string(),
-                actual_execution_id: "actual".to_string(),
-            }),
-            RuntimeTaskAttemptInterruptProjectionError::IdentityConflict {
-                task_id: "task".to_string(),
-                attempt: 2,
-                expected_execution_id: "expected".to_string(),
-                actual_execution_id: "actual".to_string(),
-            }
-        );
     }
 
     #[test]
