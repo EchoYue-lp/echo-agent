@@ -131,7 +131,6 @@ impl PluginLifecycleManager {
                 ));
             }
             if let Err(error) = lifecycle.callbacks.init() {
-                lifecycle.cleanup_required = true;
                 lifecycle.shutdown_required = true;
                 return Err(format!("Plugin '{plugin_id}' init failed: {error}"));
             }
@@ -372,6 +371,11 @@ mod tests {
     impl PluginLifecycle for FailingInitializationLifecycle {
         fn init(&self) -> Result<(), String> {
             Err("injected init failure".to_string())
+        }
+
+        fn deactivate(&self) -> Result<(), String> {
+            self.0.deactivate.fetch_add(1, Ordering::SeqCst);
+            Err("deactivate called before activation".to_string())
         }
 
         fn shutdown(&self) -> Result<(), String> {
@@ -687,7 +691,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_init_requires_shutdown_even_after_deactivation() -> Result<(), String> {
+    fn failed_init_requires_shutdown_without_deactivation() -> Result<(), String> {
         let counts = Arc::new(Counts::default());
         let mut manager = PluginLifecycleManager::new();
         manager.register(
@@ -697,6 +701,7 @@ mod tests {
         assert!(manager.activate("old").is_err());
 
         assert!(manager.unregister("old")?);
+        assert_eq!(counts.deactivate.load(Ordering::SeqCst), 0);
         assert_eq!(counts.shutdown.load(Ordering::SeqCst), 1);
         Ok(())
     }

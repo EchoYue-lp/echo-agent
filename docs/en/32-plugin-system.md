@@ -141,7 +141,8 @@ the complete immutable snapshot.
 `deactivate`, `init`, or `activate` retains cleanup debt and blocks further callback activation
 through `reconcile`, `activate_enabled`, and direct `activate`. The failed registration remains
 available for a cleanup retry; successful deactivation settles its deactivation debt, while
-failed initialization/activation requires successful `unregister` cleanup. A failed callback is
+failed initialization requires shutdown but not deactivation, and failed activation requires
+successful `unregister` cleanup. A failed callback is
 not treated as withdrawn merely because the desired enabled set changed. Failed `shutdown` remains
 unsettled even if a later `deactivate` succeeds, and must be retried through `unregister`. See
 [ADR 0060](../adr/0060-plugin-lifecycle-reconcile-settlement.md). Registry and component wiring

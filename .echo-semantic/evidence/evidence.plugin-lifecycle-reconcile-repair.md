@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.plugin-lifecycle-reconcile-repair
 kind: evidence
-observed_at: source:2eb36d5b3126ac0426ec63925cba133cfe2193c92aa22c2da3b108faa9cc4e55
+observed_at: source:370d0d64574bf270a787a39a524b5e4e14066b5a87f253fe8ba5102d8aa74dd7
 source_refs:
   - echo-core/src/plugin/lifecycle.rs
   - docs/adr/0060-plugin-lifecycle-reconcile-settlement.md
@@ -26,7 +26,8 @@ effect。拆分的`deactivate_not_in` / `activate_enabled`和直接`activate`同
 现由原有Manager内的`cleanup_required`与独立`shutdown_required`统一阻断所有新增callback
 激活。撤销失败仍持有旧registration，之后`deactivate`成功只结清撤销阶段债务；
 `unregister`的shutdown失败持续阻断激活，直到shutdown重试成功。`init`失败虽然未设置
-initialized，也须执行shutdown，防止部分获得资源后仅靠deactivate结算；激活失败的
+initialized，也须执行shutdown，防止部分获得资源；它不进入deactivate阶段，因为
+activate从未开始。激活失败的
 潜在部分effect同样由`unregister`完成清理。没有自身债务的已活跃callback保持幂等；
 相同enabled集合重复reconcile不会重复激活。
 

@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.plugin-lifecycle-reconcile-verification
 kind: evidence
-observed_at: source:2eb36d5b3126ac0426ec63925cba133cfe2193c92aa22c2da3b108faa9cc4e55
+observed_at: source:370d0d64574bf270a787a39a524b5e4e14066b5a87f253fe8ba5102d8aa74dd7
 source_refs:
   - echo-core/src/plugin/lifecycle.rs
   - docs/adr/0060-plugin-lifecycle-reconcile-settlement.md
@@ -26,8 +26,9 @@ limitations:
 `successful_deactivate_does_not_settle_failed_unregister_shutdown`先在旧实现以exit 101
 稳定复现，再验证公开deactivate成功后仍阻断新旧激活，直到shutdown重试结算；
 `shutdown_retry_does_not_repeat_successful_deactivation`验证独立阶段重试不重复已成功撤销。
-`failed_init_requires_shutdown_even_after_deactivation`先在增量实现上以exit 101暴露遗漏，
-最终证明部分初始化失败仍须由shutdown结算。
+`failed_init_requires_shutdown_without_deactivation`在第二轮复审增量上以exit 101稳定复现，
+证明init失败项若被错误送入deactivate可永久阻断；最终验证不调用deactivate，shutdown
+成功即可移除。
 
 ## 来源与范围
 
