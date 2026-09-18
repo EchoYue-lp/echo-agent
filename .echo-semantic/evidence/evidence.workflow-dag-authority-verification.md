@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.workflow-dag-authority-verification
 kind: evidence
-observed_at: source:865c258f9d8c3303cd4ce3949b1a35c6748436af3d246e41ab0340b3b106c401
+observed_at: 73f7592ae1a40dda1673f0038b49750c5c105499
 source_refs:
   - echo-agent-learning/tests/documentation_contract.rs
   - docs/adr/0059-task-workflow-dag-authority.md
