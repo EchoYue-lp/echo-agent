@@ -424,6 +424,9 @@ while True:
         if exited.initialized || exited.pid.is_some() || exited.last_error.is_none() {
             return Err(format!("EOF did not settle status: {exited:?}"));
         }
+        if !old.read().await.process_has_exited().await {
+            return Err("EOF published terminal status before child exit".to_string());
+        }
         if old
             .read()
             .await
@@ -519,6 +522,9 @@ while True:
         {
             return Err(format!("writer failure was not authoritative: {status:?}"));
         }
+        if !client.read().await.process_has_exited().await {
+            return Err("writer failure published terminal status before child exit".to_string());
+        }
         manager.shutdown_all().await;
         Ok(())
     }
@@ -537,6 +543,9 @@ while True:
                     .collect(),
             })?;
             manager.start_server(language).await?;
+            let client = manager
+                .get_client(language)
+                .ok_or("missing malformed client")?;
             let status = wait_for_exit(&manager, language).await?;
             if !status
                 .last_error
@@ -544,6 +553,11 @@ while True:
                 .is_some_and(|error| error.contains(expected))
             {
                 return Err(format!("{mode} did not settle with {expected}: {status:?}"));
+            }
+            if !client.read().await.process_has_exited().await {
+                return Err(format!(
+                    "{mode} published terminal status before child exit"
+                ));
             }
             manager.shutdown_all().await;
         }

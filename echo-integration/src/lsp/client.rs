@@ -53,11 +53,12 @@ fn accepts_lsp_message_size(bytes: usize) -> bool {
 struct LspRuntime {
     status: LspServerStatus,
     pending: HashMap<u64, oneshot::Sender<JsonRpcResponse>>,
+    accepting: bool,
 }
 
 impl LspRuntime {
     fn register(&mut self, id: u64, tx: oneshot::Sender<JsonRpcResponse>) -> LspResult<()> {
-        if !self.status.running {
+        if !self.status.running || !self.accepting {
             return Err(LspError::NotInitialized);
         }
         self.pending.insert(id, tx);
@@ -65,9 +66,18 @@ impl LspRuntime {
     }
 
     fn settle(&mut self, error: Option<String>) {
+        self.accepting = false;
         self.status.running = false;
         self.status.initialized = false;
         self.status.pid = None;
+        if self.status.last_error.is_none() {
+            self.status.last_error = error;
+        }
+        self.pending.clear();
+    }
+
+    fn begin_terminal(&mut self, error: Option<String>) {
+        self.accepting = false;
         if self.status.last_error.is_none() {
             self.status.last_error = error;
         }
@@ -138,6 +148,7 @@ impl StdioLspClient {
                     pid: None,
                 },
                 pending: HashMap::new(),
+                accepting: false,
             })),
             diagnostics_cache: Arc::new(Mutex::new(HashMap::new())),
             lifecycle,
@@ -176,7 +187,7 @@ impl StdioLspClient {
             .runtime
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        if !runtime.status.running {
+        if !runtime.status.running || !runtime.accepting {
             return false;
         }
         runtime.status.initialized = true;
@@ -187,7 +198,7 @@ impl StdioLspClient {
     async fn abort_process(&mut self) {
         self.writer_tx = None;
         if let Some(child) = self.child.take() {
-            let _ = child.lock().await.kill().await;
+            Self::terminate_child(&child).await;
         }
         for task in [self.writer_task.take(), self.reader_task.take()]
             .into_iter()
@@ -207,6 +218,20 @@ impl StdioLspClient {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
             .settle(None);
+    }
+
+    async fn terminate_child(child: &Arc<Mutex<Child>>) {
+        let mut child = child.lock().await;
+        let _ = child.start_kill();
+        let _ = child.wait().await;
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn process_has_exited(&self) -> bool {
+        let Some(child) = self.child.as_ref() else {
+            return true;
+        };
+        child.lock().await.try_wait().ok().flatten().is_some()
     }
 
     /// Spawn the server process and set up communication channels.
@@ -242,12 +267,17 @@ impl StdioLspClient {
 
         let child_id = child.id();
         let child = Arc::new(Mutex::new(child));
-        self.update_runtime(|status| {
-            status.running = true;
-            status.initialized = false;
-            status.last_error = None;
-            status.pid = child_id;
-        });
+        {
+            let mut runtime = self
+                .runtime
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            runtime.status.running = true;
+            runtime.status.initialized = false;
+            runtime.status.last_error = None;
+            runtime.status.pid = child_id;
+            runtime.accepting = true;
+        }
 
         // Writer failure must settle pending calls even if the child keeps
         // stdout open indefinitely after its stdin has closed.
@@ -267,9 +297,15 @@ impl StdioLspClient {
                     writer_runtime
                         .lock()
                         .unwrap_or_else(|poison| poison.into_inner())
-                        .settle((!writer_stopping.load(Ordering::SeqCst)).then_some(detail));
+                        .begin_terminal(
+                            (!writer_stopping.load(Ordering::SeqCst)).then_some(detail),
+                        );
                     writer_cache.lock().await.clear();
-                    let _ = writer_child.lock().await.kill().await;
+                    Self::terminate_child(&writer_child).await;
+                    writer_runtime
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner())
+                        .settle(None);
                     break;
                 }
             }
@@ -280,6 +316,7 @@ impl StdioLspClient {
         let runtime = Arc::clone(&self.runtime);
         let closed = Arc::clone(&self.closed);
         let stopping = Arc::clone(&self.stopping);
+        let reader_child = Arc::clone(&child);
         let reader_task = tokio::spawn(async move {
             let reader = BufReader::new(stdout);
             let error =
@@ -287,11 +324,16 @@ impl StdioLspClient {
             runtime
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner())
-                .settle(
+                .begin_terminal(
                     (!closed.load(Ordering::SeqCst) && !stopping.load(Ordering::SeqCst))
                         .then_some(error),
                 );
             diagnostics_cache.lock().await.clear();
+            Self::terminate_child(&reader_child).await;
+            runtime
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .settle(None);
         });
 
         self.child = Some(child);
@@ -834,6 +876,7 @@ mod message_size_tests {
                 pid: Some(42),
             },
             pending: HashMap::new(),
+            accepting: true,
         };
         let (before_tx, before_rx) = oneshot::channel();
         runtime
