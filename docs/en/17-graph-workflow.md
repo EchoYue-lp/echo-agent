@@ -267,7 +267,15 @@ let result = graph.run(state).await?;
 | `Graph` | LangGraph-style with conditional edges, loops | Complex multi-agent orchestration |
 | `SequentialWorkflow` | Simple pipeline, step N output → step N+1 input | ETL pipelines |
 | `ConcurrentWorkflow` | All agents run in parallel, results merged | Parallel analysis |
-| `DagWorkflow` | Topological scheduling, independent nodes parallel | DAG tasks |
+| `DagWorkflow` | Fixed acyclic Agent pipeline; predecessor text output feeds successor nodes | Static pipeline invocation |
+
+These are public Workflow APIs, separate from the revisioned Task graph.
+`Graph` owns conditional routing, shared state and checkpoint continuation;
+`DagWorkflow` owns one fixed topological pipeline invocation and has no Task
+claim or checkpoint contract. Use `RuntimeTaskService` for a dynamic Task DAG.
+If a Workflow is dispatched by a Task, its output is evidence for the Task's
+exact claim settlement, not another Task status authority. See
+[ADR 0059](../adr/0059-task-workflow-dag-authority.md).
 
 ### SequentialWorkflow
 

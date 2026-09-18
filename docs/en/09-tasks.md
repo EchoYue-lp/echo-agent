@@ -13,6 +13,12 @@ one revisioned task graph. There is no separate task-manager state machine.
 - A plan is an editable, versioned artifact over the graph. It is not an
   approval state machine.
 
+The Task graph is the authority for dynamic Task dependencies and exact
+claim/attempt settlement. A caller-authored `Graph` or `DagWorkflow` may be
+executed inside a Task, but its nodes and result do not commit Task status.
+The distinction and composition rules are recorded in
+[ADR 0059](../adr/0059-task-workflow-dag-authority.md).
+
 ## Task Model
 
 Each committed node separates immutable specification from mutable execution

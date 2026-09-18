@@ -10,6 +10,10 @@ echo-agent 将单任务、Todo 风格列表和依赖 DAG 统一表示为一个�
 - `TaskSpawner` 只追踪进程内后台 Future，不拥有持久任务关系。
 - Plan 是任务图之上的可编辑、版本化 artifact，不进入审批状态机。
 
+Task graph 是动态 Task 依赖与精确 claim/attempt 结算的权威。调用方定义的
+`Graph` 或 `DagWorkflow` 可以在某个 Task 内执行，但其节点和输出不会提交 Task
+状态。边界与组合规则见 [ADR 0059](../adr/0059-task-workflow-dag-authority.md)。
+
 ## 任务模型
 
 每个已提交节点将不可变规格与可变执行状态分开：

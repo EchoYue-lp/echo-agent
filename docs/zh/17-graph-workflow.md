@@ -265,7 +265,13 @@ let result = graph.run(state).await?;
 | `Graph` | LangGraph 风格，支持条件边、循环 | 复杂多 Agent 编排 |
 | `SequentialWorkflow` | 简单管道，步骤 N 输出 → 步骤 N+1 输入 | ETL 管道 |
 | `ConcurrentWorkflow` | 所有 Agent 并行执行，结果合并 | 并行分析 |
-| `DagWorkflow` | 拓扑调度，独立节点自动并行 | DAG 任务 |
+| `DagWorkflow` | 固定的无环 Agent 管道，前驱文本输出传给后继节点 | 静态管道调用 |
+
+这些是公开的 Workflow API，与版本化 Task graph 分属不同权威。`Graph` 拥有条件
+路由、共享状态和 checkpoint continuation；`DagWorkflow` 拥有一次固定拓扑的管道
+调用，没有 Task claim 或 checkpoint 合同。动态 Task DAG 应使用
+`RuntimeTaskService`。Task 派发 Workflow 时，其输出是精确 claim 结算的证据，
+不是另一套 Task 状态权威。见 [ADR 0059](../adr/0059-task-workflow-dag-authority.md)。
 
 ### SequentialWorkflow
 

@@ -38,8 +38,8 @@ scenarios:
     finding_refs: [finding.workflow-dag-authority, finding.workflow-entry-loop-drift, finding.workflow-checkpoint-claim-recovery, finding.workflow-checkpoint-resurrection-race, finding.workflow-parallel-failure-settlement]
     evidence_refs: [evidence.task-subagent-workflow, evidence.workflow-parallel-failure-settlement-repair, evidence.workflow-parallel-failure-settlement-verification, evidence.workflow-checkpoint-claim-settlement-repair, evidence.workflow-checkpoint-claim-settlement-verification, evidence.workflow-entry-loop-authority-repair, evidence.workflow-entry-loop-authority-verification]
     audit_refs: [audit.workflow-parallel-failure-settlement-rereview, audit.workflow-checkpoint-claim-settlement-rereview, audit.workflow-entry-loop-authority-rereview]
-    unknown: checkpoint claim/lease、并行sibling settlement及四执行入口事件对等已关闭；Task DAG与Workflow DAG authority仍未归并
-    next_step: 由Finding #111执行DAG consolidation，不重建第二个Workflow入口循环
+    unknown: checkpoint claim/lease、并行sibling settlement及四执行入口事件对等已关闭；Task/Graph/DagWorkflow长期边界已由ADR 0059裁决，仍待独立复审、严格语义门禁与远端交付
+    next_step: 对Finding #111执行独立复审，不合并三套DAG或重建第二个Workflow入口循环
   cron-scheduler:
     status: needs_review
     source_refs: [echo-orchestration/src/scheduler/runner.rs, echo-orchestration/src/scheduler/cron_task.rs]
