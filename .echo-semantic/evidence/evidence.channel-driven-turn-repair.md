@@ -2,9 +2,11 @@
 schema_version: 1
 id: evidence.channel-driven-turn-repair
 kind: evidence
-observed_at: source:8d956c10941594a85bb7c3d79c385fbb7e6ea4c25abc4a67f46bf8a99dc078b5
+observed_at: source:4b8f4328fa7758990ed6a070317da3dc5435f74f29f6f8f3f4e4ae5454da5afe
 source_refs:
   - src/channels.rs
+  - echo-integration/src/channels/types.rs
+  - echo-integration/src/channels/session.rs
   - echo-orchestration/src/runtime/turn_driver.rs
   - echo-integration/src/channels/session.rs
   - docs/adr/0046-turn-execution-delivery-settlement.md
@@ -35,7 +37,15 @@ EKO's separate `AppChannelMessageHandler` enters the same framework driver
 through `drive_foreground_pooled_chat_turn`; it does not construct this framework
 handler or call `ReactAgent::chat` on its production channel path.
 
+The shared `MessageHandler` contract now has an opt-in cancellation settlement
+path. `SessionHandler` tracks active driven setups separately, passes its exact
+generation token to opted-in handlers, and waits for those setups to release
+after cancellation before reset acknowledgement. `drive_turn_with_sink`
+preserves a caller's real event delivery failure in the same receipt; its
+default sink is explicitly limited to in-process acceptance.
+
 ## 已知缺口
 
 This does not change raw Agent APIs, A2A adapter authority, or remote provider
-delivery settlement. Independent rereview and main delivery remain outstanding.
+delivery settlement. `ChannelManager::stop_all` adapter-close settlement is
+owned by Finding #36. Independent rereview and main delivery remain outstanding.

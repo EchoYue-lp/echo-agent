@@ -51,6 +51,14 @@ Completed while the returned receipt says Failed.
    terminal reducer; `SessionHandler` still owns session generation and the
    transport delivery fence. The raw Rust `Agent::chat` and stream APIs remain
    valid low-level contracts for callers without a driven Turn promise.
+9. Channel session reset passes the generation cancellation token into handlers
+   that declare driven settlement. For those handlers, reset retires delivery,
+   requests cancellation, and waits for the active driven setup to release its
+   receipt before acknowledging replacement. Legacy/custom handlers keep the
+   earlier drop-on-cancel behavior unless they opt into the settlement method.
+   `drive_turn_with_sink` lets adapters attach a real Journal/projection sink;
+   the default sink only records in-process event acceptance and is never
+   described as remote QQ/Feishu delivery.
 
 ## Alternatives rejected
 
@@ -81,6 +89,10 @@ Channel receipt delivery refers to the channel event sink, not a remote QQ or
 Feishu delivery ACK. The transport's generation fence remains responsible for
 local queue/network admission and reset ordering; a remote send failure cannot
 retroactively change the Agent's producer terminal.
+`ChannelManager::stop_all` and QQ/Feishu task shutdown still require the
+adapter-close resource settlement owned by Finding #36. This decision does not
+add a competing channel-close coordinator, and Finding #107 cannot be closed
+until that dependency is verifiable on remote main.
 
 ## Industry Basis for Channel Adoption
 
@@ -103,4 +115,5 @@ failure, wire validation, persistence, and legacy receipt decoding. Full
 framework and independent SDK gates remain required before closing Finding
 #108.
 Channel adapter tests additionally cover a real driven receipt with identity
-and usage, standard reply projection, producer failure, and cancellation.
+and usage, standard reply projection, producer failure, cancellation, custom
+sink failure, and Session reset waiting for a real cancelled Turn to settle.

@@ -167,6 +167,11 @@ the exact Turn identity, usage, or cancellation result can call
 `AgentChannelHandler::drive_turn(&message, cancel_token)` and inspect the
 returned `TurnReceipt`. Receipt delivery means event-sink acceptance, while
 the channel's transport generation fence governs outbound network admission.
+`drive_turn_with_sink` accepts a caller-owned Journal or projection sink when
+events must be retained. The default sink is only an in-process acceptance
+boundary and is not a QQ/Feishu delivery acknowledgement. Framework session
+reset passes cancellation to this driven handler and waits for that Turn to
+settle before publishing the replacement reply.
 Raw `Agent::chat` remains available for lower-level Rust consumers. See
 [ADR 0046](../adr/0046-turn-execution-delivery-settlement.md).
 

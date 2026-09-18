@@ -44,4 +44,7 @@ Channel invocation 遇到 EOF、sink failure、cancel、usage accounting 或 clo
 框架 `AgentChannelHandler` 已改用 `AgentTurnDriver` 并公开单次调用的 `TurnReceipt`；
 标准回复仅接受 `Completed + Delivered + final_answer`。EKO 应用 channel 自有 handler
 通过 `drive_foreground_pooled_chat_turn` 进入同一个框架 driver，本 Finding 不修改其产品
-投影。当前保留 open，待独立复审、完整门禁和远端 main 交付。
+投影。Session reset 现在向 driven handler 传播 generation cancel，并等待 active driven
+setup 释放 receipt 后才确认替换。当前保留 open：`ChannelManager::stop_all` 的
+QQ/飞书 adapter close 结算属于 Finding #36，待该依赖、独立复审、完整门禁和远端 main
+交付均闭合后再关闭。

@@ -1,6 +1,7 @@
 //! IM channel unified message types and trait definitions
 
 use async_trait::async_trait;
+use echo_core::agent::CancellationToken;
 pub use echo_core::error::ChannelError;
 pub use echo_core::error::ReactError;
 use echo_core::error::Result;
@@ -408,6 +409,24 @@ pub trait MessageHandler: Send + Sync {
     ) -> Result<BoxStream<'a, Result<OutboundMessage>>> {
         let out = self.handle(msg).await?;
         Ok(futures::stream::once(async move { Ok(out) }).boxed())
+    }
+
+    /// Whether this handler settles a driven Turn after session cancellation.
+    ///
+    /// Session reset waits for opted-in handlers to finish their existing
+    /// invocation. Legacy/custom handlers retain their previous stream-drop
+    /// behavior unless they also implement `handle_stream_with_cancel`.
+    fn settles_on_cancel(&self) -> bool {
+        false
+    }
+
+    /// Run one stream with the owning session's cancellation lifetime.
+    async fn handle_stream_with_cancel<'a>(
+        &'a self,
+        msg: InboundMessage,
+        _cancel: CancellationToken,
+    ) -> Result<BoxStream<'a, Result<OutboundMessage>>> {
+        self.handle_stream(msg).await
     }
 }
 

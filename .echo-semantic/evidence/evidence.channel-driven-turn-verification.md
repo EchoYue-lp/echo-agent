@@ -2,9 +2,10 @@
 schema_version: 1
 id: evidence.channel-driven-turn-verification
 kind: evidence
-observed_at: source:8d956c10941594a85bb7c3d79c385fbb7e6ea4c25abc4a67f46bf8a99dc078b5
+observed_at: source:4b8f4328fa7758990ed6a070317da3dc5435f74f29f6f8f3f4e4ae5454da5afe
 source_refs:
   - src/channels.rs
+  - echo-integration/src/channels/session.rs
   - docs/en/15-im-channels.md
   - docs/zh/15-im-channels.md
 supports: [behavior.agent-turn-lifecycle, rule.turn-terminal-authority]
@@ -18,10 +19,14 @@ limitations:
 ## 支持的结论
 
 Focused `cargo test -p echo_agent --features channels --lib channels::tests
---locked` passed all six channel tests. They exercise a real `ReactAgent` with
+--locked` passed all eight channel tests. They exercise a real `ReactAgent` with
 mock provider: receipt identity, final answer, provider usage, completed
 delivery, normal outbound projection, failed provider execution, and a cancelled
-Turn that cannot produce a successful reply. `cargo check -p echo_agent
+Turn that cannot produce a successful reply, a failing projection sink, and a
+Session reset that cancels and settles a real active Turn before cleanup.
+`cargo test -p echo_integration --features channels channels::session::tests
+--locked` passed all 26 session tests, including the fail-before-fix driven
+setup settlement case. `cargo check -p echo_agent
 --no-default-features --features channels --locked` passed the independently
 selected channels feature. `cargo clippy -p echo_agent --lib
 --no-default-features --features channels --locked -- -D warnings

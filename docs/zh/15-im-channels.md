@@ -142,7 +142,10 @@ async fn main() -> echo_agent::error::Result<()> {
 不能被误判为成功。框架调用者可通过
 `AgentChannelHandler::drive_turn(&message, cancel_token)` 获取 Turn 身份、用量和
 取消终态。这里的 delivery 指事件 sink 接纳，向 IM 平台发送则继续由 channel
-generation fence 约束。底层 Rust `Agent::chat` API 保留。参见
+generation fence 约束；`drive_turn_with_sink` 可接入调用方自己的 Journal 或投影
+sink，默认 sink 仅表示进程内接纳，不是 QQ/飞书送达确认。framework session reset
+会把取消 token 交给该 driven handler，并等待 Turn 结算后再确认替换。底层 Rust
+`Agent::chat` API 保留。参见
 [ADR 0046](../adr/0046-turn-execution-delivery-settlement.md)。
 
 所有 IM 通道实现统一接口：
