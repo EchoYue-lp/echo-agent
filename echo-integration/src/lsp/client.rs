@@ -8,6 +8,7 @@ use echo_core::lsp::{
 use futures::future::BoxFuture;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
@@ -62,18 +63,14 @@ pub struct StdioLspClient {
     child: Option<Child>,
     /// Channel to send JSON-RPC messages to the writer task.
     writer_tx: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
+    writer_task: Option<tokio::task::JoinHandle<()>>,
+    reader_task: Option<tokio::task::JoinHandle<()>>,
     /// Pending request callbacks.
     pending: Arc<Mutex<HashMap<u64, oneshot::Sender<JsonRpcResponse>>>>,
     /// Next request ID.
     next_id: AtomicU64,
-    /// Whether the server is running.
-    running: AtomicBool,
-    /// Whether initialization is complete.
-    initialized: AtomicBool,
-    /// Restart count.
-    restart_count: u32,
-    /// Last error message.
-    last_error: Option<String>,
+    /// One snapshot authority shared with the background stdout reader.
+    runtime: Arc<StdMutex<LspServerStatus>>,
     /// Cached diagnostics per file URI.
     diagnostics_cache: Arc<Mutex<HashMap<String, Vec<Diagnostic>>>>,
     /// Manager lifecycle captured when this derived handle was created.
@@ -81,7 +78,7 @@ pub struct StdioLspClient {
     /// Generation associated with this client handle.
     lifecycle_generation: u64,
     /// Client-level close fence, set by explicit stop/shutdown.
-    closed: AtomicBool,
+    closed: Arc<AtomicBool>,
 }
 
 impl StdioLspClient {
@@ -99,20 +96,26 @@ impl StdioLspClient {
     ) -> Self {
         let language = config.language.clone();
         Self {
-            language,
+            language: language.clone(),
             config,
             child: None,
             writer_tx: None,
+            writer_task: None,
+            reader_task: None,
             pending: Arc::new(Mutex::new(HashMap::new())),
             next_id: AtomicU64::new(1),
-            running: AtomicBool::new(false),
-            initialized: AtomicBool::new(false),
-            restart_count: 0,
-            last_error: None,
+            runtime: Arc::new(StdMutex::new(LspServerStatus {
+                language: language.clone(),
+                running: false,
+                initialized: false,
+                restart_count: 0,
+                last_error: None,
+                pid: None,
+            })),
             diagnostics_cache: Arc::new(Mutex::new(HashMap::new())),
             lifecycle,
             lifecycle_generation,
-            closed: AtomicBool::new(false),
+            closed: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -124,15 +127,60 @@ impl StdioLspClient {
         Ok(())
     }
 
+    fn update_runtime(&self, update: impl FnOnce(&mut LspServerStatus)) {
+        let mut status = self
+            .runtime
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        update(&mut status);
+    }
+
+    pub(crate) fn set_restart_count(&self, count: u32) {
+        self.update_runtime(|status| status.restart_count = count);
+    }
+
+    pub(crate) fn set_last_error(&self, error: String) {
+        self.update_runtime(|status| status.last_error = Some(error));
+    }
+
+    fn mark_initialized_if_running(&self) -> bool {
+        let mut status = self
+            .runtime
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if !status.running {
+            return false;
+        }
+        status.initialized = true;
+        true
+    }
+
     /// Kill a process without sending more protocol messages.
     async fn abort_process(&mut self) {
         self.writer_tx = None;
         if let Some(mut child) = self.child.take() {
             let _ = child.kill().await;
         }
+        for task in [self.writer_task.take(), self.reader_task.take()]
+            .into_iter()
+            .flatten()
+        {
+            let mut task = task;
+            if tokio::time::timeout(std::time::Duration::from_secs(2), &mut task)
+                .await
+                .is_err()
+            {
+                task.abort();
+                let _ = task.await;
+            }
+        }
         self.pending.lock().await.clear();
-        self.running.store(false, Ordering::SeqCst);
-        self.initialized.store(false, Ordering::SeqCst);
+        self.diagnostics_cache.lock().await.clear();
+        self.update_runtime(|status| {
+            status.running = false;
+            status.initialized = false;
+            status.pid = None;
+        });
     }
 
     /// Spawn the server process and set up communication channels.
@@ -167,7 +215,7 @@ impl StdioLspClient {
         let (writer_tx, mut writer_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
 
         // Spawn writer task
-        tokio::spawn(async move {
+        let writer_task = tokio::spawn(async move {
             let mut stdin = stdin;
             while let Some(data) = writer_rx.recv().await {
                 if stdin.write_all(&data).await.is_err() {
@@ -182,14 +230,32 @@ impl StdioLspClient {
         // Spawn reader task
         let pending = self.pending.clone();
         let diagnostics_cache = self.diagnostics_cache.clone();
-        tokio::spawn(async move {
+        self.update_runtime(|status| {
+            status.running = true;
+            status.initialized = false;
+            status.last_error = None;
+            status.pid = child.id();
+        });
+        let runtime = Arc::clone(&self.runtime);
+        let closed = Arc::clone(&self.closed);
+        let reader_task = tokio::spawn(async move {
             let reader = BufReader::new(stdout);
-            Self::read_loop(reader, pending, diagnostics_cache).await;
+            let error = Self::read_loop(reader, pending.clone(), diagnostics_cache.clone()).await;
+            pending.lock().await.clear();
+            diagnostics_cache.lock().await.clear();
+            let mut status = runtime.lock().unwrap_or_else(|poison| poison.into_inner());
+            status.running = false;
+            status.initialized = false;
+            status.pid = None;
+            if !closed.load(Ordering::SeqCst) {
+                status.last_error = Some(error);
+            }
         });
 
         self.child = Some(child);
         self.writer_tx = Some(writer_tx);
-        self.running.store(true, Ordering::SeqCst);
+        self.writer_task = Some(writer_task);
+        self.reader_task = Some(reader_task);
         Ok(())
     }
 
@@ -198,7 +264,7 @@ impl StdioLspClient {
         mut reader: BufReader<tokio::process::ChildStdout>,
         pending: Arc<Mutex<HashMap<u64, oneshot::Sender<JsonRpcResponse>>>>,
         diagnostics_cache: Arc<Mutex<HashMap<String, Vec<Diagnostic>>>>,
-    ) {
+    ) -> String {
         let mut header_line = String::new();
 
         loop {
@@ -207,15 +273,9 @@ impl StdioLspClient {
             loop {
                 header_line.clear();
                 match reader.read_line(&mut header_line).await {
-                    Ok(0) => {
-                        pending.lock().await.clear();
-                        return;
-                    }
+                    Ok(0) => return "Language server stdout closed".to_string(),
                     Ok(_) => {}
-                    Err(_) => {
-                        pending.lock().await.clear();
-                        return;
-                    }
+                    Err(error) => return format!("Language server stdout read failed: {error}"),
                 }
 
                 let trimmed = header_line.trim();
@@ -232,15 +292,13 @@ impl StdioLspClient {
                 continue;
             };
             if !accepts_lsp_message_size(len) {
-                pending.lock().await.clear();
-                return;
+                return format!("Language server message exceeds {MAX_LSP_MESSAGE_BYTES} bytes");
             }
 
             // Read body
             let mut body = vec![0u8; len];
-            if reader.read_exact(&mut body).await.is_err() {
-                pending.lock().await.clear();
-                return;
+            if let Err(error) = reader.read_exact(&mut body).await {
+                return format!("Language server message body truncated: {error}");
             }
 
             // Parse JSON
@@ -281,6 +339,9 @@ impl StdioLspClient {
         params: Option<serde_json::Value>,
     ) -> LspResult<serde_json::Value> {
         self.ensure_live()?;
+        if !self.is_running() {
+            return Err(LspError::NotInitialized);
+        }
         let writer_tx = self.writer_tx.as_ref().ok_or(LspError::NotInitialized)?;
 
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
@@ -324,6 +385,9 @@ impl StdioLspClient {
         };
 
         self.ensure_live()?;
+        if !self.is_running() {
+            return Err(LspError::NotInitialized);
+        }
 
         if let Some(err) = response.error {
             return Err(LspError::ServerError(err.to_string()));
@@ -341,6 +405,9 @@ impl StdioLspClient {
         params: Option<serde_json::Value>,
     ) -> LspResult<()> {
         self.ensure_live()?;
+        if !self.is_running() {
+            return Err(LspError::NotInitialized);
+        }
         let writer_tx = self.writer_tx.as_ref().ok_or(LspError::NotInitialized)?;
 
         let notification = JsonRpcNotification::new(method, params);
@@ -362,18 +429,26 @@ impl LspClient for StdioLspClient {
     }
 
     fn is_running(&self) -> bool {
-        self.running.load(Ordering::SeqCst)
+        self.status().running
     }
 
     fn is_initialized(&self) -> bool {
-        self.initialized.load(Ordering::SeqCst)
+        self.status().initialized
     }
 
     fn initialize<'a>(&'a mut self, root_uri: &'a str) -> BoxFuture<'a, LspResult<()>> {
         Box::pin(async move {
             self.ensure_live()?;
+            if self.child.is_some() {
+                return Err(LspError::CommunicationError(
+                    "Language server is already started".to_string(),
+                ));
+            }
             // Spawn the process
-            self.spawn_process()?;
+            if let Err(error) = self.spawn_process() {
+                self.set_last_error(error.to_string());
+                return Err(error);
+            }
 
             // Shutdown may win while spawning or while the child is starting.
             // Abort the just-created child instead of allowing an unowned
@@ -407,6 +482,7 @@ impl LspClient for StdioLspClient {
             });
 
             if let Err(error) = self.send_request("initialize", Some(params)).await {
+                self.set_last_error(error.to_string());
                 self.abort_process().await;
                 return Err(error);
             }
@@ -416,6 +492,7 @@ impl LspClient for StdioLspClient {
                 .send_notification("initialized", Some(serde_json::json!({})))
                 .await
             {
+                self.set_last_error(error.to_string());
                 self.abort_process().await;
                 return Err(error);
             }
@@ -425,7 +502,10 @@ impl LspClient for StdioLspClient {
                 return Err(error);
             }
 
-            self.initialized.store(true, Ordering::SeqCst);
+            if !self.mark_initialized_if_running() {
+                self.abort_process().await;
+                return Err(LspError::NotInitialized);
+            }
             Ok(())
         })
     }
@@ -434,22 +514,31 @@ impl LspClient for StdioLspClient {
         Box::pin(async move {
             if self.is_running() {
                 // Send shutdown request
-                let _ = self.send_request("shutdown", None).await;
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_secs(2),
+                    self.send_request("shutdown", None),
+                )
+                .await;
                 // Send exit notification
-                let _ = self.send_notification("exit", None).await;
-
-                self.closed.store(true, Ordering::SeqCst);
-                self.abort_process().await;
-            } else {
-                self.closed.store(true, Ordering::SeqCst);
-                self.initialized.store(false, Ordering::SeqCst);
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_secs(2),
+                    self.send_notification("exit", None),
+                )
+                .await;
             }
+            self.closed.store(true, Ordering::SeqCst);
+            self.abort_process().await;
+            self.update_runtime(|status| status.last_error = None);
             Ok(())
         })
     }
 
     fn diagnostics<'a>(&'a self, uri: &'a str) -> BoxFuture<'a, LspResult<Vec<Diagnostic>>> {
         Box::pin(async move {
+            self.ensure_live()?;
+            if !self.is_initialized() {
+                return Err(LspError::NotInitialized);
+            }
             let cache = self.diagnostics_cache.lock().await;
             Ok(cache.get(uri).cloned().unwrap_or_default())
         })
@@ -641,14 +730,10 @@ impl LspClient for StdioLspClient {
     }
 
     fn status(&self) -> LspServerStatus {
-        LspServerStatus {
-            language: self.language.clone(),
-            running: self.is_running(),
-            initialized: self.is_initialized(),
-            restart_count: self.restart_count,
-            last_error: self.last_error.clone(),
-            pid: self.child.as_ref().and_then(|c| c.id()),
-        }
+        self.runtime
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone()
     }
 }
 

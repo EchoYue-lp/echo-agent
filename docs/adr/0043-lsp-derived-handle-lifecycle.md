@@ -23,7 +23,7 @@ generation. Manager shutdown closes the fence before awaiting owned child
 shutdown. Derived handles remain usable only while their captured generation is
 live; after close they return the existing typed `LspError::NotInitialized`
 stale/closed error and cannot initialize, send requests, or send notifications.
-A fresh manager lifecycle is required to start new children.
+A fresh manager lifecycle is required to start new children after manager close.
 
 The existing `Arc<RwLock<StdioLspClient>>` facade shape remains unchanged. The
 SDK Host continues to own only facade records and calls `shutdown_all`; it does
@@ -44,8 +44,33 @@ not become a second process owner.
 Consumers must reopen a manager to obtain usable clients after a manager close.
 Stale handles fail explicitly instead of silently reviving a child. The
 framework gains one internal lifecycle token; no wire schema or SDK operation
-changes. Finding #64 remains open for restart counters, EOF state, and config
-reload semantics.
+changes.
+
+## Runtime status and configuration follow-up (Issue #64)
+
+The client's shared runtime snapshot is the authority for live transport state.
+Its stdout reader clears `running`, `initialized`, and PID on EOF or framing
+failure, drops pending calls and cached diagnostics, and records the cause.
+Manager status retains restart attempts and the last error after client removal.
+An explicit `restart_server` consumes one configured `max_restarts` attempt;
+initial start and deliberate repeated `start_server` do not consume that budget.
+An exhausted budget returns an error without starting a process. There is no
+background retry policy or implicit resurrection of a dead child.
+
+Synchronous `load_config` merges cold configurations, but rejects a manager
+that still owns client entries. `reload_config` awaits all old child shutdowns,
+then replaces the complete configuration and extension routes; callers must
+start desired servers explicitly. A retained client is closed before the new
+route becomes visible. A closed manager rejects both configuration methods.
+
+We considered making synchronous reload enqueue asynchronous teardown, but it
+would publish new routes before old process settlement and hide cleanup errors.
+Making every configuration call asynchronous would break cold-start consumers
+that require no teardown. The separate asynchronous replacement makes the
+resource boundary explicit while retaining the cold-start API. The LSP 3.17
+shutdown/exit ordering and Tokio's explicit cancel-and-wait shutdown pattern
+inform the bounded graceful request followed by process termination and bounded
+reader/writer task joins; `Drop` does not establish completion.
 
 ## Rollback
 
@@ -59,3 +84,5 @@ the Finding or claim independent client ownership is safe.
 - `.echo-semantic/findings/finding.lsp-runtime-state.md`
 - `docs/en/31-lsp-integration.md`
 - `docs/zh/31-lsp-integration.md`
+- https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#shutdown-request-leftwards_arrow_with_hook
+- https://tokio.rs/tokio/topics/shutdown
