@@ -13,8 +13,8 @@ rule_refs: [rule.turn-terminal-authority, rule.protocol-role-separation]
 evidence_refs: [evidence.agent-context-execution, evidence.provider-protocol-quality]
 audit_refs: [audit.agent-session-turn.state-authority, audit.protocol-surfaces.state-authority, audit.protocol-surfaces.contract-evidence]
 decision_refs: []
-repair_evidence_refs: []
-verification_evidence_refs: []
+repair_evidence_refs: [evidence.channel-driven-turn-repair]
+verification_evidence_refs: [evidence.channel-driven-turn-verification]
 rereview_audit_refs: []
 discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 ---
@@ -40,3 +40,8 @@ Channel invocation 遇到 EOF、sink failure、cancel、usage accounting 或 clo
 ## 处理记录
 
 状态权威 Audit 已收窄问题；后续 repair/decision 只处理承诺有限 Turn 生命周期的 Channel adapter，不强迫低层 Agent API生成 receipt。
+
+框架 `AgentChannelHandler` 已改用 `AgentTurnDriver` 并公开单次调用的 `TurnReceipt`；
+标准回复仅接受 `Completed + Delivered + final_answer`。EKO 应用 channel 自有 handler
+通过 `drive_foreground_pooled_chat_turn` 进入同一个框架 driver，本 Finding 不修改其产品
+投影。当前保留 open，待独立复审、完整门禁和远端 main 交付。

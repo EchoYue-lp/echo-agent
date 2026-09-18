@@ -74,11 +74,15 @@ pub mod integration {
 
 pub use echo_integration::channels::prelude::*;
 
-use crate::agent::Agent;
 use crate::agent::react::ReactAgent;
-use crate::error::Result;
+use crate::agent::{CancellationToken, EventEnvelope, EventIdentity};
+use crate::error::{AgentError, Result};
 use crate::llm::{LlmClient, LlmConfig};
 use crate::prelude::AgentConfig;
+use crate::runtime::{
+    AgentTurnDriver, EventSink, SinkControl, TurnDeliveryOutcome, TurnMode, TurnOutcome,
+    TurnReceipt, TurnRequest,
+};
 use async_trait::async_trait;
 use std::sync::Arc;
 
@@ -91,6 +95,15 @@ use std::sync::Arc;
 /// an independent `AgentChannelHandler` to ensure conversation isolation.
 pub struct AgentChannelHandler {
     agent: Arc<ReactAgent>,
+}
+
+struct ChannelEventSink;
+
+#[async_trait]
+impl EventSink for ChannelEventSink {
+    async fn on_event(&self, _envelope: EventEnvelope) -> Result<SinkControl> {
+        Ok(SinkControl::Continue)
+    }
 }
 
 impl AgentChannelHandler {
@@ -124,13 +137,63 @@ impl AgentChannelHandler {
     pub fn from_config_with_client(config: AgentConfig, client: Arc<dyn LlmClient>) -> Self {
         Self::new(ReactAgent::new(config).with_llm_client(client))
     }
+
+    /// Drive one channel message through the framework Turn authority.
+    ///
+    /// Callers that need cancellation, terminal classification, or usage can
+    /// retain this receipt; the standard `MessageHandler` path projects its
+    /// completed final answer into an outbound message.
+    pub async fn drive_turn(
+        &self,
+        msg: &InboundMessage,
+        cancel: CancellationToken,
+    ) -> Result<TurnReceipt> {
+        let turn_id = format!("channel-turn-{}", uuid::Uuid::new_v4());
+        let conversation_id =
+            serde_json::to_string(&(&msg.channel_id, &msg.chat_id, &msg.sender_id))?;
+        let message_id = if msg.message_id.trim().is_empty() {
+            turn_id.clone()
+        } else {
+            msg.message_id.clone()
+        };
+        let identity = EventIdentity::for_chat(Some(conversation_id), turn_id, message_id, None)?;
+        let request = TurnRequest::new(identity, &msg.text)
+            .mode(TurnMode::Chat)
+            .cancel(cancel);
+        Ok(AgentTurnDriver
+            .drive(self.agent.as_ref(), request, &ChannelEventSink)
+            .await)
+    }
+}
+
+fn channel_reply_from_receipt(receipt: TurnReceipt) -> Result<String> {
+    match (receipt.outcome, receipt.delivery, receipt.final_answer) {
+        (TurnOutcome::Completed, TurnDeliveryOutcome::Delivered, Some(reply)) => Ok(reply),
+        (TurnOutcome::Cancelled, _, _) => {
+            Err(AgentError::Cancelled(format!("channel turn {}", receipt.turn_id)).into())
+        }
+        (TurnOutcome::Failed(failure), _, _) => Err(ReactError::Other(format!(
+            "channel turn {} failed ({}): {}",
+            receipt.turn_id, failure.code, failure.message
+        ))),
+        (TurnOutcome::Completed, TurnDeliveryOutcome::Failed(failure), _) => {
+            Err(ReactError::Other(format!(
+                "channel turn {} delivery failed ({}): {}",
+                receipt.turn_id, failure.code, failure.message
+            )))
+        }
+        (TurnOutcome::Completed, delivery, _) => Err(ReactError::Other(format!(
+            "channel turn {} cannot be replied to after delivery {delivery:?} or without a final answer",
+            receipt.turn_id
+        ))),
+    }
 }
 
 #[async_trait]
 impl MessageHandler for AgentChannelHandler {
     async fn handle(&self, msg: InboundMessage) -> echo_core::error::Result<OutboundMessage> {
-        let agent = self.agent.as_ref();
-        let reply = agent.chat(&msg.text).await?;
+        let receipt = self.drive_turn(&msg, CancellationToken::new()).await?;
+        let reply = channel_reply_from_receipt(receipt)?;
 
         Ok(OutboundMessage::new(
             &msg.channel_id,
@@ -149,8 +212,21 @@ impl MessageHandler for AgentChannelHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::Agent;
     use crate::llm::LlmApiProtocol;
+    use crate::llm::types::Usage;
     use crate::testing::MockLlmClient;
+
+    fn test_message(message_id: &str) -> InboundMessage {
+        InboundMessage::new(
+            "qq",
+            "sender",
+            "conversation",
+            ChatType::Direct,
+            "hello",
+            message_id,
+        )
+    }
 
     #[test]
     fn from_config_installs_the_explicit_provider_contract() -> Result<()> {
@@ -208,5 +284,93 @@ mod tests {
 
         assert!(handler.agent.llm_client().is_some());
         assert_eq!(handler.agent.model_name(), "shared-model");
+    }
+
+    #[tokio::test]
+    async fn channel_turn_exposes_one_driven_receipt_with_identity_and_usage() -> Result<()> {
+        let client = Arc::new(
+            MockLlmClient::new()
+                .with_response_usage(
+                    "first reply",
+                    Usage {
+                        prompt_tokens: Some(12),
+                        completion_tokens: Some(4),
+                        ..Usage::default()
+                    },
+                )
+                .with_response("second reply"),
+        );
+        let handler = AgentChannelHandler::from_config_with_client(
+            AgentConfig::minimal("mock-model", "channel-agent"),
+            client.clone(),
+        );
+        let receipt = handler
+            .drive_turn(&test_message("incoming-1"), CancellationToken::new())
+            .await?;
+
+        assert_eq!(receipt.outcome, TurnOutcome::Completed);
+        assert_eq!(receipt.delivery, TurnDeliveryOutcome::Delivered);
+        assert_eq!(receipt.final_answer.as_deref(), Some("first reply"));
+        assert_eq!(receipt.prompt_tokens, 12);
+        assert_eq!(receipt.completion_tokens, 4);
+        assert_eq!(receipt.llm_calls, 1);
+        assert!(receipt.turn_id.as_str().starts_with("channel-turn-"));
+        assert!(receipt.last_event_sequence > 0);
+        let next = handler
+            .drive_turn(&test_message("incoming-2"), CancellationToken::new())
+            .await?;
+        assert_eq!(next.outcome, TurnOutcome::Completed);
+        assert_ne!(receipt.turn_id, next.turn_id);
+        assert_eq!(client.call_count(), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn channel_handler_replies_only_after_driven_turn_completion() -> Result<()> {
+        let handler = AgentChannelHandler::from_config_with_client(
+            AgentConfig::minimal("mock-model", "channel-agent"),
+            Arc::new(MockLlmClient::new().with_response("reply")),
+        );
+        let outbound = handler.handle(test_message("incoming-2")).await?;
+        assert_eq!(outbound.text, "reply");
+        assert_eq!(outbound.to, "conversation");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn channel_turn_keeps_failure_and_cancellation_out_of_success_projection() -> Result<()> {
+        let failing = AgentChannelHandler::from_config_with_client(
+            AgentConfig::minimal("mock-model", "channel-agent"),
+            Arc::new(MockLlmClient::new().with_network_error("provider offline")),
+        );
+        let failed = failing
+            .drive_turn(&test_message("incoming-3"), CancellationToken::new())
+            .await?;
+        assert!(matches!(failed.outcome, TurnOutcome::Failed(_)));
+        assert!(channel_reply_from_receipt(failed).is_err());
+
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let cancelled = AgentChannelHandler::from_config_with_client(
+            AgentConfig::minimal("mock-model", "channel-agent"),
+            Arc::new(MockLlmClient::new().with_response("must not be delivered")),
+        )
+        .drive_turn(&test_message("incoming-4"), cancel)
+        .await?;
+        assert_eq!(cancelled.outcome, TurnOutcome::Cancelled);
+        assert!(matches!(
+            channel_reply_from_receipt(cancelled),
+            Err(ReactError::Agent(_))
+        ));
+
+        let mut undelivered = TurnReceipt::failed(
+            "undelivered-turn",
+            echo_core::error::AgentFailure::from(&ReactError::Other("delivery".to_string())),
+        )?;
+        undelivered.outcome = TurnOutcome::Completed;
+        undelivered.delivery = TurnDeliveryOutcome::Closed;
+        undelivered.final_answer = Some("must not be replied to".to_string());
+        assert!(channel_reply_from_receipt(undelivered).is_err());
+        Ok(())
     }
 }

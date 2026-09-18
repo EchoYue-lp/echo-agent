@@ -159,6 +159,17 @@ pub trait ChannelPlugin: Send + Sync {
 
 ## Message Flow
 
+`AgentChannelHandler` drives every inbound message through `AgentTurnDriver`.
+Its standard handler returns a reply only after the receipt reports
+`Completed + Delivered` and contains a final answer; cancellation or a failed
+Turn cannot be mistaken for a successful reply. Framework callers needing
+the exact Turn identity, usage, or cancellation result can call
+`AgentChannelHandler::drive_turn(&message, cancel_token)` and inspect the
+returned `TurnReceipt`. Receipt delivery means event-sink acceptance, while
+the channel's transport generation fence governs outbound network admission.
+Raw `Agent::chat` remains available for lower-level Rust consumers. See
+[ADR 0046](../adr/0046-turn-execution-delivery-settlement.md).
+
 ### InboundMessage —— Received Messages
 
 ```rust

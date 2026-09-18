@@ -137,6 +137,14 @@ async fn main() -> echo_agent::error::Result<()> {
 
 ## ChannelPlugin 接口
 
+`AgentChannelHandler` 将每条入站消息交给 `AgentTurnDriver`。标准 handler 只在
+`TurnReceipt` 为 `Completed + Delivered` 且包含最终答案时生成回复；取消或失败
+不能被误判为成功。框架调用者可通过
+`AgentChannelHandler::drive_turn(&message, cancel_token)` 获取 Turn 身份、用量和
+取消终态。这里的 delivery 指事件 sink 接纳，向 IM 平台发送则继续由 channel
+generation fence 约束。底层 Rust `Agent::chat` API 保留。参见
+[ADR 0046](../adr/0046-turn-execution-delivery-settlement.md)。
+
 所有 IM 通道实现统一接口：
 
 ```rust
