@@ -8,7 +8,7 @@ risk: high
 primary_focus: failure_concurrency
 focus: [trigger_input, contract_evidence, time_lifecycle, result_side_effect]
 boundary: boundary.llm-provider-runtime
-observed_at: source:a51e7ba8bf501d598ece14a0b67cc13d93a7bc691891788eccda22db12a33bd2
+observed_at: 2f4da65cd5b83daa07d6c0f36d47bb50fd259c91
 code_refs: [echo-core/src/llm/mod.rs, echo-core/src/llm/capabilities.rs, echo-core/src/budget.rs, echo-core/src/tokenizer.rs, echo-integration/src/providers/client.rs, echo-integration/src/providers/openai.rs, echo-integration/src/providers/anthropic.rs, echo-integration/src/providers/responses.rs]
 rule_refs: [rule.provider-protocol-boundary]
 evidence_refs: [evidence.provider-protocol-quality, evidence.sse-eof-framing-acceptance-repair, evidence.sse-eof-framing-acceptance-verification, evidence.provider-stream-terminal-parity-repair, evidence.provider-stream-terminal-parity-verification]

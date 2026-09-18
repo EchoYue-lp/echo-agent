@@ -11,11 +11,11 @@ boundary_ref: boundary.agent-session-turn
 behavior_refs: [behavior.agent-turn-lifecycle, behavior.protocol-projection]
 rule_refs: [rule.turn-terminal-authority, rule.protocol-role-separation]
 evidence_refs: [evidence.agent-context-execution, evidence.provider-protocol-quality]
-audit_refs: [audit.agent-session-turn.state-authority, audit.protocol-surfaces.state-authority, audit.protocol-surfaces.contract-evidence]
+audit_refs: [audit.agent-session-turn.state-authority, audit.protocol-surfaces.state-authority, audit.protocol-surfaces.contract-evidence, audit.channel-driven-turn-rereview]
 decision_refs: []
 repair_evidence_refs: [evidence.channel-driven-turn-repair]
 verification_evidence_refs: [evidence.channel-driven-turn-verification]
-rereview_audit_refs: []
+rereview_audit_refs: [audit.channel-driven-turn-rereview]
 discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 ---
 

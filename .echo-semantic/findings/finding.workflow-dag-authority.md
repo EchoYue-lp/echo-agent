@@ -11,11 +11,11 @@ boundary_ref: boundary.task-subagent-workflow
 behavior_refs: [behavior.task-subagent-execution]
 rule_refs: [rule.task-subagent-authority]
 evidence_refs: [evidence.task-subagent-workflow, evidence.workflow-dag-authority-repair, evidence.workflow-dag-authority-verification]
-audit_refs: [audit.task-subagent-workflow.failure-concurrency]
+audit_refs: [audit.task-subagent-workflow.failure-concurrency, audit.workflow-dag-authority-rereview]
 decision_refs: []
 repair_evidence_refs: [evidence.workflow-dag-authority-repair]
 verification_evidence_refs: [evidence.workflow-dag-authority-verification]
-rereview_audit_refs: []
+rereview_audit_refs: [audit.workflow-dag-authority-rereview]
 discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 candidate_asset_refs: [asset.task-graph-authority, asset.workflow-runtime]
 decision: keep

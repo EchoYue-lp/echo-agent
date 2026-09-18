@@ -11,11 +11,11 @@ boundary_ref: boundary.extension-lifecycle
 behavior_refs: [behavior.extension-publication]
 rule_refs: [rule.extension-generation-authority]
 evidence_refs: [evidence.effects-extensions]
-audit_refs: [audit.extension-lifecycle.time-lifecycle]
+audit_refs: [audit.extension-lifecycle.time-lifecycle, audit.plugin-lifecycle-reconcile-rereview]
 decision_refs: []
 repair_evidence_refs: [evidence.plugin-lifecycle-reconcile-repair]
 verification_evidence_refs: [evidence.plugin-lifecycle-reconcile-verification]
-rereview_audit_refs: []
+rereview_audit_refs: [audit.plugin-lifecycle-reconcile-rereview]
 discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 ---
 

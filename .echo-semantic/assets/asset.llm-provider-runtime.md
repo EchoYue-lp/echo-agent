@@ -6,7 +6,7 @@ title: LLM Provider 与 Harness Contract
 asset_type: protocol
 status: needs_review
 risk: high
-observed_at: source:a51e7ba8bf501d598ece14a0b67cc13d93a7bc691891788eccda22db12a33bd2
+observed_at: 2f4da65cd5b83daa07d6c0f36d47bb50fd259c91
 boundary_refs: [boundary.llm-provider-runtime]
 code_refs: [echo-core/src/llm/mod.rs, echo-core/src/llm/capabilities.rs, echo-core/src/budget.rs, echo-core/src/tokenizer.rs, echo-integration/src/providers/config.rs, echo-integration/src/providers/client.rs]
 consumer_refs: [src/agent/react/run/phases/think.rs, echo-state/src/compression/compressor/summary.rs]

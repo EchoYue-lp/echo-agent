@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.plugin-lifecycle-reconcile-verification
 kind: evidence
-observed_at: source:370d0d64574bf270a787a39a524b5e4e14066b5a87f253fe8ba5102d8aa74dd7
+observed_at: fe018b059d85bb6b92c1d23e421915fa8970ffb9
 source_refs:
   - echo-core/src/plugin/lifecycle.rs
   - docs/adr/0060-plugin-lifecycle-reconcile-settlement.md

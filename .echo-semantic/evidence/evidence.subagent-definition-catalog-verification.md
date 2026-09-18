@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.subagent-definition-catalog-verification
 kind: evidence
-observed_at: 9e9b0191220aa0899fc1e8849ff8745ee78abe63
+observed_at: d0ff62ec8b17e847d6abc57837327321297c39c6
 source_refs:
   - src/agent/subagent/registry.rs
   - src/tools/builtin/agent_dispatch.rs

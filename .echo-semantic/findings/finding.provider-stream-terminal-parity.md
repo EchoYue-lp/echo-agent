@@ -11,11 +11,11 @@ boundary_ref: boundary.llm-provider-runtime
 behavior_refs: [behavior.llm-provider-execution]
 rule_refs: [rule.provider-protocol-boundary]
 evidence_refs: [evidence.provider-protocol-quality, evidence.provider-stream-terminal-parity-repair, evidence.provider-stream-terminal-parity-verification]
-audit_refs: [audit.llm-provider-runtime.failure-concurrency, audit.llm-provider-runtime.time-lifecycle]
+audit_refs: [audit.llm-provider-runtime.failure-concurrency, audit.llm-provider-runtime.time-lifecycle, audit.provider-stream-terminal-parity-rereview]
 decision_refs: []
 repair_evidence_refs: [evidence.provider-stream-terminal-parity-repair]
 verification_evidence_refs: [evidence.provider-stream-terminal-parity-verification]
-rereview_audit_refs: []
+rereview_audit_refs: [audit.provider-stream-terminal-parity-rereview]
 discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 ---
 

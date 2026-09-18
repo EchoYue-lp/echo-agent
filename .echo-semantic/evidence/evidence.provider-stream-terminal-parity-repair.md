@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.provider-stream-terminal-parity-repair
 kind: evidence
-observed_at: source:a51e7ba8bf501d598ece14a0b67cc13d93a7bc691891788eccda22db12a33bd2
+observed_at: 2f4da65cd5b83daa07d6c0f36d47bb50fd259c91
 source_refs:
   - echo-integration/src/providers/client.rs
   - echo-integration/src/providers/anthropic.rs

@@ -11,11 +11,11 @@ boundary_ref: boundary.task-subagent-workflow
 behavior_refs: [behavior.task-subagent-execution]
 rule_refs: [rule.task-subagent-authority]
 evidence_refs: [evidence.task-subagent-workflow]
-audit_refs: [audit.task-subagent-workflow.state-authority]
+audit_refs: [audit.task-subagent-workflow.state-authority, audit.subagent-definition-catalog-rereview]
 decision_refs: []
 repair_evidence_refs: [evidence.subagent-definition-catalog-repair]
 verification_evidence_refs: [evidence.subagent-definition-catalog-verification]
-rereview_audit_refs: []
+rereview_audit_refs: [audit.subagent-definition-catalog-rereview]
 discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 ---
 

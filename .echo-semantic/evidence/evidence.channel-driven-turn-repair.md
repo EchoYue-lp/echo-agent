@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.channel-driven-turn-repair
 kind: evidence
-observed_at: source:4b8f4328fa7758990ed6a070317da3dc5435f74f29f6f8f3f4e4ae5454da5afe
+observed_at: c68a2c64a21c52315e8388dd4532477db9323d7b
 source_refs:
   - src/channels.rs
   - echo-integration/src/channels/types.rs
