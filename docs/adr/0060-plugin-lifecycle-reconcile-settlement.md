@@ -29,7 +29,10 @@ retains debt and blocks activation.
   including `reconcile`, `activate_enabled`, and direct `activate`.
 - A successful retry of an active callback's `deactivate` clears its cleanup debt. For failed
   initialization or activation, `unregister` must complete cleanup before the registration can
-  be replaced. The existing registration remains the retry owner on cleanup failure.
+  be replaced. A failed `shutdown` is tracked separately: later `deactivate` success does not
+  settle it. Failed `init` also requires shutdown because it may have partially acquired
+  resources. `unregister` retries only the cleanup stages still outstanding. The existing
+  registration remains the retry owner on cleanup failure.
 - The manager still attempts the remaining deactivations and reports their errors. It does not
   publish a replacement callback while any old cleanup is unresolved. Already active callbacks
   without their own debt retain idempotent `activate` behavior; repeated reconciliation after

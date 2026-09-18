@@ -58,7 +58,9 @@ struct ManagedLifecycle {
     callbacks: Arc<dyn PluginLifecycle>,
     initialized: bool,
     active: bool,
+    // Callback acquisition or deactivation may be partial; shutdown has its own settlement.
     cleanup_required: bool,
+    shutdown_required: bool,
 }
 
 /// Owns lifecycle callbacks and drives them from enabled plugin state.
@@ -91,6 +93,7 @@ impl PluginLifecycleManager {
                 initialized: false,
                 active: false,
                 cleanup_required: false,
+                shutdown_required: false,
             },
         );
         Ok(())
@@ -102,14 +105,14 @@ impl PluginLifecycleManager {
             .plugins
             .get(plugin_id)
             .ok_or_else(|| format!("No lifecycle callbacks registered for '{plugin_id}'"))?;
-        if lifecycle.active && !lifecycle.cleanup_required {
+        if lifecycle.active && !lifecycle.cleanup_required && !lifecycle.shutdown_required {
             return Ok(());
         }
         // A failed callback may still own effects; no other generation may start until it settles.
         if let Some(blocker) = self
             .plugins
             .iter()
-            .filter(|(_, lifecycle)| lifecycle.cleanup_required)
+            .filter(|(_, lifecycle)| lifecycle.cleanup_required || lifecycle.shutdown_required)
             .map(|(id, _)| id.as_str())
             .min()
         {
@@ -122,13 +125,14 @@ impl PluginLifecycleManager {
             .get_mut(plugin_id)
             .ok_or_else(|| format!("No lifecycle callbacks registered for '{plugin_id}'"))?;
         if !lifecycle.initialized {
-            if lifecycle.cleanup_required {
+            if lifecycle.cleanup_required || lifecycle.shutdown_required {
                 return Err(format!(
                     "Plugin '{plugin_id}' has unresolved lifecycle cleanup debt"
                 ));
             }
             if let Err(error) = lifecycle.callbacks.init() {
                 lifecycle.cleanup_required = true;
+                lifecycle.shutdown_required = true;
                 return Err(format!("Plugin '{plugin_id}' init failed: {error}"));
             }
             lifecycle.initialized = true;
@@ -184,28 +188,30 @@ impl PluginLifecycleManager {
         let mut errors = Vec::new();
         if lifecycle.active || lifecycle.cleanup_required {
             if let Err(error) = lifecycle.callbacks.deactivate() {
+                lifecycle.cleanup_required = true;
                 errors.push(format!(
                     "Plugin '{plugin_id}' deactivation failed during unregister: {error}"
                 ));
             } else {
                 lifecycle.active = false;
+                lifecycle.cleanup_required = false;
             }
         }
-        if lifecycle.initialized || lifecycle.cleanup_required {
+        if lifecycle.initialized || lifecycle.shutdown_required {
             if let Err(error) = lifecycle.callbacks.shutdown() {
+                lifecycle.shutdown_required = true;
                 errors.push(format!(
                     "Plugin '{plugin_id}' shutdown failed during unregister: {error}"
                 ));
             } else {
                 lifecycle.initialized = false;
+                lifecycle.shutdown_required = false;
             }
         }
         if errors.is_empty() {
-            lifecycle.cleanup_required = false;
             self.plugins.remove(plugin_id);
             Ok(true)
         } else {
-            lifecycle.cleanup_required = true;
             Err(errors.join("; "))
         }
     }
@@ -311,9 +317,17 @@ mod tests {
 
     struct FailingActivationLifecycle(Arc<Counts>);
 
+    struct FailingInitializationLifecycle(Arc<Counts>);
+
     struct RetryingDeactivateLifecycle {
         counts: Arc<Counts>,
         fail_deactivate: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    struct RetryingCleanupLifecycle {
+        counts: Arc<Counts>,
+        fail_deactivate: Arc<std::sync::atomic::AtomicBool>,
+        fail_shutdown: Arc<std::sync::atomic::AtomicBool>,
     }
 
     impl PluginLifecycle for CountingLifecycle {
@@ -355,6 +369,17 @@ mod tests {
         }
     }
 
+    impl PluginLifecycle for FailingInitializationLifecycle {
+        fn init(&self) -> Result<(), String> {
+            Err("injected init failure".to_string())
+        }
+
+        fn shutdown(&self) -> Result<(), String> {
+            self.0.shutdown.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
     impl PluginLifecycle for RetryingDeactivateLifecycle {
         fn activate(&self) -> Result<(), String> {
             self.counts.activate.fetch_add(1, Ordering::SeqCst);
@@ -365,6 +390,26 @@ mod tests {
             self.counts.deactivate.fetch_add(1, Ordering::SeqCst);
             if self.fail_deactivate.load(Ordering::SeqCst) {
                 Err("injected deactivate failure".to_string())
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    impl PluginLifecycle for RetryingCleanupLifecycle {
+        fn deactivate(&self) -> Result<(), String> {
+            self.counts.deactivate.fetch_add(1, Ordering::SeqCst);
+            if self.fail_deactivate.load(Ordering::SeqCst) {
+                Err("injected deactivate failure".to_string())
+            } else {
+                Ok(())
+            }
+        }
+
+        fn shutdown(&self) -> Result<(), String> {
+            self.counts.shutdown.fetch_add(1, Ordering::SeqCst);
+            if self.fail_shutdown.load(Ordering::SeqCst) {
+                Err("injected shutdown failure".to_string())
             } else {
                 Ok(())
             }
@@ -568,6 +613,91 @@ mod tests {
         assert!(manager.activate_enabled(["z-later"]).is_empty());
         assert_eq!(failed_counts.activate.load(Ordering::SeqCst), 1);
         assert_eq!(later_counts.activate.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn successful_deactivate_does_not_settle_failed_unregister_shutdown() -> Result<(), String> {
+        let old_counts = Arc::new(Counts::default());
+        let next_counts = Arc::new(Counts::default());
+        let fail_deactivate = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let fail_shutdown = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let mut manager = PluginLifecycleManager::new();
+        manager.register(
+            "old",
+            Arc::new(RetryingCleanupLifecycle {
+                counts: Arc::clone(&old_counts),
+                fail_deactivate: Arc::clone(&fail_deactivate),
+                fail_shutdown: Arc::clone(&fail_shutdown),
+            }),
+        )?;
+        manager.register(
+            "next",
+            Arc::new(CountingLifecycle(Arc::clone(&next_counts))),
+        )?;
+        manager.activate("old")?;
+
+        let error = manager
+            .unregister("old")
+            .err()
+            .ok_or_else(|| "both cleanup callbacks unexpectedly succeeded".to_string())?;
+        assert!(error.contains("deactivation failed"));
+        assert!(error.contains("shutdown failed"));
+
+        fail_deactivate.store(false, Ordering::SeqCst);
+        manager.deactivate("old")?;
+        assert!(manager.activate("next").is_err());
+        assert!(manager.activate("old").is_err());
+        assert_eq!(next_counts.activate.load(Ordering::SeqCst), 0);
+
+        fail_shutdown.store(false, Ordering::SeqCst);
+        assert!(manager.unregister("old")?);
+        manager.activate("next")?;
+        assert_eq!(old_counts.deactivate.load(Ordering::SeqCst), 2);
+        assert_eq!(old_counts.shutdown.load(Ordering::SeqCst), 2);
+        assert_eq!(next_counts.activate.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn shutdown_retry_does_not_repeat_successful_deactivation() -> Result<(), String> {
+        let counts = Arc::new(Counts::default());
+        let fail_shutdown = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let mut manager = PluginLifecycleManager::new();
+        manager.register(
+            "old",
+            Arc::new(RetryingCleanupLifecycle {
+                counts: Arc::clone(&counts),
+                fail_deactivate: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                fail_shutdown: Arc::clone(&fail_shutdown),
+            }),
+        )?;
+        manager.register("next", Arc::new(NoopLifecycle))?;
+        manager.activate("old")?;
+
+        assert!(manager.unregister("old").is_err());
+        manager.deactivate("old")?;
+        assert!(manager.activate("next").is_err());
+        fail_shutdown.store(false, Ordering::SeqCst);
+        assert!(manager.unregister("old")?);
+        assert_eq!(counts.deactivate.load(Ordering::SeqCst), 1);
+        assert_eq!(counts.shutdown.load(Ordering::SeqCst), 2);
+        manager.activate("next")?;
+        Ok(())
+    }
+
+    #[test]
+    fn failed_init_requires_shutdown_even_after_deactivation() -> Result<(), String> {
+        let counts = Arc::new(Counts::default());
+        let mut manager = PluginLifecycleManager::new();
+        manager.register(
+            "old",
+            Arc::new(FailingInitializationLifecycle(Arc::clone(&counts))),
+        )?;
+        assert!(manager.activate("old").is_err());
+
+        assert!(manager.unregister("old")?);
+        assert_eq!(counts.shutdown.load(Ordering::SeqCst), 1);
         Ok(())
     }
 }
