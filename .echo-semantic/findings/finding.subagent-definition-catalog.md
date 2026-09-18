@@ -13,8 +13,8 @@ rule_refs: [rule.task-subagent-authority]
 evidence_refs: [evidence.task-subagent-workflow]
 audit_refs: [audit.task-subagent-workflow.state-authority]
 decision_refs: []
-repair_evidence_refs: []
-verification_evidence_refs: []
+repair_evidence_refs: [evidence.subagent-definition-catalog-repair]
+verification_evidence_refs: [evidence.subagent-definition-catalog-verification]
 rereview_audit_refs: []
 discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 ---
@@ -39,4 +39,7 @@ Plugin 或配置只注册 definition 时，调用方可能看到与文档不同�
 
 ## 处理记录
 
-Discovery 记录；下一阶段裁决 advertised-but-not-runnable 或 hidden-until-resolvable，再统一文档和测试。
+修复采用 hidden-until-resolvable：低层定义仍可通过 `get`/`contains` 检查，模型可见
+catalog 和可用列表只展示已绑定实例或 factory 的定义。源码注释、双语文档和测试已在
+`9e9b0191220aa0899fc1e8849ff8745ee78abe63` 对齐；待独立复审、完整门禁和远端
+main 交付后再关闭本 Finding 与 Issue。
