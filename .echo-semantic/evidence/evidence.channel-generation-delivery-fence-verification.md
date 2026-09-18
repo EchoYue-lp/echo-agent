@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.channel-generation-delivery-fence-verification
 kind: evidence
-observed_at: source:540d5deec89168d61324861902eb2e1dc8b9408add3b62af30de0f71a76baa6a
+observed_at: 28530ca13fa005879ee5e652c078f5a9fb7a7f4f
 source_refs:
   - echo-integration/src/channels/session.rs
   - echo-integration/src/channels/types.rs
