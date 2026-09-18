@@ -3,8 +3,8 @@ schema_version: 1
 id: baseline.repository
 kind: baseline
 source_snapshot:
-  base_revision: f310825c418932cde02f661f0686f83f216771d6
-  content_digest: ef856d7d622f0a60de4388108d0a987611e9804946e0c4d198ae8aa8b1fc50ec
+  base_revision: 28530ca13fa005879ee5e652c078f5a9fb7a7f4f
+  content_digest: b22b2d043da2ab324b2f2a02956dd6cf969a88a1a2633ee0e2c664cb7786752d
 inventory_closure: closed
 behavior_model_closure: closed
 map_refs:
@@ -143,7 +143,7 @@ coverage:
 
 ## 源码快照
 
-基线以 #99 framework 实现 checkpoint `f310825c` 为可恢复祖先，并绑定当前非语义源码摘要；
+基线以当前目标 main `28530ca1` 为可恢复祖先，并绑定 #99 候选的当前非语义源码摘要；
 `.echo-semantic` 自身不参与摘要。PR #132 的 Channel 证据已从临时 source digest 重新绑定到
 实际 squash commit `28530ca1`，未改变其行为结论。后续业务、合同、测试或正式文档变化必须
 通过 semantic-diff 刷新。

@@ -12,7 +12,7 @@ source_refs:
   - tests/facade_smoke.rs
 supports: [behavior.task-subagent-execution, rule.task-subagent-authority]
 limitations:
-  - complete workspace gate, independent feature matrix, and remote CI are delivery gates run after this checkpoint
+  - remote CI remains a delivery gate after the pull request is opened
   - echo-agent-sdk command replay and cross-repository E2E are outside this framework phase
 ---
 
@@ -46,7 +46,13 @@ observation、恢复顺序和 Team runtime handle 在 framework 内形成一条�
 - `cargo test -p echo_agent --lib --features subagent --locked`，778/778；
 - `cargo test -p echo_agent --test facade_smoke --features subagent --locked`，10/10。
 
+合并前完整门禁随后在包含最新 main 的任务分支上全部通过：workspace all-target/all-feature
+Clippy、panic-policy Clippy、workspace all-target/all-feature tests、workspace lib no-default check
+均为 exit 0；`acp`、`a2a`、`mcp`、`lsp`、`sqlite`、`telemetry`、`topology`、
+`subagent`、`web`、`media`、`data`、`statistics`、`channels`、`git`、`database`、
+`rag`、`chart` 共 17 个独立 feature check 全部 exit 0。完整测试包含 examples、benches、
+learning contracts 与 workspace tests；存在既有 opt-in ignored tests，未出现 failed。
+
 ## 已知缺口
 
-完整 workspace、no-default、独立 feature matrix 与远端 CI 在合并门禁阶段追加，不能由本定向
-证据替代。SDK command replay 与跨仓库 E2E 仍是独立第二阶段。
+远端 CI 需在 PR 创建后确认。SDK command replay 与跨仓库 E2E 仍是独立第二阶段。

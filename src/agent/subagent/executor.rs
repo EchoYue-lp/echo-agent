@@ -4889,11 +4889,10 @@ mod tests {
                 run_id: Some(run_id),
                 ..
             } = event.as_ref()
+                && agent == "member"
             {
-                if agent == "member" {
-                    member_execution = Some((execution_id.clone(), run_id.clone()));
-                    break;
-                }
+                member_execution = Some((execution_id.clone(), run_id.clone()));
+                break;
             }
         }
         let (execution_id, run_id) = member_execution.ok_or_else(|| {

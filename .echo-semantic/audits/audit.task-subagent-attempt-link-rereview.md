@@ -49,11 +49,11 @@ Critical 0、Important 0、Minor 0。
 
 ## 残余风险
 
-已被远端接纳的外部 effect 不能由本地 cancellation 撤回。完整合并门禁、feature matrix、
-semantic strict gate 和远端 CI 仍需执行；SDK Host command replay/E2E 未交付，因此 Finding 与
-GitHub Issue #99 继续保持 open。
+已被远端接纳的外部 effect 不能由本地 cancellation 撤回。完整合并门禁、17-feature matrix 与
+semantic strict gate 已由主流程通过；远端 CI 仍需在 PR 上确认。SDK Host command replay/E2E
+未交付，因此 Finding 与 GitHub Issue #99 继续保持 open。
 
 ## 未检查项
 
 未执行 SDK Host durable command replay、跨仓库 E2E、真实远端 provider/effect 撤回或 EKO
-GUI/TUI 投影。完整 workspace、feature matrix 与远端 CI 留给最终交付门禁。
+GUI/TUI 投影。远端 Linux/Windows CI 留给 PR 交付核实。
