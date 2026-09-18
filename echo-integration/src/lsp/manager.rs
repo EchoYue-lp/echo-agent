@@ -326,7 +326,7 @@ mod tests {
     use std::fs;
 
     const MOCK_LSP: &str = r#"
-import json, sys
+import json, os, sys, time
 mode = sys.argv[1]
 while True:
     line = sys.stdin.buffer.readline()
@@ -338,6 +338,7 @@ while True:
     sys.stdin.buffer.readline()
     message = json.loads(sys.stdin.buffer.read(size))
     method = message.get('method')
+    close_stdin_after_write = False
     if method == 'initialize':
         body = json.dumps({'jsonrpc':'2.0','id':message['id'],'result':{'capabilities':{}}}).encode()
     elif method == 'shutdown':
@@ -346,10 +347,27 @@ while True:
         break
     elif mode == 'request_eof' and method == 'textDocument/definition':
         break
+    elif mode == 'writer_fail' and method == 'textDocument/hover':
+        body = json.dumps({'jsonrpc':'2.0','id':message['id'],'result':{'contents':'ready'}}).encode()
+        close_stdin_after_write = True
+    elif mode == 'malformed_header' and method == 'initialized':
+        sys.stdout.buffer.write(b'Broken-Header\r\n\r\nbody')
+        sys.stdout.buffer.flush()
+        time.sleep(60)
+        break
+    elif mode == 'missing_length' and method == 'initialized':
+        sys.stdout.buffer.write(b'X-Test: value\r\n\r\nbody')
+        sys.stdout.buffer.flush()
+        time.sleep(60)
+        break
     else:
         continue
     sys.stdout.buffer.write(b'Content-Length: %d\r\n\r\n' % len(body) + body)
     sys.stdout.buffer.flush()
+    if close_stdin_after_write:
+        os.close(0)
+        time.sleep(60)
+        break
 "#;
 
     fn mock_config(language: &str, mode: &str, max_restarts: u32) -> LspServerConfig {
@@ -415,6 +433,17 @@ while True:
         {
             return Err("EOF retained diagnostics access".to_string());
         }
+        let eof_error = exited.last_error.clone();
+        manager.stop_server(language).await?;
+        let stopped = manager
+            .status_all()
+            .await
+            .into_iter()
+            .find(|status| status.language == language)
+            .ok_or("missing stopped EOF status")?;
+        if stopped.last_error != eof_error {
+            return Err("explicit stop erased the prior EOF failure".to_string());
+        }
         manager.restart_server(language).await?;
         let restarted = wait_for_exit(&manager, language).await?;
         if restarted.restart_count != 1 || restarted.last_error.is_none() {
@@ -424,6 +453,127 @@ while True:
             return Err("restart exceeded configured limit".to_string());
         }
         manager.shutdown_all().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn writer_failure_settles_status_and_pending_without_stdout_eof() -> Result<(), String> {
+        let mut manager = LspManager::new();
+        let language = "test";
+        manager.load_config(&LspConfig {
+            servers: [(
+                language.to_string(),
+                mock_config(language, "writer_fail", 1),
+            )]
+            .into_iter()
+            .collect(),
+        })?;
+        manager.start_server(language).await?;
+        let client = manager.get_client(language).ok_or("missing client")?;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            client.read().await.hover(
+                "file:///writer-ready.test",
+                echo_core::lsp::Position {
+                    line: 0,
+                    character: 0,
+                },
+            ),
+        )
+        .await
+        .map_err(|_| "writer failure fixture did not close stdin".to_string())?
+        .map_err(|error| error.to_string())?;
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while client.read().await.is_running() {
+                let _ = client
+                    .read()
+                    .await
+                    .did_save("file:///writer-ready.test")
+                    .await;
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .map_err(|_| "writer task did not observe the closed stdin".to_string())?;
+        let request = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            client
+                .read()
+                .await
+                .goto_definition(
+                    "file:///example.test",
+                    echo_core::lsp::Position {
+                        line: 0,
+                        character: 0,
+                    },
+                )
+                .await
+        })
+        .await
+        .map_err(|_| "writer failure left a pending request".to_string())?;
+        let status = wait_for_exit(&manager, language).await?;
+        if request.is_ok()
+            || !status
+                .last_error
+                .as_deref()
+                .is_some_and(|error| error.contains("stdin write failed"))
+        {
+            return Err(format!("writer failure was not authoritative: {status:?}"));
+        }
+        manager.shutdown_all().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn malformed_or_missing_content_length_settles_runtime() -> Result<(), String> {
+        for (mode, expected) in [
+            ("malformed_header", "Malformed LSP header"),
+            ("missing_length", "Missing LSP Content-Length header"),
+        ] {
+            let mut manager = LspManager::new();
+            let language = "test";
+            manager.load_config(&LspConfig {
+                servers: [(language.to_string(), mock_config(language, mode, 1))]
+                    .into_iter()
+                    .collect(),
+            })?;
+            manager.start_server(language).await?;
+            let status = wait_for_exit(&manager, language).await?;
+            if !status
+                .last_error
+                .as_deref()
+                .is_some_and(|error| error.contains(expected))
+            {
+                return Err(format!("{mode} did not settle with {expected}: {status:?}"));
+            }
+            manager.shutdown_all().await;
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn clean_stop_does_not_invent_a_transport_error() -> Result<(), String> {
+        let mut manager = LspManager::new();
+        let language = "test";
+        manager.load_config(&LspConfig {
+            servers: [(language.to_string(), mock_config(language, "stable", 1))]
+                .into_iter()
+                .collect(),
+        })?;
+        manager.start_server(language).await?;
+        manager.stop_server(language).await?;
+        let status = manager
+            .status_all()
+            .await
+            .into_iter()
+            .find(|status| status.language == language)
+            .ok_or("missing clean stop status")?;
+        if status.running
+            || status.initialized
+            || status.pid.is_some()
+            || status.last_error.is_some()
+        {
+            return Err(format!("clean stop invented a failure: {status:?}"));
+        }
         Ok(())
     }
 

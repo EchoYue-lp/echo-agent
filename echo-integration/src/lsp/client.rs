@@ -50,6 +50,31 @@ fn accepts_lsp_message_size(bytes: usize) -> bool {
     bytes <= MAX_LSP_MESSAGE_BYTES
 }
 
+struct LspRuntime {
+    status: LspServerStatus,
+    pending: HashMap<u64, oneshot::Sender<JsonRpcResponse>>,
+}
+
+impl LspRuntime {
+    fn register(&mut self, id: u64, tx: oneshot::Sender<JsonRpcResponse>) -> LspResult<()> {
+        if !self.status.running {
+            return Err(LspError::NotInitialized);
+        }
+        self.pending.insert(id, tx);
+        Ok(())
+    }
+
+    fn settle(&mut self, error: Option<String>) {
+        self.status.running = false;
+        self.status.initialized = false;
+        self.status.pid = None;
+        if self.status.last_error.is_none() {
+            self.status.last_error = error;
+        }
+        self.pending.clear();
+    }
+}
+
 /// Stdio-based LSP client for a single language server.
 ///
 /// Spawns the server as a child process and communicates via JSON-RPC
@@ -60,17 +85,15 @@ pub struct StdioLspClient {
     /// Server configuration.
     config: LspServerConfig,
     /// Child process handle.
-    child: Option<Child>,
+    child: Option<Arc<Mutex<Child>>>,
     /// Channel to send JSON-RPC messages to the writer task.
     writer_tx: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
     writer_task: Option<tokio::task::JoinHandle<()>>,
     reader_task: Option<tokio::task::JoinHandle<()>>,
-    /// Pending request callbacks.
-    pending: Arc<Mutex<HashMap<u64, oneshot::Sender<JsonRpcResponse>>>>,
     /// Next request ID.
     next_id: AtomicU64,
-    /// One snapshot authority shared with the background stdout reader.
-    runtime: Arc<StdMutex<LspServerStatus>>,
+    /// Status and request admission share one atomic failure boundary.
+    runtime: Arc<StdMutex<LspRuntime>>,
     /// Cached diagnostics per file URI.
     diagnostics_cache: Arc<Mutex<HashMap<String, Vec<Diagnostic>>>>,
     /// Manager lifecycle captured when this derived handle was created.
@@ -79,6 +102,8 @@ pub struct StdioLspClient {
     lifecycle_generation: u64,
     /// Client-level close fence, set by explicit stop/shutdown.
     closed: Arc<AtomicBool>,
+    /// Suppress intentional EOF/error during graceful shutdown.
+    stopping: Arc<AtomicBool>,
 }
 
 impl StdioLspClient {
@@ -102,20 +127,23 @@ impl StdioLspClient {
             writer_tx: None,
             writer_task: None,
             reader_task: None,
-            pending: Arc::new(Mutex::new(HashMap::new())),
             next_id: AtomicU64::new(1),
-            runtime: Arc::new(StdMutex::new(LspServerStatus {
-                language: language.clone(),
-                running: false,
-                initialized: false,
-                restart_count: 0,
-                last_error: None,
-                pid: None,
+            runtime: Arc::new(StdMutex::new(LspRuntime {
+                status: LspServerStatus {
+                    language: language.clone(),
+                    running: false,
+                    initialized: false,
+                    restart_count: 0,
+                    last_error: None,
+                    pid: None,
+                },
+                pending: HashMap::new(),
             })),
             diagnostics_cache: Arc::new(Mutex::new(HashMap::new())),
             lifecycle,
             lifecycle_generation,
             closed: Arc::new(AtomicBool::new(false)),
+            stopping: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -128,11 +156,11 @@ impl StdioLspClient {
     }
 
     fn update_runtime(&self, update: impl FnOnce(&mut LspServerStatus)) {
-        let mut status = self
+        let mut runtime = self
             .runtime
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        update(&mut status);
+        update(&mut runtime.status);
     }
 
     pub(crate) fn set_restart_count(&self, count: u32) {
@@ -144,22 +172,22 @@ impl StdioLspClient {
     }
 
     fn mark_initialized_if_running(&self) -> bool {
-        let mut status = self
+        let mut runtime = self
             .runtime
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        if !status.running {
+        if !runtime.status.running {
             return false;
         }
-        status.initialized = true;
+        runtime.status.initialized = true;
         true
     }
 
     /// Kill a process without sending more protocol messages.
     async fn abort_process(&mut self) {
         self.writer_tx = None;
-        if let Some(mut child) = self.child.take() {
-            let _ = child.kill().await;
+        if let Some(child) = self.child.take() {
+            let _ = child.lock().await.kill().await;
         }
         for task in [self.writer_task.take(), self.reader_task.take()]
             .into_iter()
@@ -174,13 +202,11 @@ impl StdioLspClient {
                 let _ = task.await;
             }
         }
-        self.pending.lock().await.clear();
         self.diagnostics_cache.lock().await.clear();
-        self.update_runtime(|status| {
-            status.running = false;
-            status.initialized = false;
-            status.pid = None;
-        });
+        self.runtime
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .settle(None);
     }
 
     /// Spawn the server process and set up communication channels.
@@ -214,42 +240,58 @@ impl StdioLspClient {
         // Create writer channel
         let (writer_tx, mut writer_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
 
-        // Spawn writer task
+        let child_id = child.id();
+        let child = Arc::new(Mutex::new(child));
+        self.update_runtime(|status| {
+            status.running = true;
+            status.initialized = false;
+            status.last_error = None;
+            status.pid = child_id;
+        });
+
+        // Writer failure must settle pending calls even if the child keeps
+        // stdout open indefinitely after its stdin has closed.
+        let writer_runtime = Arc::clone(&self.runtime);
+        let writer_cache = Arc::clone(&self.diagnostics_cache);
+        let writer_child = Arc::clone(&child);
+        let writer_stopping = Arc::clone(&self.stopping);
         let writer_task = tokio::spawn(async move {
             let mut stdin = stdin;
             while let Some(data) = writer_rx.recv().await {
-                if stdin.write_all(&data).await.is_err() {
-                    break;
-                }
-                if stdin.flush().await.is_err() {
+                let result = match stdin.write_all(&data).await {
+                    Ok(()) => stdin.flush().await,
+                    Err(error) => Err(error),
+                };
+                if let Err(error) = result {
+                    let detail = format!("Language server stdin write failed: {error}");
+                    writer_runtime
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner())
+                        .settle((!writer_stopping.load(Ordering::SeqCst)).then_some(detail));
+                    writer_cache.lock().await.clear();
+                    let _ = writer_child.lock().await.kill().await;
                     break;
                 }
             }
         });
 
         // Spawn reader task
-        let pending = self.pending.clone();
         let diagnostics_cache = self.diagnostics_cache.clone();
-        self.update_runtime(|status| {
-            status.running = true;
-            status.initialized = false;
-            status.last_error = None;
-            status.pid = child.id();
-        });
         let runtime = Arc::clone(&self.runtime);
         let closed = Arc::clone(&self.closed);
+        let stopping = Arc::clone(&self.stopping);
         let reader_task = tokio::spawn(async move {
             let reader = BufReader::new(stdout);
-            let error = Self::read_loop(reader, pending.clone(), diagnostics_cache.clone()).await;
-            pending.lock().await.clear();
+            let error =
+                Self::read_loop(reader, Arc::clone(&runtime), diagnostics_cache.clone()).await;
+            runtime
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .settle(
+                    (!closed.load(Ordering::SeqCst) && !stopping.load(Ordering::SeqCst))
+                        .then_some(error),
+                );
             diagnostics_cache.lock().await.clear();
-            let mut status = runtime.lock().unwrap_or_else(|poison| poison.into_inner());
-            status.running = false;
-            status.initialized = false;
-            status.pid = None;
-            if !closed.load(Ordering::SeqCst) {
-                status.last_error = Some(error);
-            }
         });
 
         self.child = Some(child);
@@ -262,7 +304,7 @@ impl StdioLspClient {
     /// Read loop — parses LSP framed messages from stdout.
     async fn read_loop(
         mut reader: BufReader<tokio::process::ChildStdout>,
-        pending: Arc<Mutex<HashMap<u64, oneshot::Sender<JsonRpcResponse>>>>,
+        runtime: Arc<StdMutex<LspRuntime>>,
         diagnostics_cache: Arc<Mutex<HashMap<String, Vec<Diagnostic>>>>,
     ) -> String {
         let mut header_line = String::new();
@@ -283,13 +325,20 @@ impl StdioLspClient {
                     break; // End of headers
                 }
 
-                if let Some(len) = jsonrpc::parse_content_length(trimmed) {
-                    content_length = Some(len);
+                if let Some((name, _)) = trimmed.split_once(':') {
+                    if name.eq_ignore_ascii_case("content-length") {
+                        let Some(length) = jsonrpc::parse_content_length(trimmed) else {
+                            return "Invalid LSP Content-Length header".to_string();
+                        };
+                        content_length = Some(length);
+                    }
+                } else {
+                    return "Malformed LSP header".to_string();
                 }
             }
 
             let Some(len) = content_length else {
-                continue;
+                return "Missing LSP Content-Length header".to_string();
             };
             if !accepts_lsp_message_size(len) {
                 return format!("Language server message exceeds {MAX_LSP_MESSAGE_BYTES} bytes");
@@ -310,8 +359,8 @@ impl StdioLspClient {
             if let Some(id) = value.get("id").and_then(|v| v.as_u64()) {
                 // Response to a request
                 if let Ok(resp) = serde_json::from_value::<JsonRpcResponse>(value) {
-                    let mut pending = pending.lock().await;
-                    if let Some(tx) = pending.remove(&id) {
+                    let mut runtime = runtime.lock().unwrap_or_else(|poison| poison.into_inner());
+                    if let Some(tx) = runtime.pending.remove(&id) {
                         let _ = tx.send(resp);
                     }
                 }
@@ -325,8 +374,17 @@ impl StdioLspClient {
                         .get("diagnostics")
                         .and_then(|v| serde_json::from_value(v.clone()).ok())
                         .unwrap_or_default();
-                    let mut cache = diagnostics_cache.lock().await;
-                    cache.insert(uri.to_string(), diagnostics);
+                    if runtime
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner())
+                        .status
+                        .running
+                    {
+                        diagnostics_cache
+                            .lock()
+                            .await
+                            .insert(uri.to_string(), diagnostics);
+                    }
                 }
             }
         }
@@ -351,25 +409,39 @@ impl StdioLspClient {
 
         let (tx, rx) = oneshot::channel();
         {
-            let mut pending = self.pending.lock().await;
-            pending.insert(id, tx);
+            self.runtime
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .register(id, tx)?;
         }
 
         if writer_tx.send(data).await.is_err() {
-            self.pending.lock().await.remove(&id);
+            self.runtime
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .pending
+                .remove(&id);
             return Err(LspError::CommunicationError("Writer channel closed".into()));
         }
 
         let response = match tokio::time::timeout(REQUEST_TIMEOUT, rx).await {
             Ok(Ok(response)) => response,
             Ok(Err(_)) => {
-                self.pending.lock().await.remove(&id);
+                self.runtime
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner())
+                    .pending
+                    .remove(&id);
                 return Err(LspError::CommunicationError(
                     "Response channel closed".into(),
                 ));
             }
             Err(_) => {
-                self.pending.lock().await.remove(&id);
+                self.runtime
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner())
+                    .pending
+                    .remove(&id);
                 let cancellation = JsonRpcNotification::new(
                     "$/cancelRequest",
                     Some(serde_json::json!({ "id": id })),
@@ -512,6 +584,7 @@ impl LspClient for StdioLspClient {
 
     fn shutdown(&mut self) -> BoxFuture<'_, LspResult<()>> {
         Box::pin(async move {
+            self.stopping.store(true, Ordering::SeqCst);
             if self.is_running() {
                 // Send shutdown request
                 let _ = tokio::time::timeout(
@@ -528,7 +601,6 @@ impl LspClient for StdioLspClient {
             }
             self.closed.store(true, Ordering::SeqCst);
             self.abort_process().await;
-            self.update_runtime(|status| status.last_error = None);
             Ok(())
         })
     }
@@ -733,6 +805,7 @@ impl LspClient for StdioLspClient {
         self.runtime
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
+            .status
             .clone()
     }
 }
@@ -747,5 +820,33 @@ mod message_size_tests {
         assert!(!accepts_lsp_message_size(
             MAX_LSP_MESSAGE_BYTES.saturating_add(1)
         ));
+    }
+
+    #[test]
+    fn eof_settlement_and_request_admission_share_one_boundary() -> Result<(), String> {
+        let mut runtime = LspRuntime {
+            status: LspServerStatus {
+                language: "test".to_string(),
+                running: true,
+                initialized: true,
+                restart_count: 0,
+                last_error: None,
+                pid: Some(42),
+            },
+            pending: HashMap::new(),
+        };
+        let (before_tx, before_rx) = oneshot::channel();
+        runtime
+            .register(1, before_tx)
+            .map_err(|error| error.to_string())?;
+        runtime.settle(Some("EOF".to_string()));
+        if before_rx.blocking_recv().is_ok() {
+            return Err("settlement did not close the admitted request".to_string());
+        }
+        let (after_tx, _after_rx) = oneshot::channel();
+        if runtime.register(2, after_tx).is_ok() || !runtime.pending.is_empty() {
+            return Err("request was admitted after EOF settlement".to_string());
+        }
+        Ok(())
     }
 }

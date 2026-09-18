@@ -48,9 +48,11 @@ changes.
 
 ## Runtime status and configuration follow-up (Issue #64)
 
-The client's shared runtime snapshot is the authority for live transport state.
-Its stdout reader clears `running`, `initialized`, and PID on EOF or framing
-failure, drops pending calls and cached diagnostics, and records the cause.
+The client's shared runtime snapshot and pending-request map share one lock, so
+request admission cannot race past EOF settlement. Its stdout reader clears
+`running`, `initialized`, and PID on EOF or framing failure, drops pending calls
+and cached diagnostics, and records the cause. Writer failure performs the same
+settlement and terminates the child even when stdout remains open.
 Manager status retains restart attempts and the last error after client removal.
 An explicit `restart_server` consumes one configured `max_restarts` attempt;
 initial start and deliberate repeated `start_server` do not consume that budget.
@@ -70,7 +72,8 @@ that require no teardown. The separate asynchronous replacement makes the
 resource boundary explicit while retaining the cold-start API. The LSP 3.17
 shutdown/exit ordering and Tokio's explicit cancel-and-wait shutdown pattern
 inform the bounded graceful request followed by process termination and bounded
-reader/writer task joins; `Drop` does not establish completion.
+reader/writer task joins. Intentional shutdown suppresses its own transport EOF
+without erasing an earlier failure; `Drop` does not establish completion.
 
 ## Rollback
 

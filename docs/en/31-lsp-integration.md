@@ -342,9 +342,9 @@ handle is never an independent process owner.
 `load_config` rejects changes while this manager owns any client. Use
 `reload_config(&config).await?` to stop all old clients, replace the complete
 configuration and extension routes, then explicitly start desired servers.
-After stdout EOF or a framing failure, status reports `running: false`,
+After stdout EOF, stdin write failure, or a framing failure, status reports `running: false`,
 `initialized: false`, no PID and the last transport error; pending calls and
-cached diagnostics are cleared. `restart_server` counts each explicit attempt
+cached diagnostics are cleared atomically with request admission. `restart_server` counts each explicit attempt
 against that language's `max_restarts`, including a failed start. An exhausted
 budget rejects further attempts. No background restart is scheduled. Initial
 `start_server` and deliberate replacement via `start_server` do not consume
