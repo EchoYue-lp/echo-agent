@@ -58,6 +58,9 @@ boundaries over that same authority.
   state. Application fields must round-trip losslessly through the extension.
 - Claims bind revision, attempt, stable spec hash, and unique identity.
   Compare-and-set settlement rejects stale or superseded Subagent results.
+- Exact Subagent identity and live control are derived from that claim under
+  [ADR 0058](0058-task-claim-subagent-attempt-control.md); live control remains
+  a recoverable projection and never becomes a second durable task authority.
 - Relation patches keep graph revision and runtime execution as separate
   preconditions. `TaskGraphCommit.expected_executions` captures the exact
   `TaskId -> TaskExecution` map observed before applying a patch. A store first

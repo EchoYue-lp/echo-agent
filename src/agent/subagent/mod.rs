@@ -24,7 +24,8 @@ pub use context::{ContextInheritance, SubagentContext};
 pub use control::{
     ActiveAttemptSummary, SubagentAttemptIdentity, SubagentCommandIdentity, SubagentCommandPhase,
     SubagentControlError, SubagentControlPhase, SubagentGuidanceQueueReceipt,
-    SubagentInterruptOutcome, SubagentMessageReceipt,
+    SubagentInterruptOutcome, SubagentInterruptRequestDisposition, SubagentInterruptRequestReceipt,
+    SubagentMessageReceipt,
 };
 pub use events::{
     SubagentEvent, SubagentEventBus, SubagentEventEnvelope, SubagentEventGap, SubagentEventPayload,
@@ -48,8 +49,10 @@ pub use prompt::{
 };
 pub use registry::{AgentFactory, FnAgentFactory, SubagentRegistry};
 pub use team::{
-    Team, TeamAgent, TeamAgentBuilder, TeamConfig, TeamExecutionResult, TeamMember, TeamRole,
-    TeamRuntime, TeamSpec, TeamStrategy, execute_team, execute_team_on_runtime,
+    Team, TeamAgent, TeamAgentBuilder, TeamConfig, TeamDispatchController, TeamDispatchRequest,
+    TeamExecutionResult, TeamMember, TeamRole, TeamRuntime, TeamRuntimeHandle,
+    TeamRuntimeServiceHandle, TeamSpec, TeamStrategy, execute_team, execute_team_on_runtime,
+    execute_team_on_runtime_service,
 };
 pub use types::{
     ExecutionMode, ObservedIsolation, RegisteredSubagent, SubagentAccessMode, SubagentArtifact,

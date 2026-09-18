@@ -6,15 +6,15 @@
 //! through [`RuntimeDagController`].
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use echo_core::agent::ExecutionAdmission;
 use echo_core::error::{ReactError, Result};
 use serde::{Deserialize, Serialize};
-use tokio::sync::Semaphore;
-use tokio::task::JoinSet;
+use tokio::sync::{Semaphore, watch};
+use tokio::task::{AbortHandle, Id, JoinSet};
 use tokio_util::sync::CancellationToken;
 
 use super::runtime::{
@@ -22,7 +22,8 @@ use super::runtime::{
     Task, TaskClaim, TaskId, TaskStatus, TaskSubagentContext,
 };
 use super::runtime_service::{
-    RuntimeInterruptionSettlementOutcome, RuntimeTaskSettlementOutcome,
+    RuntimeInterruptionSettlementOutcome, RuntimeTaskAttemptInterruptDisposition,
+    RuntimeTaskAttemptInterruptProjectionError, RuntimeTaskSettlementOutcome,
     validate_runtime_snapshot_claims,
 };
 use crate::planning::PlanValidator;
@@ -83,6 +84,29 @@ pub enum RuntimeTaskResolution {
     Cancelled,
     Superseded,
 }
+
+/// Receipt from the process-local control projection after durable claim
+/// settlement. The durable task state is already authoritative when this is
+/// returned; a retryable cleanup failure is reported separately and must not
+/// trigger a second CAS or reverse the committed terminal state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeAttemptControlCleanupReceipt {
+    Retired,
+    NotFound,
+    AlreadyConsumed,
+    RetryableFailure { error: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeAttemptControlObservation {
+    pub run_id: String,
+    pub task_id: TaskId,
+    pub claim: TaskClaim,
+    pub receipt: RuntimeAttemptControlCleanupReceipt,
+}
+
+pub type RuntimeAttemptControlObserver =
+    Arc<dyn Fn(&RuntimeAttemptControlObservation) + Send + Sync>;
 
 /// Terminal state used when a requeued claim consumes its final retry.
 ///
@@ -174,9 +198,53 @@ pub trait RuntimeDagController: Send + Sync + 'static {
     async fn dispatch_task(
         &self,
         context: TaskSubagentContext,
-        claim: TaskClaim,
         task: Task,
     ) -> Result<Self::DispatchOutput>;
+
+    /// Register the exact claim-derived context before shared admission or a
+    /// semaphore can delay dispatch. Implementations may bind the context to a
+    /// process-local live-control registry; the durable claim remains the
+    /// authority and is validated by the caller before this hook runs.
+    async fn reserve_attempt_control(&self, _context: &TaskSubagentContext) -> Result<()> {
+        Ok(())
+    }
+
+    /// Project a durable exact interrupt into the live reservation/attempt
+    /// registry. Returning `true` means the controller accepted the request;
+    /// the runtime still re-checks the durable claim before returning.
+    async fn request_live_interrupt(
+        &self,
+        _run_id: &str,
+        _task_id: &str,
+        _claim: &TaskClaim,
+    ) -> std::result::Result<
+        Option<RuntimeTaskAttemptInterruptDisposition>,
+        RuntimeTaskAttemptInterruptProjectionError,
+    > {
+        Ok(None)
+    }
+
+    /// Retire the process-local control projection after the durable claim has
+    /// reached a terminal or superseded outcome. Cleanup is diagnostic and must
+    /// never mutate the already committed task state.
+    async fn retire_attempt_control(
+        &self,
+        _run_id: &str,
+        _task: &Task,
+        _claim: &TaskClaim,
+    ) -> RuntimeAttemptControlCleanupReceipt {
+        RuntimeAttemptControlCleanupReceipt::Retired
+    }
+
+    /// Reconcile process-local attempt projections with the execution IDs
+    /// still owned by the durable snapshot for this run.
+    async fn reconcile_attempt_control(
+        &self,
+        _run_id: &str,
+        _current_execution_ids: &HashSet<String>,
+    ) -> Result<()> {
+        Ok(())
+    }
 
     async fn resolve_dispatch(
         &self,
@@ -245,7 +313,7 @@ pub trait RuntimeDagController: Send + Sync + 'static {
 }
 
 /// Execution configuration accepted by [`super::RuntimeTaskService`].
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct RuntimeTaskServiceConfig {
     pub max_concurrent_subagents: usize,
     pub external_progress_poll_interval: Duration,
@@ -255,6 +323,28 @@ pub struct RuntimeTaskServiceConfig {
     pub delegation_policy: NestedDelegationPolicy,
     /// Optional process-wide admission shared with subagent dispatchers.
     pub shared_admission: Option<Arc<ExecutionAdmission>>,
+    /// Optional diagnostic observer for post-CAS live-control cleanup.
+    pub attempt_control_observer: Option<RuntimeAttemptControlObserver>,
+}
+
+impl std::fmt::Debug for RuntimeTaskServiceConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RuntimeTaskServiceConfig")
+            .field("max_concurrent_subagents", &self.max_concurrent_subagents)
+            .field(
+                "external_progress_poll_interval",
+                &self.external_progress_poll_interval,
+            )
+            .field("cancellation_grace_period", &self.cancellation_grace_period)
+            .field("delegation_policy", &self.delegation_policy)
+            .field("shared_admission", &self.shared_admission)
+            .field(
+                "has_attempt_control_observer",
+                &self.attempt_control_observer.is_some(),
+            )
+            .finish()
+    }
 }
 
 impl Default for RuntimeTaskServiceConfig {
@@ -269,15 +359,51 @@ impl Default for RuntimeTaskServiceConfig {
                 max_delegate_depth: 2,
             },
             shared_admission: None,
+            attempt_control_observer: None,
         }
     }
 }
 
 /// The framework's executor for revisioned dynamic Agent plans.
 pub(crate) struct RuntimeDagExecutor<C: RuntimeDagController> {
-    controller: Arc<C>,
-    config: RuntimeTaskServiceConfig,
+    pub(crate) controller: Arc<C>,
+    pub(crate) config: RuntimeTaskServiceConfig,
     validator: PlanValidator,
+    pub(crate) attempt_cancellations: Arc<Mutex<HashMap<String, CancellationToken>>>,
+    pub(crate) attempt_runs: Arc<Mutex<HashMap<String, String>>>,
+    pub(crate) attempt_abort_handles: Arc<Mutex<HashMap<String, AbortHandle>>>,
+    attempt_task_ids: Arc<Mutex<HashMap<Id, String>>>,
+    pub(crate) pending_attempt_interrupts: Arc<Mutex<HashMap<String, String>>>,
+    pub(crate) scheduled_attempt_aborts: Arc<Mutex<HashMap<String, u64>>>,
+    attempt_settlements: Arc<Mutex<HashMap<String, AttemptSettlementProjection>>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AttemptSettlementPhase {
+    Active,
+    JoinedAwaitingDurableSettlement,
+}
+
+struct AttemptSettlementProjection {
+    phase: AttemptSettlementPhase,
+    settled_tx: watch::Sender<Option<AttemptSettlementObservation>>,
+    cancel: CancellationToken,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AttemptSettlementObservation {
+    Settled { status: String },
+    AuthorityUnknown { error: String },
+}
+
+pub(crate) enum RuntimeAttemptObservation {
+    Active {
+        cancel: CancellationToken,
+        settled_rx: watch::Receiver<Option<AttemptSettlementObservation>>,
+    },
+    JoinedAwaitingDurableSettlement {
+        settled_rx: watch::Receiver<Option<AttemptSettlementObservation>>,
+    },
 }
 
 enum InterruptionBoundary {
@@ -292,6 +418,13 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
             controller,
             config,
             validator: PlanValidator::default(),
+            attempt_cancellations: Arc::new(Mutex::new(HashMap::new())),
+            attempt_runs: Arc::new(Mutex::new(HashMap::new())),
+            attempt_abort_handles: Arc::new(Mutex::new(HashMap::new())),
+            attempt_task_ids: Arc::new(Mutex::new(HashMap::new())),
+            pending_attempt_interrupts: Arc::new(Mutex::new(HashMap::new())),
+            scheduled_attempt_aborts: Arc::new(Mutex::new(HashMap::new())),
+            attempt_settlements: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -299,6 +432,214 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
     pub(crate) fn with_validator(mut self, validator: PlanValidator) -> Self {
         self.validator = validator;
         self
+    }
+
+    pub(crate) fn schedule_attempt_abort(&self, execution_id: String, rearm: bool) {
+        let generation = {
+            let Ok(mut scheduled) = self.scheduled_attempt_aborts.lock() else {
+                return;
+            };
+            if scheduled.contains_key(&execution_id) && !rearm {
+                return;
+            }
+            let generation = scheduled
+                .get(&execution_id)
+                .copied()
+                .unwrap_or(0)
+                .saturating_add(1);
+            scheduled.insert(execution_id.clone(), generation);
+            generation
+        };
+        let abort_handles = Arc::clone(&self.attempt_abort_handles);
+        let scheduled_attempt_aborts = Arc::clone(&self.scheduled_attempt_aborts);
+        let grace_period = self.config.cancellation_grace_period;
+        tokio::spawn(async move {
+            tokio::time::sleep(grace_period).await;
+            let is_current = scheduled_attempt_aborts
+                .lock()
+                .ok()
+                .and_then(|scheduled| scheduled.get(&execution_id).copied())
+                == Some(generation);
+            if !is_current {
+                return;
+            }
+            let handle = abort_handles
+                .lock()
+                .ok()
+                .and_then(|handles| handles.get(&execution_id).cloned());
+            if let Some(handle) = handle.filter(|handle| !handle.is_finished()) {
+                handle.abort();
+            }
+            if let Ok(mut scheduled) = scheduled_attempt_aborts.lock()
+                && scheduled.get(&execution_id).copied() == Some(generation)
+            {
+                scheduled.remove(&execution_id);
+            }
+        });
+    }
+
+    pub(crate) fn observe_attempt(&self, execution_id: &str) -> Option<RuntimeAttemptObservation> {
+        let settlements = self
+            .attempt_settlements
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let projection = settlements.get(execution_id)?;
+        let settled_rx = projection.settled_tx.subscribe();
+        Some(match projection.phase {
+            AttemptSettlementPhase::Active => RuntimeAttemptObservation::Active {
+                cancel: projection.cancel.clone(),
+                settled_rx,
+            },
+            AttemptSettlementPhase::JoinedAwaitingDurableSettlement => {
+                RuntimeAttemptObservation::JoinedAwaitingDurableSettlement { settled_rx }
+            }
+        })
+    }
+
+    fn mark_attempt_joined(&self, execution_id: &str) {
+        if let Ok(mut settlements) = self.attempt_settlements.lock()
+            && let Some(projection) = settlements.get_mut(execution_id)
+        {
+            projection.phase = AttemptSettlementPhase::JoinedAwaitingDurableSettlement;
+        }
+    }
+
+    pub(crate) fn settle_attempt_projection(&self, execution_id: &str, status: impl Into<String>) {
+        if let Ok(settlements) = self.attempt_settlements.lock()
+            && let Some(projection) = settlements.get(execution_id)
+        {
+            projection
+                .settled_tx
+                .send_replace(Some(AttemptSettlementObservation::Settled {
+                    status: status.into(),
+                }));
+        }
+    }
+
+    pub(crate) fn reconcile_local_attempt_control(
+        &self,
+        run_id: &str,
+        current_execution_ids: &HashSet<String>,
+    ) {
+        let stale_execution_ids = self
+            .attempt_runs
+            .lock()
+            .map(|runs| {
+                runs.iter()
+                    .filter_map(|(execution_id, attempt_run_id)| {
+                        (attempt_run_id == run_id && !current_execution_ids.contains(execution_id))
+                            .then_some(execution_id.clone())
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        for execution_id in stale_execution_ids {
+            let phase = self
+                .attempt_settlements
+                .lock()
+                .ok()
+                .and_then(|settlements| {
+                    settlements
+                        .get(&execution_id)
+                        .map(|projection| projection.phase)
+                });
+            self.settle_attempt_projection(&execution_id, "superseded");
+            if let Some(cancel) = self
+                .attempt_cancellations
+                .lock()
+                .ok()
+                .and_then(|controls| controls.get(&execution_id).cloned())
+            {
+                cancel.cancel();
+            }
+            if phase == Some(AttemptSettlementPhase::JoinedAwaitingDurableSettlement) {
+                self.retire_local_attempt_control(&execution_id);
+            } else {
+                self.schedule_attempt_abort(execution_id, false);
+            }
+        }
+        if let Ok(mut pending) = self.pending_attempt_interrupts.lock() {
+            pending.retain(|execution_id, pending_run_id| {
+                pending_run_id != run_id || current_execution_ids.contains(execution_id)
+            });
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_attempt_supervisor_state(&self, execution_id: &str) -> bool {
+        self.attempt_cancellations
+            .lock()
+            .is_ok_and(|controls| controls.contains_key(execution_id))
+            || self
+                .attempt_runs
+                .lock()
+                .is_ok_and(|runs| runs.contains_key(execution_id))
+            || self
+                .attempt_abort_handles
+                .lock()
+                .is_ok_and(|handles| handles.contains_key(execution_id))
+            || self
+                .pending_attempt_interrupts
+                .lock()
+                .is_ok_and(|pending| pending.contains_key(execution_id))
+            || self
+                .scheduled_attempt_aborts
+                .lock()
+                .is_ok_and(|scheduled| scheduled.contains_key(execution_id))
+            || self
+                .attempt_settlements
+                .lock()
+                .is_ok_and(|settlements| settlements.contains_key(execution_id))
+    }
+
+    fn mark_attempt_authority_unknown(&self, execution_id: &str, error: impl Into<String>) {
+        if let Ok(settlements) = self.attempt_settlements.lock()
+            && let Some(projection) = settlements.get(execution_id)
+        {
+            projection.settled_tx.send_replace(Some(
+                AttemptSettlementObservation::AuthorityUnknown {
+                    error: error.into(),
+                },
+            ));
+        }
+    }
+
+    fn retire_local_attempt_control(&self, execution_id: &str) {
+        if let Ok(mut controls) = self.attempt_cancellations.lock() {
+            controls.remove(execution_id);
+        }
+        if let Ok(mut runs) = self.attempt_runs.lock() {
+            runs.remove(execution_id);
+        }
+        if let Ok(mut handles) = self.attempt_abort_handles.lock() {
+            handles.remove(execution_id);
+        }
+        if let Ok(mut pending) = self.pending_attempt_interrupts.lock() {
+            pending.remove(execution_id);
+        }
+        if let Ok(mut scheduled) = self.scheduled_attempt_aborts.lock() {
+            scheduled.remove(execution_id);
+        }
+        if let Ok(mut settlements) = self.attempt_settlements.lock() {
+            settlements.remove(execution_id);
+        }
+    }
+
+    pub(crate) fn observe_attempt_control_cleanup(
+        &self,
+        run_id: &str,
+        task_id: &str,
+        claim: &TaskClaim,
+        receipt: RuntimeAttemptControlCleanupReceipt,
+    ) {
+        if let Some(observer) = &self.config.attempt_control_observer {
+            observer(&RuntimeAttemptControlObservation {
+                run_id: run_id.to_string(),
+                task_id: task_id.to_string(),
+                claim: claim.clone(),
+                receipt,
+            });
+        }
     }
 
     pub(crate) async fn execute(
@@ -517,7 +858,6 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
                 let controller = self.controller.clone();
                 let semaphore = subagent_semaphore.clone();
                 let shared_admission = self.config.shared_admission.clone();
-                let task_cancel = cancel.clone();
                 let claim = match self
                     .controller
                     .claim_task(run_id, &task, snapshot.revision)
@@ -531,7 +871,36 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
                     }
                 };
                 let claim_id = claim.claim_id.clone();
-                outstanding_claims.insert(claim_id.clone(), (task.clone(), claim.clone()));
+                // Each claim owns a child token: cancelling one exact attempt
+                // must not cancel sibling tasks in the same ready wave. The
+                // token is published before waiting for shared admission.
+                let task_cancel = cancel.child_token();
+                let execution_id = claim.execution_id(run_id, &task.spec.id);
+                let pending_interrupt = self
+                    .pending_attempt_interrupts
+                    .lock()
+                    .ok()
+                    .is_some_and(|mut pending| pending.remove(&execution_id).is_some());
+                if let Ok(mut controls) = self.attempt_cancellations.lock() {
+                    controls.insert(execution_id.clone(), task_cancel.clone());
+                }
+                if let Ok(mut runs) = self.attempt_runs.lock() {
+                    runs.insert(execution_id.clone(), run_id.to_string());
+                }
+                if let Ok(mut settlements) = self.attempt_settlements.lock() {
+                    let (settled_tx, _) = watch::channel(None);
+                    settlements.insert(
+                        execution_id.clone(),
+                        AttemptSettlementProjection {
+                            phase: AttemptSettlementPhase::Active,
+                            settled_tx,
+                            cancel: task_cancel.clone(),
+                        },
+                    );
+                }
+                if pending_interrupt {
+                    task_cancel.cancel();
+                }
                 let dispatch_run_id = run_id.to_string();
                 let delegation_policy = self.config.delegation_policy;
                 let waived_dependency_ids = match dependency_states.get(&task.spec.id) {
@@ -540,45 +909,116 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
                     }) => waived_dependency_ids.clone(),
                     _ => Vec::new(),
                 };
-                join_set.spawn(async move {
+                let context = match TaskSubagentContext::from_claim(
+                    dispatch_run_id.clone(),
+                    task.spec.id.clone(),
+                    claim.clone(),
+                    task_cancel.clone(),
+                ) {
+                    Ok(context) => context
+                        .with_delegation_policy(delegation_policy)
+                        .with_waived_dependencies(waived_dependency_ids),
+                    Err(error) => {
+                        let message = format!("invalid exact task context: {error}");
+                        match self
+                            .controller
+                            .abandon_claim(
+                                run_id,
+                                &claim,
+                                &task,
+                                RuntimeClaimAbandonment::Failed {
+                                    error: message.clone(),
+                                },
+                            )
+                            .await
+                        {
+                            Ok(_) => {
+                                self.cleanup_attempt_control(run_id, &task, &claim).await;
+                            }
+                            Err(settlement_error) => wave_errors.push(format!(
+                                "invalid context abandonment outcome is unknown: {settlement_error}"
+                            )),
+                        }
+                        wave_errors.push(message);
+                        continue;
+                    }
+                };
+                if let Err(error) = self.controller.reserve_attempt_control(&context).await {
+                    let message = format!("exact attempt control reservation failed: {error}");
+                    match self
+                        .controller
+                        .abandon_claim(
+                            run_id,
+                            &claim,
+                            &task,
+                            RuntimeClaimAbandonment::Failed {
+                                error: message.clone(),
+                            },
+                        )
+                        .await
+                    {
+                        Ok(_) => {
+                            self.cleanup_attempt_control(run_id, &task, &claim).await;
+                        }
+                        Err(settlement_error) => {
+                            wave_errors.push(format!(
+                                "reservation failure abandonment outcome is unknown: {settlement_error}"
+                            ));
+                        }
+                    }
+                    wave_errors.push(message);
+                    continue;
+                }
+                outstanding_claims.insert(claim_id.clone(), (task.clone(), claim.clone()));
+                let abort_execution_id = execution_id.clone();
+                let supervisor_cancel = task_cancel.clone();
+                let abort_handle = join_set.spawn(async move {
                     let dispatch = if let Some(admission) = shared_admission {
                         let lease = tokio::select! {
-                            _ = task_cancel.cancelled() => {
-                                Err(ReactError::Agent(Box::new(echo_core::error::AgentError::Cancelled("cancelled while waiting for shared execution admission".to_string()))))
-                            }
-                            lease = admission.issue_wait(format!("runtime:{dispatch_run_id}:{claim_id}")) => lease
-                                .map_err(|error| ReactError::Other(format!("shared execution admission rejected task: {error}"))),
+                            biased;
+                            _ = task_cancel.cancelled() => None,
+                            lease = admission.issue_wait(format!("runtime:{dispatch_run_id}:{claim_id}")) => Some(
+                                lease.map_err(|error| ReactError::Other(format!("shared execution admission rejected task: {error}")))
+                            ),
                         };
                         match lease {
-                            Ok(lease) => {
-                                let context = TaskSubagentContext::new(dispatch_run_id)
-                                    .with_cancel(task_cancel)
-                                    .with_delegation_policy(delegation_policy)
-                                    .with_waived_dependencies(waived_dependency_ids);
-                                let result = controller.dispatch_task(context, claim, task).await;
+                            Some(Ok(lease)) => {
+                                let result = controller.dispatch_task(context, task).await;
                                 drop(lease);
                                 result
                             }
-                            Err(error) => Err(error),
+                            Some(Err(error)) => Err(error),
+                            None => controller.dispatch_task(context, task).await,
                         }
                     } else {
-                        match semaphore.acquire_owned().await {
-                            Ok(permit) => {
-                                let context = TaskSubagentContext::new(dispatch_run_id)
-                                    .with_cancel(task_cancel)
-                                    .with_delegation_policy(delegation_policy)
-                                    .with_waived_dependencies(waived_dependency_ids);
-                                let result = controller.dispatch_task(context, claim, task).await;
+                        let permit = tokio::select! {
+                            biased;
+                            _ = task_cancel.cancelled() => None,
+                            permit = semaphore.acquire_owned() => Some(permit),
+                        };
+                        match permit {
+                            Some(Ok(permit)) => {
+                                let result = controller.dispatch_task(context, task).await;
                                 drop(permit);
                                 result
                             }
-                            Err(error) => Err(ReactError::Other(format!(
+                            Some(Err(error)) => Err(ReactError::Other(format!(
                                 "Subagent semaphore closed: {error}"
                             ))),
+                            None => controller.dispatch_task(context, task).await,
                         }
                     };
                     (claim_id, dispatch)
                 });
+                if let Ok(mut task_ids) = self.attempt_task_ids.lock() {
+                    task_ids.insert(abort_handle.id(), abort_execution_id.clone());
+                }
+                if let Ok(mut handles) = self.attempt_abort_handles.lock() {
+                    handles.insert(abort_execution_id.clone(), abort_handle);
+                }
+                if supervisor_cancel.is_cancelled() {
+                    self.schedule_attempt_abort(abort_execution_id, true);
+                }
             }
 
             let mut wave_results = Vec::new();
@@ -588,16 +1028,67 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
             while !join_set.is_empty() {
                 tokio::select! {
                     biased;
-                    joined = join_set.join_next() => {
+                    joined = join_set.join_next_with_id() => {
                         match joined {
-                            Some(Ok(result)) => wave_results.push((
-                                result,
-                                !cancellation_observed && !cancel.is_cancelled(),
-                            )),
-                            Some(Err(error)) => {
-                                wave_errors.push(format!(
-                                    "Subagent dispatch task failed to join: {error}"
+                            Some(Ok((task_id, result))) => {
+                                if let Some(execution_id) = self
+                                    .attempt_task_ids
+                                    .lock()
+                                    .ok()
+                                    .and_then(|mut task_ids| task_ids.remove(&task_id))
+                                {
+                                    self.mark_attempt_joined(&execution_id);
+                                }
+                                wave_results.push((
+                                    result,
+                                    !cancellation_observed && !cancel.is_cancelled(),
                                 ));
+                            }
+                            Some(Err(error)) => {
+                                let execution_id = self
+                                    .attempt_task_ids
+                                    .lock()
+                                    .ok()
+                                    .and_then(|mut task_ids| task_ids.remove(&error.id()));
+                                if let Some(execution_id) = execution_id {
+                                    self.mark_attempt_joined(&execution_id);
+                                    let cancelled = self
+                                        .attempt_cancellations
+                                        .lock()
+                                        .ok()
+                                        .and_then(|controls| controls.get(&execution_id).cloned())
+                                        .is_some_and(|token| token.is_cancelled());
+                                    let claim_id = cancelled.then(|| {
+                                        outstanding_claims
+                                            .iter()
+                                            .find(|(_, (task, claim))| {
+                                                claim.execution_id(run_id, &task.spec.id)
+                                                    == execution_id
+                                            })
+                                            .map(|(claim_id, _)| claim_id.clone())
+                                    }).flatten();
+                                    if error.is_cancelled() && let Some(claim_id) = claim_id {
+                                        wave_results.push((
+                                            (
+                                                claim_id,
+                                                Err(ReactError::Agent(Box::new(
+                                                    echo_core::error::AgentError::Cancelled(
+                                                        "exact attempt aborted after cancellation grace period".to_string(),
+                                                    ),
+                                                ))),
+                                            ),
+                                            false,
+                                        ));
+                                    } else {
+                                        wave_errors.push(format!(
+                                            "Subagent dispatch task '{execution_id}' failed to join: {error}"
+                                        ));
+                                    }
+                                } else {
+                                    wave_errors.push(format!(
+                                        "Subagent dispatch task failed to join: {error}"
+                                    ));
+                                }
                             }
                             None => {}
                         }
@@ -610,11 +1101,38 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
                     }
                     _ = &mut cancellation_grace, if cancellation_observed => {
                         join_set.abort_all();
-                        while let Some(joined) = join_set.join_next().await {
+                        while let Some(joined) = join_set.join_next_with_id().await {
                             match joined {
-                                Ok(result) => wave_results.push((result, false)),
-                                Err(error) if error.is_cancelled() => {}
+                                Ok((task_id, result)) => {
+                                    if let Some(execution_id) = self
+                                        .attempt_task_ids
+                                        .lock()
+                                        .ok()
+                                        .and_then(|mut task_ids| task_ids.remove(&task_id))
+                                    {
+                                        self.mark_attempt_joined(&execution_id);
+                                    }
+                                    wave_results.push((result, false));
+                                }
+                                Err(error) if error.is_cancelled() => {
+                                    if let Some(execution_id) = self
+                                        .attempt_task_ids
+                                        .lock()
+                                        .ok()
+                                        .and_then(|mut task_ids| task_ids.remove(&error.id()))
+                                    {
+                                        self.mark_attempt_joined(&execution_id);
+                                    }
+                                }
                                 Err(error) => {
+                                    if let Some(execution_id) = self
+                                        .attempt_task_ids
+                                        .lock()
+                                        .ok()
+                                        .and_then(|mut task_ids| task_ids.remove(&error.id()))
+                                    {
+                                        self.mark_attempt_joined(&execution_id);
+                                    }
                                     wave_errors.push(format!(
                                         "Subagent dispatch task failed to join: {error}"
                                     ));
@@ -625,6 +1143,9 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
                     }
                 }
             }
+
+            // Joined attempts remain addressable until their durable claim CAS
+            // is proven settled or superseded. Cleanup happens after that point.
 
             let mut interruption_policy_failed = false;
             let mut interruption_is_durable = false;
@@ -656,7 +1177,7 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
                     let disposition = interruption
                         .clone()
                         .ok_or_else(|| ReactError::Other("interruption disappeared".to_string()))?;
-                    if let Err(error) = self
+                    match self
                         .settle_abandonment(
                             run_id,
                             &claim,
@@ -665,7 +1186,16 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
                         )
                         .await
                     {
-                        wave_errors.push(error.to_string());
+                        Ok(_) => {
+                            self.cleanup_attempt_control(run_id, &task, &claim).await;
+                        }
+                        Err(error) => {
+                            self.mark_attempt_authority_unknown(
+                                &claim.execution_id(run_id, &task.spec.id),
+                                error.to_string(),
+                            );
+                            wave_errors.push(error.to_string());
+                        }
                     }
                     continue;
                 }
@@ -677,18 +1207,51 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
                     Ok(resolution) => resolution,
                     Err(error) => {
                         let message = error.to_string();
-                        if let Err(abandon_error) = self
-                            .settle_abandonment(
-                                run_id,
-                                &claim,
-                                &task,
-                                RuntimeClaimAbandonment::Failed {
-                                    error: message.clone(),
-                                },
-                            )
+                        match self
+                            .controller
+                            .claim_is_current(run_id, &task.spec.id, &claim)
                             .await
                         {
-                            wave_errors.push(abandon_error.to_string());
+                            Ok(false) => {
+                                self.settle_attempt_projection(
+                                    &claim.execution_id(run_id, &task.spec.id),
+                                    "superseded",
+                                );
+                                self.cleanup_attempt_control(run_id, &task, &claim).await;
+                                continue;
+                            }
+                            Ok(true) => match self
+                                .settle_abandonment(
+                                    run_id,
+                                    &claim,
+                                    &task,
+                                    RuntimeClaimAbandonment::Failed {
+                                        error: message.clone(),
+                                    },
+                                )
+                                .await
+                            {
+                                Ok(_) => {
+                                    self.cleanup_attempt_control(run_id, &task, &claim).await;
+                                }
+                                Err(abandon_error) => {
+                                    self.mark_attempt_authority_unknown(
+                                        &claim.execution_id(run_id, &task.spec.id),
+                                        abandon_error.to_string(),
+                                    );
+                                    wave_errors.push(abandon_error.to_string());
+                                }
+                            },
+                            Err(lookup_error) => {
+                                let lookup_message = format!(
+                                    "runtime settlement outcome is unknown and claim lookup failed: {lookup_error}"
+                                );
+                                self.mark_attempt_authority_unknown(
+                                    &claim.execution_id(run_id, &task.spec.id),
+                                    lookup_message.clone(),
+                                );
+                                wave_errors.push(lookup_message);
+                            }
                         }
                         wave_errors.push(message);
                         continue;
@@ -701,23 +1264,57 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
                     Ok(resolution) => resolution,
                     Err(error) => {
                         let message = error.to_string();
-                        if let Err(abandon_error) = self
-                            .settle_abandonment(
-                                run_id,
-                                &claim,
-                                &task,
-                                RuntimeClaimAbandonment::Failed {
-                                    error: message.clone(),
-                                },
-                            )
+                        match self
+                            .controller
+                            .claim_is_current(run_id, &task.spec.id, &claim)
                             .await
                         {
-                            wave_errors.push(abandon_error.to_string());
+                            Ok(false) => {
+                                self.settle_attempt_projection(
+                                    &claim.execution_id(run_id, &task.spec.id),
+                                    "superseded",
+                                );
+                                self.cleanup_attempt_control(run_id, &task, &claim).await;
+                                continue;
+                            }
+                            Ok(true) => match self
+                                .settle_abandonment(
+                                    run_id,
+                                    &claim,
+                                    &task,
+                                    RuntimeClaimAbandonment::Failed {
+                                        error: message.clone(),
+                                    },
+                                )
+                                .await
+                            {
+                                Ok(_) => {
+                                    self.cleanup_attempt_control(run_id, &task, &claim).await;
+                                }
+                                Err(abandon_error) => {
+                                    self.mark_attempt_authority_unknown(
+                                        &claim.execution_id(run_id, &task.spec.id),
+                                        abandon_error.to_string(),
+                                    );
+                                    wave_errors.push(abandon_error.to_string());
+                                }
+                            },
+                            Err(lookup_error) => {
+                                let lookup_message = format!(
+                                    "runtime settlement outcome is unknown and claim lookup failed: {lookup_error}"
+                                );
+                                self.mark_attempt_authority_unknown(
+                                    &claim.execution_id(run_id, &task.spec.id),
+                                    lookup_message.clone(),
+                                );
+                                wave_errors.push(lookup_message);
+                            }
                         }
                         wave_errors.push(message);
                         continue;
                     }
                 };
+                self.cleanup_attempt_control(run_id, &task, &claim).await;
                 match resolution {
                     RuntimeTaskResolution::Completed
                     | RuntimeTaskResolution::Pending
@@ -775,11 +1372,20 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
                             .unwrap_or_else(|| "dispatch ended without a result".to_string()),
                     }
                 };
-                if let Err(error) = self
+                match self
                     .settle_abandonment(run_id, &claim, &task, abandonment)
                     .await
                 {
-                    wave_errors.push(error.to_string());
+                    Ok(_) => {
+                        self.cleanup_attempt_control(run_id, &task, &claim).await;
+                    }
+                    Err(error) => {
+                        self.mark_attempt_authority_unknown(
+                            &claim.execution_id(run_id, &task.spec.id),
+                            error.to_string(),
+                        );
+                        wave_errors.push(error.to_string());
+                    }
                 }
             }
 
@@ -898,6 +1504,10 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
                 claim.claim_id
             )));
         }
+        self.settle_attempt_projection(
+            &claim.execution_id(run_id, &task.spec.id),
+            runtime_resolution_status(&resolution),
+        );
         Ok(resolution)
     }
 
@@ -908,6 +1518,7 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
         task: &Task,
         abandonment: RuntimeClaimAbandonment,
     ) -> Result<RuntimeTaskSettlementOutcome> {
+        let intended_status = abandonment_status(&abandonment);
         let settlement = self
             .controller
             .abandon_claim(run_id, claim, task, abandonment)
@@ -922,7 +1533,61 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
                 claim.claim_id
             )));
         }
+        let status = match settlement {
+            RuntimeTaskSettlementOutcome::Settled => intended_status,
+            RuntimeTaskSettlementOutcome::Superseded => "superseded",
+        };
+        self.settle_attempt_projection(&claim.execution_id(run_id, &task.spec.id), status);
         Ok(settlement)
+    }
+
+    async fn cleanup_attempt_control(&self, run_id: &str, task: &Task, claim: &TaskClaim) {
+        let execution_id = claim.execution_id(run_id, &task.spec.id);
+        let receipt = self
+            .controller
+            .retire_attempt_control(run_id, task, claim)
+            .await;
+        self.observe_attempt_control_cleanup(run_id, &task.spec.id, claim, receipt.clone());
+        self.retire_local_attempt_control(&execution_id);
+        match receipt {
+            RuntimeAttemptControlCleanupReceipt::RetryableFailure { ref error } => {
+                tracing::warn!(
+                    run_id,
+                    task_id = %task.spec.id,
+                    claim_id = %claim.claim_id,
+                    error = %error,
+                    "exact attempt control cleanup requires retry after durable settlement"
+                );
+            }
+            RuntimeAttemptControlCleanupReceipt::Retired
+            | RuntimeAttemptControlCleanupReceipt::NotFound
+            | RuntimeAttemptControlCleanupReceipt::AlreadyConsumed => {}
+        }
+    }
+}
+
+fn runtime_resolution_status(resolution: &RuntimeTaskResolution) -> &'static str {
+    match resolution {
+        RuntimeTaskResolution::Completed => "completed",
+        RuntimeTaskResolution::Pending => "pending",
+        RuntimeTaskResolution::Skipped => "skipped",
+        RuntimeTaskResolution::Failed { .. } => "failed",
+        RuntimeTaskResolution::TimedOut { .. } => "timed_out",
+        RuntimeTaskResolution::Blocked { .. } => "blocked",
+        RuntimeTaskResolution::Cancelled => "cancelled",
+        RuntimeTaskResolution::Superseded => "superseded",
+    }
+}
+
+fn abandonment_status(abandonment: &RuntimeClaimAbandonment) -> &'static str {
+    match abandonment {
+        RuntimeClaimAbandonment::Interrupted {
+            disposition: RuntimeInterruptionDisposition::Cancelled,
+        } => "cancelled",
+        RuntimeClaimAbandonment::Interrupted {
+            disposition: RuntimeInterruptionDisposition::Paused { .. },
+        } => "paused",
+        RuntimeClaimAbandonment::Failed { .. } => "failed",
     }
 }
 
@@ -1056,7 +1721,7 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
-    use crate::tasks::TaskStatus;
+    use crate::tasks::{RuntimeTaskAttemptInterruptError, TaskStatus};
 
     #[derive(Default)]
     struct ScriptedController {
@@ -1072,6 +1737,24 @@ mod tests {
         interruption_error: Mutex<Option<String>>,
         dispatch_barrier: Mutex<Option<Arc<tokio::sync::Barrier>>>,
         cancel_after_dispatch: Mutex<HashMap<TaskId, CancellationToken>>,
+        claim_ready: Mutex<Option<Arc<tokio::sync::Notify>>>,
+        reserved: Mutex<Vec<String>>,
+        retired: Mutex<Vec<String>>,
+        current_check_count: Mutex<usize>,
+        current_check_error_at: Mutex<Option<usize>>,
+        stale_after_current_check: Mutex<Option<usize>>,
+        supersede_on_stale_check: Mutex<bool>,
+        settlement_error_once: Mutex<Option<String>>,
+        settle_response_error_once: Mutex<bool>,
+        reservation_error: Mutex<Option<String>>,
+        reservation_delay: Mutex<Option<Duration>>,
+        settlement_entered: Mutex<Option<Arc<tokio::sync::Notify>>>,
+        settlement_release: Mutex<Option<Arc<tokio::sync::Notify>>>,
+        reconciliation_entered: Mutex<Option<Arc<tokio::sync::Notify>>>,
+        reconciliation_release: Mutex<Option<Arc<tokio::sync::Notify>>>,
+        reconciliation_error: Mutex<Option<String>>,
+        abandonment_error_once: Mutex<bool>,
+        cleanup_receipt: Mutex<Option<RuntimeAttemptControlCleanupReceipt>>,
     }
 
     impl ScriptedController {
@@ -1132,8 +1815,21 @@ mod tests {
             let snapshot = snapshot
                 .as_mut()
                 .ok_or_else(|| ReactError::Other("missing snapshot".to_string()))?;
-            super::super::runtime_service::claim_runtime_task(snapshot, task, expected_revision)
-                .map_err(|error| ReactError::Other(error.to_string()))
+            let result = super::super::runtime_service::claim_runtime_task(
+                snapshot,
+                task,
+                expected_revision,
+            )
+            .map_err(|error| ReactError::Other(error.to_string()))?;
+            if let Some(notify) = self
+                .claim_ready
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .as_ref()
+            {
+                notify.notify_one();
+            }
+            Ok(result)
         }
 
         async fn claim_is_current(
@@ -1142,6 +1838,57 @@ mod tests {
             task_id: &str,
             claim: &TaskClaim,
         ) -> Result<bool> {
+            let check_count = {
+                let mut count = self
+                    .current_check_count
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                *count = count.saturating_add(1);
+                *count
+            };
+            let current_check_error = {
+                let mut error_at = self
+                    .current_check_error_at
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if error_at.is_some_and(|error_at| check_count >= error_at) {
+                    error_at.take()
+                } else {
+                    None
+                }
+            };
+            if current_check_error.is_some() {
+                return Err(ReactError::Other(
+                    "scripted current-claim lookup unavailable".to_string(),
+                ));
+            }
+            let stale = self
+                .stale_after_current_check
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_some_and(|limit| check_count >= limit);
+            if stale {
+                if *self
+                    .supersede_on_stale_check
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                {
+                    let mut snapshot = self
+                        .snapshot
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    if let Some(task) = snapshot.as_mut().and_then(|snapshot| {
+                        snapshot
+                            .tasks
+                            .iter_mut()
+                            .find(|task| task.spec.id == task_id)
+                    }) {
+                        task.execution.status = TaskStatus::Completed;
+                        task.execution.claim = None;
+                    }
+                }
+                return Ok(false);
+            }
             let snapshot = self
                 .snapshot
                 .lock()
@@ -1153,10 +1900,84 @@ mod tests {
                 .map_err(|error| ReactError::Other(error.to_string()))
         }
 
+        async fn reserve_attempt_control(&self, context: &TaskSubagentContext) -> Result<()> {
+            let delay = *self
+                .reservation_delay
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(delay) = delay {
+                tokio::time::sleep(delay).await;
+            }
+            if let Some(error) = self
+                .reservation_error
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
+            {
+                return Err(ReactError::Other(error));
+            }
+            let execution_id = context
+                .execution_id()
+                .ok_or_else(|| ReactError::Other("missing exact execution identity".to_string()))?;
+            self.reserved
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(execution_id);
+            Ok(())
+        }
+
+        async fn reconcile_attempt_control(
+            &self,
+            _run_id: &str,
+            _current_execution_ids: &HashSet<String>,
+        ) -> Result<()> {
+            let entered = self
+                .reconciliation_entered
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone();
+            let release = self
+                .reconciliation_release
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone();
+            if let Some(entered) = entered {
+                entered.notify_one();
+            }
+            if let Some(release) = release {
+                release.notified().await;
+            }
+            if let Some(error) = self
+                .reconciliation_error
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
+            {
+                return Err(ReactError::Other(error));
+            }
+            Ok(())
+        }
+
+        async fn retire_attempt_control(
+            &self,
+            run_id: &str,
+            task: &Task,
+            claim: &TaskClaim,
+        ) -> RuntimeAttemptControlCleanupReceipt {
+            self.retired
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(claim.execution_id(run_id, &task.spec.id));
+            self.cleanup_receipt
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
+                .unwrap_or(RuntimeAttemptControlCleanupReceipt::Retired)
+        }
+
         async fn dispatch_task(
             &self,
             context: TaskSubagentContext,
-            _claim: TaskClaim,
             task: Task,
         ) -> Result<Self::DispatchOutput> {
             self.order
@@ -1177,7 +1998,7 @@ mod tests {
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .contains(&task.spec.id);
             if wait_for_cancel {
-                context.cancel.cancelled().await;
+                context.cancellation_token().cancelled().await;
                 return Err(ReactError::Agent(Box::new(
                     echo_core::error::AgentError::Cancelled("cancelled by test".to_string()),
                 )));
@@ -1255,6 +2076,30 @@ mod tests {
             task: &Task,
             request: RuntimeTaskResolutionRequest,
         ) -> Result<RuntimeTaskResolution> {
+            let settlement_entered = self
+                .settlement_entered
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone();
+            let settlement_release = self
+                .settlement_release
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone();
+            if let Some(entered) = settlement_entered {
+                entered.notify_one();
+            }
+            if let Some(release) = settlement_release {
+                release.notified().await;
+            }
+            if let Some(error) = self
+                .settlement_error_once
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take()
+            {
+                return Err(ReactError::Other(error));
+            }
             let mut snapshot = self
                 .snapshot
                 .lock()
@@ -1286,6 +2131,16 @@ mod tests {
                     &[task.spec.id.as_str()],
                 ));
             }
+            let mut response_error = self
+                .settle_response_error_once
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if *response_error {
+                *response_error = false;
+                return Err(ReactError::Other(
+                    "scripted lost settlement response".to_string(),
+                ));
+            }
             Ok(resolution)
         }
 
@@ -1296,6 +2151,17 @@ mod tests {
             task: &Task,
             abandonment: RuntimeClaimAbandonment,
         ) -> Result<RuntimeTaskSettlementOutcome> {
+            let mut abandonment_error = self
+                .abandonment_error_once
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if *abandonment_error {
+                *abandonment_error = false;
+                return Err(ReactError::Other(
+                    "scripted abandonment outcome unknown".to_string(),
+                ));
+            }
+            drop(abandonment_error);
             let mut snapshot = self
                 .snapshot
                 .lock()
@@ -1418,6 +2284,404 @@ mod tests {
             .ok_or_else(|| ReactError::Other("revised task was not dispatched".to_string()))?;
         assert!(a_position < b_position);
         assert!(a_position < inserted_position);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn exact_control_is_reserved_before_dispatch_and_retired_after_settlement() -> Result<()>
+    {
+        let controller = Arc::new(ScriptedController::with_tasks(vec![runtime_task(
+            "exact",
+            TaskStatus::Pending,
+            &[],
+        )]));
+        let service = super::super::RuntimeTaskService::new(
+            controller.clone(),
+            RuntimeTaskServiceConfig::default(),
+        );
+
+        assert_eq!(
+            service
+                .execute("exact-run", CancellationToken::new())
+                .await?,
+            RuntimeDagOutcome::Completed
+        );
+        let reserved = controller
+            .reserved
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let retired = controller
+            .retired
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        assert_eq!(reserved.len(), 1);
+        assert_eq!(retired, reserved);
+        assert!(
+            reserved
+                .first()
+                .is_some_and(|execution_id| execution_id.starts_with("exact-run:exact:1:1:"))
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn lost_settlement_response_reloads_committed_authority_without_abandonment() -> Result<()>
+    {
+        let controller = Arc::new(ScriptedController::with_tasks(vec![runtime_task(
+            "committed",
+            TaskStatus::Pending,
+            &[],
+        )]));
+        *controller
+            .settle_response_error_once
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
+        let service = super::super::RuntimeTaskService::new(
+            controller.clone(),
+            RuntimeTaskServiceConfig::default(),
+        );
+
+        assert_eq!(
+            service
+                .execute("lost-settlement", CancellationToken::new())
+                .await?,
+            RuntimeDagOutcome::Completed
+        );
+        assert_eq!(
+            controller.statuses().get("committed"),
+            Some(&TaskStatus::Completed)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn joined_attempt_remains_addressable_until_durable_settlement() -> Result<()> {
+        let controller = Arc::new(ScriptedController::with_tasks(vec![runtime_task(
+            "joined",
+            TaskStatus::Pending,
+            &[],
+        )]));
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        *controller
+            .settlement_entered
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(entered.clone());
+        *controller
+            .settlement_release
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(release.clone());
+        let service = Arc::new(super::super::RuntimeTaskService::new(
+            controller.clone(),
+            RuntimeTaskServiceConfig::default(),
+        ));
+        let execution = tokio::spawn({
+            let service = Arc::clone(&service);
+            async move {
+                service
+                    .execute("joined-settlement", CancellationToken::new())
+                    .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(2), entered.notified())
+            .await
+            .map_err(|_| ReactError::Other("settlement barrier was not reached".to_string()))?;
+        let claim = controller
+            .snapshot
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .and_then(|snapshot| snapshot.tasks.first())
+            .and_then(|task| task.execution.claim.clone())
+            .ok_or_else(|| ReactError::Other("joined claim was not current".to_string()))?;
+        let interrupt = tokio::spawn({
+            let service = Arc::clone(&service);
+            let claim = claim.clone();
+            async move {
+                service
+                    .request_attempt_interrupt("joined-settlement", "joined", &claim)
+                    .await
+            }
+        });
+        tokio::task::yield_now().await;
+        assert!(!interrupt.is_finished());
+        release.notify_one();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), execution)
+                .await
+                .map_err(|_| ReactError::Other("joined settlement did not finish".to_string()))?
+                .map_err(|error| ReactError::Other(format!("runtime task panicked: {error}")))??,
+            RuntimeDagOutcome::Completed
+        );
+        let receipt = tokio::time::timeout(Duration::from_secs(2), interrupt)
+            .await
+            .map_err(|_| ReactError::Other("joined interrupt receipt did not settle".to_string()))?
+            .map_err(|error| ReactError::Other(format!("interrupt task panicked: {error}")))?
+            .map_err(ReactError::from)?;
+        assert!(!receipt.requested);
+        assert_eq!(
+            receipt.disposition,
+            RuntimeTaskAttemptInterruptDisposition::AlreadySettled {
+                status: "completed".to_string(),
+            }
+        );
+        assert_eq!(service.pending_attempt_interrupt_count(), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn joined_attempt_reports_unknown_authority_and_recovery_settles_observation()
+    -> Result<()> {
+        let controller = Arc::new(ScriptedController::with_tasks(vec![runtime_task(
+            "joined",
+            TaskStatus::Pending,
+            &[],
+        )]));
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        *controller
+            .settlement_entered
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(entered.clone());
+        *controller
+            .settlement_release
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(release.clone());
+        *controller
+            .settlement_error_once
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            Some("scripted durable settlement unavailable".to_string());
+        *controller
+            .current_check_error_at
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(3);
+        let service = Arc::new(super::super::RuntimeTaskService::new(
+            controller.clone(),
+            RuntimeTaskServiceConfig::default(),
+        ));
+        let execution = tokio::spawn({
+            let service = Arc::clone(&service);
+            async move {
+                service
+                    .execute("joined-unknown", CancellationToken::new())
+                    .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(2), entered.notified())
+            .await
+            .map_err(|_| ReactError::Other("settlement barrier was not reached".to_string()))?;
+        let claim = controller
+            .snapshot
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .and_then(|snapshot| snapshot.tasks.first())
+            .and_then(|task| task.execution.claim.clone())
+            .ok_or_else(|| ReactError::Other("joined claim was not current".to_string()))?;
+        let execution_id = claim.execution_id("joined-unknown", "joined");
+        let interrupt = tokio::spawn({
+            let service = Arc::clone(&service);
+            let claim = claim.clone();
+            async move {
+                service
+                    .request_attempt_interrupt("joined-unknown", "joined", &claim)
+                    .await
+            }
+        });
+        tokio::task::yield_now().await;
+        assert!(!interrupt.is_finished());
+        release.notify_one();
+
+        let execution_error = tokio::time::timeout(Duration::from_secs(2), execution)
+            .await
+            .map_err(|_| ReactError::Other("unknown settlement did not finish".to_string()))?
+            .map_err(|error| ReactError::Other(format!("runtime task panicked: {error}")))?
+            .err()
+            .ok_or_else(|| {
+                ReactError::Other("unknown settlement unexpectedly succeeded".to_string())
+            })?;
+        assert!(execution_error.to_string().contains("claim lookup failed"));
+        let interrupt_error = tokio::time::timeout(Duration::from_secs(2), interrupt)
+            .await
+            .map_err(|_| ReactError::Other("unknown interrupt remained pending".to_string()))?
+            .map_err(|error| ReactError::Other(format!("interrupt task panicked: {error}")))?
+            .err()
+            .ok_or_else(|| {
+                ReactError::Other("unknown interrupt unexpectedly succeeded".to_string())
+            })?;
+        assert!(matches!(
+            interrupt_error,
+            RuntimeTaskAttemptInterruptError::DurableAuthority { .. }
+        ));
+        assert!(matches!(
+            service.attempt_settlement_observation(&execution_id),
+            Some(AttemptSettlementObservation::AuthorityUnknown { .. })
+        ));
+        let mut recovered_settlement = service
+            .attempt_settlement_receiver(&execution_id)
+            .ok_or_else(|| ReactError::Other("recovery settlement watch missing".to_string()))?;
+        let _ = recovered_settlement.borrow_and_update();
+        let recovery_waiter = tokio::spawn(async move {
+            recovered_settlement
+                .changed()
+                .await
+                .map_err(|_| ReactError::Other("recovery settlement watch closed".to_string()))?;
+            Ok::<_, ReactError>(recovered_settlement.borrow_and_update().clone())
+        });
+
+        let reconcile_entered = Arc::new(tokio::sync::Notify::new());
+        let reconcile_release = Arc::new(tokio::sync::Notify::new());
+        *controller
+            .reconciliation_entered
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(reconcile_entered.clone());
+        *controller
+            .reconciliation_release
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(reconcile_release.clone());
+        {
+            let mut snapshot = controller
+                .snapshot
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let task = snapshot
+                .as_mut()
+                .and_then(|snapshot| snapshot.tasks.first_mut())
+                .ok_or_else(|| ReactError::Other("joined task disappeared".to_string()))?;
+            task.execution.status = TaskStatus::Completed;
+            task.execution.claim = None;
+        }
+        let reconciliation = tokio::spawn({
+            let service = Arc::clone(&service);
+            async move { service.reconcile_attempt_control("joined-unknown").await }
+        });
+        tokio::time::timeout(Duration::from_secs(2), reconcile_entered.notified())
+            .await
+            .map_err(|_| ReactError::Other("reconciliation hook was not reached".to_string()))?;
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), recovery_waiter)
+                .await
+                .map_err(|_| {
+                    ReactError::Other(
+                        "durable recovery did not release the settlement waiter".to_string(),
+                    )
+                })?
+                .map_err(|error| {
+                    ReactError::Other(format!("recovery waiter task panicked: {error}"))
+                })??,
+            Some(AttemptSettlementObservation::Settled {
+                status: "superseded".to_string(),
+            })
+        );
+        assert!(!service.has_attempt_supervisor_state(&execution_id));
+        service.reconcile_local_attempt_control("joined-unknown", &HashSet::new());
+        assert!(!service.has_attempt_supervisor_state(&execution_id));
+        reconcile_release.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), reconciliation)
+            .await
+            .map_err(|_| ReactError::Other("reconciliation remained blocked".to_string()))?
+            .map_err(|error| {
+                ReactError::Other(format!("reconciliation task panicked: {error}"))
+            })??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unknown_reservation_abandonment_preserves_control_projection() -> Result<()> {
+        let controller = Arc::new(ScriptedController::with_tasks(vec![runtime_task(
+            "reserved",
+            TaskStatus::Pending,
+            &[],
+        )]));
+        *controller
+            .reservation_error
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            Some("reservation failed".to_string());
+        *controller
+            .abandonment_error_once
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
+        let service = super::super::RuntimeTaskService::new(
+            controller.clone(),
+            RuntimeTaskServiceConfig::default(),
+        );
+
+        let error = service
+            .execute("unknown-reservation", CancellationToken::new())
+            .await
+            .err()
+            .ok_or_else(|| ReactError::Other("reservation failure unexpectedly ran".to_string()))?;
+        assert!(error.to_string().contains("outcome is unknown"));
+        assert!(
+            controller
+                .retired
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_empty()
+        );
+        assert_eq!(
+            controller.statuses().get("reserved"),
+            Some(&TaskStatus::Running)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cleanup_failure_is_observed_without_reversing_committed_terminal() -> Result<()> {
+        let controller = Arc::new(ScriptedController::with_tasks(vec![runtime_task(
+            "completed",
+            TaskStatus::Pending,
+            &[],
+        )]));
+        *controller
+            .cleanup_receipt
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            Some(RuntimeAttemptControlCleanupReceipt::RetryableFailure {
+                error: "cleanup unavailable".to_string(),
+            });
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let observed_receipts = Arc::clone(&observed);
+        let service = super::super::RuntimeTaskService::new(
+            controller.clone(),
+            RuntimeTaskServiceConfig {
+                attempt_control_observer: Some(Arc::new(move |observation| {
+                    observed_receipts
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .push((observation.task_id.clone(), observation.receipt.clone()));
+                })),
+                ..RuntimeTaskServiceConfig::default()
+            },
+        );
+
+        assert_eq!(
+            service
+                .execute("cleanup-observer", CancellationToken::new())
+                .await?,
+            RuntimeDagOutcome::Completed
+        );
+        assert_eq!(
+            controller.statuses().get("completed"),
+            Some(&TaskStatus::Completed)
+        );
+        assert!(
+            observed
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .iter()
+                .any(|(task_id, receipt)| {
+                    task_id == "completed"
+                        && matches!(
+                            receipt,
+                            RuntimeAttemptControlCleanupReceipt::RetryableFailure { .. }
+                        )
+                })
+        );
         Ok(())
     }
 
@@ -1630,10 +2894,10 @@ mod tests {
             runtime_task("a", TaskStatus::Pending, &[]),
             runtime_task("b", TaskStatus::Pending, &[]),
         ]));
-        let runtime_tasks = super::super::RuntimeTaskService::new(
+        let runtime_tasks = Arc::new(super::super::RuntimeTaskService::new(
             controller.clone(),
             RuntimeTaskServiceConfig::default(),
-        );
+        ));
         let cancel = CancellationToken::new();
         cancel.cancel();
 
@@ -1670,10 +2934,10 @@ mod tests {
             RuntimeInterruptionDisposition::Paused {
                 reason: "deterministic pause".to_string(),
             };
-        let runtime_tasks = super::super::RuntimeTaskService::new(
+        let runtime_tasks = Arc::new(super::super::RuntimeTaskService::new(
             controller.clone(),
             RuntimeTaskServiceConfig::default(),
-        );
+        ));
         let cancel = CancellationToken::new();
         cancel.cancel();
 
@@ -1700,7 +2964,7 @@ mod tests {
             runtime_task("slow", TaskStatus::Pending, &[]),
         ]));
         controller
-            .wait_for_cancel
+            .ignore_cancel
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert("slow".to_string());
@@ -1729,6 +2993,571 @@ mod tests {
         let statuses = controller.statuses();
         assert_eq!(statuses.get("fast"), Some(&TaskStatus::Completed));
         assert_eq!(statuses.get("slow"), Some(&TaskStatus::Cancelled));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn exact_runtime_interrupt_cancels_only_claimed_task_child() -> Result<()> {
+        let controller = Arc::new(ScriptedController::with_tasks(vec![runtime_task(
+            "slow",
+            TaskStatus::Pending,
+            &[],
+        )]));
+        let claim_ready = Arc::new(tokio::sync::Notify::new());
+        *controller
+            .claim_ready
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(claim_ready.clone());
+        controller
+            .wait_for_cancel
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert("slow".to_string());
+        let runtime_tasks = Arc::new(super::super::RuntimeTaskService::new(
+            controller.clone(),
+            RuntimeTaskServiceConfig::default(),
+        ));
+        let run_cancel = CancellationToken::new();
+        let execution = tokio::spawn({
+            let runtime_tasks = Arc::clone(&runtime_tasks);
+            let run_cancel = run_cancel.clone();
+            async move { runtime_tasks.execute("exact-interrupt", run_cancel).await }
+        });
+        tokio::time::timeout(Duration::from_secs(2), claim_ready.notified())
+            .await
+            .map_err(|_| ReactError::Other("claim was not admitted".to_string()))?;
+        let claim = controller
+            .snapshot
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .and_then(|snapshot| snapshot.tasks.first())
+            .and_then(|task| task.execution.claim.clone())
+            .ok_or_else(|| ReactError::Other("claimed task was not persisted".to_string()))?;
+        let receipt = runtime_tasks
+            .request_attempt_interrupt("exact-interrupt", "slow", &claim)
+            .await?;
+        assert!(receipt.requested);
+        let outcome = tokio::time::timeout(Duration::from_secs(2), execution)
+            .await
+            .map_err(|_| ReactError::Other("exact interrupt did not settle".to_string()))?
+            .map_err(|error| ReactError::Other(format!("runtime task panicked: {error}")))??;
+        assert_eq!(outcome, RuntimeDagOutcome::Cancelled);
+        assert_eq!(
+            controller.statuses().get("slow"),
+            Some(&TaskStatus::Cancelled)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn exact_interrupt_before_shared_admission_runs_pre_cancelled_dispatch() -> Result<()> {
+        let controller = Arc::new(ScriptedController::with_tasks(vec![runtime_task(
+            "queued",
+            TaskStatus::Pending,
+            &[],
+        )]));
+        let claim_ready = Arc::new(tokio::sync::Notify::new());
+        *controller
+            .claim_ready
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(claim_ready.clone());
+        controller
+            .wait_for_cancel
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert("queued".to_string());
+        let admission = Arc::new(ExecutionAdmission::with_capacity(1));
+        let held = admission
+            .issue("held")
+            .map_err(|error| ReactError::Other(error.to_string()))?;
+        let runtime_tasks = Arc::new(super::super::RuntimeTaskService::new(
+            controller.clone(),
+            RuntimeTaskServiceConfig {
+                shared_admission: Some(admission),
+                ..RuntimeTaskServiceConfig::default()
+            },
+        ));
+        let execution = tokio::spawn({
+            let runtime_tasks = Arc::clone(&runtime_tasks);
+            async move {
+                runtime_tasks
+                    .execute("pre-admission-interrupt", CancellationToken::new())
+                    .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(2), claim_ready.notified())
+            .await
+            .map_err(|_| ReactError::Other("claim was not admitted".to_string()))?;
+        let claim = controller
+            .snapshot
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .and_then(|snapshot| snapshot.tasks.first())
+            .and_then(|task| task.execution.claim.clone())
+            .ok_or_else(|| ReactError::Other("claimed task was not persisted".to_string()))?;
+        assert!(
+            runtime_tasks
+                .request_attempt_interrupt("pre-admission-interrupt", "queued", &claim)
+                .await?
+                .requested
+        );
+        let outcome = tokio::time::timeout(Duration::from_secs(2), execution)
+            .await
+            .map_err(|_| ReactError::Other("pre-admission interrupt did not settle".to_string()))?
+            .map_err(|error| ReactError::Other(format!("runtime task panicked: {error}")))??;
+        assert_eq!(outcome, RuntimeDagOutcome::Cancelled);
+        assert_eq!(
+            controller
+                .order
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .as_slice(),
+            ["queued"]
+        );
+        drop(held);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn exact_interrupt_before_runtime_reservation_returns_typed_queued_receipt() -> Result<()>
+    {
+        let controller = Arc::new(ScriptedController::with_tasks(vec![runtime_task(
+            "queued",
+            TaskStatus::Pending,
+            &[],
+        )]));
+        let expected = controller
+            .snapshot
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .and_then(|snapshot| snapshot.tasks.first())
+            .cloned()
+            .ok_or_else(|| ReactError::Other("queued task missing".to_string()))?;
+        let claim = match controller
+            .claim_task("queued-receipt", &expected, 1)
+            .await?
+        {
+            RuntimeTaskClaimOutcome::Claimed(claim) => claim,
+            RuntimeTaskClaimOutcome::ReloadSnapshot => {
+                return Err(ReactError::Other("queued task was not claimed".to_string()));
+            }
+        };
+        let service =
+            super::super::RuntimeTaskService::new(controller, RuntimeTaskServiceConfig::default());
+
+        let receipt = service
+            .request_attempt_interrupt("queued-receipt", "queued", &claim)
+            .await?;
+        assert_eq!(
+            receipt.disposition,
+            RuntimeTaskAttemptInterruptDisposition::QueuedBeforeReservation
+        );
+        assert!(receipt.requested);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn delayed_reservation_rearms_abort_for_pre_handle_interrupt() -> Result<()> {
+        let controller = Arc::new(ScriptedController::with_tasks(vec![runtime_task(
+            "delayed",
+            TaskStatus::Pending,
+            &[],
+        )]));
+        let claim_ready = Arc::new(tokio::sync::Notify::new());
+        *controller
+            .claim_ready
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(claim_ready.clone());
+        *controller
+            .reservation_delay
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Duration::from_millis(80));
+        controller
+            .ignore_cancel
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert("delayed".to_string());
+        let service = Arc::new(super::super::RuntimeTaskService::new(
+            controller.clone(),
+            RuntimeTaskServiceConfig {
+                cancellation_grace_period: Duration::from_millis(20),
+                ..RuntimeTaskServiceConfig::default()
+            },
+        ));
+        let execution = tokio::spawn({
+            let service = Arc::clone(&service);
+            async move {
+                service
+                    .execute("delayed-reservation", CancellationToken::new())
+                    .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(2), claim_ready.notified())
+            .await
+            .map_err(|_| ReactError::Other("delayed claim was not admitted".to_string()))?;
+        let claim = controller
+            .snapshot
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .and_then(|snapshot| snapshot.tasks.first())
+            .and_then(|task| task.execution.claim.clone())
+            .ok_or_else(|| ReactError::Other("delayed claim was not persisted".to_string()))?;
+        let receipt = service
+            .request_attempt_interrupt("delayed-reservation", "delayed", &claim)
+            .await?;
+        assert_eq!(
+            receipt.disposition,
+            RuntimeTaskAttemptInterruptDisposition::ActiveRequested
+        );
+        let outcome = tokio::time::timeout(Duration::from_secs(2), execution)
+            .await
+            .map_err(|_| ReactError::Other("delayed reservation escaped exact abort".to_string()))?
+            .map_err(|error| ReactError::Other(format!("runtime task panicked: {error}")))??;
+        assert_eq!(outcome, RuntimeDagOutcome::Cancelled);
+        assert_eq!(
+            controller.statuses().get("delayed"),
+            Some(&TaskStatus::Cancelled)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn exact_interrupt_retires_projection_when_claim_supersedes_during_request() -> Result<()>
+    {
+        let controller = Arc::new(ScriptedController::with_tasks(vec![runtime_task(
+            "slow",
+            TaskStatus::Pending,
+            &[],
+        )]));
+        let claim_ready = Arc::new(tokio::sync::Notify::new());
+        *controller
+            .claim_ready
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(claim_ready.clone());
+        controller
+            .wait_for_cancel
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert("slow".to_string());
+        *controller
+            .stale_after_current_check
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(2);
+        *controller
+            .supersede_on_stale_check
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
+        let runtime_tasks = Arc::new(super::super::RuntimeTaskService::new(
+            controller.clone(),
+            RuntimeTaskServiceConfig {
+                cancellation_grace_period: Duration::from_millis(20),
+                ..RuntimeTaskServiceConfig::default()
+            },
+        ));
+        let execution = tokio::spawn({
+            let runtime_tasks = Arc::clone(&runtime_tasks);
+            async move {
+                runtime_tasks
+                    .execute("stale-interrupt", CancellationToken::new())
+                    .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(2), claim_ready.notified())
+            .await
+            .map_err(|_| ReactError::Other("claim was not admitted".to_string()))?;
+        let claim = controller
+            .snapshot
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .and_then(|snapshot| snapshot.tasks.first())
+            .and_then(|task| task.execution.claim.clone())
+            .ok_or_else(|| ReactError::Other("claimed task was not persisted".to_string()))?;
+        let error = runtime_tasks
+            .request_attempt_interrupt("stale-interrupt", "slow", &claim)
+            .await
+            .err()
+            .ok_or_else(|| {
+                ReactError::Other("stale interrupt unexpectedly succeeded".to_string())
+            })?;
+        assert!(error.to_string().contains("stale or settled"));
+        let outcome = tokio::time::timeout(Duration::from_secs(2), execution)
+            .await
+            .map_err(|_| ReactError::Other("stale interrupt did not settle".to_string()))?
+            .map_err(|error| ReactError::Other(format!("runtime task panicked: {error}")))??;
+        assert_eq!(outcome, RuntimeDagOutcome::Completed);
+        assert_eq!(
+            controller.statuses().get("slow"),
+            Some(&TaskStatus::Completed)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stale_claim_outcome_survives_reconciliation_failure() -> Result<()> {
+        let controller = Arc::new(ScriptedController::with_tasks(vec![runtime_task(
+            "settled",
+            TaskStatus::Completed,
+            &[],
+        )]));
+        *controller
+            .reconciliation_error
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            Some("live cleanup unavailable".to_string());
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let observed_cleanup = Arc::clone(&observed);
+        let service = super::super::RuntimeTaskService::new(
+            controller,
+            RuntimeTaskServiceConfig {
+                attempt_control_observer: Some(Arc::new(move |observation| {
+                    observed_cleanup
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .push(observation.clone());
+                })),
+                ..RuntimeTaskServiceConfig::default()
+            },
+        );
+        let stale = TaskClaim::new(1, 1, "stale".to_string());
+
+        assert!(matches!(
+            service
+                .request_attempt_interrupt("stale-cleanup", "settled", &stale)
+                .await,
+            Err(super::super::RuntimeTaskAttemptInterruptError::StaleOrSettledClaim { .. })
+        ));
+        assert!(
+            observed
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .iter()
+                .any(|observation| {
+                    observation.run_id == "stale-cleanup"
+                        && observation.task_id == "settled"
+                        && matches!(
+                            &observation.receipt,
+                            RuntimeAttemptControlCleanupReceipt::RetryableFailure { .. }
+                        )
+                })
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn exact_interrupt_aborts_non_cooperative_attempt_after_grace() -> Result<()> {
+        let controller = Arc::new(ScriptedController::with_tasks(vec![runtime_task(
+            "stuck",
+            TaskStatus::Pending,
+            &[],
+        )]));
+        let claim_ready = Arc::new(tokio::sync::Notify::new());
+        *controller
+            .claim_ready
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(claim_ready.clone());
+        controller
+            .ignore_cancel
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert("stuck".to_string());
+        let runtime_tasks = Arc::new(super::super::RuntimeTaskService::new(
+            controller.clone(),
+            RuntimeTaskServiceConfig {
+                cancellation_grace_period: Duration::from_millis(20),
+                ..RuntimeTaskServiceConfig::default()
+            },
+        ));
+        let execution = tokio::spawn({
+            let runtime_tasks = Arc::clone(&runtime_tasks);
+            async move {
+                runtime_tasks
+                    .execute("forced-interrupt", CancellationToken::new())
+                    .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(2), claim_ready.notified())
+            .await
+            .map_err(|_| ReactError::Other("claim was not admitted".to_string()))?;
+        let claim = controller
+            .snapshot
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .and_then(|snapshot| snapshot.tasks.first())
+            .and_then(|task| task.execution.claim.clone())
+            .ok_or_else(|| ReactError::Other("claimed task was not persisted".to_string()))?;
+        let mut receipt = None;
+        for _ in 0..100 {
+            let candidate = runtime_tasks
+                .request_attempt_interrupt("forced-interrupt", "stuck", &claim)
+                .await?;
+            if candidate.requested {
+                receipt = Some(candidate);
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(receipt.is_some());
+        let outcome = tokio::time::timeout(Duration::from_secs(2), execution)
+            .await
+            .map_err(|_| ReactError::Other("non-cooperative interrupt did not settle".to_string()))?
+            .map_err(|error| ReactError::Other(format!("runtime task panicked: {error}")))??;
+        assert_eq!(outcome, RuntimeDagOutcome::Cancelled);
+        assert_eq!(
+            controller.statuses().get("stuck"),
+            Some(&TaskStatus::Cancelled)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn concurrent_exact_aborts_settle_their_own_claims() -> Result<()> {
+        let controller = Arc::new(ScriptedController::with_tasks(vec![
+            runtime_task("left", TaskStatus::Pending, &[]),
+            runtime_task("right", TaskStatus::Pending, &[]),
+        ]));
+        controller
+            .ignore_cancel
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .extend(["left".to_string(), "right".to_string()]);
+        let runtime_tasks = Arc::new(super::super::RuntimeTaskService::new(
+            controller.clone(),
+            RuntimeTaskServiceConfig {
+                max_concurrent_subagents: 2,
+                cancellation_grace_period: Duration::from_millis(20),
+                ..RuntimeTaskServiceConfig::default()
+            },
+        ));
+        let execution = tokio::spawn({
+            let runtime_tasks = Arc::clone(&runtime_tasks);
+            async move {
+                runtime_tasks
+                    .execute("concurrent-aborts", CancellationToken::new())
+                    .await
+            }
+        });
+        let claims = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let claims = controller
+                    .snapshot
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .as_ref()
+                    .map(|snapshot| {
+                        snapshot
+                            .tasks
+                            .iter()
+                            .filter_map(|task| {
+                                task.execution
+                                    .claim
+                                    .clone()
+                                    .map(|claim| (task.spec.id.clone(), claim))
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                if claims.len() == 2 {
+                    break claims;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .map_err(|_| ReactError::Other("both exact claims were not admitted".to_string()))?;
+        for (task_id, claim) in claims {
+            assert!(
+                runtime_tasks
+                    .request_attempt_interrupt("concurrent-aborts", &task_id, &claim)
+                    .await?
+                    .requested
+            );
+        }
+        let outcome = tokio::time::timeout(Duration::from_secs(2), execution)
+            .await
+            .map_err(|_| ReactError::Other("concurrent exact aborts did not settle".to_string()))?
+            .map_err(|error| ReactError::Other(format!("runtime task panicked: {error}")))??;
+        assert_eq!(outcome, RuntimeDagOutcome::Cancelled);
+        let statuses = controller.statuses();
+        assert_eq!(statuses.get("left"), Some(&TaskStatus::Cancelled));
+        assert_eq!(statuses.get("right"), Some(&TaskStatus::Cancelled));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn root_and_exact_abort_converge_without_cross_attempt_attribution() -> Result<()> {
+        let controller = Arc::new(ScriptedController::with_tasks(vec![
+            runtime_task("exact", TaskStatus::Pending, &[]),
+            runtime_task("root", TaskStatus::Pending, &[]),
+        ]));
+        controller
+            .ignore_cancel
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .extend(["exact".to_string(), "root".to_string()]);
+        let runtime_tasks = Arc::new(super::super::RuntimeTaskService::new(
+            controller.clone(),
+            RuntimeTaskServiceConfig {
+                max_concurrent_subagents: 2,
+                cancellation_grace_period: Duration::from_millis(20),
+                ..RuntimeTaskServiceConfig::default()
+            },
+        ));
+        let run_cancel = CancellationToken::new();
+        let execution = tokio::spawn({
+            let runtime_tasks = Arc::clone(&runtime_tasks);
+            let run_cancel = run_cancel.clone();
+            async move { runtime_tasks.execute("root-exact", run_cancel).await }
+        });
+        let exact_claim = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let claim = controller
+                    .snapshot
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .as_ref()
+                    .and_then(|snapshot| {
+                        let all_claimed = snapshot
+                            .tasks
+                            .iter()
+                            .all(|task| task.execution.claim.is_some());
+                        all_claimed.then(|| {
+                            snapshot
+                                .tasks
+                                .iter()
+                                .find(|task| task.spec.id == "exact")
+                                .and_then(|task| task.execution.claim.clone())
+                        })
+                    })
+                    .flatten();
+                if let Some(claim) = claim {
+                    break claim;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .map_err(|_| ReactError::Other("root/exact claims were not admitted".to_string()))?;
+        assert!(
+            runtime_tasks
+                .request_attempt_interrupt("root-exact", "exact", &exact_claim)
+                .await?
+                .requested
+        );
+        run_cancel.cancel();
+        let outcome = tokio::time::timeout(Duration::from_secs(2), execution)
+            .await
+            .map_err(|_| ReactError::Other("root/exact abort did not settle".to_string()))?
+            .map_err(|error| ReactError::Other(format!("runtime task panicked: {error}")))??;
+        assert_eq!(outcome, RuntimeDagOutcome::Cancelled);
+        let statuses = controller.statuses();
+        assert_eq!(statuses.get("exact"), Some(&TaskStatus::Cancelled));
+        assert_eq!(statuses.get("root"), Some(&TaskStatus::Cancelled));
         Ok(())
     }
 

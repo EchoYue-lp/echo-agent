@@ -71,6 +71,45 @@ timeout也不会消费未来的task result。Status、result delivery、list和r
 controller 返回已提交快照，并以 compare-and-set 完成 claim 与结果提交；它不
 复制 DAG 主循环。
 
+### 精确 Attempt 控制
+
+每个已 claim 的任务都通过 `TaskClaim::execution_id(run_id, task_id)` 派生
+Subagent execution identity。runtime 在容量接纳前预留该 identity，并让同一个
+task child cancellation token 贯穿 dispatch、事件、终态结算和 live control。
+取消整个 run 会传播到所有 child；`request_attempt_interrupt` 只取消 exact claim，
+且在投影控制请求后再次检查持久 claim。
+
+`TeamRuntimeHandle` 绑定同一个 Team run ID、任务 store、`RuntimeTaskService` 和
+Subagent control registry。执行期间需要并发检查快照或精确取消时，应保留该 handle：
+
+```rust,ignore
+let handle = team.runtime_handle().await?;
+let execution = team.execute("review the repository");
+
+let snapshot = handle.snapshot().await?;
+let task = snapshot.tasks.iter().find(|task| task.execution.claim.is_some())?;
+let claim = task.execution.claim.as_ref()?;
+handle
+    .request_attempt_interrupt(&task.spec.id, claim)
+    .await?;
+```
+
+live pending/reserved/active/settled 记录只是进程内投影。
+`RuntimeTaskService::reconcile_attempt_control` 在恢复时依据持久 TaskClaim 重建其
+有效性。持久 command replay 属于 Host；重放时必须携带 exact claim identity，
+不能只依赖 execution name。
+如果已 join 的 attempt 无法证明持久终态，等待者会收到类型化 authority error，
+而不是无限等待。恢复先向 stale joined waiter 发布持久 supersede 并退休本地
+supervisor 状态，再等待尽力而为的 live-controller cleanup；仍 active 的 attempt
+继续保留 binding，直到 targeted abort 与 canonical join 完成。
+自定义 Team 集成必须实现完整 `TeamDispatchController`，使 dispatch、reservation、
+interrupt、cleanup 与 reconciliation 共用一个 live control scope。每个保留 runtime
+都有唯一 `handle_id`；同一个业务 run 可持有多个 handle，不会由后创建者覆盖先前控制
+权威。active handle 不受历史数量上限淘汰；只有已结算 handle 进入有界的 64 项保留集。
+需要并发控制的 caller-supplied runtime 应构造单个
+`TeamRuntimeServiceHandle<R>` 并传给 `execute_team_on_runtime_service`，从类型上阻止
+graph/output authority 与 execution/CAS authority 来自不同 runtime 实例。
+
 ## 进度
 
 `PhasePlan` 和 `ProgressReporter` 提供任务内结构化进度。`ProgressBridge` 可将

@@ -6,12 +6,16 @@
 //! module while holding that transaction. This keeps claim/CAS/retry semantics
 //! identical across in-memory and product file stores.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use echo_core::error::Result;
 use tokio_util::sync::CancellationToken;
 
-use super::runtime_executor::RuntimeDagExecutor;
+use super::runtime_executor::{
+    AttemptSettlementObservation, RuntimeAttemptControlCleanupReceipt, RuntimeAttemptObservation,
+    RuntimeDagExecutor,
+};
 use super::{
     RuntimeDagController, RuntimeDagOutcome, RuntimeInterruptionDisposition, RuntimePlanSnapshot,
     RuntimeRetryExhaustion, RuntimeTaskClaimOutcome, RuntimeTaskServiceConfig, Task, TaskClaim,
@@ -47,6 +51,111 @@ pub enum RuntimeTaskMutationError {
     },
     #[error("task '{task_id}' has an invalid runtime claim: {message}")]
     InvalidClaim { task_id: String, message: String },
+}
+
+/// Immediate result of requesting cancellation for one exact claimed attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeTaskAttemptInterruptReceipt {
+    pub run_id: String,
+    pub task_id: TaskId,
+    pub execution_id: String,
+    pub revision: u64,
+    pub attempt: u32,
+    pub requested: bool,
+    pub disposition: RuntimeTaskAttemptInterruptDisposition,
+}
+
+/// Typed process-local result of projecting one durable exact interrupt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeTaskAttemptInterruptDisposition {
+    QueuedBeforeReservation,
+    ReservedRequested,
+    ActiveRequested,
+    ActiveAlreadyRequested,
+    AlreadySettled { status: String },
+}
+
+impl RuntimeTaskAttemptInterruptDisposition {
+    fn starts_cancellation(&self) -> bool {
+        matches!(
+            self,
+            Self::QueuedBeforeReservation | Self::ReservedRequested | Self::ActiveRequested
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum RuntimeTaskAttemptInterruptError {
+    #[error("runtime attempt claim is stale or settled: {run_id}/{task_id}/{execution_id}")]
+    StaleOrSettledClaim {
+        run_id: String,
+        task_id: String,
+        execution_id: String,
+    },
+    #[error("runtime interrupt pending capacity exceeded (limit {limit})")]
+    PendingCapacityExceeded { limit: usize },
+    #[error(
+        "runtime task '{task_id}' attempt {attempt} execution identity conflict: expected {expected_execution_id}, actual {actual_execution_id}"
+    )]
+    IdentityConflict {
+        task_id: String,
+        attempt: u32,
+        expected_execution_id: String,
+        actual_execution_id: String,
+    },
+    #[error("runtime attempt durable authority unavailable: {message}")]
+    DurableAuthority { message: String },
+    #[error("runtime attempt live control unavailable: {message}")]
+    LiveControl { message: String },
+}
+
+/// Rejection produced while a controller projects a durable exact command
+/// into its process-local live-control registry.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum RuntimeTaskAttemptInterruptProjectionError {
+    #[error("runtime interrupt pending capacity exceeded (limit {limit})")]
+    PendingCapacityExceeded { limit: usize },
+    #[error(
+        "runtime task '{task_id}' attempt {attempt} execution identity conflict: expected {expected_execution_id}, actual {actual_execution_id}"
+    )]
+    IdentityConflict {
+        task_id: String,
+        attempt: u32,
+        expected_execution_id: String,
+        actual_execution_id: String,
+    },
+    #[error("runtime attempt live control unavailable: {message}")]
+    Unavailable { message: String },
+}
+
+impl From<RuntimeTaskAttemptInterruptProjectionError> for RuntimeTaskAttemptInterruptError {
+    fn from(error: RuntimeTaskAttemptInterruptProjectionError) -> Self {
+        match error {
+            RuntimeTaskAttemptInterruptProjectionError::PendingCapacityExceeded { limit } => {
+                Self::PendingCapacityExceeded { limit }
+            }
+            RuntimeTaskAttemptInterruptProjectionError::IdentityConflict {
+                task_id,
+                attempt,
+                expected_execution_id,
+                actual_execution_id,
+            } => Self::IdentityConflict {
+                task_id,
+                attempt,
+                expected_execution_id,
+                actual_execution_id,
+            },
+            RuntimeTaskAttemptInterruptProjectionError::Unavailable { message } => {
+                Self::LiveControl { message }
+            }
+        }
+    }
+}
+
+impl From<RuntimeTaskAttemptInterruptError> for echo_core::error::ReactError {
+    fn from(error: RuntimeTaskAttemptInterruptError) -> Self {
+        Self::Other(error.to_string())
+    }
 }
 
 /// Typed compare-and-set result for one exact physical claim settlement.
@@ -147,7 +256,301 @@ impl<C: RuntimeDagController> RuntimeTaskService<C> {
         run_id: &str,
         cancel: CancellationToken,
     ) -> Result<RuntimeDagOutcome> {
+        self.reconcile_attempt_control(run_id).await?;
         self.executor.execute(run_id, cancel).await
+    }
+
+    /// Reconcile live attempt projections from the durable TaskClaim snapshot.
+    /// This is safe to replay on process recovery and before command replay.
+    pub async fn reconcile_attempt_control(&self, run_id: &str) -> Result<()> {
+        let snapshot = self.executor.controller.load_snapshot(run_id).await?;
+        validate_runtime_snapshot_claims(&snapshot).map_err(|error| {
+            echo_core::error::ReactError::Other(format!(
+                "invalid runtime claim snapshot during control reconciliation: {error}"
+            ))
+        })?;
+        let current_execution_ids = snapshot
+            .tasks
+            .iter()
+            .filter_map(|task| {
+                task.execution
+                    .claim
+                    .as_ref()
+                    .map(|claim| claim.execution_id(run_id, &task.spec.id))
+            })
+            .collect::<HashSet<_>>();
+        self.executor
+            .reconcile_local_attempt_control(run_id, &current_execution_ids);
+        self.executor
+            .controller
+            .reconcile_attempt_control(run_id, &current_execution_ids)
+            .await
+    }
+
+    /// Request cancellation for one exact current claim without affecting
+    /// sibling task children. The durable claim check is the authority; the
+    /// process-local token map is only the live cancellation projection.
+    pub async fn request_attempt_interrupt(
+        &self,
+        run_id: &str,
+        task_id: &str,
+        claim: &TaskClaim,
+    ) -> std::result::Result<RuntimeTaskAttemptInterruptReceipt, RuntimeTaskAttemptInterruptError>
+    {
+        let execution_id = claim.execution_id(run_id, task_id);
+        let current = self
+            .executor
+            .controller
+            .claim_is_current(run_id, task_id, claim)
+            .await
+            .map_err(|error| RuntimeTaskAttemptInterruptError::DurableAuthority {
+                message: error.to_string(),
+            })?;
+        if !current {
+            if let Err(error) = self.reconcile_attempt_control(run_id).await {
+                self.observe_reconciliation_failure(run_id, task_id, claim, &error);
+                tracing::warn!(
+                    run_id,
+                    task_id,
+                    error = %error,
+                    "stale runtime attempt control reconciliation requires retry"
+                );
+            }
+            return Err(RuntimeTaskAttemptInterruptError::StaleOrSettledClaim {
+                run_id: run_id.to_string(),
+                task_id: task_id.to_string(),
+                execution_id,
+            });
+        }
+        let registry_disposition = self
+            .executor
+            .controller
+            .request_live_interrupt(run_id, task_id, claim)
+            .await
+            .map_err(RuntimeTaskAttemptInterruptError::from)?;
+        let observation = self.executor.observe_attempt(&execution_id);
+        let (active_cancel, joined_settlement) = match observation {
+            Some(RuntimeAttemptObservation::Active { cancel, settled_rx }) => {
+                let controller_already_settled = matches!(
+                    &registry_disposition,
+                    Some(RuntimeTaskAttemptInterruptDisposition::AlreadySettled { .. })
+                );
+                if controller_already_settled {
+                    (None, Some(settled_rx))
+                } else {
+                    (Some(cancel), None)
+                }
+            }
+            Some(RuntimeAttemptObservation::JoinedAwaitingDurableSettlement { settled_rx }) => {
+                (None, Some(settled_rx))
+            }
+            None => (None, None),
+        };
+        if let Some(settled_rx) = joined_settlement {
+            if !self
+                .executor
+                .controller
+                .claim_is_current(run_id, task_id, claim)
+                .await
+                .map_err(|error| RuntimeTaskAttemptInterruptError::DurableAuthority {
+                    message: error.to_string(),
+                })?
+            {
+                if let Err(error) = self.reconcile_attempt_control(run_id).await {
+                    self.observe_reconciliation_failure(run_id, task_id, claim, &error);
+                }
+                return Err(RuntimeTaskAttemptInterruptError::StaleOrSettledClaim {
+                    run_id: run_id.to_string(),
+                    task_id: task_id.to_string(),
+                    execution_id,
+                });
+            }
+            return self
+                .wait_for_attempt_settlement(run_id, task_id, claim, settled_rx)
+                .await;
+        }
+        let disposition = match registry_disposition {
+            Some(disposition) => disposition,
+            None => match active_cancel.or_else(|| {
+                self.executor
+                    .attempt_cancellations
+                    .lock()
+                    .ok()
+                    .and_then(|controls| controls.get(&execution_id).cloned())
+            }) {
+                Some(cancel) if cancel.is_cancelled() => {
+                    RuntimeTaskAttemptInterruptDisposition::ActiveAlreadyRequested
+                }
+                Some(cancel) => {
+                    cancel.cancel();
+                    RuntimeTaskAttemptInterruptDisposition::ActiveRequested
+                }
+                None => {
+                    let mut pending =
+                        self.executor
+                            .pending_attempt_interrupts
+                            .lock()
+                            .map_err(|_| RuntimeTaskAttemptInterruptError::LiveControl {
+                                message: "runtime interrupt pending state is unavailable"
+                                    .to_string(),
+                            })?;
+                    if pending.len() >= 256 && !pending.contains_key(&execution_id) {
+                        return Err(RuntimeTaskAttemptInterruptError::PendingCapacityExceeded {
+                            limit: 256,
+                        });
+                    }
+                    pending.insert(execution_id.clone(), run_id.to_string());
+                    RuntimeTaskAttemptInterruptDisposition::QueuedBeforeReservation
+                }
+            },
+        };
+        let requested = disposition.starts_cancellation();
+        // The claim can be superseded between the first precondition check and
+        // the live-token write. Re-read the durable authority and retire only
+        // the exact projection just written; never let a stale command claim a
+        // future attempt or turn the race into a second task transition.
+        if !self
+            .executor
+            .controller
+            .claim_is_current(run_id, task_id, claim)
+            .await
+            .map_err(|error| RuntimeTaskAttemptInterruptError::DurableAuthority {
+                message: error.to_string(),
+            })?
+        {
+            if let Err(error) = self.reconcile_attempt_control(run_id).await {
+                self.observe_reconciliation_failure(run_id, task_id, claim, &error);
+                tracing::warn!(
+                    run_id,
+                    task_id,
+                    error = %error,
+                    "raced stale runtime attempt control reconciliation requires retry"
+                );
+            }
+            return Err(RuntimeTaskAttemptInterruptError::StaleOrSettledClaim {
+                run_id: run_id.to_string(),
+                task_id: task_id.to_string(),
+                execution_id,
+            });
+        }
+        if requested
+            && disposition != RuntimeTaskAttemptInterruptDisposition::QueuedBeforeReservation
+        {
+            self.executor
+                .schedule_attempt_abort(execution_id.clone(), false);
+        }
+        Ok(RuntimeTaskAttemptInterruptReceipt {
+            run_id: run_id.to_string(),
+            task_id: task_id.to_string(),
+            execution_id,
+            revision: claim.revision,
+            attempt: claim.attempt,
+            requested,
+            disposition,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending_attempt_interrupt_count(&self) -> usize {
+        self.executor
+            .pending_attempt_interrupts
+            .lock()
+            .map(|pending| pending.len())
+            .unwrap_or_default()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn attempt_settlement_observation(
+        &self,
+        execution_id: &str,
+    ) -> Option<AttemptSettlementObservation> {
+        let settled_rx = match self.executor.observe_attempt(execution_id)? {
+            RuntimeAttemptObservation::Active { settled_rx, .. }
+            | RuntimeAttemptObservation::JoinedAwaitingDurableSettlement { settled_rx } => {
+                settled_rx
+            }
+        };
+        settled_rx.borrow().clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn attempt_settlement_receiver(
+        &self,
+        execution_id: &str,
+    ) -> Option<tokio::sync::watch::Receiver<Option<AttemptSettlementObservation>>> {
+        match self.executor.observe_attempt(execution_id)? {
+            RuntimeAttemptObservation::Active { settled_rx, .. }
+            | RuntimeAttemptObservation::JoinedAwaitingDurableSettlement { settled_rx } => {
+                Some(settled_rx)
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_attempt_supervisor_state(&self, execution_id: &str) -> bool {
+        self.executor.has_attempt_supervisor_state(execution_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reconcile_local_attempt_control(
+        &self,
+        run_id: &str,
+        current_execution_ids: &HashSet<String>,
+    ) {
+        self.executor
+            .reconcile_local_attempt_control(run_id, current_execution_ids);
+    }
+
+    fn observe_reconciliation_failure(
+        &self,
+        run_id: &str,
+        task_id: &str,
+        claim: &TaskClaim,
+        error: &echo_core::error::ReactError,
+    ) {
+        self.executor.observe_attempt_control_cleanup(
+            run_id,
+            task_id,
+            claim,
+            RuntimeAttemptControlCleanupReceipt::RetryableFailure {
+                error: error.to_string(),
+            },
+        );
+    }
+
+    async fn wait_for_attempt_settlement(
+        &self,
+        run_id: &str,
+        task_id: &str,
+        claim: &TaskClaim,
+        mut settled_rx: tokio::sync::watch::Receiver<Option<AttemptSettlementObservation>>,
+    ) -> std::result::Result<RuntimeTaskAttemptInterruptReceipt, RuntimeTaskAttemptInterruptError>
+    {
+        let observation = loop {
+            if let Some(observation) = settled_rx.borrow_and_update().clone() {
+                break observation;
+            }
+            settled_rx.changed().await.map_err(|_| {
+                RuntimeTaskAttemptInterruptError::LiveControl {
+                    message: "joined attempt settlement observation closed".to_string(),
+                }
+            })?;
+        };
+        let status = match observation {
+            AttemptSettlementObservation::Settled { status } => status,
+            AttemptSettlementObservation::AuthorityUnknown { error } => {
+                return Err(RuntimeTaskAttemptInterruptError::DurableAuthority { message: error });
+            }
+        };
+        Ok(RuntimeTaskAttemptInterruptReceipt {
+            run_id: run_id.to_string(),
+            task_id: task_id.to_string(),
+            execution_id: claim.execution_id(run_id, task_id),
+            revision: claim.revision,
+            attempt: claim.attempt,
+            requested: false,
+            disposition: RuntimeTaskAttemptInterruptDisposition::AlreadySettled { status },
+        })
     }
 }
 
@@ -643,6 +1046,32 @@ pub fn validate_runtime_snapshot_claims(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn interrupt_projection_errors_preserve_typed_capacity_and_identity() {
+        assert_eq!(
+            RuntimeTaskAttemptInterruptError::from(
+                RuntimeTaskAttemptInterruptProjectionError::PendingCapacityExceeded { limit: 9 }
+            ),
+            RuntimeTaskAttemptInterruptError::PendingCapacityExceeded { limit: 9 }
+        );
+        assert_eq!(
+            RuntimeTaskAttemptInterruptError::from(
+                RuntimeTaskAttemptInterruptProjectionError::IdentityConflict {
+                    task_id: "task".to_string(),
+                    attempt: 3,
+                    expected_execution_id: "expected".to_string(),
+                    actual_execution_id: "actual".to_string(),
+                }
+            ),
+            RuntimeTaskAttemptInterruptError::IdentityConflict {
+                task_id: "task".to_string(),
+                attempt: 3,
+                expected_execution_id: "expected".to_string(),
+                actual_execution_id: "actual".to_string(),
+            }
+        );
+    }
     use crate::tasks::{TaskExecution, TaskSpec};
 
     fn task(id: &str) -> Task {

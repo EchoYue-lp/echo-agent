@@ -9,6 +9,7 @@ mod manager_subagent;
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -21,14 +22,19 @@ use tokio_util::sync::CancellationToken;
 
 use echo_orchestration::tasks::{
     DefaultTaskToolPolicy, InMemoryRevisionedTaskStore, NestedDelegationPolicy,
-    RevisionedTaskGraph, RevisionedTaskStore, RuntimeClaimAbandonment, RuntimeDagController,
-    RuntimeDagOutcome, RuntimeInterruptionDisposition, RuntimeInterruptionSettlementOutcome,
-    RuntimePlanSnapshot, RuntimeTaskClaimOutcome, RuntimeTaskResolution,
-    RuntimeTaskResolutionRequest, RuntimeTaskService, RuntimeTaskServiceConfig, Task, TaskClaim,
-    TaskExecution, TaskGraphContext, TaskGraphExecutionMode, TaskPlanPatch, TaskPlanPatchOp,
-    TaskRevisionError, TaskRevisionService, TaskSpec, TaskStatus, TaskSubagentContext,
+    RevisionedTaskGraph, RevisionedTaskStore, RuntimeAttemptControlCleanupReceipt,
+    RuntimeClaimAbandonment, RuntimeDagController, RuntimeDagOutcome,
+    RuntimeInterruptionDisposition, RuntimeInterruptionSettlementOutcome, RuntimePlanSnapshot,
+    RuntimeTaskAttemptInterruptDisposition, RuntimeTaskAttemptInterruptProjectionError,
+    RuntimeTaskClaimOutcome, RuntimeTaskResolution, RuntimeTaskResolutionRequest,
+    RuntimeTaskService, RuntimeTaskServiceConfig, Task, TaskClaim, TaskExecution, TaskGraphContext,
+    TaskGraphExecutionMode, TaskPlanPatch, TaskPlanPatchOp, TaskRevisionError, TaskRevisionService,
+    TaskSpec, TaskStatus, TaskSubagentContext,
 };
 
+use super::control::{
+    SubagentAttemptIdentity, SubagentControlError, SubagentInterruptRequestDisposition,
+};
 use super::executor::{DispatchRequest, SubagentExecutor, SubagentExecutorConfig};
 use super::registry::SubagentRegistry;
 use super::types::{ExecutionMode, SubagentDefinition, SubagentResult, SubagentStatus};
@@ -272,70 +278,297 @@ impl Team {
         Ok(spec)
     }
 
-    fn dispatch(&self) -> TeamDispatchFn {
+    async fn dispatch_controller(&self) -> Arc<dyn TeamDispatchController> {
         let members = self.members.clone();
-        let runtime = Arc::new(tokio::sync::OnceCell::<Arc<SubagentExecutor>>::new());
+        let registry = Arc::new(SubagentRegistry::new());
+        for member in members.values() {
+            registry
+                .register_shared(member.definition.clone(), member.agent.clone())
+                .await;
+        }
+        let executor = Arc::new(SubagentExecutor::new(
+            registry,
+            SubagentExecutorConfig {
+                max_concurrent_forks: self.config.max_concurrent.max(1),
+                default_timeout_secs: self.config.default_timeout_secs,
+                ..SubagentExecutorConfig::default()
+            },
+        ));
+        let control_scope_id = format!("team-control-{}", uuid::Uuid::new_v4().as_simple());
         let parent_agent = self.name.clone();
-        let config = self.config.clone();
-        Arc::new(move |name, task, cancel| {
+        let dispatch_executor = Arc::clone(&executor);
+        let dispatch_scope_id = control_scope_id.clone();
+        let dispatch: TeamDispatchFn = Arc::new(move |request| {
+            let TeamDispatchRequest {
+                member: name,
+                task,
+                context,
+            } = request;
             let member = members.get(&name).cloned();
-            let members = members.clone();
-            let runtime = runtime.clone();
+            let executor = Arc::clone(&dispatch_executor);
             let parent_agent = parent_agent.clone();
-            let config = config.clone();
+            let control_scope_id = dispatch_scope_id.clone();
             Box::pin(async move {
-                let member = member.ok_or_else(|| format!("Team member '{name}' not found"))?;
+                let member = member
+                    .ok_or_else(|| ReactError::Other(format!("Team member '{name}' not found")))?;
                 let _execution = member.execution_gate.lock().await;
-                let executor = runtime
-                    .get_or_init(|| async move {
-                        let registry = Arc::new(SubagentRegistry::new());
-                        for member in members.values() {
-                            registry
-                                .register_shared(member.definition.clone(), member.agent.clone())
-                                .await;
-                        }
-                        Arc::new(SubagentExecutor::new(
-                            registry,
-                            SubagentExecutorConfig {
-                                max_concurrent_forks: config.max_concurrent.max(1),
-                                default_timeout_secs: config.default_timeout_secs,
-                                ..SubagentExecutorConfig::default()
-                            },
-                        ))
-                    })
-                    .await;
+                let claim = context.claim().ok_or_else(|| {
+                    ReactError::Other("Team member dispatch requires an exact claim".to_string())
+                })?;
+                let task_id = context.task_id().ok_or_else(|| {
+                    ReactError::Other("Team member dispatch requires an exact task id".to_string())
+                })?;
+                let identity = SubagentAttemptIdentity::for_runtime_scope(
+                    control_scope_id,
+                    context.run_id().to_string(),
+                    task_id.to_string(),
+                    claim.execution_id(context.run_id(), task_id),
+                    claim.attempt,
+                )
+                .map_err(|error| ReactError::Other(error.to_string()))?;
                 executor
-                    .dispatch(DispatchRequest {
-                        agent_name: name,
-                        task,
-                        mode_override: Some(ExecutionMode::Sync),
-                        cancel,
-                        parent_agent,
-                        parent_context: None,
-                        delegation_policy: NestedDelegationPolicy::default(),
-                        runtime_context: None,
-                        message: None,
-                        prompt_payload: None,
-                        prompt_context: None,
-                        constraints: Vec::new(),
-                        background: false,
-                    })
+                    .dispatch_attempt(
+                        DispatchRequest {
+                            agent_name: name,
+                            task,
+                            mode_override: Some(ExecutionMode::Sync),
+                            cancel: context.cancellation_token().clone(),
+                            parent_agent,
+                            parent_context: None,
+                            delegation_policy: NestedDelegationPolicy::default(),
+                            runtime_context: Some(context.runtime_context()),
+                            message: None,
+                            prompt_payload: None,
+                            prompt_context: None,
+                            constraints: Vec::new(),
+                            background: false,
+                        },
+                        identity,
+                    )
                     .await
-                    .map_err(|error| error.to_string())
             })
-        })
+        });
+        let reserve_executor = Arc::clone(&executor);
+        let reserve_scope_id = control_scope_id.clone();
+        let reserve_attempt: TeamReserveAttemptFn = Arc::new(move |context| {
+            let identity = identity_from_context(&context, &reserve_scope_id, "Team reservation")?;
+            reserve_executor
+                .reserve_attempt(identity, context.cancellation_token().clone())
+                .map_err(|error| error.to_string())
+        });
+        let interrupt_executor = Arc::clone(&executor);
+        let interrupt_scope_id = control_scope_id.clone();
+        let request_interrupt: TeamRequestInterruptFn = Arc::new(move |run_id, task_id, claim| {
+            let identity = SubagentAttemptIdentity::for_runtime_scope(
+                interrupt_scope_id.clone(),
+                run_id.clone(),
+                task_id.clone(),
+                claim.execution_id(&run_id, &task_id),
+                claim.attempt,
+            )
+            .map_err(runtime_interrupt_projection_error)?;
+            interrupt_executor
+                .request_interrupt(identity)
+                .map(|receipt| Some(runtime_interrupt_disposition(receipt.disposition)))
+                .map_err(runtime_interrupt_projection_error)
+        });
+        let reconcile_executor = Arc::clone(&executor);
+        let reconcile_scope_id = control_scope_id.clone();
+        let reconcile_attempts: TeamReconcileAttemptFn =
+            Arc::new(move |_run_id, current_execution_ids| {
+                reconcile_executor
+                    .reconcile_attempt_control(&reconcile_scope_id, &current_execution_ids)
+                    .map_err(|error| error.to_string())
+            });
+        let cleanup_executor = executor;
+        let cleanup_scope_id = control_scope_id;
+        let retire_attempt: TeamRetireAttemptFn = Arc::new(move |run_id, task, claim| {
+            let cleanup_executor = Arc::clone(&cleanup_executor);
+            let control_scope_id = cleanup_scope_id.clone();
+            Box::pin(async move {
+                let task_id = task.spec.id.clone();
+                let identity = match SubagentAttemptIdentity::for_runtime_scope(
+                    control_scope_id,
+                    run_id.clone(),
+                    task_id.clone(),
+                    claim.execution_id(&run_id, &task_id),
+                    claim.attempt,
+                ) {
+                    Ok(identity) => identity,
+                    Err(error) => {
+                        return RuntimeAttemptControlCleanupReceipt::RetryableFailure {
+                            error: error.to_string(),
+                        };
+                    }
+                };
+                match cleanup_executor.retire_attempt_control(&identity) {
+                    Ok(true) => RuntimeAttemptControlCleanupReceipt::Retired,
+                    Ok(false) => RuntimeAttemptControlCleanupReceipt::AlreadyConsumed,
+                    Err(error) => RuntimeAttemptControlCleanupReceipt::RetryableFailure {
+                        error: error.to_string(),
+                    },
+                }
+            })
+        });
+        closure_dispatch_controller(
+            dispatch,
+            TeamDispatchControl {
+                reserve_attempt,
+                request_interrupt,
+                retire_attempt,
+                reconcile_attempts,
+            },
+        )
     }
 }
 
+/// Inseparable binding between one Team runtime authority and the canonical
+/// task service built from that exact `Arc<R>`.
+pub struct TeamRuntimeServiceHandle<R: TeamRuntime> {
+    runtime: Arc<R>,
+    runtime_tasks: Arc<RuntimeTaskService<R>>,
+}
+
+impl<R: TeamRuntime> Clone for TeamRuntimeServiceHandle<R> {
+    fn clone(&self) -> Self {
+        Self {
+            runtime: self.runtime.clone(),
+            runtime_tasks: self.runtime_tasks.clone(),
+        }
+    }
+}
+
+impl<R: TeamRuntime> TeamRuntimeServiceHandle<R> {
+    pub fn new(runtime: Arc<R>, config: RuntimeTaskServiceConfig) -> Self {
+        let runtime_tasks = Arc::new(RuntimeTaskService::new(runtime.clone(), config));
+        Self {
+            runtime,
+            runtime_tasks,
+        }
+    }
+
+    pub fn runtime(&self) -> &Arc<R> {
+        &self.runtime
+    }
+
+    pub fn runtime_tasks(&self) -> &Arc<RuntimeTaskService<R>> {
+        &self.runtime_tasks
+    }
+}
+
+/// Stable execution-time authority for one Team run.
+///
+/// The handle keeps the revisioned task store, canonical runtime service, and
+/// live Subagent control registry together. Exact control therefore cannot be
+/// accidentally issued through a fresh service that lacks the active attempt.
+#[derive(Clone)]
+pub struct TeamRuntimeHandle {
+    handle_id: String,
+    run_id: String,
+    service: TeamRuntimeServiceHandle<TeamRuntimeController>,
+    active_executions: Arc<AtomicUsize>,
+}
+
+pub(super) struct TeamRuntimeExecutionGuard {
+    active_executions: Arc<AtomicUsize>,
+}
+
+impl Drop for TeamRuntimeExecutionGuard {
+    fn drop(&mut self) {
+        self.active_executions.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+impl TeamRuntimeHandle {
+    fn new(
+        run_id: String,
+        runtime: Arc<TeamRuntimeController>,
+        config: RuntimeTaskServiceConfig,
+    ) -> Self {
+        Self {
+            handle_id: uuid::Uuid::new_v4().to_string(),
+            run_id,
+            service: TeamRuntimeServiceHandle::new(runtime, config),
+            active_executions: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    pub fn handle_id(&self) -> &str {
+        &self.handle_id
+    }
+
+    pub fn run_id(&self) -> &str {
+        &self.run_id
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.active_executions.load(Ordering::SeqCst) > 0
+    }
+
+    pub(super) fn start_execution(&self) -> TeamRuntimeExecutionGuard {
+        self.active_executions.fetch_add(1, Ordering::SeqCst);
+        TeamRuntimeExecutionGuard {
+            active_executions: Arc::clone(&self.active_executions),
+        }
+    }
+
+    pub async fn snapshot(&self) -> Result<RuntimePlanSnapshot> {
+        self.service.runtime().load_snapshot(&self.run_id).await
+    }
+
+    pub async fn request_attempt_interrupt(
+        &self,
+        task_id: &str,
+        claim: &TaskClaim,
+    ) -> std::result::Result<
+        echo_orchestration::tasks::RuntimeTaskAttemptInterruptReceipt,
+        echo_orchestration::tasks::RuntimeTaskAttemptInterruptError,
+    > {
+        self.service
+            .runtime_tasks()
+            .request_attempt_interrupt(&self.run_id, task_id, claim)
+            .await
+    }
+
+    pub(super) async fn execute(
+        &self,
+        spec: &TeamSpec,
+        objective: &str,
+        cancel: CancellationToken,
+    ) -> Result<TeamExecutionResult> {
+        let active = self.start_execution();
+        self.execute_started(spec, objective, cancel, active).await
+    }
+
+    pub(super) async fn execute_started(
+        &self,
+        spec: &TeamSpec,
+        objective: &str,
+        cancel: CancellationToken,
+        _active: TeamRuntimeExecutionGuard,
+    ) -> Result<TeamExecutionResult> {
+        execute_team_on_runtime_service(spec, objective, &self.run_id, cancel, &self.service).await
+    }
+}
+
+pub(super) fn runtime_handle_for_controller(
+    run_id: String,
+    controller: Arc<dyn TeamDispatchController>,
+    config: RuntimeTaskServiceConfig,
+) -> Arc<TeamRuntimeHandle> {
+    let runtime = Arc::new(TeamRuntimeController::with_controller(controller));
+    Arc::new(TeamRuntimeHandle::new(run_id, runtime, config))
+}
+
 /// Programmatic Team facade. It owns only concrete Agent handles and delegates
-/// all graph semantics to [`execute_team`].
+/// all graph semantics to [`TeamRuntimeHandle`].
 pub struct TeamAgent {
     team: Team,
     strategy: TeamStrategy,
     run_id: Option<String>,
     cancel: CancellationToken,
-    member_dispatch: Option<TeamDispatchFn>,
-    runtime: OnceCell<Arc<TeamRuntimeController>>,
+    member_controller: Option<Arc<dyn TeamDispatchController>>,
+    runtime: OnceCell<Arc<TeamRuntimeHandle>>,
 }
 
 impl TeamAgent {
@@ -345,7 +578,7 @@ impl TeamAgent {
             strategy,
             run_id: None,
             cancel: CancellationToken::new(),
-            member_dispatch: None,
+            member_controller: None,
             runtime: OnceCell::new(),
         }
     }
@@ -363,7 +596,10 @@ impl TeamAgent {
     }
 
     pub fn run_id(&self) -> Option<&str> {
-        self.run_id.as_deref()
+        self.runtime
+            .get()
+            .map(|handle| handle.run_id())
+            .or(self.run_id.as_deref())
     }
 
     pub fn cancellation_token(&self) -> &CancellationToken {
@@ -381,25 +617,38 @@ impl TeamAgent {
         task: &str,
     ) -> std::result::Result<TeamExecutionResult, String> {
         let spec = self.team.to_spec(self.strategy.clone())?;
-        let stable_run_id = self.run_id.clone();
-        let run_id = stable_run_id
-            .clone()
-            .unwrap_or_else(|| format!("team-{}", uuid::Uuid::new_v4().as_simple()));
-        let dispatch = self
-            .member_dispatch
-            .clone()
-            .unwrap_or_else(|| self.team.dispatch());
-        let runtime = if stable_run_id.is_some() {
-            self.runtime
-                .get_or_init(|| async move { Arc::new(TeamRuntimeController::new(dispatch)) })
-                .await
-                .clone()
-        } else {
-            Arc::new(TeamRuntimeController::new(dispatch))
-        };
-        execute_team_on_runtime(&spec, task, &run_id, self.cancel.child_token(), runtime)
+        let runtime = self.runtime_handle().await?;
+        runtime
+            .execute(&spec, task, self.cancel.child_token())
             .await
             .map_err(|error| error.to_string())
+    }
+
+    /// Return the stable runtime/control handle used by every execution of
+    /// this TeamAgent. Calling this before `execute` prepares the same handle
+    /// without starting task work.
+    pub async fn runtime_handle(&self) -> std::result::Result<Arc<TeamRuntimeHandle>, String> {
+        self.runtime
+            .get_or_try_init(|| async {
+                let run_id = self
+                    .run_id
+                    .clone()
+                    .unwrap_or_else(|| format!("team-{}", uuid::Uuid::new_v4().as_simple()));
+                let dispatch_controller = match self.member_controller.clone() {
+                    Some(controller) => controller,
+                    None => self.team.dispatch_controller().await,
+                };
+                Ok::<Arc<TeamRuntimeHandle>, String>(runtime_handle_for_controller(
+                    run_id,
+                    dispatch_controller,
+                    RuntimeTaskServiceConfig {
+                        max_concurrent_subagents: self.team.config.max_concurrent.max(1),
+                        ..RuntimeTaskServiceConfig::default()
+                    },
+                ))
+            })
+            .await
+            .cloned()
     }
 }
 
@@ -411,7 +660,7 @@ pub struct TeamAgentBuilder {
     config: TeamConfig,
     run_id: Option<String>,
     cancel: CancellationToken,
-    member_dispatch: Option<TeamDispatchFn>,
+    member_controller: Option<Arc<dyn TeamDispatchController>>,
 }
 
 impl Default for TeamAgentBuilder {
@@ -429,7 +678,7 @@ impl TeamAgentBuilder {
             config: TeamConfig::default(),
             run_id: None,
             cancel: CancellationToken::new(),
-            member_dispatch: None,
+            member_controller: None,
         }
     }
 
@@ -518,8 +767,11 @@ impl TeamAgentBuilder {
         self
     }
 
-    pub fn member_dispatch(mut self, dispatch: TeamDispatchFn) -> Self {
-        self.member_dispatch = Some(dispatch);
+    pub fn member_dispatch_controller(
+        mut self,
+        controller: Arc<dyn TeamDispatchController>,
+    ) -> Self {
+        self.member_controller = Some(controller);
         self
     }
 
@@ -540,21 +792,223 @@ impl TeamAgentBuilder {
         let mut team_agent = TeamAgent::new(team, self.strategy);
         team_agent.run_id = self.run_id;
         team_agent.cancel = self.cancel;
-        team_agent.member_dispatch = self.member_dispatch;
+        team_agent.member_controller = self.member_controller;
         Ok(team_agent)
     }
 }
 
+/// Structured request sent to one exact Team member attempt.
+#[derive(Debug, Clone)]
+pub struct TeamDispatchRequest {
+    pub member: String,
+    pub task: String,
+    pub context: TaskSubagentContext,
+}
+
+fn identity_from_context(
+    context: &TaskSubagentContext,
+    control_scope_id: &str,
+    operation: &str,
+) -> std::result::Result<SubagentAttemptIdentity, String> {
+    let claim = context
+        .claim()
+        .ok_or_else(|| format!("{operation} requires an exact TaskClaim"))?;
+    let task_id = context
+        .task_id()
+        .ok_or_else(|| format!("{operation} requires an exact task id"))?;
+    SubagentAttemptIdentity::for_runtime_scope(
+        control_scope_id.to_string(),
+        context.run_id().to_string(),
+        task_id.to_string(),
+        claim.execution_id(context.run_id(), task_id),
+        claim.attempt,
+    )
+    .map_err(|error| error.to_string())
+}
+
+pub(super) fn runtime_interrupt_disposition(
+    disposition: SubagentInterruptRequestDisposition,
+) -> RuntimeTaskAttemptInterruptDisposition {
+    match disposition {
+        SubagentInterruptRequestDisposition::QueuedBeforeAdmission => {
+            RuntimeTaskAttemptInterruptDisposition::QueuedBeforeReservation
+        }
+        SubagentInterruptRequestDisposition::ReservedRequested => {
+            RuntimeTaskAttemptInterruptDisposition::ReservedRequested
+        }
+        SubagentInterruptRequestDisposition::ActiveRequested => {
+            RuntimeTaskAttemptInterruptDisposition::ActiveRequested
+        }
+        SubagentInterruptRequestDisposition::ActiveAlreadyRequested => {
+            RuntimeTaskAttemptInterruptDisposition::ActiveAlreadyRequested
+        }
+        SubagentInterruptRequestDisposition::AlreadySettled(status) => {
+            RuntimeTaskAttemptInterruptDisposition::AlreadySettled {
+                status: status.as_str().to_string(),
+            }
+        }
+    }
+}
+
+pub(super) fn runtime_interrupt_projection_error(
+    error: SubagentControlError,
+) -> RuntimeTaskAttemptInterruptProjectionError {
+    match error {
+        SubagentControlError::PendingCapacityExceeded { limit } => {
+            RuntimeTaskAttemptInterruptProjectionError::PendingCapacityExceeded { limit }
+        }
+        SubagentControlError::IdentityConflict {
+            task_id,
+            attempt,
+            expected_execution_id,
+            actual_execution_id,
+        } => RuntimeTaskAttemptInterruptProjectionError::IdentityConflict {
+            task_id,
+            attempt,
+            expected_execution_id,
+            actual_execution_id,
+        },
+        error => RuntimeTaskAttemptInterruptProjectionError::Unavailable {
+            message: error.to_string(),
+        },
+    }
+}
+
 /// Canonical member execution adapter supplied by [`super::SubagentExecutor`].
-pub type TeamDispatchFn = Arc<
+pub type TeamDispatchFn =
+    Arc<dyn Fn(TeamDispatchRequest) -> BoxFuture<'static, Result<SubagentResult>> + Send + Sync>;
+
+/// Process-local reservation hook paired with a Team dispatch callback.
+pub type TeamReserveAttemptFn =
+    Arc<dyn Fn(TaskSubagentContext) -> std::result::Result<(), String> + Send + Sync>;
+
+/// Live exact-interrupt projection hook paired with a Team runtime.
+pub type TeamRequestInterruptFn = Arc<
     dyn Fn(
             String,
             String,
-            CancellationToken,
-        ) -> BoxFuture<'static, std::result::Result<SubagentResult, String>>
+            TaskClaim,
+        ) -> std::result::Result<
+            Option<RuntimeTaskAttemptInterruptDisposition>,
+            RuntimeTaskAttemptInterruptProjectionError,
+        > + Send
+        + Sync,
+>;
+
+/// Post-settlement cleanup hook for a Team attempt control projection.
+pub type TeamRetireAttemptFn = Arc<
+    dyn Fn(String, Task, TaskClaim) -> BoxFuture<'static, RuntimeAttemptControlCleanupReceipt>
         + Send
         + Sync,
 >;
+
+pub type TeamReconcileAttemptFn =
+    Arc<dyn Fn(String, HashSet<String>) -> std::result::Result<(), String> + Send + Sync>;
+
+#[derive(Clone)]
+pub(super) struct TeamDispatchControl {
+    pub reserve_attempt: TeamReserveAttemptFn,
+    pub request_interrupt: TeamRequestInterruptFn,
+    pub retire_attempt: TeamRetireAttemptFn,
+    pub reconcile_attempts: TeamReconcileAttemptFn,
+}
+
+impl Default for TeamDispatchControl {
+    fn default() -> Self {
+        Self {
+            reserve_attempt: Arc::new(|_| Ok(())),
+            request_interrupt: Arc::new(|_, _, _| Ok(None)),
+            retire_attempt: Arc::new(|_, _, _| {
+                Box::pin(async { RuntimeAttemptControlCleanupReceipt::Retired })
+            }),
+            reconcile_attempts: Arc::new(|_, _| Ok(())),
+        }
+    }
+}
+
+/// Complete execution and exact-control contract for Team member attempts.
+/// Implementations must keep dispatch and control on the same live registry.
+#[async_trait]
+pub trait TeamDispatchController: Send + Sync {
+    async fn dispatch(&self, request: TeamDispatchRequest) -> Result<SubagentResult>;
+
+    fn reserve_attempt(&self, context: TaskSubagentContext) -> std::result::Result<(), String>;
+
+    fn request_interrupt(
+        &self,
+        run_id: String,
+        task_id: String,
+        claim: TaskClaim,
+    ) -> std::result::Result<
+        Option<RuntimeTaskAttemptInterruptDisposition>,
+        RuntimeTaskAttemptInterruptProjectionError,
+    >;
+
+    async fn retire_attempt(
+        &self,
+        run_id: String,
+        task: Task,
+        claim: TaskClaim,
+    ) -> RuntimeAttemptControlCleanupReceipt;
+
+    fn reconcile_attempts(
+        &self,
+        run_id: String,
+        current_execution_ids: HashSet<String>,
+    ) -> std::result::Result<(), String>;
+}
+
+struct ClosureTeamDispatchController {
+    dispatch: TeamDispatchFn,
+    control: TeamDispatchControl,
+}
+
+#[async_trait]
+impl TeamDispatchController for ClosureTeamDispatchController {
+    async fn dispatch(&self, request: TeamDispatchRequest) -> Result<SubagentResult> {
+        (self.dispatch)(request).await
+    }
+
+    fn reserve_attempt(&self, context: TaskSubagentContext) -> std::result::Result<(), String> {
+        (self.control.reserve_attempt)(context)
+    }
+
+    fn request_interrupt(
+        &self,
+        run_id: String,
+        task_id: String,
+        claim: TaskClaim,
+    ) -> std::result::Result<
+        Option<RuntimeTaskAttemptInterruptDisposition>,
+        RuntimeTaskAttemptInterruptProjectionError,
+    > {
+        (self.control.request_interrupt)(run_id, task_id, claim)
+    }
+
+    async fn retire_attempt(
+        &self,
+        run_id: String,
+        task: Task,
+        claim: TaskClaim,
+    ) -> RuntimeAttemptControlCleanupReceipt {
+        (self.control.retire_attempt)(run_id, task, claim).await
+    }
+
+    fn reconcile_attempts(
+        &self,
+        run_id: String,
+        current_execution_ids: HashSet<String>,
+    ) -> std::result::Result<(), String> {
+        (self.control.reconcile_attempts)(run_id, current_execution_ids)
+    }
+}
+
+pub(super) fn closure_dispatch_controller(
+    dispatch: TeamDispatchFn,
+    control: TeamDispatchControl,
+) -> Arc<dyn TeamDispatchController> {
+    Arc::new(ClosureTeamDispatchController { dispatch, control })
+}
 
 /// Terminal output of one Team graph execution.
 #[derive(Debug, Clone)]
@@ -625,10 +1079,42 @@ pub async fn execute_team_on_runtime<R>(
 where
     R: TeamRuntime,
 {
+    let service = TeamRuntimeServiceHandle::new(
+        runtime.clone(),
+        RuntimeTaskServiceConfig {
+            max_concurrent_subagents: spec.config.max_concurrent.max(1),
+            ..RuntimeTaskServiceConfig::default()
+        },
+    );
+    execute_team_on_runtime_service(spec, objective, run_id, cancel, &service).await
+}
+
+/// Execute or resume a Team with a caller-retained runtime service.
+///
+/// Use this entry point when exact control must run concurrently with a
+/// caller-supplied [`TeamRuntime`]; the same service owns execution, supervisor
+/// handles, reconciliation, and interrupt requests.
+pub async fn execute_team_on_runtime_service<R>(
+    spec: &TeamSpec,
+    objective: &str,
+    run_id: &str,
+    cancel: CancellationToken,
+    service: &TeamRuntimeServiceHandle<R>,
+) -> Result<TeamExecutionResult>
+where
+    R: TeamRuntime,
+{
     validate_team_spec(spec)?;
     let timeout = spec.config.default_timeout_secs;
     let timeout_cancel = cancel.clone();
-    let execution = execute_team_inner(spec, objective, run_id, cancel, runtime);
+    let execution = execute_team_inner(
+        spec,
+        objective,
+        run_id,
+        cancel,
+        service.runtime().clone(),
+        service.runtime_tasks().clone(),
+    );
     if timeout == 0 {
         execution.await
     } else {
@@ -661,18 +1147,12 @@ async fn execute_team_inner<R>(
     run_id: &str,
     cancel: CancellationToken,
     runtime: Arc<R>,
+    runtime_tasks: Arc<RuntimeTaskService<R>>,
 ) -> Result<TeamExecutionResult>
 where
     R: TeamRuntime,
 {
     let service = runtime.revisions();
-    let runtime_tasks = RuntimeTaskService::new(
-        runtime.clone(),
-        RuntimeTaskServiceConfig {
-            max_concurrent_subagents: spec.config.max_concurrent.max(1),
-            ..RuntimeTaskServiceConfig::default()
-        },
-    );
     let graph_context = team_graph_context(spec, objective)?;
 
     let terminal_task_id = if spec.strategy == TeamStrategy::ManagerSubagent {
@@ -698,7 +1178,7 @@ where
             validate_manager_graph(run_id, &graph, &initial.tasks, &expanded.tasks)?;
         } else {
             validate_team_graph_specs(run_id, &graph, &initial.tasks)?;
-            drive_team_graph(&runtime_tasks, run_id, cancel.child_token()).await?;
+            drive_team_graph(runtime_tasks.as_ref(), run_id, cancel.child_token()).await?;
             let plan =
                 manager_plan_output(runtime.as_ref(), run_id, &initial.terminal_task_id).await?;
             let expanded = manager_subagent::expand_graph(spec, objective, &plan)?;
@@ -720,7 +1200,7 @@ where
             };
             validate_manager_graph(run_id, &committed, &initial.tasks, &expanded.tasks)?;
         }
-        drive_team_graph(&runtime_tasks, run_id, cancel.child_token()).await?;
+        drive_team_graph(runtime_tasks.as_ref(), run_id, cancel.child_token()).await?;
         synthesis_task_id.to_string()
     } else {
         let compiled = compile_team_graph(spec, objective)?;
@@ -733,7 +1213,7 @@ where
         )
         .await?;
         validate_team_graph_specs(run_id, &graph, &compiled.tasks)?;
-        drive_team_graph(&runtime_tasks, run_id, cancel).await?;
+        drive_team_graph(runtime_tasks.as_ref(), run_id, cancel).await?;
         compiled.terminal_task_id
     };
 
@@ -1170,7 +1650,7 @@ struct StagedTeamOutput {
 struct TeamRuntimeController {
     store: Arc<InMemoryRevisionedTaskStore>,
     revisions: TaskRevisionService,
-    dispatch: TeamDispatchFn,
+    dispatch_controller: Arc<dyn TeamDispatchController>,
     outputs: Mutex<HashMap<String, HashMap<String, SubagentResult>>>,
     staged_outputs: Mutex<HashMap<String, StagedTeamOutput>>,
     settlement: Mutex<()>,
@@ -1178,6 +1658,13 @@ struct TeamRuntimeController {
 
 impl TeamRuntimeController {
     fn new(dispatch: TeamDispatchFn) -> Self {
+        Self::with_controller(closure_dispatch_controller(
+            dispatch,
+            TeamDispatchControl::default(),
+        ))
+    }
+
+    fn with_controller(dispatch_controller: Arc<dyn TeamDispatchController>) -> Self {
         let store = Arc::new(InMemoryRevisionedTaskStore::new());
         let revisions = TaskRevisionService::new(
             store.clone(),
@@ -1186,7 +1673,7 @@ impl TeamRuntimeController {
         Self {
             store,
             revisions,
-            dispatch,
+            dispatch_controller,
             outputs: Mutex::new(HashMap::new()),
             staged_outputs: Mutex::new(HashMap::new()),
             settlement: Mutex::new(()),
@@ -1231,17 +1718,59 @@ impl RuntimeDagController for TeamRuntimeController {
             .map_err(|error| ReactError::Other(error.to_string()))
     }
 
+    async fn reserve_attempt_control(&self, context: &TaskSubagentContext) -> Result<()> {
+        self.dispatch_controller
+            .reserve_attempt(context.clone())
+            .map_err(ReactError::Other)
+    }
+
+    async fn request_live_interrupt(
+        &self,
+        run_id: &str,
+        task_id: &str,
+        claim: &TaskClaim,
+    ) -> std::result::Result<
+        Option<RuntimeTaskAttemptInterruptDisposition>,
+        RuntimeTaskAttemptInterruptProjectionError,
+    > {
+        self.dispatch_controller.request_interrupt(
+            run_id.to_string(),
+            task_id.to_string(),
+            claim.clone(),
+        )
+    }
+
+    async fn retire_attempt_control(
+        &self,
+        run_id: &str,
+        task: &Task,
+        claim: &TaskClaim,
+    ) -> RuntimeAttemptControlCleanupReceipt {
+        self.dispatch_controller
+            .retire_attempt(run_id.to_string(), task.clone(), claim.clone())
+            .await
+    }
+
+    async fn reconcile_attempt_control(
+        &self,
+        run_id: &str,
+        current_execution_ids: &HashSet<String>,
+    ) -> Result<()> {
+        self.dispatch_controller
+            .reconcile_attempts(run_id.to_string(), current_execution_ids.clone())
+            .map_err(ReactError::Other)
+    }
+
     async fn dispatch_task(
         &self,
         context: TaskSubagentContext,
-        _claim: TaskClaim,
         task: Task,
     ) -> Result<Self::DispatchOutput> {
         let outputs = self.outputs.lock().await;
-        let run_outputs = outputs.get(&context.run_id);
+        let run_outputs = outputs.get(context.run_id());
         let mut dependency_outputs = Vec::with_capacity(task.spec.depends_on.len());
         let waived_dependencies: HashSet<&str> = context
-            .waived_dependency_ids
+            .waived_dependency_ids()
             .iter()
             .map(String::as_str)
             .collect();
@@ -1282,14 +1811,23 @@ impl RuntimeDagController for TeamRuntimeController {
         if pipeline_phase && task.spec.depends_on.is_empty() {
             prompt = task.spec.description.clone();
         }
-        for dependency in &context.waived_dependency_ids {
+        for dependency in context.waived_dependency_ids() {
             prompt.push_str("\n\nDependency '");
             prompt.push_str(dependency);
             prompt.push_str("' was explicitly skipped; no reusable output is available.");
         }
-        (self.dispatch)(extension.member, prompt, context.cancel)
+        if context.claim().is_none() {
+            return Err(ReactError::Other(
+                "Team runtime dispatch requires an exact TaskClaim context".to_string(),
+            ));
+        }
+        self.dispatch_controller
+            .dispatch(TeamDispatchRequest {
+                member: extension.member,
+                task: prompt,
+                context,
+            })
             .await
-            .map_err(ReactError::Other)
     }
 
     async fn resolve_dispatch(
@@ -1316,10 +1854,16 @@ impl RuntimeDagController for TeamRuntimeController {
             }
             Err(error) => {
                 let message = error.to_string();
-                (
-                    RuntimeTaskResolutionRequest::Failed { error: message },
-                    None,
-                )
+                let request = match AgentFailure::from(&error).terminal_kind {
+                    AgentTerminalKind::Cancelled => RuntimeTaskResolutionRequest::Cancelled,
+                    AgentTerminalKind::TimedOut => {
+                        RuntimeTaskResolutionRequest::TimedOut { error: message }
+                    }
+                    AgentTerminalKind::Failed | AgentTerminalKind::PermissionDenied => {
+                        RuntimeTaskResolutionRequest::Failed { error: message }
+                    }
+                };
+                (request, None)
             }
         };
         if let Some(output) = output {
@@ -1503,7 +2047,13 @@ mod tests {
     async fn manager_team_uses_canonical_graph_and_dependency_outputs() -> Result<()> {
         let calls = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
         let observed = calls.clone();
-        let dispatch: TeamDispatchFn = Arc::new(move |name, task, _cancel| {
+        let dispatch: TeamDispatchFn = Arc::new(move |request| {
+            let TeamDispatchRequest {
+                member: name,
+                task,
+                context,
+            } = request;
+            let _cancel = context.cancellation_token().clone();
             let observed = observed.clone();
             Box::pin(async move {
                 observed.lock().await.push((name.clone(), task.clone()));
@@ -1556,7 +2106,13 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_manager_expansion_converges_on_one_exact_revision() -> Result<()> {
-        let dispatch: TeamDispatchFn = Arc::new(|name, task, _cancel| {
+        let dispatch: TeamDispatchFn = Arc::new(|request| {
+            let TeamDispatchRequest {
+                member: name,
+                task,
+                context,
+            } = request;
+            let _cancel = context.cancellation_token().clone();
             Box::pin(async move { Ok(successful_result(name, &task)) })
         });
         let runtime = TeamRuntimeController::new(dispatch);
@@ -1617,7 +2173,13 @@ mod tests {
     async fn concurrent_callers_resume_one_manager_run_without_duplicate_dispatch() -> Result<()> {
         let calls = Arc::new(Mutex::new(Vec::<String>::new()));
         let observed = calls.clone();
-        let dispatch: TeamDispatchFn = Arc::new(move |name, task, _cancel| {
+        let dispatch: TeamDispatchFn = Arc::new(move |request| {
+            let TeamDispatchRequest {
+                member: name,
+                task,
+                context,
+            } = request;
+            let _cancel = context.cancellation_token().clone();
             let observed = observed.clone();
             Box::pin(async move {
                 observed.lock().await.push(name.clone());
@@ -1667,7 +2229,13 @@ mod tests {
     async fn caller_owned_runtime_resumes_manager_graph_without_redispatch() -> Result<()> {
         let calls = Arc::new(Mutex::new(0usize));
         let observed = calls.clone();
-        let dispatch: TeamDispatchFn = Arc::new(move |name, task, _cancel| {
+        let dispatch: TeamDispatchFn = Arc::new(move |request| {
+            let TeamDispatchRequest {
+                member: name,
+                task,
+                context,
+            } = request;
+            let _cancel = context.cancellation_token().clone();
             let observed = observed.clone();
             Box::pin(async move {
                 let mut count = observed.lock().await;
@@ -1690,22 +2258,25 @@ mod tests {
             subagents: vec!["researcher".to_string()],
             config: TeamConfig::default(),
         };
+        let service =
+            TeamRuntimeServiceHandle::new(runtime.clone(), RuntimeTaskServiceConfig::default());
+        assert!(Arc::ptr_eq(service.runtime(), &runtime));
 
-        let first = execute_team_on_runtime(
+        let first = execute_team_on_runtime_service(
             &spec,
             "review the repository",
             "resumable-team",
             CancellationToken::new(),
-            runtime.clone(),
+            &service,
         )
         .await?;
         let first_call_count = *calls.lock().await;
-        let resumed = execute_team_on_runtime(
+        let resumed = execute_team_on_runtime_service(
             &spec,
             "review the repository",
             "resumable-team",
             CancellationToken::new(),
-            runtime,
+            &service,
         )
         .await?;
 
@@ -1720,7 +2291,13 @@ mod tests {
     async fn reused_run_id_rejects_a_different_team_identity() -> Result<()> {
         let calls = Arc::new(Mutex::new(0usize));
         let observed = calls.clone();
-        let dispatch: TeamDispatchFn = Arc::new(move |name, task, _cancel| {
+        let dispatch: TeamDispatchFn = Arc::new(move |request| {
+            let TeamDispatchRequest {
+                member: name,
+                task,
+                context,
+            } = request;
+            let _cancel = context.cancellation_token().clone();
             let observed = observed.clone();
             Box::pin(async move {
                 let mut count = observed.lock().await;
@@ -1761,7 +2338,13 @@ mod tests {
 
     #[tokio::test]
     async fn superseded_claim_does_not_publish_a_team_result() -> Result<()> {
-        let dispatch: TeamDispatchFn = Arc::new(|name, task, _cancel| {
+        let dispatch: TeamDispatchFn = Arc::new(|request| {
+            let TeamDispatchRequest {
+                member: name,
+                task,
+                context,
+            } = request;
+            let _cancel = context.cancellation_token().clone();
             Box::pin(async move { Ok(successful_result(name, &task)) })
         });
         let runtime = TeamRuntimeController::new(dispatch);
@@ -1827,7 +2410,13 @@ mod tests {
     #[tokio::test]
     async fn superseded_settlement_preserves_the_committed_team_result() -> Result<()> {
         for current_first in [true, false] {
-            let dispatch: TeamDispatchFn = Arc::new(|name, task, _cancel| {
+            let dispatch: TeamDispatchFn = Arc::new(|request| {
+                let TeamDispatchRequest {
+                    member: name,
+                    task,
+                    context,
+                } = request;
+                let _cancel = context.cancellation_token().clone();
                 Box::pin(async move { Ok(successful_result(name, &task)) })
             });
             let runtime = TeamRuntimeController::new(dispatch);
@@ -1922,7 +2511,13 @@ mod tests {
     async fn pipeline_passes_previous_output_to_next_prompt() -> Result<()> {
         let calls = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
         let observed = calls.clone();
-        let dispatch: TeamDispatchFn = Arc::new(move |name, task, _cancel| {
+        let dispatch: TeamDispatchFn = Arc::new(move |request| {
+            let TeamDispatchRequest {
+                member: name,
+                task,
+                context,
+            } = request;
+            let _cancel = context.cancellation_token().clone();
             let observed = observed.clone();
             Box::pin(async move {
                 observed.lock().await.push((name.clone(), task.clone()));
@@ -1959,7 +2554,13 @@ mod tests {
     async fn skipped_team_dependency_is_a_typed_waiver_without_required_output() -> Result<()> {
         let calls = Arc::new(Mutex::new(Vec::<String>::new()));
         let observed = calls.clone();
-        let dispatch: TeamDispatchFn = Arc::new(move |name, task, _cancel| {
+        let dispatch: TeamDispatchFn = Arc::new(move |request| {
+            let TeamDispatchRequest {
+                member: name,
+                task,
+                context,
+            } = request;
+            let _cancel = context.cancellation_token().clone();
             let observed = observed.clone();
             Box::pin(async move {
                 observed.lock().await.push(task.clone());
@@ -2017,7 +2618,13 @@ mod tests {
     async fn failed_member_blocks_synthesis() {
         let calls = Arc::new(Mutex::new(Vec::<String>::new()));
         let observed = calls.clone();
-        let dispatch: TeamDispatchFn = Arc::new(move |name, task, _cancel| {
+        let dispatch: TeamDispatchFn = Arc::new(move |request| {
+            let TeamDispatchRequest {
+                member: name,
+                task,
+                context,
+            } = request;
+            let _cancel = context.cancellation_token().clone();
             let observed = observed.clone();
             Box::pin(async move {
                 observed.lock().await.push(name.clone());
@@ -2027,7 +2634,7 @@ mod tests {
                         r#"{"tasks":[{"id":"broken-task","subagent":"broken","description":"one concrete task","depends_on":[]}]}"#,
                     ))
                 } else if name == "broken" {
-                    Err("scripted member failure".to_string())
+                    Err(ReactError::Other("scripted member failure".to_string()))
                 } else {
                     Ok(successful_result(name, &task))
                 }
@@ -2057,7 +2664,13 @@ mod tests {
     async fn pre_cancelled_team_dispatches_nothing() {
         let calls = Arc::new(Mutex::new(0usize));
         let observed = calls.clone();
-        let dispatch: TeamDispatchFn = Arc::new(move |name, task, _cancel| {
+        let dispatch: TeamDispatchFn = Arc::new(move |request| {
+            let TeamDispatchRequest {
+                member: name,
+                task,
+                context,
+            } = request;
+            let _cancel = context.cancellation_token().clone();
             let observed = observed.clone();
             Box::pin(async move {
                 let mut count = observed.lock().await;
@@ -2087,8 +2700,18 @@ mod tests {
 
     #[tokio::test]
     async fn unresolved_member_is_a_graph_failure() {
-        let dispatch: TeamDispatchFn = Arc::new(|name, _task, _cancel| {
-            Box::pin(async move { Err(format!("Team Subagent '{name}' not registered")) })
+        let dispatch: TeamDispatchFn = Arc::new(|request| {
+            let TeamDispatchRequest {
+                member: name,
+                task: _task,
+                context,
+            } = request;
+            let _cancel = context.cancellation_token().clone();
+            Box::pin(async move {
+                Err(ReactError::Other(format!(
+                    "Team Subagent '{name}' not registered"
+                )))
+            })
         });
         let result = execute_team(
             &TeamSpec {
@@ -2119,6 +2742,30 @@ mod tests {
         )
         .err();
         assert!(error.is_some_and(|error| error.to_string().contains("at least one")));
+    }
+
+    #[test]
+    fn interrupt_projection_preserves_capacity_and_identity_conflict() {
+        assert_eq!(
+            runtime_interrupt_projection_error(SubagentControlError::PendingCapacityExceeded {
+                limit: 17
+            }),
+            RuntimeTaskAttemptInterruptProjectionError::PendingCapacityExceeded { limit: 17 }
+        );
+        assert_eq!(
+            runtime_interrupt_projection_error(SubagentControlError::IdentityConflict {
+                task_id: "task".to_string(),
+                attempt: 2,
+                expected_execution_id: "expected".to_string(),
+                actual_execution_id: "actual".to_string(),
+            }),
+            RuntimeTaskAttemptInterruptProjectionError::IdentityConflict {
+                task_id: "task".to_string(),
+                attempt: 2,
+                expected_execution_id: "expected".to_string(),
+                actual_execution_id: "actual".to_string(),
+            }
+        );
     }
 
     #[test]
@@ -2281,7 +2928,13 @@ mod tests {
     async fn team_timeout_cancels_the_root_token() {
         let settled = Arc::new(AtomicBool::new(false));
         let observed_settlement = settled.clone();
-        let dispatch: TeamDispatchFn = Arc::new(move |_name, _task, cancel| {
+        let dispatch: TeamDispatchFn = Arc::new(move |request| {
+            let TeamDispatchRequest {
+                member: _name,
+                task: _task,
+                context,
+            } = request;
+            let cancel = context.cancellation_token().clone();
             let observed_settlement = observed_settlement.clone();
             Box::pin(async move {
                 cancel.cancelled().await;
@@ -2405,6 +3058,94 @@ mod tests {
                 .await
                 .first()
                 .is_some_and(|input| input.contains("first-output"))
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn team_runtime_handle_shares_execution_and_exact_control_authority() -> Result<()> {
+        let dispatch: TeamDispatchFn = Arc::new(|request| {
+            let TeamDispatchRequest {
+                member,
+                task: _,
+                context,
+            } = request;
+            Box::pin(async move {
+                context.cancellation_token().cancelled().await;
+                Ok(SubagentResult::cancelled(
+                    member,
+                    "cancelled by exact Team runtime control",
+                    ExecutionMode::Sync,
+                ))
+            })
+        });
+        let team = Arc::new(
+            TeamAgent::builder()
+                .name("controlled-team")
+                .subagent(
+                    "slow",
+                    Box::new(RecordingAgent {
+                        name: "slow".to_string(),
+                        response: "unused".to_string(),
+                        inputs: Arc::new(Mutex::new(Vec::new())),
+                        executed: Arc::new(AtomicBool::new(false)),
+                    }),
+                    SubagentDefinition::simple_sync("slow"),
+                )
+                .strategy(TeamStrategy::Pipeline(vec!["slow".to_string()]))
+                .member_dispatch_controller(closure_dispatch_controller(
+                    dispatch,
+                    TeamDispatchControl::default(),
+                ))
+                .build()
+                .map_err(ReactError::Other)?,
+        );
+        let handle = team.runtime_handle().await.map_err(ReactError::Other)?;
+        let same_handle = team.runtime_handle().await.map_err(ReactError::Other)?;
+        assert!(Arc::ptr_eq(&handle, &same_handle));
+        assert_eq!(team.run_id(), Some(handle.run_id()));
+
+        let execution = tokio::spawn({
+            let team = Arc::clone(&team);
+            async move { team.execute("wait for control").await }
+        });
+        let (task_id, claim) = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Ok(snapshot) = handle.snapshot().await
+                    && let Some((task_id, claim)) = snapshot.tasks.iter().find_map(|task| {
+                        task.execution
+                            .claim
+                            .clone()
+                            .map(|claim| (task.spec.id.clone(), claim))
+                    })
+                {
+                    break (task_id, claim);
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .map_err(|_| ReactError::Other("Team claim was not observable".to_string()))?;
+        let receipt = handle.request_attempt_interrupt(&task_id, &claim).await?;
+        assert!(receipt.requested);
+        let error = tokio::time::timeout(Duration::from_secs(2), execution)
+            .await
+            .map_err(|_| ReactError::Other("Team exact interrupt did not settle".to_string()))?
+            .map_err(|error| ReactError::Other(format!("Team execution panicked: {error}")))?
+            .err()
+            .ok_or_else(|| {
+                ReactError::Other("cancelled Team unexpectedly succeeded".to_string())
+            })?;
+        assert!(error.contains("cancelled"));
+        assert_eq!(
+            handle
+                .snapshot()
+                .await?
+                .tasks
+                .iter()
+                .find(|task| task.spec.id == task_id)
+                .map(|task| &task.execution.status),
+            Some(&TaskStatus::Cancelled)
         );
         Ok(())
     }

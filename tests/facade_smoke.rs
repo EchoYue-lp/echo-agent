@@ -83,6 +83,14 @@ fn subagent_facade_exposes_receipts_and_usage_contract() {
 
     public_type::<echo_agent::subagent::SubagentResult>();
     public_type::<echo_agent::subagent::SubagentOutcome>();
+    public_type::<echo_agent::subagent::TeamRuntimeHandle>();
+    public_type::<std::sync::Arc<dyn echo_agent::subagent::TeamDispatchController>>();
+    public_type::<echo_agent::tasks::RuntimeTaskAttemptInterruptReceipt>();
+    public_type::<echo_agent::tasks::RuntimeTaskAttemptInterruptError>();
+    public_type::<echo_agent::tasks::RuntimeTaskAttemptInterruptProjectionError>();
+    public_type::<echo_agent::tasks::RuntimeAttemptControlCleanupReceipt>();
+    public_type::<echo_agent::tasks::RuntimeAttemptControlObservation>();
+    public_type::<echo_agent::tasks::RuntimeAttemptControlObserver>();
     public_type::<echo_agent::runtime::ExecutionUsage>();
     let _subagent_usage: fn(
         &echo_agent::subagent::SubagentResult,
@@ -225,7 +233,6 @@ impl RuntimeDagController for FacadeController {
     async fn dispatch_task(
         &self,
         _context: echo_agent::tasks::TaskSubagentContext,
-        _claim: TaskClaim,
         _task: Task,
     ) -> echo_agent::error::Result<Self::DispatchOutput> {
         Ok(())

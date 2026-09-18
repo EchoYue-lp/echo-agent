@@ -3,8 +3,8 @@ schema_version: 1
 id: baseline.repository
 kind: baseline
 source_snapshot:
-  base_revision: ab3ed7d23f0a3fbe2bb859a7537df2546531239e
-  content_digest: 540d5deec89168d61324861902eb2e1dc8b9408add3b62af30de0f71a76baa6a
+  base_revision: 28530ca13fa005879ee5e652c078f5a9fb7a7f4f
+  content_digest: b22b2d043da2ab324b2f2a02956dd6cf969a88a1a2633ee0e2c664cb7786752d
 inventory_closure: closed
 behavior_model_closure: closed
 map_refs:
@@ -143,7 +143,10 @@ coverage:
 
 ## 源码快照
 
-基线以PR #117的squash merge结果`d492c676`为可恢复主线祖先，并绑定当前非语义源码摘要；`.echo-semantic`自身不参与摘要，后续业务、合同、测试或正式文档变化必须通过semantic-diff刷新。
+基线以当前目标 main `28530ca1` 为可恢复祖先，并绑定 #99 候选的当前非语义源码摘要；
+`.echo-semantic` 自身不参与摘要。PR #132 的 Channel 证据已从临时 source digest 重新绑定到
+实际 squash commit `28530ca1`，未改变其行为结论。后续业务、合同、测试或正式文档变化必须
+通过 semantic-diff 刷新。
 
 ## 仓库区域
 

@@ -13,9 +13,9 @@ rule_refs: [rule.task-subagent-authority]
 evidence_refs: [evidence.task-subagent-workflow]
 audit_refs: [audit.task-subagent-workflow.state-authority]
 decision_refs: []
-repair_evidence_refs: []
-verification_evidence_refs: []
-rereview_audit_refs: []
+repair_evidence_refs: [evidence.task-subagent-attempt-link-repair]
+verification_evidence_refs: [evidence.task-subagent-attempt-link-verification]
+rereview_audit_refs: [audit.task-subagent-attempt-link-rereview]
 discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 ---
 
@@ -39,4 +39,10 @@ TaskRuntime 执行 Team 或 SDK task 时，Task CAS claim 与 Subagent control/e
 
 ## 处理记录
 
-Discovery 记录；下一阶段审计 typed claim-to-attempt 传递，不新增第二 identity authority。
+Framework 阶段已在 `f310825c418932cde02f661f0686f83f216771d6` 修复：TaskClaim 派生
+唯一 physical attempt identity，Team/runtime dispatch、精确 interrupt、targeted abort、
+join-to-CAS observation 与 recovery reconciliation 共享同一权威链。live registry 继续是
+进程内投影，不成为第二持久状态机。
+
+Finding 保持 open：独立 `echo-agent-sdk` Host adapter、durable command replay、framework pin、
+inventory 与端到端合同仍未交付。Issue #99 只能在该第二阶段完成并重新验证后关闭。
