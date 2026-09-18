@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.lsp-runtime-state-verification
 kind: evidence
-observed_at: ee1ebb6aca5a6ed45fa2510a8c517d7d18090a7c
+observed_at: c04ab97fdbdc7712af36360de5db10cfeeccfec1
 source_refs:
   - echo-integration/src/lsp/client.rs
   - echo-integration/src/lsp/manager.rs
@@ -26,8 +26,10 @@ retention across stop, clean stop, restart success and exhaustion, failed
 initial spawn and failed restart accounting, rejected synchronous config
 mutation, async reload teardown and route replacement, repeated start,
 retained-handle invalidation, and rejection after manager shutdown. JSON-RPC
-header tests include non-ASCII input. The focused LSP run passed 20 tests with
-zero failures and one ignored opt-in live-server smoke test.
+header tests include non-ASCII input. EOF, writer failure, and malformed-header
+fixtures directly verify that the child has exited before terminal status is
+observed, without calling shutdown or restart first. The focused LSP run passed
+20 tests with zero failures and one ignored opt-in live-server smoke test.
 
 ## 来源与范围
 

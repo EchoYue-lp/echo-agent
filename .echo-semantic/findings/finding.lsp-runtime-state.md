@@ -39,6 +39,6 @@ Language server 异常退出、配置 reload 或重复启动时，查询状态�
 
 ## 处理记录
 
-Framework 修复候选位于 `ee1ebb6aca5a6ed45fa2510a8c517d7d18090a7c`：
+Framework 修复候选位于 `c04ab97fdbdc7712af36360de5db10cfeeccfec1`：
 EOF/restart/reload/shutdown 合同测试和局部编译、lint 已通过。Finding 保持 open，
 等待独立复审、SDK/EKO 消费端对齐、完整合并门禁、网站文档同步与远端 main 交付。
