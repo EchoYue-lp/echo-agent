@@ -136,6 +136,13 @@ EchoAgent 向 stdio 子进程提供 `PLUGIN_ROOT` 和 `PLUGIN_DATA`。`${PLUGIN_
 存在组件诊断时，整个 set 仍然可应用；只有依赖排序或 generation 分配等代次级不变量无法
 构造完整不可变快照时，set 才会被拒绝。
 
+`PluginLifecycleManager` 单独拥有 callback 清理状态。`deactivate`、`init` 或 `activate`
+失败会留下 cleanup debt，并阻断 `reconcile`、`activate_enabled` 和直接 `activate` 的后续
+callback 激活。失败注册项保留供重试；已激活 callback 成功撤销后结清债务，初始化或激活
+失败则须成功执行 `unregister` 清理。期望 enabled 集合变化本身不表示旧资源已撤销。见
+[ADR 0060](../adr/0060-plugin-lifecycle-reconcile-settlement.md)。完整 reload 事务仍需宿主
+协调 Registry 与组件 wiring。
+
 ## API
 
 ```rust,no_run
