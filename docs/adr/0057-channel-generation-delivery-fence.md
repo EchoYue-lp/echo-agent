@@ -7,6 +7,11 @@
 
 Accepted
 
+Channel resource close now follows
+[ADR 0066](./0066-agent-adapter-close-ownership.md): transport stop precedes
+handler and sender-Agent close, while this ADR remains the authority for
+generation-scoped delivery admission and reset ordering.
+
 ## Context
 
 `SessionHandler` already assigns a unique incarnation to each sender-scoped

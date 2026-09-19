@@ -13,8 +13,8 @@ rule_refs: [rule.turn-terminal-authority, rule.protocol-role-separation]
 evidence_refs: [evidence.agent-context-execution, evidence.provider-protocol-quality]
 audit_refs: [audit.agent-session-turn.state-authority, audit.protocol-surfaces.time-lifecycle]
 decision_refs: []
-repair_evidence_refs: []
-verification_evidence_refs: []
+repair_evidence_refs: [evidence.agent-adapter-close-settlement-repair]
+verification_evidence_refs: [evidence.agent-adapter-close-settlement-verification, evidence.foundation-36-72-51-integration-verification]
 rereview_audit_refs: []
 discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 ---
@@ -40,3 +40,5 @@ Adapter shutdown、disconnect 或 owner drop 时，in-flight Turn、MCP/LSP/chil
 ## 处理记录
 
 State-authority Audit 记录；后续 time-lifecycle audit 需分别确认每个 adapter 的 Agent ownership、admission stop、cancel、drain 与 awaited close 顺序。
+
+当前工作树形成部分 repair candidate：ACP adapter在poll连接future前同步交出同一服务的close handle，连接future取消或双失败后仍可重试；registry保留Run receipt与Agent。Headless awaited close、Channel manager在start前登记handler并关闭sender session、ReactAgent Drop取消detached MCP cleanup。A2A未修改且仍是本Finding的开放缺口，因此Finding保持`open`；即使其它范围通过复审和门禁也不得关闭#36。

@@ -14,9 +14,15 @@
 //! ```
 
 use chrono::Utc;
-use echo_agent::evolution::{Curator, CuratorConfig, SkillLifecycle};
+use echo_agent::evolution::{
+    ChangeFilter, ChangeLog, Curator, CuratorConfig, JsonlChangeLog, MemoryLayer,
+    MemoryRuntimeIntegrationBuilder, SkillLifecycle,
+};
 use echo_agent::improve::*;
+use echo_agent::memory::store::FileStore;
+use echo_agent::prelude::{MemoryMeta, MemorySource, MemoryType};
 use echo_agent::trace::{Run, RunEvent, RunStatus, RunTimings, TokenUsage};
+use std::sync::Arc;
 
 macro_rules! section {
     ($n:expr, $title:expr) => {
@@ -78,6 +84,63 @@ async fn contract_demo51_self_improvement() -> Result<(), Box<dyn std::error::Er
     println!("\n╔══════════════════════════════════════════════════╗");
     println!("║  全部 4 个场景通过 ✅                             ║");
     println!("╚══════════════════════════════════════════════════╝");
+    Ok(())
+}
+
+#[tokio::test]
+async fn contract_demo51_layered_memory_recovery_api() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join(".echo-agent");
+    let store_path = dir.path().join("store.json");
+    let store = Arc::new(FileStore::new(&store_path)?);
+    let manager = MemoryRuntimeIntegrationBuilder::new(root.clone(), store)
+        .build_layer_manager_reconciled()
+        .await?;
+    let meta = MemoryMeta::new(
+        MemoryType::ProjectFact,
+        MemorySource::AutoExtracted,
+        "build",
+    );
+    manager.write_memory("cargo", "Use cargo", meta).await?;
+    assert!(manager.read_hot_content()?.is_empty());
+    let exact_content = "  first line\nsecond line  \n";
+    let promoted = MemoryMeta::new(
+        MemoryType::UserPreference,
+        MemorySource::ExplicitSave,
+        "format",
+    )
+    .with_confidence(0.95)
+    .with_stability(0.90);
+    manager
+        .write_memory("format", exact_content, promoted)
+        .await?;
+    let (layer, live) = manager
+        .locate("format")
+        .await?
+        .ok_or("missing promoted example memory")?;
+    assert_eq!(layer, MemoryLayer::Hot);
+    assert_eq!(live.content, exact_content);
+    drop(manager);
+
+    let store = Arc::new(FileStore::new(store_path)?);
+    let reopened = MemoryRuntimeIntegrationBuilder::new(root.clone(), store)
+        .build_layer_manager_reconciled()
+        .await?;
+    assert_eq!(
+        reopened
+            .list_warm_memories(&Default::default())
+            .await?
+            .len(),
+        1
+    );
+    let (layer, recovered) = reopened
+        .locate("format")
+        .await?
+        .ok_or("missing recovered example memory")?;
+    assert_eq!(layer, MemoryLayer::Hot);
+    assert_eq!(recovered.content, exact_content);
+    let log = JsonlChangeLog::new(root.join("evolution/change-log.jsonl"))?;
+    assert_eq!(log.query(&ChangeFilter::new())?.len(), 3);
     Ok(())
 }
 

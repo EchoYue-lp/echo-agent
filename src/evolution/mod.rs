@@ -5,7 +5,8 @@
 //!
 //! - **Skill lifecycle**: [`Curator`] manages skill transitions (Candidate → Draft → Active → Stale → Deprecated → Archived)
 //! - **Typed memory**: Structured metadata (type, confidence, stability, risk) for every memory
-//! - **Change audit**: Complete log of all mutations with rollback capability
+//! - **Change audit**: Queryable memory changes with durable reconciliation;
+//!   later rollback is a separate capability (#52)
 //! - **Security**: Secret scanning, untrusted input isolation, injection detection
 //! - **Memory review**: Staleness scoring, conflict detection, merge, and archival
 //! - **Skill creation**: Candidate detection from observed patterns, draft SKILL.md generation
@@ -17,7 +18,8 @@
 //!
 //! # Safety
 //!
-//! All mutations to memories, skills, and rules are recorded in the audit log.
+//! Layered memory mutations carry durable audit identities; skill and rule
+//! mutation coverage is tracked separately.
 //! High-risk changes (rule promotion, skill merges) require human review.
 //! Content from untrusted sources is never automatically promoted.
 
@@ -30,6 +32,7 @@ pub mod dreaming;
 pub mod health;
 pub mod layer;
 pub mod merge;
+mod mutation;
 pub mod patch;
 pub mod recall;
 pub mod review;

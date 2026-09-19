@@ -80,7 +80,7 @@ impl MemoryPromoter for StoreMemoryPromoter {
                     .with_recall_weight(recall_weight);
                 if layer_manager
                     .locate(&key)
-                    .await
+                    .await?
                     .is_some_and(|(_, existing)| existing.content.trim() == fact.trim())
                 {
                     deduplicated = deduplicated.saturating_add(1);

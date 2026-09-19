@@ -75,7 +75,7 @@ pub mod integration {
 pub use echo_integration::channels::prelude::*;
 
 use crate::agent::react::ReactAgent;
-use crate::agent::{CancellationToken, EventEnvelope, EventIdentity};
+use crate::agent::{Agent, CancellationToken, EventEnvelope, EventIdentity};
 use crate::error::{AgentError, Result};
 use crate::llm::{LlmClient, LlmConfig};
 use crate::prelude::AgentConfig;
@@ -221,6 +221,10 @@ impl MessageHandler for AgentChannelHandler {
     async fn reply(&self, _msg: OutboundMessage) -> echo_core::error::Result<()> {
         // reply is handled by the channel itself
         Ok(())
+    }
+
+    async fn close(&self) -> echo_core::error::Result<()> {
+        self.agent.close().await
     }
 
     fn settles_on_cancel(&self) -> bool {

@@ -4,7 +4,7 @@ id: audit.eval-evolution.failure-concurrency
 kind: audit
 boundary_ref: boundary.eval-evolution
 lens: failure_concurrency
-freshness: examined
+freshness: stale
 revision: f1e9027246760661144786e9e35615cd46d580c6
 finding_refs: [finding.eval-timeout-settlement, finding.improve-iteration-config, finding.improve-single-case-panic, finding.eval-workspace-generation-isolation, finding.background-review-detached-persistence-settlement]
 challenges:
@@ -43,6 +43,9 @@ Eval timeout只cancel并立即评分；ReactAgent有detached bounded reaper但Ev
 ## 残余风险
 
 重叠Dreaming pass对warm memory执行get-modify-put无pass-level single-flight/CAS，当前缺应用调度证据，作为audit atomicity residual。
+
+Issue #51候选为同一memory journal根目录加入串行恢复和多manager同根顺序；
+原Dreaming重叠故障假设须在独立rereview中重新核对，历史结论仅适用于旧revision。
 
 ## 未检查项
 

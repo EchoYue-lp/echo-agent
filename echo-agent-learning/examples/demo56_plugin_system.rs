@@ -2,6 +2,7 @@
 //!
 //! All operations are local; no LLM calls are made.
 
+use echo_agent::agent::ReactAgentBuilder;
 use echo_agent::plugin::{
     AGENT_PLUGIN_SCHEMA_V1, InstallSource, PluginIntegrator, PluginRegistry, PluginScope,
 };
@@ -66,6 +67,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         prepared.generation(),
         prepared.identity()
     );
+    let mut agent = ReactAgentBuilder::new().model("plugin-demo").build()?;
+    let target = integrator.publication_target(&agent);
+    let receipt = target.wire_prepared(&mut agent, &prepared).await?;
+    println!(
+        "Published generation {} ({})",
+        receipt.generation(),
+        receipt.identity()
+    );
+    target.rollback(&mut agent, &receipt).await?;
     let entry = registry
         .get(&plugin_id)
         .ok_or_else(|| format!("installed plugin '{plugin_id}' was not registered"))?;

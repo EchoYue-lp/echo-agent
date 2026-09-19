@@ -6,13 +6,13 @@ title: Trace、Eval、Improve 与 Evolution
 asset_type: state_authority
 status: needs_review
 risk: high
-observed_at: 81e2756cee9127fa23a9bb1023bd56aa8f954964
+observed_at: source:b214951ece8e09325efc846ad7bd88a402135000e42fe67d2b917317b2d27923
 boundary_refs: [boundary.eval-evolution]
-code_refs: [src/trace/mod.rs, src/eval/runner.rs, src/eval/comparator.rs, echo-orchestration/src/runtime/turn_driver.rs, src/agent/react/run/stream_channel.rs, src/improve/mod.rs, src/improve/loop.rs, src/evolution/mod.rs, src/evolution/background_review.rs, src/evolution/dreaming.rs, src/evolution/layer.rs, src/evolution/curator.rs, src/evolution/draft.rs, src/evolution/merge.rs, src/evolution/patch.rs, src/evolution/review.rs, src/evolution/security.rs, echo-state/src/skill_telemetry.rs, docs/adr/0036-eval-workspace-generation-lifecycle.md, docs/adr/0037-eval-timeout-turn-settlement.md, docs/adr/0038-eval-trace-correlation-identity.md]
+code_refs: [src/trace/mod.rs, src/eval/runner.rs, src/eval/comparator.rs, echo-orchestration/src/runtime/turn_driver.rs, src/agent/react/run/stream_channel.rs, src/improve/mod.rs, src/improve/loop.rs, src/evolution/mod.rs, src/evolution/background_review.rs, src/evolution/dreaming.rs, src/evolution/layer.rs, src/evolution/mutation.rs, src/evolution/runtime_integration.rs, src/evolution/curator.rs, src/evolution/draft.rs, src/evolution/merge.rs, src/evolution/patch.rs, src/evolution/review.rs, src/evolution/security.rs, echo-state/src/skill_telemetry.rs, docs/adr/0036-eval-workspace-generation-lifecycle.md, docs/adr/0037-eval-timeout-turn-settlement.md, docs/adr/0038-eval-trace-correlation-identity.md, docs/adr/0065-evolution-memory-audit-reconciliation.md]
 consumer_refs: [echo-agent-learning/tests/example_contracts/demo50_eval.rs, echo-agent-learning/tests/example_contracts/demo51_self_improvement.rs]
 behavior_refs: [behavior.eval-evolution]
 rule_refs: [rule.quality-observation-boundary]
-evidence_refs: [evidence.provider-protocol-quality, evidence.persistence-observation, evidence.improve-singleton-split-repair, evidence.improve-singleton-split-verification, evidence.improve-iteration-config-repair, evidence.improve-iteration-config-verification, evidence.eval-workspace-generation-repair, evidence.eval-workspace-generation-verification, evidence.eval-timeout-turn-settlement-repair, evidence.eval-timeout-turn-settlement-verification, evidence.eval-trace-correlation-repair, evidence.eval-trace-correlation-verification]
+evidence_refs: [evidence.provider-protocol-quality, evidence.persistence-observation, evidence.improve-singleton-split-repair, evidence.improve-singleton-split-verification, evidence.improve-iteration-config-repair, evidence.improve-iteration-config-verification, evidence.eval-workspace-generation-repair, evidence.eval-workspace-generation-verification, evidence.eval-timeout-turn-settlement-repair, evidence.eval-timeout-turn-settlement-verification, evidence.eval-trace-correlation-repair, evidence.eval-trace-correlation-verification, evidence.evolution-memory-audit-repair, evidence.evolution-memory-audit-verification]
 finding_refs: [finding.eval-trace-identity, finding.eval-timeout-settlement, finding.eval-workspace-generation-isolation, finding.improve-iteration-config, finding.improve-single-case-panic, finding.evolution-audit-atomicity, finding.evolution-skill-promotion-audit, finding.evolution-doc-namespace]
 candidate_refs: []
 ---
@@ -29,7 +29,7 @@ ReactAgent trace producer、Eval/Improve API、Evolution runtime integration 和
 
 ## 生命周期
 
-Record/finalize/query trace、create/retain/close workspace generation、drive/deadline/cancel/settle/correlate/grade/report eval、suggest/export improve、detect/review/apply/audit evolution。
+Record/finalize/query trace、create/retain/close workspace generation、drive/deadline/cancel/settle/correlate/grade/report eval、suggest/export improve、detect/review/prepare/project/audit/reconcile evolution。
 
 ## 候选关系
 
@@ -37,4 +37,4 @@ Quality observation 不替代业务 commit；Evolution 持久 mutation 需要独
 
 ## 未知与限制
 
-Trace correlation、timeout settlement、workspace generation、singleton split与iteration config已闭合；memory audit atomicity、Skill promotion audit与文档namespace仍有Finding。
+Trace correlation、timeout settlement、workspace generation、singleton split与iteration config已闭合；memory audit durable reconciliation是待独立复审和交付的候选，raw Store直接读取的中间态、Skill promotion audit与文档namespace仍需明确边界。

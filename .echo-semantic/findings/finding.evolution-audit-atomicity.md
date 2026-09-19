@@ -10,11 +10,11 @@ focus: [result_side_effect, failure_concurrency, state_authority]
 boundary_ref: boundary.eval-evolution
 behavior_refs: [behavior.eval-evolution]
 rule_refs: [rule.quality-observation-boundary]
-evidence_refs: [evidence.provider-protocol-quality]
+evidence_refs: [evidence.provider-protocol-quality, evidence.evolution-memory-audit-repair, evidence.evolution-memory-audit-verification]
 audit_refs: [audit.eval-evolution.data-durability]
 decision_refs: []
-repair_evidence_refs: []
-verification_evidence_refs: []
+repair_evidence_refs: [evidence.evolution-memory-audit-repair]
+verification_evidence_refs: [evidence.evolution-memory-audit-verification, evidence.foundation-36-72-51-integration-verification]
 rereview_audit_refs: []
 discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 ---
@@ -39,4 +39,7 @@ Audit 文件写入失败或进程在两步间中断时，memory/skill state 无�
 
 ## 处理记录
 
-Discovery 记录；下一阶段设计 prepare/commit/reconcile 或 durable outbox，不用 trace 替代业务 commit。
+候选实现已把分层记忆 write/delete/status/layer/budget/approved merge 接到
+durable prepare、业务 audit 幂等提交与重启 reconcile；ADR 0065 明确原始 Store
+读者的中间态和事后 rollback 边界。当前状态保持 open，等待完整工程门禁、独立
+rereview 与远端主线交付，不能用本分支 focused 结果提前关闭 Issue。

@@ -34,6 +34,9 @@ pub struct HeadlessConfig {
 
     /// 强制停止前的最大迭代次数（安全限制）
     pub max_iterations: Option<usize>,
+
+    /// 调用方可提供的取消 token
+    pub cancel_token: Option<CancellationToken>,
 }
 ```
 
@@ -43,6 +46,7 @@ pub struct HeadlessConfig {
 | `exit_on_error` | `bool` | `true` | 为 `true` 时，Agent 失败则进程以退出码 1 终止。 |
 | `output_format` | `String` | `"text"` | 控制 `format_output()`：`"text"` 返回原始输出；`"json"` 将结果包装为结构化 JSON。 |
 | `max_iterations` | `Option<usize>` | `None` | ReAct 循环的迭代次数上限。在无人值守环境中防止失控执行。 |
+| `cancel_token` | `Option<CancellationToken>` | `None` | 请求取消当前 driven Turn。 |
 
 ---
 
@@ -89,10 +93,12 @@ run_headless(config, configure)
     │                               │
     │                               ├─ 构建失败？ → 返回错误 HeadlessResult
     │                               │
-    │                               └─ agent.execute(&prompt)
+    │                               └─ AgentTurnDriver.drive(agent, prompt)
     │                                       │
-    │                                       ├─ Ok → HeadlessResult { success: true, ... }
-    │                                       └─ Err → HeadlessResult { success: false, ... }
+    │                                       ├─ 结算唯一 TurnReceipt
+    │                                       └─ await Agent::close
+    │                                               ├─ Ok → 投影 Turn 结果
+    │                                               └─ Err → 失败结果包含 close 错误
     │
     └─ 返回 HeadlessResult
 ```
@@ -114,6 +120,9 @@ pub struct HeadlessResult {
 
     /// 请求的输出格式
     pub format: String,
+
+    /// 失败是否改变进程退出码
+    pub exit_on_error: bool,
 }
 ```
 
@@ -126,6 +135,15 @@ pub fn exit_code(&self) -> i32
 ```
 
 成功返回 `0`，失败返回 `1` —— 可直接配合 `std::process::exit()` 使用。
+显式设置 `exit_on_error: false` 时，失败仍使 `success` 为 `false` 并在 `output`
+中可见，但 `exit_code()` 按调用方策略返回 `0`。
+
+单次 Headless 调用在 Turn receipt 后始终 await `Agent::close`，包括 Turn 失败或
+取消。关闭错误进入 `HeadlessResult.output`；此按值消费的 API 返回后无法重试同一
+Agent。如果调用方在进入 close 阶段前超时、abort 或 drop 外层 `run_headless`
+future，局部 Agent owner 会随 future 释放，无法保证 awaited cleanup。需要取消安全
+资源所有权的调用方必须保留长期 Agent 或 adapter owner，不能放弃 one-shot future。
+参见 [ADR 0066](../adr/0066-agent-adapter-close-ownership.md)。
 
 #### format_output()
 
@@ -164,6 +182,7 @@ async fn main() {
         exit_on_error: true,
         output_format: "text".into(),
         max_iterations: Some(10),
+        cancel_token: None,
     };
 
     let result = run_headless(config, |builder| builder).await;
@@ -186,6 +205,7 @@ async fn main() {
         exit_on_error: true,
         output_format: "text".into(),
         max_iterations: Some(20),
+        cancel_token: None,
     };
 
     let result = run_headless(config, |builder| {
@@ -216,6 +236,7 @@ async fn main() {
         exit_on_error: true,
         output_format: "json".into(),   // ← JSON 信封
         max_iterations: Some(10),
+        cancel_token: None,
     };
 
     let result = run_headless(config, |builder| builder).await;

@@ -49,7 +49,7 @@ explicit user-save/correction paths may write automatically, but the system **ne
 - Applies skill merges, patches, or rule promotions (it only generates proposals, applied by humans via commands)
 - Promotes memory from untrusted sources (tool output) into the hot layer or rules
 
-Every mutation to memory/skills/rules is written to the change audit log (`change-log.jsonl`), which is queryable and rollback-capable. Writes also undergo secret scanning and prompt-injection detection.
+Layered memory mutations use a durable recovery operation before writing Store or `MEMORY.md`; their committed business changes are queryable in `change-log.jsonl`. This does not provide a later rollback API for arbitrary memory, skill, or rule changes (tracked separately as #52). Memory writes also undergo secret scanning and prompt-injection detection.
 
 ---
 
@@ -64,7 +64,7 @@ Every mutation to memory/skills/rules is written to the change audit log (`chang
 | **TrajectorySaver** | Convert runs into ShareGPT fine-tune data | `improve/` |
 | **TypedMemoryStore** | Typed memory read/write with metadata | `echo-state` |
 | **MemoryLayerManager** | Hot/warm/cold tiered memory management | `evolution/` |
-| **ChangeLog** | Change audit and rollback | `evolution/` |
+| **ChangeLog** | Queryable business change audit (later rollback is not implemented) | `evolution/` |
 | **TriggerDetector** | Online conversation signals → new memory | `evolution/` |
 | **MemoryReviewer** | Staleness scoring, conflict detection, merge, archival (GC) | `evolution/` |
 | **Curator** | Skill lifecycle state machine | `evolution/` |
@@ -221,11 +221,12 @@ Memory is tiered by value; the hot tier is always in context, warm is retrieved 
 use echo_agent::evolution::{MemoryLayerManager, JsonlChangeLog, MemoryMeta, MemorySource, MemoryType};
 use std::path::PathBuf;
 
-let mgr = MemoryLayerManager::new(
+let mgr = MemoryLayerManager::try_new(
     PathBuf::from(".echo-agent"),
     arc_store,
     Box::new(JsonlChangeLog::new(PathBuf::from(".echo-agent/evolution/change-log.jsonl"))?),
-);
+)?;
+mgr.reconcile_pending().await?; // before exposing this Store to independent readers
 
 // Write (auto-scans secrets/injection, promotes to hot based on confidence)
 let meta = MemoryMeta::new(MemoryType::ProjectFact, MemorySource::ExplicitSave, "deploy")
@@ -233,8 +234,8 @@ let meta = MemoryMeta::new(MemoryType::ProjectFact, MemorySource::ExplicitSave, 
 mgr.write_memory("deploy:prod-script", "Build with pnpm build", meta).await?;
 
 // Promote / demote
-mgr.promote("some-key").await?;          // cold→warm→hot
-mgr.demote("some-key", "stale").await?;  // hot→warm→cold
+mgr.promote("some-key").await?;          // eligible warm→hot
+mgr.demote("some-key", "stale").await?;  // hot→warm or warm→Archived
 
 // Cross-tier search
 let hits = mgr.search_layered("deploy", 10).await?;
@@ -242,7 +243,7 @@ let hits = mgr.search_layered("deploy", 10).await?;
 
 ### Change Audit — `ChangeLog`
 
-Every mutation to memory/skills/rules is recorded in an append-only JSONL, filterable:
+Committed layered-memory changes are recorded in a filterable append-only JSONL; other evolution producers have their own audit contracts:
 
 ```rust
 use echo_agent::evolution::{ChangeFilter, ChangeType, EntityType};
@@ -252,6 +253,33 @@ let filter = ChangeFilter::new()
     .with_change_type(ChangeType::Promote)
     .with_limit(50);
 // log file: .echo-agent/evolution/change-log.jsonl
+```
+
+For `MemoryLayerManager`, `.echo-agent/evolution/memory-operations.jsonl` is the
+separate crash-recovery authority. A SyncData-confirmed prepared operation
+contains the stable change IDs and target values before Store/`MEMORY.md`
+mutation. The manager applies the projection, appends those IDs to the business
+`ChangeLog` idempotently, and settles the operation. A failure after prepare
+returns an uncertain outcome; `reconcile_pending().await?` finishes it after
+restart without duplicate business audit. Reconciliation also checks settled
+keys against the latest journal target, repairing a Store projection that lost
+its durability barrier. Synchronous hot reads fail before startup recovery or
+while an operation is pending; manager async reads reconcile before returning.
+Raw Store or file readers can observe a prepared intermediate state and must
+wait for startup reconciliation. Observers fire only after live settlement and
+are not replayed after restart. See [ADR 0065](../adr/0065-evolution-memory-audit-reconciliation.md).
+
+Hot entries with newlines or surrounding whitespace carry `content_json: true`
+in `MEMORY.md` frontmatter and a JSON-escaped body bullet, preserving the
+exact text through promotion and demotion; legacy plain bullets remain valid.
+A promotion or demotion based on a stale read fails before prepare when another
+manager has already changed that key.
+
+An approved `MemoryMerger` now binds to the same manager:
+
+```rust
+use echo_agent::evolution::MemoryMerger;
+let outcome = MemoryMerger::new(&mgr).merge_group(&reviewed_group).await?;
 ```
 
 ### Memory Review and Deterministic Maintenance
@@ -376,7 +404,7 @@ for report in monitor.analyze_all_skills().await? {
 - **Pre-write**: secret scanning (AWS `AKIA...`, GitHub `ghp_...`, `BEGIN PRIVATE KEY`, etc.; matches replaced with `[REDACTED]`) + prompt-injection detection (e.g. "ignore previous" patterns)
 - **Untrusted-input isolation**: memory from tool output gets `risk = High` and cannot be promoted to hot layer or rules without human approval
 - **Rate limiting**: max 50 memory writes per session, max 5 skill patches per day
-- All changes are rollback-capable via `ChangeLog`
+- `ChangeLog` records committed changes; later rollback requires a separate implementation (#52)
 
 ---
 

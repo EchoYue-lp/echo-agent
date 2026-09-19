@@ -79,6 +79,10 @@ Checkpoint compounding continues after the complete batch is folded. A
 checkpoint failure degrades the receipt but does not roll back authoritative
 journal records; recovery can rebuild from the journal.
 
+[ADR 0065](0065-evolution-memory-audit-reconciliation.md) applies this prepared
+batch identity and unknown-outcome contract to layered memory's business audit
+without changing the generic journal authority.
+
 ## Verification
 
 The conformance suite covers contiguous concurrent batches, non-interleaving,

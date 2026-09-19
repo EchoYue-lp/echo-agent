@@ -4,11 +4,11 @@ id: map.eval-evolution
 kind: capability_map
 title: Trace、Eval、Improve 与 Evolution
 risk: high
-observed_at: 81e2756cee9127fa23a9bb1023bd56aa8f954964
+observed_at: source:b214951ece8e09325efc846ad7bd88a402135000e42fe67d2b917317b2d27923
 boundary_refs: [boundary.eval-evolution]
 behavior_refs: [behavior.eval-evolution]
 rule_refs: [rule.quality-observation-boundary, rule.fact-projection-separation]
-evidence_refs: [evidence.provider-protocol-quality, evidence.persistence-observation, evidence.high-risk-audit-frontier, evidence.improve-singleton-split-repair, evidence.improve-singleton-split-verification, evidence.improve-iteration-config-repair, evidence.improve-iteration-config-verification, evidence.eval-workspace-generation-repair, evidence.eval-workspace-generation-verification, evidence.eval-timeout-turn-settlement-repair, evidence.eval-timeout-turn-settlement-verification, evidence.eval-trace-correlation-repair, evidence.eval-trace-correlation-verification]
+evidence_refs: [evidence.provider-protocol-quality, evidence.persistence-observation, evidence.high-risk-audit-frontier, evidence.improve-singleton-split-repair, evidence.improve-singleton-split-verification, evidence.improve-iteration-config-repair, evidence.improve-iteration-config-verification, evidence.eval-workspace-generation-repair, evidence.eval-workspace-generation-verification, evidence.eval-timeout-turn-settlement-repair, evidence.eval-timeout-turn-settlement-verification, evidence.eval-trace-correlation-repair, evidence.eval-trace-correlation-verification, evidence.evolution-memory-audit-repair, evidence.evolution-memory-audit-verification]
 finding_refs: [finding.eval-trace-identity, finding.eval-timeout-settlement, finding.improve-iteration-config, finding.improve-single-case-panic, finding.eval-workspace-generation-isolation, finding.background-review-detached-persistence-settlement, finding.evolution-audit-atomicity, finding.evolution-changelog-rollback-authority, finding.evolution-skill-promotion-audit, finding.skill-candidate-reinforcement-audit-gap, finding.evolution-doc-namespace, finding.pre-compaction-memory-trust-provenance]
 audit_refs: [audit.eval-evolution.data-durability, audit.eval-evolution.failure-concurrency, audit.eval-evolution.permission-external, audit.improve-singleton-split-rereview, audit.improve-iteration-config-rereview, audit.eval-workspace-generation-rereview, audit.eval-timeout-turn-settlement-rereview, audit.eval-trace-correlation-rereview]
 related_map_refs: [map.observation-persistence-delivery, map.agent-session-turn, map.llm-provider-runtime, map.extension-lifecycle]
@@ -41,11 +41,12 @@ scenarios:
     next_step: 区分 observation/proposal 与 mutation，并审计 join/取消/失败结算
   evolution-memory-mutation:
     status: needs_review
-    source_refs: [src/evolution/layer.rs, src/evolution/audit.rs, src/evolution/security.rs]
+    source_refs: [src/evolution/layer.rs, src/evolution/mutation.rs, src/evolution/audit.rs, src/evolution/review.rs, src/evolution/runtime_integration.rs, src/tools/builtin/memory.rs, src/memory_promoter.rs, src/agent/react/run/context.rs, src/evolution/security.rs, docs/adr/0065-evolution-memory-audit-reconciliation.md]
     finding_refs: [finding.evolution-audit-atomicity, finding.evolution-changelog-rollback-authority, finding.evolution-doc-namespace, finding.pre-compaction-memory-trust-provenance]
     rule_refs: [rule.quality-observation-boundary]
-    unknown: memory mutation 与 audit 非原子，正式 namespace 文档漂移
-    next_step: audit commit/audit/rollback 顺序与当前 namespace contract
+    evidence_refs: [evidence.evolution-memory-audit-repair, evidence.evolution-memory-audit-verification]
+    unknown: durable prepare/reconcile候选尚待独立复审与远端主线门禁；raw Store读者可暂见中间态，later rollback/旧namespace仍属独立范围
+    next_step: 在集成结果复核跨Store可见性、完整门禁与Finding关闭条件；rollback和旧namespace分别依其Finding处置
   evolution-skill-lifecycle:
     status: needs_review
     source_refs: [src/evolution/curator.rs, src/evolution/draft.rs, src/evolution/merge.rs, src/evolution/patch.rs, src/evolution/review.rs, src/evolution/security.rs]
@@ -79,11 +80,11 @@ ReactAgent 可选记录 trace；显式 Eval/Improve API 和 runtime/app trigger 
 
 ## 行为关系
 
-Trace 是 observation，Eval/Improve 消费但不驱动业务 commit；Evolution 可写持久状态，需独立 authorization/audit/rollback。
+Trace 是 observation，Eval/Improve 消费但不驱动业务 commit；Evolution 可写持久状态，分层记忆用独立业务audit与journal恢复，事后rollback仍单独跟踪。
 
 ## 状态与数据流
 
-RunStore保存producer-owned trace；EvalRunner拥有每次invocation唯一run/turn/execution correlation并只把已load的真实trace ID写入EvalResult；AgentTurnDriver/TurnReceipt是Eval invocation终态权威；EvalWorkspaceGeneration持有每次run的临时目录与cleanup disposition；EvalResult/Report保存评分；ImprovementLoop保存迭代结果；MemoryLayer/Curator/ChangeLog保存演化状态。
+RunStore保存producer-owned trace；EvalRunner拥有每次invocation唯一run/turn/execution correlation并只把已load的真实trace ID写入EvalResult；AgentTurnDriver/TurnReceipt是Eval invocation终态权威；EvalWorkspaceGeneration持有每次run的临时目录与cleanup disposition；EvalResult/Report保存评分；ImprovementLoop保存迭代结果；MemoryLayer的operation journal保存可恢复写入事实，ChangeLog保存业务审计，Curator保存独立技能状态。
 
 ## 策略来源与优先级
 
@@ -91,7 +92,7 @@ Eval cases/constraints、grader、explicit config、memory source/risk/status �
 
 ## 生命周期与失败路径
 
-Trace start/finalize；Eval run/deadline/cancel/bounded settlement/correlate trace/grade/report，未settled timeout跳过RunStore与评分并保留generation；trace缺失保持可选，歧义或存储不一致失败；Improve iterate/stop/export；Evolution detect/review/apply/audit/rollback。
+Trace start/finalize；Eval run/deadline/cancel/bounded settlement/correlate trace/grade/report，未settled timeout跳过RunStore与评分并保留generation；trace缺失保持可选，歧义或存储不一致失败；Improve iterate/stop/export；Evolution detect/review/prepare/project/audit/settle/reconcile；later rollback未实现。
 
 ## 权限与敏感信息
 

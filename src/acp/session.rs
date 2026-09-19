@@ -298,6 +298,8 @@ impl AcpSession {
     pub async fn wait_until_idle(&self) {
         loop {
             let notified = self.turn_settled.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             if self
                 .turn
                 .lock()
@@ -316,6 +318,7 @@ pub struct SessionRegistry {
     registry_id: String,
     factory: Arc<dyn AcpSessionFactory>,
     max_sessions: usize,
+    admission_open: AtomicBool,
     creation_gate: Mutex<()>,
     client_capabilities: RwLock<Option<ClientCapabilities>>,
     sessions: RwLock<HashMap<SessionId, Arc<AcpSession>>>,
@@ -409,6 +412,7 @@ impl SessionRegistry {
             registry_id: uuid::Uuid::new_v4().to_string(),
             factory,
             max_sessions,
+            admission_open: AtomicBool::new(true),
             creation_gate: Mutex::new(()),
             client_capabilities: RwLock::new(None),
             sessions: RwLock::new(HashMap::new()),
@@ -417,6 +421,20 @@ impl SessionRegistry {
 
     pub async fn initialize(&self, capabilities: ClientCapabilities) {
         *self.client_capabilities.write().await = Some(capabilities);
+    }
+
+    pub fn close_admission(&self) {
+        self.admission_open.store(false, Ordering::Release);
+    }
+
+    fn ensure_admission(&self) -> Result<()> {
+        if self.admission_open.load(Ordering::Acquire) {
+            Ok(())
+        } else {
+            Err(ReactError::Other(
+                "ACP Session registry is closing".to_string(),
+            ))
+        }
     }
 
     pub async fn create(&self, request: NewSessionRequest) -> Result<SessionId> {
@@ -447,6 +465,7 @@ impl SessionRegistry {
     /// Session limit and per-Session Agent ownership stay authoritative.
     pub async fn insert_session(&self, context: AcpSessionContext) -> Result<SessionId> {
         let _creation = self.creation_gate.lock().await;
+        self.ensure_admission()?;
         if self.sessions.read().await.len() >= self.max_sessions {
             return Err(ReactError::Other(format!(
                 "ACP Session limit {} reached",
@@ -465,10 +484,21 @@ impl SessionRegistry {
         // adapter compatible with text-only Agent implementations.
         agent.set_working_dir(Some(context.cwd.clone()));
         let session_id = context.session_id.clone();
-        self.sessions.write().await.insert(
-            session_id.clone(),
-            Arc::new(AcpSession::new(context, agent)),
-        );
+        let session = Arc::new(AcpSession::new(context, agent));
+        if !self.admission_open.load(Ordering::Acquire) {
+            // Shutdown that raced the async factory still owns this Agent.
+            // Retain it as a closed Session for close_all after the creation
+            // gate is released; the caller must not receive a usable handle.
+            session.mark_closed();
+            self.sessions.write().await.insert(session_id, session);
+            return Err(ReactError::Other(
+                "ACP Session registry is closing".to_string(),
+            ));
+        }
+        self.sessions
+            .write()
+            .await
+            .insert(session_id.clone(), session);
         Ok(session_id)
     }
 
@@ -517,6 +547,8 @@ impl SessionRegistry {
 
         loop {
             let notified = lease.receipt.settled.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             let action = {
                 let mut phase = lease
                     .receipt
@@ -615,8 +647,9 @@ impl SessionRegistry {
     }
 
     pub async fn close_all(&self) -> Result<()> {
-        let _creation = self.creation_gate.lock().await;
+        self.close_admission();
         let leases = {
+            let _creation = self.creation_gate.lock().await;
             let guard = self.sessions.read().await;
             guard
                 .values()
@@ -931,6 +964,29 @@ mod tests {
         assert!(registry.sessions.read().await.is_empty());
         assert_eq!(failed_attempts.load(Ordering::Acquire), 2);
         assert_eq!(settled_attempts.load(Ordering::Acquire), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn registry_close_permanently_fences_session_creation() -> Result<()> {
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let factory: Arc<dyn AcpSessionFactory> = Arc::new({
+            let attempts = Arc::clone(&attempts);
+            move |_context| {
+                let attempts = Arc::clone(&attempts);
+                async move {
+                    attempts.fetch_add(1, Ordering::AcqRel);
+                    Ok(Box::new(RetryCloseProbeAgent {
+                        failures_remaining: std::sync::atomic::AtomicUsize::new(0),
+                        attempts: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                    }) as Box<dyn Agent>)
+                }
+            }
+        });
+        let registry = SessionRegistry::new(factory, 2);
+        registry.close_all().await?;
+        assert!(registry.insert_session(context("late")).await.is_err());
+        assert_eq!(attempts.load(Ordering::Acquire), 0);
         Ok(())
     }
 

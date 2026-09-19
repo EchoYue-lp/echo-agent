@@ -38,17 +38,23 @@
 //! are demoted back to warm based on a demotion score.
 
 use echo_core::memory::store::Store;
-use echo_core::memory::types::{MemoryMeta, MemoryRisk, MemorySource, MemoryStatus, MemoryType};
+use echo_core::memory::types::{
+    MemoryMeta, MemoryRisk, MemorySource, MemoryStatus, MemoryType, TypedMemoryValue,
+};
 use echo_state::memory::typed_store::{MemoryFilter, TypedMemoryEntry, TypedMemoryStore};
 use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::Mutex;
 
 use super::audit::{ChangeEntryBuilder, ChangeLog, ChangeType, EntityType};
+use super::mutation::{HotValue, MemoryOperation, MemoryOperationBatch, MemoryOperationJournal};
 use super::review::{
-    AppliedMemoryMerge, ConflictDetector, MemoryConflictProposal, MemoryMergeSnapshot, MemoryMerger,
+    AppliedMemoryMerge, ConflictDetector, ConflictGroup, MemoryConflictProposal,
+    MemoryMergeSnapshot, MemoryMerger, MergeResult, ordered_conflict_entries,
 };
 use super::security::{EvolutionSecurityGuard, InputTrustLevel};
 use echo_core::error::{ConfigError, ReactError};
@@ -130,7 +136,7 @@ impl std::fmt::Display for MemoryLayer {
 /// Metadata for a single entry within the MEMORY.md hot layer.
 ///
 /// Stored in YAML frontmatter alongside the markdown body.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HotEntryMeta {
     /// Key identifier for this memory.
     pub key: String,
@@ -159,8 +165,17 @@ pub struct HotEntryMeta {
     /// Last successful recall timestamp.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_recalled_at: Option<u64>,
+    /// Nontrivial content is stored as a JSON string in its body bullet so
+    /// whitespace and newlines survive a MEMORY.md roundtrip. Legacy bullets
+    /// without this flag remain plain text.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub content_json: bool,
     /// When this entry was promoted to hot (ISO 8601).
     pub last_promoted: String,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl HotEntryMeta {
@@ -229,6 +244,11 @@ pub struct MemoryLayerManager {
     typed_store: TypedMemoryStore,
     /// Change log for audit trail.
     change_log: Box<dyn ChangeLog>,
+    /// A failed journal open remains a hard mutation error, even though this
+    /// legacy constructor cannot return Result.
+    operation_journal: std::result::Result<MemoryOperationJournal, String>,
+    operation_lock: Arc<Mutex<()>>,
+    reconciled: AtomicBool,
     /// Security guard for write-time checks (secret scan, injection, rate limit).
     security_guard: EvolutionSecurityGuard,
     /// Optional observer called after persisted evolution changes.
@@ -272,6 +292,7 @@ pub trait EvolutionObserver: Send + Sync {
 /// flock also auto-releases if the process dies, so a kill -9 cannot wedge a
 /// peer).
 struct HotFileGuard<'a> {
+    #[cfg(test)]
     manager: &'a MemoryLayerManager,
     file: MemoryFile,
     /// In-process Mutex guard (`tokio::sync::MutexGuard`, which is `Send`, so
@@ -286,6 +307,7 @@ struct HotFileGuard<'a> {
 impl<'a> HotFileGuard<'a> {
     /// Persist the (possibly mutated) `MemoryFile` back to disk, still under
     /// the held locks.
+    #[cfg(test)]
     fn commit(self) -> std::io::Result<()> {
         self.manager.write_memory_file(&self.file)
         // self drops here: inproc guard + lock file fd dropped → both released.
@@ -305,14 +327,35 @@ impl MemoryLayerManager {
         change_log: Box<dyn ChangeLog>,
     ) -> Self {
         let hot_path = echo_agent_dir.join("MEMORY.md");
+        let operation_journal =
+            MemoryOperationJournal::open(&echo_agent_dir).map_err(|error| error.to_string());
+        let operation_lock = operation_journal
+            .as_ref()
+            .map(MemoryOperationJournal::serial)
+            .unwrap_or_else(|_| Arc::new(Mutex::new(())));
         Self {
             hot_path,
             hot_lock: Mutex::new(()),
             typed_store: TypedMemoryStore::new(store),
             change_log,
+            operation_journal,
+            operation_lock,
+            reconciled: AtomicBool::new(false),
             security_guard: EvolutionSecurityGuard::default_config(),
             evolution_observer: None,
         }
+    }
+
+    /// Construct a manager that rejects a missing or corrupt recovery journal.
+    /// Call [`Self::reconcile_pending`] before handing its Store to readers.
+    pub fn try_new(
+        echo_agent_dir: PathBuf,
+        store: Arc<dyn Store>,
+        change_log: Box<dyn ChangeLog>,
+    ) -> Result<Self> {
+        let manager = Self::new(echo_agent_dir, store, change_log);
+        manager.operation_journal()?;
+        Ok(manager)
     }
 
     /// Configure an observer invoked after successful durable evolution events.
@@ -321,20 +364,329 @@ impl MemoryLayerManager {
         self
     }
 
+    fn operation_journal(&self) -> Result<&MemoryOperationJournal> {
+        self.operation_journal.as_ref().map_err(|error| {
+            ReactError::Other(format!("memory operation journal unavailable: {error}"))
+        })
+    }
+
+    fn typed_value(content: &str, meta: MemoryMeta) -> Result<serde_json::Value> {
+        TypedMemoryValue::new(content, meta)
+            .to_value()
+            .map_err(|error| {
+                ReactError::Other(format!("failed to serialize memory projection: {error}"))
+            })
+    }
+
+    fn hot_value(file: &MemoryFile, key: &str) -> Option<HotValue> {
+        file.entries
+            .iter()
+            .find(|entry| entry.key == key)
+            .map(|meta| HotValue {
+                meta: meta.clone(),
+                content: extract_hot_value_content(&file.body, meta),
+            })
+    }
+
+    fn set_hot_value(file: &mut MemoryFile, key: &str, value: Option<&HotValue>) -> Result<()> {
+        file.entries.retain(|entry| entry.key != key);
+        let pattern = format!("- **[{key}]**");
+        file.body = file
+            .body
+            .lines()
+            .filter(|line| !line.starts_with(&pattern))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !file.body.is_empty() && !file.body.ends_with('\n') {
+            file.body.push('\n');
+        }
+        if let Some(value) = value {
+            let content = if value.meta.content_json {
+                serde_json::to_string(&value.content).map_err(|error| {
+                    ReactError::Other(format!("failed to encode hot memory content: {error}"))
+                })?
+            } else {
+                value.content.clone()
+            };
+            file.entries.push(value.meta.clone());
+            file.body.push_str(&format!("- **[{key}]** {content}\n"));
+        }
+        Ok(())
+    }
+
+    fn semantic_warm(value: &serde_json::Value) -> serde_json::Value {
+        let mut normalized = value.clone();
+        if let Some(meta) = normalized
+            .get_mut("meta")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            meta.remove("recall_count");
+            meta.remove("last_recalled_at");
+        }
+        normalized
+    }
+
+    fn warm_matches(
+        current: Option<&serde_json::Value>,
+        expected: Option<&serde_json::Value>,
+    ) -> bool {
+        match (current, expected) {
+            (Some(current), Some(expected)) => {
+                Self::semantic_warm(current) == Self::semantic_warm(expected)
+            }
+            (None, None) => true,
+            _ => false,
+        }
+    }
+
+    fn preserve_recall_telemetry(
+        current: Option<&serde_json::Value>,
+        desired: &serde_json::Value,
+    ) -> serde_json::Value {
+        let mut result = desired.clone();
+        if let (Some(current_meta), Some(target_meta)) = (
+            current
+                .and_then(|value| value.get("meta"))
+                .and_then(serde_json::Value::as_object),
+            result
+                .get_mut("meta")
+                .and_then(serde_json::Value::as_object_mut),
+        ) {
+            for field in ["recall_count", "last_recalled_at"] {
+                let old = current_meta.get(field).and_then(serde_json::Value::as_u64);
+                let new = target_meta.get(field).and_then(serde_json::Value::as_u64);
+                if let Some(value) = old.into_iter().chain(new).max() {
+                    target_meta.insert(field.to_owned(), serde_json::Value::from(value));
+                }
+            }
+        }
+        result
+    }
+
+    async fn apply_operation(&self, operation: &MemoryOperation) -> Result<()> {
+        self.apply_operation_with_history(operation, std::slice::from_ref(operation))
+            .await
+    }
+
+    async fn apply_operation_with_history(
+        &self,
+        operation: &MemoryOperation,
+        history: &[MemoryOperation],
+    ) -> Result<()> {
+        let mut hot = self.lock_hot_file().await.map_err(ReactError::from)?;
+        let current_hot = Self::hot_value(&hot.file, &operation.key);
+        let current_warm = self
+            .typed_store
+            .inner()
+            .get(WARM_NAMESPACE, &operation.key)
+            .await?
+            .map(|entry| entry.value);
+        if !history
+            .iter()
+            .any(|prior| current_hot == prior.hot_before || current_hot == prior.hot_after)
+        {
+            return Err(ReactError::Other(format!(
+                "memory operation {} conflicts with hot entry {}",
+                operation.id, operation.key
+            )));
+        }
+        if !history.iter().any(|prior| {
+            Self::warm_matches(current_warm.as_ref(), prior.warm_before.as_ref())
+                || Self::warm_matches(current_warm.as_ref(), prior.warm_after.as_ref())
+        }) {
+            return Err(ReactError::Other(format!(
+                "memory operation {} conflicts with warm entry {}",
+                operation.id, operation.key
+            )));
+        }
+
+        // Destination-first on layer moves. Every intermediate state is
+        // repairable from the durable intent, including a cancelled future.
+        if operation.hot_after.is_some() && current_hot != operation.hot_after {
+            Self::set_hot_value(&mut hot.file, &operation.key, operation.hot_after.as_ref())?;
+            self.write_memory_file(&hot.file)
+                .map_err(ReactError::from)?;
+        }
+        if let Some(after) = &operation.warm_after
+            && !Self::warm_matches(current_warm.as_ref(), Some(after))
+        {
+            self.typed_store
+                .inner()
+                .put(
+                    WARM_NAMESPACE,
+                    &operation.key,
+                    Self::preserve_recall_telemetry(current_warm.as_ref(), after),
+                )
+                .await?;
+        }
+        if operation.hot_after.is_none() && current_hot.is_some() {
+            Self::set_hot_value(&mut hot.file, &operation.key, None)?;
+            self.write_memory_file(&hot.file)
+                .map_err(ReactError::from)?;
+        }
+        if operation.warm_after.is_none() && current_warm.is_some() {
+            self.typed_store
+                .inner()
+                .delete(WARM_NAMESPACE, &operation.key)
+                .await?;
+        }
+        drop(hot);
+        Ok(())
+    }
+
+    async fn settle_batch(&self, batch: &MemoryOperationBatch) -> Result<()> {
+        for operation in &batch.operations {
+            self.apply_operation(operation).await?;
+            self.change_log.record_idempotent(operation.audit.clone())?;
+        }
+        self.operation_journal()?.settle(&batch.id)
+    }
+
+    async fn reconcile_pending_locked(&self) -> Result<()> {
+        let history = self.operation_journal()?.history()?;
+        let mut by_key = BTreeMap::<String, Vec<MemoryOperation>>::new();
+        for (batch, _) in &history {
+            for operation in &batch.operations {
+                by_key
+                    .entry(operation.key.clone())
+                    .or_default()
+                    .push(operation.clone());
+            }
+        }
+        for operations in by_key.values() {
+            let latest = operations.last().ok_or_else(|| {
+                ReactError::Other("memory operation history has an empty key series".into())
+            })?;
+            self.apply_operation_with_history(latest, operations)
+                .await?;
+        }
+        for (batch, settled) in history {
+            if !settled {
+                for operation in &batch.operations {
+                    self.change_log.record_idempotent(operation.audit.clone())?;
+                }
+                self.operation_journal()?.settle(&batch.id)?;
+            }
+        }
+        self.reconciled.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    /// Finish prepared memory operations after restart or an uncertain failure.
+    /// Repeated calls replay the same identity and never append duplicate audit.
+    pub async fn reconcile_pending(&self) -> Result<()> {
+        let _serial = self.operation_lock.lock().await;
+        self.reconcile_pending_locked().await
+    }
+
+    async fn transition(
+        &self,
+        key: &str,
+        warm_after: Option<serde_json::Value>,
+        hot_after: Option<HotValue>,
+        builder: ChangeEntryBuilder,
+        expected: Option<(MemoryLayer, &TypedMemoryEntry)>,
+    ) -> Result<()> {
+        let _serial = self.operation_lock.lock().await;
+        self.reconcile_pending_locked().await?;
+        let hot = self.lock_hot_file().await.map_err(ReactError::from)?;
+        let hot_before = Self::hot_value(&hot.file, key);
+        let warm_before = self
+            .typed_store
+            .inner()
+            .get(WARM_NAMESPACE, key)
+            .await?
+            .map(|entry| entry.value);
+        drop(hot);
+
+        if let Some((layer, entry)) = expected {
+            let matches = if entry.key != key {
+                false
+            } else {
+                match layer {
+                    MemoryLayer::Warm => {
+                        hot_before.is_none()
+                            && Self::warm_matches(warm_before.as_ref(), Some(&entry.raw.value))
+                    }
+                    MemoryLayer::Hot => match hot_before.as_ref() {
+                        Some(current) if current.content == entry.content => {
+                            let current_value =
+                                Self::typed_value(&current.content, current.meta.to_memory_meta())?;
+                            let expected_value =
+                                Self::typed_value(&entry.content, entry.meta.clone())?;
+                            Self::warm_matches(Some(&current_value), Some(&expected_value))
+                        }
+                        _ => false,
+                    },
+                    MemoryLayer::Cold => false,
+                }
+            };
+            if !matches {
+                return Err(ReactError::Other(format!(
+                    "memory key {key} changed before transition; retry from a fresh read"
+                )));
+            }
+        }
+
+        let id = uuid::Uuid::new_v4().to_string();
+        let mut audit = builder.build_with(id.clone(), chrono::Utc::now());
+        if audit.trigger == "write_memory" {
+            audit.change_type = if warm_before.is_some() || hot_before.is_some() {
+                ChangeType::Update
+            } else {
+                ChangeType::Create
+            };
+            audit.before = (warm_before.is_some() || hot_before.is_some())
+                .then(|| serde_json::json!({ "layer": if hot_before.is_some() { "hot" } else { "warm" } }));
+        }
+        let operation = MemoryOperation {
+            audit,
+            id,
+            key: key.to_owned(),
+            warm_before,
+            warm_after,
+            hot_before,
+            hot_after,
+        };
+        self.operation_journal()?.prepare(operation.clone())?;
+        self.settle_batch(&MemoryOperationBatch {
+            id: operation.id.clone(),
+            operations: vec![operation],
+        })
+        .await
+    }
+
     // ── Reading ─────────────────────────────────────────────────────
 
     /// Read the hot layer content (MEMORY.md body, frontmatter stripped).
     ///
-    /// Returns empty string if the file doesn't exist or has no body.
-    pub fn read_hot_content(&self) -> String {
-        self.parse_memory_file().body
+    /// Returns an error while an operation awaits reconciliation.
+    pub fn read_hot_content(&self) -> Result<String> {
+        let _serial = self.clean_read_guard()?;
+        Ok(self.parse_memory_file().body)
     }
 
     /// Read the hot layer metadata (MEMORY.md YAML frontmatter entries).
     ///
-    /// Returns empty vec if the file doesn't exist or has no frontmatter.
-    pub fn read_hot_meta(&self) -> Vec<HotEntryMeta> {
-        self.parse_memory_file().entries
+    /// Returns an error while an operation awaits reconciliation.
+    pub fn read_hot_meta(&self) -> Result<Vec<HotEntryMeta>> {
+        let _serial = self.clean_read_guard()?;
+        Ok(self.parse_memory_file().entries)
+    }
+
+    fn clean_read_guard(&self) -> Result<tokio::sync::MutexGuard<'_, ()>> {
+        let guard = self.operation_lock.try_lock().map_err(|_| {
+            ReactError::Other("memory mutation in progress; read after settlement".into())
+        })?;
+        let history = self.operation_journal()?.history()?;
+        if history.iter().any(|(_, settled)| !settled)
+            || (!history.is_empty() && !self.reconciled.load(Ordering::Acquire))
+        {
+            return Err(ReactError::Other(
+                "memory mutation pending; call reconcile_pending before reading".into(),
+            ));
+        }
+        Ok(guard)
     }
 
     /// Determine which layer a memory key currently resides in.
@@ -342,32 +694,38 @@ impl MemoryLayerManager {
     /// Checks hot (MEMORY.md), then warm (Store). Stage4 removed the cold
     /// layer — Archived memories live on in the warm/unified namespace.
     /// Returns `None` if the key is not found in any layer.
-    pub async fn locate(&self, key: &str) -> Option<(MemoryLayer, TypedMemoryEntry)> {
+    pub async fn locate(&self, key: &str) -> Result<Option<(MemoryLayer, TypedMemoryEntry)>> {
+        let _serial = self.operation_lock.lock().await;
+        self.reconcile_pending_locked().await?;
         // Check hot layer
         let file = self.parse_memory_file();
         if let Some(entry) = self.find_in_hot(&file, key) {
-            return Some((MemoryLayer::Hot, entry));
+            return Ok(Some((MemoryLayer::Hot, entry)));
         }
 
         // Check warm layer (unified namespace; includes Archived entries)
-        if let Ok(Some(entry)) = self.typed_store.get_typed(WARM_NAMESPACE, key).await {
-            return Some((MemoryLayer::Warm, entry));
+        if let Some(entry) = self.typed_store.get_typed(WARM_NAMESPACE, key).await? {
+            return Ok(Some((MemoryLayer::Warm, entry)));
         }
 
-        None
+        Ok(None)
     }
 
     /// Get all hot entries as TypedMemoryEntries (reconstructed from MEMORY.md).
-    pub fn list_hot(&self) -> Vec<TypedMemoryEntry> {
+    pub fn list_hot(&self) -> Result<Vec<TypedMemoryEntry>> {
+        let _serial = self.clean_read_guard()?;
         let file = self.parse_memory_file();
-        file.entries
+        Ok(file
+            .entries
             .iter()
             .filter_map(|meta| self.hot_meta_to_entry(meta, &file.body))
-            .collect()
+            .collect())
     }
 
     /// Get all warm entries matching a filter.
     pub async fn list_warm(&self, filter: &MemoryFilter) -> Result<Vec<TypedMemoryEntry>> {
+        let _serial = self.operation_lock.lock().await;
+        self.reconcile_pending_locked().await?;
         self.typed_store.list_typed(WARM_NAMESPACE, filter).await
     }
 
@@ -389,7 +747,7 @@ impl MemoryLayerManager {
     /// Retained as pub API (aligned with Letta/MemGPT promotion + OpenClaw
     /// Dreaming) so consumers with a three-tier layout can hook in.
     pub async fn promote(&self, key: &str) -> Result<Option<LayerChangeResult>> {
-        let Some((layer, _entry)) = self.locate(key).await else {
+        let Some((layer, _entry)) = self.locate(key).await? else {
             return Ok(None);
         };
         match layer {
@@ -412,7 +770,7 @@ impl MemoryLayerManager {
     /// handled by Dreaming (stage 2). `update_meta` takes a full `MemoryMeta`
     /// (not a closure), hence get-modify-put.
     pub async fn demote(&self, key: &str, reason: &str) -> Result<LayerChangeResult> {
-        let Some((layer, entry)) = self.locate(key).await else {
+        let Some((layer, entry)) = self.locate(key).await? else {
             return Err(ReactError::Config(Box::new(ConfigError::ConfigFileError(
                 format!("Memory key '{key}' not found in any layer"),
             ))));
@@ -423,17 +781,21 @@ impl MemoryLayerManager {
             MemoryLayer::Warm => {
                 let mut meta = entry.meta.clone();
                 meta.status = MemoryStatus::Archived;
-                self.typed_store
-                    .update_meta(WARM_NAMESPACE, key, meta)
-                    .await?;
-                self.record_change(
+                self.transition(
                     key,
-                    ChangeType::Demote,
-                    Some("warm"),
-                    Some("archived"),
-                    reason,
-                    "demote",
-                )?;
+                    Some(Self::typed_value(&entry.content, meta)?),
+                    None,
+                    Self::change_builder(
+                        key,
+                        ChangeType::Demote,
+                        Some("warm"),
+                        Some("archived"),
+                        reason,
+                        "demote",
+                    ),
+                    Some((MemoryLayer::Warm, &entry)),
+                )
+                .await?;
                 self.notify_memory_layer_change(key, "warm", "archived")
                     .await;
                 Ok(LayerChangeResult {
@@ -461,25 +823,26 @@ impl MemoryLayerManager {
         if let Some(entry) = self.typed_store.get_typed(WARM_NAMESPACE, key).await?
             && entry.meta.status == MemoryStatus::Archived
         {
-            let mut meta = entry.meta;
+            let mut meta = entry.meta.clone();
             meta.status = MemoryStatus::Active;
-            let updated = self
-                .typed_store
-                .update_meta(WARM_NAMESPACE, key, meta)
-                .await?;
-            if updated {
-                self.record_change(
+            self.transition(
+                key,
+                Some(Self::typed_value(&entry.content, meta)?),
+                None,
+                Self::change_builder(
                     key,
                     ChangeType::Promote,
                     Some("archived"),
                     Some("warm"),
                     "recent high-recall activity revived archived memory",
                     "dreaming",
-                )?;
-                self.notify_memory_layer_change(key, "archived", "warm")
-                    .await;
-            }
-            return Ok(updated);
+                ),
+                Some((MemoryLayer::Warm, &entry)),
+            )
+            .await?;
+            self.notify_memory_layer_change(key, "archived", "warm")
+                .await;
+            return Ok(true);
         }
         Ok(false)
     }
@@ -497,42 +860,16 @@ impl MemoryLayerManager {
     /// — so `forget` could never delete what `remember` stored. The layered
     /// variant (`LayeredForgetTool`) routes here.
     pub async fn delete_memory(&self, key: &str) -> Result<bool> {
-        let Some((layer, _entry)) = self.locate(key).await else {
+        let Some((layer, entry)) = self.locate(key).await? else {
             return Ok(false);
         };
 
         match layer {
-            MemoryLayer::Hot => {
-                // Remove from MEMORY.md under the lock so a concurrent writer
-                // cannot interleave (mirrors `demote_hot_to_warm`).
-                let mut guard = self.lock_hot_file().await.map_err(ReactError::from)?;
-                guard.file.entries.retain(|e| e.key != key);
-
-                let pattern = format!("- **[{key}]**");
-                guard.file.body = guard
-                    .file
-                    .body
-                    .lines()
-                    .filter(|line| !line.starts_with(&pattern))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                guard.commit().map_err(ReactError::from)?;
-            }
-            MemoryLayer::Warm => {
-                let deleted = self.typed_store.delete_typed(WARM_NAMESPACE, key).await?;
-                if !deleted {
-                    return Ok(false);
-                }
-            }
+            MemoryLayer::Hot | MemoryLayer::Warm => {}
             MemoryLayer::Cold => {
-                // Optional tier: consumers maintaining a separate COLD_NAMESPACE
-                // store should delete from it here. Default path has no cold
-                // entries (locate() won't return Cold), so this is unreachable
-                // in the product but required for exhaustiveness.
-                let deleted = self.typed_store.delete_typed(COLD_NAMESPACE, key).await?;
-                if !deleted {
-                    return Ok(false);
-                }
+                return Err(ReactError::Other(format!(
+                    "memory key {key} belongs to an unsupported cold store"
+                )));
             }
         }
 
@@ -541,14 +878,21 @@ impl MemoryLayerManager {
             MemoryLayer::Warm => "warm",
             MemoryLayer::Cold => "cold",
         };
-        self.record_change(
+        self.transition(
             key,
-            ChangeType::Delete,
-            Some(layer_name),
             None,
-            "user forget",
-            "delete_memory",
-        )?;
+            None,
+            Self::change_builder(
+                key,
+                ChangeType::Delete,
+                Some(layer_name),
+                None,
+                "user forget",
+                "delete_memory",
+            ),
+            Some((layer, &entry)),
+        )
+        .await?;
         if layer == MemoryLayer::Hot {
             self.notify_memory_layer_change(key, "hot", "deleted").await;
         }
@@ -560,7 +904,7 @@ impl MemoryLayerManager {
     /// Dreaming scans the unified `["agent","memories"]` namespace to find
     /// high-recall memories worth promoting and stale low-recall ones to demote.
     pub async fn list_warm_memories(&self, filter: &MemoryFilter) -> Result<Vec<TypedMemoryEntry>> {
-        self.typed_store.list_typed(WARM_NAMESPACE, filter).await
+        self.list_warm(filter).await
     }
 
     /// Apply a previously reviewed semantic-conflict proposal.
@@ -644,13 +988,100 @@ impl MemoryLayerManager {
                 meta: entry.meta.clone(),
             })
             .collect();
-        let result = MemoryMerger::new(&self.typed_store, self.change_log.as_ref())
-            .merge_group(&group)
-            .await?;
+        let result = MemoryMerger::new(self).merge_group(&group).await?;
         Ok(AppliedMemoryMerge {
             primary_key: result.primary_key,
             superseded_keys: result.superseded_keys,
             before,
+        })
+    }
+
+    pub(super) async fn commit_merge_group(&self, group: &ConflictGroup) -> Result<MergeResult> {
+        let ordered = ordered_conflict_entries(group);
+        let Some(primary) = ordered.first() else {
+            return Ok(MergeResult {
+                primary_key: String::new(),
+                superseded_keys: Vec::new(),
+            });
+        };
+        if ordered.len() < 2 {
+            return Ok(MergeResult {
+                primary_key: primary.key.clone(),
+                superseded_keys: Vec::new(),
+            });
+        }
+        let _serial = self.operation_lock.lock().await;
+        self.reconcile_pending_locked().await?;
+        let revision_count = ordered.iter().fold(0_u32, |sum, entry| {
+            sum.saturating_add(entry.meta.revision_count)
+        });
+        let mut operations = Vec::with_capacity(ordered.len());
+        for (index, entry) in ordered.iter().enumerate() {
+            let current = self
+                .typed_store
+                .inner()
+                .get(WARM_NAMESPACE, &entry.key)
+                .await?
+                .ok_or_else(|| stale_merge_plan_error("memory merge member disappeared"))?;
+            if current.value != entry.raw.value
+                || Self::hot_value(&self.parse_memory_file(), &entry.key).is_some()
+            {
+                return Err(stale_merge_plan_error(
+                    "memory merge member changed; refresh Review Inbox",
+                ));
+            }
+            let mut meta = entry.meta.clone();
+            let superseded_by = if index == 0 {
+                None
+            } else {
+                Some(primary.key.clone())
+            };
+            if index == 0 {
+                meta.revision_count = revision_count.max(meta.revision_count);
+            } else {
+                meta.status = MemoryStatus::Superseded;
+                meta.superseded_by = superseded_by.clone();
+            }
+            let id = uuid::Uuid::new_v4().to_string();
+            let reason = if index == 0 {
+                format!(
+                    "primary survivor of {}-way merge on topic '{}'",
+                    ordered.len(),
+                    group.topic
+                )
+            } else {
+                format!(
+                    "superseded by '{}' during merge on topic '{}'",
+                    primary.key, group.topic
+                )
+            };
+            let audit = ChangeEntryBuilder::new(EntityType::Memory, &entry.key, ChangeType::Merge)
+                .reason(reason).trigger("explicit_memory_merge")
+                .after(serde_json::json!({ "superseded_by": superseded_by, "group_size": ordered.len() }))
+                .build_with(id.clone(), chrono::Utc::now());
+            operations.push(MemoryOperation {
+                id,
+                key: entry.key.clone(),
+                warm_before: Some(current.value),
+                warm_after: Some(Self::typed_value(&entry.content, meta)?),
+                hot_before: None,
+                hot_after: None,
+                audit,
+            });
+        }
+        let batch = MemoryOperationBatch {
+            id: uuid::Uuid::new_v4().to_string(),
+            operations,
+        };
+        self.operation_journal()?.prepare_batch(batch.clone())?;
+        self.settle_batch(&batch).await?;
+        Ok(MergeResult {
+            primary_key: primary.key.clone(),
+            superseded_keys: ordered
+                .iter()
+                .skip(1)
+                .map(|entry| entry.key.clone())
+                .collect(),
         })
     }
 
@@ -662,22 +1093,21 @@ impl MemoryLayerManager {
             ));
         }
         for snapshot in snapshots {
-            self.typed_store
-                .put_typed(
-                    WARM_NAMESPACE,
-                    &snapshot.key,
-                    &snapshot.content,
-                    snapshot.meta.clone(),
-                )
-                .await?;
-            self.record_change(
+            self.transition(
                 &snapshot.key,
-                ChangeType::Update,
-                Some("merged"),
-                Some("warm"),
-                "user undid an approved memory merge",
-                "review_inbox_undo",
-            )?;
+                Some(Self::typed_value(&snapshot.content, snapshot.meta.clone())?),
+                None,
+                Self::change_builder(
+                    &snapshot.key,
+                    ChangeType::Update,
+                    Some("merged"),
+                    Some("warm"),
+                    "user undid an approved memory merge",
+                    "review_inbox_undo",
+                ),
+                None,
+            )
+            .await?;
         }
         Ok(())
     }
@@ -686,7 +1116,7 @@ impl MemoryLayerManager {
     ///
     /// Called after every new memory write.
     pub async fn consider_promotion(&self, key: &str) -> Result<Option<LayerChangeResult>> {
-        let Some((layer, entry)) = self.locate(key).await else {
+        let Some((layer, entry)) = self.locate(key).await? else {
             return Ok(None);
         };
 
@@ -712,101 +1142,26 @@ impl MemoryLayerManager {
     ///
     /// Called after every hot-layer write. Returns a list of demotion results.
     pub async fn enforce_hot_budget(&self) -> Result<Vec<LayerChangeResult>> {
-        // Hold the hot-file lock across the whole demotion pass: we read the
-        // body, demote entries to the warm Store (async), and rewrite the file,
-        // all of which must be one atomic critical section so a concurrent
-        // writer cannot interleave and lose entries (P0-3).
-        let mut guard = self.lock_hot_file().await.map_err(ReactError::from)?;
-
-        let tokens = estimate_tokens(&guard.file.body);
-        if tokens <= HOT_TOKEN_BUDGET {
-            return Ok(Vec::new());
-        }
-
-        // Sort entries by demotion score (highest = demote first)
-        let mut scored: Vec<(f32, HotEntryMeta)> = guard
-            .file
-            .entries
-            .iter()
-            .map(|e| (Self::demotion_score(e), e.clone()))
-            .collect();
-        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-
         let mut results = Vec::new();
-        let mut removed_keys: Vec<String> = Vec::new();
-
-        // Demote in-place on the guard's body until within budget.
-        for (_, meta) in scored {
-            if estimate_tokens(&guard.file.body) <= HOT_TOKEN_BUDGET {
+        loop {
+            let file = self.parse_memory_file();
+            if estimate_tokens(&file.body) <= HOT_TOKEN_BUDGET {
                 break;
             }
-
-            // Capture the entry's content BEFORE we strip its bullet from the
-            // body (extract_hot_entry_content scans the body text).
-            let removed_content = extract_hot_entry_content(&guard.file.body, &meta.key);
-
-            // Remove this entry's bullet from the body.
-            let pattern = format!("- **[{}]**", meta.key);
-            guard.file.body = guard
-                .file
-                .body
-                .lines()
-                .filter(|line| !line.starts_with(&pattern))
-                .collect::<Vec<_>>()
-                .join("\n");
-            if !guard.file.body.ends_with('\n') {
-                guard.file.body.push('\n');
-            }
-
-            let warm_meta = meta.to_memory_meta();
-            let removed_entry = TypedMemoryEntry {
-                key: meta.key.clone(),
-                content: removed_content,
-                meta: warm_meta.clone(),
-                raw: echo_core::memory::store::StoreItem::new(
-                    WARM_NAMESPACE.iter().map(|s| s.to_string()).collect(),
-                    meta.key.clone(),
-                    serde_json::Value::Null,
-                ),
-            };
-
-            removed_keys.push(meta.key.clone());
-
-            // Write the removed entry to warm layer (async, but still under lock).
-            self.typed_store
-                .put_typed(WARM_NAMESPACE, &meta.key, &removed_entry.content, warm_meta)
-                .await?;
-
-            // Record the change
-            self.record_change(
-                &meta.key,
-                ChangeType::Demote,
-                Some("hot"),
-                Some("warm"),
-                "hot layer budget enforcement",
-                "enforce_hot_budget",
-            )?;
-
-            results.push(LayerChangeResult {
-                key: meta.key.clone(),
-                from_layer: MemoryLayer::Hot,
-                to_layer: MemoryLayer::Warm,
-                reason: "hot layer budget enforcement".to_string(),
+            let candidate = file.entries.iter().max_by(|a, b| {
+                Self::demotion_score(a)
+                    .partial_cmp(&Self::demotion_score(b))
+                    .unwrap_or(std::cmp::Ordering::Equal)
             });
-        }
-
-        // Drop the demoted entries from the frontmatter.
-        if !removed_keys.is_empty() {
-            guard
-                .file
-                .entries
-                .retain(|e| !removed_keys.contains(&e.key));
-            guard.commit().map_err(ReactError::from)?;
-        }
-
-        for result in &results {
-            self.notify_memory_layer_change(&result.key, "hot", "warm")
-                .await;
+            let Some(candidate) = candidate else { break };
+            let key = candidate.key.clone();
+            let entry = self
+                .find_in_hot(&file, &key)
+                .ok_or_else(|| ReactError::Other(format!("missing hot entry {key}")))?;
+            results.push(
+                self.demote_hot_to_warm(&key, entry, "hot layer budget enforcement")
+                    .await?,
+            );
         }
 
         Ok(results)
@@ -863,23 +1218,21 @@ impl MemoryLayerManager {
             .sanitized_content
             .unwrap_or_else(|| content.to_string());
 
-        // Write to warm layer
-        self.typed_store
-            .put_typed(WARM_NAMESPACE, key, &safe_content, meta.clone())
-            .await?;
-
-        // Record the creation
-        self.record_change(
+        self.transition(
             key,
-            ChangeType::Create,
+            Some(Self::typed_value(&safe_content, meta.clone())?),
             None,
-            Some("warm"),
-            &format!(
-                "new memory via {}",
-                meta.source.as_str().unwrap_or("unknown")
+            Self::change_builder(
+                key,
+                ChangeType::Create,
+                None,
+                Some("warm"),
+                &format!("memory via {}", meta.source.as_str().unwrap_or("unknown")),
+                "write_memory",
             ),
-            "write_memory",
-        )?;
+            None,
+        )
+        .await?;
 
         self.notify_memory_write(key, meta.source.as_str().unwrap_or("unknown"))
             .await;
@@ -898,6 +1251,8 @@ impl MemoryLayerManager {
         query: &str,
         limit: usize,
     ) -> Result<Vec<(MemoryLayer, TypedMemoryEntry)>> {
+        let _serial = self.operation_lock.lock().await;
+        self.reconcile_pending_locked().await?;
         let mut results = Vec::new();
 
         // Search hot layer (keyword match on body)
@@ -979,9 +1334,12 @@ impl MemoryLayerManager {
             tmp.write_all(content.as_bytes())?;
             // fsync before rename so a crash after rename cannot expose an
             // empty file (the prior version had no fsync).
-            let _ = tmp.sync_all();
+            tmp.sync_all()?;
         }
         std::fs::rename(&tmp_path, &self.hot_path)?;
+        if let Some(parent) = self.hot_path.parent() {
+            std::fs::File::open(parent)?.sync_all()?;
+        }
 
         Ok(())
     }
@@ -1014,11 +1372,6 @@ impl MemoryLayerManager {
 
         // Cross-process advisory lock on a sidecar file.
         let lock_path = self.hot_path.with_extension("md.lock");
-        let _ = std::fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(false)
-            .open(&lock_path);
         let lock_file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -1036,21 +1389,27 @@ impl MemoryLayerManager {
         const BACKOFF: std::time::Duration = std::time::Duration::from_secs(1);
         let mut got_lock = false;
         for _ in 0..MAX_ATTEMPTS {
-            if lock_file.lock_exclusive().is_ok() {
-                got_lock = true;
-                break;
+            match lock_file.try_lock_exclusive() {
+                Ok(()) => {
+                    got_lock = true;
+                    break;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    tokio::time::sleep(BACKOFF).await;
+                }
+                Err(error) => return Err(error),
             }
-            tokio::time::sleep(BACKOFF).await;
         }
         if !got_lock {
-            tracing::error!(
-                attempts = MAX_ATTEMPTS,
-                "MEMORY.md lock unavailable after retries; proceeding WITHOUT cross-process lock (TOCTOU risk across processes)"
-            );
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                format!("MEMORY.md lock unavailable after {MAX_ATTEMPTS} attempts"),
+            ));
         }
 
         let file = self.parse_memory_file();
         Ok(HotFileGuard {
+            #[cfg(test)]
             manager: self,
             file,
             _inproc: inproc,
@@ -1059,29 +1418,15 @@ impl MemoryLayerManager {
     }
 
     /// Add an entry to the MEMORY.md hot layer.
+    #[cfg(test)]
     async fn add_to_hot(&self, entry: &TypedMemoryEntry) -> std::io::Result<()> {
         let mut guard = self.lock_hot_file().await?;
-        let hot_meta = HotEntryMeta {
-            key: entry.key.clone(),
-            memory_type: entry.meta.memory_type,
-            confidence: entry.meta.confidence,
-            stability: entry.meta.stability,
-            recall_weight: entry.meta.recall_weight,
-            source: entry.meta.source,
-            topic: entry.meta.topic.clone(),
-            risk: entry.meta.risk,
-            revision_count: entry.meta.revision_count,
-            recall_count: entry.meta.recall_count,
-            last_recalled_at: entry.meta.last_recalled_at,
-            last_promoted: crate::utils::time::now_local().to_rfc3339(),
+        let value = HotValue {
+            meta: Self::hot_meta(entry),
+            content: entry.content.clone(),
         };
-
-        // Add to frontmatter
-        guard.file.entries.push(hot_meta);
-
-        // Add to body
-        let bullet = format!("- **[{}]** {}\n", entry.key, entry.content.trim());
-        guard.file.body.push_str(&bullet);
+        Self::set_hot_value(&mut guard.file, &entry.key, Some(&value))
+            .map_err(std::io::Error::other)?;
 
         guard.commit()
     }
@@ -1094,7 +1439,7 @@ impl MemoryLayerManager {
 
     /// Reconstruct a TypedMemoryEntry from a HotEntryMeta and the file body.
     fn hot_meta_to_entry(&self, meta: &HotEntryMeta, body: &str) -> Option<TypedMemoryEntry> {
-        let content = extract_hot_entry_content(body, &meta.key);
+        let content = extract_hot_value_content(body, meta);
         Some(TypedMemoryEntry {
             key: meta.key.clone(),
             content,
@@ -1114,23 +1459,25 @@ impl MemoryLayerManager {
         key: &str,
         entry: TypedMemoryEntry,
     ) -> Result<Option<LayerChangeResult>> {
-        // Write to the DESTINATION (hot) FIRST. If this fails, the warm entry
-        // is untouched — at worst we have a duplicate, never a loss (P0-2).
-        if let Err(e) = self.add_to_hot(&entry).await {
-            return Err(ReactError::from(e));
-        }
-
-        // Only after hot write succeeds, remove from warm.
-        self.typed_store.delete_typed(WARM_NAMESPACE, key).await?;
-
-        self.record_change(
+        let hot = HotValue {
+            meta: Self::hot_meta(&entry),
+            content: entry.content.clone(),
+        };
+        self.transition(
             key,
-            ChangeType::Promote,
-            Some("warm"),
-            Some("hot"),
-            "warm→hot promotion (eligible)",
-            "promote",
-        )?;
+            None,
+            Some(hot),
+            Self::change_builder(
+                key,
+                ChangeType::Promote,
+                Some("warm"),
+                Some("hot"),
+                "warm-to-hot promotion (eligible)",
+                "promote",
+            ),
+            Some((MemoryLayer::Warm, &entry)),
+        )
+        .await?;
 
         self.notify_memory_layer_change(key, "warm", "hot").await;
 
@@ -1152,36 +1499,21 @@ impl MemoryLayerManager {
         entry: TypedMemoryEntry,
         reason: &str,
     ) -> Result<LayerChangeResult> {
-        // Write to warm layer FIRST. If this fails, the hot entry is untouched
-        // — at worst we have a duplicate, never a loss (P0-2).
-        self.typed_store
-            .put_typed(WARM_NAMESPACE, key, &entry.content, entry.meta.clone())
-            .await?;
-
-        // Only after warm write succeeds, remove from hot layer file — under
-        // the lock so a concurrent writer cannot interleave (P0-3).
-        let mut guard = self.lock_hot_file().await.map_err(ReactError::from)?;
-        guard.file.entries.retain(|e| e.key != key);
-
-        let pattern = format!("- **[{key}]**");
-        guard.file.body = guard
-            .file
-            .body
-            .lines()
-            .filter(|line| !line.starts_with(&pattern))
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        guard.commit().map_err(ReactError::from)?;
-
-        self.record_change(
+        self.transition(
             key,
-            ChangeType::Demote,
-            Some("hot"),
-            Some("warm"),
-            reason,
-            "demote",
-        )?;
+            Some(Self::typed_value(&entry.content, entry.meta.clone())?),
+            None,
+            Self::change_builder(
+                key,
+                ChangeType::Demote,
+                Some("hot"),
+                Some("warm"),
+                reason,
+                "demote",
+            ),
+            Some((MemoryLayer::Hot, &entry)),
+        )
+        .await?;
 
         self.notify_memory_layer_change(key, "hot", "warm").await;
 
@@ -1193,16 +1525,34 @@ impl MemoryLayerManager {
         })
     }
 
-    /// Record a change in the audit log.
-    fn record_change(
-        &self,
+    fn hot_meta(entry: &TypedMemoryEntry) -> HotEntryMeta {
+        HotEntryMeta {
+            key: entry.key.clone(),
+            memory_type: entry.meta.memory_type,
+            confidence: entry.meta.confidence,
+            stability: entry.meta.stability,
+            recall_weight: entry.meta.recall_weight,
+            source: entry.meta.source,
+            topic: entry.meta.topic.clone(),
+            risk: entry.meta.risk,
+            revision_count: entry.meta.revision_count,
+            recall_count: entry.meta.recall_count,
+            last_recalled_at: entry.meta.last_recalled_at,
+            content_json: entry.content.trim() != entry.content
+                || entry.content.contains('\n')
+                || entry.content.contains('\r'),
+            last_promoted: crate::utils::time::now_local().to_rfc3339(),
+        }
+    }
+
+    fn change_builder(
         key: &str,
         change_type: ChangeType,
         from: Option<&str>,
         to: Option<&str>,
         reason: &str,
         trigger: &str,
-    ) -> Result<()> {
+    ) -> ChangeEntryBuilder {
         let mut builder = ChangeEntryBuilder::new(EntityType::Memory, key, change_type);
 
         if let Some(f) = from {
@@ -1214,8 +1564,7 @@ impl MemoryLayerManager {
         builder = builder.reason(reason.to_string());
         builder = builder.trigger(trigger.to_string());
 
-        let entry = builder.build(&*self.change_log);
-        self.change_log.record(entry)
+        builder.reason(reason).trigger(trigger)
     }
 
     async fn notify_memory_write(&self, key: &str, source: &str) {
@@ -1323,9 +1672,17 @@ struct MemoryFileFrontmatter {
 fn extract_hot_entry_content(body: &str, key: &str) -> String {
     let pattern = format!("- **[{key}]** ");
     body.lines()
-        .find(|line| line.starts_with(&pattern))
-        .map(|line| line.trim_start_matches(&pattern).to_string())
+        .find_map(|line| line.strip_prefix(&pattern).map(str::to_owned))
         .unwrap_or_default()
+}
+
+fn extract_hot_value_content(body: &str, meta: &HotEntryMeta) -> String {
+    let raw = extract_hot_entry_content(body, &meta.key);
+    if meta.content_json {
+        serde_json::from_str::<String>(&raw).unwrap_or(raw)
+    } else {
+        raw
+    }
 }
 
 /// Estimate the token count of a string.
@@ -1384,11 +1741,12 @@ mod security_ext {
 
 #[cfg(test)]
 mod tests {
-    use super::super::audit::ChangeEntry;
+    use super::super::audit::{ChangeEntry, ChangeRecordOutcome, JsonlChangeLog};
     use super::*;
     use echo_core::memory::types::{MemoryMeta, MemorySource, MemoryType};
-    use echo_state::memory::store::InMemoryStore;
+    use echo_state::memory::store::{FileStore, InMemoryStore};
     use std::sync::Mutex as StdMutex;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     /// A no-op ChangeLog for testing.
     struct NullChangeLog;
@@ -1451,6 +1809,70 @@ mod tests {
     }
 
     struct FailingChangeLog;
+
+    struct FailOnceChangeLog {
+        inner: JsonlChangeLog,
+        fail_next: AtomicBool,
+    }
+
+    struct FailSecondChangeLog {
+        inner: JsonlChangeLog,
+        calls: AtomicUsize,
+    }
+
+    impl ChangeLog for FailSecondChangeLog {
+        fn record(&self, entry: ChangeEntry) -> Result<()> {
+            self.record_idempotent(entry).map(|_| ())
+        }
+
+        fn record_idempotent(&self, entry: ChangeEntry) -> Result<ChangeRecordOutcome> {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 1 {
+                return Err(merge_plan_error("injected second audit failure"));
+            }
+            self.inner.record_idempotent(entry)
+        }
+
+        fn query(&self, filter: &super::super::audit::ChangeFilter) -> Result<Vec<ChangeEntry>> {
+            self.inner.query(filter)
+        }
+
+        fn latest_for(&self, entity_type: EntityType, key: &str) -> Result<Option<ChangeEntry>> {
+            self.inner.latest_for(entity_type, key)
+        }
+
+        fn len(&self) -> usize {
+            self.inner.len()
+        }
+    }
+
+    impl ChangeLog for FailOnceChangeLog {
+        fn record(&self, entry: ChangeEntry) -> Result<()> {
+            self.record_idempotent(entry).map(|_| ())
+        }
+
+        fn record_idempotent(&self, entry: ChangeEntry) -> Result<ChangeRecordOutcome> {
+            if self.fail_next.swap(false, Ordering::SeqCst) {
+                return Err(merge_plan_error("injected change-log failure"));
+            }
+            self.inner.record_idempotent(entry)
+        }
+
+        fn query(&self, filter: &super::super::audit::ChangeFilter) -> Result<Vec<ChangeEntry>> {
+            self.inner.query(filter)
+        }
+
+        fn latest_for(
+            &self,
+            entity_type: EntityType,
+            entity_key: &str,
+        ) -> Result<Option<ChangeEntry>> {
+            self.inner.latest_for(entity_type, entity_key)
+        }
+
+        fn len(&self) -> usize {
+            self.inner.len()
+        }
+    }
 
     impl ChangeLog for FailingChangeLog {
         fn record(&self, _entry: ChangeEntry) -> Result<()> {
@@ -1545,6 +1967,7 @@ entries:
                 revision_count: 2,
                 recall_count: 4,
                 last_recalled_at: Some(1_750_000_000),
+                content_json: false,
                 last_promoted: "2026-06-15T10:00:00Z".to_string(),
             }],
             body: "- **[test_key]** User prefers concise output.\n".to_string(),
@@ -1558,13 +1981,14 @@ entries:
     }
 
     #[test]
-    fn test_read_hot_content_empty() {
+    fn test_read_hot_content_empty() -> Result<()> {
         let manager = make_manager();
-        assert!(manager.read_hot_content().is_empty());
+        assert!(manager.read_hot_content()?.is_empty());
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_add_to_hot_under_budget() {
+    async fn test_add_to_hot_under_budget() -> Result<()> {
         let manager = make_manager();
         let entry = TypedMemoryEntry {
             key: "test_key".to_string(),
@@ -1583,13 +2007,14 @@ entries:
 
         manager.add_to_hot(&entry).await.expect("add to hot");
 
-        let content = manager.read_hot_content();
+        let content = manager.read_hot_content()?;
         assert!(content.contains("**[test_key]**"));
         assert!(content.contains("User prefers concise output"));
 
-        let meta = manager.read_hot_meta();
+        let meta = manager.read_hot_meta()?;
         assert_eq!(meta.len(), 1);
         assert_eq!(meta[0].key, "test_key");
+        Ok(())
     }
 
     #[tokio::test]
@@ -1656,6 +2081,583 @@ entries:
 
         assert!(manager.delete_memory("failed_delete").await.is_err());
         assert!(observer.changes().is_empty());
+        assert!(manager.read_hot_content().is_err());
+        assert!(manager.list_hot().is_err());
+        assert!(manager.locate("failed_delete").await.is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn two_managers_share_one_root_operation_order() -> Result<()> {
+        let dir = tempfile::tempdir().map_err(ReactError::from)?;
+        let root = dir.path().join(".echo-agent");
+        let audit_path = root.join("evolution/change-log.jsonl");
+        let store = Arc::new(FileStore::new(dir.path().join("store.json"))?);
+        let first = MemoryLayerManager::new(
+            root.clone(),
+            store.clone(),
+            Box::new(JsonlChangeLog::new(audit_path.clone())?),
+        );
+        let second = MemoryLayerManager::new(
+            root,
+            store.clone(),
+            Box::new(JsonlChangeLog::new(audit_path.clone())?),
+        );
+        let meta = MemoryMeta::new(
+            MemoryType::ProjectFact,
+            MemorySource::AutoExtracted,
+            "build",
+        );
+        let (a, b) = tokio::join!(
+            first.write_memory("shared", "A", meta.clone()),
+            second.write_memory("shared", "B", meta),
+        );
+        assert!(a?.is_none());
+        assert!(b?.is_none());
+        let audit =
+            JsonlChangeLog::new(audit_path)?.query(&super::super::audit::ChangeFilter::new())?;
+        assert_eq!(audit.len(), 2);
+        assert_eq!(
+            audit
+                .iter()
+                .filter(|entry| entry.change_type == ChangeType::Create)
+                .count(),
+            1
+        );
+        assert_eq!(
+            audit
+                .iter()
+                .filter(|entry| entry.change_type == ChangeType::Update)
+                .count(),
+            1
+        );
+        assert_eq!(store.list(WARM_NAMESPACE).await?.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn journal_lease_child_probe() -> Result<()> {
+        let Some(root) = std::env::var_os("ECHO_TEST_MEMORY_JOURNAL_ROOT") else {
+            return Ok(());
+        };
+        let manager = MemoryLayerManager::try_new(
+            PathBuf::from(root),
+            Arc::new(InMemoryStore::new()),
+            Box::new(NullChangeLog),
+        );
+        if manager.is_ok() {
+            return Err(merge_plan_error(
+                "competing process opened the live memory operation journal",
+            ));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn second_process_fails_closed_while_manager_owns_journal() -> Result<()> {
+        let dir = tempfile::tempdir().map_err(ReactError::from)?;
+        let root = dir.path().join(".echo-agent");
+        let _manager = MemoryLayerManager::try_new(
+            root.clone(),
+            Arc::new(InMemoryStore::new()),
+            Box::new(NullChangeLog),
+        )?;
+        let executable = std::env::current_exe().map_err(ReactError::from)?;
+        let child = std::process::Command::new(executable)
+            .arg("--exact")
+            .arg("evolution::layer::tests::journal_lease_child_probe")
+            .env("ECHO_TEST_MEMORY_JOURNAL_ROOT", root)
+            .output()
+            .map_err(ReactError::from)?;
+        if !child.status.success() {
+            return Err(ReactError::Other(format!(
+                "competing memory journal process probe failed: {}",
+                String::from_utf8_lossy(&child.stdout)
+            )));
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn durable_write_reconciles_one_audit_after_restart() -> Result<()> {
+        let dir = tempfile::tempdir().map_err(ReactError::from)?;
+        let root = dir.path().join(".echo-agent");
+        let store_path = dir.path().join("store.json");
+        let audit_path = root.join("evolution/change-log.jsonl");
+        let store = Arc::new(FileStore::new(&store_path)?);
+        let log = FailOnceChangeLog {
+            inner: JsonlChangeLog::new(audit_path.clone())?,
+            fail_next: AtomicBool::new(true),
+        };
+        let manager = MemoryLayerManager::new(root.clone(), store.clone(), Box::new(log));
+        let meta = MemoryMeta::new(
+            MemoryType::ProjectFact,
+            MemorySource::AutoExtracted,
+            "build",
+        );
+
+        assert!(
+            manager
+                .write_memory("durable", "Use cargo", meta)
+                .await
+                .is_err()
+        );
+        assert!(store.get(WARM_NAMESPACE, "durable").await?.is_some());
+        assert_eq!(JsonlChangeLog::new(audit_path.clone())?.len(), 0);
+        drop(manager);
+        drop(store);
+
+        let reopened = MemoryLayerManager::new(
+            root,
+            Arc::new(FileStore::new(store_path)?),
+            Box::new(JsonlChangeLog::new(audit_path.clone())?),
+        );
+        reopened.reconcile_pending().await?;
+        reopened.reconcile_pending().await?;
+        let entries =
+            JsonlChangeLog::new(audit_path)?.query(&super::super::audit::ChangeFilter::new())?;
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries.first().map(|entry| entry.entity_key.as_str()),
+            Some("durable")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn settled_history_repairs_older_store_projection_without_duplicate_audit() -> Result<()>
+    {
+        let dir = tempfile::tempdir().map_err(ReactError::from)?;
+        let root = dir.path().join(".echo-agent");
+        let store_path = dir.path().join("store.json");
+        let audit_path = root.join("evolution/change-log.jsonl");
+        let store = Arc::new(FileStore::new(&store_path)?);
+        let manager = MemoryLayerManager::new(
+            root.clone(),
+            store.clone(),
+            Box::new(JsonlChangeLog::new(audit_path.clone())?),
+        );
+        let meta = MemoryMeta::new(
+            MemoryType::ProjectFact,
+            MemorySource::AutoExtracted,
+            "build",
+        );
+        manager
+            .write_memory("settled", "Old value", meta.clone())
+            .await?;
+        let old = store
+            .get(WARM_NAMESPACE, "settled")
+            .await?
+            .ok_or_else(|| merge_plan_error("missing old projection"))?
+            .value;
+        manager.write_memory("settled", "New value", meta).await?;
+        drop(manager);
+        store.put(WARM_NAMESPACE, "settled", old).await?;
+        drop(store);
+
+        let store = Arc::new(FileStore::new(&store_path)?);
+        let reopened = MemoryLayerManager::new(
+            root,
+            store.clone(),
+            Box::new(JsonlChangeLog::new(audit_path.clone())?),
+        );
+        assert!(reopened.read_hot_content().is_err());
+        reopened.reconcile_pending().await?;
+        reopened.reconcile_pending().await?;
+        let restored = reopened
+            .typed_store
+            .get_typed(WARM_NAMESPACE, "settled")
+            .await?
+            .ok_or_else(|| merge_plan_error("missing repaired projection"))?;
+        assert_eq!(restored.content, "New value");
+        assert_eq!(JsonlChangeLog::new(audit_path)?.len(), 2);
+        store
+            .put(
+                WARM_NAMESPACE,
+                "settled",
+                serde_json::json!({ "external": "different" }),
+            )
+            .await?;
+        assert!(reopened.reconcile_pending().await.is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn failed_prepare_does_not_mutate_warm_store() -> Result<()> {
+        let dir = tempfile::tempdir().map_err(ReactError::from)?;
+        let root = dir.path().join(".echo-agent");
+        std::fs::create_dir_all(root.join("evolution/memory-operations.jsonl"))
+            .map_err(ReactError::from)?;
+        let store = Arc::new(InMemoryStore::new());
+        let manager = MemoryLayerManager::new(root, store.clone(), Box::new(NullChangeLog));
+        let meta = MemoryMeta::new(
+            MemoryType::ProjectFact,
+            MemorySource::AutoExtracted,
+            "build",
+        );
+        assert!(
+            manager
+                .write_memory("no_prepare", "No mutation", meta)
+                .await
+                .is_err()
+        );
+        assert!(store.get(WARM_NAMESPACE, "no_prepare").await?.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn restart_reconciles_mid_promotion_and_demotion_once() -> Result<()> {
+        for promote in [true, false] {
+            let dir = tempfile::tempdir().map_err(ReactError::from)?;
+            let root = dir.path().join(".echo-agent");
+            let store_path = dir.path().join("store.json");
+            let audit_path = root.join("evolution/change-log.jsonl");
+            let store = Arc::new(FileStore::new(&store_path)?);
+            let manager = MemoryLayerManager::new(
+                root.clone(),
+                store.clone(),
+                Box::new(JsonlChangeLog::new(audit_path.clone())?),
+            );
+            let meta = MemoryMeta::new(
+                MemoryType::UserPreference,
+                MemorySource::ExplicitSave,
+                "style",
+            )
+            .with_confidence(0.95)
+            .with_stability(0.90);
+            let entry = TypedMemoryEntry {
+                key: "moving".into(),
+                content: "Keep this memory".into(),
+                meta: meta.clone(),
+                raw: echo_core::memory::store::StoreItem::new(
+                    WARM_NAMESPACE
+                        .iter()
+                        .map(|part| (*part).to_owned())
+                        .collect(),
+                    "moving".into(),
+                    serde_json::Value::Null,
+                ),
+            };
+            if promote {
+                manager
+                    .typed_store
+                    .put_typed(WARM_NAMESPACE, "moving", &entry.content, meta.clone())
+                    .await?;
+            } else {
+                manager.add_to_hot(&entry).await.map_err(ReactError::from)?;
+            }
+            let hot = HotValue {
+                meta: MemoryLayerManager::hot_meta(&entry),
+                content: entry.content.clone(),
+            };
+            let id = uuid::Uuid::new_v4().to_string();
+            let operation = MemoryOperation {
+                id: id.clone(),
+                key: "moving".into(),
+                warm_before: store
+                    .get(WARM_NAMESPACE, "moving")
+                    .await?
+                    .map(|item| item.value),
+                warm_after: if promote {
+                    None
+                } else {
+                    Some(MemoryLayerManager::typed_value(&entry.content, meta)?)
+                },
+                hot_before: MemoryLayerManager::hot_value(&manager.parse_memory_file(), "moving"),
+                hot_after: if promote { Some(hot.clone()) } else { None },
+                audit: MemoryLayerManager::change_builder(
+                    "moving",
+                    if promote {
+                        ChangeType::Promote
+                    } else {
+                        ChangeType::Demote
+                    },
+                    Some(if promote { "warm" } else { "hot" }),
+                    Some(if promote { "hot" } else { "warm" }),
+                    "crash window",
+                    "test",
+                )
+                .build_with(id, chrono::Utc::now()),
+            };
+            manager.operation_journal()?.prepare(operation)?;
+            if promote {
+                let mut guard = manager.lock_hot_file().await.map_err(ReactError::from)?;
+                MemoryLayerManager::set_hot_value(&mut guard.file, "moving", Some(&hot))?;
+                guard.commit().map_err(ReactError::from)?;
+            } else {
+                manager
+                    .typed_store
+                    .put_typed(WARM_NAMESPACE, "moving", &entry.content, entry.meta)
+                    .await?;
+            }
+            drop(manager);
+            drop(store);
+
+            let reopened = MemoryLayerManager::new(
+                root,
+                Arc::new(FileStore::new(store_path)?),
+                Box::new(JsonlChangeLog::new(audit_path.clone())?),
+            );
+            reopened.reconcile_pending().await?;
+            reopened.reconcile_pending().await?;
+            let actual = reopened.locate("moving").await?.map(|(layer, _)| layer);
+            assert_eq!(
+                actual,
+                Some(if promote {
+                    MemoryLayer::Hot
+                } else {
+                    MemoryLayer::Warm
+                })
+            );
+            assert_eq!(JsonlChangeLog::new(audit_path)?.len(), 1);
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn restart_reconciles_mid_warm_delete_and_meta_update() -> Result<()> {
+        for delete in [true, false] {
+            let dir = tempfile::tempdir().map_err(ReactError::from)?;
+            let root = dir.path().join(".echo-agent");
+            let store_path = dir.path().join("store.json");
+            let audit_path = root.join("evolution/change-log.jsonl");
+            let store = Arc::new(FileStore::new(&store_path)?);
+            let manager = MemoryLayerManager::new(
+                root.clone(),
+                store.clone(),
+                Box::new(JsonlChangeLog::new(audit_path.clone())?),
+            );
+            let meta = MemoryMeta::new(
+                MemoryType::ProjectFact,
+                MemorySource::AutoExtracted,
+                "build",
+            );
+            manager
+                .typed_store
+                .put_typed(WARM_NAMESPACE, "warm", "Original", meta.clone())
+                .await?;
+            let mut after_meta = meta;
+            after_meta.status = MemoryStatus::Archived;
+            let after = if delete {
+                None
+            } else {
+                Some(MemoryLayerManager::typed_value("Original", after_meta)?)
+            };
+            let id = uuid::Uuid::new_v4().to_string();
+            manager.operation_journal()?.prepare(MemoryOperation {
+                id: id.clone(),
+                key: "warm".into(),
+                warm_before: store
+                    .get(WARM_NAMESPACE, "warm")
+                    .await?
+                    .map(|item| item.value),
+                warm_after: after.clone(),
+                hot_before: None,
+                hot_after: None,
+                audit: MemoryLayerManager::change_builder(
+                    "warm",
+                    if delete {
+                        ChangeType::Delete
+                    } else {
+                        ChangeType::Demote
+                    },
+                    Some("warm"),
+                    if delete { None } else { Some("archived") },
+                    "crash window",
+                    "test",
+                )
+                .build_with(id, chrono::Utc::now()),
+            })?;
+            match after {
+                Some(value) => store.put(WARM_NAMESPACE, "warm", value).await?,
+                None => {
+                    store.delete(WARM_NAMESPACE, "warm").await?;
+                }
+            }
+            drop(manager);
+            drop(store);
+
+            let reopened = MemoryLayerManager::new(
+                root,
+                Arc::new(FileStore::new(store_path)?),
+                Box::new(JsonlChangeLog::new(audit_path.clone())?),
+            );
+            reopened.reconcile_pending().await?;
+            reopened.reconcile_pending().await?;
+            let entry = reopened
+                .typed_store
+                .get_typed(WARM_NAMESPACE, "warm")
+                .await?;
+            if delete {
+                assert!(entry.is_none());
+            } else {
+                assert_eq!(
+                    entry.map(|item| item.meta.status),
+                    Some(MemoryStatus::Archived)
+                );
+            }
+            assert_eq!(JsonlChangeLog::new(audit_path)?.len(), 1);
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn merge_group_replays_all_member_audits_after_second_failure() -> Result<()> {
+        let dir = tempfile::tempdir().map_err(ReactError::from)?;
+        let root = dir.path().join(".echo-agent");
+        let store_path = dir.path().join("store.json");
+        let audit_path = root.join("evolution/change-log.jsonl");
+        let store = Arc::new(FileStore::new(&store_path)?);
+        let manager = MemoryLayerManager::new(
+            root.clone(),
+            store.clone(),
+            Box::new(FailSecondChangeLog {
+                inner: JsonlChangeLog::new(audit_path.clone())?,
+                calls: AtomicUsize::new(0),
+            }),
+        );
+        let primary = MemoryMeta::new(MemoryType::ProjectFact, MemorySource::ExplicitSave, "build")
+            .with_confidence(0.95);
+        let secondary = MemoryMeta::new(
+            MemoryType::ProjectFact,
+            MemorySource::AutoExtracted,
+            "build",
+        )
+        .with_confidence(0.55);
+        manager
+            .typed_store
+            .put_typed(WARM_NAMESPACE, "primary", "Use cargo", primary)
+            .await?;
+        manager
+            .typed_store
+            .put_typed(WARM_NAMESPACE, "secondary", "Use make", secondary)
+            .await?;
+        let entries = manager.list_warm_memories(&MemoryFilter::new()).await?;
+        let group = ConflictDetector::new()
+            .detect(&entries)
+            .into_iter()
+            .next()
+            .ok_or_else(|| merge_plan_error("expected conflict group"))?;
+        assert!(
+            MemoryMerger::new(&manager)
+                .merge_group(&group)
+                .await
+                .is_err()
+        );
+        assert_eq!(JsonlChangeLog::new(audit_path.clone())?.len(), 1);
+        assert!(manager.read_hot_content().is_err());
+        drop(manager);
+        drop(store);
+
+        let reopened = MemoryLayerManager::new(
+            root,
+            Arc::new(FileStore::new(store_path)?),
+            Box::new(JsonlChangeLog::new(audit_path.clone())?),
+        );
+        reopened.reconcile_pending().await?;
+        reopened.reconcile_pending().await?;
+        let state = reopened.list_warm_memories(&MemoryFilter::new()).await?;
+        assert_eq!(
+            state
+                .iter()
+                .find(|entry| entry.key == "secondary")
+                .map(|entry| entry.meta.status),
+            Some(MemoryStatus::Superseded)
+        );
+        let audit =
+            JsonlChangeLog::new(audit_path)?.query(&super::super::audit::ChangeFilter::new())?;
+        assert_eq!(audit.len(), 2);
+        assert_eq!(
+            audit
+                .iter()
+                .filter(|entry| entry.change_type == ChangeType::Merge)
+                .count(),
+            2
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn prepared_merge_replays_remaining_member_after_interrupted_projection() -> Result<()> {
+        let dir = tempfile::tempdir().map_err(ReactError::from)?;
+        let root = dir.path().join(".echo-agent");
+        let store_path = dir.path().join("store.json");
+        let audit_path = root.join("evolution/change-log.jsonl");
+        let store = Arc::new(FileStore::new(&store_path)?);
+        let manager = MemoryLayerManager::new(
+            root.clone(),
+            store.clone(),
+            Box::new(JsonlChangeLog::new(audit_path.clone())?),
+        );
+        let mut operations = Vec::new();
+        for key in ["first", "second"] {
+            let before = MemoryLayerManager::typed_value(
+                "Original",
+                MemoryMeta::new(
+                    MemoryType::ProjectFact,
+                    MemorySource::AutoExtracted,
+                    "merge",
+                ),
+            )?;
+            store.put(WARM_NAMESPACE, key, before.clone()).await?;
+            let mut meta = MemoryMeta::new(
+                MemoryType::ProjectFact,
+                MemorySource::AutoExtracted,
+                "merge",
+            );
+            meta.status = MemoryStatus::Superseded;
+            let after = MemoryLayerManager::typed_value("Original", meta)?;
+            let id = uuid::Uuid::new_v4().to_string();
+            operations.push(MemoryOperation {
+                id: id.clone(),
+                key: key.into(),
+                warm_before: Some(before),
+                warm_after: Some(after),
+                hot_before: None,
+                hot_after: None,
+                audit: MemoryLayerManager::change_builder(
+                    key,
+                    ChangeType::Merge,
+                    Some("warm"),
+                    Some("superseded"),
+                    "approved merge",
+                    "test",
+                )
+                .build_with(id, chrono::Utc::now()),
+            });
+        }
+        let batch = MemoryOperationBatch {
+            id: uuid::Uuid::new_v4().to_string(),
+            operations,
+        };
+        manager.operation_journal()?.prepare_batch(batch.clone())?;
+        let first = batch
+            .operations
+            .first()
+            .ok_or_else(|| merge_plan_error("missing first member"))?;
+        manager.apply_operation(first).await?;
+        assert_eq!(JsonlChangeLog::new(audit_path.clone())?.len(), 0);
+        drop(manager);
+        drop(store);
+
+        let reopened = MemoryLayerManager::new(
+            root,
+            Arc::new(FileStore::new(store_path)?),
+            Box::new(JsonlChangeLog::new(audit_path.clone())?),
+        );
+        reopened.reconcile_pending().await?;
+        reopened.reconcile_pending().await?;
+        for key in ["first", "second"] {
+            assert_eq!(
+                reopened
+                    .typed_store
+                    .get_typed(WARM_NAMESPACE, key)
+                    .await?
+                    .map(|entry| entry.meta.status),
+                Some(MemoryStatus::Superseded)
+            );
+        }
+        assert_eq!(JsonlChangeLog::new(audit_path)?.len(), 2);
         Ok(())
     }
 
@@ -1673,6 +2675,7 @@ entries:
             revision_count: 0,
             recall_count: 0,
             last_recalled_at: None,
+            content_json: false,
             last_promoted: "2026-06-15T10:00:00Z".to_string(),
         };
 
@@ -1688,6 +2691,7 @@ entries:
             revision_count: 0,
             recall_count: 0,
             last_recalled_at: None,
+            content_json: false,
             last_promoted: "2026-06-15T10:00:00Z".to_string(),
         };
 
@@ -1722,7 +2726,7 @@ entries:
     }
 
     #[tokio::test]
-    async fn test_write_memory_and_consider_promotion() {
+    async fn test_write_memory_and_consider_promotion() -> Result<()> {
         let manager = make_manager();
 
         // High confidence, high stability → should be eligible for hot
@@ -1746,12 +2750,212 @@ entries:
         assert_eq!(change.to_layer, MemoryLayer::Hot);
 
         // Verify it's in hot
-        let content = manager.read_hot_content();
+        let content = manager.read_hot_content()?;
         assert!(content.contains("**[test_pref]**"));
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_write_memory_not_eligible_for_hot() {
+    async fn promoted_whitespace_and_multiline_content_survives_reconcile() -> Result<()> {
+        for content in [
+            "  leading and trailing  ",
+            "first line\nsecond line\n",
+            "- **[formatted]** literal content",
+        ] {
+            let dir = tempfile::tempdir().map_err(ReactError::from)?;
+            let root = dir.path().join(".echo-agent");
+            let store_path = dir.path().join("store.json");
+            let audit_path = root.join("evolution/change-log.jsonl");
+            let store = Arc::new(FileStore::new(&store_path)?);
+            let manager = MemoryLayerManager::try_new(
+                root.clone(),
+                store,
+                Box::new(JsonlChangeLog::new(audit_path.clone())?),
+            )?;
+            let meta = MemoryMeta::new(
+                MemoryType::UserPreference,
+                MemorySource::ExplicitSave,
+                "format",
+            )
+            .with_confidence(0.95)
+            .with_stability(0.90);
+            manager
+                .write_memory("formatted", content, meta.clone())
+                .await?;
+            let (_, live) = manager
+                .locate("formatted")
+                .await?
+                .ok_or_else(|| merge_plan_error("promoted memory missing"))?;
+            assert_eq!(live.content, content);
+            drop(manager);
+
+            let reopened = MemoryLayerManager::try_new(
+                root,
+                Arc::new(FileStore::new(store_path)?),
+                Box::new(JsonlChangeLog::new(audit_path)?),
+            )?;
+            reopened.reconcile_pending().await?;
+            let (_, recovered) = reopened
+                .locate("formatted")
+                .await?
+                .ok_or_else(|| merge_plan_error("recovered memory missing"))?;
+            assert_eq!(recovered.content, content);
+            reopened.demote("formatted", "format roundtrip").await?;
+            let (_, warm) = reopened
+                .locate("formatted")
+                .await?
+                .ok_or_else(|| merge_plan_error("demoted memory missing"))?;
+            assert_eq!(warm.content, content);
+            reopened
+                .write_memory("subsequent", "another fact", meta)
+                .await?;
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stale_promotion_snapshot_cannot_overwrite_newer_warm_write() -> Result<()> {
+        let dir = tempfile::tempdir().map_err(ReactError::from)?;
+        let store = Arc::new(InMemoryStore::new());
+        let first = MemoryLayerManager::new(
+            dir.path().to_path_buf(),
+            store.clone(),
+            Box::new(NullChangeLog),
+        );
+        let second = MemoryLayerManager::new(
+            dir.path().to_path_buf(),
+            store.clone(),
+            Box::new(NullChangeLog),
+        );
+        let eligible = MemoryMeta::new(
+            MemoryType::UserPreference,
+            MemorySource::ExplicitSave,
+            "style",
+        )
+        .with_confidence(0.95)
+        .with_stability(0.90);
+        first
+            .typed_store
+            .put_typed(WARM_NAMESPACE, "shared", "Old fact", eligible)
+            .await?;
+        let (_, stale) = first
+            .locate("shared")
+            .await?
+            .ok_or_else(|| merge_plan_error("missing initial memory"))?;
+        let newer = MemoryMeta::new(
+            MemoryType::ProjectFact,
+            MemorySource::AutoExtracted,
+            "style",
+        );
+        second.write_memory("shared", "New fact", newer).await?;
+
+        assert!(first.promote_warm_to_hot("shared", stale).await.is_err());
+        let (layer, current) = first
+            .locate("shared")
+            .await?
+            .ok_or_else(|| merge_plan_error("newer memory disappeared"))?;
+        assert_eq!(layer, MemoryLayer::Warm);
+        assert_eq!(current.content, "New fact");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stale_demotion_snapshot_cannot_overwrite_newer_hot_write() -> Result<()> {
+        let dir = tempfile::tempdir().map_err(ReactError::from)?;
+        let store = Arc::new(InMemoryStore::new());
+        let first = MemoryLayerManager::new(
+            dir.path().to_path_buf(),
+            store.clone(),
+            Box::new(NullChangeLog),
+        );
+        let second =
+            MemoryLayerManager::new(dir.path().to_path_buf(), store, Box::new(NullChangeLog));
+        let eligible = MemoryMeta::new(
+            MemoryType::UserPreference,
+            MemorySource::ExplicitSave,
+            "style",
+        )
+        .with_confidence(0.95)
+        .with_stability(0.90);
+        first
+            .write_memory("shared", "Old fact", eligible.clone())
+            .await?;
+        let (_, stale) = first
+            .locate("shared")
+            .await?
+            .ok_or_else(|| merge_plan_error("missing initial hot memory"))?;
+        second.write_memory("shared", "New fact", eligible).await?;
+
+        assert!(
+            first
+                .demote_hot_to_warm("shared", stale, "stale decision")
+                .await
+                .is_err()
+        );
+        let (layer, current) = first
+            .locate("shared")
+            .await?
+            .ok_or_else(|| merge_plan_error("newer hot memory disappeared"))?;
+        assert_eq!(layer, MemoryLayer::Hot);
+        assert_eq!(current.content, "New fact");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stale_warm_archive_snapshot_cannot_overwrite_newer_write() -> Result<()> {
+        let dir = tempfile::tempdir().map_err(ReactError::from)?;
+        let store = Arc::new(InMemoryStore::new());
+        let first = MemoryLayerManager::new(
+            dir.path().to_path_buf(),
+            store.clone(),
+            Box::new(NullChangeLog),
+        );
+        let second =
+            MemoryLayerManager::new(dir.path().to_path_buf(), store, Box::new(NullChangeLog));
+        let meta = MemoryMeta::new(
+            MemoryType::ProjectFact,
+            MemorySource::AutoExtracted,
+            "build",
+        );
+        first
+            .write_memory("shared", "Old fact", meta.clone())
+            .await?;
+        let (_, stale) = first
+            .locate("shared")
+            .await?
+            .ok_or_else(|| merge_plan_error("missing initial warm memory"))?;
+        second.write_memory("shared", "New fact", meta).await?;
+        let mut archived = stale.meta.clone();
+        archived.status = MemoryStatus::Archived;
+
+        let result = first
+            .transition(
+                "shared",
+                Some(MemoryLayerManager::typed_value(&stale.content, archived)?),
+                None,
+                MemoryLayerManager::change_builder(
+                    "shared",
+                    ChangeType::Demote,
+                    Some("warm"),
+                    Some("archived"),
+                    "stale decision",
+                    "demote",
+                ),
+                Some((MemoryLayer::Warm, &stale)),
+            )
+            .await;
+        assert!(result.is_err());
+        let (_, current) = first
+            .locate("shared")
+            .await?
+            .ok_or_else(|| merge_plan_error("newer warm memory disappeared"))?;
+        assert_eq!(current.content, "New fact");
+        assert_eq!(current.meta.status, MemoryStatus::Active);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_write_memory_not_eligible_for_hot() -> Result<()> {
         let manager = make_manager();
 
         // Low confidence → should NOT be promoted to hot
@@ -1770,7 +2974,8 @@ entries:
 
         // Not eligible → should stay in warm
         assert!(result.is_none());
-        assert!(manager.read_hot_content().is_empty());
+        assert!(manager.read_hot_content()?.is_empty());
+        Ok(())
     }
 
     #[tokio::test]
@@ -1864,7 +3069,7 @@ entries:
     }
 
     #[tokio::test]
-    async fn test_locate_in_warm() {
+    async fn test_locate_in_warm() -> Result<()> {
         let manager = make_manager();
 
         let meta = MemoryMeta::new(
@@ -1878,21 +3083,23 @@ entries:
             .await
             .expect("put_typed");
 
-        let location = manager.locate("warm_key").await;
+        let location = manager.locate("warm_key").await?;
         assert!(location.is_some());
         let (layer, _) = location.unwrap();
         assert_eq!(layer, MemoryLayer::Warm);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_locate_not_found() {
+    async fn test_locate_not_found() -> Result<()> {
         let manager = make_manager();
-        let location = manager.locate("nonexistent").await;
+        let location = manager.locate("nonexistent").await?;
         assert!(location.is_none());
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_demote_hot_to_warm() {
+    async fn test_demote_hot_to_warm() -> Result<()> {
         let manager = make_manager();
 
         let entry = TypedMemoryEntry {
@@ -1913,7 +3120,7 @@ entries:
         };
 
         manager.add_to_hot(&entry).await.expect("add to hot");
-        assert!(manager.read_hot_content().contains("**[demote_test]**"));
+        assert!(manager.read_hot_content()?.contains("**[demote_test]**"));
 
         let result = manager
             .demote("demote_test", "test demotion")
@@ -1923,13 +3130,14 @@ entries:
         assert_eq!(result.to_layer, MemoryLayer::Warm);
 
         // Should no longer be in hot
-        assert!(!manager.read_hot_content().contains("**[demote_test]**"));
+        assert!(!manager.read_hot_content()?.contains("**[demote_test]**"));
 
         // Should be in warm
-        let location = manager.locate("demote_test").await;
+        let location = manager.locate("demote_test").await?;
         assert!(location.is_some());
         let (layer, _) = location.unwrap();
         assert_eq!(layer, MemoryLayer::Warm);
+        Ok(())
     }
 
     #[tokio::test]
@@ -1990,7 +3198,7 @@ entries:
     /// each read the file, pushed its entry, and renamed — the second rename
     /// silently dropped the first writer's entry.
     #[tokio::test]
-    async fn test_concurrent_add_to_hot_does_not_lose_entries() {
+    async fn test_concurrent_add_to_hot_does_not_lose_entries() -> Result<()> {
         use std::sync::Arc;
         let dir = tempfile::tempdir().expect("tempdir");
         let dir_path = dir.keep();
@@ -2027,7 +3235,7 @@ entries:
         r1.expect("add a");
         r2.expect("add b");
 
-        let content = manager.read_hot_content();
+        let content = manager.read_hot_content()?;
         assert!(
             content.contains("**[concurrent-a]**"),
             "concurrent-a lost (MEMORY.md TOCTOU regression)"
@@ -2036,6 +3244,7 @@ entries:
             content.contains("**[concurrent-b]**"),
             "concurrent-b lost (MEMORY.md TOCTOU regression)"
         );
-        assert_eq!(manager.read_hot_meta().len(), 2);
+        assert_eq!(manager.read_hot_meta()?.len(), 2);
+        Ok(())
     }
 }

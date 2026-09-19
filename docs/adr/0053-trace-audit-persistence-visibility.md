@@ -103,6 +103,10 @@ best-effort notification path itself lost evidence.
 more than buffered flush. Consumers that need lower-cost lossy telemetry should
 use a telemetry backend rather than weakening the Audit success contract.
 
+[ADR 0065](0065-evolution-memory-audit-reconciliation.md) binds required
+layered-memory `ChangeLog` audit to a durable operation identity; the optional
+diagnostic delivery observer defined here remains a separate boundary.
+
 A `sync_data` error has an unknown physical outcome: the record may already be
 present even though durability was not established. The callback integration
 reports the failure and does not retry blindly because AuditEvent has no

@@ -4,7 +4,7 @@
 //! credentials. It is not the configurable `echo-agent-sdk-host` binary from
 //! the next SDK delivery stage.
 
-use agent_client_protocol::{ConnectTo as _, Stdio};
+use agent_client_protocol::Stdio;
 use echo_agent::acp::{AcpAgentAdapter, AcpSessionContext};
 use echo_agent::agent::{Agent, AgentEvent, CancellationToken};
 use echo_agent::error::Result;
@@ -85,6 +85,11 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         }) as Box<dyn Agent>)
     });
 
-    adapter.connect_to(Stdio::new()).await?;
+    let (close_owner, connection) = adapter.connect_retaining_close_owner(Stdio::new());
+    let result = connection.await;
+    if result.is_err() {
+        close_owner.close().await?;
+    }
+    result?;
     Ok(())
 }

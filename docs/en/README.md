@@ -120,6 +120,7 @@ echo-agent is a composable Agent development framework written in Rust, providin
 | [0041 - Semantic Governance Continuity](../adr/0041-semantic-governance-continuity.md) | Result-specific continuity reconciles the SDK baseline with whole-workspace governance |
 | [0049 - MCP Transport Close Settlement](../adr/0049-mcp-transport-close-settlement.md) | MCP close drains pending calls and awaits owned tasks and children with observable failure |
 | [0056 - Durable Transcript Projection Settlement](../adr/0056-durable-transcript-projection-settlement.md) | Atomic projection and revisioned pending debt settle before compaction or terminal publication |
+| [0066 - Agent Adapter Close Ownership](../adr/0066-agent-adapter-close-ownership.md) | Adapter admission, cancellation, drain, and awaited Agent resource close |
 
 ---
 

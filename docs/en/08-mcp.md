@@ -341,6 +341,11 @@ every connected client before returning an aggregate cleanup error, so callers
 can observe debt without stranding later clients. Legacy SSE close also aborts
 the receive/POST lifecycle and awaits the receive task. These lifecycle checks
 do not add a permission gate for user-selected MCP servers.
+When a `ReactAgent` owns those clients, its adapter must await
+`Agent::close` while retaining the Agent. `ReactAgent::drop` cannot await MCP
+cleanup and no longer starts a detached cleanup task; dropping an unclosed
+Agent only emits a diagnostic for visible server names. See
+[ADR 0066](../adr/0066-agent-adapter-close-ownership.md).
 
 ---
 

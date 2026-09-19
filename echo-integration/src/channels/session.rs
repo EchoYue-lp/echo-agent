@@ -47,6 +47,7 @@
 use super::types::*;
 use async_trait::async_trait;
 use dashmap::DashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, MutexGuard as StdMutexGuard};
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Notify, OwnedMutexGuard};
@@ -333,7 +334,7 @@ impl DeferredSessionEnd {
 }
 
 impl SessionGeneration {
-    fn new(instance: ChannelSessionInstance) -> Self {
+    fn new(instance: ChannelSessionInstance, cancellation: CancellationToken) -> Self {
         Self {
             state: StdMutex::new(SessionGenerationState {
                 active_streams: 0,
@@ -342,7 +343,7 @@ impl SessionGeneration {
                 deferred_end: None,
             }),
             instance,
-            cancellation: CancellationToken::new(),
+            cancellation,
             streams_settled: Notify::new(),
         }
     }
@@ -410,13 +411,38 @@ impl SessionGeneration {
             .retire_and_wait()
             .await;
         if settle_driven_streams {
-            loop {
-                let settled = self.streams_settled.notified();
-                if self.lock_state().active_driven_streams == 0 {
-                    break;
+            self.wait_for_streams(false).await;
+        }
+    }
+
+    /// Shutdown settlement waits for every accepted stream receipt, including
+    /// legacy/custom handlers that do not publish a driven Turn terminal.
+    async fn retire_all_streams(&self) {
+        self.cancellation.cancel();
+        self.instance
+            .current_delivery_fence()
+            .retire_and_wait()
+            .await;
+        self.wait_for_streams(true).await;
+    }
+
+    async fn wait_for_streams(&self, all_streams: bool) {
+        loop {
+            let settled = self.streams_settled.notified();
+            tokio::pin!(settled);
+            settled.as_mut().enable();
+            let is_settled = {
+                let state = self.lock_state();
+                if all_streams {
+                    state.active_streams == 0
+                } else {
+                    state.active_driven_streams == 0
                 }
-                settled.await;
+            };
+            if is_settled {
+                return;
             }
+            settled.await;
         }
     }
 }
@@ -447,7 +473,7 @@ impl SessionStreamReceipt {
 
 impl Drop for SessionStreamReceipt {
     fn drop(&mut self) {
-        let (deferred, driven_settled) = {
+        let (deferred, streams_settled) = {
             let mut state = self.generation.lock_state();
             state.last_active = Instant::now();
             let driven_settled = if self.driving {
@@ -471,7 +497,7 @@ impl Drop for SessionStreamReceipt {
                         (active_streams == 0)
                             .then(|| state.deferred_end.take())
                             .flatten(),
-                        driven_settled,
+                        driven_settled || active_streams == 0,
                     )
                 }
                 None => {
@@ -480,8 +506,8 @@ impl Drop for SessionStreamReceipt {
                 }
             }
         };
-        if driven_settled {
-            self.generation.streams_settled.notify_one();
+        if streams_settled {
+            self.generation.streams_settled.notify_waiters();
         }
         if let Some(deferred) = deferred {
             deferred.settle();
@@ -540,6 +566,9 @@ pub struct SessionHandler {
     factory: Arc<dyn SessionFactory>,
     sessions: DashMap<SessionKey, Arc<Mutex<Session>>>,
     on_session_end: Option<Arc<dyn Fn(SessionEndInfo) + Send + Sync>>,
+    admission_gate: StdMutex<()>,
+    admission_open: AtomicBool,
+    shutdown: CancellationToken,
 }
 
 impl SessionHandler {
@@ -553,6 +582,9 @@ impl SessionHandler {
             factory: Arc::new(factory),
             sessions: DashMap::new(),
             on_session_end: None,
+            admission_gate: StdMutex::new(()),
+            admission_open: AtomicBool::new(true),
+            shutdown: CancellationToken::new(),
         }
     }
 
@@ -591,32 +623,74 @@ impl SessionHandler {
         Session {
             handler,
             instance: instance.clone(),
-            generation: Arc::new(SessionGeneration::new(instance)),
+            generation: Arc::new(SessionGeneration::new(
+                instance,
+                self.shutdown.child_token(),
+            )),
         }
     }
 
+    fn replace_closed_session(
+        &self,
+        key: &SessionKey,
+        current: &mut Session,
+        previous_incarnation_id: Option<String>,
+    ) -> echo_core::error::Result<()> {
+        let _gate = self.admission_gate.lock().map_err(|_| {
+            ReactError::Other("channel session admission lock poisoned".to_string())
+        })?;
+        if !self.admission_open.load(Ordering::Acquire) {
+            // The prior handler already closed. The shutdown snapshot may
+            // still contain this map entry; removing it makes that snapshot
+            // skip a duplicate close without publishing a new Agent.
+            self.sessions.remove(key);
+            return Err(ReactError::Other(
+                "channel session handler is closed".to_string(),
+            ));
+        }
+        *current = self.create_session(key, previous_incarnation_id);
+        Ok(())
+    }
+
     /// Get or create a session (atomic operation, uses DashMap entry API to prevent race conditions)
-    fn get_or_create(&self, key: &SessionKey) -> Arc<Mutex<Session>> {
-        self.sessions
+    fn get_or_create(&self, key: &SessionKey) -> echo_core::error::Result<Arc<Mutex<Session>>> {
+        let _gate = self.admission_gate.lock().map_err(|_| {
+            ReactError::Other("channel session admission lock poisoned".to_string())
+        })?;
+        if !self.admission_open.load(Ordering::Acquire) {
+            return Err(ReactError::Other(
+                "channel session handler is closed".to_string(),
+            ));
+        }
+        Ok(self
+            .sessions
             .entry(key.clone())
             .or_insert_with(|| Arc::new(Mutex::new(self.create_session(key, None))))
-            .clone()
+            .clone())
     }
 
     /// Lock the authoritative map entry. A timeout prune can remove a session
     /// after `get_or_create` returns but before its async mutex is acquired, so
     /// identity must be rechecked under the same lock used by pruning.
-    async fn lock_current_session(&self, key: &SessionKey) -> OwnedMutexGuard<Session> {
+    async fn lock_current_session(
+        &self,
+        key: &SessionKey,
+    ) -> echo_core::error::Result<OwnedMutexGuard<Session>> {
         loop {
-            let session = self.get_or_create(key);
+            let session = self.get_or_create(key)?;
             let guard = Arc::clone(&session).lock_owned().await;
+            if !self.admission_open.load(Ordering::Acquire) {
+                return Err(ReactError::Other(
+                    "channel session handler is closed".to_string(),
+                ));
+            }
             let is_current = self
                 .sessions
                 .get(key)
                 .map(|current| Arc::ptr_eq(current.value(), &session))
                 .unwrap_or(false);
             if is_current {
-                return guard;
+                return Ok(guard);
             }
         }
     }
@@ -642,7 +716,10 @@ impl SessionHandler {
         }
     }
 
-    async fn prune_expired_except(&self, requested_key: &SessionKey) {
+    async fn prune_expired_except(
+        &self,
+        requested_key: &SessionKey,
+    ) -> echo_core::error::Result<()> {
         let sessions = self
             .sessions
             .iter()
@@ -662,13 +739,14 @@ impl SessionHandler {
             }
             let ended_instance = guard.instance.clone();
             let ended_generation = Arc::clone(&guard.generation);
+            ended_generation.retire(false).await;
+            guard.handler.close().await?;
             let removed = self
                 .sessions
                 .remove_if(&key, |_, current| Arc::ptr_eq(current, &session))
                 .is_some();
             drop(guard);
             if removed {
-                ended_generation.retire(false).await;
                 self.settle_session_end(
                     &ended_generation,
                     ended_instance,
@@ -676,6 +754,7 @@ impl SessionHandler {
                 );
             }
         }
+        Ok(())
     }
 }
 
@@ -683,15 +762,16 @@ impl SessionHandler {
 impl MessageHandler for SessionHandler {
     async fn handle(&self, msg: InboundMessage) -> echo_core::error::Result<OutboundMessage> {
         let key = SessionKey::from_message(&msg)?;
-        self.prune_expired_except(&key).await;
-        let mut guard = self.lock_current_session(&key).await;
+        self.prune_expired_except(&key).await?;
+        let mut guard = self.lock_current_session(&key).await?;
         if self.config.is_reset(&msg.text) {
             let ended_instance = guard.instance.clone();
             let ended_generation = Arc::clone(&guard.generation);
             ended_generation
                 .retire(guard.handler.settles_on_cancel())
                 .await;
-            *guard = self.create_session(&key, Some(ended_instance.incarnation_id()));
+            guard.handler.close().await?;
+            self.replace_closed_session(&key, &mut guard, Some(ended_instance.incarnation_id()))?;
             let delivery_fence = guard.instance.current_delivery_fence();
             drop(guard);
             self.settle_session_end(
@@ -707,11 +787,15 @@ impl MessageHandler for SessionHandler {
             )
             .with_delivery_fence(delivery_fence));
         }
+        if guard.generation.cancellation.is_cancelled() {
+            return Err(ReactError::Other("channel session is closing".to_string()));
+        }
         if guard.generation.is_idle_and_expired(self.config.timeout) {
             let ended_instance = guard.instance.clone();
             let ended_generation = Arc::clone(&guard.generation);
             ended_generation.retire(false).await;
-            *guard = self.create_session(&key, Some(ended_instance.incarnation_id()));
+            guard.handler.close().await?;
+            self.replace_closed_session(&key, &mut guard, Some(ended_instance.incarnation_id()))?;
             self.settle_session_end(
                 &ended_generation,
                 ended_instance,
@@ -732,15 +816,16 @@ impl MessageHandler for SessionHandler {
     > {
         use futures::stream::StreamExt;
         let key = SessionKey::from_message(&msg)?;
-        self.prune_expired_except(&key).await;
-        let mut guard = self.lock_current_session(&key).await;
+        self.prune_expired_except(&key).await?;
+        let mut guard = self.lock_current_session(&key).await?;
         if self.config.is_reset(&msg.text) {
             let ended_instance = guard.instance.clone();
             let ended_generation = Arc::clone(&guard.generation);
             ended_generation
                 .retire(guard.handler.settles_on_cancel())
                 .await;
-            *guard = self.create_session(&key, Some(ended_instance.incarnation_id()));
+            guard.handler.close().await?;
+            self.replace_closed_session(&key, &mut guard, Some(ended_instance.incarnation_id()))?;
             let delivery_fence = guard.instance.current_delivery_fence();
             drop(guard);
             self.settle_session_end(
@@ -758,6 +843,10 @@ impl MessageHandler for SessionHandler {
             return Ok(futures::stream::once(async move { Ok(reply) }).boxed());
         }
 
+        if guard.generation.cancellation.is_cancelled() {
+            return Err(ReactError::Other("channel session is closing".to_string()));
+        }
+
         let timeout_replaced = guard.generation.is_idle_and_expired(self.config.timeout);
         let ended_instance = timeout_replaced.then(|| guard.instance.clone());
         let ended_generation = timeout_replaced.then(|| Arc::clone(&guard.generation));
@@ -765,12 +854,14 @@ impl MessageHandler for SessionHandler {
             if let Some(generation) = ended_generation.as_ref() {
                 generation.retire(false).await;
             }
-            *guard = self.create_session(
+            guard.handler.close().await?;
+            self.replace_closed_session(
                 &key,
+                &mut guard,
                 ended_instance
                     .as_ref()
                     .map(ChannelSessionInstance::incarnation_id),
-            );
+            )?;
         }
         let handler = guard.handler.clone();
         let settles_on_cancel = handler.settles_on_cancel();
@@ -848,6 +939,47 @@ impl MessageHandler for SessionHandler {
         // reply is handled by the channel wrapper; passthrough here
         // No additional operations needed at the SessionHandler level
         Ok(())
+    }
+
+    async fn close(&self) -> echo_core::error::Result<()> {
+        let sessions = {
+            let _gate = self.admission_gate.lock().map_err(|_| {
+                ReactError::Other("channel session admission lock poisoned".to_string())
+            })?;
+            self.admission_open.store(false, Ordering::Release);
+            self.shutdown.cancel();
+            self.sessions
+                .iter()
+                .map(|entry| (entry.key().clone(), entry.value().clone()))
+                .collect::<Vec<_>>()
+        };
+        let mut failures = Vec::new();
+        for (key, session) in sessions {
+            let guard = session.lock().await;
+            if !self
+                .sessions
+                .get(&key)
+                .is_some_and(|entry| Arc::ptr_eq(entry.value(), &session))
+            {
+                continue;
+            }
+            guard.generation.retire_all_streams().await;
+            match guard.handler.close().await {
+                Ok(()) => {
+                    self.sessions
+                        .remove_if(&key, |_, current| Arc::ptr_eq(current, &session));
+                }
+                Err(error) => failures.push(error.to_string()),
+            }
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(ReactError::Other(format!(
+                "channel session Agent close failed: {}",
+                failures.join("; ")
+            )))
+        }
     }
 }
 
@@ -2557,6 +2689,219 @@ mod tests {
         let (active_streams, last_active) = generation_snapshot(&generation);
         if active_streams != 0 || last_active <= expired_at {
             return Err("panic unwind did not settle and touch its receipt".to_string());
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn session_close_keeps_failed_agent_owner_for_retry() -> Result<(), String> {
+        struct RetryCloseHandler(Arc<AtomicUsize>);
+
+        #[async_trait]
+        impl MessageHandler for RetryCloseHandler {
+            async fn handle(
+                &self,
+                msg: InboundMessage,
+            ) -> echo_core::error::Result<OutboundMessage> {
+                Ok(OutboundMessage::new(
+                    &msg.channel_id,
+                    msg.reply_target(),
+                    msg.chat_type,
+                    "reply",
+                ))
+            }
+
+            async fn reply(&self, _msg: OutboundMessage) -> echo_core::error::Result<()> {
+                Ok(())
+            }
+
+            async fn close(&self) -> echo_core::error::Result<()> {
+                if self.0.fetch_add(1, Ordering::AcqRel) == 0 {
+                    Err(ReactError::Other("session agent close failed".to_string()))
+                } else {
+                    Ok(())
+                }
+            }
+        }
+
+        let closes = Arc::new(AtomicUsize::new(0));
+        let handler = SessionHandler::new(SessionConfig::default(), {
+            let closes = Arc::clone(&closes);
+            move |_instance: &ChannelSessionInstance| -> Box<dyn MessageHandler> {
+                Box::new(RetryCloseHandler(Arc::clone(&closes)))
+            }
+        });
+        handler
+            .handle(test_message("hello", "first"))
+            .await
+            .map_err(|error| error.to_string())?;
+        if handler.close().await.is_ok() || handler.active_sessions() != 1 {
+            return Err("failed close lost the session Agent owner".to_string());
+        }
+        if handler.handle(test_message("late", "second")).await.is_ok() {
+            return Err("closed SessionHandler admitted a new message".to_string());
+        }
+        handler.close().await.map_err(|error| error.to_string())?;
+        if handler.active_sessions() != 0 || closes.load(Ordering::Acquire) != 2 {
+            return Err("retried session Agent close did not settle".to_string());
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancelled_session_close_keeps_agent_owner_for_retry() -> Result<(), String> {
+        struct InterruptedHandler {
+            closes: Arc<AtomicUsize>,
+        }
+
+        #[async_trait]
+        impl MessageHandler for InterruptedHandler {
+            async fn handle(
+                &self,
+                msg: InboundMessage,
+            ) -> echo_core::error::Result<OutboundMessage> {
+                Ok(OutboundMessage::new(
+                    &msg.channel_id,
+                    msg.reply_target(),
+                    msg.chat_type,
+                    "reply",
+                ))
+            }
+            async fn reply(&self, _msg: OutboundMessage) -> echo_core::error::Result<()> {
+                Ok(())
+            }
+            async fn close(&self) -> echo_core::error::Result<()> {
+                if self.closes.fetch_add(1, Ordering::AcqRel) == 0 {
+                    std::future::pending::<()>().await;
+                }
+                Ok(())
+            }
+        }
+
+        let closes = Arc::new(AtomicUsize::new(0));
+        let handler = SessionHandler::new(SessionConfig::default(), {
+            let closes = Arc::clone(&closes);
+            move |_instance: &ChannelSessionInstance| -> Box<dyn MessageHandler> {
+                Box::new(InterruptedHandler {
+                    closes: Arc::clone(&closes),
+                })
+            }
+        });
+        handler
+            .handle(test_message("first", "m1"))
+            .await
+            .map_err(|error| error.to_string())?;
+        if timeout(Duration::from_millis(20), handler.close())
+            .await
+            .is_ok()
+        {
+            return Err("interrupted Agent close unexpectedly finished".to_string());
+        }
+        if handler.active_sessions() != 1 || closes.load(Ordering::Acquire) != 1 {
+            return Err("interrupted Agent close lost its owner".to_string());
+        }
+        handler.close().await.map_err(|error| error.to_string())?;
+        if handler.active_sessions() != 0 || closes.load(Ordering::Acquire) != 2 {
+            return Err("Agent close retry did not settle".to_string());
+        }
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn session_close_waits_for_legacy_stream_drop_before_handler_close() -> Result<(), String>
+    {
+        struct StreamDropFlag(Arc<AtomicBool>);
+        impl Drop for StreamDropFlag {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+
+        struct LegacyResourceHandler {
+            started: Arc<Notify>,
+            stream_dropped: Arc<AtomicBool>,
+            closes: Arc<AtomicUsize>,
+        }
+        #[async_trait]
+        impl MessageHandler for LegacyResourceHandler {
+            async fn handle(
+                &self,
+                msg: InboundMessage,
+            ) -> echo_core::error::Result<OutboundMessage> {
+                Ok(OutboundMessage::new(
+                    &msg.channel_id,
+                    msg.reply_target(),
+                    msg.chat_type,
+                    "unused",
+                ))
+            }
+            async fn reply(&self, _msg: OutboundMessage) -> echo_core::error::Result<()> {
+                Ok(())
+            }
+            async fn handle_stream<'a>(
+                &'a self,
+                _msg: InboundMessage,
+            ) -> echo_core::error::Result<BoxStream<'a, echo_core::error::Result<OutboundMessage>>>
+            {
+                let started = Arc::clone(&self.started);
+                let dropped = Arc::clone(&self.stream_dropped);
+                Ok(async_stream::stream! {
+                    let _drop_flag = StreamDropFlag(dropped);
+                    started.notify_one();
+                    std::future::pending::<()>().await;
+                    #[allow(unreachable_code)]
+                    yield Err(ReactError::Other("unreachable legacy stream".to_string()));
+                }
+                .boxed())
+            }
+            async fn close(&self) -> echo_core::error::Result<()> {
+                if !self.stream_dropped.load(Ordering::Acquire) {
+                    return Err(ReactError::Other(
+                        "legacy stream resource was still active".to_string(),
+                    ));
+                }
+                self.closes.fetch_add(1, Ordering::AcqRel);
+                Ok(())
+            }
+        }
+
+        let started = Arc::new(Notify::new());
+        let stream_dropped = Arc::new(AtomicBool::new(false));
+        let closes = Arc::new(AtomicUsize::new(0));
+        let handler = Arc::new(SessionHandler::new(SessionConfig::default(), {
+            let started = Arc::clone(&started);
+            let stream_dropped = Arc::clone(&stream_dropped);
+            let closes = Arc::clone(&closes);
+            move |_instance: &ChannelSessionInstance| -> Box<dyn MessageHandler> {
+                Box::new(LegacyResourceHandler {
+                    started: Arc::clone(&started),
+                    stream_dropped: Arc::clone(&stream_dropped),
+                    closes: Arc::clone(&closes),
+                })
+            }
+        }));
+        let stream_owner = Arc::clone(&handler);
+        let stream_task = tokio::spawn(async move {
+            let mut stream = stream_owner
+                .handle_stream(test_message("legacy", "legacy-stream"))
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok::<_, String>(stream.next().await)
+        });
+        timeout(TEST_TIMEOUT, started.notified())
+            .await
+            .map_err(|_| "legacy stream did not start polling".to_string())?;
+
+        handler.close().await.map_err(|error| error.to_string())?;
+        let settled = timeout(TEST_TIMEOUT, stream_task)
+            .await
+            .map_err(|_| "legacy stream owner did not settle".to_string())?
+            .map_err(|error| error.to_string())??;
+        if settled.is_some()
+            || !stream_dropped.load(Ordering::Acquire)
+            || closes.load(Ordering::Acquire) != 1
+        {
+            return Err("legacy stream was not dropped before handler close".to_string());
         }
         Ok(())
     }

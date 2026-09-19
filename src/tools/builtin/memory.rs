@@ -730,24 +730,22 @@ async fn resolve_forget_key(
     id: &str,
 ) -> crate::error::Result<Option<String>> {
     // Fast path: exact match.
-    if layer_manager.locate(id).await.is_some() {
+    if layer_manager.locate(id).await?.is_some() {
         return Ok(Some(id.to_string()));
     }
     // Slow path: treat `id` as a prefix and scan both layers.
     let mut matches = Vec::new();
-    for entry in layer_manager.list_hot() {
+    for entry in layer_manager.list_hot()? {
         if entry.key.starts_with(id) {
             matches.push(entry.key);
         }
     }
-    if let Ok(warm) = layer_manager
+    let warm = layer_manager
         .list_warm_memories(&echo_state::memory::typed_store::MemoryFilter::new())
-        .await
-    {
-        for entry in warm {
-            if entry.key.starts_with(id) {
-                matches.push(entry.key);
-            }
+        .await?;
+    for entry in warm {
+        if entry.key.starts_with(id) {
+            matches.push(entry.key);
         }
     }
     matches.sort();

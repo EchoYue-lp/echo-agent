@@ -47,8 +47,28 @@ Trace, transcript, and checkpoint writes can occur before or during finalization
 Their independently stored status and ordering do not define the TurnReceipt,
 but a write error explicitly propagated by the Agent producer contract can make
 a driven Turn fail. A best-effort transcript diagnostic does not do so by itself.
-Adapter projection and awaited close coverage remain defined by each detailed
-adapter contract, not by one fixed sequence in this overview.
+Adapter projection and awaited close are separate facts. ACP, Headless, and
+Channels now fence adapter admission, cancel accepted work, wait for its
+owner, and await `Agent::close` where the owner survives. A2A remains outside
+this repair and keeps its existing open lifecycle Findings. Channel delivery
+still has its own protocol boundary. See
+[ADR 0066](../adr/0066-agent-adapter-close-ownership.md),
+and [IM Channels](./15-im-channels.md).
+
+ACP callers must retain `let close_owner = adapter.close_owner()` before
+passing the adapter to `ConnectTo` or `Client::connect_with`. Connection setup
+rejects callers without a retained handle, because the official trait
+consumes the adapter and cannot return the Session/Agent owner after a failed
+close. On error, `close_owner.close().await` retries the same framework
+Session/Run service. Independent SDK Host consumers must adopt this public
+lifecycle contract when updating their framework dependency.
+Direct transport callers can use
+`let (close_owner, connection) =
+adapter.connect_retaining_close_owner(transport)` to receive the handle before
+polling, awaiting, or spawning `connection`. Manual official Client callers must keep their handle
+through connection return and any failed close; dropping it after admission
+forfeits retry ownership and violates the contract. Dropping it before the
+connection starts rejects setup without creating an Agent.
 
 See [ReAct Agent](./01-react-agent.md), [Streaming](./10-streaming.md), and
 [Headless](./33-headless-mode.md). Adapter-specific guarantees stay in their

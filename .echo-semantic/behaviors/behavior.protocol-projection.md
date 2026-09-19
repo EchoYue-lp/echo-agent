@@ -8,7 +8,7 @@ risk: high
 primary_focus: contract_evidence
 focus: [state_authority, time_lifecycle, permission_external, failure_concurrency]
 boundary: boundary.protocol-surfaces
-observed_at: source:b5a13ba1045ca78323b1837a5c96d038b4c7c9a9b0ce2f4ebd5c8056e20d85fa
+observed_at: source:b214951ece8e09325efc846ad7bd88a402135000e42fe67d2b917317b2d27923
 code_refs: [src/acp/adapter.rs, src/acp/runtime.rs, src/a2a/server.rs, echo-integration/src/channels/manager.rs, echo-integration/src/lsp/manager.rs, src/channels.rs, src/headless.rs]
 rule_refs: [rule.protocol-role-separation, rule.sdk-rust-authority]
 evidence_refs: [evidence.provider-protocol-quality, evidence.sdk-contracts, evidence.lsp-derived-handle-lifecycle-repair, evidence.lsp-derived-handle-lifecycle-verification, evidence.channel-generation-delivery-fence-repair, evidence.channel-generation-delivery-fence-verification]
@@ -23,7 +23,7 @@ ACP 连接 Client 与 coding Agent，MCP 连接 Agent 与 tools/resources，A2A 
 
 ## 当前行为
 
-ACP Session/Prompt/update/cancel 投影同一 driven Agent Turn；A2A server 当前自持 task/terminal；Channels 路由外部消息、以generation fence阻止reset后的旧delivery，但仍直接调用raw Agent chat；Headless 聚合 driven Turn；SDK Host 以 ACP 和 `_echo_agent/*` 暴露 Rust authority。
+ACP Session/Prompt/update/cancel 投影同一 driven Agent Turn，并在关闭时保留无receipt的Run；A2A保持当前自持task/terminal与开放Finding；Channels以generation fence阻止reset后的旧delivery，并由AgentChannelHandler进入driven Turn、SessionHandler关闭sender Agent；Headless聚合driven Turn且在返回前await Agent close；SDK Host以ACP和`_echo_agent/*`暴露Rust authority。
 
 ## 期望行为
 

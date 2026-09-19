@@ -7,10 +7,10 @@ expectation: human_confirmed
 risk: high
 primary_focus: time_lifecycle
 focus: [state_authority, failure_concurrency, contract_evidence]
-observed_at: cba8e08f3e3f0ccf1d4df3a22be11589f63b2ecd
+observed_at: source:b214951ece8e09325efc846ad7bd88a402135000e42fe67d2b917317b2d27923
 behavior_refs: [behavior.agent-turn-lifecycle]
-code_refs: [echo-orchestration/src/runtime/turn_driver.rs, echo-core/src/agent/event_envelope.rs, src/headless.rs, src/acp/runtime.rs, src/eval/runner.rs, src/channels.rs, src/agent/react/mod.rs, echo-sdk-host/src/core_profile/persistence.rs, docs/adr/0009-tracked-input-receipts.md, docs/adr/0010-canonical-turn-receipt-accounting.md, docs/adr/0037-eval-timeout-turn-settlement.md, docs/adr/0046-turn-execution-delivery-settlement.md]
-evidence_refs: [evidence.agent-context-execution, evidence.eval-timeout-turn-settlement-repair, evidence.eval-timeout-turn-settlement-verification, evidence.turn-terminal-delivery-settlement-repair, evidence.turn-terminal-delivery-settlement-verification]
+code_refs: [echo-orchestration/src/runtime/turn_driver.rs, echo-core/src/agent/event_envelope.rs, src/headless.rs, src/acp/runtime.rs, src/eval/runner.rs, src/channels.rs, src/agent/react/mod.rs, docs/adr/0009-tracked-input-receipts.md, docs/adr/0010-canonical-turn-receipt-accounting.md, docs/adr/0037-eval-timeout-turn-settlement.md, docs/adr/0046-turn-execution-delivery-settlement.md, docs/adr/0066-agent-adapter-close-ownership.md]
+evidence_refs: [evidence.agent-context-execution, evidence.eval-timeout-turn-settlement-repair, evidence.eval-timeout-turn-settlement-verification, evidence.turn-terminal-delivery-settlement-repair, evidence.turn-terminal-delivery-settlement-verification, evidence.agent-adapter-close-settlement-repair, evidence.agent-adapter-close-settlement-verification]
 finding_refs: [finding.turn-driver-entry-coverage, finding.eval-timeout-settlement, finding.turn-terminal-commit-projection-order]
 ---
 
@@ -22,11 +22,12 @@ finding_refs: [finding.turn-driver-entry-coverage, finding.eval-timeout-settleme
 
 ## 适用行为
 
-适用于Headless、ACP、Eval、经ACP的SDK和其它显式通过driver执行的Turn，以及tracked steer input；不自动覆盖raw ReactAgent或Channel调用。
+适用于Headless、ACP、Eval、Channel、经ACP的SDK和其它显式通过driver执行的Turn，以及tracked steer input；不自动覆盖raw ReactAgent或A2A协议Task。
 
 ## 当前实现
 
 Driver先由producer terminal确定Completed/Cancelled/Failed，再独立结算sink的Delivered、Closed或Failed；delivery不得覆盖已提交的执行终态和final facts。ReactAgent managed stream在producer task settled后才释放terminal；提前drop才走bounded reaper。Eval deadline只发出cancel request，必须继续等待同一driver future取得receipt，或在共享bounded grace后显式标记未settled。
+Adapter resource close由各自owner等待`Agent::close`，其错误不反向改写同一TurnReceipt执行终态，也不能用新的adapter terminal替代它。
 
 ## 期望行为
 

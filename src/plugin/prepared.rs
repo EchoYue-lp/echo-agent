@@ -3,7 +3,11 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+
+// Prepared ordinals are ordered across independent Integrators in one process.
+static NEXT_PREPARED_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 /// Severity of a preparation diagnostic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -179,7 +183,6 @@ impl PreparedPluginSet {
 #[derive(Default)]
 struct PluginPreparationCache {
     sets: HashMap<(String, u64), Arc<PreparedPluginSet>>,
-    next_generation: u64,
 }
 
 /// Successfully applied framework components grouped by plugin owner.
@@ -191,8 +194,11 @@ pub struct WiredPluginComponents {
 }
 
 /// Apply receipt. It contains no package inventory and owns no reload policy.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default)]
 pub struct PluginWiringResult {
+    generation: u64,
+    identity: String,
+    publication_token: Option<Arc<()>>,
     pub plugins_loaded: Vec<String>,
     pub skills_loaded: Vec<String>,
     pub hooks_registered: Vec<String>,
@@ -203,7 +209,37 @@ pub struct PluginWiringResult {
     pub components_by_plugin: HashMap<String, WiredPluginComponents>,
 }
 
+impl PartialEq for PluginWiringResult {
+    fn eq(&self, other: &Self) -> bool {
+        self.generation == other.generation
+            && self.identity == other.identity
+            && match (&self.publication_token, &other.publication_token) {
+                (Some(left), Some(right)) => Arc::ptr_eq(left, right),
+                (None, None) => true,
+                _ => false,
+            }
+            && self.plugins_loaded == other.plugins_loaded
+            && self.skills_loaded == other.skills_loaded
+            && self.hooks_registered == other.hooks_registered
+            && self.mcp_connected == other.mcp_connected
+            && self.agents_discovered == other.agents_discovered
+            && self.lsp_discovered == other.lsp_discovered
+            && self.warnings == other.warnings
+            && self.components_by_plugin == other.components_by_plugin
+    }
+}
+
+impl Eq for PluginWiringResult {}
+
 impl PluginWiringResult {
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub fn identity(&self) -> &str {
+        &self.identity
+    }
+
     pub fn is_ok(&self) -> bool {
         true
     }
@@ -219,6 +255,27 @@ pub enum PluginWiringError {
     InvalidPreparedSet {
         generation: u64,
     },
+    StaleGeneration {
+        requested: u64,
+        latest: u64,
+    },
+    AlreadyPublished {
+        generation: u64,
+    },
+    ActiveGeneration {
+        generation: u64,
+    },
+    CleanupPending {
+        generation: u64,
+    },
+    StaleReceipt {
+        requested: u64,
+        latest: u64,
+    },
+    InvalidReceipt {
+        generation: u64,
+    },
+    WrongTarget,
     ApplyFailed {
         generation: u64,
         diagnostics: String,
@@ -255,23 +312,244 @@ impl fmt::Display for PluginWiringError {
                 formatter,
                 "prepared plugin generation {generation} is not applicable"
             ),
+            Self::StaleGeneration { requested, latest } => write!(
+                formatter,
+                "prepared plugin generation {requested} is stale; target has generation {latest}"
+            ),
+            Self::AlreadyPublished { generation } => write!(
+                formatter,
+                "prepared plugin generation {generation} was already published on this target"
+            ),
+            Self::ActiveGeneration { generation } => write!(
+                formatter,
+                "plugin generation {generation} must be withdrawn before replacement"
+            ),
+            Self::CleanupPending { generation } => write!(
+                formatter,
+                "plugin generation {generation} has unsettled cleanup"
+            ),
+            Self::StaleReceipt { requested, latest } => write!(
+                formatter,
+                "plugin receipt generation {requested} is stale; target has generation {latest}"
+            ),
+            Self::InvalidReceipt { generation } => write!(
+                formatter,
+                "plugin receipt for generation {generation} is not issued by this target"
+            ),
+            Self::WrongTarget => {
+                formatter.write_str("plugin publication target belongs to another Agent")
+            }
             Self::ApplyFailed {
                 generation,
                 diagnostics,
-            }
-            | Self::RollbackFailed {
+            } => write!(
+                formatter,
+                "plugin generation {generation} failed to apply: {diagnostics}"
+            ),
+            Self::RollbackFailed {
                 generation,
                 diagnostics,
                 ..
             } => write!(
                 formatter,
-                "plugin generation {generation} failed to apply: {diagnostics}"
+                "plugin generation {generation} failed to settle cleanup: {diagnostics}"
             ),
         }
     }
 }
 
 impl std::error::Error for PluginWiringError {}
+
+#[derive(Default)]
+struct PluginPublicationState {
+    latest: Option<(u64, String)>,
+    active: Option<PluginWiringResult>,
+    cleanup_debt: Option<PluginWiringResult>,
+    settled: Option<PluginWiringResult>,
+}
+
+/// One canonical state authority per ReactAgent, shared by its publication handles.
+#[derive(Default)]
+pub(crate) struct PluginPublicationAuthority {
+    state: tokio::sync::Mutex<PluginPublicationState>,
+}
+
+/// Agent-bound handle for publishing and withdrawing immutable plugin generations.
+#[derive(Clone)]
+pub struct PluginPublicationTarget {
+    authority: Arc<PluginPublicationAuthority>,
+}
+
+impl PluginPublicationTarget {
+    fn for_agent(agent: &crate::agent::react::ReactAgent) -> Self {
+        Self {
+            authority: Arc::clone(&agent.plugin_publication),
+        }
+    }
+
+    fn check_agent(
+        &self,
+        agent: &crate::agent::react::ReactAgent,
+    ) -> Result<(), PluginWiringError> {
+        if Arc::ptr_eq(&self.authority, &agent.plugin_publication) {
+            Ok(())
+        } else {
+            Err(PluginWiringError::WrongTarget)
+        }
+    }
+
+    /// A cancelled apply retains a cleanup receipt in the target authority.
+    pub async fn pending_cleanup_receipt(&self) -> Option<PluginWiringResult> {
+        self.authority.state.lock().await.cleanup_debt.clone()
+    }
+
+    /// Publish only a generation newer than this target's settled publication.
+    pub async fn wire_prepared(
+        &self,
+        agent: &mut crate::agent::react::ReactAgent,
+        prepared: &PreparedPluginSet,
+    ) -> Result<PluginWiringResult, PluginWiringError> {
+        self.check_agent(agent)?;
+        if !prepared.is_applicable() {
+            return Err(PluginWiringError::InvalidPreparedSet {
+                generation: prepared.generation(),
+            });
+        }
+        let mut state = self.authority.state.lock().await;
+        if let Some((latest, identity)) = &state.latest {
+            if prepared.generation() < *latest {
+                return Err(PluginWiringError::StaleGeneration {
+                    requested: prepared.generation(),
+                    latest: *latest,
+                });
+            }
+            if prepared.generation() == *latest {
+                return Err(if prepared.identity() == identity {
+                    PluginWiringError::AlreadyPublished {
+                        generation: *latest,
+                    }
+                } else {
+                    PluginWiringError::StaleGeneration {
+                        requested: prepared.generation(),
+                        latest: *latest,
+                    }
+                });
+            }
+        }
+        if let Some(receipt) = &state.cleanup_debt {
+            return Err(PluginWiringError::CleanupPending {
+                generation: receipt.generation,
+            });
+        }
+        if let Some(receipt) = &state.active {
+            return Err(PluginWiringError::ActiveGeneration {
+                generation: receipt.generation,
+            });
+        }
+
+        state.cleanup_debt = Some(PluginWiringResult {
+            generation: prepared.generation(),
+            identity: prepared.identity().to_string(),
+            publication_token: Some(Arc::new(())),
+            ..PluginWiringResult::default()
+        });
+        let errors = if let Some(receipt) = &mut state.cleanup_debt {
+            PluginIntegrator::apply_prepared(agent, prepared, receipt).await
+        } else {
+            return Err(PluginWiringError::ApplyFailed {
+                generation: prepared.generation(),
+                diagnostics: "plugin publication lost its pending receipt".to_string(),
+            });
+        };
+        if errors.is_empty() {
+            let receipt =
+                state
+                    .cleanup_debt
+                    .take()
+                    .ok_or_else(|| PluginWiringError::ApplyFailed {
+                        generation: prepared.generation(),
+                        diagnostics: "plugin publication lost its completed receipt".to_string(),
+                    })?;
+            state.latest = Some((receipt.generation, receipt.identity.clone()));
+            state.settled = None;
+            state.active = Some(receipt.clone());
+            return Ok(receipt);
+        }
+
+        let receipt =
+            state
+                .cleanup_debt
+                .as_ref()
+                .cloned()
+                .ok_or_else(|| PluginWiringError::ApplyFailed {
+                    generation: prepared.generation(),
+                    diagnostics: "plugin publication lost its cleanup receipt".to_string(),
+                })?;
+        let mut errors = errors;
+        if let Err(error) = PluginIntegrator::unwire(agent, &receipt.components_by_plugin).await {
+            errors.push(format!("plugin rollback cleanup: {error}"));
+            return Err(PluginWiringError::RollbackFailed {
+                generation: prepared.generation(),
+                diagnostics: errors.join("; "),
+                receipt: Box::new(receipt),
+            });
+        }
+        state.cleanup_debt = None;
+        Err(PluginWiringError::ApplyFailed {
+            generation: prepared.generation(),
+            diagnostics: errors.join("; "),
+        })
+    }
+
+    /// Withdraw only the exact receipt issued for this Agent's current generation.
+    pub async fn rollback(
+        &self,
+        agent: &mut crate::agent::react::ReactAgent,
+        receipt: &PluginWiringResult,
+    ) -> Result<(), PluginWiringError> {
+        self.check_agent(agent)?;
+        let mut state = self.authority.state.lock().await;
+        if let Some((latest, _)) = &state.latest
+            && receipt.generation < *latest
+        {
+            return Err(PluginWiringError::StaleReceipt {
+                requested: receipt.generation,
+                latest: *latest,
+            });
+        }
+        if state
+            .settled
+            .as_ref()
+            .is_some_and(|settled| receipt_matches(settled, receipt))
+        {
+            return Ok(());
+        }
+        let canonical = state
+            .cleanup_debt
+            .as_ref()
+            .or(state.active.as_ref())
+            .filter(|canonical| receipt_matches(canonical, receipt))
+            .cloned()
+            .ok_or(PluginWiringError::InvalidReceipt {
+                generation: receipt.generation,
+            })?;
+        if let Err(error) = PluginIntegrator::unwire(agent, &canonical.components_by_plugin).await {
+            return Err(PluginWiringError::RollbackFailed {
+                generation: receipt.generation,
+                diagnostics: format!("plugin rollback cleanup: {error}"),
+                receipt: Box::new(canonical),
+            });
+        }
+        state.cleanup_debt = None;
+        state.active = None;
+        state.settled = Some(canonical);
+        Ok(())
+    }
+}
+
+fn receipt_matches(canonical: &PluginWiringResult, submitted: &PluginWiringResult) -> bool {
+    canonical.publication_token.is_some() && canonical == submitted
+}
 
 /// Shared preparation cache and zero-read apply manager.
 #[derive(Clone)]
@@ -286,6 +564,14 @@ impl PluginIntegrator {
             cache: Arc::new(Mutex::new(PluginPreparationCache::default())),
             preparation: Arc::new(tokio::sync::Mutex::new(())),
         }
+    }
+
+    /// Resolve the canonical publication authority attached to one Agent.
+    pub fn publication_target(
+        &self,
+        agent: &crate::agent::react::ReactAgent,
+    ) -> PluginPublicationTarget {
+        PluginPublicationTarget::for_agent(agent)
     }
 
     /// Evict the cached revision. Existing `Arc` generations remain valid.
@@ -623,7 +909,7 @@ impl PluginIntegrator {
             });
         }
 
-        let generation = self.next_generation().unwrap_or(u64::MAX);
+        let generation = Self::next_generation().unwrap_or(u64::MAX);
         if generation == u64::MAX {
             applicable = false;
             diagnostics.push(error_diagnostic(
@@ -647,11 +933,13 @@ impl PluginIntegrator {
         prepared
     }
 
-    fn next_generation(&self) -> Option<u64> {
-        let mut cache = self.cache.lock().ok()?;
-        let next = cache.next_generation.checked_add(1)?;
-        cache.next_generation = next;
-        Some(next)
+    fn next_generation() -> Option<u64> {
+        NEXT_PREPARED_GENERATION
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |generation| {
+                generation.checked_add(1).filter(|next| *next < u64::MAX)
+            })
+            .ok()?
+            .checked_add(1)
     }
 
     /// Apply a frozen generation. No package files are read here.
@@ -660,12 +948,16 @@ impl PluginIntegrator {
         agent: &mut crate::agent::react::ReactAgent,
         prepared: &PreparedPluginSet,
     ) -> Result<PluginWiringResult, PluginWiringError> {
-        if !prepared.is_applicable() {
-            return Err(PluginWiringError::InvalidPreparedSet {
-                generation: prepared.generation(),
-            });
-        }
-        let mut receipt = PluginWiringResult::default();
+        self.publication_target(agent)
+            .wire_prepared(agent, prepared)
+            .await
+    }
+
+    async fn apply_prepared(
+        agent: &mut crate::agent::react::ReactAgent,
+        prepared: &PreparedPluginSet,
+        receipt: &mut PluginWiringResult,
+    ) -> Vec<String> {
         receipt.warnings.extend(
             prepared
                 .diagnostics()
@@ -677,6 +969,20 @@ impl PluginIntegrator {
 
         for plugin in prepared.plugins() {
             let source = format!("plugin:{}", plugin.id());
+            // The receipt must already name possible mutations while an awaited
+            // registration is in flight, so cancellation retains a cleanup owner.
+            if !plugin.skills().is_empty() || plugin.hooks().is_some() {
+                let owned = receipt
+                    .components_by_plugin
+                    .entry(plugin.id().to_string())
+                    .or_default();
+                owned.skills = plugin
+                    .skills()
+                    .iter()
+                    .map(|skill| skill.document().descriptor().name.clone())
+                    .collect();
+                owned.hooks_registered = plugin.hooks().is_some();
+            }
             match agent
                 .register_prepared_plugin_skills(&source, plugin.variables(), plugin.skills())
                 .await
@@ -687,8 +993,7 @@ impl PluginIntegrator {
                         .components_by_plugin
                         .entry(plugin.id().to_string())
                         .or_default()
-                        .skills
-                        .extend(names);
+                        .skills = names;
                 }
                 Err(error) => errors.push(format!("Plugin '{}' Skills: {error}", plugin.id())),
             }
@@ -701,26 +1006,69 @@ impl PluginIntegrator {
                 );
                 if registered {
                     receipt.hooks_registered.push(plugin.id().to_string());
-                    receipt
-                        .components_by_plugin
-                        .entry(plugin.id().to_string())
-                        .or_default()
-                        .hooks_registered = true;
                 }
+                receipt
+                    .components_by_plugin
+                    .entry(plugin.id().to_string())
+                    .or_default()
+                    .hooks_registered = registered;
             }
             #[cfg(feature = "mcp")]
             if let Some(config) = plugin.mcp() {
-                match agent.load_mcp_config(config.clone()).await {
-                    Ok(clients) => {
-                        for client in clients {
-                            let name = client.server_name().to_string();
-                            receipt.mcp_connected.push(name.clone());
-                            receipt
-                                .components_by_plugin
-                                .entry(plugin.id().to_string())
-                                .or_default()
-                                .mcp_servers
-                                .push(name);
+                match config.to_server_configs() {
+                    Ok(mut servers) => {
+                        servers.sort_by(|left, right| left.name.cmp(&right.name));
+                        for server in servers {
+                            let name = server.name.clone();
+                            let preexisting = agent.mcp_client(&name).is_some();
+                            if !preexisting {
+                                receipt
+                                    .components_by_plugin
+                                    .entry(plugin.id().to_string())
+                                    .or_default()
+                                    .mcp_servers
+                                    .push(name.clone());
+                            }
+                            match agent.connect_mcp_from_config(server).await {
+                                Ok(client) => {
+                                    let connected = client.server_name().to_string();
+                                    receipt.mcp_connected.push(connected.clone());
+                                    if preexisting {
+                                        receipt
+                                            .components_by_plugin
+                                            .entry(plugin.id().to_string())
+                                            .or_default()
+                                            .mcp_servers
+                                            .push(connected);
+                                    }
+                                }
+                                Err(error) => {
+                                    tracing::warn!(
+                                        plugin = %plugin.id(),
+                                        server = %name,
+                                        error = %error,
+                                        "Plugin MCP server connection failed, skipping"
+                                    );
+                                    if !preexisting {
+                                        match agent.disconnect_mcp(&name).await {
+                                            Ok(_) => {
+                                                if let Some(owned) = receipt
+                                                    .components_by_plugin
+                                                    .get_mut(plugin.id())
+                                                {
+                                                    owned
+                                                        .mcp_servers
+                                                        .retain(|server| server != &name);
+                                                }
+                                            }
+                                            Err(cleanup_error) => errors.push(format!(
+                                                "Plugin '{}' MCP '{name}' cleanup: {cleanup_error}",
+                                                plugin.id()
+                                            )),
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                     Err(error) => errors.push(format!("Plugin '{}' MCP: {error}", plugin.id())),
@@ -742,27 +1090,20 @@ impl PluginIntegrator {
                     document.source_path().display()
                 ));
             }
-            if receipt.components_by_plugin.contains_key(plugin.id()) {
+            if receipt
+                .components_by_plugin
+                .get(plugin.id())
+                .is_some_and(|owned| {
+                    !owned.skills.is_empty()
+                        || owned.hooks_registered
+                        || !owned.mcp_servers.is_empty()
+                })
+            {
                 receipt.plugins_loaded.push(plugin.id().to_string());
             }
         }
 
-        if errors.is_empty() {
-            Ok(receipt)
-        } else {
-            if let Err(error) = self.rollback(agent, &receipt).await {
-                errors.push(format!("plugin rollback cleanup: {error}"));
-                return Err(PluginWiringError::RollbackFailed {
-                    generation: prepared.generation(),
-                    diagnostics: errors.join("; "),
-                    receipt: Box::new(receipt),
-                });
-            }
-            Err(PluginWiringError::ApplyFailed {
-                generation: prepared.generation(),
-                diagnostics: errors.join("; "),
-            })
-        }
+        errors
     }
 
     /// Undo exactly the registrations recorded by one apply receipt.
@@ -770,11 +1111,13 @@ impl PluginIntegrator {
         &self,
         agent: &mut crate::agent::react::ReactAgent,
         receipt: &PluginWiringResult,
-    ) -> crate::error::Result<()> {
-        Self::unwire(agent, &receipt.components_by_plugin).await
+    ) -> Result<(), PluginWiringError> {
+        self.publication_target(agent)
+            .rollback(agent, receipt)
+            .await
     }
 
-    pub async fn unwire(
+    async fn unwire(
         agent: &mut crate::agent::react::ReactAgent,
         components: &HashMap<String, WiredPluginComponents>,
     ) -> crate::error::Result<()> {
@@ -1507,6 +1850,380 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn publication_rejects_stale_prepared_and_receipt_before_mutation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temporary = tempfile::tempdir()?;
+        let source = create_plugin(temporary.path(), "prepared.test", serde_json::json!([]))?;
+        let mut registry = registry(temporary.path());
+        registry.install(&InstallSource::Local(source), PluginScope::Local)?;
+        let integrator = PluginIntegrator::new();
+        let old = integrator.prepare(&mut registry).await;
+        let mut agent = crate::agent::ReactAgentBuilder::new()
+            .model("prepared-test")
+            .llm_client(Arc::new(crate::testing::MockLlmClient::new()))
+            .build()?;
+        let target = integrator.publication_target(&agent);
+        let old_receipt = target.wire_prepared(&mut agent, &old).await?;
+        target.rollback(&mut agent, &old_receipt).await?;
+        integrator.invalidate(&registry);
+        let current = integrator.prepare(&mut registry).await;
+        let current_receipt = target.wire_prepared(&mut agent, &current).await?;
+        assert_eq!(current_receipt.generation(), current.generation());
+        assert_eq!(current_receipt.identity(), current.identity());
+        assert!(matches!(
+            target.wire_prepared(&mut agent, &old).await,
+            Err(PluginWiringError::StaleGeneration { .. })
+        ));
+        assert!(matches!(
+            target.rollback(&mut agent, &old_receipt).await,
+            Err(PluginWiringError::StaleReceipt { .. })
+        ));
+        assert!(agent.skill_registry().get_descriptor("example").is_some());
+        target.rollback(&mut agent, &current_receipt).await?;
+        target.rollback(&mut agent, &current_receipt).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn publication_target_is_canonical_per_agent_and_rejects_receipt_forgery()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temporary = tempfile::tempdir()?;
+        let source = create_plugin(temporary.path(), "prepared.test", serde_json::json!([]))?;
+        let mut registry = registry(temporary.path());
+        registry.install(&InstallSource::Local(source), PluginScope::Local)?;
+        let integrator = PluginIntegrator::new();
+        let prepared = integrator.prepare(&mut registry).await;
+        let mut first_agent = crate::agent::ReactAgentBuilder::new()
+            .model("prepared-test")
+            .llm_client(Arc::new(crate::testing::MockLlmClient::new()))
+            .build()?;
+        let mut second_agent = crate::agent::ReactAgentBuilder::new()
+            .model("prepared-test")
+            .llm_client(Arc::new(crate::testing::MockLlmClient::new()))
+            .build()?;
+        let first = integrator.publication_target(&first_agent);
+        let shared = integrator.clone().publication_target(&first_agent);
+        let second = integrator.clone().publication_target(&second_agent);
+        let first_receipt = first.wire_prepared(&mut first_agent, &prepared).await?;
+        let second_receipt = second.wire_prepared(&mut second_agent, &prepared).await?;
+        assert_ne!(first_receipt, second_receipt);
+        assert!(matches!(
+            shared.wire_prepared(&mut first_agent, &prepared).await,
+            Err(PluginWiringError::AlreadyPublished { .. })
+        ));
+        assert!(matches!(
+            second.rollback(&mut second_agent, &first_receipt).await,
+            Err(PluginWiringError::InvalidReceipt { .. })
+        ));
+        let mut forged = first_receipt.clone();
+        forged.components_by_plugin.clear();
+        assert!(matches!(
+            first.rollback(&mut first_agent, &forged).await,
+            Err(PluginWiringError::InvalidReceipt { .. })
+        ));
+        assert!(matches!(
+            second.rollback(&mut first_agent, &second_receipt).await,
+            Err(PluginWiringError::WrongTarget)
+        ));
+        shared.rollback(&mut first_agent, &first_receipt).await?;
+        second.rollback(&mut second_agent, &second_receipt).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn independent_integrators_share_preparation_order_on_one_agent()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temporary = tempfile::tempdir()?;
+        let source = create_plugin(temporary.path(), "prepared.test", serde_json::json!([]))?;
+        let mut registry = registry(temporary.path());
+        registry.install(&InstallSource::Local(source), PluginScope::Local)?;
+        let first_integrator = PluginIntegrator::new();
+        let second_integrator = PluginIntegrator::new();
+        let first = first_integrator.prepare(&mut registry).await;
+        let mut agent = crate::agent::ReactAgentBuilder::new()
+            .model("prepared-test")
+            .llm_client(Arc::new(crate::testing::MockLlmClient::new()))
+            .build()?;
+        let target = first_integrator.publication_target(&agent);
+        let first_receipt = target.wire_prepared(&mut agent, &first).await?;
+        target.rollback(&mut agent, &first_receipt).await?;
+
+        let second = second_integrator.prepare(&mut registry).await;
+        assert!(second.generation() > first.generation());
+        let second_receipt = target.wire_prepared(&mut agent, &second).await?;
+        target.rollback(&mut agent, &second_receipt).await?;
+
+        for _ in 0..2 {
+            first_integrator.invalidate(&registry);
+            let _ = first_integrator.prepare(&mut registry).await;
+        }
+        let old_third = first_integrator.prepare(&mut registry).await;
+        second_integrator.invalidate(&registry);
+        let newer = second_integrator.prepare(&mut registry).await;
+        assert!(newer.generation() > old_third.generation());
+        let newer_receipt = target.wire_prepared(&mut agent, &newer).await?;
+        target.rollback(&mut agent, &newer_receipt).await?;
+        assert!(matches!(
+            target.wire_prepared(&mut agent, &old_third).await,
+            Err(PluginWiringError::StaleGeneration { .. })
+        ));
+        Ok(())
+    }
+
+    #[cfg(feature = "mcp")]
+    #[tokio::test]
+    async fn cancelled_second_mcp_server_keeps_first_in_cleanup_receipt()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let temporary = tempfile::tempdir()?;
+        let source = create_plugin(temporary.path(), "prepared.test", serde_json::json!([]))?;
+        let first_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let first_address = first_listener.local_addr()?;
+        let first_server = tokio::spawn(async move {
+            let initialize = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "protocolVersion": echo_integration::mcp::types::MCP_PROTOCOL_VERSION,
+                    "capabilities": {}
+                }
+            })
+            .to_string();
+            for response in [
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{initialize}",
+                    initialize.len()
+                ),
+                "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    .to_string(),
+            ] {
+                let (mut connection, _) = first_listener.accept().await?;
+                let mut request = [0_u8; 8192];
+                let _ = connection.read(&mut request).await?;
+                connection.write_all(response.as_bytes()).await?;
+            }
+            Ok::<(), std::io::Error>(())
+        });
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        std::fs::write(
+            source.join("mcp.json"),
+            serde_json::json!({
+                "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+                "mcpServers": {
+                    "a-owned": {"type": "streamable-http", "url": format!("http://{first_address}/mcp")},
+                    "z-blocked": {"type": "streamable-http", "url": format!("http://{address}/mcp")}
+                }
+            })
+            .to_string(),
+        )?;
+        let mut registry = registry(temporary.path());
+        registry.install(&InstallSource::Local(source), PluginScope::Local)?;
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let blocked_server = tokio::spawn(async move {
+            if let Ok((_connection, _)) = listener.accept().await {
+                let _ = entered_tx.send(());
+                std::future::pending::<()>().await;
+            }
+        });
+        let integrator = PluginIntegrator::new();
+        let prepared = integrator.prepare(&mut registry).await;
+        assert!(prepared.is_applicable(), "{:?}", prepared.diagnostics());
+        assert!(
+            prepared
+                .plugins
+                .first()
+                .is_some_and(|plugin| plugin.mcp().is_some())
+        );
+        let mut agent = crate::agent::ReactAgentBuilder::new()
+            .model("prepared-test")
+            .llm_client(Arc::new(crate::testing::MockLlmClient::new()))
+            .build()?;
+        assert!(agent.mcp_client("a-owned").is_none());
+        let target = integrator.publication_target(&agent);
+        {
+            let apply = target.wire_prepared(&mut agent, &prepared);
+            tokio::pin!(apply);
+            tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                tokio::select! {
+                    reached = entered_rx => reached.map_err(|_| missing("second MCP request was not observed")),
+                    result = &mut apply => Err(missing(&format!("apply completed before cancellation: {result:?}"))),
+                }
+            })
+            .await??;
+        }
+        blocked_server.abort();
+        let _ = blocked_server.await;
+        first_server
+            .await
+            .map_err(|error| missing(&error.to_string()))??;
+
+        assert!(agent.mcp_client("a-owned").is_some());
+        let pending = target
+            .pending_cleanup_receipt()
+            .await
+            .ok_or_else(|| missing("cancelled MCP apply lost cleanup receipt"))?;
+        assert_eq!(pending.mcp_connected, ["a-owned"]);
+        assert!(
+            pending
+                .components_by_plugin
+                .get("prepared.test")
+                .is_some_and(|owned| owned.mcp_servers.contains(&"z-blocked".to_string()))
+        );
+        assert!(matches!(
+            target.wire_prepared(&mut agent, &prepared).await,
+            Err(PluginWiringError::CleanupPending { .. })
+        ));
+        target.rollback(&mut agent, &pending).await?;
+        assert!(agent.mcp_client("a-owned").is_none());
+        assert!(agent.mcp_client("z-blocked").is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancelled_apply_retains_cleanup_owner_and_blocks_replacement()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temporary = tempfile::tempdir()?;
+        let source = create_plugin(temporary.path(), "prepared.test", serde_json::json!([]))?;
+        let mut registry = registry(temporary.path());
+        registry.install(&InstallSource::Local(source), PluginScope::Local)?;
+        let integrator = PluginIntegrator::new();
+        let prepared = integrator.prepare(&mut registry).await;
+        let mut agent = crate::agent::ReactAgentBuilder::new()
+            .model("prepared-test")
+            .llm_client(Arc::new(crate::testing::MockLlmClient::new()))
+            .build()?;
+        let target = integrator.publication_target(&agent);
+        let hooks = Arc::clone(agent.hook_registry());
+        let held = hooks.write_owned().await;
+        let timed_out = tokio::time::timeout(
+            std::time::Duration::from_millis(40),
+            target.wire_prepared(&mut agent, &prepared),
+        )
+        .await;
+        assert!(timed_out.is_err());
+        drop(held);
+
+        let pending = target
+            .pending_cleanup_receipt()
+            .await
+            .ok_or_else(|| missing("cancelled apply lost its cleanup receipt"))?;
+        assert!(agent.skill_registry().get_descriptor("example").is_some());
+        assert!(matches!(
+            target.wire_prepared(&mut agent, &prepared).await,
+            Err(PluginWiringError::CleanupPending { .. })
+        ));
+        target.rollback(&mut agent, &pending).await?;
+        assert!(agent.skill_registry().get_descriptor("example").is_none());
+        let retried = target.wire_prepared(&mut agent, &prepared).await?;
+        target.rollback(&mut agent, &retried).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancelled_withdraw_retains_current_receipt_and_blocks_replacement()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temporary = tempfile::tempdir()?;
+        let source = create_plugin(temporary.path(), "prepared.test", serde_json::json!([]))?;
+        let mut registry = registry(temporary.path());
+        registry.install(&InstallSource::Local(source), PluginScope::Local)?;
+        let integrator = PluginIntegrator::new();
+        let prepared = integrator.prepare(&mut registry).await;
+        let mut agent = crate::agent::ReactAgentBuilder::new()
+            .model("prepared-test")
+            .llm_client(Arc::new(crate::testing::MockLlmClient::new()))
+            .build()?;
+        let target = integrator.publication_target(&agent);
+        let receipt = target.wire_prepared(&mut agent, &prepared).await?;
+        let hooks = Arc::clone(agent.hook_registry());
+        let held = hooks.write_owned().await;
+        let timed_out = tokio::time::timeout(
+            std::time::Duration::from_millis(40),
+            target.rollback(&mut agent, &receipt),
+        )
+        .await;
+        assert!(timed_out.is_err());
+        drop(held);
+
+        integrator.invalidate(&registry);
+        let replacement = integrator.prepare(&mut registry).await;
+        assert!(matches!(
+            target.wire_prepared(&mut agent, &replacement).await,
+            Err(PluginWiringError::ActiveGeneration { .. })
+        ));
+        target.rollback(&mut agent, &receipt).await?;
+        let next = target.wire_prepared(&mut agent, &replacement).await?;
+        target.rollback(&mut agent, &next).await?;
+        Ok(())
+    }
+
+    #[cfg(feature = "mcp")]
+    #[tokio::test]
+    async fn failed_active_withdraw_keeps_publication_fenced_until_retry()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temporary = tempfile::tempdir()?;
+        let source = create_plugin(temporary.path(), "prepared.test", serde_json::json!([]))?;
+        let mut registry = registry(temporary.path());
+        registry.install(&InstallSource::Local(source), PluginScope::Local)?;
+        let integrator = PluginIntegrator::new();
+        let mut prepared = (*integrator.prepare(&mut registry).await).clone();
+        let valid = crate::mcp::McpConfigFile::parse(
+            r#"{"mcpServers":{"owned":{"command":"unused-test-command"}}}"#,
+        )?;
+        prepared
+            .plugins
+            .first_mut()
+            .ok_or_else(|| missing("prepared plugin missing"))?
+            .mcp = Some(valid.clone());
+        let mut agent = crate::agent::ReactAgentBuilder::new()
+            .model("prepared-test")
+            .llm_client(Arc::new(crate::testing::MockLlmClient::new()))
+            .build()?;
+        let transport = Arc::new(RetryCloseTransport {
+            close_attempts: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let client = crate::mcp::McpClient::from_transport("owned", transport.clone())?.await?;
+        let config = valid
+            .to_server_configs()?
+            .pop()
+            .ok_or_else(|| missing("test MCP target missing"))?;
+        agent
+            .tools
+            .mcp_manager
+            .install_prepared_target("owned", config, client)
+            .await?;
+        let target = integrator.publication_target(&agent);
+        let receipt = target.wire_prepared(&mut agent, &prepared).await?;
+        assert_eq!(receipt.mcp_connected, ["owned"]);
+
+        let failed = target
+            .rollback(&mut agent, &receipt)
+            .await
+            .err()
+            .ok_or_else(|| missing("first active cleanup unexpectedly succeeded"))?;
+        assert!(matches!(failed, PluginWiringError::RollbackFailed { .. }));
+        assert_eq!(failed.cleanup_receipt(), Some(&receipt));
+        integrator.invalidate(&registry);
+        let replacement = integrator.prepare(&mut registry).await;
+        assert!(matches!(
+            target.wire_prepared(&mut agent, &replacement).await,
+            Err(PluginWiringError::ActiveGeneration { .. })
+        ));
+        target.rollback(&mut agent, &receipt).await?;
+        assert_eq!(
+            transport
+                .close_attempts
+                .load(std::sync::atomic::Ordering::Acquire),
+            2
+        );
+        let next = target.wire_prepared(&mut agent, &replacement).await?;
+        target.rollback(&mut agent, &next).await?;
+        Ok(())
+    }
+
     #[cfg(feature = "mcp")]
     #[tokio::test]
     async fn partial_apply_rollback_failure_returns_retryable_receipt()
@@ -1579,6 +2296,18 @@ mod tests {
                 .load(std::sync::atomic::Ordering::Acquire),
             2
         );
+        let mut retry = prepared.clone();
+        retry.plugins.retain(|plugin| plugin.id() != "invalid.test");
+        if let Some(plugin) = retry.plugins.first_mut() {
+            plugin.mcp = None;
+        }
+        let published = integrator.wire_prepared(&mut agent, &retry).await?;
+        assert_eq!(published.generation(), prepared.generation());
+        assert!(matches!(
+            integrator.rollback(&mut agent, receipt).await,
+            Err(PluginWiringError::InvalidReceipt { .. })
+        ));
+        integrator.rollback(&mut agent, &published).await?;
         Ok(())
     }
 }

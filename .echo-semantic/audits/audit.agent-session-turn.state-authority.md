@@ -4,7 +4,7 @@ id: audit.agent-session-turn.state-authority
 kind: audit
 boundary_ref: boundary.agent-session-turn
 lens: state_authority
-freshness: examined
+freshness: stale
 revision: f1e9027246760661144786e9e35615cd46d580c6
 finding_refs: [finding.turn-driver-entry-coverage, finding.agent-adapter-close-settlement]
 challenges:
@@ -39,6 +39,8 @@ Raw `Agent::execute/chat/stream` 是 driver 依赖的低层 public contract，�
 ## 问题记录
 
 `finding.turn-driver-entry-coverage` 收窄为 Channel 外部 adapter 缺口，不把 direct Rust API 判错；新增 `finding.agent-adapter-close-settlement` 记录跨 adapter 的 Agent close/cleanup owner 缺口。
+
+Issue #36 的 ACP、Headless、Channel 与 ReactAgent Drop repair candidate 已改变本审查中的 close 路径。A2A 不在本轮修复范围。旧故障假设仍可恢复，但本 Audit 不再代表当前结果；必须对合并后的源码和验证做独立复审。
 
 ## 残余风险
 

@@ -172,6 +172,19 @@ events must be retained. The default sink is only an in-process acceptance
 boundary and is not a QQ/Feishu delivery acknowledgement. Framework session
 reset passes cancellation to this driven handler and waits for that Turn to
 settle before publishing the replacement reply.
+Resource close is a separate boundary: `ChannelManager::stop_all` stops each
+transport before awaiting its retained `MessageHandler::close`. A
+`SessionHandler` then cancels sender generations, waits for active streams and
+delivery leases, and awaits each sender Agent close. Shutdown waits for every
+accepted/polled stream, including legacy/custom handlers that do not publish a
+driven terminal; this is resource lifetime only and does not create another
+Turn terminal. Reset retains its existing driven-only terminal settlement
+policy. Reset or timeout
+replacement closes the previous Agent before publishing the next one. A
+failed or cancelled close keeps the handler/session owner for a later `stop`
+or `close` retry; it does not reopen new message admission. Resourceful custom
+handlers implement `MessageHandler::close`, while stateless handlers use its
+default no-op. See [ADR 0066](../adr/0066-agent-adapter-close-ownership.md).
 Raw `Agent::chat` remains available for lower-level Rust consumers. See
 [ADR 0046](../adr/0046-turn-execution-delivery-settlement.md).
 
@@ -364,11 +377,13 @@ manager.register(Box::new(QqChannel::new(config)?));
 manager.register(Box::new(FeishuChannel::new(config)?));
 
 // Create independent Handler for each channel
-manager.start_all(|channel_id| {
+for started in manager.start_all(|_channel_id| {
     Arc::new(MyHandler::new(llm_client.clone()))
-}).await?;
+}).await {
+    started.result?;
+}
 
-// Stop all
+// Stop transports, drain handlers, and await each sender Agent close.
 manager.stop_all().await?;
 ```
 

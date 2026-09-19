@@ -48,7 +48,7 @@
 - 应用技能合并、补丁或规则晋升（仅生成提案，由人通过命令应用）
 - 把来自不可信来源（工具输出）的记忆晋升到热层或规则
 
-所有对记忆/技能/规则的变更都写入变更审计日志（`change-log.jsonl`），可查询、可回滚。写入时还会进行密钥扫描与提示注入检测。
+分层记忆变更先写入持久恢复操作，再修改 Store 或 `MEMORY.md`；已提交的业务变更可在 `change-log.jsonl` 查询。任意记忆、技能和规则的事后回滚 API 尚未实现（另由 #52 跟踪）。记忆写入还会进行密钥扫描与提示注入检测。
 
 ---
 
@@ -63,7 +63,7 @@
 | **TrajectorySaver** | 将运行转为 ShareGPT 微调数据 | `improve/` |
 | **TypedMemoryStore** | 带元数据的结构化记忆读写 | `echo-state` |
 | **MemoryLayerManager** | 热/暖/冷三层记忆管理 | `evolution/` |
-| **ChangeLog** | 变更审计与回滚 | `evolution/` |
+| **ChangeLog** | 可查询的业务变更审计（尚无事后回滚） | `evolution/` |
 | **TriggerDetector** | 在线对话信号→新记忆 | `evolution/` |
 | **MemoryReviewer** | 陈旧评分、冲突检测、合并、归档（GC） | `evolution/` |
 | **Curator** | 技能生命周期状态机 | `evolution/` |
@@ -208,23 +208,24 @@ let entries = store.list_typed(&["agent", "typed_memories"], &filter).await?;
 | `RepeatedWorkflow` | 相同工具序列被观察 ≥3 次 | 0.75 |
 | `AutoExtracted` | AutoMemory 从会话归档提取 | 0.6 |
 
-### 三层记忆管理 — `MemoryLayerManager`
+### 分层记忆管理 — `MemoryLayerManager`
 
-记忆按价值分层，热层始终加载进上下文，暖/冷层按需检索：
+记忆按价值分层，热层始终加载进上下文，暖层按需检索：
 
 - **热层**（`.echo-agent/MEMORY.md`）：最高价值，YAML frontmatter + markdown 正文，上限 ~2000 token，人类与 Agent 都可编辑。
-- **暖层**（Store KV `["agent","typed_memories"]`）：按主题组织，按需加载。
-- **冷层**（Store KV `["agent","cold_memories"]`）：归档旧/低置信度记忆。
+- **暖层**（Store KV `["agent","memories"]`）：统一类型化存储，`Archived` 条目仍在此层并按衰减权重召回。
+- **冷层**（可选公共 API `["agent","cold_memories"]`）：默认路径不使用独立冷存储；有独立归档需求的复用方可自行接入。
 
 ```rust
 use echo_agent::evolution::{MemoryLayerManager, JsonlChangeLog, MemoryMeta, MemorySource, MemoryType};
 use std::path::PathBuf;
 
-let mgr = MemoryLayerManager::new(
+let mgr = MemoryLayerManager::try_new(
     PathBuf::from(".echo-agent"),
     arc_store,
     Box::new(JsonlChangeLog::new(PathBuf::from(".echo-agent/evolution/change-log.jsonl"))?),
-);
+)?;
+mgr.reconcile_pending().await?; // 向独立 Store 读者开放前先恢复
 
 // 写入（自动扫描密钥/注入，并按置信度判断是否进热层）
 let meta = MemoryMeta::new(MemoryType::ProjectFact, MemorySource::ExplicitSave, "deploy")
@@ -232,8 +233,8 @@ let meta = MemoryMeta::new(MemoryType::ProjectFact, MemorySource::ExplicitSave, 
 mgr.write_memory("deploy:prod-script", "部署用 pnpm build", meta).await?;
 
 // 晋升/降级
-mgr.promote("some-key").await?;          // 冷→暖→热
-mgr.demote("some-key", "stale").await?;  // 热→暖→冷
+mgr.promote("some-key").await?;          // 符合条件的暖→热
+mgr.demote("some-key", "stale").await?;  // 热→暖，或暖层原位归档
 
 // 跨层搜索
 let hits = mgr.search_layered("deploy", 10).await?;
@@ -241,7 +242,7 @@ let hits = mgr.search_layered("deploy", 10).await?;
 
 ### 变更审计 — `ChangeLog`
 
-所有对记忆/技能/规则的变更都记录到 append-only JSONL，支持过滤查询：
+已提交的分层记忆变更记录到可过滤查询的 append-only JSONL；其它演化写入分别遵循自身审计合同：
 
 ```rust
 use echo_agent::evolution::{ChangeFilter, ChangeType, EntityType};
@@ -251,6 +252,17 @@ let filter = ChangeFilter::new()
     .with_change_type(ChangeType::Promote)
     .with_limit(50);
 // 日志文件：.echo-agent/evolution/change-log.jsonl
+```
+
+对 `MemoryLayerManager`，`.echo-agent/evolution/memory-operations.jsonl` 是独立的崩溃恢复权威。操作先以 `SyncData` 确认含固定 change ID 和目标值的 prepare，再写 Store/`MEMORY.md` 投影，以同一 ID 幂等写入业务 `ChangeLog`，最后记录 settlement。prepare 后任一步失败都会返回未知完成结果；重启调用 `reconcile_pending().await?` 可补齐且不会重复业务审计。恢复还会核对已结算 key 的最新 journal 目标，修复 Store 因持久化屏障 degraded 而回退的投影。同步热层读在启动恢复前或待恢复时返回错误，manager 的异步读先恢复；直接读取 Store 或文件的调用者仍可能暂见中间态，必须等启动恢复完成。observer 仅在实时提交后触发，不跨重启重放。见 [ADR 0065](../adr/0065-evolution-memory-audit-reconciliation.md)。
+
+含换行或首尾空白的热层内容在 `MEMORY.md` frontmatter 标记 `content_json: true`，正文 bullet 使用单行 JSON 字符串，无损恢复原文；旧的普通 bullet 仍可读取。晋升或降级若基于过期读取，另一 manager 已改同一 key，则在 prepare 前失败，不覆盖较新的值。
+
+已批准的 `MemoryMerger` 现在绑定同一 manager：
+
+```rust
+use echo_agent::evolution::MemoryMerger;
+let outcome = MemoryMerger::new(&mgr).merge_group(&reviewed_group).await?;
 ```
 
 ### 记忆审查与确定性维护
@@ -363,7 +375,7 @@ for report in monitor.analyze_all_skills().await? {
 - **写入前**：密钥扫描（AWS `AKIA...`、GitHub `ghp_...`、`BEGIN PRIVATE KEY` 等，匹配项替换为 `[REDACTED]`）+ 提示注入检测（如 "ignore previous" 模式）
 - **不可信输入隔离**：工具输出来源的记忆 `risk = High`，未经人工批准不可晋升到热层或规则
 - **速率限制**：每会话最多 50 次记忆写入，每天最多 5 次技能补丁
-- 所有变更经 `ChangeLog` 可回滚
+- `ChangeLog` 记录已提交变更；事后回滚另由 #52 实现
 
 ---
 

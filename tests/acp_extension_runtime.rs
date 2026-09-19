@@ -310,6 +310,22 @@ async fn connection_services_own_one_extension_authority_and_close_drains_it() -
     Ok(())
 }
 
+#[tokio::test]
+async fn connection_close_retains_unsettled_extension_for_retry() -> Result<()> {
+    let services = test_services();
+    let authority = services.extensions();
+    let held = authority
+        .lease(Some("extension-close-retry"), CancellationToken::new())
+        .map_err(|error| echo_agent::error::ReactError::Other(error.to_string()))?;
+
+    assert!(services.close(Duration::from_millis(20)).await.is_err());
+    assert_eq!(authority.in_flight(), 1);
+    assert_eq!(held.settlement(), Some(ExtensionSettlement::Cancelled));
+    drop(held);
+    services.close(Duration::from_secs(1)).await?;
+    Ok(())
+}
+
 /// A prompt-driven run keeps using the same Session/Run authority while an
 /// extension lease runs next to it; the run settles via the framework
 /// receipt, the lease settles via its own lifecycle, and neither settles the

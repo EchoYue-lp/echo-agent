@@ -4,7 +4,7 @@ id: audit.protocol-surfaces.time-lifecycle
 kind: audit
 boundary_ref: boundary.protocol-surfaces
 lens: time_lifecycle
-freshness: examined
+freshness: stale
 revision: f1e9027246760661144786e9e35615cd46d580c6
 finding_refs: [finding.a2a-stream-cleanup, finding.a2a-task-id-admission-authority, finding.agent-adapter-close-settlement, finding.turn-terminal-commit-projection-order, finding.channel-reset-stale-generation-delivery]
 challenges:
@@ -39,6 +39,8 @@ A2A 在返回惰性 stream 前写 task/token，未 poll drop、setup/event error
 ## 问题记录
 
 确认 A2A cleanup、adapter close 与 terminal commit order；新增 Channel stale-generation delivery，A2A task ID竞态复用 state Audit Finding。
+
+Issue #36 的 adapter close repair candidate 改变了 ACP/Channel close 与 ReactAgent Drop 路径。此 Audit 保留旧 revision 的历史故障假设，不能用其 `examined` 结论证明当前候选已通过；A2A 未修改，terminal、stream-cleanup 与 task-id Finding 继续开放。
 
 ## 残余风险
 

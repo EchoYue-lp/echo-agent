@@ -171,29 +171,36 @@ where
         }
     };
 
-    let model = agent.model_name().to_string();
+    run_headless_agent(config, &agent).await
+}
 
+async fn run_headless_agent(config: HeadlessConfig, agent: &dyn Agent) -> HeadlessResult {
+    let model = agent.model_name().to_string();
+    let exit_on_error = config.exit_on_error;
     let cancel = config.cancel_token.unwrap_or_default();
     let identity_value = format!("headless-{}", uuid::Uuid::new_v4());
-    let identity = match crate::agent::EventIdentity::new(&identity_value, &identity_value) {
-        Ok(identity) => identity,
-        Err(error) => {
-            return HeadlessResult {
-                output: format!("Error: {error}"),
-                success: false,
-                model,
-                format: config.output_format,
-                exit_on_error,
-            };
+    let execution = match crate::agent::EventIdentity::new(&identity_value, &identity_value) {
+        Ok(identity) => {
+            let request = TurnRequest::new(identity, config.prompt)
+                .mode(TurnMode::Execute)
+                .cancel(cancel);
+            let receipt = AgentTurnDriver
+                .drive(agent, request, &HeadlessEventSink)
+                .await;
+            headless_result_from_receipt(receipt)
         }
+        Err(error) => (format!("Error: {error}"), false),
     };
-    let request = TurnRequest::new(identity, config.prompt)
-        .mode(TurnMode::Execute)
-        .cancel(cancel);
-    let receipt = AgentTurnDriver
-        .drive(&agent, request, &HeadlessEventSink)
-        .await;
-    let (output, success) = headless_result_from_receipt(receipt);
+    let (mut output, mut success) = execution;
+    if let Err(error) = agent.close().await {
+        if !success {
+            output.push_str("; ");
+        } else {
+            output.clear();
+        }
+        output.push_str(&format!("Error closing agent: {error}"));
+        success = false;
+    }
     HeadlessResult {
         output,
         success,
@@ -234,11 +241,63 @@ fn headless_result_from_receipt(receipt: TurnReceipt) -> (String, bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::AgentEvent;
     use crate::error::{AgentFailure, ReactError};
     use crate::testing::MockLlmClient;
     use echo_core::agent::TurnId;
+    use futures::StreamExt;
+    use futures::future::BoxFuture;
+    use futures::stream::BoxStream;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
+
+    struct ClosingAgent {
+        closes: Arc<AtomicUsize>,
+        close_error: bool,
+    }
+
+    impl Agent for ClosingAgent {
+        fn name(&self) -> &str {
+            "closing-agent"
+        }
+
+        fn model_name(&self) -> &str {
+            "closing-model"
+        }
+
+        fn system_prompt(&self) -> &str {
+            "test"
+        }
+
+        fn execute<'a>(&'a self, _task: &'a str) -> BoxFuture<'a, crate::error::Result<String>> {
+            Box::pin(async { Ok("done".to_string()) })
+        }
+
+        fn execute_stream<'a>(
+            &'a self,
+            _task: &'a str,
+        ) -> BoxFuture<'a, crate::error::Result<BoxStream<'a, crate::error::Result<AgentEvent>>>>
+        {
+            Box::pin(async {
+                Ok(
+                    futures::stream::iter(vec![Ok(AgentEvent::FinalAnswer("done".to_string()))])
+                        .boxed(),
+                )
+            })
+        }
+
+        fn close(&self) -> BoxFuture<'_, crate::error::Result<()>> {
+            Box::pin(async move {
+                self.closes.fetch_add(1, Ordering::AcqRel);
+                if self.close_error {
+                    Err(ReactError::Other("close failed".to_string()))
+                } else {
+                    Ok(())
+                }
+            })
+        }
+    }
 
     #[test]
     fn test_headless_config_default() {
@@ -346,5 +405,25 @@ mod tests {
         assert!(result.success);
         assert_eq!(result.output, "driver result");
         assert_eq!(result.exit_code(), 0);
+    }
+
+    #[tokio::test]
+    async fn headless_awaits_agent_close_and_surfaces_cleanup_failure() {
+        let closes = Arc::new(AtomicUsize::new(0));
+        let result = run_headless_agent(
+            HeadlessConfig {
+                prompt: "close after settlement".to_string(),
+                ..HeadlessConfig::default()
+            },
+            &ClosingAgent {
+                closes: Arc::clone(&closes),
+                close_error: true,
+            },
+        )
+        .await;
+
+        assert_eq!(closes.load(Ordering::Acquire), 1);
+        assert!(!result.success);
+        assert!(result.output.contains("close failed"));
     }
 }

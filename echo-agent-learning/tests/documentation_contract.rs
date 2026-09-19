@@ -943,6 +943,39 @@ fn demos_use_only_the_public_facade_and_safe_string_access()
 }
 
 #[test]
+fn plugin_publication_docs_and_demo_share_the_target_receipt_contract()
+-> Result<(), Box<dyn std::error::Error>> {
+    let learning_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = learning_root.parent().ok_or_else(|| {
+        std::io::Error::other("learning package has no workspace parent directory")
+    })?;
+    let demo = std::fs::read_to_string(learning_root.join("examples/demo56_plugin_system.rs"))?;
+    for entry in [
+        "integrator.publication_target(&agent)",
+        "target.wire_prepared(&mut agent, &prepared).await?",
+        "target.rollback(&mut agent, &receipt).await?",
+    ] {
+        assert!(demo.contains(entry), "plugin demo misses {entry}");
+    }
+    for language in ["en", "zh"] {
+        let guide =
+            std::fs::read_to_string(root.join(format!("docs/{language}/32-plugin-system.md")))?;
+        for entry in [
+            "publication_target(&agent)",
+            "target.wire_prepared(&mut agent, &prepared)",
+            "target.rollback(&mut agent, &receipt)",
+            "pending_cleanup_receipt()",
+        ] {
+            assert!(
+                guide.contains(entry),
+                "{language} plugin guide misses {entry}"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn package_identity_is_consolidated() -> Result<(), Box<dyn std::error::Error>> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let manifest = std::fs::read_to_string(root.join("Cargo.toml"))?;

@@ -148,6 +148,17 @@ sink，默认 sink 仅表示进程内接纳，不是 QQ/飞书送达确认。fra
 `Agent::chat` API 保留。参见
 [ADR 0046](../adr/0046-turn-execution-delivery-settlement.md)。
 
+资源关闭是独立边界：`ChannelManager::stop_all` 先停止每个 transport，再 await
+它保留的 `MessageHandler::close`。`SessionHandler` 取消 sender generation、
+等待全部 accepted/polled active stream 与 delivery lease，然后 await 每个 sender
+Agent close。shutdown 也等待不发布 driven terminal 的 legacy/custom handler；
+该 receipt 只证明资源生命周期，不新建 Turn terminal。reset 继续使用既有
+driven-only terminal settlement policy。
+reset 或超时替换会先关闭旧 Agent，再发布新 Agent。关闭错误或调用方取消时保留
+handler/session owner，后续可重试 `stop` 或 `close`，且不会重新开放消息接纳。
+有资源的自定义 handler 应实现 `MessageHandler::close`；无资源 handler 使用默认
+no-op。参见 [ADR 0066](../adr/0066-agent-adapter-close-ownership.md)。
+
 所有 IM 通道实现统一接口：
 
 ```rust
@@ -344,11 +355,13 @@ manager.register(Box::new(QqChannel::new(config)?));
 manager.register(Box::new(FeishuChannel::new(config)?));
 
 // 为每个通道创建独立的 Handler
-manager.start_all(|channel_id| {
+for started in manager.start_all(|_channel_id| {
     Arc::new(MyHandler::new(llm_client.clone()))
-}).await?;
+}).await {
+    started.result?;
+}
 
-// 停止所有
+// 停止 transport、排空 handler，并等待各 sender Agent close。
 manager.stop_all().await?;
 ```
 
