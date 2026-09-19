@@ -6,7 +6,7 @@ title: MCP、Hook、Skill、Plugin 与 LSP Registries
 asset_type: state_authority
 status: needs_review
 risk: high
-observed_at: source:b214951ece8e09325efc846ad7bd88a402135000e42fe67d2b917317b2d27923
+observed_at: source:c692702d1e9c1752aa396348037aea8baab1b4a8f1bbc2979fe95fc5ec9c7323
 boundary_refs: [boundary.extension-lifecycle]
 code_refs: [echo-integration/src/mcp/mod.rs, echo-execution/src/skills/hooks.rs, echo-execution/src/skills/registry.rs, echo-core/src/plugin/registry.rs, src/plugin/prepared.rs, src/agent/react/mod.rs, echo-core/src/plugin/lifecycle.rs, echo-integration/src/lsp/manager.rs]
 consumer_refs: [src/agent/react/capabilities.rs, echo-sdk-host/src/core_profile/facade/integrations.rs]

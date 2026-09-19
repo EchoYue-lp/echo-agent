@@ -1529,16 +1529,18 @@ impl ReactAgent {
     #[cfg(feature = "mcp")]
     async fn settle_mcp_close_projections(
         &self,
-        previous: std::collections::HashMap<String, Arc<McpClient>>,
+        previous: std::collections::HashMap<crate::mcp::McpServerId, Arc<McpClient>>,
     ) {
-        let current = self.tools.mcp_manager.get_clients();
-        for (server, client) in previous {
+        let current = self.tools.mcp_manager.get_clients_by_id();
+        for (server_id, client) in previous {
             let retained = current
-                .get(&server)
+                .get(&server_id)
                 .is_some_and(|active| Arc::ptr_eq(active, &client));
             if !retained {
                 for tool in client.tools() {
-                    let exposed = crate::mcp::McpToolAdapter::exposed_name_for(&server, &tool.name);
+                    let exposed = crate::mcp::McpToolAdapter::exposed_name_for_identity(
+                        &server_id, &tool.name,
+                    );
                     self.tools.tool_manager.unregister(&exposed);
                 }
             }
@@ -3623,7 +3625,7 @@ impl Agent for ReactAgent {
         Box::pin(async move {
             #[cfg(feature = "mcp")]
             {
-                let previous = self.tools.mcp_manager.get_clients();
+                let previous = self.tools.mcp_manager.get_clients_by_id();
                 let result = self.tools.mcp_manager.close_all().await;
                 self.settle_mcp_close_projections(previous).await;
                 result?;

@@ -8,7 +8,7 @@ risk: high
 primary_focus: failure_concurrency
 focus: [state_authority, time_lifecycle, result_side_effect, permission_external, data_durability]
 boundary: boundary.extension-lifecycle
-observed_at: source:b214951ece8e09325efc846ad7bd88a402135000e42fe67d2b917317b2d27923
+observed_at: source:c692702d1e9c1752aa396348037aea8baab1b4a8f1bbc2979fe95fc5ec9c7323
 code_refs: [echo-integration/src/mcp/mod.rs, echo-execution/src/skills/hooks.rs, echo-execution/src/skills/registry.rs, echo-core/src/plugin/registry.rs, src/plugin/prepared.rs, src/agent/react/mod.rs, echo-integration/src/lsp/manager.rs]
 rule_refs: [rule.extension-generation-authority]
 evidence_refs: [evidence.effects-extensions, evidence.skill-activation-authority-repair, evidence.skill-activation-authority-verification, evidence.mcp-tool-local-classification-repair, evidence.mcp-tool-local-classification-verification, evidence.mcp-client-capability-advertisement-repair, evidence.mcp-client-capability-advertisement-verification, evidence.lsp-derived-handle-lifecycle-repair, evidence.lsp-derived-handle-lifecycle-verification, evidence.plugin-component-preparation-repair, evidence.plugin-component-preparation-verification, evidence.plugin-generation-publication-authority-repair, evidence.plugin-generation-publication-authority-verification]

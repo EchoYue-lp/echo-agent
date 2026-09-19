@@ -90,6 +90,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .join(", ")
     );
 
+    #[cfg(feature = "mcp")]
+    {
+        let server_id = echo_agent::mcp::McpServerId::plugin(&plugin_id, "local-review");
+        println!(
+            "Plugin MCP identity: {} (selector {})",
+            server_id,
+            server_id.selector()
+        );
+    }
+
     registry.disable(&plugin_id)?;
     registry.enable(&plugin_id)?;
     registry.uninstall(&plugin_id, false)?;

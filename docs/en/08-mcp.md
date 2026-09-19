@@ -298,6 +298,18 @@ the framework `McpManager`. A failed replacement leaves the last-known-good
 connection in place; applications only coordinate their own file and scope
 policy around this call.
 
+Plugin-owned MCP servers use `McpServerId::plugin(plugin_id, local_name)`.
+`McpServerConfig.name` and portable `mcp.json` remain unchanged, while the
+manager's typed maps and cleanup receipts use the owner-qualified selector.
+Direct string APIs map to `McpServerOwner::Direct`. Plugin tool names are
+namespaced and resource selectors are opaque, reversible values; a plugin
+withdrawal therefore cannot close another plugin's same-named server.
+Direct selectors preserve ordinary legacy names and reversibly escape the
+reserved `plugin:`/`direct:` prefixes.
+`build_mcp_resource_tools(HashMap<String, ...>)` remains the source-compatible
+Direct builder; integrations carrying owner identity use
+`build_mcp_resource_tools_by_id`.
+
 ### Method 2: Manage Connections via McpManager
 
 ```rust

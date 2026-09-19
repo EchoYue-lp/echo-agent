@@ -191,6 +191,8 @@ pub struct WiredPluginComponents {
     pub skills: Vec<String>,
     pub hooks_registered: bool,
     pub mcp_servers: Vec<String>,
+    #[cfg(feature = "mcp")]
+    pub mcp_server_ids: Vec<crate::mcp::McpServerId>,
 }
 
 /// Apply receipt. It contains no package inventory and owns no reload policy.
@@ -203,6 +205,8 @@ pub struct PluginWiringResult {
     pub skills_loaded: Vec<String>,
     pub hooks_registered: Vec<String>,
     pub mcp_connected: Vec<String>,
+    #[cfg(feature = "mcp")]
+    pub mcp_connected_ids: Vec<crate::mcp::McpServerId>,
     pub agents_discovered: Vec<String>,
     pub lsp_discovered: Vec<String>,
     pub warnings: Vec<String>,
@@ -222,6 +226,16 @@ impl PartialEq for PluginWiringResult {
             && self.skills_loaded == other.skills_loaded
             && self.hooks_registered == other.hooks_registered
             && self.mcp_connected == other.mcp_connected
+            && {
+                #[cfg(feature = "mcp")]
+                {
+                    self.mcp_connected_ids == other.mcp_connected_ids
+                }
+                #[cfg(not(feature = "mcp"))]
+                {
+                    true
+                }
+            }
             && self.agents_discovered == other.agents_discovered
             && self.lsp_discovered == other.lsp_discovered
             && self.warnings == other.warnings
@@ -998,11 +1012,15 @@ impl PluginIntegrator {
                 Err(error) => errors.push(format!("Plugin '{}' Skills: {error}", plugin.id())),
             }
             if let Some(hooks) = plugin.hooks() {
+                #[cfg(feature = "mcp")]
+                let hooks = owner_qualified_plugin_hooks(plugin.id(), hooks);
+                #[cfg(not(feature = "mcp"))]
+                let hooks = hooks.clone();
                 let registered = agent.hook_registry().write().await.register_plugin_hooks(
                     plugin.id(),
                     &plugin.variables().plugin_root.display().to_string(),
                     &plugin.variables().plugin_data.display().to_string(),
-                    hooks.clone(),
+                    hooks,
                 );
                 if registered {
                     receipt.hooks_registered.push(plugin.id().to_string());
@@ -1020,7 +1038,9 @@ impl PluginIntegrator {
                         servers.sort_by(|left, right| left.name.cmp(&right.name));
                         for server in servers {
                             let name = server.name.clone();
-                            let preexisting = agent.mcp_client(&name).is_some();
+                            let server_id = crate::mcp::McpServerId::plugin(plugin.id(), &name);
+                            let selector = server_id.selector();
+                            let preexisting = agent.mcp_client(&selector).is_some();
                             if !preexisting {
                                 receipt
                                     .components_by_plugin
@@ -1028,11 +1048,18 @@ impl PluginIntegrator {
                                     .or_default()
                                     .mcp_servers
                                     .push(name.clone());
+                                receipt
+                                    .components_by_plugin
+                                    .entry(plugin.id().to_string())
+                                    .or_default()
+                                    .mcp_server_ids
+                                    .push(server_id.clone());
                             }
-                            match agent.connect_mcp_from_config(server).await {
+                            match agent.connect_mcp_owned(server_id.clone(), server).await {
                                 Ok(client) => {
                                     let connected = client.server_name().to_string();
                                     receipt.mcp_connected.push(connected.clone());
+                                    receipt.mcp_connected_ids.push(server_id.clone());
                                     if preexisting {
                                         receipt
                                             .components_by_plugin
@@ -1040,6 +1067,12 @@ impl PluginIntegrator {
                                             .or_default()
                                             .mcp_servers
                                             .push(connected);
+                                        receipt
+                                            .components_by_plugin
+                                            .entry(plugin.id().to_string())
+                                            .or_default()
+                                            .mcp_server_ids
+                                            .push(server_id.clone());
                                     }
                                 }
                                 Err(error) => {
@@ -1050,7 +1083,7 @@ impl PluginIntegrator {
                                         "Plugin MCP server connection failed, skipping"
                                     );
                                     if !preexisting {
-                                        match agent.disconnect_mcp(&name).await {
+                                        match agent.disconnect_mcp_owned(&server_id).await {
                                             Ok(_) => {
                                                 if let Some(owned) = receipt
                                                     .components_by_plugin
@@ -1059,6 +1092,9 @@ impl PluginIntegrator {
                                                     owned
                                                         .mcp_servers
                                                         .retain(|server| server != &name);
+                                                    owned
+                                                        .mcp_server_ids
+                                                        .retain(|server| server != &server_id);
                                                 }
                                             }
                                             Err(cleanup_error) => errors.push(format!(
@@ -1135,9 +1171,17 @@ impl PluginIntegrator {
                     .unregister(&crate::skills::hooks::HookSource::Plugin(plugin_id.clone()));
             }
             #[cfg(feature = "mcp")]
-            for server in &owned.mcp_servers {
-                if let Err(error) = agent.disconnect_mcp(server).await {
-                    cleanup_failures.push(format!("{plugin_id}/{server}: {error}"));
+            for server_id in &owned.mcp_server_ids {
+                if let Err(error) = agent.disconnect_mcp_owned(server_id).await {
+                    cleanup_failures.push(format!("{plugin_id}/{server_id}: {error}"));
+                }
+            }
+            #[cfg(feature = "mcp")]
+            if owned.mcp_server_ids.is_empty() {
+                for server in &owned.mcp_servers {
+                    if let Err(error) = agent.disconnect_mcp(server).await {
+                        cleanup_failures.push(format!("{plugin_id}/{server}: {error}"));
+                    }
                 }
             }
         }
@@ -1150,6 +1194,25 @@ impl PluginIntegrator {
             )))
         }
     }
+}
+
+#[cfg(feature = "mcp")]
+fn owner_qualified_plugin_hooks(
+    plugin_id: &str,
+    hooks: &echo_execution::skills::hooks::HooksDefinition,
+) -> echo_execution::skills::hooks::HooksDefinition {
+    let mut qualified = hooks.clone();
+    for rules in qualified.rules.values_mut() {
+        for rule in rules {
+            for action in &mut rule.hooks {
+                if let echo_execution::skills::hooks::HookAction::McpTool { server, .. } = action {
+                    *server =
+                        crate::mcp::McpServerId::plugin(plugin_id, server.as_str()).selector();
+                }
+            }
+        }
+    }
+    qualified
 }
 
 impl Default for PluginIntegrator {
@@ -1293,6 +1356,44 @@ async fn freeze_document(
 mod tests {
     use super::*;
     use crate::plugin::{AGENT_PLUGIN_SCHEMA_V1, InstallSource, PluginScope};
+
+    #[cfg(feature = "mcp")]
+    #[test]
+    fn plugin_mcp_hook_server_is_qualified_by_prepared_owner() {
+        use crate::skills::hooks::{HookAction, HookEvent, HookRule, HooksDefinition};
+
+        let mut hooks = HooksDefinition::default();
+        hooks.add_rules(
+            HookEvent::PreToolUse,
+            vec![HookRule {
+                matcher: "probe".to_string(),
+                hooks: vec![HookAction::McpTool {
+                    server: "shared".to_string(),
+                    tool: "probe".to_string(),
+                    arguments: None,
+                    timeout: 1,
+                }],
+            }],
+        );
+        let qualified = owner_qualified_plugin_hooks("plugin-a", &hooks);
+        let server = qualified
+            .rules_for(HookEvent::PreToolUse)
+            .first()
+            .and_then(|rule| rule.hooks.first())
+            .and_then(|action| match action {
+                HookAction::McpTool { server, .. } => Some(server.as_str()),
+                _ => None,
+            });
+        let expected = crate::mcp::McpServerId::plugin("plugin-a", "shared").selector();
+        assert_eq!(server, Some(expected.as_str()));
+        assert!(matches!(
+            hooks
+                .rules_for(HookEvent::PreToolUse)
+                .first()
+                .and_then(|rule| rule.hooks.first()),
+            Some(HookAction::McpTool { server, .. }) if server == "shared"
+        ));
+    }
 
     #[cfg(feature = "mcp")]
     struct RetryCloseTransport {
@@ -1922,6 +2023,17 @@ mod tests {
             first.rollback(&mut first_agent, &forged).await,
             Err(PluginWiringError::InvalidReceipt { .. })
         ));
+        #[cfg(feature = "mcp")]
+        {
+            let mut forged_identity = first_receipt.clone();
+            forged_identity
+                .mcp_connected_ids
+                .push(crate::mcp::McpServerId::plugin("forged", "server"));
+            assert!(matches!(
+                first.rollback(&mut first_agent, &forged_identity).await,
+                Err(PluginWiringError::InvalidReceipt { .. })
+            ));
+        }
         assert!(matches!(
             second.rollback(&mut first_agent, &second_receipt).await,
             Err(PluginWiringError::WrongTarget)
@@ -2061,7 +2173,13 @@ mod tests {
             .await
             .map_err(|error| missing(&error.to_string()))??;
 
-        assert!(agent.mcp_client("a-owned").is_some());
+        assert!(
+            agent
+                .tools
+                .mcp_manager
+                .get_client_by_id(&crate::mcp::McpServerId::plugin("prepared.test", "a-owned",))
+                .is_some()
+        );
         let pending = target
             .pending_cleanup_receipt()
             .await
@@ -2078,8 +2196,23 @@ mod tests {
             Err(PluginWiringError::CleanupPending { .. })
         ));
         target.rollback(&mut agent, &pending).await?;
-        assert!(agent.mcp_client("a-owned").is_none());
-        assert!(agent.mcp_client("z-blocked").is_none());
+        assert!(
+            agent
+                .tools
+                .mcp_manager
+                .get_client_by_id(&crate::mcp::McpServerId::plugin("prepared.test", "a-owned",))
+                .is_none()
+        );
+        assert!(
+            agent
+                .tools
+                .mcp_manager
+                .get_client_by_id(&crate::mcp::McpServerId::plugin(
+                    "prepared.test",
+                    "z-blocked",
+                ))
+                .is_none()
+        );
         Ok(())
     }
 
@@ -2193,7 +2326,11 @@ mod tests {
         agent
             .tools
             .mcp_manager
-            .install_prepared_target("owned", config, client)
+            .install_prepared_server(
+                crate::mcp::McpServerId::plugin("prepared.test", "owned"),
+                config,
+                client,
+            )
             .await?;
         let target = integrator.publication_target(&agent);
         let receipt = target.wire_prepared(&mut agent, &prepared).await?;
@@ -2267,7 +2404,11 @@ mod tests {
         agent
             .tools
             .mcp_manager
-            .install_prepared_target("owned", config, client)
+            .install_prepared_server(
+                crate::mcp::McpServerId::plugin("prepared.test", "owned"),
+                config,
+                client,
+            )
             .await?;
 
         let error = integrator

@@ -321,7 +321,19 @@ fn segmented_journal_is_available_from_the_public_facade() {
 fn mcp_reconcile_receipts_are_available_from_the_facade() {
     fn public_type<T>() {}
 
+    let _legacy_resource_builder: fn(
+        std::collections::HashMap<String, std::sync::Arc<echo_agent::mcp::McpClient>>,
+    ) -> Vec<Box<dyn echo_agent::tools::Tool>> = echo_agent::mcp::build_mcp_resource_tools;
+    let _typed_resource_builder: fn(
+        std::collections::HashMap<
+            echo_agent::mcp::McpServerId,
+            std::sync::Arc<echo_agent::mcp::McpClient>,
+        >,
+    ) -> Vec<Box<dyn echo_agent::tools::Tool>> = echo_agent::mcp::build_mcp_resource_tools_by_id;
+
     public_type::<echo_agent::mcp::McpTargetReceipt>();
+    public_type::<echo_agent::mcp::McpServerId>();
+    public_type::<echo_agent::mcp::McpServerOwner>();
     assert_eq!(
         echo_agent::mcp::McpTargetChange::Connected,
         echo_agent::advanced::McpTargetChange::Connected

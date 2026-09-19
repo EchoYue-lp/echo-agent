@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.transcript-observer-current-repair
 kind: evidence
-observed_at: source:b214951ece8e09325efc846ad7bd88a402135000e42fe67d2b917317b2d27923
+observed_at: source:c692702d1e9c1752aa396348037aea8baab1b4a8f1bbc2979fe95fc5ec9c7323
 source_refs:
   - src/agent/react/run/phases/compact.rs
   - src/agent/react/run/phases/tools.rs

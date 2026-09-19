@@ -8,7 +8,7 @@ risk: high
 primary_focus: time_lifecycle
 focus: [state_authority, failure_concurrency, result_side_effect, contract_evidence]
 boundary: boundary.agent-session-turn
-observed_at: source:b214951ece8e09325efc846ad7bd88a402135000e42fe67d2b917317b2d27923
+observed_at: source:c692702d1e9c1752aa396348037aea8baab1b4a8f1bbc2979fe95fc5ec9c7323
 code_refs: [echo-core/src/agent/mod.rs, echo-core/src/agent/event_envelope.rs, echo-core/src/tools/mod.rs, src/agent/react/mod.rs, src/agent/react/run/stream_channel.rs, src/agent/handle.rs, echo-orchestration/src/runtime/turn_driver.rs, src/acp/session.rs, src/acp/runtime.rs, src/acp/adapter.rs, src/headless.rs, src/eval/runner.rs, src/channels.rs, echo-integration/src/channels/manager.rs, echo-integration/src/channels/types.rs, echo-integration/src/channels/session.rs, docs/adr/0037-eval-timeout-turn-settlement.md, docs/adr/0038-eval-trace-correlation-identity.md, docs/adr/0046-turn-execution-delivery-settlement.md, docs/adr/0066-agent-adapter-close-ownership.md]
 rule_refs: [rule.turn-terminal-authority, rule.context-persistence-separation]
 evidence_refs: [evidence.agent-context-execution, evidence.eval-timeout-turn-settlement-repair, evidence.eval-timeout-turn-settlement-verification, evidence.eval-trace-correlation-repair, evidence.eval-trace-correlation-verification, evidence.turn-terminal-delivery-settlement-repair, evidence.turn-terminal-delivery-settlement-verification, evidence.agent-adapter-close-settlement-repair, evidence.agent-adapter-close-settlement-verification]

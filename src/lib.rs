@@ -355,7 +355,8 @@ pub mod advanced {
     #[cfg(feature = "mcp")]
     #[cfg_attr(docsrs, doc(cfg(feature = "mcp")))]
     pub use crate::mcp::{
-        McpManager, McpServerConfig, McpTargetChange, McpTargetReceipt, McpTool, TransportConfig,
+        McpManager, McpServerConfig, McpServerId, McpServerOwner, McpTargetChange,
+        McpTargetReceipt, McpTool, TransportConfig,
     };
 
     #[cfg(feature = "channels")]

@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- MCP connections now use owner-qualified `McpServerId` identities. Direct
+  string APIs remain compatible, while plugin wiring uses the stable prepared
+  plugin id so same-named servers, cleanup debt, tools, and resources cannot
+  interfere. Plugin projections are namespaced and resource selectors are
+  reversible; see ADR 0067.
+
 - Agent adapters now fence new work, cancel and drain accepted invocations,
   and await resource close: ACP retains unsettled Run receipts and retries
   failed connection cleanup, Headless reports Agent close errors, and Channels

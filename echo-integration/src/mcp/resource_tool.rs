@@ -7,7 +7,7 @@ use futures::future::{BoxFuture, join_all};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
-use super::{McpClient, McpResource, McpResourceTemplate};
+use super::{McpClient, McpResource, McpResourceTemplate, McpServerId};
 use echo_core::error::Result;
 use echo_core::tools::{Tool, ToolFailureCategory, ToolParameters, ToolResult, ToolRiskLevel};
 
@@ -24,14 +24,21 @@ const PAGE_SIZE: usize = 50;
 
 #[derive(Clone)]
 struct McpResourceDirectory {
-    clients: Arc<BTreeMap<String, Arc<McpClient>>>,
+    clients: Arc<BTreeMap<String, ResourceClient>>,
+}
+
+#[derive(Clone)]
+struct ResourceClient {
+    id: McpServerId,
+    client: Arc<McpClient>,
 }
 
 impl McpResourceDirectory {
-    fn new(clients: HashMap<String, Arc<McpClient>>) -> Self {
+    fn new(clients: HashMap<McpServerId, Arc<McpClient>>) -> Self {
         let clients = clients
             .into_iter()
             .filter(|(_, client)| client.supports_resources())
+            .map(|(id, client)| (id.selector(), ResourceClient { id, client }))
             .collect::<BTreeMap<_, _>>();
         Self {
             clients: Arc::new(clients),
@@ -45,18 +52,17 @@ impl McpResourceDirectory {
     fn select(
         &self,
         server: Option<&str>,
-    ) -> std::result::Result<Vec<(String, Arc<McpClient>)>, String> {
+    ) -> std::result::Result<Vec<(McpServerId, Arc<McpClient>)>, String> {
         match server {
             Some(server) => self
                 .clients
                 .get(server)
-                .cloned()
-                .map(|client| vec![(server.to_string(), client)])
+                .map(|entry| vec![(entry.id.clone(), Arc::clone(&entry.client))])
                 .ok_or_else(|| format!("MCP resource server '{server}' is not connected")),
             None => Ok(self
                 .clients
-                .iter()
-                .map(|(name, client)| (name.clone(), Arc::clone(client)))
+                .values()
+                .map(|entry| (entry.id.clone(), Arc::clone(&entry.client)))
                 .collect()),
         }
     }
@@ -67,6 +73,18 @@ impl McpResourceDirectory {
 /// The returned tools share an immutable snapshot of the manager's connected
 /// clients. Callers replace the tools whenever the connection topology changes.
 pub fn build_mcp_resource_tools(clients: HashMap<String, Arc<McpClient>>) -> Vec<Box<dyn Tool>> {
+    build_mcp_resource_tools_by_id(
+        clients
+            .into_iter()
+            .map(|(name, client)| (McpServerId::direct(name), client))
+            .collect(),
+    )
+}
+
+/// Build Resource tools from owner-qualified MCP client identities.
+pub fn build_mcp_resource_tools_by_id(
+    clients: HashMap<McpServerId, Arc<McpClient>>,
+) -> Vec<Box<dyn Tool>> {
     let directory = McpResourceDirectory::new(clients);
     if directory.is_empty() {
         return Vec::new();
@@ -268,7 +286,7 @@ impl Tool for ListMcpResourcesTool {
                 match response {
                     Ok(entries) => {
                         resources.extend(entries.into_iter().map(|resource| ResourceEntry {
-                            server: name.clone(),
+                            server: name.selector(),
                             resource,
                         }))
                     }
@@ -279,7 +297,7 @@ impl Tool for ListMcpResourcesTool {
                         ));
                     }
                     Err(error) => errors.push(ServerError {
-                        server: name,
+                        server: name.selector(),
                         message: error.to_string(),
                     }),
                 }
@@ -343,7 +361,7 @@ impl Tool for ListMcpResourceTemplatesTool {
                 match response {
                     Ok(entries) => templates.extend(entries.into_iter().map(|template| {
                         ResourceTemplateEntry {
-                            server: name.clone(),
+                            server: name.selector(),
                             template,
                         }
                     })),
@@ -354,7 +372,7 @@ impl Tool for ListMcpResourceTemplatesTool {
                         ));
                     }
                     Err(error) => errors.push(ServerError {
-                        server: name,
+                        server: name.selector(),
                         message: error.to_string(),
                     }),
                 }
@@ -418,7 +436,7 @@ impl Tool for ReadMcpResourceTool {
                 Err(error) => return Ok(ToolResult::invalid_arguments(error)),
             };
             let client = match self.directory.clients.get(&server) {
-                Some(client) => Arc::clone(client),
+                Some(entry) => Arc::clone(&entry.client),
                 None => {
                     return Ok(ToolResult::invalid_arguments(format!(
                         "MCP resource server '{server}' is not connected"
@@ -608,7 +626,7 @@ mod tests {
 
     fn resource_tools() -> Vec<Box<dyn Tool>> {
         let client = McpClient::with_test_transport("context", Arc::new(ResourceTransport));
-        build_mcp_resource_tools(HashMap::from([("context".to_string(), client)]))
+        build_mcp_resource_tools_by_id(HashMap::from([(McpServerId::direct("context"), client)]))
     }
 
     async fn execute_named(
@@ -653,7 +671,7 @@ mod tests {
 
     #[test]
     fn empty_directory_registers_no_tools() {
-        assert!(build_mcp_resource_tools(HashMap::new()).is_empty());
+        assert!(build_mcp_resource_tools_by_id(HashMap::new()).is_empty());
     }
 
     #[tokio::test]
@@ -749,9 +767,9 @@ mod tests {
     -> std::result::Result<(), String> {
         let healthy = McpClient::with_test_transport("healthy", Arc::new(ResourceTransport));
         let failing = McpClient::with_test_transport("failing", Arc::new(FailingResourceTransport));
-        let tools = build_mcp_resource_tools(HashMap::from([
-            ("healthy".to_string(), healthy),
-            ("failing".to_string(), failing),
+        let tools = build_mcp_resource_tools_by_id(HashMap::from([
+            (McpServerId::direct("healthy"), healthy),
+            (McpServerId::direct("failing"), failing),
         ]));
 
         let aggregate =
@@ -787,6 +805,56 @@ mod tests {
             targeted.failure.as_ref().map(|failure| failure.category),
             Some(ToolFailureCategory::Unavailable)
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn same_resource_uri_from_two_plugin_owners_keeps_distinct_selectors()
+    -> std::result::Result<(), String> {
+        let first_id = McpServerId::plugin("插件/A", "资料:shared");
+        let second_id = McpServerId::plugin("plugin-b", "资料:shared");
+        let tools = build_mcp_resource_tools_by_id(HashMap::from([
+            (
+                first_id.clone(),
+                McpClient::with_test_transport("资料:shared", Arc::new(ResourceTransport)),
+            ),
+            (
+                second_id.clone(),
+                McpClient::with_test_transport("资料:shared", Arc::new(ResourceTransport)),
+            ),
+        ]));
+        let aggregate =
+            execute_named(&tools, LIST_MCP_RESOURCES_TOOL, ToolParameters::new()).await?;
+        let resources = aggregate
+            .data
+            .as_ref()
+            .and_then(|data| data.get("resources"))
+            .and_then(Value::as_array)
+            .ok_or_else(|| "resource list missing".to_string())?;
+        assert_eq!(resources.len(), 4);
+        let selectors = resources
+            .iter()
+            .filter_map(|entry| entry.get("server").and_then(Value::as_str))
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(selectors.len(), 2);
+        assert!(selectors.contains(first_id.selector().as_str()));
+        assert!(selectors.contains(second_id.selector().as_str()));
+
+        for id in [first_id, second_id] {
+            let resource = execute_named(
+                &tools,
+                READ_MCP_RESOURCE_TOOL,
+                ToolParameters::from([
+                    ("server".to_string(), Value::String(id.selector())),
+                    (
+                        "uri".to_string(),
+                        Value::String("file:///project/说明.txt".to_string()),
+                    ),
+                ]),
+            )
+            .await?;
+            assert!(resource.success);
+        }
         Ok(())
     }
 }
