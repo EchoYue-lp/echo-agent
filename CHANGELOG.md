@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Added the canonical Skill lifecycle mutation authority for exact SKILL.md
+  bytes plus Curator state. Draft, Merge, Patch, and runtime usage now use
+  durable prepare/projection/idempotent-audit/settle ordering, digest-bound
+  one-use approvals, generation-fenced later rollback, restart reconciliation,
+  a reserved-marker-bound business-audit destination, machine-readable approval
+  and inverse lineage, per-Skill Curator merge CAS, canonical UTF-8 file
+  identities, redacted audit summaries, and typed host-owned Rule
+  rollback. Direct Curator mutation APIs are no longer public; see ADR 0069.
+
 - Skill candidate creation and reinforcement now share one durable private
   mutation journal. Detection reconciles candidate payloads, Curator
   registration, and stable idempotent ChangeLog entries before scanning;

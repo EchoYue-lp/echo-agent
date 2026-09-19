@@ -7,7 +7,7 @@ expectation: human_confirmed
 risk: high
 primary_focus: time_lifecycle
 focus: [state_authority, failure_concurrency, contract_evidence]
-observed_at: source:4c4bf7193da92bb6a7830e5a6f769ca18e2ed021db517cbf7050ac8d81769b78
+observed_at: source:da606226e50036419c8df4e353de35d35acb5cc65c605df57764578aaaf04666
 behavior_refs: [behavior.agent-turn-lifecycle]
 code_refs: [echo-orchestration/src/runtime/turn_driver.rs, echo-core/src/agent/event_envelope.rs, src/headless.rs, src/acp/runtime.rs, src/eval/runner.rs, src/channels.rs, src/agent/react/mod.rs, docs/adr/0009-tracked-input-receipts.md, docs/adr/0010-canonical-turn-receipt-accounting.md, docs/adr/0037-eval-timeout-turn-settlement.md, docs/adr/0046-turn-execution-delivery-settlement.md, docs/adr/0066-agent-adapter-close-ownership.md]
 evidence_refs: [evidence.agent-context-execution, evidence.eval-timeout-turn-settlement-repair, evidence.eval-timeout-turn-settlement-verification, evidence.turn-terminal-delivery-settlement-repair, evidence.turn-terminal-delivery-settlement-verification, evidence.agent-adapter-close-settlement-repair, evidence.agent-adapter-close-settlement-verification]

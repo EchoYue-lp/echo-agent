@@ -304,20 +304,21 @@ let report = reviewer
 Candidate → Draft → Active → Stale → Deprecated → Archived
 ```
 
-`Curator`（位于 `evolution/`）管理这些状态转换：
+`Curator`（位于 `evolution/`）保存生命周期状态；mutation 统一提交给
+`SkillMutationAuthority`，旧的 Curator 直接 mutation 方法不再公开。host 审阅
+exact preview digest 后提供一次性 approval artifact：
 
 ```rust
-use echo_agent::evolution::{Curator, CuratorConfig, SkillLifecycle};
+use echo_agent::evolution::{SkillApprovalArtifact, SkillMutationAuthority};
 
-let curator = Curator::new(
-    CuratorConfig { stale_days: 30, archive_days: 90, enabled: true },
-    "~/.echo-agent/curator_state.json",
+let authority = Arc::new(SkillMutationAuthority::open(
+    curator, change_log.clone(),
+)?);
+let preview = authority.preview(&request)?;
+let approval = SkillApprovalArtifact::new(
+    approval_id, &preview.operation_digest, approver, approved_at,
 );
-curator.register_candidate("cargo-build")?;   // 候选
-curator.promote_to_draft("cargo-build")?;      // → 草稿
-curator.promote_to_active("cargo-build")?;     // → 激活
-curator.pin_skill("critical-skill")?;          // 固定免于自动转换
-let transitions = curator.apply_transitions()?; // 按闲置时间自动转换
+let receipt = authority.apply(request, approval).await?;
 ```
 
 #### 从观察模式自动创建技能
@@ -345,11 +346,28 @@ let transitions = curator.apply_transitions()?; // 按闲置时间自动转换
 2. **`SkillDraftGenerator`** 从候选用模板生成草稿 `SKILL.md`，保存到消费方传入的 evolution root 下 `skills/_drafts/<name>/SKILL.md`。
 
    ```rust
-   use echo_agent::evolution::SkillDraftGenerator;
-   let gen = SkillDraftGenerator::new("<application-data>".into(), &change_log);
-   let result = gen.generate_from_candidate(&candidate).await?;
+   use echo_agent::evolution::{SkillApprovalArtifact, SkillDraftGenerator};
+   let gen = SkillDraftGenerator::new("<application-data>".into(), authority.clone());
+   let preview = gen.preview_generate_from_candidate(&candidate, request_id).await?;
+   let approval = SkillApprovalArtifact::new(
+       approval_id, &preview.preview.operation_digest, approver, approved_at,
+   );
+   let result = gen.generate_from_preview(preview, approval).await?;
    // result.skill_md_path 指向生成的草稿
    ```
+
+   Draft、Merge 与 Patch 共用同一个 prepare → projection → 幂等 audit → settle
+   owner。later rollback 以 retained change/batch 为目标，对每个文件和 lifecycle
+   identity 做 journal generation fencing，再写入新的 inverse batch。Rule rollback
+   返回 typed `HostOwned`，framework 不从 ChangeLog 猜测 Rule 状态。见
+   [ADR 0069](../adr/0069-skill-lifecycle-mutation-authority.md)。
+
+   一个 authority 永久绑定 business `ChangeLog` 的 canonical durable destination
+   identity；复制到其它路径的 marker 和无法提供该 identity 的 log 都 fail closed。
+   apply/reconcile/rollback 不接受其它 log。SKILL.md 使用 canonical absolute path，`after` bytes
+   必须是 UTF-8。exact bytes 只保存在 private recovery journal；business audit
+   仅记录 path、hash、length 和有界的 secret-redacted summary。Curator 投影按
+   Skill entity 做 merge CAS，因此不会覆盖无关 candidate insert。
 
    embedding application 当前传入 `<application-data>`，因此草稿位于 `<application-data>/skills/_drafts/<name>/SKILL.md`。这一产品路径应以 [embedding application app-core 源码](https://github.com/EchoYue-lp/echo-agent-cli/tree/main/echo-agent-app-core/src) 为准。
 

@@ -662,8 +662,8 @@ pub struct AgentRunSnapshot {
     pub memory_layer_manager: Option<Arc<crate::evolution::MemoryLayerManager>>,
     /// Optional application projection refreshed at the pre-prepare boundary.
     pub pre_model_context_projector: Option<Arc<dyn crate::compression::PreModelContextProjector>>,
-    /// Consumer-supplied skill lifecycle curator used by telemetry writes.
-    pub skill_curator: Option<crate::evolution::Curator>,
+    /// Consumer-supplied canonical Skill lifecycle mutation authority.
+    pub skill_mutation_authority: Option<Arc<crate::evolution::SkillMutationAuthority>>,
 }
 
 struct AgentPersistenceCoordinator<'a> {
@@ -1578,7 +1578,7 @@ impl AgentRunSnapshot {
                 .read()
                 .unwrap_or_else(|error| error.into_inner())
                 .clone(),
-            skill_curator: agent.skill_curator.clone(),
+            skill_mutation_authority: agent.skill_mutation_authority.clone(),
             skill_activation,
         }
     }
@@ -1607,7 +1607,7 @@ impl AgentRunSnapshot {
         let session_id = self.config.session_id.clone().unwrap_or_default();
         let tool_name = tool_name.to_string();
         let error_message = error.map(str::to_string);
-        let curator = self.skill_curator.clone();
+        let skill_authority = self.skill_mutation_authority.clone();
         let activated_at = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0);
         tokio::spawn(async move {
             let telemetry_store = crate::skill_telemetry::SkillTelemetryStore::new(store);
@@ -1629,12 +1629,15 @@ impl AgentRunSnapshot {
                         "skill telemetry write failed"
                     );
                 }
-                if let Some(curator) = curator.as_ref() {
-                    let curator = curator.clone();
-                    let skill_name = skill_name.clone();
-                    let _ =
-                        tokio::task::spawn_blocking(move || curator.touch_skill(&skill_name, true))
-                            .await;
+                if let Some(authority) = skill_authority.as_ref() {
+                    let usage = crate::evolution::SkillUsageHandle::new(authority.clone());
+                    if let Err(error) = usage.record_usage(&skill_name).await {
+                        tracing::warn!(
+                            skill = %skill_name,
+                            error = %error,
+                            "skill usage lifecycle mutation failed"
+                        );
+                    }
                 }
             }
         });

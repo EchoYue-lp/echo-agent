@@ -8,7 +8,7 @@ risk: high
 primary_focus: contract_evidence
 focus: [state_authority, time_lifecycle, permission_external, failure_concurrency]
 boundary: boundary.protocol-surfaces
-observed_at: source:4c4bf7193da92bb6a7830e5a6f769ca18e2ed021db517cbf7050ac8d81769b78
+observed_at: source:da606226e50036419c8df4e353de35d35acb5cc65c605df57764578aaaf04666
 code_refs: [src/acp/adapter.rs, src/acp/runtime.rs, src/a2a/server.rs, echo-integration/src/channels/manager.rs, echo-integration/src/lsp/manager.rs, src/channels.rs, src/headless.rs]
 rule_refs: [rule.protocol-role-separation, rule.sdk-rust-authority]
 evidence_refs: [evidence.provider-protocol-quality, evidence.sdk-contracts, evidence.lsp-derived-handle-lifecycle-repair, evidence.lsp-derived-handle-lifecycle-verification, evidence.channel-generation-delivery-fence-repair, evidence.channel-generation-delivery-fence-verification]

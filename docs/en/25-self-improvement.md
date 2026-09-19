@@ -333,20 +333,22 @@ and that write is stored as Draft memory. The review response is capped at 512 t
 Candidate → Draft → Active → Stale → Deprecated → Archived
 ```
 
-`Curator` (in `evolution/`) manages these transitions:
+`Curator` stores lifecycle state. Mutations are submitted through
+`SkillMutationAuthority`; the former direct Curator mutation methods are no
+longer public. The host reviews the exact preview digest and supplies a one-use
+approval artifact:
 
 ```rust
-use echo_agent::evolution::{Curator, CuratorConfig, SkillLifecycle};
+use echo_agent::evolution::{SkillApprovalArtifact, SkillMutationAuthority};
 
-let curator = Curator::new(
-    CuratorConfig { stale_days: 30, archive_days: 90, enabled: true },
-    "~/.echo-agent/curator_state.json",
+let authority = Arc::new(SkillMutationAuthority::open(
+    curator, change_log.clone(),
+)?);
+let preview = authority.preview(&request)?;
+let approval = SkillApprovalArtifact::new(
+    approval_id, &preview.operation_digest, approver, approved_at,
 );
-curator.register_candidate("cargo-build")?;   // candidate
-curator.promote_to_draft("cargo-build")?;      // → draft
-curator.promote_to_active("cargo-build")?;     // → active
-curator.pin_skill("critical-skill")?;          // pin (exempt from auto-transition)
-let transitions = curator.apply_transitions()?; // auto-transition by idle time
+let receipt = authority.apply(request, approval).await?;
 ```
 
 #### Auto-creating skills from observed patterns
@@ -378,11 +380,30 @@ let transitions = curator.apply_transitions()?; // auto-transition by idle time
 2. **`SkillDraftGenerator`** generates a draft `SKILL.md` from a candidate via template, saved under the consumer-supplied evolution root at `skills/_drafts/<name>/SKILL.md`.
 
    ```rust
-   use echo_agent::evolution::SkillDraftGenerator;
-   let gen = SkillDraftGenerator::new("<application-data>".into(), &change_log);
-   let result = gen.generate_from_candidate(&candidate).await?;
+   use echo_agent::evolution::{SkillApprovalArtifact, SkillDraftGenerator};
+   let gen = SkillDraftGenerator::new("<application-data>".into(), authority.clone());
+   let preview = gen.preview_generate_from_candidate(&candidate, request_id).await?;
+   let approval = SkillApprovalArtifact::new(
+       approval_id, &preview.preview.operation_digest, approver, approved_at,
+   );
+   let result = gen.generate_from_preview(preview, approval).await?;
    // result.skill_md_path points to the generated draft
    ```
+
+   Draft, Merge, and Patch use the same prepare → projection → idempotent audit
+   → settle owner. Later rollback targets a retained change or batch, fences
+   every file and lifecycle identity by journal generation, and writes a fresh
+   inverse batch. Rule rollback is typed `HostOwned`; framework code never
+   reconstructs Rule state from ChangeLog. See
+   [ADR 0069](../adr/0069-skill-lifecycle-mutation-authority.md).
+
+   One authority is permanently bound to the business `ChangeLog`'s canonical
+   durable destination identity; copied markers at another path and logs
+   without such an identity fail closed. Apply/reconcile/rollback do not accept another log. SKILL.md paths are
+   canonical absolute identities and `after` bytes must be UTF-8. Exact bytes
+   stay in the private recovery journal; business audit records path, hash,
+   length, and a bounded secret-redacted summary. Curator projection uses
+   per-Skill merge CAS, preserving unrelated candidate inserts.
 
    embedding application currently supplies `<application-data>`, so its drafts live at `<application-data>/skills/_drafts/<name>/SKILL.md`. That product-owned location should be verified against the [embedding application app-core source](https://github.com/EchoYue-lp/echo-agent-cli/tree/main/echo-agent-app-core/src).
 

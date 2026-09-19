@@ -4,7 +4,7 @@ id: map.eval-evolution
 kind: capability_map
 title: Trace、Eval、Improve 与 Evolution
 risk: high
-observed_at: source:4c4bf7193da92bb6a7830e5a6f769ca18e2ed021db517cbf7050ac8d81769b78
+observed_at: source:da606226e50036419c8df4e353de35d35acb5cc65c605df57764578aaaf04666
 boundary_refs: [boundary.eval-evolution]
 behavior_refs: [behavior.eval-evolution]
 rule_refs: [rule.quality-observation-boundary, rule.fact-projection-separation]
@@ -50,17 +50,17 @@ scenarios:
     next_step: memory rollback候选完成远端交付；Skill/Rule/host rollback依#54/#94/host，旧namespace依其Finding处置
   evolution-skill-lifecycle:
     status: needs_review
-    source_refs: [src/evolution/candidate.rs, src/evolution/curator.rs, src/evolution/draft.rs, src/evolution/merge.rs, src/evolution/patch.rs, src/evolution/review.rs, src/evolution/security.rs, docs/adr/0068-skill-candidate-mutation-audit-reconciliation.md]
+    source_refs: [src/evolution/candidate.rs, src/evolution/curator.rs, src/evolution/skill_mutation.rs, src/evolution/draft.rs, src/evolution/merge.rs, src/evolution/patch.rs, src/evolution/review.rs, src/evolution/security.rs, src/agent/snapshot.rs, docs/adr/0068-skill-candidate-mutation-audit-reconciliation.md, docs/adr/0069-skill-lifecycle-mutation-authority.md]
     finding_refs: [finding.evolution-skill-promotion-audit, finding.skill-candidate-reinforcement-audit-gap]
     rule_refs: [rule.quality-observation-boundary]
-    evidence_refs: [evidence.skill-candidate-audit-repair, evidence.skill-candidate-audit-verification]
-    unknown: "#94 candidate repair以reserved authority marker、Store atomic CAS、Curator private lineage及injective private paths回应三轮独立复审，最终复审、完整门禁与remote delivery待完成；promotion approval policy仍归#54"
-    next_step: 完成candidate create/reinforce durable audit候选；promotion/approval/draft/merge/patch继续依#54及各自合同
+    evidence_refs: [evidence.skill-candidate-audit-repair, evidence.skill-candidate-audit-verification, evidence.skill-lifecycle-authority-repair, evidence.skill-lifecycle-authority-verification]
+    unknown: "#94 candidate Store CAS仍等待最终closure；ADR 0069 lifecycle authority候选覆盖Draft/Promote/Touch/Deprecate/Merge/Patch、approval、audit/reconcile与later rollback，独立复审、完整门禁和remote delivery待完成"
+    next_step: 独立复审Skill lifecycle authority并完成#94/#54/#52交付闭合；Rule persistence/rollback保持host-owned
   evolution-rule-promotion-surface:
     status: needs_review
     source_refs: [src/evolution/security.rs, src/evolution/mod.rs]
-    unknown: 仅发现 rule-promotion 安全检查，未发现 framework 内规则 mutation/持久 authority，不能声明 rule evolution 已 mapped
-    next_step: 在 application boundary audit 中确认 consumer；若无实现则收窄公开文档与 capability 名称
+    unknown: framework没有Rule mutation/persistence owner；SkillMutationAuthority对Rule rollback返回typed HostOwned，不能声明rule evolution已由framework实现
+    next_step: 在application boundary审查host Rule owner、approval与持久化；framework不从ChangeLog猜回写
     rule_refs: [rule.quality-observation-boundary]
   runtime-trigger-and-human-review:
     status: needs_review
@@ -82,7 +82,7 @@ ReactAgent 可选记录 trace；显式 Eval/Improve API 和 runtime/app trigger 
 
 ## 行为关系
 
-Trace 是 observation，Eval/Improve 消费但不驱动业务 commit；Evolution 可写持久状态，分层记忆用独立业务audit与journal恢复，事后rollback仍单独跟踪。
+Trace 是 observation，Eval/Improve 消费但不驱动业务 commit；Evolution 可写持久状态，分层记忆与Skill lifecycle分别用资源owner的journal恢复和owner-applied inverse；ChangeLog保持append-only，Rule mutation/rollback归host。
 
 ## 状态与数据流
 

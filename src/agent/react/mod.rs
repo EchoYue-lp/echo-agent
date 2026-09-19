@@ -291,12 +291,8 @@ pub struct ReactAgent {
     /// Optional product-owned authority for file-based skill discovery.
     pub(crate) skill_load_policy: Option<Arc<dyn crate::skills::external::SkillLoadPolicy>>,
 
-    /// Optional consumer-supplied skill lifecycle curator.
-    ///
-    /// Framework consumers that scope skill lifecycle state per project can
-    /// replace the default user-level curator without coupling the framework to
-    /// a specific workspace layout.
-    pub(crate) skill_curator: Option<crate::evolution::Curator>,
+    /// Canonical Skill lifecycle mutation and audit authority.
+    pub(crate) skill_mutation_authority: Option<Arc<crate::evolution::SkillMutationAuthority>>,
 
     /// Shared slot for hook→classifier communication.
     /// Written by prepare phase after UserPromptSubmit hooks resolve
@@ -710,7 +706,7 @@ impl ReactAgent {
             )),
             memory_trigger_sink: None,
             skill_load_policy: None,
-            skill_curator: None,
+            skill_mutation_authority: None,
             hook_activation_cache: Arc::new(std::sync::Mutex::new(None)),
         }
     }
@@ -776,9 +772,23 @@ impl ReactAgent {
         self.skill_load_policy = policy;
     }
 
-    /// Set or clear the curator used to record skill usage lifecycle data.
-    pub fn set_skill_curator(&mut self, curator: Option<crate::evolution::Curator>) {
-        self.skill_curator = curator;
+    /// Set or clear the single authority used for all Skill lifecycle writes.
+    pub fn set_skill_mutation_authority(
+        &mut self,
+        authority: Option<Arc<crate::evolution::SkillMutationAuthority>>,
+    ) {
+        self.skill_mutation_authority = authority;
+    }
+
+    /// Curator-only configuration cannot prove the business-audit destination.
+    #[deprecated(note = "use set_skill_mutation_authority with a bound business ChangeLog")]
+    pub fn set_skill_curator(
+        &mut self,
+        _curator: Option<crate::evolution::Curator>,
+    ) -> crate::error::Result<()> {
+        Err(crate::error::ReactError::Other(
+            "Curator-only Skill mutation configuration is no longer supported".into(),
+        ))
     }
 
     // ── Constructor helpers ───────────────────────────────────────────────────────

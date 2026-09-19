@@ -17,7 +17,9 @@ use chrono::Utc;
 use echo_agent::evolution::{
     ChangeFilter, ChangeLog, ChangeType, Curator, CuratorConfig, JsonlChangeLog, MemoryLayer,
     MemoryRollbackOutcome, MemoryRollbackPreviewOutcome, MemoryRollbackTarget,
-    MemoryRuntimeIntegrationBuilder, SkillCandidateDetector, SkillLifecycle, SkillMeta,
+    MemoryRuntimeIntegrationBuilder, SkillApprovalArtifact, SkillCandidateDetector, SkillLifecycle,
+    SkillMeta, SkillMutationAuthority, SkillMutationKind, SkillMutationOutcome,
+    SkillMutationRequest,
 };
 use echo_agent::improve::*;
 use echo_agent::memory::store::FileStore;
@@ -468,16 +470,53 @@ async fn demo_curator() -> Result<(), Box<dyn std::error::Error>> {
         CuratorConfig::default(),
         dir.path().join("curator_state.json"),
     );
-
-    // 注册技能
-    curator.touch_skill("code-review", true)?;
-    curator.touch_skill("web-search", true)?;
-    curator.touch_skill("bundled-skill", false)?; // 非 Agent 创建
-    pass!("注册了 3 个技能");
-
-    // 固定重要技能
-    curator.pin_skill("code-review")?;
-    pass!("固定了 code-review 技能");
+    let change_log = Arc::new(JsonlChangeLog::new(dir.path().join("skill-changes.jsonl"))?);
+    let authority = SkillMutationAuthority::open(curator.clone(), change_log)?;
+    let before = curator.load_state()?;
+    let mut after = before.clone();
+    let now = Utc::now();
+    for (name, lifecycle, pinned, agent_created) in [
+        ("code-review", SkillLifecycle::Active, true, true),
+        ("web-search", SkillLifecycle::Stale, false, true),
+        ("bundled-skill", SkillLifecycle::Active, false, false),
+    ] {
+        after.skills.insert(
+            name.to_string(),
+            SkillMeta {
+                name: name.to_string(),
+                path: None,
+                lifecycle,
+                created_at: now,
+                last_used_at: now,
+                last_modified_at: now,
+                pinned,
+                agent_created,
+                superseded_by: None,
+            },
+        );
+    }
+    let request = SkillMutationRequest {
+        request_id: "demo51-curator".into(),
+        entity_key: "demo51-curator".into(),
+        kind: SkillMutationKind::Promote,
+        reason: "approved demo lifecycle projection".into(),
+        files: Vec::new(),
+        curator_before: before,
+        curator_after: after,
+        rollback_of: None,
+    };
+    let preview = authority.preview(&request)?;
+    let approval = SkillApprovalArtifact::new(
+        "demo51-curator-approval",
+        &preview.operation_digest,
+        "demo-reviewer",
+        Utc::now(),
+    );
+    assert!(matches!(
+        authority.apply(request, approval).await?,
+        SkillMutationOutcome::Applied(_)
+    ));
+    pass!("通过统一 authority 提交 3 个技能生命周期状态");
 
     // 查看状态
     let status = curator.status()?;
@@ -488,32 +527,11 @@ async fn demo_curator() -> Result<(), Box<dyn std::error::Error>> {
     println!("    归档: {}", status.archived);
     println!("    固定: {}", status.pinned);
     assert_eq!(status.total, 3);
-    assert_eq!(status.active, 3);
+    assert_eq!(status.active, 2);
+    assert_eq!(status.stale, 1);
     assert_eq!(status.pinned, 1);
     pass!("状态查询正确");
 
-    // 模拟时间流逝：手动设置 last_used_at 为 31 天前
-    {
-        let mut state = curator.load_state()?;
-        if let Some(meta) = state.skills.get_mut("web-search") {
-            meta.last_used_at = Utc::now() - chrono::Duration::days(31);
-        }
-        curator.save_state(&state)?;
-    }
-
-    // 应用自动转换
-    let transitions = curator.apply_transitions()?;
-    println!("\n  自动转换:");
-    for (name, from, to) in &transitions {
-        println!("    {name}: {from:?} → {to:?}");
-    }
-    assert_eq!(transitions.len(), 1);
-    assert!(transitions.first().is_some_and(|(name, _, lifecycle)| {
-        name == "web-search" && *lifecycle == SkillLifecycle::Stale
-    }));
-    pass!("web-search 从 Active 转为 Stale");
-
-    // 验证固定技能未被转换
     let state = curator.load_state()?;
     assert!(
         state

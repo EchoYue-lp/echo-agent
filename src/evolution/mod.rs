@@ -3,10 +3,11 @@
 //! This module provides the infrastructure for the agent to evolve its own
 //! capabilities over time through:
 //!
-//! - **Skill lifecycle**: [`Curator`] manages skill transitions (Candidate → Draft → Active → Stale → Deprecated → Archived)
+//! - **Skill lifecycle**: [`SkillMutationAuthority`] durably applies approved
+//!   Curator + exact SKILL.md transitions (Candidate → Draft → Active → Stale → Deprecated → Archived)
 //! - **Typed memory**: Structured metadata (type, confidence, stability, risk) for every memory
-//! - **Change audit**: Append-only queryable changes with durable memory
-//!   reconciliation and generation-fenced later memory rollback
+//! - **Change audit**: Append-only evidence for durable, generation-fenced
+//!   memory and Skill owner-applied rollback
 //! - **Security**: Secret scanning, untrusted input isolation, injection detection
 //! - **Memory review**: Staleness scoring, conflict detection, merge, and archival
 //! - **Skill creation**: Candidate detection from observed patterns, draft SKILL.md generation
@@ -38,6 +39,7 @@ pub mod recall;
 pub mod review;
 pub mod runtime_integration;
 pub mod security;
+pub mod skill_mutation;
 pub mod triggers;
 
 pub use audit::{
@@ -49,7 +51,7 @@ pub use background_review::{
 };
 pub use candidate::{CandidateReport, SkillCandidate, SkillCandidateDetector};
 pub use curator::{Curator, CuratorConfig, CuratorState, CuratorStatus, SkillLifecycle, SkillMeta};
-pub use draft::{DraftResult, SkillDraftGenerator};
+pub use draft::{DraftResult, SkillDraftGenerator, SkillDraftPreview};
 pub use dreaming::{Dreaming, DreamingAction, DreamingConfig, DreamingDecision, DreamingReport};
 pub use health::{HealthBreakdown, HealthStatus, SkillHealthMonitor, SkillHealthReport};
 pub use layer::{
@@ -58,8 +60,11 @@ pub use layer::{
     MemoryRollbackOutcome, MemoryRollbackPreview, MemoryRollbackPreviewOutcome,
     MemoryRollbackReceipt, MemoryRollbackTarget, is_stale_memory_proposal_error,
 };
-pub use merge::{SimilarityBreakdown, SkillMergeProposal, SkillMerger, SkillSimilarityDetector};
-pub use patch::{PatchType, SkillPatch, SkillPatcher};
+pub use merge::{
+    SimilarityBreakdown, SkillMergePreview, SkillMergeProposal, SkillMerger,
+    SkillSimilarityDetector,
+};
+pub use patch::{PatchType, SkillPatch, SkillPatchPreview, SkillPatcher};
 pub use recall::MemoryRecaller;
 pub use review::{
     AppliedMemoryMerge, ConflictDetector, ConflictGroup, MemoryConflictMember,
@@ -70,6 +75,12 @@ pub use runtime_integration::{HookEvolutionObserver, MemoryRuntimeIntegrationBui
 pub use security::{
     EvolutionSecurityGuard, InputTrustLevel, PromptInjectionDetector, ScanResult, SecretScanner,
     SecurityConfig, SecurityVerdict,
+};
+pub use skill_mutation::{
+    SkillApprovalArtifact, SkillFileMutation, SkillMutationAuthority, SkillMutationKind,
+    SkillMutationObserver, SkillMutationOutcome, SkillMutationPreview, SkillMutationReceipt,
+    SkillMutationRequest, SkillRollbackLineage, SkillRollbackPreviewOutcome, SkillRollbackSupport,
+    SkillRollbackTarget, SkillUsageHandle, SkillUsageOutcome,
 };
 pub use triggers::{
     ExplicitSaveRecord, MemoryTriggerDisposition, MemoryTriggerSink, ToolFailureRecord,

@@ -7,7 +7,7 @@ expectation: human_confirmed
 risk: high
 primary_focus: state_authority
 focus: [contract_evidence, permission_external, time_lifecycle]
-observed_at: source:4c4bf7193da92bb6a7830e5a6f769ca18e2ed021db517cbf7050ac8d81769b78
+observed_at: source:da606226e50036419c8df4e353de35d35acb5cc65c605df57764578aaaf04666
 behavior_refs: [behavior.protocol-projection]
 code_refs: [src/acp/adapter.rs, src/a2a/server.rs, echo-integration/src/mcp/mod.rs, echo-integration/src/lsp/manager.rs, echo-integration/src/channels/manager.rs, src/channels.rs, src/headless.rs, docs/adr/0028-source-first-multilanguage-sdk-runtime.md, docs/adr/0043-lsp-derived-handle-lifecycle.md]
 evidence_refs: [evidence.provider-protocol-quality, evidence.sdk-contracts, evidence.lsp-derived-handle-lifecycle-repair, evidence.lsp-derived-handle-lifecycle-verification, evidence.channel-generation-delivery-fence-repair, evidence.channel-generation-delivery-fence-verification]
