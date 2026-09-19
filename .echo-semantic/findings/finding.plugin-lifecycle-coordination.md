@@ -3,19 +3,19 @@ schema_version: 1
 id: finding.plugin-lifecycle-coordination
 kind: finding
 type: authority_conflict
-status: open
+status: resolved
 severity: high
 primary_focus: time_lifecycle
 focus: [state_authority, failure_concurrency, data_durability]
 boundary_ref: boundary.extension-lifecycle
 behavior_refs: [behavior.extension-publication]
 rule_refs: [rule.extension-generation-authority]
-evidence_refs: [evidence.effects-extensions]
+evidence_refs: [evidence.plugin-lifecycle-coordinator-repair, evidence.plugin-lifecycle-coordinator-verification]
 audit_refs: [audit.extension-lifecycle.state-authority, audit.extension-lifecycle.time-lifecycle]
 decision_refs: []
 repair_evidence_refs: [evidence.plugin-lifecycle-coordinator-repair]
 verification_evidence_refs: [evidence.plugin-lifecycle-coordinator-verification]
-rereview_audit_refs: []
+rereview_audit_refs: [audit.plugin-lifecycle-coordinator-rereview]
 discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 ---
 
@@ -52,4 +52,7 @@ deterministic publication cancellation 也已闭合；修复后 coordinator 14/1
 
 第三轮复审要求的 Registry refresh authority 已改为 last-successful-scope、commit-on-success；
 all-scope dependency repair、restricted-scope non-widening 与 scan failure preserving old actual
-回归通过，最终 coordinator 为 14/14。
+回归通过，最终 coordinator 为 14/14。完整 workspace 门禁、17-feature matrix 与三轮独立
+复审均通过；PR #145 七项 CI 全绿，并以 GitHub verified squash commit `dc61ef0e` 进入
+远端 main。post-merge closure rereview 未发现 Critical、Important 或 Minor 问题，本 Finding
+resolved。跨进程 durable Hook delivery 继续由 #58 独立追踪。
