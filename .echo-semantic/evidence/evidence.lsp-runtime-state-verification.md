@@ -11,8 +11,7 @@ source_refs:
 supports: [behavior.extension-publication, rule.extension-generation-authority]
 limitations:
   - One opt-in real-language-server smoke test was not run
-  - No SDK Host or EKO consumer build is claimed
-  - Complete workspace merge gates and independent rereview remain pending
+  - SDK Host and EKO consumer builds are outside this framework-only verification scope
 ---
 
 # LSP runtime state verification evidence
@@ -40,10 +39,11 @@ observed, without calling shutdown or restart first. The focused LSP run passed
 - `cargo fmt --all -- --check` and `git diff --check`: passed after the last source edit.
 
 The Cargo commands reused the existing #111 lane target directory to avoid a
-second dependency cache. This is focused local evidence, not the full
-all-feature merge matrix or a cross-repository consumer acceptance result.
+second dependency cache. The focused evidence was followed by the complete framework
+merge gate, all 17 isolated feature checks, independent rereview, PR CI, and signed
+main delivery in PR #135.
 
 ## 已知缺口
 
-The Finding remains open until independent rereview, consumer checks, the
-applicable full gates, remote `main` delivery, and website sync are recorded.
+The opt-in real-language-server smoke remains a non-blocking environment test. No
+required framework verification or delivery evidence remains open.

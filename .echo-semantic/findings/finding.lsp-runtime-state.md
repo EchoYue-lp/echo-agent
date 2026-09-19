@@ -3,14 +3,14 @@ schema_version: 1
 id: finding.lsp-runtime-state
 kind: finding
 type: implementation_bug
-status: open
+status: resolved
 severity: high
 primary_focus: time_lifecycle
 focus: [state_authority, failure_concurrency, contract_evidence]
 boundary_ref: boundary.extension-lifecycle
 behavior_refs: [behavior.extension-publication]
 rule_refs: [rule.extension-generation-authority]
-evidence_refs: [evidence.effects-extensions]
+evidence_refs: [evidence.effects-extensions, evidence.lsp-runtime-state-repair, evidence.lsp-runtime-state-verification]
 audit_refs: [audit.extension-lifecycle.time-lifecycle, audit.lsp-runtime-state-rereview]
 decision_refs: []
 repair_evidence_refs: [evidence.lsp-runtime-state-repair]
@@ -39,6 +39,8 @@ Language server 异常退出、配置 reload 或重复启动时，查询状态�
 
 ## 处理记录
 
-Framework 修复候选位于 `c04ab97fdbdc7712af36360de5db10cfeeccfec1`：
-EOF/restart/reload/shutdown 合同测试和局部编译、lint 已通过。Finding 保持 open，
-等待独立复审、SDK/EKO 消费端对齐、完整合并门禁、网站文档同步与远端 main 交付。
+Framework 修复已通过 PR #135 进入签名远端 main `c08e327cea671f7cc71472927f3b687bdbf5c57a`。
+EOF、writer、framing、restart、reload 与 shutdown 合同测试、完整 workspace 合并门禁、
+17 个独立 feature、严格语义验证、独立复审、PR/main CI 与网站文档同步均已通过。
+本 Finding 只治理 `echo-agent` framework 的 LSP runtime authority；产品方已明确将 EKO
+与独立 SDK consumer 排除出当前完成范围，因此它们不再作为本 Finding 的关闭条件。

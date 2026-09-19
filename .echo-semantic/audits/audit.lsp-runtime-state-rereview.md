@@ -38,7 +38,8 @@ Reader 与 writer 异常均先原子关闭 admission 并结算 pending，再清 
 
 ## 残余风险
 
-EKO cold-load Result 处理与 SDK Host existing-manager async reload 是跨仓消费端交付条件；framework pass 不替代其编译和 E2E。
+EKO 与独立 SDK adapter 可能需要随 framework API 演进，但产品方已明确将其排除出本轮
+framework Finding；它们不改变 `LspManager` 的进程、状态和配置权威。
 
 ## 未检查项
 
