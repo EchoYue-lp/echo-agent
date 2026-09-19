@@ -666,7 +666,7 @@ mod tests {
                 TracingDiagnosticDeliveryObserver.on_failure(uncaptured);
             })
             .join()
-            .unwrap_or_else(|_| ());
+            .unwrap_or(());
             TracingDiagnosticDeliveryObserver.on_failure(failure);
         });
         assert!(logs.contains("diagnostic persistence delivery failed"));
