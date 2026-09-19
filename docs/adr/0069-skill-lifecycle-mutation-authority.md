@@ -5,8 +5,8 @@
 
 ## Status
 
-Accepted candidate; independent review and complete local gates passed. Remote-main delivery and
-post-merge closure are pending.
+Accepted and delivered in PR #147 at GitHub verified main commit `37b6908c`. Post-merge governance
+closure is recorded with the same delivered source.
 
 ## Context
 
@@ -123,8 +123,8 @@ readers can observe an intermediate projection.
 
 Runtime usage now enters through the shared authority-owned `SkillUsageHandle`: it
 updates only an existing Skill, never creates Active state for an unknown name,
-and uses the same journal/audit/reconcile ordering. Findings #54 and #52 remain
-open until remote-main delivery and post-merge closure complete.
+and uses the same journal/audit/reconcile ordering. Findings #54 and #52 are
+resolved by the delivered authority and its post-merge governance closure.
 
 ## Verification
 

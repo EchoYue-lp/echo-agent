@@ -3,7 +3,7 @@ schema_version: 1
 id: finding.evolution-changelog-rollback-authority
 kind: finding
 type: intent_gap
-status: open
+status: resolved
 severity: high
 primary_focus: data_durability
 focus: [contract_evidence, failure_concurrency, state_authority]
@@ -39,7 +39,8 @@ ChangeLog只有record/query/latest/len，没有rollback apply API；模块和文
 
 ## 处理记录
 
-Data-durability Audit确认；memory rollback 已由 PR #140 交付远端主线。ADR 0069 候选补充
+Data-durability Audit确认；memory rollback 已由 PR #140 交付远端主线。ADR 0069 补充
 framework Skill lifecycle 的 owner-applied inverse、generation CAS 与 approval，并通过四轮独立
-复审、完整 workspace 门禁及17-feature matrix。Finding 仍保持 open，等待 remote-main 交付，
-并保留 Rule persistence/rollback 的 typed HostOwned 边界。
+复审、完整 workspace 门禁、17-feature matrix及PR #147七项CI，以GitHub verified main commit
+`37b6908c`交付。Framework拥有的Memory与Skill rollback均已闭合，Rule persistence/rollback
+保持typed HostOwned且不由ChangeLog猜回写，本Finding resolved。

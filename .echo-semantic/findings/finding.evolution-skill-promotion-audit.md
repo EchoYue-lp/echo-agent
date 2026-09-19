@@ -3,7 +3,7 @@ schema_version: 1
 id: finding.evolution-skill-promotion-audit
 kind: finding
 type: authority_conflict
-status: open
+status: resolved
 severity: high
 primary_focus: permission_external
 focus: [data_durability, state_authority, contract_evidence]
@@ -39,6 +39,7 @@ Curator promotion/touch可直接Active且无approval/ChangeLog/security；SkillM
 
 ## 处理记录
 
-ADR 0069 候选已建立 Skill lifecycle 唯一 owner、digest-bound approval、durable audit/reconcile
-与 later rollback，并通过四轮独立复审、完整 workspace 门禁及17-feature matrix；Finding 保持
-open，等待 remote-main 交付。Rule persistence/rollback 仍归 host。
+ADR 0069 已建立 Skill lifecycle 唯一 owner、digest-bound approval、durable audit/reconcile
+与 later rollback，并通过四轮独立复审、完整 workspace 门禁、17-feature matrix及PR #147
+七项CI，以GitHub verified main commit `37b6908c`交付，本Finding resolved。Rule
+persistence/rollback 仍归host。
