@@ -65,17 +65,24 @@ impl MemoryRuntimeIntegrationBuilder {
 
     /// Create the fully wired layer manager.
     pub fn build_layer_manager(&self) -> Result<MemoryLayerManager> {
-        let mut layer_manager = MemoryLayerManager::new(
+        let mut layer_manager = MemoryLayerManager::try_new(
             self.echo_agent_dir.clone(),
             self.store.clone(),
             self.create_change_log()?,
-        );
+        )?;
 
         if let Some(observer) = &self.evolution_observer {
             layer_manager = layer_manager.with_evolution_observer(observer.clone());
         }
 
         Ok(layer_manager)
+    }
+
+    /// Build and reconcile before publishing the underlying Store to runtime readers.
+    pub async fn build_layer_manager_reconciled(&self) -> Result<MemoryLayerManager> {
+        let manager = self.build_layer_manager()?;
+        manager.reconcile_pending().await?;
+        Ok(manager)
     }
 }
 
@@ -212,7 +219,8 @@ mod tests {
 
         let manager = MemoryRuntimeIntegrationBuilder::new(echo_agent_dir.clone(), store)
             .evolution_observer(observer)
-            .build_layer_manager()?;
+            .build_layer_manager_reconciled()
+            .await?;
 
         let meta = MemoryMeta::new(
             MemoryType::ProjectFact,

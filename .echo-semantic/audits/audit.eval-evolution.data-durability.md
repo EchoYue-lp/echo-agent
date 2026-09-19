@@ -4,7 +4,7 @@ id: audit.eval-evolution.data-durability
 kind: audit
 boundary_ref: boundary.eval-evolution
 lens: data_durability
-freshness: examined
+freshness: stale
 revision: f1e9027246760661144786e9e35615cd46d580c6
 finding_refs: [finding.evolution-audit-atomicity, finding.evolution-doc-namespace, finding.evolution-skill-promotion-audit, finding.evolution-changelog-rollback-authority, finding.skill-candidate-reinforcement-audit-gap]
 challenges:
@@ -43,6 +43,9 @@ Memory write/demote/revive/delete/promote/budget/merge均先改变Store或文件
 ## 残余风险
 
 跨Store/File/Curator需要durable operation identity/reconcile，不应把单个JSONL日志原子性误作跨资源事务。
+
+Issue #51分层记忆repair候选已改变本审查的memory mutation故障假设；本Audit
+保留历史revision原结论并标记stale，新的独立rereview须针对候选源码与原始Store可见性重新执行。
 
 ## 未检查项
 

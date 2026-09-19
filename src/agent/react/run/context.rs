@@ -874,12 +874,13 @@ impl crate::agent::snapshot::AgentRunSnapshot {
             let meta = MemoryMeta::new(memory_type, MemorySource::L3Promotion, "compaction_flush")
                 .with_recall_weight(rw as f32);
             let key = crate::memory_promoter::durable_memory_content_key(fact);
-            if layer_manager
-                .locate(&key)
-                .await
-                .is_some_and(|(_, existing)| existing.content.trim() == fact.trim())
-            {
-                continue;
+            match layer_manager.locate(&key).await {
+                Ok(Some((_, existing))) if existing.content.trim() == fact.trim() => continue,
+                Err(error) => {
+                    tracing::warn!(%error, "pre_compaction_flush cannot read memory while reconciliation is pending");
+                    continue;
+                }
+                _ => {}
             }
             if let Err(e) = layer_manager.write_memory(&key, fact, meta).await {
                 tracing::debug!(error = %e, "pre_compaction_flush write_memory failed");

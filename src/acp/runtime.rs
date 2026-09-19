@@ -323,6 +323,8 @@ impl RunEntry {
     pub async fn wait_receipt(&self) -> Arc<TurnReceipt> {
         loop {
             let notified = self.settled.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             if let Some(receipt) = self.receipt() {
                 return receipt;
             }
@@ -362,7 +364,7 @@ impl RunRegistry {
     /// Entries whose driver task was aborted settle through the abort path;
     /// waiting runs resolve as soon as their receipt exists or the entry is
     /// dropped with the connection.
-    async fn cancel_and_wait(&self, wait: Duration) {
+    async fn cancel_and_wait(&self, wait: Duration) -> usize {
         let entries: Vec<Arc<RunEntry>> = self.runs.read().await.values().cloned().collect();
         for entry in &entries {
             entry.cancel();
@@ -381,7 +383,9 @@ impl RunRegistry {
             })),
         )
         .await;
-        self.runs.write().await.clear();
+        let mut runs = self.runs.write().await;
+        runs.retain(|_, entry| entry.is_running());
+        runs.len()
     }
 
     async fn run_count(&self) -> usize {
@@ -495,6 +499,7 @@ impl AcpConnectionServices {
 
     pub fn close_admission(&self) {
         self.admission_open.store(false, Ordering::Release);
+        self.sessions.close_admission();
         self.extensions.close_admission();
     }
 
@@ -655,17 +660,36 @@ impl AcpConnectionServices {
         self.runs.run_count().await
     }
 
-    /// Unified close chain: cancel live runs and await their receipts with a
-    /// bounded wait, then close all Session Agents. Used by connection close
-    /// and stdin EOF alike.
+    /// Close extension and Run admission, cancel both invocation classes,
+    /// wait for their owners, then close Session Agents.
     pub async fn close(&self, timeout: Duration) -> Result<()> {
         self.close_admission();
-        self.cancel_and_wait_runs(timeout).await;
-        self.close_sessions().await
+        self.extensions.cancel_all();
+        let stage = (timeout / 2).max(Duration::from_millis(1));
+        tokio::time::timeout(timeout, async {
+            let (extensions, runs) = tokio::join!(
+                self.extensions.drain(stage),
+                self.cancel_and_wait_runs_report(stage),
+            );
+            if extensions > 0 || runs > 0 {
+                return Err(ReactError::Other(format!(
+                    "ACP close retained {extensions} extension invocation(s) and {runs} Run(s) without framework receipts"
+                )));
+            }
+            tokio::time::timeout(stage, self.close_sessions())
+                .await
+                .map_err(|_| ReactError::Other("ACP Session Agent close timed out".to_string()))?
+        })
+        .await
+        .map_err(|_| ReactError::Other("ACP connection close timed out".to_string()))?
     }
 
     pub async fn cancel_and_wait_runs(&self, timeout: Duration) {
-        self.runs.cancel_and_wait(timeout).await;
+        let _ = self.runs.cancel_and_wait(timeout).await;
+    }
+
+    pub(crate) async fn cancel_and_wait_runs_report(&self, timeout: Duration) -> usize {
+        self.runs.cancel_and_wait(timeout).await
     }
 
     pub async fn close_sessions(&self) -> Result<()> {
@@ -821,4 +845,32 @@ pub trait AcpConnectionProfile: Send + Sync + 'static {
         impl agent_client_protocol::HandleConnectionClose<agent_client_protocol::Client>,
         agent_client_protocol::RawConnectionContext,
     >;
+}
+
+#[cfg(test)]
+mod close_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn run_close_timeout_keeps_unsettled_framework_receipt_for_retry() -> Result<()> {
+        let runs = RunRegistry::default();
+        let cancellation = crate::agent::CancellationToken::new();
+        let entry = Arc::new(RunEntry::new(
+            "run-close-timeout".to_string(),
+            SessionId::new("session-close-timeout"),
+            "stream-close-timeout".to_string(),
+            Arc::new(EventLedger::new(AcpLedgerLimits::default(), None)),
+            cancellation.clone(),
+        ));
+        runs.register(Arc::clone(&entry)).await?;
+
+        runs.cancel_and_wait(Duration::from_millis(20)).await;
+        assert!(cancellation.is_cancelled());
+        assert_eq!(runs.run_count().await, 1);
+
+        entry.settle(TurnReceipt::cancelled(entry.run_id.clone())?);
+        runs.cancel_and_wait(Duration::from_secs(1)).await;
+        assert_eq!(runs.run_count().await, 0);
+        Ok(())
+    }
 }

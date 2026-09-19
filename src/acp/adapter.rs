@@ -10,8 +10,10 @@ use crate::agent::EventIdentity;
 use crate::runtime::{TurnDeliveryOutcome, TurnMode, TurnOutcome, TurnRequest};
 use agent_client_protocol::schema::{ProtocolVersion, v1};
 use agent_client_protocol::{Agent as AcpRole, Client, ConnectTo, ConnectionTo, Error, Responder};
+use futures::future::BoxFuture;
+use std::future::Future;
 use std::sync::{
-    Arc,
+    Arc, Mutex as StdMutex,
     atomic::{AtomicBool, Ordering},
 };
 use std::time::Duration;
@@ -24,6 +26,82 @@ const DEFAULT_MAX_TOTAL_UPDATE_CHARS: usize = 8_000_000;
 const DEFAULT_MAX_EXTENSION_CONCURRENCY: usize = 8;
 const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_ERROR_CHARS: usize = 512;
+
+trait AcpCloseContext: Send + Sync {
+    fn close(&self) -> BoxFuture<'_, agent_client_protocol::Result<()>>;
+}
+
+/// Retained owner of one ACP connection's framework Sessions and cleanup debt.
+///
+/// Obtain and keep this handle before moving an adapter into the official
+/// `ConnectTo` API. Connection setup rejects a caller that has not retained a
+/// handle, because the protocol trait consumes the adapter and cannot return
+/// its resource owner with a close error. A manual caller must keep the handle
+/// until close succeeds; dropping it after admission forfeits retry ownership.
+/// [`AcpAgentAdapter::connect_retaining_close_owner`] holds and returns it for
+/// direct connection callers.
+#[derive(Clone, Default)]
+pub struct AcpAdapterCloseHandle {
+    context: Arc<StdMutex<Option<Arc<dyn AcpCloseContext>>>>,
+}
+
+impl AcpAdapterCloseHandle {
+    fn is_retained(&self) -> bool {
+        Arc::strong_count(&self.context) > 1
+    }
+
+    fn bind(&self, context: Arc<dyn AcpCloseContext>) -> agent_client_protocol::Result<()> {
+        let mut slot = self.context.lock().map_err(|_| {
+            Error::internal_error().data("ACP close owner lock poisoned".to_string())
+        })?;
+        if slot.is_some() {
+            return Err(Error::internal_error()
+                .data("ACP close owner is already bound to a connection".to_string()));
+        }
+        *slot = Some(context);
+        Ok(())
+    }
+
+    /// Retry cleanup on the same Session/Run owner after transport return.
+    pub async fn close(&self) -> agent_client_protocol::Result<()> {
+        let context = self
+            .context
+            .lock()
+            .map_err(|_| Error::internal_error().data("ACP close owner lock poisoned".to_string()))?
+            .clone()
+            .ok_or_else(|| {
+                Error::internal_error().data("ACP close owner has no connection".to_string())
+            })?;
+        context.close().await
+    }
+}
+
+struct ConnectionCloseContext<P: AcpConnectionProfile> {
+    services: Arc<AcpConnectionServices>,
+    profile: Arc<P>,
+    timeout: Duration,
+    gate: tokio::sync::Mutex<()>,
+    settled: AtomicBool,
+}
+
+impl<P: AcpConnectionProfile> AcpCloseContext for ConnectionCloseContext<P> {
+    fn close(&self) -> BoxFuture<'_, agent_client_protocol::Result<()>> {
+        Box::pin(async move {
+            // This gate serializes cleanup attempts only. Neither Session nor
+            // Run state is copied or locked across the resource awaits.
+            let _attempt = self.gate.lock().await;
+            if self.settled.load(Ordering::Acquire) {
+                return Ok(());
+            }
+            let result =
+                close_connection(self.services.as_ref(), self.profile.as_ref(), self.timeout).await;
+            if result.is_ok() {
+                self.settled.store(true, Ordering::Release);
+            }
+            result
+        })
+    }
+}
 
 /// Resource and implementation metadata for one ACP Agent adapter.
 #[derive(Debug, Clone)]
@@ -103,6 +181,7 @@ impl AcpAdapterConfig {
 pub struct AcpAgentAdapter {
     factory: Arc<dyn AcpSessionFactory>,
     config: AcpAdapterConfig,
+    close_owner: AcpAdapterCloseHandle,
 }
 
 impl AcpAgentAdapter {
@@ -111,6 +190,7 @@ impl AcpAgentAdapter {
         Self {
             factory: Arc::new(factory),
             config: AcpAdapterConfig::default(),
+            close_owner: AcpAdapterCloseHandle::default(),
         }
     }
 
@@ -123,12 +203,35 @@ impl AcpAgentAdapter {
         Ok(Self {
             factory: Arc::new(factory),
             config,
+            close_owner: AcpAdapterCloseHandle::default(),
         })
     }
 
     /// Return the immutable adapter configuration.
     pub fn config(&self) -> &AcpAdapterConfig {
         &self.config
+    }
+
+    /// Retain the connection's retryable close owner before calling
+    /// `ConnectTo::connect_to` or passing this adapter to an official Client.
+    /// Keep the handle through connection return and until cleanup succeeds.
+    pub fn close_owner(&self) -> AcpAdapterCloseHandle {
+        self.close_owner.clone()
+    }
+
+    /// Return the close owner before the connection future can be polled.
+    /// Dropping or aborting that future cannot discard the caller's handle.
+    pub fn connect_retaining_close_owner(
+        self,
+        client: impl ConnectTo<AcpRole>,
+    ) -> (
+        AcpAdapterCloseHandle,
+        impl Future<Output = agent_client_protocol::Result<()>>,
+    ) {
+        let close_owner = self.close_owner();
+        (close_owner, async move {
+            ConnectTo::connect_to(self, client).await
+        })
     }
 
     /// Attach a negotiated extension profile. The profile contributes its
@@ -150,6 +253,28 @@ impl AcpAgentAdapter {
 pub struct AcpAgentAdapterWithProfile<P: AcpConnectionProfile> {
     adapter: AcpAgentAdapter,
     profile: Arc<P>,
+}
+
+impl<P: AcpConnectionProfile> AcpAgentAdapterWithProfile<P> {
+    /// Retain the same close owner used by the standard ACP handlers.
+    /// Keep it through connection return and until cleanup succeeds.
+    pub fn close_owner(&self) -> AcpAdapterCloseHandle {
+        self.adapter.close_owner()
+    }
+
+    /// Return the profile's close owner before the connection future is polled.
+    pub fn connect_retaining_close_owner(
+        self,
+        client: impl ConnectTo<AcpRole>,
+    ) -> (
+        AcpAdapterCloseHandle,
+        impl Future<Output = agent_client_protocol::Result<()>>,
+    ) {
+        let close_owner = self.close_owner();
+        (close_owner, async move {
+            ConnectTo::connect_to(self, client).await
+        })
+    }
 }
 
 impl<P: AcpConnectionProfile> ConnectTo<Client> for AcpAgentAdapterWithProfile<P> {
@@ -200,6 +325,12 @@ async fn run_connection<P: AcpConnectionProfile>(
     profile: Arc<P>,
     client: impl ConnectTo<AcpRole>,
 ) -> agent_client_protocol::Result<()> {
+    if !adapter.close_owner.is_retained() {
+        return Err(Error::internal_error().data(
+            "ACP connection requires caller to retain a close owner via adapter.close_owner()"
+                .to_string(),
+        ));
+    }
     adapter.config.validate().map_err(framework_error)?;
     let registry = Arc::new(SessionRegistry::new(
         adapter.factory,
@@ -207,6 +338,14 @@ async fn run_connection<P: AcpConnectionProfile>(
     ));
     let config = Arc::new(adapter.config);
     let services = Arc::new(AcpConnectionServices::new(registry.clone(), config.clone()));
+    let close_context = Arc::new(ConnectionCloseContext {
+        services: Arc::clone(&services),
+        profile: Arc::clone(&profile),
+        timeout: config.shutdown_timeout,
+        gate: tokio::sync::Mutex::new(()),
+        settled: AtomicBool::new(false),
+    });
+    adapter.close_owner.bind(close_context.clone())?;
 
     // `initialize`: single registration point. The profile's advertisement
     // rides `agentCapabilities._meta`, and its hello decision promotes the
@@ -228,11 +367,7 @@ async fn run_connection<P: AcpConnectionProfile>(
     let prompt_registry = registry.clone();
     let prompt_config = config.clone();
     let cancel_registry = registry.clone();
-    let close_services = services.clone();
-    let close_config = config.clone();
-    let close_profile = profile.clone();
-    let cleanup_claim = Arc::new(AtomicBool::new(false));
-    let close_cleanup_claim = cleanup_claim.clone();
+    let close_on_transport = Arc::clone(&close_context);
 
     let connection_result = AcpRole
         .builder()
@@ -368,77 +503,82 @@ async fn run_connection<P: AcpConnectionProfile>(
             },
             agent_client_protocol::on_receive_notification!(),
         )
-        .on_close(async move |_connection: ConnectionTo<Client>| {
-            if close_cleanup_claim.swap(true, Ordering::AcqRel) {
-                return Ok(());
-            }
-            let timeout = close_config.shutdown_timeout;
-            close_services.close_admission();
-            tokio::time::timeout(timeout, async {
-                // Extension teardown order (design §12.3): close admission,
-                // cancel in-flight callbacks, await bounded settlement —
-                // before waiting for runs that may be blocked on a callback.
-                close_services.extensions().close_admission();
-                close_services.extensions().cancel_all();
-                let leaked = close_services.extensions().drain(timeout).await;
-                if leaked > 0 {
-                    tracing::warn!("extension teardown left {leaked} unsettled invocations");
-                }
-                close_services.cancel_and_wait_runs(timeout).await;
-                close_profile
-                    .wait_for_settlements(timeout)
-                    .await
-                    .map_err(framework_error)?;
-                close_profile
-                    .flush_before_agents()
-                    .map_err(framework_error)?;
-                close_services
-                    .close_sessions()
-                    .await
-                    .map_err(framework_error)?;
-                close_profile.release_after_agents();
-                Ok::<(), Error>(())
-            })
-            .await
-            .map_err(|_| {
-                Error::internal_error().data("ACP Session shutdown timed out".to_string())
-            })?
-            .map_err(framework_error)
-        })
+        .on_close(async move |_connection: ConnectionTo<Client>| close_on_transport.close().await)
         .with_connection_builder(profile.attach(services.clone()))
         .connect_to(client)
         .await;
-    let cleanup_result = if cleanup_claim.swap(true, Ordering::AcqRel) {
-        Ok(())
-    } else {
-        tokio::time::timeout(config.shutdown_timeout, async {
-            services.close_admission();
-            services.extensions().close_admission();
-            services.extensions().cancel_all();
-            let leaked = services.extensions().drain(config.shutdown_timeout).await;
-            if leaked > 0 {
-                tracing::warn!("extension cleanup left {leaked} unsettled invocations");
-            }
-            services.cancel_and_wait_runs(config.shutdown_timeout).await;
-            profile
-                .wait_for_settlements(config.shutdown_timeout)
-                .await
-                .map_err(framework_error)?;
-            profile.flush_before_agents().map_err(framework_error)?;
-            services.close_sessions().await.map_err(framework_error)?;
-            profile.release_after_agents();
-            Ok(())
-        })
-        .await
-        .map_err(|_| {
-            agent_client_protocol::Error::internal_error()
-                .data("ACP Session shutdown timed out".to_string())
-        })?
-    };
+    let cleanup_result = close_context.close().await;
     match (connection_result, cleanup_result) {
+        (Err(connection_error), Err(cleanup_error)) => Err(Error::internal_error().data(bounded(
+            &format!("ACP connection failed: {connection_error}; cleanup failed: {cleanup_error}"),
+        ))),
         (Err(error), _) => Err(error),
         (Ok(()), result) => result,
     }
+}
+
+async fn close_connection<P: AcpConnectionProfile>(
+    services: &AcpConnectionServices,
+    profile: &P,
+    timeout: Duration,
+) -> agent_client_protocol::Result<()> {
+    services.close_admission();
+    services.extensions().cancel_all();
+    let stage = (timeout / 3).max(Duration::from_millis(1));
+    tokio::time::timeout(timeout, async {
+        let (leaked_extensions, unsettled_runs) = tokio::join!(
+            services.extensions().drain(stage),
+            services.cancel_and_wait_runs_report(stage),
+        );
+        let settlements = tokio::time::timeout(stage, profile.wait_for_settlements(stage))
+            .await
+            .unwrap_or_else(|_| Err("profile settlement timed out".to_string()));
+        let flush = profile.flush_before_agents();
+        // Profile persistence failures must remain visible but cannot skip
+        // explicit Agent close once all invocations and receipts have drained.
+        let agents = if leaked_extensions == 0 && unsettled_runs == 0 {
+            tokio::time::timeout(stage, services.close_sessions())
+                .await
+                .unwrap_or_else(|_| {
+                    Err(crate::error::ReactError::Other(
+                        "ACP Session Agent close timed out".to_string(),
+                    ))
+                })
+        } else {
+            Err(crate::error::ReactError::Other(
+                "ACP Session Agent close awaits unsettled callbacks or Runs".to_string(),
+            ))
+        };
+        let mut failures = Vec::new();
+        if leaked_extensions > 0 {
+            failures.push(format!(
+                "{leaked_extensions} extension invocations did not settle"
+            ));
+        }
+        if unsettled_runs > 0 {
+            failures.push(format!("{unsettled_runs} Runs lack framework receipts"));
+        }
+        if let Err(error) = settlements {
+            failures.push(format!("profile settlement failed: {error}"));
+        }
+        if let Err(error) = flush {
+            failures.push(format!("profile flush failed: {error}"));
+        }
+        if let Err(error) = agents {
+            failures.push(format!("Session Agent close failed: {error}"));
+        }
+        if failures.is_empty() {
+            profile.release_after_agents();
+            Ok(())
+        } else {
+            Err(Error::internal_error().data(bounded(&format!(
+                "ACP Session shutdown incomplete: {}",
+                failures.join("; ")
+            ))))
+        }
+    })
+    .await
+    .map_err(|_| Error::internal_error().data("ACP Session shutdown timed out".to_string()))?
 }
 
 struct PreparedPrompt {

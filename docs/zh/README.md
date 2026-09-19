@@ -119,6 +119,7 @@
 | [0041 - 语义治理连续性](../adr/0041-semantic-governance-continuity.md) | 用结果特定的连续性裁决衔接 SDK 基线与全 workspace 治理 |
 | [0049 - MCP Transport Close 结算](../adr/0049-mcp-transport-close-settlement.md) | MCP close 排空 pending call，并有界等待 owned task 与 child，失败可观察 |
 | [0056 - Durable Transcript Projection Settlement](../adr/0056-durable-transcript-projection-settlement.md) | 原子 transcript projection 与 revisioned pending debt 在压缩或终态发布前完成结算 |
+| [0066 - Agent Adapter Close Ownership](../adr/0066-agent-adapter-close-ownership.md) | Adapter 接纳、取消、排空与 awaited Agent 资源关闭 |
 
 ---
 

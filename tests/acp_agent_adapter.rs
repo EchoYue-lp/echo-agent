@@ -282,6 +282,78 @@ impl Agent for TextOnlyAgent {
 
 struct FailingSettlementProfile;
 
+struct FailingFlushProfile {
+    flushes: Arc<AtomicUsize>,
+}
+
+impl AcpConnectionProfile for FailingFlushProfile {
+    fn negotiate_hello(&self, _hello: &serde_json::Value) -> std::result::Result<(), String> {
+        Err("standard profile".to_string())
+    }
+
+    fn flush_before_agents(&self) -> std::result::Result<(), String> {
+        self.flushes.fetch_add(1, Ordering::AcqRel);
+        Err("profile flush failed".to_string())
+    }
+
+    fn attach(
+        &self,
+        _services: Arc<echo_agent::acp::AcpConnectionServices>,
+    ) -> agent_client_protocol::Builder<
+        AcpRole,
+        impl agent_client_protocol::HandleDispatchFrom<Client>,
+        impl agent_client_protocol::RunWithConnectionTo<Client>,
+        impl agent_client_protocol::HandleConnectionClose<Client>,
+        agent_client_protocol::RawConnectionContext,
+    > {
+        AcpRole.builder()
+    }
+}
+
+struct CountingCloseAgent {
+    closes: Arc<AtomicUsize>,
+    failures_before_success: usize,
+}
+
+impl Agent for CountingCloseAgent {
+    fn name(&self) -> &str {
+        "counting-close"
+    }
+    fn model_name(&self) -> &str {
+        "test"
+    }
+    fn system_prompt(&self) -> &str {
+        "test"
+    }
+    fn execute<'a>(&'a self, _task: &'a str) -> BoxFuture<'a, Result<String>> {
+        Box::pin(async { Ok("done".to_string()) })
+    }
+    fn execute_stream<'a>(
+        &'a self,
+        _task: &'a str,
+    ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+        Box::pin(async { Ok(stream::empty().boxed()) })
+    }
+    fn chat_stream_with_cancel<'a>(
+        &'a self,
+        message: &'a str,
+        _cancel: CancellationToken,
+    ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+        let answer = message.to_string();
+        Box::pin(async move { Ok(stream::iter(vec![Ok(AgentEvent::FinalAnswer(answer))]).boxed()) })
+    }
+    fn close(&self) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async move {
+            let attempt = self.closes.fetch_add(1, Ordering::AcqRel);
+            if attempt < self.failures_before_success {
+                Err(ReactError::Other("Agent close failed".to_string()))
+            } else {
+                Ok(())
+            }
+        })
+    }
+}
+
 impl AcpConnectionProfile for FailingSettlementProfile {
     fn negotiate_hello(&self, _hello: &serde_json::Value) -> std::result::Result<(), String> {
         Err("no extension negotiation".to_string())
@@ -315,6 +387,7 @@ struct TestFactory {
     contexts: Arc<Mutex<Vec<AcpSessionContext>>>,
     closed: Arc<Mutex<Vec<Arc<AtomicBool>>>>,
     gate: Arc<TurnGate>,
+    close_owners: Arc<Mutex<Vec<echo_agent::acp::AcpAdapterCloseHandle>>>,
 }
 
 impl TestFactory {
@@ -324,40 +397,64 @@ impl TestFactory {
             contexts: Arc::new(Mutex::new(Vec::new())),
             closed: Arc::new(Mutex::new(Vec::new())),
             gate: Arc::new(TurnGate::default()),
+            close_owners: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
     fn session_factory(&self) -> impl AcpSessionFactory {
-        let factory = self.clone();
+        let next_id = Arc::clone(&self.next_id);
+        let contexts = Arc::clone(&self.contexts);
+        let closed = Arc::clone(&self.closed);
+        let gate = Arc::clone(&self.gate);
         move |context: AcpSessionContext| {
-            let factory = factory.clone();
+            let next_id = Arc::clone(&next_id);
+            let contexts = Arc::clone(&contexts);
+            let closed = Arc::clone(&closed);
+            let gate = Arc::clone(&gate);
             async move {
-                let id = factory.next_id.fetch_add(1, Ordering::AcqRel);
-                let closed = Arc::new(AtomicBool::new(false));
-                factory
-                    .contexts
+                let id = next_id.fetch_add(1, Ordering::AcqRel);
+                let closed_flag = Arc::new(AtomicBool::new(false));
+                contexts
                     .lock()
                     .unwrap_or_else(|error| error.into_inner())
                     .push(context);
-                factory
-                    .closed
+                closed
                     .lock()
                     .unwrap_or_else(|error| error.into_inner())
-                    .push(closed.clone());
-                Ok(
-                    Box::new(RecordingAgent::new(id, closed, factory.gate.clone()))
-                        as Box<dyn Agent>,
-                )
+                    .push(Arc::clone(&closed_flag));
+                Ok(Box::new(RecordingAgent::new(id, closed_flag, gate)) as Box<dyn Agent>)
             }
         }
     }
 
     fn adapter(&self) -> AcpAgentAdapter {
-        AcpAgentAdapter::new(self.session_factory())
+        let adapter = AcpAgentAdapter::new(self.session_factory());
+        self.close_owners
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .push(adapter.close_owner());
+        adapter
     }
 
     fn adapter_with_config(&self, config: AcpAdapterConfig) -> Result<AcpAgentAdapter> {
-        AcpAgentAdapter::with_config(self.session_factory(), config)
+        let adapter = AcpAgentAdapter::with_config(self.session_factory(), config)?;
+        self.close_owners
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .push(adapter.close_owner());
+        Ok(adapter)
+    }
+
+    async fn close_retained(&self) -> agent_client_protocol::Result<()> {
+        let owners = self
+            .close_owners
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        for owner in owners {
+            owner.close().await?;
+        }
+        Ok(())
     }
 }
 
@@ -468,6 +565,7 @@ async fn terminal_projection_failure_never_returns_end_turn() -> agent_client_pr
         },
     )
     .map_err(Error::into_internal_error)?;
+    let _close_owner = adapter.close_owner();
     Client
         .builder()
         .connect_with(adapter, async move |connection| {
@@ -505,6 +603,7 @@ async fn receipt_persistence_failure_never_returns_end_turn() -> agent_client_pr
         Ok(Box::new(TextOnlyAgent) as Box<dyn Agent>)
     })
     .with_profile(FailingSettlementProfile);
+    let _close_owner = adapter.close_owner();
     Client
         .builder()
         .on_receive_notification(
@@ -591,6 +690,7 @@ async fn resource_link_requires_structured_agent_support() -> agent_client_proto
     let adapter = AcpAgentAdapter::new(|_context: AcpSessionContext| async {
         Ok(Box::new(TextOnlyAgent) as Box<dyn Agent>)
     });
+    let _close_owner = adapter.close_owner();
     Client
         .builder()
         .connect_with(adapter, async move |connection| {
@@ -694,6 +794,7 @@ async fn official_client_observes_isolated_sessions_and_ordered_updates()
             Ok(())
         })
         .await?;
+    factory.close_retained().await?;
 
     let contexts = factory
         .contexts
@@ -917,6 +1018,229 @@ async fn closing_official_channel_cancels_active_prompt_and_closes_agent()
             .iter()
             .all(|closed| closed.load(Ordering::Acquire))
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn profile_flush_failure_still_awaits_agent_close_and_retries_on_eof()
+-> agent_client_protocol::Result<()> {
+    let closes = Arc::new(AtomicUsize::new(0));
+    let flushes = Arc::new(AtomicUsize::new(0));
+    let adapter = AcpAgentAdapter::new({
+        let closes = Arc::clone(&closes);
+        move |_context: AcpSessionContext| {
+            let closes = Arc::clone(&closes);
+            async move {
+                Ok(Box::new(CountingCloseAgent {
+                    closes,
+                    failures_before_success: 0,
+                }) as Box<dyn Agent>)
+            }
+        }
+    })
+    .with_profile(FailingFlushProfile {
+        flushes: Arc::clone(&flushes),
+    });
+    let _close_owner = adapter.close_owner();
+
+    let (agent_transport, client_transport) = Channel::duplex();
+    let adapter_future = adapter.connect_to(agent_transport);
+    let client_future = Client
+        .builder()
+        .connect_with(client_transport, async move |connection| {
+            connection
+                .send_request(v1::InitializeRequest::new(ProtocolVersion::V1))
+                .block_task()
+                .await?;
+            connection
+                .send_request(v1::NewSessionRequest::new(
+                    absolute_test_path("acp-flush-close").map_err(Error::into_internal_error)?,
+                ))
+                .block_task()
+                .await?;
+            Ok(())
+        });
+    let (adapter_result, client_result) = tokio::join!(adapter_future, client_future);
+
+    client_result?;
+    assert!(adapter_result.is_err());
+    assert_eq!(closes.load(Ordering::Acquire), 1);
+    assert!(flushes.load(Ordering::Acquire) >= 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn failed_agent_close_retries_on_connection_eof() -> agent_client_protocol::Result<()> {
+    let closes = Arc::new(AtomicUsize::new(0));
+    let adapter = AcpAgentAdapter::new({
+        let closes = Arc::clone(&closes);
+        move |_context: AcpSessionContext| {
+            let closes = Arc::clone(&closes);
+            async move {
+                Ok(Box::new(CountingCloseAgent {
+                    closes,
+                    failures_before_success: 1,
+                }) as Box<dyn Agent>)
+            }
+        }
+    });
+    let _close_owner = adapter.close_owner();
+    let (agent_transport, client_transport) = Channel::duplex();
+    let adapter_future = adapter.connect_to(agent_transport);
+    let client_future = Client
+        .builder()
+        .connect_with(client_transport, async move |connection| {
+            connection
+                .send_request(v1::InitializeRequest::new(ProtocolVersion::V1))
+                .block_task()
+                .await?;
+            connection
+                .send_request(v1::NewSessionRequest::new(
+                    absolute_test_path("acp-agent-close-retry")
+                        .map_err(Error::into_internal_error)?,
+                ))
+                .block_task()
+                .await?;
+            Ok(())
+        });
+    let (adapter_result, client_result) = tokio::join!(adapter_future, client_future);
+    client_result?;
+    assert!(adapter_result.is_err());
+    assert_eq!(closes.load(Ordering::Acquire), 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn standard_adapter_rejects_connection_without_retained_close_owner()
+-> agent_client_protocol::Result<()> {
+    let creations = Arc::new(AtomicUsize::new(0));
+    let adapter = AcpAgentAdapter::new({
+        let creations = Arc::clone(&creations);
+        move |_context: AcpSessionContext| {
+            let creations = Arc::clone(&creations);
+            async move {
+                creations.fetch_add(1, Ordering::AcqRel);
+                Ok(Box::new(TextOnlyAgent) as Box<dyn Agent>)
+            }
+        }
+    });
+    let dropped_owner = adapter.close_owner();
+    drop(dropped_owner);
+    let (agent_transport, _client_transport) = Channel::duplex();
+    let failure = tokio::time::timeout(Duration::from_secs(1), adapter.connect_to(agent_transport))
+        .await
+        .map_err(|_| client_error("ACP connect without close owner did not reject"))?
+        .err()
+        .ok_or_else(|| client_error("ACP connect without close owner was accepted"))?;
+    assert_eq!(failure.code, ErrorCode::InternalError);
+    assert!(failure.to_string().contains("retain a close owner"));
+    assert_eq!(creations.load(Ordering::Acquire), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn standard_close_owner_retries_after_transport_and_eof_failures()
+-> agent_client_protocol::Result<()> {
+    let closes = Arc::new(AtomicUsize::new(0));
+    let adapter = AcpAgentAdapter::new({
+        let closes = Arc::clone(&closes);
+        move |_context: AcpSessionContext| {
+            let closes = Arc::clone(&closes);
+            async move {
+                Ok(Box::new(CountingCloseAgent {
+                    closes,
+                    failures_before_success: 2,
+                }) as Box<dyn Agent>)
+            }
+        }
+    });
+    let (agent_transport, client_transport) = Channel::duplex();
+    let (close_owner, adapter_future) = adapter.connect_retaining_close_owner(agent_transport);
+    let client_future = Client
+        .builder()
+        .connect_with(client_transport, async move |connection| {
+            connection
+                .send_request(v1::InitializeRequest::new(ProtocolVersion::V1))
+                .block_task()
+                .await?;
+            connection
+                .send_request(v1::NewSessionRequest::new(
+                    absolute_test_path("acp-retained-close-owner")
+                        .map_err(Error::into_internal_error)?,
+                ))
+                .block_task()
+                .await?;
+            Ok(())
+        });
+    let (adapter_result, client_result) = tokio::join!(adapter_future, client_future);
+    client_result?;
+    assert!(adapter_result.is_err());
+    assert_eq!(closes.load(Ordering::Acquire), 2);
+    close_owner.close().await?;
+    assert_eq!(closes.load(Ordering::Acquire), 3);
+    close_owner.close().await?;
+    assert_eq!(closes.load(Ordering::Acquire), 3);
+    Ok(())
+}
+
+#[tokio::test]
+async fn aborting_connection_future_keeps_preissued_close_owner_after_a_run()
+-> agent_client_protocol::Result<()> {
+    let closes = Arc::new(AtomicUsize::new(0));
+    let adapter = AcpAgentAdapter::new({
+        let closes = Arc::clone(&closes);
+        move |_context: AcpSessionContext| {
+            let closes = Arc::clone(&closes);
+            async move {
+                Ok(Box::new(CountingCloseAgent {
+                    closes,
+                    failures_before_success: 0,
+                }) as Box<dyn Agent>)
+            }
+        }
+    });
+    let (agent_transport, client_transport) = Channel::duplex();
+    let (close_owner, connection) = adapter.connect_retaining_close_owner(agent_transport);
+    let connected = Arc::new(Notify::new());
+    let client_connected = Arc::clone(&connected);
+    let adapter_task = tokio::spawn(connection);
+    let client_task = tokio::spawn(async move {
+        Client
+            .builder()
+            .connect_with(client_transport, async move |connection| {
+                connection
+                    .send_request(v1::InitializeRequest::new(ProtocolVersion::V1))
+                    .block_task()
+                    .await?;
+                let session = connection
+                    .send_request(v1::NewSessionRequest::new(
+                        absolute_test_path("acp-aborted-connection")
+                            .map_err(Error::into_internal_error)?,
+                    ))
+                    .block_task()
+                    .await?
+                    .session_id;
+                connection
+                    .send_request(v1::PromptRequest::new(
+                        session,
+                        vec![v1::ContentBlock::Text(v1::TextContent::new("settled run"))],
+                    ))
+                    .block_task()
+                    .await?;
+                client_connected.notify_one();
+                std::future::pending::<agent_client_protocol::Result<()>>().await
+            })
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(2), connected.notified())
+        .await
+        .map_err(|_| client_error("ACP Session/Run did not complete before abort"))?;
+    adapter_task.abort();
+    let _ = adapter_task.await;
+    close_owner.close().await?;
+    assert_eq!(closes.load(Ordering::Acquire), 1);
+    client_task.abort();
+    let _ = client_task.await;
     Ok(())
 }
 

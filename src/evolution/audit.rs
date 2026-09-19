@@ -4,7 +4,8 @@
 //! recorded as a `ChangeEntry` in a JSONL file. This enables:
 //!
 //! - **Auditing**: review what changed and why
-//! - **Rollback**: undo any change by restoring the previous state
+//! - **Reconciliation**: stable change IDs let a prepared memory operation
+//!   finish its audit after restart. Later rollback remains separate (#52).
 //! - **Trending**: detect patterns in evolution activity
 
 use chrono::{DateTime, Utc};
@@ -440,7 +441,8 @@ impl ChangeLog for JsonlChangeLog {
     }
 
     fn query(&self, filter: &ChangeFilter) -> Result<Vec<ChangeEntry>> {
-        let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        *entries = self.with_disk_lock(|| Self::load_from_disk(&self.path))?;
         let mut results: Vec<ChangeEntry> = entries
             .iter()
             .rev() // most recent first
@@ -455,7 +457,8 @@ impl ChangeLog for JsonlChangeLog {
     }
 
     fn latest_for(&self, entity_type: EntityType, entity_key: &str) -> Result<Option<ChangeEntry>> {
-        let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        *entries = self.with_disk_lock(|| Self::load_from_disk(&self.path))?;
         Ok(entries
             .iter()
             .rev()
@@ -631,6 +634,26 @@ mod tests {
         assert_eq!(
             results.first().map(|entry| entry.entity_key.as_str()),
             Some("mem_001")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn two_handles_query_current_durable_audit()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("change-log.jsonl");
+        let first = JsonlChangeLog::new(path.clone())?;
+        let second = JsonlChangeLog::new(path)?;
+        first.record_idempotent(sample_entry("first", "one"))?;
+        second.record_idempotent(sample_entry("second", "two"))?;
+        assert_eq!(first.query(&ChangeFilter::new())?.len(), 2);
+        assert_eq!(second.query(&ChangeFilter::new())?.len(), 2);
+        assert_eq!(
+            first
+                .latest_for(EntityType::Memory, "two")?
+                .map(|entry| entry.change_id),
+            Some("second".into())
         );
         Ok(())
     }

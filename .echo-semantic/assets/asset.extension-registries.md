@@ -6,13 +6,13 @@ title: MCP、Hook、Skill、Plugin 与 LSP Registries
 asset_type: state_authority
 status: needs_review
 risk: high
-observed_at: f1e9027246760661144786e9e35615cd46d580c6
+observed_at: source:b214951ece8e09325efc846ad7bd88a402135000e42fe67d2b917317b2d27923
 boundary_refs: [boundary.extension-lifecycle]
-code_refs: [echo-integration/src/mcp/mod.rs, echo-execution/src/skills/hooks.rs, echo-execution/src/skills/registry.rs, echo-core/src/plugin/registry.rs, src/plugin/prepared.rs, echo-core/src/plugin/lifecycle.rs, echo-integration/src/lsp/manager.rs]
+code_refs: [echo-integration/src/mcp/mod.rs, echo-execution/src/skills/hooks.rs, echo-execution/src/skills/registry.rs, echo-core/src/plugin/registry.rs, src/plugin/prepared.rs, src/agent/react/mod.rs, echo-core/src/plugin/lifecycle.rs, echo-integration/src/lsp/manager.rs]
 consumer_refs: [src/agent/react/capabilities.rs, echo-sdk-host/src/core_profile/facade/integrations.rs]
 behavior_refs: [behavior.extension-publication]
 rule_refs: [rule.extension-generation-authority]
-evidence_refs: [evidence.effects-extensions]
+evidence_refs: [evidence.effects-extensions, evidence.plugin-generation-publication-authority-repair, evidence.plugin-generation-publication-authority-verification]
 finding_refs: [finding.skill-activation-authority, finding.hook-permission-precedence, finding.mcp-client-capability-advertisement, finding.plugin-mcp-owner-isolation, finding.plugin-failure-isolation-contract, finding.plugin-lifecycle-coordination, finding.lsp-runtime-state, finding.extension-cleanup-settlement, finding.mcp-version-doc-drift]
 candidate_refs: []
 ---
@@ -25,7 +25,7 @@ candidate_refs: []
 
 ## 来源与消费者
 
-ReactAgent capabilities、PluginIntegrator、SDK Host 和 public APIs 消费。
+ReactAgent capabilities、PluginIntegrator、SDK Host 和 public APIs 消费；每个ReactAgent独立持有Plugin active publication与cleanup receipt。
 
 ## 生命周期
 
@@ -37,4 +37,4 @@ Discover/connect/prepare/apply/activate/start，reload/replace，unwire/deactiva
 
 ## 未知与限制
 
-双 Skill state、Plugin lifecycle、MCP owner 和 LSP recovery 已形成 Findings。
+Plugin generation publication已有候选修复，尚待独立复审与主线交付；MCP owner与其它开放Finding各自保留验收边界。

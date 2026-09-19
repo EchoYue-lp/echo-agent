@@ -34,6 +34,9 @@ pub struct HeadlessConfig {
 
     /// Max iterations before forcing stop (safety limit).
     pub max_iterations: Option<usize>,
+
+    /// Optional caller-owned cancellation token.
+    pub cancel_token: Option<CancellationToken>,
 }
 ```
 
@@ -43,6 +46,7 @@ pub struct HeadlessConfig {
 | `exit_on_error` | `bool` | `true` | When `true`, the process exits with code 1 on agent failure. |
 | `output_format` | `String` | `"text"` | Controls `format_output()`: `"text"` returns raw output; `"json"` wraps the result in a structured JSON envelope. |
 | `max_iterations` | `Option<usize>` | `None` | Safety cap on ReAct loop iterations. Prevents runaway execution in unattended environments. |
+| `cancel_token` | `Option<CancellationToken>` | `None` | Requests cancellation of the current driven Turn. |
 
 ---
 
@@ -89,10 +93,12 @@ run_headless(config, configure)
     │                               │
     │                               ├─ Build error? → return error HeadlessResult
     │                               │
-    │                               └─ agent.execute(&prompt)
+    │                               └─ AgentTurnDriver.drive(agent, prompt)
     │                                       │
-    │                                       ├─ Ok → HeadlessResult { success: true, ... }
-    │                                       └─ Err → HeadlessResult { success: false, ... }
+    │                                       ├─ settle one TurnReceipt
+    │                                       └─ await Agent::close
+    │                                               ├─ Ok → project the Turn result
+    │                                               └─ Err → unsuccessful result with close error
     │
     └─ return HeadlessResult
 ```
@@ -114,6 +120,9 @@ pub struct HeadlessResult {
 
     /// Output format requested.
     pub format: String,
+
+    /// Whether failure changes the process exit code.
+    pub exit_on_error: bool,
 }
 ```
 
@@ -126,6 +135,18 @@ pub fn exit_code(&self) -> i32
 ```
 
 Returns `0` on success, `1` on failure — suitable for direct use with `std::process::exit()`.
+When `exit_on_error` is `false`, failures still set `success: false` and remain
+visible in `output`, but `exit_code()` returns `0` by explicit caller policy.
+
+The one-shot Headless owner awaits `Agent::close` after the Turn receipt even
+when execution failed or was cancelled. A close error is returned in the
+`HeadlessResult` output and cannot be retried through this one-shot API after
+the function returns. If the caller times out, aborts, or drops the outer
+`run_headless` future before it reaches close, the local Agent owner is dropped
+and awaited cleanup is not guaranteed. Code that requires cancellation-safe
+cleanup must keep a long-lived Agent or adapter owner instead of abandoning
+the one-shot future. See
+[ADR 0066](../adr/0066-agent-adapter-close-ownership.md).
 
 #### format_output()
 
@@ -164,6 +185,7 @@ async fn main() {
         exit_on_error: true,
         output_format: "text".into(),
         max_iterations: Some(10),
+        cancel_token: None,
     };
 
     let result = run_headless(config, |builder| builder).await;
@@ -186,6 +208,7 @@ async fn main() {
         exit_on_error: true,
         output_format: "text".into(),
         max_iterations: Some(20),
+        cancel_token: None,
     };
 
     let result = run_headless(config, |builder| {
@@ -216,6 +239,7 @@ async fn main() {
         exit_on_error: true,
         output_format: "json".into(),   // ← JSON envelope
         max_iterations: Some(10),
+        cancel_token: None,
     };
 
     let result = run_headless(config, |builder| builder).await;

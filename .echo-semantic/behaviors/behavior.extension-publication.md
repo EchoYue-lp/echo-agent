@@ -8,10 +8,10 @@ risk: high
 primary_focus: failure_concurrency
 focus: [state_authority, time_lifecycle, result_side_effect, permission_external, data_durability]
 boundary: boundary.extension-lifecycle
-observed_at: 44b2ed68772c7c016d09af6c2e1adac9fe4fea70
-code_refs: [echo-integration/src/mcp/mod.rs, echo-execution/src/skills/hooks.rs, echo-execution/src/skills/registry.rs, echo-core/src/plugin/registry.rs, src/plugin/prepared.rs, echo-integration/src/lsp/manager.rs]
+observed_at: source:b214951ece8e09325efc846ad7bd88a402135000e42fe67d2b917317b2d27923
+code_refs: [echo-integration/src/mcp/mod.rs, echo-execution/src/skills/hooks.rs, echo-execution/src/skills/registry.rs, echo-core/src/plugin/registry.rs, src/plugin/prepared.rs, src/agent/react/mod.rs, echo-integration/src/lsp/manager.rs]
 rule_refs: [rule.extension-generation-authority]
-evidence_refs: [evidence.effects-extensions, evidence.skill-activation-authority-repair, evidence.skill-activation-authority-verification, evidence.mcp-tool-local-classification-repair, evidence.mcp-tool-local-classification-verification, evidence.mcp-client-capability-advertisement-repair, evidence.mcp-client-capability-advertisement-verification, evidence.lsp-derived-handle-lifecycle-repair, evidence.lsp-derived-handle-lifecycle-verification, evidence.plugin-component-preparation-repair, evidence.plugin-component-preparation-verification]
+evidence_refs: [evidence.effects-extensions, evidence.skill-activation-authority-repair, evidence.skill-activation-authority-verification, evidence.mcp-tool-local-classification-repair, evidence.mcp-tool-local-classification-verification, evidence.mcp-client-capability-advertisement-repair, evidence.mcp-client-capability-advertisement-verification, evidence.lsp-derived-handle-lifecycle-repair, evidence.lsp-derived-handle-lifecycle-verification, evidence.plugin-component-preparation-repair, evidence.plugin-component-preparation-verification, evidence.plugin-generation-publication-authority-repair, evidence.plugin-generation-publication-authority-verification]
 finding_refs: [finding.skill-activation-authority, finding.hook-permission-precedence, finding.mcp-client-capability-advertisement, finding.mcp-tool-permission-classification, finding.plugin-mcp-owner-isolation, finding.plugin-failure-isolation-contract, finding.plugin-lifecycle-coordination, finding.lsp-runtime-state, finding.lsp-manager-derived-handle-resurrection, finding.extension-cleanup-settlement, finding.extension-credential-debug-redaction, finding.mcp-version-doc-drift]
 ---
 
@@ -23,7 +23,7 @@ finding_refs: [finding.skill-activation-authority, finding.hook-permission-prece
 
 ## 当前行为
 
-McpManager管命名连接且client只广告已实现capability；HookRegistry管source/order/action reduction；Skill definition view可为异步tool适配而复制，但主registry、tool adapter、run snapshot与checkpoint共享epoch-fenced activation handle。PluginRegistry/Integrator/Lifecycle管持久状态、不可变generation与callback。LspManager唯一拥有client child process，派生handle共享其generation/closed fence。
+McpManager管命名连接且client只广告已实现capability；HookRegistry管source/order/action reduction；Skill definition view可为异步tool适配而复制，但主registry、tool adapter、run snapshot与checkpoint共享epoch-fenced activation handle。PluginRegistry/Integrator/Lifecycle管持久状态、不可变generation与callback；独立Integrator的prepare序号由进程统一分配，每个ReactAgent另有唯一publication target，成功发布后拒绝旧prepared和旧receipt，失败清理保留本target的receipt。逐server MCP发布即时记录当前receipt，取消中的新名字提前预留清理范围。LspManager唯一拥有client child process，派生handle共享其generation/closed fence。
 
 ## 期望行为
 
@@ -47,6 +47,6 @@ Prepare/apply/rollback、transport close、pending call、LSP EOF/restart、Plug
 
 Skill activation、Hook permission precedence、MCP capability advertisement/local
 classification、LSP派生handle与ADR 0045 DU-71确认的Plugin component preparation isolation
-均已修复并独立复审。Plugin active generation、lifecycle coordination、reconcile overlap、
-MCP owner isolation、LSP runtime status与异步cleanup仍为open Finding，因此本Behavior继续
-保持needs_review。
+均已修复并独立复审。Plugin active generation有本分支修复候选，尚待独立复审与主线交付；
+lifecycle coordination、MCP owner isolation和其它开放Finding仍需各自验收，因此本Behavior
+继续保持needs_review。

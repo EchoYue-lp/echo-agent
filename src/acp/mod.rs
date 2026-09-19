@@ -14,6 +14,16 @@
 //! authority, a ledger-first event path and one close chain. Extension
 //! profiles plug in through [`AcpConnectionProfile`] without forking the
 //! official dispatch loop.
+//!
+//! Before moving an adapter into the official `ConnectTo` API, retain its
+//! [`AcpAdapterCloseHandle`] with `adapter.close_owner()`. The protocol trait
+//! consumes the adapter and cannot return a failed close owner; connection
+//! setup rejects callers without an external handle. The retained handle
+//! retries cleanup on the same Session/Run authority after transport return.
+//! Direct transport callers can use
+//! [`AcpAgentAdapter::connect_retaining_close_owner`] to receive the handle
+//! alongside the connection result. Manual official Client callers must keep
+//! their handle until close succeeds, including after a failed connection.
 
 mod adapter;
 mod extension;
@@ -22,7 +32,9 @@ mod prompt;
 mod runtime;
 mod session;
 
-pub use adapter::{AcpAdapterConfig, AcpAgentAdapter, AcpAgentAdapterWithProfile};
+pub use adapter::{
+    AcpAdapterCloseHandle, AcpAdapterConfig, AcpAgentAdapter, AcpAgentAdapterWithProfile,
+};
 pub use extension::{
     ExtensionInvocationAuthority, ExtensionInvocationLease, ExtensionLeaseError,
     ExtensionSettlement,

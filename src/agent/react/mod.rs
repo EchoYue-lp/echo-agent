@@ -254,6 +254,9 @@ pub struct ReactAgent {
     /// `ContextManager` and other internal mutable state.
     pub(crate) execution_mutex: Arc<tokio::sync::Mutex<()>>,
 
+    /// Canonical publication authority for this Agent's plugin registries.
+    pub(crate) plugin_publication: Arc<crate::plugin::PluginPublicationAuthority>,
+
     /// Thread-safe token usage tracker that accumulates prompt/completion
     /// tokens across all LLM calls in this agent's lifetime.
     /// Prefer reading real usage from API responses; falls back to estimation.
@@ -692,6 +695,7 @@ impl ReactAgent {
             recently_read_files: Arc::new(std::sync::Mutex::new(HashMap::new())),
             mutable_system_prompt: std::sync::RwLock::new(None),
             execution_mutex: Arc::new(tokio::sync::Mutex::new(())),
+            plugin_publication: Arc::new(crate::plugin::PluginPublicationAuthority::default()),
             token_tracker: Arc::new(echo_core::tokenizer::TokenUsageTracker::new(model_name)),
             calibrated_tokenizer: Arc::new(echo_core::tokenizer::CalibratedTokenizer::new(
                 Arc::new(echo_core::tokenizer::HeuristicTokenizer),
@@ -2348,10 +2352,10 @@ impl ReactAgent {
         Some(run_id)
     }
 
-    /// Shut down the agent and release all resources.
+    /// Run the SessionEnd hook, then await the Agent's resource close.
     ///
-    /// Closes MCP connections, cancels background tasks, and shuts down WebSocket servers.
-    /// Call this when the agent is no longer needed, or rely on `Drop` for automatic cleanup.
+    /// Call this (or [`Agent::close`]) while the owner still retains the Agent.
+    /// `Drop` cannot await MCP cleanup and only reports unclosed resources.
     ///
     /// This is a convenience wrapper around [`Agent::close()`]. Prefer `close()` for
     /// trait-object usage; `shutdown()` is retained for backward compatibility.
@@ -3224,22 +3228,19 @@ impl ReactAgent {
     }
 }
 
-// ── Drop implementation for automatic resource cleanup ──
+// ── Drop reports unclosed resources; async cleanup belongs to Agent::close ──
 
 impl Drop for ReactAgent {
     fn drop(&mut self) {
         #[cfg(feature = "mcp")]
         {
-            // MCP cleanup is async, but Drop is synchronous.
-            // Only spawn cleanup when a Tokio runtime is available.
-            let mcp_mgr =
-                std::mem::replace(&mut self.tools.mcp_manager, crate::mcp::McpManager::new());
-            if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                handle.spawn(async move {
-                    if let Err(error) = mcp_mgr.close_all().await {
-                        tracing::warn!(error = %error, "MCP drop cleanup did not settle");
-                    }
-                });
+            let remaining = self.tools.mcp_manager.server_names();
+            if !remaining.is_empty() {
+                tracing::warn!(
+                    agent = %self.config.agent_name,
+                    servers = ?remaining,
+                    "ReactAgent dropped with MCP resources; await Agent::close before releasing its owner"
+                );
             }
         }
     }

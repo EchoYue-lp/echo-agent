@@ -51,6 +51,11 @@ callers need an explicit owner. Process abort and panic-abort remain outside an
 in-process receipt; partial store mutations are reported as unknown rather than
 being described as rolled back.
 
+[ADR 0065](0065-evolution-memory-audit-reconciliation.md) gives the layered
+memory mutation behind an accepted review a durable operation identity. Its
+startup reconciliation closes the framework audit gap but does not replace the
+application's review admission, shutdown, or result ownership.
+
 ## Verification
 
 Framework tests cover unpolled futures, cancellation, panic, partial writes,

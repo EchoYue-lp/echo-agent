@@ -7,7 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Agent adapters now fence new work, cancel and drain accepted invocations,
+  and await resource close: ACP retains unsettled Run receipts and retries
+  failed connection cleanup, Headless reports Agent close errors, and Channels
+  retain handlers until their sender-scoped Agents close. `ReactAgent::drop`
+  no longer spawns unawaited MCP cleanup; long-lived owners call
+  `Agent::close` explicitly. ACP connection setup now requires a
+  caller-retained `AcpAdapterCloseHandle` before moving an adapter into
+  `ConnectTo`; existing framework and independent SDK Host callers must retain
+  that handle and use it to retry failed connection close.
+
+- Plugin publication is now fenced per `ReactAgent`: stale prepared generations and
+  foreign, altered, or superseded wiring receipts fail before registry mutation.
+  Withdrawal settles the current receipt before replacement, while failed or
+  cancelled apply retains retryable cleanup state. Independent integrators share
+  preparation ordering, and multi-server MCP cancellation retains every
+  connection already published by that apply.
+
 ### Added
+
+- **Durable layered-memory audit reconciliation.** `MemoryLayerManager` prepares
+  warm/hot mutations and approved merge groups in the existing `echo-state`
+  file journal before projecting them, then idempotently commits `ChangeLog`
+  entries under stable identities. Restart recovery finishes uncertain writes;
+  manager reads fence pending operations, and the reconciled runtime builder
+  completes startup replay. `MemoryMerger::new` now takes the manager instead of
+  separate Store and log references. Hot content with whitespace or newlines
+  round-trips without loss, and stale promotion/demotion decisions fail before
+  prepare when another manager has updated the key. Later rollback remains a
+  separate task.
 
 - **Intrinsic tool values in all source SDKs.** TypeScript, Python and Java now
   expose `ToolCallParams` typed accessors and `ToolResult` construction/update

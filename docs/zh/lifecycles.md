@@ -39,7 +39,22 @@ Reply 和 Wait 操作返回或观察owner的result/receipt，不把partial text�
 Delivery failure 在 execution terminal 旁边单独报告，不能改写 producer 已经发出的 execution result。
 Trace、transcript和checkpoint write可在finalization前或期间发生。它们各自存储的status和ordering不定义TurnReceipt，
 但Agent producer contract显式传播的write error可令driven Turn失败；best-effort transcript diagnostic本身不会。
-Adapter projection和awaited close覆盖由各详细adapter contract定义，本概览不定义一条固定顺序。
+Adapter projection 与 awaited close 是不同事实。ACP、Headless、Channels
+现在由各自 owner 关闭接纳、取消已接纳工作、等待结算，再 await `Agent::close`。
+A2A 不在本轮修复范围，既有 lifecycle Findings 保持开放；Channel delivery 仍有
+独立协议边界。参见 [ADR 0066](../adr/0066-agent-adapter-close-ownership.md)
+及[IM Channels](./15-im-channels.md)。
+
+ACP 调用方在把 adapter 传给 `ConnectTo` 或 `Client::connect_with` 前必须保留
+`let close_owner = adapter.close_owner()`。官方 trait 按值消费 adapter，关闭失败时
+无法返还 Session/Agent owner；未保留句柄的连接因此在创建资源前拒绝。出错后调用
+`close_owner.close().await` 可重试同一 framework Session/Run service。独立 SDK
+Host 在升级 framework 依赖时必须同步接入这一公共生命周期合同。
+直接 transport 调用方可用 `let (close_owner, connection) =
+adapter.connect_retaining_close_owner(transport)`，在 poll、await 或 spawn `connection`
+前同步取得句柄。使用官方 Client 的调用方需手动持有句柄，直到连接返回并且
+全部关闭成功；接纳后提前 drop 会放弃重试所有权，属于违反调用合同。连接启动前 drop
+则会拒绝建立连接，不创建 Agent。
 
 详见 [ReAct Agent](./01-react-agent.md)、[流式输出](./10-streaming.md)和
 [Headless](./33-headless-mode.md)。Adapter-specific 保证仍属于各自协议章节；本页不声称所有

@@ -132,6 +132,20 @@ EchoAgent 向 stdio 子进程提供 `PLUGIN_ROOT` 和 `PLUGIN_DATA`。`${PLUGIN_
 内容 identity、结构化诊断、已解析的 Skills/Hooks/MCP，以及保留 owner 的 Subagent/LSP 文档。
 `wire_prepared` 与 rollback 不读取组件文件；磁盘变化只在 registry mutation 或显式 invalidation
 后可见。见 [ADR 0012](../adr/0012-immutable-plugin-preparation.md)。
+generation 序号在同一进程的所有 Integrator 间统一分配，因此两个独立 Integrator 为同一 Agent
+准备的新旧快照仍有可比较的顺序。
+
+每个 `ReactAgent` 独立拥有一个 publication target。通过
+`integrator.publication_target(&agent)` 取得可克隆句柄，再调用
+`target.wire_prepared(&mut agent, &prepared)`；receipt 携带 generation 和 identity。发布新代前
+先用 `target.rollback(&mut agent, &receipt)` 撤销当前代。旧 prepared、外来或被修改的 receipt、
+同代重复发布都会在 registry 副作用前被拒绝。成功撤销可重复调用；发布新代后，旧 receipt
+变成 stale。apply 失败不推进 active generation，清理失败保留 receipt 供重试；取消中的 apply
+留下的 pending receipt 可通过 `target.pending_cleanup_receipt()` 获取并结算。共享 cloned
+Integrator 的两个 Agent 各有自己的 active publication 状态。
+每个成功的 MCP 连接在开始下一个 server 前立即进入 pending receipt。原本不存在的名字在
+连接 await 前预留清理范围，覆盖 manager 已发布而 Agent 尚未返回时的取消；新连接失败须先
+结算该名字才能发布 generation。这不代替 #75 独立处理的 MCP owner-qualified identity。
 
 存在组件诊断时，整个 set 仍然可应用；只有依赖排序或 generation 分配等代次级不变量无法
 构造完整不可变快照时，set 才会被拒绝。

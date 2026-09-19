@@ -37,7 +37,9 @@ use echo_core::utils::hash::fnv1a_64;
 use echo_state::memory::typed_store::{MemoryFilter, TypedMemoryEntry, TypedMemoryStore};
 use std::collections::HashMap;
 
-use super::audit::{ChangeEntryBuilder, ChangeLog, ChangeType, EntityType};
+#[cfg(test)]
+use super::audit::{ChangeLog, EntityType};
+use super::layer::MemoryLayerManager;
 use crate::error::Result;
 
 // ── Constants ──────────────────────────────────────────────────────────
@@ -323,7 +325,7 @@ impl MemoryConflictProposal {
     }
 }
 
-fn ordered_conflict_entries(group: &ConflictGroup) -> Vec<TypedMemoryEntry> {
+pub(super) fn ordered_conflict_entries(group: &ConflictGroup) -> Vec<TypedMemoryEntry> {
     let mut ordered = group.entries.clone();
     ordered.sort_by(|a, b| {
         b.meta
@@ -359,10 +361,10 @@ fn content_hash(content: &str) -> u64 {
 /// - Secondary entries are rewritten with `status = Superseded`,
 ///   `superseded_by = <primary key>`, and their `revision_count` is folded into
 ///   the primary's.
-/// - Each mutation is recorded via [`ChangeLog`] with `ChangeType::Merge`.
+/// - The manager prepares the complete group before projecting any member,
+///   then records each member in the business audit under a stable identity.
 pub struct MemoryMerger<'a> {
-    typed_store: &'a TypedMemoryStore,
-    change_log: &'a dyn ChangeLog,
+    manager: &'a MemoryLayerManager,
 }
 
 /// Outcome of merging one conflict group.
@@ -375,12 +377,9 @@ pub struct MergeResult {
 }
 
 impl<'a> MemoryMerger<'a> {
-    /// Create a new merger bound to a store and audit log.
-    pub fn new(typed_store: &'a TypedMemoryStore, change_log: &'a dyn ChangeLog) -> Self {
-        Self {
-            typed_store,
-            change_log,
-        }
+    /// Bind the merge policy to the canonical durable mutation owner.
+    pub fn new(manager: &'a MemoryLayerManager) -> Self {
+        Self { manager }
     }
 
     /// Merge a single conflict group.
@@ -388,115 +387,7 @@ impl<'a> MemoryMerger<'a> {
     /// Returns `Ok(MergeResult)` with an empty `superseded_keys` when the group
     /// has fewer than 2 entries (nothing to merge).
     pub async fn merge_group(&self, group: &ConflictGroup) -> Result<MergeResult> {
-        if group.entries.len() < 2 {
-            return Ok(MergeResult {
-                primary_key: group
-                    .entries
-                    .first()
-                    .map(|e| e.key.clone())
-                    .unwrap_or_default(),
-                superseded_keys: Vec::new(),
-            });
-        }
-
-        // Pick the primary: highest confidence, then most recent updated_at,
-        // then key (deterministic tiebreak).
-        let ordered = ordered_conflict_entries(group);
-
-        let primary = match ordered.first() {
-            Some(p) => p.clone(),
-            None => {
-                return Ok(MergeResult {
-                    primary_key: String::new(),
-                    superseded_keys: Vec::new(),
-                });
-            }
-        };
-        let secondaries = ordered.get(1..).unwrap_or_default();
-
-        let combined_revision_count = group
-            .entries
-            .iter()
-            .map(|e| e.meta.revision_count)
-            .sum::<u32>();
-
-        // Preserve the selected fact verbatim. Merge provenance belongs in
-        // metadata/audit records, not in model-visible memory content.
-        let primary_meta = MemoryMeta {
-            revision_count: combined_revision_count.max(primary.meta.revision_count),
-            ..primary.meta.clone()
-        };
-        self.typed_store
-            .put_typed(
-                crate::evolution::layer::WARM_NAMESPACE,
-                &primary.key,
-                &primary.content,
-                primary_meta.clone(),
-            )
-            .await?;
-
-        self.record_merge(
-            &primary.key,
-            /* superseded_by = */ None,
-            group.entries.len(),
-            &format!(
-                "primary survivor of {}-way merge on topic '{}'",
-                group.entries.len(),
-                group.topic
-            ),
-        )?;
-
-        // Supersede each secondary.
-        let mut superseded_keys = Vec::with_capacity(secondaries.len());
-        for secondary in secondaries {
-            let secondary_meta = MemoryMeta {
-                status: MemoryStatus::Superseded,
-                superseded_by: Some(primary.key.clone()),
-                ..secondary.meta.clone()
-            };
-            self.typed_store
-                .update_meta(
-                    crate::evolution::layer::WARM_NAMESPACE,
-                    &secondary.key,
-                    secondary_meta,
-                )
-                .await?;
-            superseded_keys.push(secondary.key.clone());
-
-            self.record_merge(
-                &secondary.key,
-                Some(&primary.key),
-                group.entries.len(),
-                &format!(
-                    "superseded by '{}' during merge on topic '{}'",
-                    primary.key, group.topic
-                ),
-            )?;
-        }
-
-        Ok(MergeResult {
-            primary_key: primary.key,
-            superseded_keys,
-        })
-    }
-
-    /// Record one merge-side change in the audit log.
-    fn record_merge(
-        &self,
-        key: &str,
-        superseded_by: Option<&str>,
-        group_size: usize,
-        reason: &str,
-    ) -> Result<()> {
-        let mut builder =
-            ChangeEntryBuilder::new(EntityType::Memory, key, ChangeType::Merge).reason(reason);
-        builder = builder.trigger("explicit_memory_merge".to_string());
-        builder = builder.after(serde_json::json!({
-            "superseded_by": superseded_by,
-            "group_size": group_size,
-        }));
-        let entry = builder.build(self.change_log);
-        self.change_log.record(entry)
+        self.manager.commit_merge_group(group).await
     }
 }
 
@@ -909,10 +800,11 @@ mod tests {
     // ── MemoryMerger ──
 
     #[tokio::test]
-    async fn test_merge_keeps_highest_confidence_as_primary() {
+    async fn test_merge_keeps_highest_confidence_as_primary() -> Result<()> {
         let store = Arc::new(InMemoryStore::new());
-        let typed = TypedMemoryStore::new(store);
-        let log = NullChangeLog;
+        let typed = TypedMemoryStore::new(store.clone());
+        let dir = tempfile::tempdir()?;
+        let manager = MemoryLayerManager::new(dir.keep(), store, Box::new(NullChangeLog));
 
         let meta_high =
             MemoryMeta::new(MemoryType::ProjectFact, MemorySource::ExplicitSave, "build")
@@ -956,7 +848,7 @@ mod tests {
             .next()
             .expect("should detect one group");
 
-        let result = MemoryMerger::new(&typed, &log)
+        let result = MemoryMerger::new(&manager)
             .merge_group(&group)
             .await
             .unwrap();
@@ -979,13 +871,14 @@ mod tests {
             .unwrap();
         assert_eq!(secondary.meta.status, MemoryStatus::Superseded);
         assert_eq!(secondary.meta.superseded_by.as_deref(), Some("high"));
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_merge_single_entry_is_noop() {
+    async fn test_merge_single_entry_is_noop() -> Result<()> {
         let store = Arc::new(InMemoryStore::new());
-        let typed = TypedMemoryStore::new(store);
-        let log = NullChangeLog;
+        let dir = tempfile::tempdir()?;
+        let manager = MemoryLayerManager::new(dir.keep(), store, Box::new(NullChangeLog));
 
         let group = ConflictGroup {
             topic: "build".to_string(),
@@ -997,11 +890,12 @@ mod tests {
                 now_secs(),
             )],
         };
-        let result = MemoryMerger::new(&typed, &log)
+        let result = MemoryMerger::new(&manager)
             .merge_group(&group)
             .await
             .unwrap();
         assert!(result.superseded_keys.is_empty());
+        Ok(())
     }
 
     // ── MemoryReviewer end-to-end ──

@@ -132,6 +132,23 @@ Loading proceeds in dependency order. Fatal manifest errors skip the package. Fr
 deterministic content identity, structured diagnostics, parsed Skills/Hooks/MCP, and owner-qualified
 Subagent/LSP documents. `wire_prepared` and rollback perform no component file reads. Disk changes
 become visible only after registry mutation or explicit invalidation. See [ADR 0012](../adr/0012-immutable-plugin-preparation.md).
+Generation ordinals are allocated across all integrators in the process, so independent integrators
+can publish successive snapshots to the same Agent without resetting their order.
+
+Each `ReactAgent` owns one publication target. Obtain its cloneable handle through
+`integrator.publication_target(&agent)` and call `target.wire_prepared(&mut agent, &prepared)`;
+the returned receipt records the generation and identity. Withdraw with
+`target.rollback(&mut agent, &receipt)` before publishing a newer generation. A stale prepared set,
+foreign or altered receipt, or repeated publication is rejected before mutating registries.
+Successful withdrawal can be repeated; after a newer generation publishes, the old receipt becomes
+stale. Failed apply does not advance the active generation, and failed cleanup keeps its receipt
+for retry. A cancelled apply's pending receipt can be obtained with
+`target.pending_cleanup_receipt()` and settled before another publication. Cloned integrators
+preparing for independent Agents do not share active publication state.
+Each successful MCP connection enters the pending receipt before the next server begins. A name
+that was absent before connection is reserved for cleanup across cancellation during its await;
+failed new connections settle that name before the generation may publish. This does not change
+the separate owner-qualified MCP identity work tracked by #75.
 
 The set remains applicable when a component diagnostic is present. It is rejected only when a
 generation-wide invariant, such as dependency ordering or generation allocation, prevents building

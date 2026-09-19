@@ -13,7 +13,9 @@ pub use echo_core::plugin::{
 mod prepared;
 
 pub use prepared::{
-    PluginDiagnosticSeverity, PluginIntegrator, PluginPreparationDiagnostic, PluginWiringError,
-    PluginWiringResult, PreparedPlugin, PreparedPluginDocument, PreparedPluginSet,
-    PreparedPluginSkill, WiredPluginComponents,
+    PluginDiagnosticSeverity, PluginIntegrator, PluginPreparationDiagnostic,
+    PluginPublicationTarget, PluginWiringError, PluginWiringResult, PreparedPlugin,
+    PreparedPluginDocument, PreparedPluginSet, PreparedPluginSkill, WiredPluginComponents,
 };
+
+pub(crate) use prepared::PluginPublicationAuthority;

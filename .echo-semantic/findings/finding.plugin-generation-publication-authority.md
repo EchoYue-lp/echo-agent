@@ -13,8 +13,8 @@ rule_refs: [rule.extension-generation-authority]
 evidence_refs: [evidence.effects-extensions]
 audit_refs: [audit.extension-lifecycle.state-authority]
 decision_refs: []
-repair_evidence_refs: []
-verification_evidence_refs: []
+repair_evidence_refs: [evidence.plugin-generation-publication-authority-repair]
+verification_evidence_refs: [evidence.plugin-generation-publication-authority-verification, evidence.foundation-36-72-51-integration-verification]
 rereview_audit_refs: []
 discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 ---
@@ -39,4 +39,6 @@ PreparedPluginSet 有 generation/identity，但 PluginWiringResult 不携带 gen
 
 ## 处理记录
 
-State-authority Audit 确认；后续 repair 需 active generation CAS 与 stale apply/receipt tests。
+State-authority Audit 确认。本候选在每个ReactAgent内绑定唯一target authority，增加
+active generation、receipt token与stale apply/receipt测试；独立复审、整合门禁和远端主线交付
+尚未完成，Finding保持open。

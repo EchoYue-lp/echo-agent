@@ -8,10 +8,10 @@ risk: high
 primary_focus: time_lifecycle
 focus: [state_authority, failure_concurrency, result_side_effect, contract_evidence]
 boundary: boundary.agent-session-turn
-observed_at: cba8e08f3e3f0ccf1d4df3a22be11589f63b2ecd
-code_refs: [echo-core/src/agent/mod.rs, echo-core/src/agent/event_envelope.rs, echo-core/src/tools/mod.rs, src/agent/react/mod.rs, src/agent/react/run/stream_channel.rs, src/agent/handle.rs, echo-orchestration/src/runtime/turn_driver.rs, src/acp/session.rs, src/acp/runtime.rs, src/headless.rs, src/eval/runner.rs, src/channels.rs, echo-integration/src/channels/session.rs, echo-sdk-host/src/core_profile/persistence.rs, docs/adr/0037-eval-timeout-turn-settlement.md, docs/adr/0038-eval-trace-correlation-identity.md, docs/adr/0046-turn-execution-delivery-settlement.md]
+observed_at: source:b214951ece8e09325efc846ad7bd88a402135000e42fe67d2b917317b2d27923
+code_refs: [echo-core/src/agent/mod.rs, echo-core/src/agent/event_envelope.rs, echo-core/src/tools/mod.rs, src/agent/react/mod.rs, src/agent/react/run/stream_channel.rs, src/agent/handle.rs, echo-orchestration/src/runtime/turn_driver.rs, src/acp/session.rs, src/acp/runtime.rs, src/acp/adapter.rs, src/headless.rs, src/eval/runner.rs, src/channels.rs, echo-integration/src/channels/manager.rs, echo-integration/src/channels/types.rs, echo-integration/src/channels/session.rs, docs/adr/0037-eval-timeout-turn-settlement.md, docs/adr/0038-eval-trace-correlation-identity.md, docs/adr/0046-turn-execution-delivery-settlement.md, docs/adr/0066-agent-adapter-close-ownership.md]
 rule_refs: [rule.turn-terminal-authority, rule.context-persistence-separation]
-evidence_refs: [evidence.agent-context-execution, evidence.eval-timeout-turn-settlement-repair, evidence.eval-timeout-turn-settlement-verification, evidence.eval-trace-correlation-repair, evidence.eval-trace-correlation-verification, evidence.turn-terminal-delivery-settlement-repair, evidence.turn-terminal-delivery-settlement-verification]
+evidence_refs: [evidence.agent-context-execution, evidence.eval-timeout-turn-settlement-repair, evidence.eval-timeout-turn-settlement-verification, evidence.eval-trace-correlation-repair, evidence.eval-trace-correlation-verification, evidence.turn-terminal-delivery-settlement-repair, evidence.turn-terminal-delivery-settlement-verification, evidence.agent-adapter-close-settlement-repair, evidence.agent-adapter-close-settlement-verification]
 finding_refs: [finding.turn-driver-entry-coverage, finding.eval-timeout-settlement, finding.eval-trace-identity, finding.turn-terminal-commit-projection-order]
 ---
 
@@ -23,7 +23,7 @@ finding_refs: [finding.turn-driver-entry-coverage, finding.eval-timeout-settleme
 
 ## 当前行为
 
-`ReactAgent`实现原始Agent调用、生成真实trace Run，并在managed stream中等待自有producer settled后才释放terminal；`AgentTurnDriver`接纳输入、提交envelope、归约usage/final output，并把producer execution outcome与sink delivery outcome写入同一receipt。ACP、Headless、经ACP的SDK与Eval使用driver；SDK持久化在恢复时校验Journal/index/receipt一致性。Channel和直接Rust execute/chat当前绕过driver。
+`ReactAgent`实现原始Agent调用、生成真实trace Run，并在managed stream中等待自有producer settled后才释放terminal；`AgentTurnDriver`接纳输入、提交envelope、归约usage/final output，并把producer execution outcome与sink delivery outcome写入同一receipt。ACP、Headless、Channel、经ACP的SDK与Eval使用driver；A2A与raw Rust execute/chat保持现有边界。ACP adapter在poll连接future前同步交出同一registry/services的close handle，未保留时拒绝创建Agent；registry保留未结算Run和Agent。Headless一次性await close，Channel保留长期owner并可重试地关闭资源；ReactAgent Drop不再假称异步cleanup已结算。A2A不在本轮修复范围。
 
 ## 期望行为
 
@@ -35,7 +35,7 @@ ACP prompt、Headless prompt、Eval case和经ACP的SDK call触发driven Turn；
 
 ## 失败、重试与恢复
 
-输入需区分accepted、drained与turn-settled；取消传播、Eval timeout、Session close和runtime restore必须等待receipt或明确界定未结算effect。
+输入需区分accepted、drained与turn-settled；取消传播、Eval timeout、Session close和runtime restore必须等待receipt或明确界定未结算effect。Adapter关闭失败或被调用方取消时，不把transport EOF或drop当成功；仍存活的registry/server/manager/session owner保留资源以供重试。
 
 ## 证据
 

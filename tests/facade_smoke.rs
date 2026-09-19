@@ -2,7 +2,8 @@ use echo_agent::agent::{AgentConfig, AgentInvocationContext};
 use echo_agent::config::FrameworkConfig;
 use echo_agent::paths::DataRoot;
 use echo_agent::plugin::{
-    PluginIntegrator, PluginPreparationDiagnostic, PluginWiringError, PreparedPluginSet,
+    PluginIntegrator, PluginPreparationDiagnostic, PluginPublicationTarget, PluginWiringError,
+    PreparedPluginSet,
 };
 use echo_agent::runtime::{AgentTurnDriver, TurnMode};
 use echo_agent::state::journal::{
@@ -123,6 +124,7 @@ fn prepared_plugin_generation_types_are_available_from_the_public_facade() {
     public_type::<PreparedPluginSet>();
     public_type::<PluginPreparationDiagnostic>();
     public_type::<PluginWiringError>();
+    public_type::<PluginPublicationTarget>();
     let integrator = PluginIntegrator::new();
     let _shared_integrator = integrator.clone();
 }

@@ -399,6 +399,13 @@ pub trait MessageHandler: Send + Sync {
     /// Send an outbound message back to the IM platform (implemented by the Channel itself)
     async fn reply(&self, msg: OutboundMessage) -> Result<()>;
 
+    /// Release handler-owned Agent and session resources after the transport
+    /// stops accepting messages and its in-flight deliveries settle.
+    /// Stateless handlers have no resources to release.
+    async fn close(&self) -> Result<()> {
+        Ok(())
+    }
+
     /// 流式 handle:产出逐段 `OutboundMessage`。
     ///
     /// 默认实现:只 yield 一次 `handle` 的返回值(向后兼容,所有现有 impl 无需 override)。
@@ -510,25 +517,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn default_handle_stream_yields_exactly_one_outbound() {
+    async fn default_handle_stream_yields_exactly_one_outbound() -> Result<()> {
         let handler = OnceHandler {
             reply_text: "hello".into(),
         };
         let msg = InboundMessage::new("qq", "u1", "c1", ChatType::Direct, "hi", "m1");
-        let mut stream = handler.handle_stream(msg).await.expect("stream ok");
+        let mut stream = handler.handle_stream(msg).await?;
 
         // 第一条 = handle 的返回值
         let first = stream
             .next()
             .await
-            .expect("at least one item")
-            .expect("item is ok");
+            .ok_or_else(|| ReactError::Other("stream yielded no item".to_string()))??;
         assert_eq!(first.text, "hello");
         assert_eq!(first.channel_id, "qq");
         assert_eq!(first.to, "c1");
 
         // 之后不再有(恰好 1 条)
         assert!(stream.next().await.is_none(), "default yields exactly one");
+        Ok(())
     }
 
     #[tokio::test]

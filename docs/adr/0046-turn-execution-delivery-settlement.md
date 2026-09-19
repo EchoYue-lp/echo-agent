@@ -89,10 +89,12 @@ Channel receipt delivery refers to the channel event sink, not a remote QQ or
 Feishu delivery ACK. The transport's generation fence remains responsible for
 local queue/network admission and reset ordering; a remote send failure cannot
 retroactively change the Agent's producer terminal.
-`ChannelManager::stop_all` and QQ/Feishu task shutdown still require the
-adapter-close resource settlement owned by Finding #36. This decision does not
-add a competing channel-close coordinator, and Finding #107 cannot be closed
-until that dependency is verifiable on remote main.
+`ChannelManager::stop_all` now retains the handler until its awaited close
+succeeds. Sender-scoped Agents are settled by `SessionHandler`, while the
+generation fence still guards network admission. The resource-close ordering
+is recorded separately in [ADR 0066](./0066-agent-adapter-close-ownership.md);
+it does not add a competing Turn terminal. Finding #107 remains governed by
+its own remote-main acceptance evidence.
 
 ## Industry Basis for Channel Adoption
 
