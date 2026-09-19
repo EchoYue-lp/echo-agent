@@ -8,9 +8,9 @@ observed_at: source:1793556b87f7275872eba5723d9643e2ec78e14e5e11cbdfc5c3f7a3c1a3
 boundary_refs: [boundary.extension-lifecycle]
 behavior_refs: [behavior.extension-publication]
 rule_refs: [rule.extension-generation-authority, rule.permission-effect-order]
-evidence_refs: [evidence.effects-extensions, evidence.high-risk-audit-frontier, evidence.framework-concept-navigation, evidence.extension-credential-debug-redaction-repair, evidence.extension-credential-debug-redaction-verification, evidence.skill-activation-authority-repair, evidence.skill-activation-authority-verification, evidence.mcp-tool-local-classification-repair, evidence.mcp-tool-local-classification-verification, evidence.mcp-client-capability-advertisement-repair, evidence.mcp-client-capability-advertisement-verification, evidence.mcp-protocol-negotiation-repair, evidence.mcp-protocol-negotiation-verification, evidence.lsp-derived-handle-lifecycle-repair, evidence.lsp-derived-handle-lifecycle-verification, evidence.plugin-component-preparation-repair, evidence.plugin-generation-publication-authority-repair, evidence.plugin-generation-publication-authority-verification]
+evidence_refs: [evidence.effects-extensions, evidence.high-risk-audit-frontier, evidence.framework-concept-navigation, evidence.extension-credential-debug-redaction-repair, evidence.extension-credential-debug-redaction-verification, evidence.skill-activation-authority-repair, evidence.skill-activation-authority-verification, evidence.mcp-tool-local-classification-repair, evidence.mcp-tool-local-classification-verification, evidence.mcp-client-capability-advertisement-repair, evidence.mcp-client-capability-advertisement-verification, evidence.mcp-protocol-negotiation-repair, evidence.mcp-protocol-negotiation-verification, evidence.lsp-derived-handle-lifecycle-repair, evidence.lsp-derived-handle-lifecycle-verification, evidence.plugin-component-preparation-repair, evidence.plugin-generation-publication-authority-repair, evidence.plugin-generation-publication-authority-verification, evidence.plugin-mcp-owner-isolation-repair, evidence.plugin-mcp-owner-isolation-verification]
 finding_refs: [finding.skill-activation-authority, finding.hook-permission-precedence, finding.hook-protected-path, finding.hook-event-producer-contract, finding.mcp-client-capability-advertisement, finding.mcp-tool-permission-classification, finding.plugin-mcp-owner-isolation, finding.plugin-failure-isolation-contract, finding.plugin-lifecycle-coordination, finding.plugin-generation-publication-authority, finding.plugin-lifecycle-reconcile-overlap, finding.lsp-runtime-state, finding.lsp-manager-derived-handle-resurrection, finding.extension-cleanup-settlement, finding.extension-credential-debug-redaction, finding.mcp-version-doc-drift]
-audit_refs: [audit.extension-lifecycle.state-authority, audit.extension-lifecycle.time-lifecycle, audit.extension-lifecycle.permission-external, audit.extension-lifecycle.contract-evidence, audit.skill-activation-authority-rereview, audit.mcp-tool-local-classification-rereview, audit.mcp-client-capability-advertisement-rereview, audit.mcp-protocol-negotiation-rereview, audit.lsp-derived-handle-lifecycle-rereview, audit.plugin-component-preparation-rereview, audit.plugin-generation-publication-authority-rereview]
+audit_refs: [audit.extension-lifecycle.state-authority, audit.extension-lifecycle.time-lifecycle, audit.extension-lifecycle.permission-external, audit.extension-lifecycle.contract-evidence, audit.skill-activation-authority-rereview, audit.mcp-tool-local-classification-rereview, audit.mcp-client-capability-advertisement-rereview, audit.mcp-protocol-negotiation-rereview, audit.lsp-derived-handle-lifecycle-rereview, audit.plugin-component-preparation-rereview, audit.plugin-generation-publication-authority-rereview, audit.plugin-mcp-owner-isolation-rereview]
 related_map_refs: [map.workspace-architecture, map.context-memory, map.tool-permission-sandbox, map.protocol-surfaces]
 scenarios:
   mcp-connect-discover-close:
@@ -31,11 +31,11 @@ scenarios:
     evidence_refs: [evidence.effects-extensions, evidence.skill-activation-authority-repair, evidence.skill-activation-authority-verification]
   plugin-prepare-publish-withdraw:
     status: mapped
-    source_refs: [echo-core/src/plugin/registry.rs, echo-core/src/plugin/lifecycle.rs, src/plugin/prepared.rs, src/agent/react/mod.rs]
+    source_refs: [echo-core/src/plugin/registry.rs, echo-core/src/plugin/lifecycle.rs, echo-integration/src/mcp/identity.rs, echo-integration/src/mcp/mod.rs, echo-integration/src/mcp/resource_tool.rs, src/plugin/prepared.rs, src/agent/react/capabilities.rs, src/agent/react/mod.rs]
     finding_refs: [finding.plugin-mcp-owner-isolation, finding.plugin-failure-isolation-contract, finding.plugin-lifecycle-coordination, finding.plugin-generation-publication-authority, finding.plugin-lifecycle-reconcile-overlap]
     rule_refs: [rule.extension-generation-authority]
-    evidence_refs: [evidence.plugin-component-preparation-repair, evidence.plugin-generation-publication-authority-repair, evidence.plugin-generation-publication-authority-verification]
-    audit_refs: [audit.plugin-generation-publication-authority-rereview]
+    evidence_refs: [evidence.plugin-component-preparation-repair, evidence.plugin-generation-publication-authority-repair, evidence.plugin-generation-publication-authority-verification, evidence.plugin-mcp-owner-isolation-repair, evidence.plugin-mcp-owner-isolation-verification]
+    audit_refs: [audit.plugin-generation-publication-authority-rereview, audit.plugin-mcp-owner-isolation-rereview]
   lsp-process-routing:
     status: mapped
     source_refs: [echo-core/src/lsp/client.rs, echo-integration/src/lsp/client.rs, echo-integration/src/lsp/manager.rs]
@@ -91,8 +91,8 @@ Catalog/status/tool list 是 registry projection；仅可执行且当前 generat
 ## 场景处置清单
 
 五类生命周期和十六个Finding已映射；Skill activation authority、Plugin prepare failure
-isolation与active generation已在主线修复并通过独立复审。跨Host统一编排与MCP owner
-结算保持needs_review。
+isolation、active generation 与 MCP owner isolation 已在主线修复并通过独立复审。跨 Host
+统一编排仍由 #73 保持 needs_review。
 
 ## 未展开项
 

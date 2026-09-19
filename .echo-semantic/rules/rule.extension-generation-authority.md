@@ -10,7 +10,7 @@ focus: [state_authority, time_lifecycle, data_durability, permission_external]
 observed_at: source:1793556b87f7275872eba5723d9643e2ec78e14e5e11cbdfc5c3f7a3c1a3ce70
 behavior_refs: [behavior.extension-publication]
 code_refs: [echo-integration/src/mcp/mod.rs, echo-execution/src/skills/hooks.rs, echo-execution/src/skills/registry.rs, echo-core/src/plugin/registry.rs, src/plugin/prepared.rs, src/agent/react/mod.rs, echo-core/src/plugin/lifecycle.rs, echo-integration/src/lsp/manager.rs]
-evidence_refs: [evidence.effects-extensions, evidence.skill-activation-authority-repair, evidence.skill-activation-authority-verification, evidence.mcp-client-capability-advertisement-repair, evidence.mcp-client-capability-advertisement-verification, evidence.lsp-derived-handle-lifecycle-repair, evidence.lsp-derived-handle-lifecycle-verification, evidence.plugin-component-preparation-repair, evidence.plugin-component-preparation-verification, evidence.plugin-generation-publication-authority-repair, evidence.plugin-generation-publication-authority-verification]
+evidence_refs: [evidence.effects-extensions, evidence.skill-activation-authority-repair, evidence.skill-activation-authority-verification, evidence.mcp-client-capability-advertisement-repair, evidence.mcp-client-capability-advertisement-verification, evidence.lsp-derived-handle-lifecycle-repair, evidence.lsp-derived-handle-lifecycle-verification, evidence.plugin-component-preparation-repair, evidence.plugin-component-preparation-verification, evidence.plugin-generation-publication-authority-repair, evidence.plugin-generation-publication-authority-verification, evidence.plugin-mcp-owner-isolation-repair, evidence.plugin-mcp-owner-isolation-verification]
 finding_refs: [finding.skill-activation-authority, finding.hook-permission-precedence, finding.mcp-client-capability-advertisement, finding.mcp-tool-permission-classification, finding.plugin-mcp-owner-isolation, finding.plugin-failure-isolation-contract, finding.plugin-lifecycle-coordination, finding.lsp-runtime-state, finding.lsp-manager-derived-handle-resurrection, finding.extension-cleanup-settlement, finding.mcp-version-doc-drift]
 ---
 
@@ -26,7 +26,7 @@ MCP、Hook、Skill、Plugin 和 LSP 各自使用明确 owner/registry；Plugin p
 
 ## 当前实现
 
-各manager/registry持有自身状态；SkillRegistry主视图、definition adapter、run snapshot与checkpoint共享唯一epoch/generation-fenced activation handle。MCP client只协商已实现capability；LspManager的generation/closed lifecycle覆盖所有派生client。PluginRegistry、PluginIntegrator与PluginLifecycleManager分别负责持久状态、immutable preparation和callbacks；prepare的进程级序号跨独立Integrator排序，ReactAgent持有唯一target-scoped active publication与cleanup receipt，cloned Integrator不拥有全局active generation。MCP每次成功连接在下一次await前登记receipt，原本缺席的名字在连接期间保留清理scope。
+各manager/registry持有自身状态；SkillRegistry主视图、definition adapter、run snapshot与checkpoint共享唯一epoch/generation-fenced activation handle。MCP client只协商已实现capability，McpManager以typed owner identity统一索引active/prepared/debt状态；LspManager的generation/closed lifecycle覆盖所有派生client。PluginRegistry、PluginIntegrator与PluginLifecycleManager分别负责持久状态、immutable preparation和callbacks；prepare的进程级序号跨独立Integrator排序，ReactAgent持有唯一target-scoped active publication与cleanup receipt，cloned Integrator不拥有全局active generation。MCP每次成功连接在下一次await前登记typed receipt，原本缺席的identity在连接期间保留清理scope。
 
 ## 期望行为
 
@@ -42,5 +42,5 @@ MCP/Hook/Skill/Plugin/LSP 源码、ADR 0012/0023/0026 和 focused tests 提供�
 
 Skill state、MCP capability/local classification与LSP derived ownership已修复复审；ADR 0045
 DU-71与ADR 0012也已统一component isolation和atomic generation合同。Plugin active generation
-已在主线 `cb4ee9ed` 交付target-scoped authority并通过独立复审；lifecycle coordination、MCP
-owner isolation及其它开放Finding不由本切片关闭，故本Rule继续待审计。
+已在主线 `cb4ee9ed` 交付target-scoped authority并通过独立复审；MCP owner isolation已在
+`c327f2d0` 交付并复审。lifecycle coordination与其它开放Finding不由本切片关闭，故本Rule继续待审计。
