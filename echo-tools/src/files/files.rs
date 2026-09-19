@@ -4,7 +4,7 @@ use echo_core::tokenizer::{HeuristicTokenizer, Tokenizer};
 use echo_core::tools::pagination::PageRequest;
 use echo_core::tools::permission::ToolPermission;
 use echo_core::tools::{
-    Tool, ToolFailure, ToolFailureCategory, ToolParameters, ToolResult, ToolRiskLevel,
+    Tool, ToolEffect, ToolFailure, ToolFailureCategory, ToolParameters, ToolResult, ToolRiskLevel,
     ToolSideEffect,
 };
 use futures::future::BoxFuture;
@@ -72,7 +72,9 @@ fn with_read_file_metadata(
         "remaining_lines".to_string(),
         total_lines.saturating_sub(end_line).to_string(),
     );
-    result
+    result.with_effect(ToolEffect::FileRead {
+        path: path.display().to_string(),
+    })
 }
 
 fn file_idempotency_key(
@@ -170,13 +172,6 @@ impl Tool for CreateFileTool {
                 ctx.working_dir.as_deref(),
             )?;
 
-            if path.exists() {
-                return Ok(ToolResult::failure(
-                    ToolFailureCategory::InvalidArguments,
-                    format!("File already exists: {}", path.display()),
-                ));
-            }
-
             // Auto-create parent directory
             if let Some(parent) = path.parent() {
                 tokio::fs::create_dir_all(parent).await.map_err(|e| {
@@ -187,17 +182,34 @@ impl Tool for CreateFileTool {
                 })?;
             }
 
-            tokio::fs::write(&path, "")
+            match tokio::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
                 .await
-                .map_err(|e| ToolError::ExecutionFailed {
-                    tool: "create_file".to_string(),
-                    message: format!("Failed to create file: {}", e),
-                })?;
+            {
+                Ok(file) => drop(file),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    return Ok(ToolResult::failure(
+                        ToolFailureCategory::InvalidArguments,
+                        format!("File already exists: {}", path.display()),
+                    ));
+                }
+                Err(error) => {
+                    return Err(ToolError::ExecutionFailed {
+                        tool: "create_file".to_string(),
+                        message: format!("Failed to create file: {error}"),
+                    }
+                    .into());
+                }
+            }
 
-            Ok(ToolResult::success(format!(
-                "File created successfully: {}",
-                path.display()
-            )))
+            Ok(
+                ToolResult::success(format!("File created successfully: {}", path.display()))
+                    .with_effect(ToolEffect::FileEdit {
+                        path: path.display().to_string(),
+                    }),
+            )
         })
     }
 }
@@ -305,7 +317,10 @@ impl Tool for DeleteFileTool {
                 })?;
 
             let mut result =
-                ToolResult::success(format!("File deleted successfully: {}", path.display()));
+                ToolResult::success(format!("File deleted successfully: {}", path.display()))
+                    .with_effect(ToolEffect::FileEdit {
+                        path: path.display().to_string(),
+                    });
 
             if let Some(tag) = checkpoint_tag {
                 result = result.with_meta("git_checkpoint", tag);
@@ -721,7 +736,10 @@ impl Tool for WriteFileTool {
                 "Successfully wrote {} bytes to '{}'",
                 bytes,
                 path.display()
-            ));
+            ))
+            .with_effect(ToolEffect::FileEdit {
+                path: path.display().to_string(),
+            });
 
             if let Some(tag) = checkpoint_tag {
                 result = result.with_meta("git_checkpoint", tag);
@@ -832,6 +850,7 @@ impl Tool for AppendFileTool {
                 })?;
             }
 
+            let existed_before = path.exists();
             let mut file = tokio::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
@@ -849,11 +868,17 @@ impl Tool for AppendFileTool {
                     message: format!("Failed to append write: {}", e),
                 })?;
 
-            Ok(ToolResult::success(format!(
+            let mut result = ToolResult::success(format!(
                 "Appended {} bytes to '{}'",
                 content.len(),
                 path.display()
-            )))
+            ));
+            if !existed_before || !content.is_empty() {
+                result = result.with_effect(ToolEffect::FileEdit {
+                    path: path.display().to_string(),
+                });
+            }
+            Ok(result)
         })
     }
 }
@@ -978,10 +1003,13 @@ impl Tool for UpdateFileTool {
                     message: format!("Failed to write update: {}", e),
                 })?;
 
-            Ok(ToolResult::success(format!(
-                "File updated: {}",
-                path.display()
-            )))
+            Ok(
+                ToolResult::success(format!("File updated: {}", path.display())).with_effect(
+                    ToolEffect::FileEdit {
+                        path: path.display().to_string(),
+                    },
+                ),
+            )
         })
     }
 }
@@ -1111,7 +1139,13 @@ impl Tool for MoveFileTool {
                 "File moved successfully, old_path: {}, new_path: {}.",
                 old_path.display(),
                 new_path.display()
-            )))
+            ))
+            .with_effect(ToolEffect::FileEdit {
+                path: old_path.display().to_string(),
+            })
+            .with_effect(ToolEffect::FileEdit {
+                path: new_path.display().to_string(),
+            }))
         })
     }
 }
@@ -1622,6 +1656,160 @@ mod worktree_cwd_tests {
         );
 
         let _ = std::fs::remove_dir_all(&wt);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod mutation_effect_tests {
+    use super::*;
+    use echo_core::tools::ToolContext;
+
+    #[tokio::test]
+    async fn file_mutators_report_only_confirmed_affected_paths() -> echo_core::error::Result<()> {
+        let root = tempfile::tempdir()?;
+        let canonical_root = std::fs::canonicalize(root.path())?;
+        let context = ToolContext {
+            working_dir: Some(canonical_root.clone()),
+            ..Default::default()
+        };
+        let original = canonical_root.join("original.txt");
+        let destination = canonical_root.join("destination.txt");
+        let effect = |path: &Path| ToolEffect::FileEdit {
+            path: path.display().to_string(),
+        };
+
+        let created = CreateFileTool::new()
+            .execute_with_context(
+                ToolParameters::from([("path".to_string(), json!("original.txt"))]),
+                &context,
+            )
+            .await?;
+        assert!(created.success);
+        assert_eq!(created.effects, [effect(&original)]);
+        let rejected = CreateFileTool::new()
+            .execute_with_context(
+                ToolParameters::from([("path".to_string(), json!("original.txt"))]),
+                &context,
+            )
+            .await?;
+        assert!(!rejected.success);
+        assert!(rejected.effects.is_empty());
+
+        let unchanged = AppendFileTool::new()
+            .execute_with_context(
+                ToolParameters::from([
+                    ("path".to_string(), json!("original.txt")),
+                    ("content".to_string(), json!("")),
+                ]),
+                &context,
+            )
+            .await?;
+        assert!(unchanged.success);
+        assert!(unchanged.effects.is_empty());
+        let appended = AppendFileTool::new()
+            .execute_with_context(
+                ToolParameters::from([
+                    ("path".to_string(), json!("original.txt")),
+                    ("content".to_string(), json!("hello")),
+                ]),
+                &context,
+            )
+            .await?;
+        assert_eq!(appended.effects, [effect(&original)]);
+
+        let updated = UpdateFileTool::new()
+            .execute_with_context(
+                ToolParameters::from([
+                    ("path".to_string(), json!("original.txt")),
+                    ("old_content".to_string(), json!("hello")),
+                    ("new_content".to_string(), json!("world")),
+                ]),
+                &context,
+            )
+            .await?;
+        assert_eq!(updated.effects, [effect(&original)]);
+        let rejected_after_write = CreateFileTool::new()
+            .execute_with_context(
+                ToolParameters::from([("path".to_string(), json!("original.txt"))]),
+                &context,
+            )
+            .await?;
+        assert!(!rejected_after_write.success);
+        assert!(rejected_after_write.effects.is_empty());
+        assert_eq!(std::fs::read_to_string(&original)?, "world");
+        let moved = MoveFileTool::new()
+            .execute_with_context(
+                ToolParameters::from([
+                    ("old_path".to_string(), json!("original.txt")),
+                    ("new_path".to_string(), json!("destination.txt")),
+                ]),
+                &context,
+            )
+            .await?;
+        assert_eq!(moved.effects, [effect(&original), effect(&destination)]);
+        let deleted = DeleteFileTool::new()
+            .execute_with_context(
+                ToolParameters::from([("path".to_string(), json!("destination.txt"))]),
+                &context,
+            )
+            .await?;
+        assert_eq!(deleted.effects, [effect(&destination)]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn successful_read_reports_resolved_path_and_failed_read_reports_none()
+    -> echo_core::error::Result<()> {
+        let root = tempfile::tempdir()?;
+        let canonical_root = std::fs::canonicalize(root.path())?;
+        let context = ToolContext {
+            working_dir: Some(canonical_root.clone()),
+            ..Default::default()
+        };
+        let path = canonical_root.join("nested/read.txt");
+        std::fs::create_dir_all(path.parent().ok_or_else(|| {
+            echo_core::error::ReactError::Other("read path has no parent".to_string())
+        })?)?;
+        std::fs::write(&path, "content")?;
+        let read = ReadFileTool::new()
+            .execute_with_context(
+                ToolParameters::from([("path".to_string(), json!("nested/read.txt"))]),
+                &context,
+            )
+            .await?;
+        assert!(read.success);
+        assert_eq!(
+            read.effects,
+            [ToolEffect::FileRead {
+                path: path.display().to_string(),
+            }]
+        );
+        let rejected = ReadFileTool::new()
+            .execute_with_context(
+                ToolParameters::from([
+                    ("path".to_string(), json!("nested/read.txt")),
+                    ("offset".to_string(), json!(999)),
+                ]),
+                &context,
+            )
+            .await?;
+        assert!(!rejected.success);
+        assert!(rejected.effects.is_empty());
+        let empty = canonical_root.join("empty.txt");
+        std::fs::write(&empty, "")?;
+        let empty_read = ReadFileTool::new()
+            .execute_with_context(
+                ToolParameters::from([("path".to_string(), json!("empty.txt"))]),
+                &context,
+            )
+            .await?;
+        assert_eq!(
+            empty_read.effects,
+            [ToolEffect::FileRead {
+                path: empty.display().to_string(),
+            }]
+        );
         Ok(())
     }
 }

@@ -328,10 +328,19 @@ async fn main() -> echo_agent::error::Result<()> {
     println!("{}", answer);
 
     // Manually close connections
-    mcp.close_all().await;
+    mcp.close_all().await?;
     Ok(())
 }
 ```
+
+`McpClient::close`, `McpManager::disconnect`, and `McpManager::close_all`
+return a `Result`. A successful close fences new transport requests, releases
+all pending callers, and waits for transport-owned I/O tasks and stdio child
+processes within the transport's bounded shutdown policy. `close_all` attempts
+every connected client before returning an aggregate cleanup error, so callers
+can observe debt without stranding later clients. Legacy SSE close also aborts
+the receive/POST lifecycle and awaits the receive task. These lifecycle checks
+do not add a permission gate for user-selected MCP servers.
 
 ---
 
@@ -541,6 +550,10 @@ Potential MCP errors:
 | `McpError::ProtocolError` | Protocol layer error | Check JSON format |
 | `McpError::ToolCallFailed` | Tool invocation failed | Check parameter correctness |
 | `McpError::TransportClosed` | Transport layer closed | Reconnect to server |
+
+Close timeout, task join, child kill/wait, and aggregate close failures use
+`McpError::ConnectionFailed` with cleanup context and are returned from the
+close call rather than converted to successful completion.
 
 ---
 

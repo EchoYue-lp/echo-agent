@@ -17,6 +17,7 @@
 pub mod analyzer;
 
 use chrono::{DateTime, Utc};
+use echo_core::utils::retention::ContentRetentionPolicy;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -305,6 +306,15 @@ pub enum RunEvent {
         /// Duration of the tool execution in milliseconds.
         duration_ms: u64,
     },
+    /// A requested tool invocation was settled without entering execution.
+    ToolExecutionSkipped {
+        /// Call ID matching the requested ToolCall.
+        call_id: String,
+        /// Requested tool name.
+        name: String,
+        /// Runtime reason for closing the unstarted invocation.
+        reason: String,
+    },
     /// A tool returned a result.
     ToolResult {
         /// Call ID matching the ToolCall.
@@ -381,6 +391,13 @@ pub enum RunEvent {
         /// Reason for the decision.
         reason: String,
     },
+    /// A file was successfully read by a tool that resolved the actual path.
+    FileRead {
+        /// Tool that performed the read.
+        tool: String,
+        /// Resolved path that was read.
+        path: String,
+    },
     /// A file was edited by a write tool.
     FileEdit {
         /// Tool that made the edit.
@@ -392,10 +409,11 @@ pub enum RunEvent {
     TestRun {
         /// The test command.
         command: String,
-        /// Whether all tests passed.
+        /// Whether the explicitly requested test command completed successfully.
         passed: bool,
-        /// Number of failing tests.
-        failure_count: usize,
+        /// Exact number of failing tests, if supplied by a structured report.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        failure_count: Option<usize>,
     },
     /// Agent turn phase transition.
     PhaseTransition {
@@ -406,6 +424,9 @@ pub enum RunEvent {
     },
     /// A subagent was dispatched.
     SubagentRun {
+        /// Tool call that admitted this dispatch, when invoked through a tool.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        call_id: Option<String>,
         /// Sub-agent name.
         agent_name: String,
         /// Task given to the subagent.
@@ -424,18 +445,86 @@ impl RunEvent {
         risk: Option<String>,
         duration_ms: u64,
     ) -> Self {
-        let safe_args = args.map(|v| {
-            let s = serde_json::to_string(&v).unwrap_or_default();
-            let redacted = crate::security::redact_secrets(&s);
-            serde_json::from_str(&redacted).unwrap_or(v)
-        });
-        Self::ToolCall {
+        let mut event = Self::ToolCall {
             call_id,
             name,
-            args: safe_args,
+            args,
             risk,
             duration_ms,
+        };
+        event.apply_retention(&ContentRetentionPolicy::default());
+        event
+    }
+
+    pub fn apply_retention(&mut self, retention: &ContentRetentionPolicy) {
+        match self {
+            Self::BudgetDecision { reason, .. } => {
+                *reason = retention.sanitize_text(reason);
+            }
+            Self::LlmCall { .. } | Self::ContextCompression { .. } => {}
+            Self::ToolCall { args, .. } => {
+                if let Some(args) = args {
+                    retention.sanitize_json(args);
+                }
+            }
+            Self::ToolExecutionSkipped { reason, .. } => {
+                *reason = retention.sanitize_text(reason);
+            }
+            Self::ToolResult { output_preview, .. } => {
+                if let Some(preview) = output_preview {
+                    *preview = retention.sanitize_text(preview);
+                }
+            }
+            Self::ToolError {
+                message, failure, ..
+            } => {
+                *message = retention.sanitize_text(message);
+                if let Some(failure) = failure
+                    && let Some(postcondition) = &mut failure.postcondition
+                {
+                    *postcondition = retention.sanitize_text(postcondition);
+                }
+            }
+            Self::Error { message } => *message = retention.sanitize_text(message),
+            Self::Checkpoint { .. } | Self::CheckpointResumed { .. } => {}
+            Self::TranscriptProjectionSettlement { settlement } => {
+                if let Some(detail) = &mut settlement.detail {
+                    *detail = retention.sanitize_text(detail);
+                }
+            }
+            Self::PermissionDecision { reason, .. } => {
+                *reason = retention.sanitize_text(reason);
+            }
+            Self::FileRead { .. } | Self::FileEdit { .. } => {}
+            Self::TestRun { command, .. } => *command = retention.sanitize_text(command),
+            Self::PhaseTransition { .. } => {}
+            Self::SubagentRun { task, .. } => {
+                *task = retention.sanitize_text(task);
+            }
         }
+    }
+}
+
+pub(crate) fn skipped_tool_call_ids(events: &[RunEvent]) -> std::collections::HashSet<&str> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            RunEvent::ToolExecutionSkipped { call_id, .. } => Some(call_id.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+pub(crate) fn apply_run_retention(run: &mut Run, retention: &ContentRetentionPolicy) {
+    run.input = retention.sanitize_text(&run.input);
+    if let Some(output) = run.final_output.as_mut() {
+        *output = retention.sanitize_text(output);
+    }
+    if let Some(error) = run.error.as_mut() {
+        *error = retention.sanitize_text(error);
+    }
+    for event in &mut run.events {
+        event.apply_retention(retention);
     }
 }
 
@@ -581,14 +670,47 @@ pub trait RunStore: Send + Sync {
     /// Append a single event to an existing run (without rewriting the entire run).
     ///
     /// The default implementation loads, modifies, and saves. Implementations
-    /// that support efficient append (e.g. JSONL) should override this.
+    /// that support efficient append (e.g. JSONL) should override this. The
+    /// compatibility path applies the default content-retention policy before
+    /// calling a custom backend; backends with a stricter policy must still
+    /// sanitize their own `save` implementation.
     async fn append_event(&self, run_id: &str, event: RunEvent) -> Result<()> {
         let mut run = self
             .load(run_id)
             .await?
             .ok_or_else(|| crate::error::ReactError::Other(format!("run '{run_id}' not found")))?;
+        let mut event = event;
+        event.apply_retention(&ContentRetentionPolicy::default());
         run.push_event(event);
         self.save(run).await
+    }
+
+    /// Atomically finalize one run relative to [`Self::append_event`].
+    ///
+    /// The compatibility default performs load/update/save. Backends that can
+    /// receive concurrent event appends must override this method under the
+    /// same mutation authority as `append_event`; both built-in stores do so.
+    /// Returns `false` when the run does not exist.
+    async fn finalize_run(
+        &self,
+        run_id: &str,
+        status: RunStatus,
+        output: Option<&str>,
+        error: Option<&str>,
+    ) -> Result<bool> {
+        validate_terminal_status(status)?;
+        let Some(mut run) = self.load(run_id).await? else {
+            return Ok(false);
+        };
+        apply_run_finalization(
+            &mut run,
+            status,
+            output,
+            error,
+            &ContentRetentionPolicy::default(),
+        );
+        self.save(run).await?;
+        Ok(true)
     }
 }
 
@@ -600,6 +722,7 @@ pub trait RunStore: Send + Sync {
 /// across restarts.
 pub struct InMemoryRunStore {
     runs: RwLock<HashMap<String, Run>>,
+    retention: echo_core::utils::retention::ContentRetentionPolicy,
 }
 
 impl InMemoryRunStore {
@@ -607,7 +730,16 @@ impl InMemoryRunStore {
     pub fn new() -> Self {
         Self {
             runs: RwLock::new(HashMap::new()),
+            retention: echo_core::utils::retention::ContentRetentionPolicy::default(),
         }
+    }
+
+    pub fn with_retention_policy(
+        mut self,
+        retention: echo_core::utils::retention::ContentRetentionPolicy,
+    ) -> Self {
+        self.retention = retention;
+        self
     }
 
     /// Return the number of stored runs.
@@ -631,13 +763,17 @@ impl Default for InMemoryRunStore {
 impl RunStore for InMemoryRunStore {
     async fn save(&self, run: Run) -> Result<()> {
         let mut runs = self.runs.write().await;
-        let merged = merge_run(runs.get(&run.run_id).cloned(), run);
+        let mut merged = merge_run(runs.get(&run.run_id).cloned(), run);
+        apply_run_retention(&mut merged, &self.retention);
         runs.insert(merged.run_id.clone(), merged);
         Ok(())
     }
 
     async fn load(&self, run_id: &str) -> Result<Option<Run>> {
-        Ok(self.runs.read().await.get(run_id).cloned())
+        Ok(self.runs.read().await.get(run_id).cloned().map(|mut run| {
+            apply_run_retention(&mut run, &self.retention);
+            run
+        }))
     }
 
     async fn list_by_session(&self, session_id: &str) -> Result<Vec<RunSummary>> {
@@ -645,7 +781,11 @@ impl RunStore for InMemoryRunStore {
         let mut summaries: Vec<RunSummary> = runs
             .values()
             .filter(|r| r.session_id == session_id)
-            .map(Run::summary)
+            .map(|run| {
+                let mut run = run.clone();
+                apply_run_retention(&mut run, &self.retention);
+                run.summary()
+            })
             .collect();
         summaries.sort_by_key(|s| s.started_at);
         summaries.reverse();
@@ -654,20 +794,44 @@ impl RunStore for InMemoryRunStore {
 
     async fn list_all(&self, limit: usize) -> Result<Vec<RunSummary>> {
         let runs = self.runs.read().await;
-        let mut summaries: Vec<RunSummary> = runs.values().map(Run::summary).collect();
+        let mut summaries: Vec<RunSummary> = runs
+            .values()
+            .map(|run| {
+                let mut run = run.clone();
+                apply_run_retention(&mut run, &self.retention);
+                run.summary()
+            })
+            .collect();
         summaries.sort_by_key(|s| s.started_at);
         summaries.reverse();
         summaries.truncate(limit);
         Ok(summaries)
     }
 
-    async fn append_event(&self, run_id: &str, event: RunEvent) -> Result<()> {
+    async fn append_event(&self, run_id: &str, mut event: RunEvent) -> Result<()> {
         let mut runs = self.runs.write().await;
         let run = runs
             .get_mut(run_id)
             .ok_or_else(|| crate::error::ReactError::Other(format!("run '{run_id}' not found")))?;
+        event.apply_retention(&self.retention);
         run.push_event(event);
         Ok(())
+    }
+
+    async fn finalize_run(
+        &self,
+        run_id: &str,
+        status: RunStatus,
+        output: Option<&str>,
+        error: Option<&str>,
+    ) -> Result<bool> {
+        validate_terminal_status(status)?;
+        let mut runs = self.runs.write().await;
+        let Some(run) = runs.get_mut(run_id) else {
+            return Ok(false);
+        };
+        apply_run_finalization(run, status, output, error, &self.retention);
+        Ok(true)
     }
 }
 
@@ -681,16 +845,26 @@ impl RunStore for InMemoryRunStore {
 /// appends only one bounded event, avoiding quadratic write amplification.
 ///
 /// Suitable for production use with persistent storage across restarts.
+#[derive(Clone)]
 pub struct JsonlRunStore {
     dir: PathBuf,
     shared: Arc<JsonlRunStoreData>,
     retention: echo_core::utils::retention::ContentRetentionPolicy,
     max_runs: usize,
+    #[cfg(test)]
+    mutation_test_hook: Option<Arc<JsonlMutationTestHook>>,
 }
 
 struct JsonlRunStoreData {
     cache: RwLock<HashMap<String, Run>>,
     mutation_lock: Mutex<()>,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct JsonlMutationTestHook {
+    physically_committed: tokio::sync::Notify,
+    release_publish: tokio::sync::Notify,
 }
 
 fn jsonl_store_registry() -> &'static StdMutex<HashMap<PathBuf, Weak<JsonlRunStoreData>>> {
@@ -717,6 +891,8 @@ impl JsonlRunStore {
                 shared,
                 retention: echo_core::utils::retention::ContentRetentionPolicy::default(),
                 max_runs: Self::DEFAULT_MAX_RUNS,
+                #[cfg(test)]
+                mutation_test_hook: None,
             });
         }
         let mut cache = HashMap::new();
@@ -755,16 +931,14 @@ impl JsonlRunStore {
                     path.file_stem()
                         .and_then(|name| name.to_str())
                         .ok_or_else(|| {
-                            crate::error::ReactError::Other(format!(
-                                "run filename is not valid UTF-8: {}",
-                                path.display()
-                            ))
+                            crate::error::ReactError::Other(
+                                "run filename is not valid UTF-8".to_string(),
+                            )
                         })?;
                 if run.run_id != expected {
-                    return Err(crate::error::ReactError::Other(format!(
-                        "run identity mismatch in {}",
-                        path.display()
-                    )));
+                    return Err(crate::error::ReactError::Other(
+                        "run identity mismatch in persisted trace".to_string(),
+                    ));
                 }
                 Ok(run)
             })();
@@ -787,6 +961,8 @@ impl JsonlRunStore {
             shared,
             retention: echo_core::utils::retention::ContentRetentionPolicy::default(),
             max_runs: Self::DEFAULT_MAX_RUNS,
+            #[cfg(test)]
+            mutation_test_hook: None,
         })
     }
 
@@ -804,29 +980,46 @@ impl JsonlRunStore {
         self
     }
 
+    #[cfg(test)]
+    fn set_mutation_test_hook(&mut self, hook: Option<Arc<JsonlMutationTestHook>>) {
+        self.mutation_test_hook = hook;
+    }
+
+    #[cfg(test)]
+    async fn wait_before_cache_publish(&self) {
+        if let Some(hook) = &self.mutation_test_hook {
+            hook.physically_committed.notify_one();
+            hook.release_publish.notified().await;
+        }
+    }
+
     /// Return the file path for a given run ID.
     fn run_path(&self, run_id: &str) -> Result<PathBuf> {
         let name = format!("{run_id}.jsonl");
         Ok(echo_core::utils::fs::join_path_segment(&self.dir, &name)?)
     }
 
-    fn parse_run_log(data: &str, path: &Path) -> Result<Run> {
+    fn parse_run_log(data: &str, _path: &Path) -> Result<Run> {
         let has_partial_tail = !data.ends_with('\n');
         let lines = data
             .lines()
             .filter(|line| !line.trim().is_empty())
             .collect::<Vec<_>>();
-        let first = lines.first().ok_or_else(|| {
-            crate::error::ReactError::Other(format!("empty run file: {}", path.display()))
-        })?;
-        let mut run = serde_json::from_str::<Run>(first)?;
+        let first = lines
+            .first()
+            .ok_or_else(|| crate::error::ReactError::Other("empty run file".to_string()))?;
+        let mut run = serde_json::from_str::<Run>(first).map_err(trace_decode_error)?;
         for (index, line) in lines.iter().enumerate().skip(1) {
             match serde_json::from_str::<RunEvent>(line) {
                 Ok(event) => run.push_event(event),
                 Err(error) if has_partial_tail && index.saturating_add(1) == lines.len() => {
-                    tracing::warn!(path = %path.display(), %error, "ignoring truncated run event tail");
+                    tracing::warn!(
+                        error_category = ?error.classify(),
+                        error_column = error.column(),
+                        "ignoring truncated run event tail"
+                    );
                 }
-                Err(error) => return Err(error.into()),
+                Err(error) => return Err(trace_decode_error(error)),
             }
         }
         Ok(run)
@@ -842,13 +1035,11 @@ impl JsonlRunStore {
         Self::parse_run_log(&data, path)
     }
 
-    async fn persist_unlocked(&self, run: Run) -> Result<()> {
+    async fn persist_unlocked(&self, mut run: Run) -> Result<()> {
+        apply_run_retention(&mut run, &self.retention);
         let run_id = run.run_id.clone();
         let path = self.run_path(&run_id)?;
-        let mut value = serde_json::to_value(&run)?;
-        self.retention.sanitize_json(&mut value);
-        let safe_run: Run = serde_json::from_value(value)?;
-        let mut bytes = serde_json::to_vec(&safe_run)?;
+        let mut bytes = serde_json::to_vec(&run)?;
         bytes.push(b'\n');
         let path_for_write = path.clone();
         tokio::task::spawn_blocking(move || {
@@ -858,7 +1049,9 @@ impl JsonlRunStore {
         .map_err(|error| {
             crate::error::ReactError::Other(format!("run writer join failed: {error}"))
         })??;
-        self.shared.cache.write().await.insert(run_id, safe_run);
+        #[cfg(test)]
+        self.wait_before_cache_publish().await;
+        self.shared.cache.write().await.insert(run_id, run);
         self.prune_unlocked().await?;
         Ok(())
     }
@@ -885,19 +1078,25 @@ impl JsonlRunStore {
     }
 }
 
-fn quarantine_corrupt_run_log(path: &Path, error: &dyn std::fmt::Display) {
+fn trace_decode_error(error: serde_json::Error) -> crate::error::ReactError {
+    crate::error::ReactError::Other(format!(
+        "invalid trace record: {:?} at line {} column {}",
+        error.classify(),
+        error.line(),
+        error.column()
+    ))
+}
+
+fn quarantine_corrupt_run_log(path: &Path, _error: &dyn std::fmt::Display) {
     let target = path.with_extension(format!("jsonl.corrupt-{}", uuid::Uuid::new_v4()));
     match std::fs::rename(path, &target) {
         Ok(()) => tracing::warn!(
-            path = %path.display(),
-            quarantine = %target.display(),
-            %error,
+            error_category = "invalid_run_log",
             "isolated unreadable run log"
         ),
         Err(rename_error) => tracing::warn!(
-            path = %path.display(),
-            %error,
-            %rename_error,
+            error_category = "invalid_run_log",
+            error_kind = ?rename_error.kind(),
             "failed to isolate unreadable run log"
         ),
     }
@@ -906,26 +1105,34 @@ fn quarantine_corrupt_run_log(path: &Path, error: &dyn std::fmt::Display) {
 #[async_trait::async_trait]
 impl RunStore for JsonlRunStore {
     async fn save(&self, run: Run) -> Result<()> {
-        let _guard = self.shared.mutation_lock.lock().await;
-        let existing = self.shared.cache.read().await.get(&run.run_id).cloned();
-        self.persist_unlocked(merge_run(existing, run)).await
+        let store = self.clone();
+        tokio::spawn(async move {
+            let _guard = store.shared.mutation_lock.lock().await;
+            let existing = store.shared.cache.read().await.get(&run.run_id).cloned();
+            store.persist_unlocked(merge_run(existing, run)).await
+        })
+        .await
+        .map_err(|error| {
+            crate::error::ReactError::Other(format!("owned run save join failed: {error}"))
+        })?
     }
 
     async fn load(&self, run_id: &str) -> Result<Option<Run>> {
         // Check cache first
-        if let Some(run) = self.shared.cache.read().await.get(run_id) {
-            return Ok(Some(run.clone()));
+        if let Some(mut run) = self.shared.cache.read().await.get(run_id).cloned() {
+            apply_run_retention(&mut run, &self.retention);
+            return Ok(Some(run));
         }
         // Fall back to disk (async)
         let path = self.run_path(run_id)?;
         if tokio::fs::try_exists(&path).await? {
-            let run = Self::load_run_async(&path).await?;
+            let mut run = Self::load_run_async(&path).await?;
             if run.run_id != run_id {
-                return Err(crate::error::ReactError::Other(format!(
-                    "run identity mismatch in {}",
-                    path.display()
-                )));
+                return Err(crate::error::ReactError::Other(
+                    "run identity mismatch in persisted trace".to_string(),
+                ));
             }
+            apply_run_retention(&mut run, &self.retention);
             self.shared
                 .cache
                 .write()
@@ -941,7 +1148,11 @@ impl RunStore for JsonlRunStore {
         let mut summaries: Vec<RunSummary> = cache
             .values()
             .filter(|r| r.session_id == session_id)
-            .map(Run::summary)
+            .map(|run| {
+                let mut run = run.clone();
+                apply_run_retention(&mut run, &self.retention);
+                run.summary()
+            })
             .collect();
         summaries.sort_by_key(|s| s.started_at);
         summaries.reverse();
@@ -950,7 +1161,14 @@ impl RunStore for JsonlRunStore {
 
     async fn list_all(&self, limit: usize) -> Result<Vec<RunSummary>> {
         let cache = self.shared.cache.read().await;
-        let mut summaries: Vec<RunSummary> = cache.values().map(Run::summary).collect();
+        let mut summaries: Vec<RunSummary> = cache
+            .values()
+            .map(|run| {
+                let mut run = run.clone();
+                apply_run_retention(&mut run, &self.retention);
+                run.summary()
+            })
+            .collect();
         summaries.sort_by_key(|s| s.started_at);
         summaries.reverse();
         summaries.truncate(limit);
@@ -959,40 +1177,104 @@ impl RunStore for JsonlRunStore {
 
     /// Append one sanitized event line without rewriting the accumulated run.
     async fn append_event(&self, run_id: &str, event: RunEvent) -> Result<()> {
-        let _guard = self.shared.mutation_lock.lock().await;
-        let mut run = match self.shared.cache.read().await.get(run_id).cloned() {
-            Some(run) => run,
-            None => {
-                return Err(crate::error::ReactError::Other(format!(
-                    "run '{run_id}' not found"
-                )));
-            }
-        };
-        let mut value = serde_json::to_value(&event)?;
-        self.retention.sanitize_json(&mut value);
-        let safe_event: RunEvent = serde_json::from_value(value)?;
-        let mut bytes = serde_json::to_vec(&safe_event)?;
-        bytes.push(b'\n');
-        let path = self.run_path(run_id)?;
-        tokio::task::spawn_blocking(move || -> std::io::Result<()> {
-            echo_core::utils::fs::append_existing(
-                &path,
-                &bytes,
-                echo_core::utils::fs::FileDurability::SyncData,
-            )
+        let store = self.clone();
+        let run_id = run_id.to_string();
+        tokio::spawn(async move {
+            let _guard = store.shared.mutation_lock.lock().await;
+            let mut run = match store.shared.cache.read().await.get(&run_id).cloned() {
+                Some(run) => run,
+                None => {
+                    return Err(crate::error::ReactError::Other(format!(
+                        "run '{run_id}' not found"
+                    )));
+                }
+            };
+            let mut safe_event = event;
+            safe_event.apply_retention(&store.retention);
+            let mut bytes = serde_json::to_vec(&safe_event)?;
+            bytes.push(b'\n');
+            let path = store.run_path(&run_id)?;
+            tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+                echo_core::utils::fs::append_existing(
+                    &path,
+                    &bytes,
+                    echo_core::utils::fs::FileDurability::SyncData,
+                )
+            })
+            .await
+            .map_err(|error| {
+                crate::error::ReactError::Other(format!("run event writer join failed: {error}"))
+            })??;
+            #[cfg(test)]
+            store.wait_before_cache_publish().await;
+            run.push_event(safe_event);
+            store.shared.cache.write().await.insert(run_id, run);
+            Ok(())
         })
         .await
         .map_err(|error| {
-            crate::error::ReactError::Other(format!("run event writer join failed: {error}"))
-        })??;
-        run.push_event(safe_event);
-        self.shared
-            .cache
-            .write()
-            .await
-            .insert(run_id.to_string(), run);
-        Ok(())
+            crate::error::ReactError::Other(format!("owned run append join failed: {error}"))
+        })?
     }
+
+    async fn finalize_run(
+        &self,
+        run_id: &str,
+        status: RunStatus,
+        output: Option<&str>,
+        error: Option<&str>,
+    ) -> Result<bool> {
+        validate_terminal_status(status)?;
+        let store = self.clone();
+        let run_id = run_id.to_string();
+        let output = output.map(str::to_string);
+        let error = error.map(str::to_string);
+        tokio::spawn(async move {
+            let _guard = store.shared.mutation_lock.lock().await;
+            let Some(mut run) = store.shared.cache.read().await.get(&run_id).cloned() else {
+                return Ok(false);
+            };
+            apply_run_finalization(
+                &mut run,
+                status,
+                output.as_deref(),
+                error.as_deref(),
+                &store.retention,
+            );
+            store.persist_unlocked(run).await?;
+            Ok(true)
+        })
+        .await
+        .map_err(|error| {
+            crate::error::ReactError::Other(format!("owned run finalize join failed: {error}"))
+        })?
+    }
+}
+
+fn apply_run_finalization(
+    run: &mut Run,
+    status: RunStatus,
+    output: Option<&str>,
+    error: Option<&str>,
+    retention: &ContentRetentionPolicy,
+) {
+    if is_terminal(run.status) {
+        return;
+    }
+    run.status = status;
+    run.final_output = output.map(str::to_string);
+    run.error = error.map(str::to_string);
+    if status == RunStatus::Failed
+        && !run
+            .events
+            .iter()
+            .any(|event| matches!(event, RunEvent::Error { .. }))
+        && let Some(message) = run.error.clone()
+    {
+        run.push_event(RunEvent::Error { message });
+    }
+    run.finished_at = Some(Utc::now());
+    apply_run_retention(run, retention);
 }
 
 fn merge_run(existing: Option<Run>, mut incoming: Run) -> Run {
@@ -1018,6 +1300,16 @@ fn is_terminal(status: RunStatus) -> bool {
         status,
         RunStatus::Completed | RunStatus::Failed | RunStatus::Cancelled
     )
+}
+
+fn validate_terminal_status(status: RunStatus) -> Result<()> {
+    if is_terminal(status) {
+        Ok(())
+    } else {
+        Err(crate::error::ReactError::Other(format!(
+            "run finalization requires a terminal status, got {status:?}"
+        )))
+    }
 }
 
 // ── Unit tests ───────────────────────────────────────────────────────
@@ -1195,6 +1487,83 @@ mod tests {
         dir
     }
 
+    #[test]
+    fn corrupt_trace_logs_do_not_render_secret_like_run_paths() -> Result<()> {
+        #[derive(Clone)]
+        struct CaptureLogWriter(Arc<StdMutex<Vec<u8>>>);
+
+        impl std::io::Write for CaptureLogWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("token=supersecretvalue.jsonl");
+        std::fs::write(&path, "invalid trace")?;
+        let output = Arc::new(StdMutex::new(Vec::new()));
+        let captured = Arc::clone(&output);
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(move || CaptureLogWriter(Arc::clone(&captured)))
+            .finish();
+        let valid_run = serde_json::to_string(&make_run("other", "session"))?;
+        tracing::subscriber::with_default(subscriber, || {
+            quarantine_corrupt_run_log(&path, &ReactError::Other("invalid".to_string()));
+            let _ignored =
+                JsonlRunStore::parse_run_log(&format!("{valid_run}\n{{invalid-tail"), &path);
+        });
+        let logs = String::from_utf8(
+            output
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone(),
+        )
+        .map_err(|error| ReactError::Other(error.to_string()))?;
+        assert!(logs.contains("isolated unreadable run log"));
+        assert!(logs.contains("ignoring truncated run event tail"));
+        assert!(!logs.contains("supersecretvalue"));
+        assert!(!logs.contains("token="));
+        Ok(())
+    }
+
+    #[test]
+    fn trace_retention_zero_limits_preserve_typed_event_and_redact_args() -> Result<()> {
+        let mut event = RunEvent::ToolCall {
+            call_id: "call_identity".into(),
+            name: "tool_identity".into(),
+            args: Some(serde_json::json!({"nested": {"password": "tiny-secret"}})),
+            risk: Some("high".into()),
+            duration_ms: 42,
+        };
+        event.apply_retention(&ContentRetentionPolicy {
+            max_string_chars: 0,
+            max_array_items: 0,
+        });
+        let value = serde_json::to_value(&event)?;
+        assert!(!value.to_string().contains("tiny-secret"));
+        assert_eq!(
+            value.get("call_id"),
+            Some(&serde_json::json!("call_identity"))
+        );
+        assert_eq!(value.get("duration_ms"), Some(&serde_json::json!(42)));
+        assert!(matches!(
+            serde_json::from_value::<RunEvent>(value)?,
+            RunEvent::ToolCall { .. }
+        ));
+        Ok(())
+    }
+
     #[tokio::test]
     async fn default_append_rejects_a_missing_run() -> Result<()> {
         let result = MissingRunStore
@@ -1316,6 +1685,208 @@ mod tests {
         assert_eq!(failure.operation, DiagnosticDeliveryOperation::Finalize);
         assert_eq!(failure.record_id.as_deref(), Some(run_id.as_str()));
         assert!(failure.error.contains("injected finalize save failure"));
+        Ok(())
+    }
+
+    async fn assert_atomic_finalization_preserves_late_event(
+        store: Arc<dyn RunStore>,
+        run_id: &str,
+    ) -> Result<()> {
+        let mut run = make_run(run_id, "session-finalize-race");
+        run.status = RunStatus::Running;
+        run.finished_at = None;
+        run.final_output = None;
+        store.save(run).await?;
+        store
+            .append_event(
+                run_id,
+                RunEvent::SubagentRun {
+                    call_id: Some("background-call".to_string()),
+                    agent_name: "reviewer".to_string(),
+                    task: "late result".to_string(),
+                    outcome: "completed".to_string(),
+                },
+            )
+            .await?;
+        assert!(
+            store
+                .finalize_run(run_id, RunStatus::Failed, None, Some("parent failed"),)
+                .await?
+        );
+        assert!(
+            store
+                .finalize_run(run_id, RunStatus::Failed, None, Some("duplicate finalize"),)
+                .await?
+        );
+        let finalized = store
+            .load(run_id)
+            .await?
+            .ok_or_else(|| ReactError::Other("finalized run missing".to_string()))?;
+        assert_eq!(finalized.status, RunStatus::Failed);
+        assert_eq!(finalized.error.as_deref(), Some("parent failed"));
+        assert_eq!(
+            finalized
+                .events
+                .iter()
+                .filter(|event| matches!(event, RunEvent::SubagentRun { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            finalized
+                .events
+                .iter()
+                .filter(|event| matches!(event, RunEvent::Error { .. }))
+                .count(),
+            1
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn built_in_run_stores_finalize_under_the_append_authority() -> Result<()> {
+        assert_atomic_finalization_preserves_late_event(
+            Arc::new(InMemoryRunStore::new()),
+            "memory-finalize-race",
+        )
+        .await?;
+        let directory = temp_dir();
+        assert_atomic_finalization_preserves_late_event(
+            Arc::new(JsonlRunStore::new(&directory)?),
+            "jsonl-finalize-race",
+        )
+        .await?;
+        std::fs::remove_dir_all(directory)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn run_stores_reject_nonterminal_finalization_without_mutation() -> Result<()> {
+        let directory = temp_dir();
+        let stores: [Arc<dyn RunStore>; 2] = [
+            Arc::new(InMemoryRunStore::new()),
+            Arc::new(JsonlRunStore::new(&directory)?),
+        ];
+        for (index, store) in stores.into_iter().enumerate() {
+            let run_id = format!("invalid-finalize-{index}");
+            let mut run = make_run(&run_id, "session-invalid-finalize");
+            run.status = RunStatus::Running;
+            run.finished_at = None;
+            run.final_output = None;
+            store.save(run).await?;
+
+            assert!(
+                store
+                    .finalize_run(&run_id, RunStatus::Running, Some("invalid"), None)
+                    .await
+                    .is_err()
+            );
+            let unchanged = store
+                .load(&run_id)
+                .await?
+                .ok_or_else(|| ReactError::Other("run missing after rejected finalize".into()))?;
+            assert_eq!(unchanged.status, RunStatus::Running);
+            assert!(unchanged.finished_at.is_none());
+            assert!(unchanged.final_output.is_none());
+        }
+        std::fs::remove_dir_all(directory)?;
+        Ok(())
+    }
+
+    async fn wait_for_cached_run(
+        store: &JsonlRunStore,
+        run_id: &str,
+        predicate: impl Fn(&Run) -> bool,
+    ) -> Result<Run> {
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if let Some(run) = store.load(run_id).await?
+                    && predicate(&run)
+                {
+                    return Ok(run);
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .map_err(|_| ReactError::Other("timed out waiting for owned trace publish".to_string()))?
+    }
+
+    #[tokio::test]
+    async fn jsonl_append_and_finalize_publish_after_caller_cancellation() -> Result<()> {
+        let directory = temp_dir();
+        let mut store = JsonlRunStore::new(&directory)?;
+        let run_id = "cancelled-caller-owned-mutation";
+        let mut run = make_run(run_id, "session-owned-mutation");
+        run.status = RunStatus::Running;
+        run.finished_at = None;
+        run.final_output = None;
+        store.save(run).await?;
+
+        let append_hook = Arc::new(JsonlMutationTestHook::default());
+        store.set_mutation_test_hook(Some(Arc::clone(&append_hook)));
+        let append_committed = append_hook.physically_committed.notified();
+        let append_caller = tokio::spawn({
+            let store = store.clone();
+            async move {
+                store
+                    .append_event(
+                        run_id,
+                        RunEvent::Checkpoint {
+                            id: "after-physical-append".to_string(),
+                        },
+                    )
+                    .await
+            }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), append_committed)
+            .await
+            .map_err(|_| ReactError::Other("append did not physically commit".to_string()))?;
+        append_caller.abort();
+        let append_join = append_caller.await;
+        assert!(append_join.is_err());
+        append_hook.release_publish.notify_one();
+        let appended = wait_for_cached_run(&store, run_id, |run| {
+            run.events.iter().any(|event| {
+                matches!(event, RunEvent::Checkpoint { id } if id == "after-physical-append")
+            })
+        })
+        .await?;
+        assert_eq!(appended.status, RunStatus::Running);
+
+        let finalize_hook = Arc::new(JsonlMutationTestHook::default());
+        store.set_mutation_test_hook(Some(Arc::clone(&finalize_hook)));
+        let finalize_committed = finalize_hook.physically_committed.notified();
+        let finalize_caller = tokio::spawn({
+            let store = store.clone();
+            async move {
+                store
+                    .finalize_run(run_id, RunStatus::Failed, None, Some("caller disappeared"))
+                    .await
+            }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), finalize_committed)
+            .await
+            .map_err(|_| ReactError::Other("finalize did not physically commit".to_string()))?;
+        finalize_caller.abort();
+        let finalize_join = finalize_caller.await;
+        assert!(finalize_join.is_err());
+        finalize_hook.release_publish.notify_one();
+        let finalized =
+            wait_for_cached_run(&store, run_id, |run| run.status == RunStatus::Failed).await?;
+        store.set_mutation_test_hook(None);
+
+        assert!(finalized.events.iter().any(|event| {
+            matches!(event, RunEvent::Checkpoint { id } if id == "after-physical-append")
+        }));
+        assert_eq!(finalized.error.as_deref(), Some("caller disappeared"));
+        let durable = JsonlRunStore::load_run(&store.run_path(run_id)?)?;
+        assert_eq!(durable.status, RunStatus::Failed);
+        assert_eq!(
+            serde_json::to_value(&durable.events)?,
+            serde_json::to_value(&finalized.events)?
+        );
+        std::fs::remove_dir_all(directory)?;
         Ok(())
     }
 
@@ -1701,6 +2272,299 @@ mod tests {
             .await?
             .ok_or_else(|| crate::error::ReactError::Other("missing redacted run".to_string()))?;
         assert!(!loaded.input.contains("abcdefghijklmnopqrstuvwxyz"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn in_memory_and_jsonl_stores_apply_matching_retention() -> Result<()> {
+        let secret_input = "password: hunter2-verylongvalue";
+        let private_key_body = "MIIEvQIBADANBgkqhkiG9w0B";
+        let mut run = make_run("parity", "session");
+        run.input = format!(
+            "{secret_input}\n-----BEGIN PRIVATE KEY-----\n{private_key_body}\n-----END PRIVATE KEY-----"
+        );
+        run.events.push(RunEvent::ToolCall {
+            call_id: "parity-call".into(),
+            name: "shell".into(),
+            args: Some(serde_json::json!({"nested": {"token": "shhh-123456"}})),
+            risk: Some("low".into()),
+            duration_ms: 7,
+        });
+
+        let memory = InMemoryRunStore::new();
+        memory.save(run.clone()).await?;
+        let memory_loaded = memory
+            .load("parity")
+            .await?
+            .ok_or_else(|| crate::error::ReactError::Other("missing memory run".to_string()))?;
+
+        let dir = temp_dir();
+        let jsonl = JsonlRunStore::new(&dir)?;
+        jsonl.save(run).await?;
+        let jsonl_loaded = jsonl
+            .load("parity")
+            .await?
+            .ok_or_else(|| crate::error::ReactError::Other("missing jsonl run".to_string()))?;
+
+        assert_eq!(memory_loaded.input, jsonl_loaded.input);
+        assert!(!memory_loaded.input.contains("hunter2"));
+        assert!(!memory_loaded.input.contains(private_key_body));
+        assert_eq!(
+            serde_json::to_string(&memory_loaded.events)?,
+            serde_json::to_string(&jsonl_loaded.events)?
+        );
+        let disk = tokio::fs::read_to_string(dir.join("parity.jsonl")).await?;
+        assert!(!disk.contains("hunter2"));
+        assert!(!disk.contains(private_key_body));
+        assert!(!disk.contains("shhh-123456"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn secret_like_identities_remain_addressable_after_retention() -> Result<()> {
+        let run_id = "sk-abcdefghijklmnopqrstuvwxyz123456";
+        let session_id = "npm_abcdefghijklmnopqrstuvwxyz1234567890";
+        let mut run = make_run(run_id, session_id);
+        run.events.push(RunEvent::Checkpoint {
+            id: "ghp_abcdefghijklmnopqrstuvwxyz1234567890".to_string(),
+        });
+        let store = InMemoryRunStore::new();
+        store.save(run).await?;
+
+        let loaded = store
+            .load(run_id)
+            .await?
+            .ok_or_else(|| ReactError::Other("identity-addressed run missing".to_string()))?;
+        assert_eq!(loaded.run_id, run_id);
+        assert_eq!(loaded.session_id, session_id);
+        assert!(matches!(
+            loaded.events.first(),
+            Some(RunEvent::Checkpoint { id }) if id == "ghp_abcdefghijklmnopqrstuvwxyz1234567890"
+        ));
+        assert_eq!(store.list_by_session(session_id).await?.len(), 1);
+        store
+            .append_event(
+                run_id,
+                RunEvent::Checkpoint {
+                    id: "second".to_string(),
+                },
+            )
+            .await?;
+        assert_eq!(
+            store.load(run_id).await?.map(|run| run.events.len()),
+            Some(2)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn retention_never_drops_records_or_token_counters() -> Result<()> {
+        let policy = echo_core::utils::retention::ContentRetentionPolicy {
+            max_string_chars: 8,
+            max_array_items: 1,
+        };
+        let mut run = make_run("bounded", "session");
+        run.push_event(RunEvent::LlmCall {
+            messages: 3,
+            prompt_tokens: 111,
+            completion_tokens: 22,
+            cached_prompt_tokens: 5,
+            cache_creation_prompt_tokens: 6,
+            usage_reported: true,
+            estimated_context_tokens: 0,
+            protected_context_tokens: 0,
+            protected_message_count: 0,
+            context_limit_tokens: 0,
+            context_breakdown: LlmContextBreakdown::default(),
+            cache_fingerprint: echo_core::llm::cache::PromptCacheFingerprint::default(),
+            duration_ms: 9,
+        });
+        run.events.push(RunEvent::ToolResult {
+            call_id: "result-call".into(),
+            name: "shell".into(),
+            success: true,
+            output_preview: Some("Bearer abcdefghijklmnopqrstuvwxyz".into()),
+            output_truncated: true,
+            duration_ms: 4,
+            original_bytes: 34,
+            returned_bytes: 8,
+            estimated_tokens: 10,
+            output_handling: Some("truncated".into()),
+            artifact: None,
+        });
+        apply_run_retention(&mut run, &policy);
+
+        assert_eq!(run.events.len(), 2);
+        assert_eq!(run.token_usage.prompt_tokens, 111);
+        assert_eq!(run.token_usage.completion_tokens, 22);
+        assert_eq!(run.token_usage.total_tokens, 133);
+        assert_eq!(run.token_usage.usage_reported_calls, 1);
+        let bounded_chars = |text: &str| text.chars().count() <= 8 + "...[TRUNCATED]".len();
+        assert!(bounded_chars(&run.input));
+        for event in &run.events {
+            match event {
+                RunEvent::LlmCall { prompt_tokens, .. } => assert_eq!(*prompt_tokens, 111),
+                RunEvent::ToolResult {
+                    output_preview,
+                    call_id,
+                    ..
+                } => {
+                    assert_eq!(call_id, "result-call");
+                    assert!(output_preview.as_deref().is_some_and(&bounded_chars));
+                }
+                other => {
+                    return Err(ReactError::Other(format!("unexpected event: {other:?}")));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn retention_zero_limits_keep_all_run_records_and_counters() -> Result<()> {
+        let policy = ContentRetentionPolicy {
+            max_string_chars: 0,
+            max_array_items: 0,
+        };
+        let mut run = make_run("zero", "session");
+        run.push_event(RunEvent::LlmCall {
+            messages: 2,
+            prompt_tokens: 50,
+            completion_tokens: 10,
+            cached_prompt_tokens: 4,
+            cache_creation_prompt_tokens: 2,
+            usage_reported: true,
+            estimated_context_tokens: 0,
+            protected_context_tokens: 0,
+            protected_message_count: 0,
+            context_limit_tokens: 0,
+            context_breakdown: LlmContextBreakdown::default(),
+            cache_fingerprint: echo_core::llm::cache::PromptCacheFingerprint::default(),
+            duration_ms: 3,
+        });
+        run.push_event(RunEvent::ToolCall {
+            call_id: "zero-call".into(),
+            name: "shell".into(),
+            args: Some(serde_json::json!({"nested": [{"secret": "tok-abc12345"}]})),
+            risk: None,
+            duration_ms: 1,
+        });
+        apply_run_retention(&mut run, &policy);
+
+        assert_eq!(run.events.len(), 2);
+        assert_eq!(run.token_usage.prompt_tokens, 50);
+        assert_eq!(run.token_usage.completion_tokens, 10);
+        assert_eq!(run.token_usage.total_tokens, 60);
+        assert_eq!(run.token_usage.usage_reported_calls, 1);
+        assert_eq!(run.run_id, "zero");
+        for event in &run.events {
+            match event {
+                RunEvent::LlmCall {
+                    prompt_tokens,
+                    completion_tokens,
+                    cache_fingerprint,
+                    ..
+                } => {
+                    assert_eq!(*prompt_tokens, 50);
+                    assert_eq!(*completion_tokens, 10);
+                    assert_eq!(cache_fingerprint.stable_prefix_hash, "");
+                }
+                RunEvent::ToolCall {
+                    call_id,
+                    args,
+                    duration_ms,
+                    ..
+                } => {
+                    assert_eq!(call_id, "zero-call");
+                    assert_eq!(*duration_ms, 1);
+                    let encoded = serde_json::to_string(
+                        args.as_ref()
+                            .ok_or_else(|| ReactError::Other("args dropped".into()))?,
+                    )?;
+                    assert!(!encoded.contains("tok-abc12345"));
+                    assert!(encoded.contains("[TRUNCATED"));
+                }
+                other => {
+                    return Err(ReactError::Other(format!("unexpected event: {other:?}")));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn retention_handles_multibyte_text_without_panicking() -> Result<()> {
+        let mut run = make_run("utf8", "session");
+        run.input = "天空 emoji 🌍🌍🌍 世界".to_string();
+        run.final_output = Some("🌍".repeat(300));
+        run.events.push(RunEvent::SubagentRun {
+            call_id: None,
+            agent_name: "subagent-name".into(),
+            task: "翻译 🌍 内容".into(),
+            outcome: "completed".into(),
+        });
+        let policy = ContentRetentionPolicy {
+            max_string_chars: 10,
+            max_array_items: 4,
+        };
+        apply_run_retention(&mut run, &policy);
+        assert!(run.input.chars().count() <= 10 + "...[TRUNCATED]".len());
+        assert!(run.input.contains("🌍") || run.input.contains("世界"));
+        Ok(())
+    }
+
+    #[test]
+    fn old_subagent_trace_event_without_call_id_still_decodes() -> Result<()> {
+        let event: RunEvent = serde_json::from_value(serde_json::json!({
+            "type": "subagent_run",
+            "agent_name": "reviewer",
+            "task": "review",
+            "outcome": "completed"
+        }))?;
+        match event {
+            RunEvent::SubagentRun { call_id, .. } => assert!(call_id.is_none()),
+            other => return Err(ReactError::Other(format!("unexpected event: {other:?}"))),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn old_test_run_without_exact_count_decodes_as_unknown() -> Result<()> {
+        let event: RunEvent = serde_json::from_value(serde_json::json!({
+            "type": "test_run",
+            "command": "cargo test",
+            "passed": false
+        }))?;
+        assert!(matches!(
+            event,
+            RunEvent::TestRun {
+                failure_count: None,
+                ..
+            }
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn custom_run_store_caller_receives_sanitized_input() -> Result<()> {
+        let mut agent = crate::agent::ReactAgent::new(crate::agent::AgentConfig::new(
+            "model", "agent", "system",
+        ));
+        agent.run_store = Some(Arc::new(InMemoryRunStore::new()));
+        let legacy = agent.capture_legacy_external_context();
+        let run_id = agent
+            .start_legacy_trace_run("password: raw-secret-input-value", &legacy)
+            .await
+            .ok_or_else(|| ReactError::Other("trace start did not return an id".to_string()))?;
+        let stored = agent
+            .run_store
+            .as_ref()
+            .ok_or_else(|| ReactError::Other("missing run store".to_string()))?
+            .load(&run_id)
+            .await?
+            .ok_or_else(|| ReactError::Other("missing traced run".to_string()))?;
+        assert!(!stored.input.contains("raw-secret-input-value"));
+        assert!(stored.input.contains("[REDACTED]"));
         Ok(())
     }
 

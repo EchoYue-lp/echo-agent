@@ -320,10 +320,17 @@ async fn main() -> echo_agent::error::Result<()> {
     println!("{}", answer);
 
     // 手动关闭连接
-    mcp.close_all().await;
+    mcp.close_all().await?;
     Ok(())
 }
 ```
+
+`McpClient::close`、`McpManager::disconnect` 和 `McpManager::close_all`
+现在返回 `Result`。close 成功表示 transport 已停止接纳新请求、全部 pending caller
+已释放，并在有界 shutdown 策略内等待完 transport 持有的 I/O task 与 stdio child
+process。`close_all` 会尝试关闭全部 client，再聚合返回 cleanup error，单个失败不会阻止
+后续 client 的清理。旧版 SSE close 同时取消 receive/POST 生命周期并等待 receive task。
+这些生命周期约束不会给用户选择的 MCP server 增加权限门控。
 
 ---
 
@@ -532,6 +539,9 @@ MCP 操作可能产生的错误：
 | `McpError::ProtocolError` | 协议层错误 | 检查 JSON 格式 |
 | `McpError::ToolCallFailed` | 工具调用失败 | 检查参数是否正确 |
 | `McpError::TransportClosed` | 传输层已关闭 | 重新连接服务端 |
+
+Close timeout、task join、child kill/wait 和聚合 close 失败会携带 cleanup 上下文，
+以 `McpError::ConnectionFailed` 从 close 调用返回，不会被转换成成功终态。
 
 ---
 

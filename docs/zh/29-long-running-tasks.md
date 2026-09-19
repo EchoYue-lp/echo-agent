@@ -127,3 +127,29 @@ Agent callback 投影为有损 `TaskEventBus` 上的 `TaskEvent::Progress`，供
 
 scheduler 模块提供 cron 触发器。定时 callback 可以启动后台 Future 或请求
 版本化 run，但 schedule 本身不会创建另一套任务图或执行状态机。
+
+已提交的 scheduler occurrence 复用 framework `DeliveryLedger` 持久记录 claim、
+attempt、owner loss 恢复和 terminal settlement。Runner 启动后会在首个周期 tick 前
+drain pending FIFO。已接纳但未持久结算的 callback 会先记为 `OutcomeUnknown`，随后以
+同一个 occurrence ID 和新的 attempt ID 重投；callback 明确返回错误时形成已知
+`Failed` 结算，通用 scheduler 不自动重试业务失败。同一进程中 callback owner 被
+drop 或 abort 时，也会在下一次 drain 通过 `OutcomeUnknown` 进入相同恢复路径。
+
+`CronTaskStore` 每次 add 都分配不可变 `definition_id`，status control 则持久递增
+`control_revision`。因此 remove 后重新 add exact task clone 仍是新 definition；旧 incarnation
+的 queued callback 不能通过 admission，也不能写入 replacement 的 last-run projection。
+
+Callback 会产生外部副作用时，使用
+`SchedulerRunner::new_with_occurrence_context` 与 `OccurrenceFireFn`。
+`SchedulerInvocation::occurrence_id` 跨 crash replay 保持稳定，应作为幂等 key；
+`attempt_id` 只标识一次物理 callback 执行。兼容入口 `FireFn(CronTask)` 仍走同一个
+ledger，只是丢弃 durable context。
+
+File-backed task store 使用完整 definition 文件名共置 journal。Store-backed
+`CronTaskStore` 在构造 runner 前必须通过 `with_path()` 提供稳定且 backend-specific 的
+anchor；Store trait 没有可由 framework 安全猜测的可移植 backend identity。
+
+该合同是 callback at-least-once delivery，不是 external effect exactly-once。副作用
+成功后、terminal settlement 前发生 crash 时 callback 可能再次执行。Cron polling
+本身也仍是 approximate：runner 离线期间错过的 schedule 不会在没有明确 misfire
+policy 时自动补跑。

@@ -4,7 +4,7 @@ id: audit.scheduler-occurrence-authority-rereview
 kind: audit
 boundary_ref: boundary.task-subagent-workflow
 lens: failure_concurrency
-freshness: examined
+freshness: stale
 revision: 8c8d8aa469233732276df8d313495a5dce67961d
 finding_refs: [finding.scheduler-control-fire-race, finding.scheduler-task-id-uniqueness, finding.scheduler-cache-delivery]
 challenges:
@@ -51,3 +51,12 @@ at-least-once语义。
 ## 未检查项
 
 未执行跨进程Store并发或进程崩溃注入。
+
+## 当前失效原因
+
+候选`573ee8b2`的DeliveryLedger组合、durable callback context、owner-loss replay与terminal
+settlement已集成到基线`b71f03ba`的新worktree，另补取消后禁止callback构造的修复及反例。
+这些变更超出本Audit绑定的`8c8d8aa469233732276df8d313495a5dce67961d`范围。
+旧候选记载的独立review不代表当前未提交集成版本已独立复审。当前验证详见verification
+Evidence；SDK/CLI consumer、17-feature/full gates、shared snapshot与最终revision复审
+尚未闭合，因此本Audit保持stale、`rereview_audit_refs`保持空且#84保持open。

@@ -182,6 +182,7 @@ impl AgentDispatchTool {
         let parent_lineage = ctx.and_then(|context| context.subagent_lineage.clone());
         let parent_execution_id = ctx.and_then(|context| context.execution_id.clone());
         let parent_call_id = ctx.and_then(|context| context.call_id.clone());
+        let effect_sink = ctx.and_then(|context| context.effect_sink.clone());
         let invocation_cancel = ctx.and_then(|context| context.cancel.clone());
         let delegation_policy = match Self::delegation_policy_from_context(ctx) {
             Ok(policy) => policy,
@@ -362,16 +363,37 @@ impl AgentDispatchTool {
             if run_background {
                 match executor.dispatch_background(req).await {
                     Ok(handle) => {
+                        let execution_id = handle.execution_id.clone();
+                        let started_agent_name = handle.agent_name.clone();
                         info!(
-                            target_agent = %handle.agent_name,
-                            execution_id = %handle.execution_id,
+                            target_agent = %started_agent_name,
+                            execution_id = %execution_id,
                             "Background subagent started"
                         );
+                        if let Some(sink) = effect_sink {
+                            let task = task.to_string();
+                            tokio::spawn(async move {
+                                let outcome = match handle.join().await {
+                                    Ok(result) => result.outcome.status.as_str().to_string(),
+                                    Err(error) => {
+                                        crate::agent::subagent::subagent_status_from_error(&error)
+                                            .as_str()
+                                            .to_string()
+                                    }
+                                };
+                                sink(echo_core::tools::ToolEffect::SubagentRun {
+                                    agent_name: started_agent_name,
+                                    task,
+                                    outcome,
+                                })
+                                .await;
+                            });
+                        }
                         Ok(ToolResult::success(
                             json!({
                                 "status": "started",
-                                "execution_id": handle.execution_id,
-                                "agent_name": handle.agent_name,
+                                "execution_id": execution_id,
+                                "agent_name": agent_name,
                             })
                             .to_string(),
                         ))
@@ -394,21 +416,43 @@ impl AgentDispatchTool {
                             output_chars = result.output.chars().count(),
                             "Subagent result"
                         );
-                        Ok(serialize_parent_result(&result.outcome)
-                            .map(ToolResult::success)
-                            .unwrap_or_else(|error| {
-                                ToolResult::error(format!(
-                                    "Subagent '{}' result serialization failed: {}",
-                                    agent_name, error
-                                ))
-                            }))
+                        let outcome = result.outcome.status.as_str().to_string();
+                        Ok(match serialize_parent_result(&result.outcome) {
+                            Ok(output) => ToolResult::success(output).with_effect(
+                                echo_core::tools::ToolEffect::SubagentRun {
+                                    agent_name: agent_name.to_string(),
+                                    task: task.to_string(),
+                                    outcome,
+                                },
+                            ),
+                            Err(error) => ToolResult::error(format!(
+                                "Subagent '{}' result serialization failed: {}",
+                                agent_name, error
+                            ))
+                            .with_effect(
+                                echo_core::tools::ToolEffect::SubagentRun {
+                                    agent_name: agent_name.to_string(),
+                                    task: task.to_string(),
+                                    outcome,
+                                },
+                            ),
+                        })
                     }
                     Err(e) => {
                         warn!(target_agent = %agent_name, error = %e, "Subagent execution failed");
                         Ok(ToolResult::error(format!(
                             "Subagent '{}' execution failed: {}",
                             agent_name, e
-                        )))
+                        ))
+                        .with_effect(
+                            echo_core::tools::ToolEffect::SubagentRun {
+                                agent_name: agent_name.to_string(),
+                                task: task.to_string(),
+                                outcome: crate::agent::subagent::subagent_status_from_error(&e)
+                                    .as_str()
+                                    .to_string(),
+                            },
+                        ))
                     }
                 }
             }
@@ -527,7 +571,7 @@ impl Tool for AgentDispatchTool {
 mod tests {
     use super::*;
     use crate::agent::subagent::{SubagentDefinition, SubagentExecutorConfig, SubagentRegistry};
-    use crate::testing::MockAgent;
+    use crate::testing::{FailingMockAgent, MockAgent, MockAgentFailure};
     use echo_core::llm::types::{ContentPart, Message};
     use std::sync::atomic::AtomicUsize;
 
@@ -793,6 +837,90 @@ mod tests {
         .await
         .map_err(|_| "background guard outlived subagent settlement".to_string())?;
         assert_eq!(drops.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn background_effect_settles_once_after_start_for_success_failure_and_cancel()
+    -> Result<(), String> {
+        for expected in ["completed", "failed", "cancelled"] {
+            let registry = Arc::new(SubagentRegistry::new());
+            let executor = Arc::new(SubagentExecutor::new(
+                Arc::clone(&registry),
+                SubagentExecutorConfig::default(),
+            ));
+            if expected == "failed" {
+                registry
+                    .register(
+                        SubagentDefinition::new("child", "Failure"),
+                        Box::new(
+                            FailingMockAgent::new("child", "failed execution")
+                                .with_failure(MockAgentFailure::Subagent),
+                        ),
+                    )
+                    .await;
+            } else {
+                registry
+                    .register(
+                        SubagentDefinition::new("child", "Success or cancellation"),
+                        Box::new(
+                            MockAgent::new("child")
+                                .with_delay_ms(if expected == "cancelled" { 1_000 } else { 30 })
+                                .with_response("## Summary\ncomplete"),
+                        ),
+                    )
+                    .await;
+            }
+            let tool = AgentDispatchTool::new(executor, "parent", CancellationToken::new());
+            let cancellation = Arc::new(CancellationToken::new());
+            let (effect_tx, mut effect_rx) = tokio::sync::mpsc::unbounded_channel();
+            let context = ToolContext {
+                call_id: Some(format!("call-{expected}")),
+                run_id: Some(format!("run-{expected}")),
+                cancel: Some(Arc::clone(&cancellation)),
+                effect_sink: Some(Arc::new(move |effect| {
+                    let effect_tx = effect_tx.clone();
+                    Box::pin(async move {
+                        let _ = effect_tx.send(effect);
+                    })
+                })),
+                ..ToolContext::default()
+            };
+            let parameters: ToolParameters = [
+                ("agent_name".to_string(), Value::String("child".to_string())),
+                ("task".to_string(), Value::String("task".to_string())),
+                ("background".to_string(), Value::Bool(true)),
+            ]
+            .into_iter()
+            .collect();
+
+            let started = tool
+                .execute_with_context(parameters, &context)
+                .await
+                .map_err(|error| error.to_string())?;
+            if !started.success || !started.effects.is_empty() {
+                return Err(format!("background launch is not an effect: {started:?}"));
+            }
+            if expected == "cancelled" {
+                cancellation.cancel();
+            }
+            let effect = tokio::time::timeout(std::time::Duration::from_secs(3), effect_rx.recv())
+                .await
+                .map_err(|_| format!("{expected} effect did not settle"))?
+                .ok_or_else(|| format!("{expected} effect sink disconnected"))?;
+            if effect
+                != (echo_core::tools::ToolEffect::SubagentRun {
+                    agent_name: "child".to_string(),
+                    task: "task".to_string(),
+                    outcome: expected.to_string(),
+                })
+            {
+                return Err(format!("wrong {expected} effect: {effect:?}"));
+            }
+            if effect_rx.try_recv().is_ok() {
+                return Err(format!("duplicate {expected} terminal effect"));
+            }
+        }
         Ok(())
     }
 

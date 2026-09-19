@@ -374,6 +374,7 @@ async fn demo_audit_logging() -> Result<()> {
             Some("session-123".to_string()),
             "code-lab".to_string(),
             AuditEventType::ToolCall {
+                call_id: Some("code-lab-call".to_string()),
                 tool: "execute_python".to_string(),
                 input: json!({"code": "print(1+1)"}),
                 output: "2".to_string(),

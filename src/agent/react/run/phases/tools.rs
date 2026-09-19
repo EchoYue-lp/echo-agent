@@ -4,24 +4,36 @@
 
 use super::super::TOOL_CANCELLATION_GRACE_PERIOD;
 use super::super::processor::build_tool_calls_from_map;
-use super::super::stream_macros::{yield_event_or, yield_final_event_or};
+use super::super::stream_macros::yield_event_or;
 use super::verify::verify_answer;
 use super::{IterOutcome, LoopState, ThinkOutput, with_reasoning_content};
-use crate::agent::AgentEvent;
 use crate::agent::react::run::pipeline::ToolPipelineEvent;
 use crate::agent::react::{StepType, TOOL_FINAL_ANSWER};
 use crate::agent::snapshot::AgentRunSnapshot;
+use crate::agent::{AgentEvent, ToolInvocation};
 use crate::error::{ReactError, Result};
 use crate::llm::types::{ContentPart, ImageUrl, Message, MessageContent};
 use futures::stream::{FuturesUnordered, StreamExt};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, mpsc};
 use tracing::{Instrument, info_span};
 
 type ToolCallSpec = (String, String, Value);
+type ToolCallOutcome = std::result::Result<
+    crate::agent::snapshot::ToolCallSuccess,
+    crate::agent::snapshot::ToolCallFailure,
+>;
+type CompletedToolCalls = HashMap<String, (String, ToolCallOutcome)>;
+
+#[derive(Default)]
+struct PublishedWave {
+    successes: usize,
+    failures: usize,
+    final_answers: Vec<String>,
+}
 
 async fn project_typed_tool_result(
     context: &Arc<Mutex<crate::compression::ContextManager>>,
@@ -83,6 +95,84 @@ fn agent_event(event: ToolPipelineEvent) -> AgentEvent {
     }
 }
 
+async fn forward_pipeline_event(
+    tx: &mpsc::Sender<Result<AgentEvent>>,
+    emitted_invocations: &mut HashSet<String>,
+    event: ToolPipelineEvent,
+) {
+    if let ToolPipelineEvent::Invocation { call_id, .. } = &event {
+        emitted_invocations.insert(call_id.clone());
+    }
+    let _ = tx.send(Ok(agent_event(event))).await;
+}
+
+async fn publish_completed_call(
+    snap: &AgentRunSnapshot,
+    context: &Arc<Mutex<crate::compression::ContextManager>>,
+    tx: &mpsc::Sender<Result<AgentEvent>>,
+    call_id: &str,
+    outcome: ToolCallOutcome,
+) -> Option<String> {
+    match outcome {
+        Ok(execution) => {
+            let name = execution.name;
+            let mut result = execution.result;
+            let output = result.output.clone();
+            let model_message = project_typed_tool_result(
+                context,
+                &result,
+                snap.config
+                    .input_modalities
+                    .as_ref()
+                    .is_none_or(|modalities| {
+                        modalities.contains(&echo_core::llm::ModelInputModality::Image)
+                    }),
+            )
+            .await;
+            result.model_content.clear();
+            let mut context_guard = context.lock().await;
+            context_guard.push(Message::tool_result(
+                call_id.to_string(),
+                name.clone(),
+                output.clone(),
+            ));
+            if let Some(message) = model_message {
+                context_guard.push(message);
+            }
+            drop(context_guard);
+            let _ = tx
+                .send(Ok(AgentEvent::ToolResult {
+                    call_id: call_id.to_string(),
+                    name: name.clone(),
+                    result,
+                }))
+                .await;
+            (name == TOOL_FINAL_ANSWER).then_some(output)
+        }
+        Err(error) => {
+            let name = error.name;
+            let message = error
+                .result
+                .error
+                .clone()
+                .unwrap_or_else(|| error.error.to_string());
+            context.lock().await.push(Message::tool_result(
+                call_id.to_string(),
+                name.clone(),
+                format!("[Error] {message}"),
+            ));
+            let _ = tx
+                .send(Ok(AgentEvent::ToolResult {
+                    call_id: call_id.to_string(),
+                    name,
+                    result: error.result,
+                }))
+                .await;
+            None
+        }
+    }
+}
+
 async fn close_cancelled_batch(
     snap: &AgentRunSnapshot,
     context: &Arc<Mutex<crate::compression::ContextManager>>,
@@ -134,6 +224,76 @@ async fn close_failed_batch(
         .send(Ok(AgentEvent::from_error("tool_batch", &error)))
         .await;
     Ok(())
+}
+
+async fn settle_interrupted_calls(
+    snap: &AgentRunSnapshot,
+    context: &Arc<Mutex<crate::compression::ContextManager>>,
+    tx: &mpsc::Sender<Result<AgentEvent>>,
+    calls: &[ToolCallSpec],
+    completed: &mut CompletedToolCalls,
+    emitted_invocations: &mut HashSet<String>,
+    settlement: InterruptedSettlement<'_>,
+) -> PublishedWave {
+    let mut published = PublishedWave::default();
+    for (call_id, name, input) in calls {
+        if emitted_invocations.insert(call_id.clone()) {
+            let _ = tx
+                .send(Ok(AgentEvent::ToolCall {
+                    call_id: call_id.clone(),
+                    invocation: ToolInvocation {
+                        requested_name: name.clone(),
+                        requested_args: input.clone(),
+                        name: name.clone(),
+                        args: input.clone(),
+                        rewrites: Vec::new(),
+                    },
+                }))
+                .await;
+        }
+        if let Some((_, outcome)) = completed.remove(call_id) {
+            let succeeded = outcome.is_ok();
+            if let Some(answer) = publish_completed_call(snap, context, tx, call_id, outcome).await
+            {
+                published.final_answers.push(answer);
+            }
+            if succeeded {
+                published.successes = published.successes.saturating_add(1);
+            } else {
+                published.failures = published.failures.saturating_add(1);
+            }
+            continue;
+        }
+        let result = snap
+            .settle_interrupted_tool_call(
+                call_id,
+                name,
+                input,
+                settlement.category,
+                settlement.message,
+            )
+            .await;
+        context.lock().await.push(Message::tool_result(
+            call_id.clone(),
+            name.clone(),
+            format!("[Error] {}", settlement.message),
+        ));
+        let _ = tx
+            .send(Ok(AgentEvent::ToolResult {
+                call_id: call_id.clone(),
+                name: name.clone(),
+                result,
+            }))
+            .await;
+        published.failures = published.failures.saturating_add(1);
+    }
+    published
+}
+
+#[derive(Clone, Copy)]
+struct InterruptedSettlement<'a> {
+    category: crate::tools::ToolFailureCategory,
+    message: &'a str,
 }
 
 fn build_execution_waves(
@@ -263,20 +423,20 @@ pub(crate) async fn run_tools(
             ToolExecutionWave::Sequential((_, name, _)) => vec![name.clone()],
         })
         .collect();
+    let mut remaining_calls: Vec<ToolCallSpec> = waves
+        .iter()
+        .flat_map(|wave| match wave {
+            ToolExecutionWave::Concurrent(calls) => calls.clone(),
+            ToolExecutionWave::Sequential(call) => vec![call.clone()],
+        })
+        .collect();
     for wave in waves {
         match wave {
             ToolExecutionWave::Concurrent(conc) => {
                 // Results are keyed by call id and projected in call order.
-                let mut completed: HashMap<
-                    String,
-                    (
-                        String,
-                        std::result::Result<
-                            crate::agent::snapshot::ToolCallSuccess,
-                            crate::agent::snapshot::ToolCallFailure,
-                        >,
-                    ),
-                > = HashMap::new();
+                let completed: Arc<std::sync::Mutex<CompletedToolCalls>> =
+                    Arc::new(std::sync::Mutex::new(HashMap::new()));
+                let mut emitted_invocations = HashSet::new();
                 if conc.is_empty() {
                     continue;
                 }
@@ -296,6 +456,7 @@ pub(crate) async fn run_tools(
                 for (id, name, args) in conc.clone() {
                     let snapshot = snapshot.clone();
                     let event_tx = stream_tx.clone();
+                    let completed = completed.clone();
                     futs.push(
                         async move {
                             let params = if let Value::Object(m) = &args {
@@ -312,7 +473,10 @@ pub(crate) async fn run_tools(
                                     Some(event_tx),
                                 )
                                 .await;
-                            (id, name, result)
+                            completed
+                                .lock()
+                                .unwrap_or_else(|error| error.into_inner())
+                                .insert(id, (name, result));
                         }
                         .instrument(info_span!("tool")),
                     );
@@ -354,11 +518,35 @@ pub(crate) async fn run_tools(
                 while !futs.is_empty() || stream_open {
                     tokio::select! {
                         biased;
+                        Some(()) = futs.next(), if !futs.is_empty() => {
+                            while let Ok(event) = stream_rx.try_recv() {
+                                forward_pipeline_event(tx, &mut emitted_invocations, event).await;
+                            }
+                        },
                         _ = &mut cancellation_grace, if cancellation_observed => {
                             tracing::warn!(
                                 grace_ms = TOOL_CANCELLATION_GRACE_PERIOD.as_millis(),
                                 "tool batch cancellation grace period elapsed"
                             );
+                            while let Ok(event) = stream_rx.try_recv() {
+                                forward_pipeline_event(tx, &mut emitted_invocations, event).await;
+                            }
+                            let mut ready = std::mem::take(
+                                &mut *completed.lock().unwrap_or_else(|error| error.into_inner()),
+                            );
+                            let published = settle_interrupted_calls(
+                                snap,
+                                context,
+                                tx,
+                                &remaining_calls,
+                                &mut ready,
+                                &mut emitted_invocations,
+                                InterruptedSettlement {
+                                    category: crate::tools::ToolFailureCategory::Cancelled,
+                                    message: "Tool call cancellation grace period elapsed",
+                                },
+                            ).await;
+                            batch_success_count = batch_success_count.saturating_add(published.successes);
                             close_cancelled_batch(
                                 snap,
                                 context,
@@ -380,6 +568,25 @@ pub(crate) async fn run_tools(
                             let error = ReactError::from(crate::error::ToolError::Timeout(
                                 "batch timeout".into()
                             ));
+                            while let Ok(event) = stream_rx.try_recv() {
+                                forward_pipeline_event(tx, &mut emitted_invocations, event).await;
+                            }
+                            let mut ready = std::mem::take(
+                                &mut *completed.lock().unwrap_or_else(|error| error.into_inner()),
+                            );
+                            let published = settle_interrupted_calls(
+                                snap,
+                                context,
+                                tx,
+                                &remaining_calls,
+                                &mut ready,
+                                &mut emitted_invocations,
+                                InterruptedSettlement {
+                                    category: crate::tools::ToolFailureCategory::Timeout,
+                                    message: "Tool batch timeout elapsed",
+                                },
+                            ).await;
+                            batch_success_count = batch_success_count.saturating_add(published.successes);
                             close_failed_batch(
                                 snap,
                                 context,
@@ -392,30 +599,48 @@ pub(crate) async fn run_tools(
                                 outcome: crate::agent::AgentSteerTurnOutcome::Failed,
                             });
                         }
-                        Some((id, fname, result)) = futs.next(), if !futs.is_empty() => {
-                            while let Ok(event) = stream_rx.try_recv() {
-                                yield_final_event_or!(
-                                    tx,
-                                    agent_event(event),
-                                    IterOutcome::Abandoned
-                                );
-                            }
-                            completed.insert(id, (fname, result));
-                        },
                         event = stream_rx.recv(), if stream_open => {
                             match event {
                                 Some(event) => {
-                                    yield_final_event_or!(
-                                        tx,
-                                        agent_event(event),
-                                        IterOutcome::Abandoned
-                                    );
+                                    forward_pipeline_event(tx, &mut emitted_invocations, event).await;
                                 }
                                 None => stream_open = false,
                             }
                         }
                     }
                 }
+                // Both normal completion and cancellation publish the captured
+                // results in assistant call order before transcript settlement.
+                let mut ready = std::mem::take(
+                    &mut *completed.lock().unwrap_or_else(|error| error.into_inner()),
+                );
+                let published = settle_interrupted_calls(
+                    snap,
+                    context,
+                    tx,
+                    if cancellation_observed {
+                        &remaining_calls
+                    } else {
+                        &conc
+                    },
+                    &mut ready,
+                    &mut emitted_invocations,
+                    InterruptedSettlement {
+                        category: if cancellation_observed {
+                            crate::tools::ToolFailureCategory::Cancelled
+                        } else {
+                            crate::tools::ToolFailureCategory::Unavailable
+                        },
+                        message: if cancellation_observed {
+                            "Tool call cancelled before returning a result"
+                        } else {
+                            "Tool call finished without a result"
+                        },
+                    },
+                )
+                .await;
+                batch_success_count = batch_success_count.saturating_add(published.successes);
+                batch_failure_count = batch_failure_count.saturating_add(published.failures);
                 if cancellation_observed {
                     close_cancelled_batch(
                         snap,
@@ -429,97 +654,37 @@ pub(crate) async fn run_tools(
                         outcome: crate::agent::AgentSteerTurnOutcome::Cancelled,
                     });
                 }
-
-                // Emit results and push them into context in call order (`conc`
-                // order), not completion order — the assistant message already
-                // carries the tool calls in call order, and strict providers reject
-                // misordered tool results with HTTP 400 (F-RCT-04-P1-01).
-                for (id, _fname, _args) in &conc {
-                    let Some((_requested_name, result)) = completed.remove(id) else {
-                        continue;
-                    };
-                    match result {
-                        Ok(execution) => {
-                            batch_success_count = batch_success_count.saturating_add(1);
-                            let fname = execution.name;
-                            let mut result = execution.result;
-                            let output = result.output.clone();
-                            let model_message = project_typed_tool_result(
-                                context,
-                                &result,
-                                snap.config
-                                    .input_modalities
-                                    .as_ref()
-                                    .is_none_or(|modalities| {
-                                        modalities
-                                            .contains(&echo_core::llm::ModelInputModality::Image)
-                                    }),
-                            )
-                            .await;
-                            result.model_content.clear();
-                            yield_event_or!(
-                                tx,
-                                AgentEvent::ToolResult {
-                                    call_id: id.clone(),
-                                    name: fname.clone(),
-                                    result,
-                                },
-                                IterOutcome::Abandoned
-                            );
-                            let mut context_guard = context.lock().await;
-                            context_guard.push(Message::tool_result(
-                                id.clone(),
-                                fname.clone(),
-                                output.clone(),
-                            ));
-                            if let Some(message) = model_message {
-                                context_guard.push(message);
-                            }
-                            drop(context_guard);
-                            if fname == TOOL_FINAL_ANSWER {
-                                // Verify answer before accepting
-                                if verify_answer(snap, context, &output, state.verifier_retry_count)
-                                    .await
-                                {
-                                    finish_output = Some(output);
-                                } else {
-                                    // Verifier failed — continue loop for self-correction
-                                    state.verifier_retry_count += 1;
-                                }
-                            }
-                        }
-                        Err(error) => {
-                            batch_failure_count = batch_failure_count.saturating_add(1);
-                            let fname = error.name;
-                            let message = error
-                                .result
-                                .error
-                                .clone()
-                                .unwrap_or_else(|| error.error.to_string());
-                            yield_event_or!(
-                                tx,
-                                AgentEvent::ToolResult {
-                                    call_id: id.clone(),
-                                    name: fname.clone(),
-                                    result: error.result,
-                                },
-                                IterOutcome::Abandoned
-                            );
-                            context.lock().await.push(Message::tool_result(
-                                id.clone(),
-                                fname.clone(),
-                                format!("[Error] {message}"),
-                            ));
-                        }
+                for output in published.final_answers {
+                    if verify_answer(snap, context, &output, state.verifier_retry_count).await {
+                        finish_output = Some(output);
+                    } else {
+                        state.verifier_retry_count = state.verifier_retry_count.saturating_add(1);
                     }
                 }
+                remaining_calls.drain(..conc.len().min(remaining_calls.len()));
             }
             ToolExecutionWave::Sequential((id, fname, args)) => {
+                let mut emitted_invocations = HashSet::new();
                 if snap
                     .cancel_token
                     .as_ref()
                     .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
                 {
+                    let mut completed = HashMap::new();
+                    let published = settle_interrupted_calls(
+                        snap,
+                        context,
+                        tx,
+                        &remaining_calls,
+                        &mut completed,
+                        &mut emitted_invocations,
+                        InterruptedSettlement {
+                            category: crate::tools::ToolFailureCategory::Cancelled,
+                            message: "Tool batch cancelled before this call started",
+                        },
+                    )
+                    .await;
+                    batch_success_count = batch_success_count.saturating_add(published.successes);
                     close_cancelled_batch(
                         snap,
                         context,
@@ -552,12 +717,30 @@ pub(crate) async fn run_tools(
                 let result = loop {
                     tokio::select! {
                         biased;
+                        result = &mut execution => break result,
                         _ = &mut cancellation_grace, if cancellation_observed => {
                             tracing::warn!(
                                 tool = %fname,
                                 grace_ms = TOOL_CANCELLATION_GRACE_PERIOD.as_millis(),
                                 "tool cancellation grace period elapsed"
                             );
+                            while let Ok(event) = stream_rx.try_recv() {
+                                forward_pipeline_event(tx, &mut emitted_invocations, event).await;
+                            }
+                            let mut completed = HashMap::new();
+                            let published = settle_interrupted_calls(
+                                snap,
+                                context,
+                                tx,
+                                &remaining_calls,
+                                &mut completed,
+                                &mut emitted_invocations,
+                                InterruptedSettlement {
+                                    category: crate::tools::ToolFailureCategory::Cancelled,
+                                    message: "Tool call cancellation grace period elapsed",
+                                },
+                            ).await;
+                            batch_success_count = batch_success_count.saturating_add(published.successes);
                             close_cancelled_batch(
                                 snap,
                                 context,
@@ -580,88 +763,35 @@ pub(crate) async fn run_tools(
                                 tokio::time::Instant::now() + TOOL_CANCELLATION_GRACE_PERIOD,
                             );
                         },
-                        result = &mut execution => break result,
                         Some(event) = stream_rx.recv() => {
-                            yield_final_event_or!(
-                                tx,
-                                agent_event(event),
-                                IterOutcome::Abandoned
-                            );
+                            forward_pipeline_event(tx, &mut emitted_invocations, event).await;
                         }
                     }
                 };
                 while let Ok(event) = stream_rx.try_recv() {
-                    yield_final_event_or!(tx, agent_event(event), IterOutcome::Abandoned);
+                    forward_pipeline_event(tx, &mut emitted_invocations, event).await;
                 }
-                match result {
-                    Ok(execution) => {
-                        batch_success_count = batch_success_count.saturating_add(1);
-                        let fname = execution.name;
-                        let mut result = execution.result;
-                        let output = result.output.clone();
-                        let model_message = project_typed_tool_result(
-                            context,
-                            &result,
-                            snap.config
-                                .input_modalities
-                                .as_ref()
-                                .is_none_or(|modalities| {
-                                    modalities.contains(&echo_core::llm::ModelInputModality::Image)
-                                }),
-                        )
-                        .await;
-                        result.model_content.clear();
-                        yield_event_or!(
-                            tx,
-                            AgentEvent::ToolResult {
-                                call_id: id.clone(),
-                                name: fname.clone(),
-                                result,
-                            },
-                            IterOutcome::Abandoned
-                        );
-                        let mut context_guard = context.lock().await;
-                        context_guard.push(Message::tool_result(id, fname.clone(), output.clone()));
-                        if let Some(message) = model_message {
-                            context_guard.push(message);
-                        }
-                        drop(context_guard);
-                        if fname == TOOL_FINAL_ANSWER {
-                            // Verify answer before accepting
-                            if verify_answer(snap, context, &output, state.verifier_retry_count)
-                                .await
-                            {
-                                finish_output = Some(output);
-                            } else {
-                                // Verifier failed — continue loop for self-correction
-                                state.verifier_retry_count += 1;
-                            }
-                        }
-                    }
-                    Err(error) => {
-                        batch_failure_count = batch_failure_count.saturating_add(1);
-                        let fname = error.name;
-                        let message = error
-                            .result
-                            .error
-                            .clone()
-                            .unwrap_or_else(|| error.error.to_string());
-                        yield_event_or!(
-                            tx,
-                            AgentEvent::ToolResult {
-                                call_id: id.clone(),
-                                name: fname.clone(),
-                                result: error.result,
-                            },
-                            IterOutcome::Abandoned
-                        );
-                        context.lock().await.push(Message::tool_result(
-                            id,
-                            fname.clone(),
-                            format!("[Error] {message}"),
-                        ));
-                    }
-                }
+                let mut completed = HashMap::from([(id.clone(), (fname.clone(), result))]);
+                let current_call = (id.clone(), fname.clone(), args.clone());
+                let published = settle_interrupted_calls(
+                    snap,
+                    context,
+                    tx,
+                    if cancellation_observed {
+                        remaining_calls.as_slice()
+                    } else {
+                        std::slice::from_ref(&current_call)
+                    },
+                    &mut completed,
+                    &mut emitted_invocations,
+                    InterruptedSettlement {
+                        category: crate::tools::ToolFailureCategory::Cancelled,
+                        message: "Tool batch cancelled after this call completed",
+                    },
+                )
+                .await;
+                batch_success_count = batch_success_count.saturating_add(published.successes);
+                batch_failure_count = batch_failure_count.saturating_add(published.failures);
                 if cancellation_observed {
                     close_cancelled_batch(
                         snap,
@@ -675,6 +805,14 @@ pub(crate) async fn run_tools(
                         outcome: crate::agent::AgentSteerTurnOutcome::Cancelled,
                     });
                 }
+                for output in published.final_answers {
+                    if verify_answer(snap, context, &output, state.verifier_retry_count).await {
+                        finish_output = Some(output);
+                    } else {
+                        state.verifier_retry_count = state.verifier_retry_count.saturating_add(1);
+                    }
+                }
+                remaining_calls.drain(..1.min(remaining_calls.len()));
             }
         }
     }
@@ -684,12 +822,12 @@ pub(crate) async fn run_tools(
     // restart never loses an already completed write/dangerous tool outcome.
     let settlement = snap.save_transcript_projection(context, None).await?;
     if snap.conversation_store.is_some() {
+        snap.mark_transcript_settlement_observed();
         yield_event_or!(
             tx,
             AgentEvent::TranscriptProjectionSettlement(settlement.clone()),
             IterOutcome::Abandoned
         );
-        snap.mark_transcript_settlement_observed();
     }
     if settlement.status != crate::memory::TranscriptProjectionSettlementStatus::Settled {
         return Err(crate::agent::snapshot::transcript_settlement_admission_error(&settlement));
@@ -707,12 +845,12 @@ pub(crate) async fn run_tools(
     if interval > 0 && (iteration + 1).is_multiple_of(interval) {
         let settlement = snap.save_transcript_projection(context, None).await?;
         if snap.conversation_store.is_some() {
+            snap.mark_transcript_settlement_observed();
             yield_event_or!(
                 tx,
                 AgentEvent::TranscriptProjectionSettlement(settlement.clone()),
                 IterOutcome::Abandoned
             );
-            snap.mark_transcript_settlement_observed();
         }
         if settlement.status != crate::memory::TranscriptProjectionSettlementStatus::Settled {
             return Err(crate::agent::snapshot::transcript_settlement_admission_error(&settlement));
@@ -724,16 +862,58 @@ pub(crate) async fn run_tools(
 
 #[cfg(test)]
 mod tests {
-    use super::{ToolExecutionWave, build_execution_waves, project_typed_tool_result};
+    use super::{
+        InterruptedSettlement, ToolExecutionWave, build_execution_waves, project_typed_tool_result,
+        settle_interrupted_calls,
+    };
     use crate::llm::types::{ContentPart, MessageContent};
     use echo_core::tools::{ToolResult, ToolResultContent, ToolResultKind};
     use serde_json::Value;
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::Mutex;
 
     fn call(id: &str) -> (String, String, Value) {
         (id.to_string(), "tool".to_string(), Value::Null)
+    }
+
+    #[derive(Default)]
+    struct InterruptedCallback {
+        interrupted: AtomicUsize,
+        ordinary_errors: AtomicUsize,
+        inputs: std::sync::Mutex<Vec<Value>>,
+    }
+
+    impl echo_core::agent::AgentCallback for InterruptedCallback {
+        fn on_tool_error_with_id<'a>(
+            &'a self,
+            _agent: &'a str,
+            _call_id: &'a str,
+            _tool: &'a str,
+            _error: &'a crate::error::ReactError,
+        ) -> futures::future::BoxFuture<'a, ()> {
+            Box::pin(async {
+                self.ordinary_errors.fetch_add(1, Ordering::SeqCst);
+            })
+        }
+
+        fn on_tool_interrupted_with_id<'a>(
+            &'a self,
+            _agent: &'a str,
+            _call_id: &'a str,
+            _tool: &'a str,
+            input: &'a Value,
+            _error: &'a crate::error::ReactError,
+        ) -> futures::future::BoxFuture<'a, ()> {
+            Box::pin(async move {
+                self.interrupted.fetch_add(1, Ordering::SeqCst);
+                self.inputs
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .push(input.clone());
+            })
+        }
     }
 
     #[test]
@@ -757,6 +937,181 @@ mod tests {
             Some(ToolExecutionWave::Concurrent(calls))
                 if calls.iter().map(|call| call.0.as_str()).eq(["b", "c"])
         ));
+    }
+
+    #[tokio::test]
+    async fn interrupted_batch_settles_only_unfinished_calls_with_possible_effects()
+    -> crate::error::Result<()> {
+        use crate::agent::AgentEvent;
+        use crate::trace::{InMemoryRunStore, RunEvent, RunStore};
+        use echo_core::tools::{ToolFailureCategory, ToolSideEffect};
+
+        let store = Arc::new(InMemoryRunStore::new());
+        let callback = Arc::new(InterruptedCallback::default());
+        let agent = crate::agent::ReactAgentBuilder::new()
+            .model("test-model")
+            .with_run_store(store.clone())
+            .callback(callback.clone())
+            .build()?;
+        let legacy = agent.capture_legacy_external_context();
+        let run_id = agent
+            .start_legacy_trace_run("interrupted batch", &legacy)
+            .await
+            .ok_or_else(|| crate::error::ReactError::Other("trace did not start".to_string()))?;
+        let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+        snapshot
+            .record_event(RunEvent::new_tool_call(
+                "pending-a".to_string(),
+                "shell".to_string(),
+                Some(Value::Null),
+                None,
+                0,
+            ))
+            .await;
+        snapshot.mark_tool_execution_started("pending-a");
+        snapshot
+            .record_event(RunEvent::new_tool_call(
+                "completed".to_string(),
+                "shell".to_string(),
+                Some(Value::Null),
+                None,
+                0,
+            ))
+            .await;
+        let calls = vec![
+            ("completed".to_string(), "shell".to_string(), Value::Null),
+            ("pending-a".to_string(), "shell".to_string(), Value::Null),
+            (
+                "pending-b".to_string(),
+                "write_file".to_string(),
+                Value::Null,
+            ),
+        ];
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let mut completed = HashMap::from([(
+            "completed".to_string(),
+            (
+                "shell".to_string(),
+                Ok(crate::agent::snapshot::ToolCallSuccess {
+                    name: "shell".to_string(),
+                    result: ToolResult::success("completed output"),
+                }),
+            ),
+        )]);
+        let mut emitted = HashSet::from(["completed".to_string(), "pending-a".to_string()]);
+        let published = settle_interrupted_calls(
+            &snapshot,
+            &agent.memory.context,
+            &tx,
+            &calls,
+            &mut completed,
+            &mut emitted,
+            InterruptedSettlement {
+                category: ToolFailureCategory::Timeout,
+                message: "batch timeout",
+            },
+        )
+        .await;
+        assert_eq!((published.successes, published.failures), (1, 2));
+        assert_eq!(callback.interrupted.load(Ordering::SeqCst), 2);
+        assert_eq!(callback.ordinary_errors.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            callback
+                .inputs
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .len(),
+            2
+        );
+        drop(tx);
+
+        let mut observed = Vec::new();
+        while let Some(event) = rx.recv().await {
+            match event? {
+                AgentEvent::ToolCall { call_id, .. } => {
+                    assert_eq!(call_id, "pending-b");
+                    observed.push((call_id, true));
+                }
+                AgentEvent::ToolResult {
+                    call_id, result, ..
+                } => {
+                    if call_id == "completed" {
+                        assert!(result.success);
+                        assert_eq!(result.output, "completed output");
+                    } else {
+                        assert!(result.failure.as_ref().is_some_and(|failure| {
+                            failure.category == ToolFailureCategory::Timeout
+                                && failure.side_effect == ToolSideEffect::Possible
+                        }));
+                    }
+                    observed.push((call_id, false));
+                }
+                other => {
+                    return Err(crate::error::ReactError::Other(format!(
+                        "unexpected event: {other:?}"
+                    )));
+                }
+            }
+        }
+        assert_eq!(
+            observed,
+            [
+                ("completed".to_string(), false),
+                ("pending-a".to_string(), false),
+                ("pending-b".to_string(), true),
+                ("pending-b".to_string(), false),
+            ]
+        );
+        let run = store
+            .load(&run_id)
+            .await?
+            .ok_or_else(|| crate::error::ReactError::Other("trace missing".to_string()))?;
+        for id in ["pending-a", "pending-b"] {
+            assert_eq!(
+                run.events
+                    .iter()
+                    .filter(
+                        |event| matches!(event, RunEvent::ToolCall { call_id, .. } if call_id == id)
+                    )
+                    .count(),
+                1
+            );
+            assert_eq!(
+                run.events
+                    .iter()
+                    .filter(|event| matches!(event, RunEvent::ToolResult { call_id, success: false, .. } if call_id == id))
+                    .count(),
+                1
+            );
+            assert_eq!(
+                run.events
+                    .iter()
+                    .filter(|event| matches!(event, RunEvent::ToolError { call_id, .. } if call_id == id))
+                    .count(),
+                1
+            );
+        }
+        assert_eq!(
+            run.events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    RunEvent::ToolExecutionSkipped { call_id, .. }
+                        if call_id == "pending-b"
+                ))
+                .count(),
+            1
+        );
+        assert!(!run.events.iter().any(|event| matches!(
+            event,
+            RunEvent::ToolExecutionSkipped { call_id, .. }
+                if call_id == "completed" || call_id == "pending-a"
+        )));
+        assert!(!run.events.iter().any(|event| matches!(event,
+            RunEvent::ToolResult { call_id, .. } | RunEvent::ToolError { call_id, .. }
+            if call_id == "completed"
+        )));
+        Ok(())
     }
 
     #[tokio::test]

@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.channel-generation-delivery-fence-repair
 kind: evidence
-observed_at: 28530ca13fa005879ee5e652c078f5a9fb7a7f4f
+observed_at: source:b5a13ba1045ca78323b1837a5c96d038b4c7c9a9b0ce2f4ebd5c8056e20d85fa
 source_refs:
   - echo-core/src/error.rs
   - echo-integration/src/channels/types.rs

@@ -1507,6 +1507,7 @@ dependencies = [
  "cron",
  "dashmap",
  "echo_core",
+ "echo_state",
  "fastrand",
  "fs2",
  "futures",

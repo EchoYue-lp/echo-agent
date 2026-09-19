@@ -4517,6 +4517,292 @@ mod tests {
         Ok(())
     }
 
+    struct StallingToolIntervention {
+        entered: Arc<std::sync::atomic::AtomicBool>,
+        tool_name: Option<&'static str>,
+    }
+
+    impl crate::agent::InterventionCallback for StallingToolIntervention {
+        fn on_tool_call<'a>(
+            &'a self,
+            _agent: &'a str,
+            tool: &'a str,
+            _args: &'a serde_json::Value,
+        ) -> futures::future::BoxFuture<'a, crate::agent::InterventionResult> {
+            if self.tool_name.is_none_or(|name| name == tool) {
+                self.entered
+                    .store(true, std::sync::atomic::Ordering::Release);
+                Box::pin(std::future::pending())
+            } else {
+                Box::pin(async { crate::agent::InterventionResult::allow() })
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn outer_timeout_during_pre_execution_stage_records_one_complete_tool_trace() -> Result<()>
+    {
+        use crate::trace::{InMemoryRunStore, RunEvent, RunStore};
+
+        let entered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let store = Arc::new(InMemoryRunStore::new());
+        let audit = Arc::new(crate::audit::InMemoryAuditLogger::new());
+        let audit_callback = Arc::new(crate::audit::AuditCallback::new(
+            audit.clone(),
+            "agent",
+            Some("prehook-timeout".to_string()),
+        ));
+        let agent = ReactAgentBuilder::new()
+            .llm_client(Arc::new(
+                MockLlmClient::new()
+                    .then_tool_call(
+                        "prehook-timeout",
+                        "bounded_tool",
+                        r#"{"label":"admitted","password":"tiny-secret"}"#,
+                    )
+                    .with_response("unused"),
+            ))
+            .system_prompt("Execute the requested tool.")
+            .tool(Box::new(
+                MockTool::new("bounded_tool").with_response("never"),
+            ))
+            .intervention_callback(Arc::new(StallingToolIntervention {
+                entered: Arc::clone(&entered),
+                tool_name: None,
+            }))
+            .tool_execution(crate::tools::ToolExecutionConfig {
+                timeout_ms: 10,
+                retry_on_fail: false,
+                ..Default::default()
+            })
+            .callback(audit_callback)
+            .with_run_store(store.clone())
+            .build()?;
+        let stream = agent.execute_stream("run bounded tool").await?;
+        let events = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            stream.collect::<Vec<_>>(),
+        )
+        .await
+        .map_err(|_| ReactError::Other("outer timeout did not settle".to_string()))?
+        .into_iter()
+        .collect::<Result<Vec<_>>>()?;
+        assert!(entered.load(std::sync::atomic::Ordering::Acquire));
+        let call_position = events.iter().position(|event| {
+            matches!(
+                event,
+                AgentEvent::ToolCall { call_id, .. } if call_id == "prehook-timeout"
+            )
+        });
+        let result_position = events.iter().position(|event| {
+            matches!(
+                event,
+                AgentEvent::ToolResult { call_id, .. } if call_id == "prehook-timeout"
+            )
+        });
+        assert!(
+            matches!((call_position, result_position), (Some(call), Some(result)) if call < result)
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    AgentEvent::ToolCall { call_id, .. } if call_id == "prehook-timeout"
+                ))
+                .count(),
+            1
+        );
+        let envelopes = crate::agent::envelope_event_stream(
+            Box::pin(futures::stream::iter(events.clone().into_iter().map(Ok))),
+            crate::agent::EventIdentity::for_run("prehook-timeout-trajectory")?,
+        )
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>>>()?;
+        assert!(crate::agent::validate_event_trajectory(&envelopes).is_empty());
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AgentEvent::ToolResult { call_id, result, .. }
+                if call_id == "prehook-timeout" && !result.success
+        )));
+        let summary = store
+            .list_all(1)
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| ReactError::Other("missing tool trace".to_string()))?;
+        let run = store
+            .load(&summary.run_id)
+            .await?
+            .ok_or_else(|| ReactError::Other("missing trace body".to_string()))?;
+        for kind in ["call", "result", "error"] {
+            let count = run
+                .events
+                .iter()
+                .filter(|event| match (kind, event) {
+                    ("call", RunEvent::ToolCall { call_id, .. })
+                    | ("result", RunEvent::ToolResult { call_id, .. })
+                    | ("error", RunEvent::ToolError { call_id, .. }) => {
+                        call_id == "prehook-timeout"
+                    }
+                    _ => false,
+                })
+                .count();
+            assert_eq!(count, 1, "expected one {kind} event: {:?}", run.events);
+        }
+        assert!(run.events.iter().any(|event| matches!(
+            event,
+            RunEvent::ToolExecutionSkipped { call_id, name, .. }
+                if call_id == "prehook-timeout" && name == "bounded_tool"
+        )));
+        assert!(run.events.iter().any(|event| matches!(
+            event,
+            RunEvent::ToolError { call_id, failure: Some(failure), .. }
+                if call_id == "prehook-timeout"
+                    && failure.side_effect == crate::tools::ToolSideEffect::Possible
+        )));
+        let audit_events =
+            crate::audit::AuditLogger::query(audit.as_ref(), crate::audit::AuditFilter::default())
+                .await?;
+        let tool_audits = audit_events
+            .iter()
+            .filter_map(|event| match &event.event_type {
+                crate::audit::AuditEventType::ToolCall {
+                    call_id,
+                    input,
+                    success,
+                    ..
+                } => Some((call_id.as_deref(), input, *success)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(tool_audits.len(), 1);
+        assert!(matches!(
+            tool_audits.first(),
+            Some((Some("prehook-timeout"), input, false))
+                if input.get("label") == Some(&serde_json::json!("admitted"))
+                    && input.get("password") == Some(&serde_json::json!("[REDACTED]"))
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn concurrent_timeout_preserves_completed_peer_and_settles_all_assistant_calls()
+    -> Result<()> {
+        use crate::trace::{InMemoryRunStore, RunEvent, RunStore};
+
+        let entered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let store = Arc::new(InMemoryRunStore::new());
+        let llm = MockLlmClient::new()
+            .then_tool_calls(vec![
+                ToolCall {
+                    id: "slow-prehook".to_string(),
+                    call_type: "function".to_string(),
+                    function: FunctionCall {
+                        name: "slow_tool".to_string(),
+                        arguments: "{}".to_string(),
+                    },
+                },
+                ToolCall {
+                    id: "fast-completed".to_string(),
+                    call_type: "function".to_string(),
+                    function: FunctionCall {
+                        name: "fast_tool".to_string(),
+                        arguments: "{}".to_string(),
+                    },
+                },
+            ])
+            .with_response("unused");
+        let agent = ReactAgentBuilder::new()
+            .llm_client(Arc::new(llm))
+            .system_prompt("Run both tools.")
+            .tool(Box::new(MockTool::new("slow_tool").with_response("never")))
+            .tool(Box::new(
+                MockTool::new("fast_tool").with_response("committed"),
+            ))
+            .intervention_callback(Arc::new(StallingToolIntervention {
+                entered: Arc::clone(&entered),
+                tool_name: Some("slow_tool"),
+            }))
+            .tool_execution(crate::tools::ToolExecutionConfig {
+                timeout_ms: 10,
+                retry_on_fail: false,
+                ..Default::default()
+            })
+            .with_run_store(store.clone())
+            .build()?;
+        let stream = agent.execute_stream("run both").await?;
+        let events = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            stream.collect::<Vec<_>>(),
+        )
+        .await
+        .map_err(|_| ReactError::Other("concurrent timeout did not settle".to_string()))?
+        .into_iter()
+        .collect::<Result<Vec<_>>>()?;
+        assert!(entered.load(std::sync::atomic::Ordering::Acquire));
+        let results = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::ToolResult {
+                    call_id, result, ..
+                } => Some((call_id.as_str(), result.success, result.output.as_str())),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(results.len(), 2, "{events:?}");
+        assert!(matches!(results.first(), Some(("slow-prehook", false, _))));
+        assert_eq!(results.get(1), Some(&("fast-completed", true, "committed")));
+        let context_results = agent
+            .memory
+            .context
+            .lock()
+            .await
+            .messages()
+            .iter()
+            .filter_map(|message| message.tool_call_id.as_deref())
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        assert_eq!(context_results, ["slow-prehook", "fast-completed"]);
+        let envelopes = crate::agent::envelope_event_stream(
+            Box::pin(futures::stream::iter(events.clone().into_iter().map(Ok))),
+            crate::agent::EventIdentity::for_run("concurrent-timeout-trajectory")?,
+        )
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>>>()?;
+        assert!(crate::agent::validate_event_trajectory(&envelopes).is_empty());
+
+        let summary = store
+            .list_all(1)
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| ReactError::Other("trace missing".to_string()))?;
+        let run = store
+            .load(&summary.run_id)
+            .await?
+            .ok_or_else(|| ReactError::Other("trace body missing".to_string()))?;
+        for id in ["slow-prehook", "fast-completed"] {
+            assert_eq!(
+                run.events
+                    .iter()
+                    .filter(|event| matches!(event, RunEvent::ToolResult { call_id, .. } if call_id == id))
+                    .count(),
+                1
+            );
+        }
+        assert!(run.events.iter().any(|event| matches!(
+            event,
+            RunEvent::ToolResult { call_id, success: true, .. }
+                if call_id == "fast-completed"
+        )));
+        Ok(())
+    }
+
     #[tokio::test]
     async fn q_flt_v06_dropping_consumer_drains_upstream_and_releases_turn() -> Result<()> {
         let started = Arc::new(tokio::sync::Notify::new());

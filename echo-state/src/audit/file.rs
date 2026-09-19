@@ -26,7 +26,10 @@ pub struct FileAuditLogger {
 
 impl FileAuditLogger {
     pub fn new(path: impl Into<PathBuf>) -> Result<Self> {
-        let path = path.into();
+        Self::open(path.into()).map_err(sanitize_file_error)
+    }
+
+    fn open(path: PathBuf) -> Result<Self> {
         let parent = path
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
@@ -108,10 +111,9 @@ impl FileAuditLogger {
                 }
                 Err(error) if !complete => {
                     tracing::warn!(
-                        path = %path.display(),
                         line = line_index.saturating_add(1),
-                        error = %error,
-                        tail_preview = %String::from_utf8_lossy(line).chars().take(120).collect::<String>(),
+                        error_category = ?error.classify(),
+                        error_column = error.column(),
                         "audit log: truncating crash-torn final JSONL record"
                     );
                     echo_core::utils::fs::truncate_existing_matching(
@@ -124,9 +126,9 @@ impl FileAuditLogger {
                 }
                 Err(error) => {
                     return Err(echo_core::error::ReactError::Other(format!(
-                        "audit log {} has corrupt complete record at line {}: {error}",
-                        path.display(),
-                        line_index.saturating_add(1)
+                        "audit log has corrupt complete record at line {}: {}",
+                        line_index.saturating_add(1),
+                        audit_decode_error(error)
                     )));
                 }
             }
@@ -143,6 +145,22 @@ impl FileAuditLogger {
     }
 }
 
+fn sanitize_file_error(error: impl std::fmt::Display) -> echo_core::error::ReactError {
+    echo_core::error::ReactError::Other(
+        echo_core::utils::retention::ContentRetentionPolicy::default()
+            .sanitize_text(&error.to_string()),
+    )
+}
+
+fn audit_decode_error(error: serde_json::Error) -> echo_core::error::ReactError {
+    echo_core::error::ReactError::Other(format!(
+        "invalid audit record: {:?} at line {} column {}",
+        error.classify(),
+        error.line(),
+        error.column()
+    ))
+}
+
 fn checked_record_end(current: u64, segment_len: usize) -> Result<u64> {
     let segment_len = u64::try_from(segment_len).map_err(|error| {
         echo_core::error::ReactError::Other(format!("audit record length overflow: {error}"))
@@ -153,13 +171,10 @@ fn checked_record_end(current: u64, segment_len: usize) -> Result<u64> {
 }
 
 impl AuditLogger for FileAuditLogger {
-    fn log<'a>(&'a self, event: AuditEvent) -> BoxFuture<'a, Result<()>> {
+    fn log<'a>(&'a self, mut event: AuditEvent) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
-            let mut value = serde_json::to_value(&event)
-                .map_err(|e| echo_core::error::ReactError::Other(e.to_string()))?;
-            self.retention.sanitize_json(&mut value);
-            let line = serde_json::to_string(&value)
-                .map_err(|e| echo_core::error::ReactError::Other(e.to_string()))?;
+            event.apply_retention(&self.retention);
+            let line = serde_json::to_string(&event).map_err(audit_decode_error)?;
             let mut bytes = line.into_bytes();
             bytes.push(b'\n');
 
@@ -174,7 +189,8 @@ impl AuditLogger for FileAuditLogger {
                 state.committed_len,
                 &bytes,
                 echo_core::utils::fs::FileDurability::SyncData,
-            )?;
+            )
+            .map_err(sanitize_file_error)?;
             state.committed_len = next_len;
             Ok(())
         })
@@ -183,8 +199,8 @@ impl AuditLogger for FileAuditLogger {
     fn query<'a>(&'a self, filter: AuditFilter) -> BoxFuture<'a, Result<Vec<AuditEvent>>> {
         Box::pin(async move {
             let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            let bytes =
-                echo_core::utils::fs::read_existing_matching(&self.path, &state.file_guard)?;
+            let bytes = echo_core::utils::fs::read_existing_matching(&self.path, &state.file_guard)
+                .map_err(sanitize_file_error)?;
             let observed_len = checked_record_end(0, bytes.len())?;
             if observed_len != state.committed_len {
                 return Err(echo_core::error::ReactError::Other(format!(
@@ -205,11 +221,9 @@ impl AuditLogger for FileAuditLogger {
                     continue;
                 }
                 {
-                    let event = serde_json::from_str::<AuditEvent>(line).map_err(|error| {
-                        echo_core::error::ReactError::Other(format!(
-                            "invalid audit record: {error}"
-                        ))
-                    })?;
+                    let mut event =
+                        serde_json::from_str::<AuditEvent>(line).map_err(audit_decode_error)?;
+                    event.apply_retention(&self.retention);
                     let mut keep = true;
                     if let Some(ref sid) = filter.session_id
                         && event.session_id.as_deref() != Some(sid)
@@ -251,6 +265,109 @@ mod tests {
     use super::*;
     use echo_core::audit::AuditEventType;
 
+    const AUDIT_LEASE_CHILD_PATH: &str = "ECHO_AUDIT_LEASE_CHILD_PATH";
+    const AUDIT_LEASE_CHILD_EXPECT_OPEN: &str = "ECHO_AUDIT_LEASE_CHILD_EXPECT_OPEN";
+
+    #[test]
+    fn file_lease_child_process() -> Result<()> {
+        let Some(path) = std::env::var_os(AUDIT_LEASE_CHILD_PATH) else {
+            return Ok(());
+        };
+        let expect_open = std::env::var_os(AUDIT_LEASE_CHILD_EXPECT_OPEN).is_some();
+        let opened = FileAuditLogger::new(std::path::PathBuf::from(path));
+        if expect_open != opened.is_ok() {
+            return Err(echo_core::error::ReactError::Other(format!(
+                "child lease expectation mismatch: expected_open={expect_open}, opened={}",
+                opened.is_ok()
+            )));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn file_lease_is_exclusive_across_processes_and_reacquirable() -> Result<()> {
+        let temp = std::env::temp_dir().join(format!("echo-audit-lease-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp)?;
+        let path = temp.join("audit.jsonl");
+        let owner = FileAuditLogger::new(&path)?;
+        let test_binary = std::env::current_exe()?;
+
+        let blocked = std::process::Command::new(&test_binary)
+            .arg("audit::file::tests::file_lease_child_process")
+            .arg("--exact")
+            .env(AUDIT_LEASE_CHILD_PATH, &path)
+            .status()?;
+        if !blocked.success() {
+            return Err(echo_core::error::ReactError::Other(
+                "child process did not observe the held audit lease".to_string(),
+            ));
+        }
+
+        drop(owner);
+        let reopened = std::process::Command::new(&test_binary)
+            .arg("audit::file::tests::file_lease_child_process")
+            .arg("--exact")
+            .env(AUDIT_LEASE_CHILD_PATH, &path)
+            .env(AUDIT_LEASE_CHILD_EXPECT_OPEN, "1")
+            .status()?;
+        if !reopened.success() {
+            return Err(echo_core::error::ReactError::Other(
+                "child process could not reacquire the released audit lease".to_string(),
+            ));
+        }
+
+        std::fs::remove_dir_all(temp)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn audit_decode_errors_never_echo_unknown_variant_payloads() -> Result<()> {
+        let temp = std::env::temp_dir().join(format!("echo-audit-errors-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp)?;
+        let path = temp.join("audit.jsonl");
+        let event = AuditEvent::now(
+            None,
+            "agent".into(),
+            AuditEventType::FinalAnswer {
+                content: "safe".into(),
+            },
+        );
+        let mut value = serde_json::to_value(event)?;
+        if let Some(kind) = value.get_mut("event_type").and_then(|v| v.get_mut("type")) {
+            *kind = serde_json::Value::String("unrecognizable-sensitive-value".into());
+        }
+        let corrupt = format!("{}\n", serde_json::to_string(&value)?);
+        std::fs::write(&path, &corrupt)?;
+        let error = FileAuditLogger::new(&path).err().ok_or_else(|| {
+            echo_core::error::ReactError::Other("expected decode rejection".into())
+        })?;
+        assert!(!error.to_string().contains("unrecognizable-sensitive-value"));
+        assert!(error.to_string().contains("Data"));
+        assert_eq!(std::fs::read_to_string(&path)?, corrupt);
+
+        std::fs::write(&path, "")?;
+        let logger = FileAuditLogger::new(&path)?;
+        std::fs::write(&path, &corrupt)?;
+        logger
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .committed_len = u64::try_from(corrupt.len())
+            .map_err(|e| echo_core::error::ReactError::Other(e.to_string()))?;
+        let error = logger
+            .query(AuditFilter::default())
+            .await
+            .err()
+            .ok_or_else(|| {
+                echo_core::error::ReactError::Other("expected query rejection".into())
+            })?;
+        assert!(!error.to_string().contains("unrecognizable-sensitive-value"));
+        assert!(error.to_string().contains("Data"));
+        drop(logger);
+        std::fs::remove_dir_all(temp)?;
+        Ok(())
+    }
+
     #[tokio::test]
     async fn durable_audit_redacts_nested_secrets_and_bounds_unicode() -> Result<()> {
         let temp = std::env::temp_dir().join(format!(
@@ -270,6 +387,7 @@ mod tests {
                 Some("session".to_string()),
                 "agent".to_string(),
                 AuditEventType::ToolCall {
+                    call_id: Some("audit-call".to_string()),
                     tool: "shell".to_string(),
                     input: serde_json::json!({
                         "nested": {"auth": "Bearer abcdefghijklmnopqrstuvwxyz"}

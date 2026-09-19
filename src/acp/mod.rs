@@ -33,5 +33,6 @@ pub use runtime::{
     RunEntry, RunEventObserver, RunObserverContext, RunStartSpec, StandardBridgeOutcome,
 };
 pub use session::{
-    AcpSession, AcpSessionContext, AcpSessionFactory, ActiveTurn, ActiveTurnLease, SessionRegistry,
+    AcpSession, AcpSessionContext, AcpSessionFactory, ActiveTurn, ActiveTurnLease,
+    SessionCloseLease, SessionRegistry,
 };

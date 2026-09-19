@@ -466,6 +466,17 @@ pub struct DeliveryLedgerProjection<Route = String, Payload = Value> {
     invalid: Option<String>,
 }
 
+fn claim_is_eligible<Route, Payload>(candidate: &DeliveryRecord<Route, Payload>) -> bool {
+    candidate.effect_started_at.is_none()
+        && !matches!(
+            candidate.phase,
+            DeliveryPhase::EffectStarted | DeliveryPhase::MailboxAccepted | DeliveryPhase::Drained
+        )
+        && candidate
+            .next_attempt_at
+            .is_none_or(|deadline| deadline <= Utc::now())
+}
+
 impl<Route, Payload> Default for DeliveryLedgerProjection<Route, Payload> {
     fn default() -> Self {
         Self {
@@ -607,9 +618,25 @@ where
                 if attempt_id.trim().is_empty() || *attempt == 0 {
                     return Err(format!("invalid claim identity for message {message_id}"));
                 }
-                if self.frontier.front().map(String::as_str) != Some(message_id.as_str()) {
+                let Some(position) = self.frontier.iter().position(|id| id == message_id) else {
                     return Err(format!(
-                        "message {message_id} is not the next FIFO delivery frontier"
+                        "message {message_id} is missing from the delivery frontier"
+                    ));
+                };
+                let predecessors_started = self.frontier.iter().take(position).all(|id| {
+                    self.entries.get(id).is_some_and(|entry| {
+                        entry.effect_started_at.is_some()
+                            && matches!(
+                                entry.phase,
+                                DeliveryPhase::EffectStarted
+                                    | DeliveryPhase::MailboxAccepted
+                                    | DeliveryPhase::Drained
+                            )
+                    })
+                });
+                if !predecessors_started {
+                    return Err(format!(
+                        "message {message_id} cannot pass an unstarted FIFO predecessor"
                     ));
                 }
                 let entry = self.entry_mut(message_id)?;
@@ -1268,6 +1295,47 @@ where
         Ok(Some(draft.claim))
     }
 
+    /// Claim the earliest eligible delivery after any predecessors whose
+    /// effects have already started.
+    ///
+    /// This preserves FIFO effect admission while allowing independent effects
+    /// to settle concurrently. Consumers that require exactly one in-flight
+    /// delivery should continue using [`Self::claim_next`].
+    pub fn claim_next_available(
+        &self,
+    ) -> std::result::Result<
+        Option<DeliveryClaim<Route, Payload>>,
+        DeliveryLedgerError<Route, Payload>,
+    > {
+        let Some(draft) = self.prepare_claim_next_available()? else {
+            return Ok(None);
+        };
+        self.apply(draft.event)?;
+        Ok(Some(draft.claim))
+    }
+
+    /// Prepare the earliest concurrently admissible FIFO claim.
+    pub fn prepare_claim_next_available(
+        &self,
+    ) -> std::result::Result<
+        Option<DeliveryClaimDraft<Route, Payload>>,
+        DeliveryLedgerError<Route, Payload>,
+    > {
+        let candidate = self.with_projection(|projection| {
+            projection
+                .frontier()
+                // Only the first unstarted record can be admitted. A deferred
+                // predecessor still owns the FIFO frontier until it is due.
+                .find(|candidate| candidate.effect_started_at.is_none())
+                .filter(|candidate| claim_is_eligible(candidate))
+                .cloned()
+        });
+        let Some(candidate) = candidate else {
+            return Ok(None);
+        };
+        self.prepare_claim(candidate)
+    }
+
     /// Select and preflight the next eligible FIFO claim without committing it.
     pub fn prepare_claim_next(
         &self,
@@ -1279,19 +1347,19 @@ where
         let Some(candidate) = candidate else {
             return Ok(None);
         };
-        if candidate.effect_started_at.is_some()
-            || matches!(
-                candidate.phase,
-                DeliveryPhase::EffectStarted
-                    | DeliveryPhase::MailboxAccepted
-                    | DeliveryPhase::Drained
-            )
-            || candidate
-                .next_attempt_at
-                .is_some_and(|deadline| deadline > Utc::now())
-        {
+        if !claim_is_eligible(&candidate) {
             return Ok(None);
         }
+        self.prepare_claim(candidate)
+    }
+
+    fn prepare_claim(
+        &self,
+        candidate: DeliveryRecord<Route, Payload>,
+    ) -> std::result::Result<
+        Option<DeliveryClaimDraft<Route, Payload>>,
+        DeliveryLedgerError<Route, Payload>,
+    > {
         let attempt = candidate.attempt.saturating_add(1);
         let attempt_id = uuid::Uuid::new_v4().to_string();
         let claimed_at = Utc::now();
@@ -2085,6 +2153,66 @@ mod tests {
             .map_err(|error| ReactError::Other(error.to_string()))?;
         assert_eq!(receipt.batch_id, batch_id);
         assert_eq!(receipt.record_count, 1);
+        assert!(ledger.validate().is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn concurrent_claim_skips_only_predecessors_whose_effect_started() -> Result<()> {
+        let ledger = ledger();
+        for id in ["first", "second"] {
+            ledger
+                .enqueue(envelope(id))
+                .map_err(|error| ReactError::Other(error.to_string()))?;
+        }
+        let first = ledger
+            .claim_next()
+            .map_err(|error| ReactError::Other(error.to_string()))?
+            .ok_or_else(|| ReactError::Other("first claim missing".to_string()))?;
+        let pre_effect = ledger
+            .prepare_claim_next_available()
+            .map_err(|error| ReactError::Other(error.to_string()))?
+            .ok_or_else(|| ReactError::Other("pre-effect claim missing".to_string()))?;
+        assert_eq!(pre_effect.claim.message_id, "first");
+        ledger
+            .begin_effect(&first, "first-turn")
+            .map_err(|error| ReactError::Other(error.to_string()))?;
+
+        let second = ledger
+            .claim_next_available()
+            .map_err(|error| ReactError::Other(error.to_string()))?
+            .ok_or_else(|| ReactError::Other("second concurrent claim missing".to_string()))?;
+        assert_eq!(second.message_id, "second");
+        assert!(ledger.validate().is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn concurrent_claim_does_not_bypass_a_deferred_predecessor() -> Result<()> {
+        let ledger = ledger();
+        for id in ["first", "second"] {
+            ledger
+                .enqueue(envelope(id))
+                .map_err(|error| ReactError::Other(error.to_string()))?;
+        }
+        let first = ledger
+            .claim_next()
+            .map_err(|error| ReactError::Other(error.to_string()))?
+            .ok_or_else(|| ReactError::Other("first claim missing".to_string()))?;
+        ledger
+            .defer(
+                &first,
+                "retry later",
+                Utc::now() + chrono::Duration::hours(1),
+            )
+            .map_err(|error| ReactError::Other(error.to_string()))?;
+
+        assert!(
+            ledger
+                .claim_next_available()
+                .map_err(|error| ReactError::Other(error.to_string()))?
+                .is_none()
+        );
         assert!(ledger.validate().is_ok());
         Ok(())
     }

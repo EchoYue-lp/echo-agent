@@ -5,7 +5,9 @@
 //!
 //! Run: cargo run -p echo-agent-learning --example demo70_scheduler
 
-use echo_agent::scheduler::{CronTask, CronTaskStatus, CronTaskStore, FireFn, SchedulerRunner};
+use echo_agent::scheduler::{
+    CronTask, CronTaskStatus, CronTaskStore, OccurrenceFireFn, SchedulerRunner,
+};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
@@ -62,14 +64,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ── 5. Create a SchedulerRunner with a simple fire function ───────
     let cancel = CancellationToken::new();
-    let fire_fn: FireFn = Arc::new(|task: CronTask| {
-        let name = task.name.clone();
+    let fire_fn: OccurrenceFireFn = Arc::new(|invocation| {
+        let name = invocation.task.name.clone();
+        let occurrence_id = invocation.occurrence_id;
         Box::pin(async move {
-            println!("   🔥 Firing task: {}", name);
+            println!("   🔥 Firing task: {} ({})", name, occurrence_id);
             Ok(format!("Executed: {}", name))
         })
     });
-    let runner = Arc::new(SchedulerRunner::new(store, cancel, fire_fn).await?);
+    let runner =
+        Arc::new(SchedulerRunner::new_with_occurrence_context(store, cancel, fire_fn).await?);
     println!("🤖 SchedulerRunner created (fire fn prints task name)\n");
 
     // ── 6. Manually trigger a task via run_once() ─────────────────────

@@ -6,13 +6,14 @@
 //!
 //! Inspired by Hermes Agent's background review system.
 
-use crate::error::Result;
 use crate::evolution::MemoryLayerManager;
 use crate::llm::LlmClient;
 use crate::memory::store::Store;
 use crate::trace::{Run, RunEvent, RunStore};
 use echo_core::memory::types::{MemoryMeta, MemorySource, MemoryStatus, MemoryType};
+use futures::FutureExt;
 use serde::{Deserialize, Serialize};
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
 // ── Review prompts (adapted from Hermes Agent) ─────────────────────
@@ -88,7 +89,6 @@ const REVIEW_SYSTEM_PROMPT: &str = "\
 pub struct BackgroundReviewConfig {
     /// Whether background review is enabled.
     pub enabled: bool,
-    /// Maximum iterations for the review agent.
     pub max_iterations: usize,
     /// Which review types to run.
     pub review_memory: bool,
@@ -132,11 +132,11 @@ pub struct ReviewCandidate {
     pub content: String,
     pub evidence: String,
     pub confidence: f32,
-    /// Whether this candidate was written to memory during the review.
-    pub persisted: bool,
+    pub persisted: Option<bool>,
 }
 
 /// Result of a background review pass.
+#[must_use]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReviewOutcome {
     /// The run ID that was reviewed.
@@ -165,9 +165,6 @@ enum ReviewDecision {
 
 // ── BackgroundReviewer ─────────────────────────────────────────────
 
-/// Spawns background tasks to review completed runs and propose durable information.
-///
-/// Uses a direct text-only chat request with no agent loop or tools.
 pub struct BackgroundReviewer {
     config: BackgroundReviewConfig,
     llm_client: Arc<dyn LlmClient>,
@@ -214,10 +211,16 @@ impl BackgroundReviewer {
     fn build_transcript(run: &Run) -> String {
         let mut lines = Vec::new();
         lines.push(format!("User: {}", run.input));
+        let skipped = crate::trace::skipped_tool_call_ids(&run.events);
 
         for event in &run.events {
             match event {
-                RunEvent::ToolCall { name, args, .. } => {
+                RunEvent::ToolCall {
+                    call_id,
+                    name,
+                    args,
+                    ..
+                } if !skipped.contains(call_id.as_str()) => {
                     let args_str = args
                         .as_ref()
                         .map(|v| serde_json::to_string(v).unwrap_or_default())
@@ -225,16 +228,22 @@ impl BackgroundReviewer {
                     lines.push(format!("Assistant [tool call]: {name}({args_str})"));
                 }
                 RunEvent::ToolResult {
+                    call_id,
                     name,
                     success,
                     output_preview,
                     ..
-                } => {
+                } if !skipped.contains(call_id.as_str()) => {
                     let status = if *success { "OK" } else { "FAILED" };
                     let output = output_preview.as_deref().unwrap_or("(no output)");
                     lines.push(format!("Tool [{status}] {name}: {output}"));
                 }
-                RunEvent::ToolError { name, message, .. } => {
+                RunEvent::ToolError {
+                    call_id,
+                    name,
+                    message,
+                    ..
+                } if !skipped.contains(call_id.as_str()) => {
                     lines.push(format!("Tool [ERROR] {name}: {message}"));
                 }
                 _ => {}
@@ -248,145 +257,79 @@ impl BackgroundReviewer {
         lines.join("\n")
     }
 
-    /// Run a background review for the given run.
-    ///
-    /// This spawns a background task that:
-    /// 1. Builds a transcript from the run events
-    /// 2. Sends it to the LLM with the review prompt
-    /// 3. Parses the response for memory/skill actions
-    /// 4. Returns a JoinHandle that resolves to a ReviewOutcome
-    ///
-    /// The returned handle is non-blocking — the caller can poll, await, or
-    /// discard it. Use [`Self::review_and_wait`] for the old blocking behavior.
-    pub fn review(&self, run: &Run) -> Result<tokio::task::JoinHandle<ReviewOutcome>> {
-        if !self.config.enabled {
-            let outcome = ReviewOutcome {
-                run_id: run.run_id.clone(),
-                actions: vec![],
-                nothing_to_save: true,
-                candidate: None,
-                error: None,
-            };
-            return Ok(tokio::spawn(async move { outcome }));
+    pub async fn review(&self, run: &Run) -> ReviewOutcome {
+        if let Some(outcome) = self.skip_review(&run.run_id) {
+            return outcome;
         }
-
-        let transcript = Self::build_transcript(run);
-        let user_input = run.input.clone();
-        let prompt = self.review_prompt().to_string();
-        let auto_persist_user_preferences = self.config.auto_persist_user_preferences;
-        let run_id = run.run_id.clone();
-        let llm_client = self.llm_client.clone();
-        let layer_manager = self.layer_manager.clone();
-
-        // Spawn background task — return handle immediately (non-blocking)
-        let handle = tokio::spawn(async move {
+        let review = async {
             Self::run_review(
-                llm_client,
-                layer_manager,
-                run_id,
-                transcript,
-                user_input,
-                prompt,
-                auto_persist_user_preferences,
+                self.llm_client.clone(),
+                self.layer_manager.clone(),
+                run.run_id.clone(),
+                Self::build_transcript(run),
+                run.input.clone(),
+                self.review_prompt().to_string(),
+                self.config.auto_persist_user_preferences,
             )
             .await
-        });
-
-        Ok(handle)
-    }
-
-    /// Blocking variant that spawns a review and waits for the result.
-    ///
-    /// This is a convenience wrapper around [`Self::review`] for callers
-    /// that need the outcome before proceeding.
-    pub async fn review_and_wait(&self, run: &Run) -> Result<ReviewOutcome> {
-        let run_id = run.run_id.clone();
-        let handle = self.review(run)?;
-        let outcome = handle.await.unwrap_or_else(|e| ReviewOutcome {
-            run_id,
-            actions: vec![],
-            nothing_to_save: true,
-            candidate: None,
-            error: Some(format!("Review task panicked: {e}")),
-        });
-        Ok(outcome)
-    }
-
-    /// Run a review for a specific run ID (loading from the run store).
-    ///
-    /// Returns a JoinHandle — use `.await` to wait for the result if needed.
-    pub fn review_by_run_id(&self, run_id: &str) -> Result<tokio::task::JoinHandle<ReviewOutcome>> {
-        let store = match &self.run_store {
-            Some(s) => s,
-            None => {
-                let outcome = ReviewOutcome {
-                    run_id: run_id.to_string(),
-                    actions: vec![],
-                    nothing_to_save: true,
-                    candidate: None,
-                    error: Some("No run store configured".into()),
-                };
-                return Ok(tokio::spawn(async move { outcome }));
-            }
         };
-
-        // load() is async, so we need to spawn a wrapper that does the load + review
-        let store = store.clone();
-        let run_id = run_id.to_string();
-        let llm_client = self.llm_client.clone();
-        let layer_manager = self.layer_manager.clone();
-        let config = self.config.clone();
-        let prompt = self.review_prompt().to_string();
-
-        let handle = tokio::spawn(async move {
-            let run = match store.load(&run_id).await {
-                Ok(Some(r)) => r,
-                Ok(None) => {
-                    return ReviewOutcome {
-                        run_id: run_id.clone(),
-                        actions: vec![],
-                        nothing_to_save: true,
-                        candidate: None,
-                        error: Some(format!("Run {run_id} not found")),
-                    };
-                }
-                Err(e) => {
-                    return ReviewOutcome {
-                        run_id: run_id.clone(),
-                        actions: vec![],
-                        nothing_to_save: true,
-                        candidate: None,
-                        error: Some(format!("Failed to load run: {e}")),
-                    };
-                }
-            };
-
-            if !config.enabled {
-                return ReviewOutcome {
-                    run_id: run.run_id.clone(),
-                    actions: vec![],
-                    nothing_to_save: true,
-                    candidate: None,
-                    error: None,
-                };
-            }
-
-            let transcript = BackgroundReviewer::build_transcript(&run);
-            let user_input = run.input.clone();
-
-            BackgroundReviewer::run_review(
-                llm_client,
-                layer_manager,
-                run_id,
-                transcript,
-                user_input,
-                prompt,
-                config.auto_persist_user_preferences,
-            )
+        AssertUnwindSafe(review)
+            .catch_unwind()
             .await
-        });
+            .unwrap_or_else(|_| {
+                Self::empty_outcome(
+                    &run.run_id,
+                    Some("Review panicked; side effects are unknown".into()),
+                )
+            })
+    }
 
-        Ok(handle)
+    pub async fn review_and_wait(&self, run: &Run) -> ReviewOutcome {
+        self.review(run).await
+    }
+
+    pub async fn review_by_run_id(&self, run_id: &str) -> ReviewOutcome {
+        if let Some(outcome) = self.skip_review(run_id) {
+            return outcome;
+        }
+        let Some(store) = &self.run_store else {
+            return Self::empty_outcome(run_id, Some("No run store configured".into()));
+        };
+        let load = async { store.load(run_id).await };
+        match AssertUnwindSafe(load).catch_unwind().await {
+            Ok(Ok(Some(run))) => self.review(&run).await,
+            Ok(Ok(None)) => Self::empty_outcome(run_id, Some(format!("Run {run_id} not found"))),
+            Ok(Err(error)) => {
+                Self::empty_outcome(run_id, Some(format!("Failed to load run: {error}")))
+            }
+            Err(_) => Self::empty_outcome(
+                run_id,
+                Some("Run load panicked; side effects are unknown".into()),
+            ),
+        }
+    }
+
+    fn skip_review(&self, run_id: &str) -> Option<ReviewOutcome> {
+        if !self.config.enabled {
+            Some(Self::empty_outcome(run_id, None))
+        } else if self.config.max_iterations == 0 {
+            Some(Self::empty_outcome(
+                run_id,
+                Some("Review iteration budget exhausted (max_iterations=0)".into()),
+            ))
+        } else {
+            None
+        }
+    }
+
+    fn empty_outcome(run_id: &str, error: Option<String>) -> ReviewOutcome {
+        ReviewOutcome {
+            run_id: run_id.to_string(),
+            actions: vec![],
+            nothing_to_save: error.is_none(),
+            candidate: None,
+            error,
+        }
     }
 
     /// Execute the review using the LLM client directly.
@@ -422,28 +365,21 @@ impl BackgroundReviewer {
         let response = match llm_client.chat(request).await {
             Ok(r) => r,
             Err(e) => {
-                return ReviewOutcome {
-                    run_id,
-                    actions: vec![],
-                    nothing_to_save: true,
-                    candidate: None,
-                    error: Some(format!("LLM call failed: {e}")),
-                };
+                return Self::empty_outcome(&run_id, Some(format!("LLM call failed: {e}")));
             }
         };
 
         let content = response.content().unwrap_or_default();
 
-        let decision = match serde_json::from_str::<ReviewDecision>(content.trim()) {
+        let decision = match serde_json::from_str::<serde_json::Value>(content.trim())
+            .and_then(serde_json::from_value::<ReviewDecision>)
+        {
             Ok(decision) => decision,
             Err(error) => {
-                return ReviewOutcome {
-                    run_id,
-                    actions: vec![],
-                    nothing_to_save: true,
-                    candidate: None,
-                    error: Some(format!("Review response rejected: invalid JSON ({error})")),
-                };
+                return Self::empty_outcome(
+                    &run_id,
+                    Some(format!("Review response rejected: invalid JSON ({error})")),
+                );
             }
         };
 
@@ -473,20 +409,17 @@ impl BackgroundReviewer {
         ) {
             Ok(candidate) => candidate,
             Err(error) => {
-                return ReviewOutcome {
-                    run_id,
-                    actions: vec![],
-                    nothing_to_save: true,
-                    candidate: None,
-                    error: Some(format!("Review response rejected: {error}")),
-                };
+                return Self::empty_outcome(
+                    &run_id,
+                    Some(format!("Review response rejected: {error}")),
+                );
             }
         };
 
         let should_persist = auto_persist_user_preferences
             && kind == ReviewCandidateKind::UserPreference
             && confidence >= 0.95;
-        let mut persisted = false;
+        let mut persisted = Some(false);
         let mut error = None;
 
         if should_persist {
@@ -499,10 +432,20 @@ impl BackgroundReviewer {
                 .with_confidence(confidence)
                 .with_status(MemoryStatus::Draft);
                 let key = format!("review_{run_id}");
-                match layer_manager.write_memory(&key, &content, meta).await {
-                    Ok(_) => persisted = true,
-                    Err(write_error) => {
-                        error = Some(format!("Review candidate was not persisted: {write_error}"));
+                let write = async { layer_manager.write_memory(&key, &content, meta).await };
+                match AssertUnwindSafe(write).catch_unwind().await {
+                    Ok(Ok(_)) => persisted = Some(true),
+                    Ok(Err(write_error)) => {
+                        persisted = None;
+                        error = Some(format!(
+                            "Review persistence outcome unknown for {key}: {write_error}; reconcile memory and change log before retrying"
+                        ));
+                    }
+                    Err(_) => {
+                        persisted = None;
+                        error = Some(format!(
+                            "Review persistence panicked; outcome unknown for {key}; reconcile memory and change log before retrying"
+                        ));
                     }
                 }
             } else {
@@ -510,10 +453,10 @@ impl BackgroundReviewer {
             }
         }
 
-        let action = if persisted {
-            format!("Draft memory saved: {content}")
-        } else {
-            format!("Candidate proposed (not saved): {content}")
+        let action = match persisted {
+            Some(true) => format!("Draft memory saved: {content}"),
+            Some(false) => format!("Candidate proposed (not saved): {content}"),
+            None => format!("Candidate persistence unknown (review_{run_id}): {content}"),
         };
         let candidate = ReviewCandidate {
             kind,
@@ -564,8 +507,449 @@ fn validate_candidate(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::ReactError;
+    use crate::error::Result;
+    use crate::evolution::audit::{
+        ChangeEntry, ChangeFilter, ChangeLog, ChangeRecordOutcome, EntityType, NullChangeLog,
+    };
+    use crate::evolution::layer::{EvolutionObserver, WARM_NAMESPACE};
+    use crate::testing::MockLlmClient;
     use crate::trace::{Run, RunEvent, RunStatus, RunTimings, TokenUsage};
     use chrono::Utc;
+    use echo_state::memory::store::InMemoryStore;
+    use futures::future::BoxFuture;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    const PREFERENCE: &str = r#"{"decision":"candidate","kind":"user_preference","content":"The user prefers concise answers","evidence":"I prefer concise answers","confidence":0.98}"#;
+
+    struct DropProbe(Arc<AtomicBool>);
+
+    impl Drop for DropProbe {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    struct ProbeClient {
+        calls: AtomicUsize,
+        dropped: Arc<AtomicBool>,
+        panics: bool,
+    }
+
+    impl LlmClient for ProbeClient {
+        fn chat(
+            &self,
+            _request: crate::llm::ChatRequest,
+        ) -> BoxFuture<'_, Result<crate::llm::ChatResponse>> {
+            Box::pin(async move {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                let _probe = DropProbe(self.dropped.clone());
+                if self.panics {
+                    std::panic::resume_unwind(Box::new("injected review panic"));
+                }
+                futures::future::pending().await
+            })
+        }
+
+        fn chat_stream(
+            &self,
+            _request: crate::llm::ChatRequest,
+        ) -> BoxFuture<'_, Result<futures::stream::BoxStream<'static, Result<crate::llm::ChatChunk>>>>
+        {
+            Box::pin(async { Err(ReactError::Other("unused stream".into())) })
+        }
+
+        fn model_name(&self) -> &str {
+            "review-probe"
+        }
+    }
+
+    struct FailingReviewLog {
+        panics: bool,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl ChangeLog for FailingReviewLog {
+        fn record(&self, _entry: ChangeEntry) -> Result<()> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if self.panics {
+                std::panic::resume_unwind(Box::new("injected persistence panic"));
+            }
+            Err(ReactError::Other("injected change log failure".into()))
+        }
+
+        fn record_idempotent(&self, entry: ChangeEntry) -> Result<ChangeRecordOutcome> {
+            self.record(entry).map(|()| ChangeRecordOutcome::Appended)
+        }
+
+        fn query(&self, filter: &ChangeFilter) -> Result<Vec<ChangeEntry>> {
+            NullChangeLog.query(filter)
+        }
+
+        fn latest_for(&self, entity_type: EntityType, key: &str) -> Result<Option<ChangeEntry>> {
+            NullChangeLog.latest_for(entity_type, key)
+        }
+
+        fn len(&self) -> usize {
+            0
+        }
+    }
+
+    struct ParkedObserver {
+        entered: AtomicBool,
+        dropped: Arc<AtomicBool>,
+        release: tokio::sync::Notify,
+        finished: AtomicBool,
+    }
+
+    impl EvolutionObserver for ParkedObserver {
+        fn on_memory_write<'a>(&'a self, _key: &'a str, _source: &'a str) -> BoxFuture<'a, ()> {
+            Box::pin(async move {
+                self.entered.store(true, Ordering::SeqCst);
+                let _probe = DropProbe(self.dropped.clone());
+                self.release.notified().await;
+                self.finished.store(true, Ordering::SeqCst);
+            })
+        }
+    }
+
+    fn preference_run() -> Run {
+        let mut run = make_test_run();
+        run.input = "I prefer concise answers".into();
+        run
+    }
+
+    fn auto_config() -> BackgroundReviewConfig {
+        BackgroundReviewConfig {
+            auto_persist_user_preferences: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn unpolled_reviews_do_not_start_without_a_runtime() {
+        let client = Arc::new(MockLlmClient::new().with_response(PREFERENCE));
+        let reviewer = BackgroundReviewer::new(auto_config(), client.clone(), None, None);
+        let run = preference_run();
+        drop(reviewer.review(&run));
+        drop(reviewer.review_and_wait(&run));
+        drop(reviewer.review_by_run_id(&run.run_id));
+        assert_eq!(client.call_count(), 0);
+    }
+
+    #[test]
+    fn skipped_invocations_are_not_rendered_as_evolution_evidence() {
+        let mut run = make_test_run();
+        run.events = vec![
+            RunEvent::ToolCall {
+                call_id: "future-wave".into(),
+                name: "write_file".into(),
+                args: Some(serde_json::json!({"path": "never-written.rs"})),
+                risk: None,
+                duration_ms: 0,
+            },
+            RunEvent::ToolExecutionSkipped {
+                call_id: "future-wave".into(),
+                name: "write_file".into(),
+                reason: "cancelled before execution".into(),
+            },
+            RunEvent::ToolResult {
+                call_id: "future-wave".into(),
+                name: "write_file".into(),
+                success: false,
+                output_preview: Some("not executed".into()),
+                output_truncated: false,
+                duration_ms: 0,
+                original_bytes: 0,
+                returned_bytes: 0,
+                estimated_tokens: 0,
+                output_handling: None,
+                artifact: None,
+            },
+            RunEvent::ToolError {
+                call_id: "future-wave".into(),
+                name: "write_file".into(),
+                message: "not executed".into(),
+                failure: None,
+            },
+        ];
+
+        let transcript = BackgroundReviewer::build_transcript(&run);
+        assert!(!transcript.contains("write_file"));
+        assert!(!transcript.contains("not executed"));
+        assert!(!transcript.contains("never-written.rs"));
+    }
+
+    #[tokio::test]
+    async fn failed_or_invalid_review_is_unresolved_not_nothing_to_save() {
+        let run = preference_run();
+        let failed = BackgroundReviewer::new(
+            auto_config(),
+            Arc::new(MockLlmClient::new().with_error(ReactError::Other("offline".into()))),
+            None,
+            None,
+        )
+        .review(&run)
+        .await;
+        let invalid = BackgroundReviewer::new(
+            auto_config(),
+            Arc::new(MockLlmClient::new().with_response("not json")),
+            None,
+            None,
+        )
+        .review(&run)
+        .await;
+
+        for outcome in [failed, invalid] {
+            assert!(outcome.error.is_some());
+            assert!(!outcome.nothing_to_save);
+            assert!(outcome.candidate.is_none());
+            assert!(outcome.actions.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn zero_budget_and_disabled_reviews_never_call_llm_or_load() -> Result<()> {
+        let client = Arc::new(MockLlmClient::new());
+        for enabled in [true, false] {
+            let reviewer = BackgroundReviewer::new(
+                BackgroundReviewConfig {
+                    enabled,
+                    max_iterations: 0,
+                    ..auto_config()
+                },
+                client.clone(),
+                None,
+                None,
+            );
+            let run = preference_run();
+            let direct = reviewer.review(&run).await;
+            let loaded = reviewer.review_by_run_id(&run.run_id).await;
+            assert_eq!(direct.error.is_some(), enabled);
+            assert_eq!(direct.error, loaded.error);
+            assert_eq!(direct.nothing_to_save, !enabled);
+        }
+        assert_eq!(client.call_count(), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn positive_budget_keeps_single_pass_and_all_entry_points() -> Result<()> {
+        let store = Arc::new(crate::trace::InMemoryRunStore::new());
+        let run = preference_run();
+        store.save(run.clone()).await?;
+        for budget in [1, 8, usize::MAX] {
+            let client =
+                Arc::new(MockLlmClient::new().with_responses([PREFERENCE, PREFERENCE, PREFERENCE]));
+            let reviewer = BackgroundReviewer::new(
+                BackgroundReviewConfig {
+                    max_iterations: budget,
+                    ..Default::default()
+                },
+                client.clone(),
+                None,
+                Some(store.clone()),
+            );
+            for outcome in [
+                reviewer.review(&run).await,
+                reviewer.review_and_wait(&run).await,
+                reviewer.review_by_run_id(&run.run_id).await,
+            ] {
+                assert!(outcome.error.is_none(), "{outcome:?}");
+                assert_eq!(
+                    outcome
+                        .candidate
+                        .as_ref()
+                        .and_then(|candidate| candidate.persisted),
+                    Some(false)
+                );
+            }
+            assert_eq!(client.call_count(), 3);
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn llm_panics_are_observed_on_every_entry_point() -> Result<()> {
+        let client = Arc::new(ProbeClient {
+            calls: AtomicUsize::new(0),
+            dropped: Arc::new(AtomicBool::new(false)),
+            panics: true,
+        });
+        let store = Arc::new(crate::trace::InMemoryRunStore::new());
+        let run = preference_run();
+        store.save(run.clone()).await?;
+        let reviewer = BackgroundReviewer::new(auto_config(), client.clone(), None, Some(store));
+        for outcome in [
+            reviewer.review(&run).await,
+            reviewer.review_and_wait(&run).await,
+            reviewer.review_by_run_id(&run.run_id).await,
+        ] {
+            assert!(
+                outcome
+                    .error
+                    .as_deref()
+                    .is_some_and(|error| error.contains("panicked"))
+            );
+            assert!(!outcome.nothing_to_save);
+        }
+        assert_eq!(client.calls.load(Ordering::SeqCst), 3);
+        assert!(client.dropped.load(Ordering::SeqCst));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn dropping_in_flight_review_cancels_owned_llm_without_persisting() -> Result<()> {
+        let client = Arc::new(ProbeClient {
+            calls: AtomicUsize::new(0),
+            dropped: Arc::new(AtomicBool::new(false)),
+            panics: false,
+        });
+        let store = Arc::new(InMemoryStore::new());
+        let dir = tempfile::tempdir()?;
+        let manager = Arc::new(MemoryLayerManager::new(
+            dir.path().into(),
+            store.clone(),
+            Box::new(NullChangeLog),
+        ));
+        let reviewer = BackgroundReviewer::new(auto_config(), client.clone(), None, None)
+            .with_layer_manager(manager);
+        let run = preference_run();
+        let mut future = Box::pin(reviewer.review_and_wait(&run));
+        assert!(futures::poll!(&mut future).is_pending());
+        assert_eq!(client.calls.load(Ordering::SeqCst), 1);
+        drop(future);
+        assert!(client.dropped.load(Ordering::SeqCst));
+        assert!(store.list(WARM_NAMESPACE).await?.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn auto_persist_success_and_missing_manager_are_distinct() -> Result<()> {
+        let client = Arc::new(MockLlmClient::new().with_responses([PREFERENCE, PREFERENCE]));
+        let store = Arc::new(InMemoryStore::new());
+        let dir = tempfile::tempdir()?;
+        let run = preference_run();
+        let reviewer = BackgroundReviewer::new(auto_config(), client, None, None);
+        let missing = reviewer.review(&run).await;
+        assert!(missing.error.is_some());
+        assert_eq!(
+            missing.candidate.and_then(|candidate| candidate.persisted),
+            Some(false)
+        );
+        let manager = Arc::new(MemoryLayerManager::new(
+            dir.path().into(),
+            store.clone(),
+            Box::new(NullChangeLog),
+        ));
+        let saved = reviewer.with_layer_manager(manager).review(&run).await;
+        assert!(saved.error.is_none());
+        assert_eq!(
+            saved.candidate.and_then(|candidate| candidate.persisted),
+            Some(true)
+        );
+        assert!(
+            store
+                .get(WARM_NAMESPACE, &format!("review_{}", run.run_id))
+                .await?
+                .is_some()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn partial_write_error_and_panic_preserve_candidate_as_unknown_without_retry()
+    -> Result<()> {
+        for panics in [false, true] {
+            let client = Arc::new(MockLlmClient::new().with_response(PREFERENCE));
+            let store = Arc::new(InMemoryStore::new());
+            let dir = tempfile::tempdir()?;
+            let calls = Arc::new(AtomicUsize::new(0));
+            let manager = Arc::new(MemoryLayerManager::new(
+                dir.path().into(),
+                store.clone(),
+                Box::new(FailingReviewLog {
+                    panics,
+                    calls: calls.clone(),
+                }),
+            ));
+            let reviewer = BackgroundReviewer::new(auto_config(), client.clone(), None, None)
+                .with_layer_manager(manager);
+            let run = preference_run();
+            let outcome = reviewer.review(&run).await;
+            let candidate = outcome
+                .candidate
+                .as_ref()
+                .ok_or_else(|| ReactError::Other("candidate lost after partial write".into()))?;
+            assert_eq!(candidate.persisted, None);
+            assert!(!outcome.nothing_to_save);
+            assert!(
+                outcome
+                    .error
+                    .as_deref()
+                    .is_some_and(|error| error.contains("unknown")
+                        && error.contains(&format!("review_{}", run.run_id)))
+            );
+            assert!(outcome.actions.iter().all(|action| !action.contains("not saved") && !action.contains("memory saved")));
+            assert!(
+                store
+                    .get(WARM_NAMESPACE, &format!("review_{}", run.run_id))
+                    .await?
+                    .is_some()
+            );
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            assert_eq!(client.call_count(), 1);
+            let wire = serde_json::to_value(candidate)?;
+            assert_eq!(wire.get("persisted"), Some(&serde_json::Value::Null));
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn shutdown_can_drain_or_drop_but_drop_does_not_rollback_partial_write() -> Result<()> {
+        for drain in [true, false] {
+            let observer = Arc::new(ParkedObserver {
+                entered: AtomicBool::new(false),
+                dropped: Arc::new(AtomicBool::new(false)),
+                release: tokio::sync::Notify::new(),
+                finished: AtomicBool::new(false),
+            });
+            let client = Arc::new(MockLlmClient::new().with_response(PREFERENCE));
+            let store = Arc::new(InMemoryStore::new());
+            let dir = tempfile::tempdir()?;
+            let manager = Arc::new(
+                MemoryLayerManager::new(dir.path().into(), store.clone(), Box::new(NullChangeLog))
+                    .with_evolution_observer(observer.clone()),
+            );
+            let reviewer = BackgroundReviewer::new(auto_config(), client, None, None)
+                .with_layer_manager(manager);
+            let run = preference_run();
+            let mut future = Box::pin(reviewer.review(&run));
+            assert!(futures::poll!(&mut future).is_pending());
+            assert!(observer.entered.load(Ordering::SeqCst));
+            assert!(
+                store
+                    .get(WARM_NAMESPACE, &format!("review_{}", run.run_id))
+                    .await?
+                    .is_some()
+            );
+            if drain {
+                observer.release.notify_one();
+                let outcome = future.await;
+                assert!(outcome.error.is_none(), "{outcome:?}");
+                assert_eq!(
+                    outcome.candidate.and_then(|candidate| candidate.persisted),
+                    Some(true)
+                );
+            } else {
+                drop(future);
+                observer.release.notify_one();
+            }
+            assert!(observer.dropped.load(Ordering::SeqCst));
+            assert_eq!(observer.finished.load(Ordering::SeqCst), drain);
+        }
+        Ok(())
+    }
 
     fn make_test_run() -> Run {
         Run {

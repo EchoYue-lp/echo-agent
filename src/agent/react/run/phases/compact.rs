@@ -36,12 +36,12 @@ pub(crate) async fn run_compact(
     // can cross the compaction horizon or realign its generation cursor.
     let settlement = snap.save_transcript_projection(context, None).await?;
     if snap.conversation_store.is_some() {
+        snap.mark_transcript_settlement_observed();
         yield_event_or!(
             tx,
             AgentEvent::TranscriptProjectionSettlement(settlement.clone()),
             CompactOutcome::Abandoned
         );
-        snap.mark_transcript_settlement_observed();
     }
     if settlement.status != crate::memory::TranscriptProjectionSettlementStatus::Settled {
         return Err(crate::agent::snapshot::transcript_settlement_admission_error(&settlement));

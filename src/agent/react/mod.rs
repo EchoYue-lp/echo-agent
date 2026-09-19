@@ -22,7 +22,7 @@ use crate::guard::GuardManager;
 use crate::human_loop::{HumanLoopProvider, PermissionService};
 use crate::llm::LlmConfig;
 #[cfg(feature = "mcp")]
-use crate::mcp::McpManager;
+use crate::mcp::{McpClient, McpManager};
 use crate::memory::snapshot::{SnapshotManager, StateSnapshot};
 use crate::memory::store::{FileStore, Store};
 use crate::sandbox::SandboxManager;
@@ -1522,6 +1522,43 @@ impl ReactAgent {
             .set_mcp_executor(executor);
     }
 
+    #[cfg(feature = "mcp")]
+    async fn settle_mcp_close_projections(
+        &self,
+        previous: std::collections::HashMap<String, Arc<McpClient>>,
+    ) {
+        let current = self.tools.mcp_manager.get_clients();
+        for (server, client) in previous {
+            let retained = current
+                .get(&server)
+                .is_some_and(|active| Arc::ptr_eq(active, &client));
+            if !retained {
+                for tool in client.tools() {
+                    let exposed = crate::mcp::McpToolAdapter::exposed_name_for(&server, &tool.name);
+                    self.tools.tool_manager.unregister(&exposed);
+                }
+            }
+        }
+
+        let registered = self
+            .tools
+            .tool_manager
+            .list_tools()
+            .into_iter()
+            .collect::<std::collections::HashSet<_>>();
+        for name in crate::mcp::MCP_RESOURCE_TOOL_NAMES {
+            self.tools.tool_manager.unregister(name);
+        }
+        if !current.is_empty() {
+            for tool in self.tools.mcp_manager.resource_tools() {
+                if registered.contains(tool.name()) {
+                    self.tools.tool_manager.register(tool);
+                }
+            }
+        }
+        self.setup_hook_mcp_executor().await;
+    }
+
     /// Enable the circuit breaker.
     ///
     /// Automatically trips after consecutive LLM failures reach the threshold,
@@ -1575,10 +1612,11 @@ impl ReactAgent {
         );
     }
 
-    pub(crate) async fn record_audit_event(&self, event: crate::audit::AuditEvent) {
+    pub(crate) async fn record_audit_event(&self, mut event: crate::audit::AuditEvent) {
         let Some(logger) = self.guard.audit_logger.as_ref() else {
             return;
         };
+        event.apply_retention(&echo_core::utils::retention::ContentRetentionPolicy::default());
         let record_id = event.trace_id.clone().or_else(|| event.session_id.clone());
         if let Err(error) = logger.log(event).await {
             self.report_diagnostic_delivery_failure(crate::audit::DiagnosticDeliveryFailure::new(
@@ -2214,12 +2252,13 @@ impl ReactAgent {
 
     /// Record a trace event to the current run (if a run store is attached).
     /// Also publishes trace lifecycle to global event bus for audit subscribers.
-    pub(crate) async fn record_trace_event(&self, event: crate::trace::RunEvent) {
+    pub(crate) async fn record_trace_event(&self, mut event: crate::trace::RunEvent) {
         let run_id = self
             .current_trace_run_id
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
+        event.apply_retention(&echo_core::utils::retention::ContentRetentionPolicy::default());
         if let (Some(store), Some(run_id)) = (&self.run_store, &run_id)
             && let Err(e) = store.append_event(run_id, event).await
         {
@@ -2267,7 +2306,7 @@ impl ReactAgent {
     ) -> Option<String> {
         let store = self.run_store.as_ref()?;
         let run_id = format!("run_{}", uuid::Uuid::new_v4());
-        let run = crate::trace::Run {
+        let mut run = crate::trace::Run {
             run_id: run_id.clone(),
             parent_run_id: parent_run_id.map(str::to_string),
             agent_name: self.config.agent_name.clone(),
@@ -2293,6 +2332,10 @@ impl ReactAgent {
             started_at: chrono::Utc::now(),
             finished_at: None,
         };
+        crate::trace::apply_run_retention(
+            &mut run,
+            &echo_core::utils::retention::ContentRetentionPolicy::default(),
+        );
         if let Err(error) = store.save(run).await {
             self.report_diagnostic_delivery_failure(crate::audit::DiagnosticDeliveryFailure::new(
                 crate::audit::DiagnosticRecordKind::Trace,
@@ -2312,11 +2355,11 @@ impl ReactAgent {
     ///
     /// This is a convenience wrapper around [`Agent::close()`]. Prefer `close()` for
     /// trait-object usage; `shutdown()` is retained for backward compatibility.
-    pub async fn shutdown(&self) {
+    pub async fn shutdown(&self) -> Result<()> {
         // Fire SessionEnd hook before cleanup
         self.fire_lifecycle_hook(crate::skills::hooks::HookEvent::SessionEnd, Some("other"))
             .await;
-        let _ = self.close().await;
+        self.close().await
     }
 
     /// Get a reference to the shared context manager (for stats/display).
@@ -3193,7 +3236,9 @@ impl Drop for ReactAgent {
                 std::mem::replace(&mut self.tools.mcp_manager, crate::mcp::McpManager::new());
             if let Ok(handle) = tokio::runtime::Handle::try_current() {
                 handle.spawn(async move {
-                    mcp_mgr.close_all().await;
+                    if let Err(error) = mcp_mgr.close_all().await {
+                        tracing::warn!(error = %error, "MCP drop cleanup did not settle");
+                    }
                 });
             }
         }
@@ -3576,7 +3621,12 @@ impl Agent for ReactAgent {
     fn close(&self) -> BoxFuture<'_, Result<()>> {
         Box::pin(async move {
             #[cfg(feature = "mcp")]
-            self.tools.mcp_manager.close_all().await;
+            {
+                let previous = self.tools.mcp_manager.get_clients();
+                let result = self.tools.mcp_manager.close_all().await;
+                self.settle_mcp_close_projections(previous).await;
+                result?;
+            }
             info!(agent = %self.config.agent_name, "Agent shut down complete");
             Ok(())
         })

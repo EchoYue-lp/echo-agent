@@ -264,7 +264,7 @@ impl DockerSandbox {
     }
 
     #[cfg(all(test, unix))]
-    fn with_program(config: DockerConfig, docker_program: PathBuf) -> Self {
+    pub(crate) fn with_program(config: DockerConfig, docker_program: PathBuf) -> Self {
         Self {
             config,
             docker_program,
@@ -1868,7 +1868,7 @@ exit 64
         let fake = FakeDocker::new("global-truncated")?;
         let error = DockerSandbox::cleanup_sandbox_containers_with_program(
             &fake.program,
-            Duration::from_millis(100),
+            Duration::from_secs(2),
         )
         .await
         .err()

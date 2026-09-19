@@ -169,8 +169,11 @@ withdraw request -> component-specific close / cleanup observation
 | Terminal | 只有specific owner报告resource已settle时close才是terminal；并非所有management API郺wait全部child resource |
 | Recovery 与 Projection | Generation fencing存在时也由component拥有；stale derived-handle覆盖、catalog和status view遵循详细component contract |
 
-Plugin publication 可组合component，但不消除child cleanup责任。当前行为必须从 [MCP](./08-mcp.md)、
-当前framework不声称拥有覆盖全部extension的单一production coordinator、通用generation fence或awaited close。
+Plugin publication 可组合component，但不消除child cleanup责任。当前framework不声称拥有覆盖全部extension的
+单一production coordinator、通用generation fence或awaited close。MCP 组件有更强的局部合同：transport、
+client、manager 与 Agent close 会传播 `Result`；stdio 与旧版 SSE 只有在 pending call、owned task 和 child
+process 已结算后才返回成功，manager 会继续尝试全部 client 后再聚合失败。
+当前行为必须从 [MCP](./08-mcp.md)、
 [Hook](./23-hooks.md)、[Skill](./07-skills.md)、[Plugin](./32-plugin-system.md) 和 [LSP](./31-lsp-integration.md)
 读取；本概览不承诺atomic hot reload。
 

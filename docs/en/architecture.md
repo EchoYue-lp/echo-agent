@@ -40,7 +40,7 @@ metadata rather than maintained as a second package registry.
 | `echo-core` | Agent, LLM, Tool, permission, event, and shared domain contracts | Foundation with no workspace dependency |
 | `echo-execution` | Sandbox, Skill, and execution mechanisms | Depends on `echo_core` |
 | `echo-state` | Memory, compression, persistence, and audit implementations | Depends on `echo_core` |
-| `echo-orchestration` | Turn driver, Task, Subagent, Workflow, scheduler, and lifecycle primitives | Depends on `echo_core` |
+| `echo-orchestration` | Turn driver, Task, Subagent, Workflow, scheduler, and lifecycle primitives | Depends on `echo_core`; composes `echo_state` durable delivery primitives |
 | `echo-integration` | Provider, MCP, LSP, channel, and external protocol implementations | Depends on `echo_core` |
 | `echo-tools` | Reusable file, shell, web, data, media, database, and research Tools | Depends on core contracts and macros |
 | `echo-macros` | Compile-time Tool, callback, guard, and handler adapters | Depends on core contracts and orchestration types |

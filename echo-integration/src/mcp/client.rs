@@ -42,41 +42,279 @@ pub struct McpClient {
     prompts: Vec<McpPrompt>,
 }
 
+/// Retry owner returned when MCP preparation fails and transport cleanup also
+/// fails. The owner exposes cleanup only; it is never a usable initialized
+/// client and cannot publish tools, resources, or prompts.
+pub struct McpClientCleanupOwner {
+    client: Arc<McpClient>,
+}
+
+impl McpClientCleanupOwner {
+    /// Server identity associated with the failed preparation.
+    pub fn server_name(&self) -> &str {
+        self.client.server_name()
+    }
+
+    /// Retry settlement of the transport retained by this receipt.
+    pub async fn retry_cleanup(&self) -> Result<()> {
+        self.client.close().await
+    }
+
+    pub(crate) fn into_client(self) -> Arc<McpClient> {
+        self.client
+    }
+}
+
+impl std::fmt::Debug for McpClientCleanupOwner {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("McpClientCleanupOwner")
+            .field("server_name", &self.server_name())
+            .finish_non_exhaustive()
+    }
+}
+
+/// Typed preparation failure that preserves retry ownership when cleanup did
+/// not settle. This follows Rust owner-returning error conventions: callers
+/// can inspect the initialization cause and retry the retained cleanup owner.
+#[derive(Debug)]
+pub struct McpClientPreparationError {
+    initialization_error: ReactError,
+    cleanup_error: Option<String>,
+    cleanup_owner: Option<McpClientCleanupOwner>,
+}
+
+impl McpClientPreparationError {
+    fn settled(initialization_error: ReactError) -> Self {
+        Self {
+            initialization_error,
+            cleanup_error: None,
+            cleanup_owner: None,
+        }
+    }
+
+    fn pending(
+        initialization_error: ReactError,
+        cleanup_error: ReactError,
+        cleanup_owner: McpClientCleanupOwner,
+    ) -> Self {
+        Self {
+            initialization_error,
+            cleanup_error: Some(cleanup_error.to_string()),
+            cleanup_owner: Some(cleanup_owner),
+        }
+    }
+
+    /// Original initialize/notification/discovery failure.
+    pub fn initialization_error(&self) -> &ReactError {
+        &self.initialization_error
+    }
+
+    /// Last cleanup failure, when retry ownership remains outstanding.
+    pub fn cleanup_error(&self) -> Option<&str> {
+        self.cleanup_error.as_deref()
+    }
+
+    /// Borrow the retryable cleanup owner, when cleanup remains unsettled.
+    pub fn cleanup_owner(&self) -> Option<&McpClientCleanupOwner> {
+        self.cleanup_owner.as_ref()
+    }
+
+    /// Consume this error into the initialization cause and optional pending
+    /// cleanup receipt. Dropping a returned receipt explicitly abandons retry.
+    pub fn into_parts(self) -> (ReactError, Option<(String, McpClientCleanupOwner)>) {
+        (
+            self.initialization_error,
+            self.cleanup_error.zip(self.cleanup_owner),
+        )
+    }
+}
+
+impl std::fmt::Display for McpClientPreparationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "MCP initialization failed: {}",
+            self.initialization_error
+        )?;
+        if let Some(cleanup_error) = &self.cleanup_error {
+            write!(
+                formatter,
+                "; transport cleanup remains retryable after: {cleanup_error}"
+            )?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for McpClientPreparationError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.initialization_error)
+    }
+}
+
+/// Result of preparing one MCP client.
+pub type McpClientPreparationResult<T> = std::result::Result<T, McpClientPreparationError>;
+
+struct McpPreparationOwner {
+    server_name: String,
+    transport: Arc<dyn McpTransport>,
+    runtime: tokio::runtime::Handle,
+    armed: bool,
+}
+
+impl McpPreparationOwner {
+    fn new(
+        server_name: String,
+        transport: Arc<dyn McpTransport>,
+        runtime: tokio::runtime::Handle,
+    ) -> Self {
+        Self {
+            server_name,
+            transport,
+            runtime,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+
+    fn transfer_cleanup(&mut self) -> McpClientCleanupOwner {
+        self.disarm();
+        McpClientCleanupOwner {
+            client: McpClient::cleanup_only(self.server_name.clone(), Arc::clone(&self.transport)),
+        }
+    }
+}
+
+impl Drop for McpPreparationOwner {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let server_name = self.server_name.clone();
+        let transport = Arc::clone(&self.transport);
+        let _cleanup_task = self
+            .runtime
+            .spawn(settle_cancelled_preparation(server_name, transport));
+    }
+}
+
+async fn settle_cancelled_preparation(server_name: String, transport: Arc<dyn McpTransport>) {
+    let mut retry_delay_ms = 50_u64;
+    loop {
+        match transport.close().await {
+            Ok(()) => {
+                tracing::debug!(
+                    server = %server_name,
+                    "Cancelled MCP preparation transport cleanup settled"
+                );
+                return;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    server = %server_name,
+                    %error,
+                    retry_delay_ms,
+                    "Cancelled MCP preparation cleanup remains pending"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(retry_delay_ms)).await;
+                retry_delay_ms = retry_delay_ms.saturating_mul(2).min(5_000);
+            }
+        }
+    }
+}
+
 impl McpClient {
     /// 连接到 MCP 服务端，完成握手和能力发现后返回 `Arc<McpClient>`
-    pub async fn new(config: McpServerConfig) -> Result<Arc<Self>> {
+    pub async fn new(config: McpServerConfig) -> McpClientPreparationResult<Arc<Self>> {
         let transport: Arc<dyn McpTransport> = match config.transport {
             TransportConfig::Stdio {
                 command,
                 args,
                 env,
                 cwd,
-            } => Arc::new(StdioTransport::new(&command, &args, &env, cwd.as_deref()).await?),
+            } => Arc::new(
+                StdioTransport::new(&command, &args, &env, cwd.as_deref())
+                    .await
+                    .map_err(McpClientPreparationError::settled)?,
+            ),
             TransportConfig::Http { base_url, headers } => {
                 Arc::new(HttpTransport::new(base_url, headers))
             }
-            TransportConfig::Sse { base_url, headers } => {
-                Arc::new(SseTransport::new(base_url, headers).await?)
-            }
+            TransportConfig::Sse { base_url, headers } => Arc::new(
+                SseTransport::new(base_url, headers)
+                    .await
+                    .map_err(McpClientPreparationError::settled)?,
+            ),
         };
 
-        Self::from_transport(config.name, transport).await
+        Self::from_transport(config.name, transport)?.await
     }
 
     /// Connect through an application-supplied transport while preserving the
     /// same initialize, notification and capability-discovery lifecycle as
     /// [`Self::new`]. This is the public consumer boundary used by SDK
     /// transport bridges; it does not let adapters bypass MCP negotiation.
-    pub async fn from_transport(
+    pub fn from_transport(
         server_name: impl Into<String>,
         transport: Arc<dyn McpTransport>,
-    ) -> Result<Arc<Self>> {
+    ) -> McpClientPreparationResult<
+        impl std::future::Future<Output = McpClientPreparationResult<Arc<Self>>> + Send,
+    > {
         let server_name = server_name.into();
-        let result = Self::initialize_from_transport(server_name, transport.clone()).await;
-        if result.is_err() {
-            transport.close().await;
-        }
-        result
+        let runtime = tokio::runtime::Handle::try_current().map_err(|error| {
+            McpClientPreparationError::pending(
+                ReactError::Other(format!(
+                    "MCP target '{server_name}' preparation requires an active Tokio runtime"
+                )),
+                ReactError::Other(format!(
+                    "transport cleanup was not started because no Tokio runtime is active: {error}"
+                )),
+                McpClientCleanupOwner {
+                    client: Self::cleanup_only(server_name.clone(), Arc::clone(&transport)),
+                },
+            )
+        })?;
+        let mut owner = McpPreparationOwner::new(server_name.clone(), transport, runtime);
+        Ok(async move {
+            let result =
+                Self::initialize_from_transport(server_name, Arc::clone(&owner.transport)).await;
+            match result {
+                Ok(client) => {
+                    owner.disarm();
+                    Ok(client)
+                }
+                Err(initialization_error) => match owner.transport.close().await {
+                    Ok(()) => {
+                        owner.disarm();
+                        Err(McpClientPreparationError::settled(initialization_error))
+                    }
+                    Err(cleanup_error) => {
+                        let cleanup_owner = owner.transfer_cleanup();
+                        Err(McpClientPreparationError::pending(
+                            initialization_error,
+                            cleanup_error,
+                            cleanup_owner,
+                        ))
+                    }
+                },
+            }
+        })
+    }
+
+    fn cleanup_only(server_name: String, transport: Arc<dyn McpTransport>) -> Arc<Self> {
+        Arc::new(Self {
+            transport,
+            server_name,
+            negotiated_version: String::new(),
+            server_capabilities: ServerCapabilities::default(),
+            tools: Vec::new(),
+            resources: Vec::new(),
+            prompts: Vec::new(),
+        })
     }
 
     async fn initialize_from_transport(
@@ -584,8 +822,8 @@ impl McpClient {
     }
 
     /// 关闭连接（stdio 传输会终止子进程）
-    pub async fn close(&self) {
-        self.transport.close().await;
+    pub async fn close(&self) -> Result<()> {
+        self.transport.close().await
     }
 
     /// 将 McpContent 列表转换为可读文本
@@ -636,6 +874,27 @@ mod tests {
         closed: Arc<AtomicBool>,
     }
 
+    struct RetryCleanupInitializeTransport {
+        close_count: Arc<std::sync::atomic::AtomicUsize>,
+        failures_remaining: std::sync::atomic::AtomicUsize,
+    }
+
+    struct BlockingInitializeTransport {
+        send_started: Arc<tokio::sync::Notify>,
+        close_count: Arc<std::sync::atomic::AtomicUsize>,
+        failures_remaining: std::sync::atomic::AtomicUsize,
+    }
+
+    async fn prepare_test_client(
+        server_name: &str,
+        transport: Arc<dyn McpTransport>,
+    ) -> McpClientPreparationResult<Arc<McpClient>> {
+        match McpClient::from_transport(server_name, transport) {
+            Ok(preparation) => preparation.await,
+            Err(error) => Err(error),
+        }
+    }
+
     impl McpTransport for FailingInitializeTransport {
         fn send(
             &self,
@@ -659,9 +918,98 @@ mod tests {
             Box::pin(async { Ok(()) })
         }
 
-        fn close(&self) -> BoxFuture<'_, ()> {
+        fn close(&self) -> BoxFuture<'_, Result<()>> {
             self.closed.store(true, Ordering::Release);
-            Box::pin(async {})
+            Box::pin(async { Ok(()) })
+        }
+
+        fn notification_rx(
+            &self,
+        ) -> Option<Arc<dyn super::super::types::JsonRpcNotificationReceiver>> {
+            None
+        }
+    }
+
+    impl McpTransport for RetryCleanupInitializeTransport {
+        fn send(
+            &self,
+            request: JsonRpcRequest,
+        ) -> BoxFuture<'_, Result<super::super::types::JsonRpcResponse>> {
+            Box::pin(async move {
+                Ok(super::super::types::JsonRpcResponse {
+                    jsonrpc: "2.0".to_string(),
+                    id: request.id,
+                    result: None,
+                    error: Some(super::super::types::JsonRpcError {
+                        code: -32000,
+                        message: "initialization rejected".to_string(),
+                        data: None,
+                    }),
+                })
+            })
+        }
+
+        fn notify(&self, _notification: JsonRpcNotification) -> BoxFuture<'_, Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn close(&self) -> BoxFuture<'_, Result<()>> {
+            self.close_count.fetch_add(1, Ordering::AcqRel);
+            let fail = self
+                .failures_remaining
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok();
+            Box::pin(async move {
+                if fail {
+                    Err(ReactError::Other("injected cleanup failure".to_string()))
+                } else {
+                    Ok(())
+                }
+            })
+        }
+
+        fn notification_rx(
+            &self,
+        ) -> Option<Arc<dyn super::super::types::JsonRpcNotificationReceiver>> {
+            None
+        }
+    }
+
+    impl McpTransport for BlockingInitializeTransport {
+        fn send(
+            &self,
+            _request: JsonRpcRequest,
+        ) -> BoxFuture<'_, Result<super::super::types::JsonRpcResponse>> {
+            let send_started = Arc::clone(&self.send_started);
+            Box::pin(async move {
+                send_started.notify_waiters();
+                std::future::pending().await
+            })
+        }
+
+        fn notify(&self, _notification: JsonRpcNotification) -> BoxFuture<'_, Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn close(&self) -> BoxFuture<'_, Result<()>> {
+            self.close_count.fetch_add(1, Ordering::AcqRel);
+            let fail = self
+                .failures_remaining
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok();
+            Box::pin(async move {
+                if fail {
+                    Err(ReactError::Other(
+                        "injected cancelled-preparation cleanup failure".to_string(),
+                    ))
+                } else {
+                    Ok(())
+                }
+            })
         }
 
         fn notification_rx(
@@ -677,12 +1025,88 @@ mod tests {
         let transport: Arc<dyn McpTransport> = Arc::new(FailingInitializeTransport {
             closed: closed.clone(),
         });
-        assert!(
-            McpClient::from_transport("fixture", transport)
-                .await
-                .is_err()
-        );
+        assert!(prepare_test_client("fixture", transport).await.is_err());
         assert!(closed.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn from_transport_without_runtime_returns_cleanup_owner_synchronously() {
+        let closed = Arc::new(AtomicBool::new(false));
+        let transport: Arc<dyn McpTransport> = Arc::new(FailingInitializeTransport {
+            closed: Arc::clone(&closed),
+        });
+        let error = McpClient::from_transport("no-runtime", transport)
+            .err()
+            .unwrap_or_else(|| {
+                McpClientPreparationError::settled(ReactError::Other(
+                    "preparation unexpectedly accepted without a runtime".to_string(),
+                ))
+            });
+
+        assert!(error.cleanup_owner().is_some());
+        assert!(error.to_string().contains("active Tokio runtime"));
+        assert!(!closed.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn preparation_error_retains_failed_cleanup_for_retry() -> std::result::Result<(), String>
+    {
+        let close_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let transport: Arc<dyn McpTransport> = Arc::new(RetryCleanupInitializeTransport {
+            close_count: Arc::clone(&close_count),
+            failures_remaining: std::sync::atomic::AtomicUsize::new(1),
+        });
+        let error = prepare_test_client("fixture", transport)
+            .await
+            .err()
+            .ok_or_else(|| "failed initialization was accepted".to_string())?;
+        assert!(error.cleanup_error().is_some());
+        let owner = error
+            .cleanup_owner()
+            .ok_or_else(|| "failed cleanup owner was not retained".to_string())?;
+        assert_eq!(owner.server_name(), "fixture");
+        assert_eq!(close_count.load(Ordering::Acquire), 1);
+        owner
+            .retry_cleanup()
+            .await
+            .map_err(|cleanup_error| cleanup_error.to_string())?;
+        assert_eq!(close_count.load(Ordering::Acquire), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancelled_preparation_transfers_cleanup_to_owned_retry_task()
+    -> std::result::Result<(), String> {
+        let send_started = Arc::new(tokio::sync::Notify::new());
+        let close_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let transport: Arc<dyn McpTransport> = Arc::new(BlockingInitializeTransport {
+            send_started: Arc::clone(&send_started),
+            close_count: Arc::clone(&close_count),
+            failures_remaining: std::sync::atomic::AtomicUsize::new(1),
+        });
+        let started = send_started.notified();
+        let preparation_future =
+            McpClient::from_transport("cancelled", transport).map_err(|error| error.to_string())?;
+        let preparation = tokio::spawn(preparation_future);
+        tokio::time::timeout(std::time::Duration::from_secs(1), started)
+            .await
+            .map_err(|_| "initialization did not start".to_string())?;
+        preparation.abort();
+        let join_error = preparation
+            .await
+            .err()
+            .ok_or_else(|| "cancelled preparation unexpectedly completed".to_string())?;
+        assert!(join_error.is_cancelled());
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while close_count.load(Ordering::Acquire) < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .map_err(|_| "owned cleanup did not retry to settlement".to_string())?;
+        assert_eq!(close_count.load(Ordering::Acquire), 2);
+        Ok(())
     }
 
     struct RecordingInitializeTransport {
@@ -722,9 +1146,9 @@ mod tests {
             Box::pin(async { Ok(()) })
         }
 
-        fn close(&self) -> BoxFuture<'_, ()> {
+        fn close(&self) -> BoxFuture<'_, Result<()>> {
             self.closed.store(true, Ordering::Release);
-            Box::pin(async {})
+            Box::pin(async { Ok(()) })
         }
 
         fn notification_rx(
@@ -745,7 +1169,7 @@ mod tests {
                 initialized: initialized.clone(),
                 closed: closed.clone(),
             });
-            let client = McpClient::from_transport("supported", transport)
+            let client = prepare_test_client("supported", transport)
                 .await
                 .map_err(|error| error.to_string())?;
             assert_eq!(client.protocol_version(), *version);
@@ -760,12 +1184,12 @@ mod tests {
             initialized: initialized.clone(),
             closed: closed.clone(),
         });
-        let error = McpClient::from_transport("unsupported", transport)
+        let error = prepare_test_client("unsupported", transport)
             .await
             .err()
             .ok_or_else(|| "unknown protocol version was accepted".to_string())?;
-        match error {
-            ReactError::Mcp(error) => match *error {
+        match error.initialization_error() {
+            ReactError::Mcp(error) => match error.as_ref() {
                 McpError::InitializationFailed(message) => {
                     assert!(message.contains("2099-01-01"));
                     assert!(message.contains(MCP_PROTOCOL_VERSION));
@@ -816,8 +1240,8 @@ mod tests {
             Box::pin(async { Ok(()) })
         }
 
-        fn close(&self) -> BoxFuture<'_, ()> {
-            Box::pin(async {})
+        fn close(&self) -> BoxFuture<'_, Result<()>> {
+            Box::pin(async { Ok(()) })
         }
 
         fn notification_rx(
@@ -835,7 +1259,7 @@ mod tests {
             initialize: initialize.clone(),
         });
 
-        let client = McpClient::from_transport("fixture", transport)
+        let client = prepare_test_client("fixture", transport)
             .await
             .map_err(|error| error.to_string())?;
         let request = initialize

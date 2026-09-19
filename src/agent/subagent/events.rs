@@ -1361,6 +1361,7 @@ mod tests {
                 retention: "test".to_string(),
             }),
             metadata: HashMap::new(),
+            effects: Vec::new(),
             model_content: Vec::new(),
         };
         let completed = SubagentEvent::DispatchToolCompleted {

@@ -432,24 +432,58 @@ fn execute_patch(
     };
     match commit_plan(&plan.mutations, &root) {
         Ok(()) => Ok(patch_result(&plan, false, checkpoints)),
-        Err(failure) if failure.rollback_errors.is_empty() => Ok(ToolResult::failure(
-            ToolFailureCategory::Permanent,
-            format!(
-                "Patch failed and all applied changes were rolled back: {}",
-                failure.error
-            ),
-        )),
-        Err(failure) => Ok(ToolResult::error(format!(
-            "Patch failed: {}. Rollback also failed: {}",
-            failure.error,
-            failure.rollback_errors.join("; ")
-        ))
-        .with_failure(
-            ToolFailure::new(ToolFailureCategory::PartialSideEffect)
-                .with_side_effect(ToolSideEffect::Possible)
-                .with_postcondition("Inspect every path in the returned patch before retrying"),
-        )),
+        Err(failure) => {
+            let changed = confirmed_mutation_paths(&plan.mutations, &failure.attempted_paths);
+            let mut result = if failure.rollback_errors.is_empty() && changed.is_empty() {
+                ToolResult::failure(
+                    ToolFailureCategory::Permanent,
+                    format!(
+                        "Patch failed and all applied changes were rolled back: {}",
+                        failure.error
+                    ),
+                )
+            } else {
+                let detail = if failure.rollback_errors.is_empty() {
+                    format!("Patch failed and changed paths remain: {}", failure.error)
+                } else {
+                    format!(
+                        "Patch failed: {}. Rollback also failed: {}",
+                        failure.error,
+                        failure.rollback_errors.join("; ")
+                    )
+                };
+                ToolResult::error(detail).with_failure(
+                    ToolFailure::new(ToolFailureCategory::PartialSideEffect)
+                        .with_side_effect(ToolSideEffect::Possible)
+                        .with_postcondition(
+                            "Inspect every path in the returned patch before retrying",
+                        ),
+                )
+            };
+            for path in changed {
+                result = result.with_effect(echo_core::tools::ToolEffect::FileEdit { path });
+            }
+            Ok(result)
+        }
     }
+}
+
+fn confirmed_mutation_paths(mutations: &[PlannedMutation], attempted: &[PathBuf]) -> Vec<String> {
+    let attempted = attempted.iter().cloned().collect::<HashSet<_>>();
+    let mut seen = HashSet::new();
+    mutations
+        .iter()
+        .filter(|mutation| attempted.contains(mutation.path()))
+        .filter(|mutation| seen.insert(mutation.path().to_path_buf()))
+        .filter(|mutation| match mutation.original() {
+            None => mutation.path().exists(),
+            Some(before) => match std::fs::read(mutation.path()) {
+                Ok(current) => current != before,
+                Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+            },
+        })
+        .map(|mutation| mutation.path().display().to_string())
+        .collect()
 }
 
 fn resolve_root(
@@ -774,6 +808,7 @@ fn create_checkpoints(
 struct CommitFailure {
     error: String,
     rollback_errors: Vec<String>,
+    attempted_paths: Vec<PathBuf>,
 }
 
 fn commit_plan(
@@ -784,6 +819,7 @@ fn commit_plan(
         return Err(CommitFailure {
             error,
             rollback_errors: Vec::new(),
+            attempted_paths: Vec::new(),
         });
     }
     let mut applied = Vec::new();
@@ -798,9 +834,15 @@ fn commit_plan(
         };
         if let Err(error) = result {
             let rollback_errors = rollback_mutations(&applied, &created_directories);
+            let mut attempted_paths = applied
+                .iter()
+                .map(|applied| applied.path().to_path_buf())
+                .collect::<Vec<_>>();
+            attempted_paths.push(mutation.path().to_path_buf());
             return Err(CommitFailure {
                 error: format!("failed to update '{}': {error}", mutation.path().display()),
                 rollback_errors,
+                attempted_paths,
             });
         }
         applied.push(mutation.clone());
@@ -909,6 +951,13 @@ fn patch_result(plan: &PatchPlan, dry_run: bool, checkpoints: Vec<(String, Strin
             result = result.with_meta("git_checkpoints", encoded);
         }
     }
+    if !dry_run {
+        for mutation in &plan.mutations {
+            result = result.with_effect(echo_core::tools::ToolEffect::FileEdit {
+                path: mutation.path().display().to_string(),
+            });
+        }
+    }
     result
 }
 
@@ -958,6 +1007,28 @@ mod tests {
             "kept\n"
         );
         assert!(matches!(result.kind, ToolResultKind::Diff { .. }));
+        let affected = result
+            .effects
+            .iter()
+            .filter_map(|effect| match effect {
+                echo_core::tools::ToolEffect::FileEdit { path } => Some(path.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let canonical_root = std::fs::canonicalize(root.path())?;
+        assert_eq!(
+            affected,
+            [
+                canonical_root.join("nested/新增.txt").display().to_string(),
+                canonical_root.join("update.txt").display().to_string(),
+                canonical_root.join("delete.txt").display().to_string(),
+                canonical_root
+                    .join("nested/moved.txt")
+                    .display()
+                    .to_string(),
+                canonical_root.join("move.txt").display().to_string(),
+            ]
+        );
         Ok(())
     }
 
@@ -1016,6 +1087,7 @@ mod tests {
             .execute_with_context(parameters, &context(root.path()))
             .await?;
         assert!(preview.success);
+        assert!(preview.effects.is_empty());
         assert_eq!(
             std::fs::read(root.path().join("lines.txt"))?,
             b"first\r\nsecond\r\n"
@@ -1027,6 +1099,34 @@ mod tests {
             std::fs::read(root.path().join("lines.txt"))?,
             b"first\r\nchanged\r\n"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn partial_rollback_effects_only_name_attempted_paths_still_changed() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let first = root.path().join("first.txt");
+        let untouched = root.path().join("untouched.txt");
+        std::fs::write(&first, "changed")?;
+        std::fs::write(&untouched, "external change")?;
+        let mutations = vec![
+            PlannedMutation::Write {
+                path: first.clone(),
+                before: Some(b"original".to_vec()),
+                after: b"changed".to_vec(),
+            },
+            PlannedMutation::Write {
+                path: untouched,
+                before: Some(b"original".to_vec()),
+                after: b"agent change".to_vec(),
+            },
+        ];
+        assert_eq!(
+            confirmed_mutation_paths(&mutations, std::slice::from_ref(&first)),
+            [first.display().to_string()]
+        );
+        std::fs::write(&first, "original")?;
+        assert!(confirmed_mutation_paths(&mutations, &[first]).is_empty());
         Ok(())
     }
 

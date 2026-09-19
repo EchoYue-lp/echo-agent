@@ -218,9 +218,12 @@ impl TraceAnalyzer {
             if let Some(run) = self.run_store.load(&summary.run_id).await? {
                 total_llm_duration_ms += run.timings.llm_duration_ms;
                 total_tool_duration_ms += run.timings.tool_duration_ms;
+                let skipped = super::skipped_tool_call_ids(&run.events);
                 for event in &run.events {
                     match event {
-                        RunEvent::ToolCall { name, .. } => {
+                        RunEvent::ToolCall { call_id, name, .. }
+                            if !skipped.contains(call_id.as_str()) =>
+                        {
                             tools_used_set.insert(name.clone(), ());
                         }
                         RunEvent::LlmCall { .. } => {
@@ -264,11 +267,15 @@ impl TraceAnalyzer {
         for summary in &summaries {
             if let Some(run) = self.run_store.load(&summary.run_id).await? {
                 let mut failed_call_ids = HashSet::new();
+                let skipped = super::skipped_tool_call_ids(&run.events);
                 for event in &run.events {
                     match event {
                         RunEvent::ToolCall {
-                            name, duration_ms, ..
-                        } => {
+                            call_id,
+                            name,
+                            duration_ms,
+                            ..
+                        } if !skipped.contains(call_id.as_str()) => {
                             let acc = tool_data.entry(name.clone()).or_default();
                             acc.call_count += 1;
                             acc.total_duration_ms += *duration_ms;
@@ -284,7 +291,7 @@ impl TraceAnalyzer {
                             name,
                             success,
                             ..
-                        } => {
+                        } if !skipped.contains(call_id.as_str()) => {
                             if let Some(acc) = tool_data.get_mut(name) {
                                 if *success {
                                     acc.success_count += 1;
@@ -293,7 +300,9 @@ impl TraceAnalyzer {
                                 }
                             }
                         }
-                        RunEvent::ToolError { call_id, name, .. } => {
+                        RunEvent::ToolError { call_id, name, .. }
+                            if !skipped.contains(call_id.as_str()) =>
+                        {
                             if failed_call_ids.insert(call_id.clone())
                                 && let Some(acc) = tool_data.get_mut(name)
                             {
@@ -415,6 +424,7 @@ impl TraceAnalyzer {
 
         for summary in &summaries {
             if let Some(run) = self.run_store.load(&summary.run_id).await? {
+                let skipped = super::skipped_tool_call_ids(&run.events);
                 // Run-level error
                 if run.status == RunStatus::Failed
                     && let Some(ref error_msg) = run.error
@@ -429,7 +439,12 @@ impl TraceAnalyzer {
                 // Event-level errors
                 for event in &run.events {
                     match event {
-                        RunEvent::ToolError { name, message, .. } => {
+                        RunEvent::ToolError {
+                            call_id,
+                            name,
+                            message,
+                            ..
+                        } if !skipped.contains(call_id.as_str()) => {
                             let key = normalize_error(message);
                             let acc = patterns.entry(key.clone()).or_default();
                             acc.occurrence_count += 1;
@@ -491,6 +506,7 @@ impl TraceAnalyzer {
             let mut calls: HashMap<String, ToolCallContext> = HashMap::new();
             let mut attempts: HashMap<String, usize> = HashMap::new();
             let mut failed_call_ids = HashSet::new();
+            let skipped = super::skipped_tool_call_ids(&run.events);
 
             for event in &run.events {
                 match event {
@@ -499,7 +515,7 @@ impl TraceAnalyzer {
                         name,
                         args,
                         ..
-                    } => {
+                    } if !skipped.contains(call_id.as_str()) => {
                         report.total_calls = report.total_calls.saturating_add(1);
                         calls.insert(
                             call_id.clone(),
@@ -510,7 +526,11 @@ impl TraceAnalyzer {
                             },
                         );
                     }
-                    RunEvent::ToolResult { success: true, .. } => {
+                    RunEvent::ToolResult {
+                        call_id,
+                        success: true,
+                        ..
+                    } if !skipped.contains(call_id.as_str()) => {
                         report.success_count = report.success_count.saturating_add(1);
                     }
                     RunEvent::ToolError {
@@ -518,7 +538,9 @@ impl TraceAnalyzer {
                         name,
                         message,
                         failure,
-                    } if failed_call_ids.insert(call_id.clone()) => {
+                    } if !skipped.contains(call_id.as_str())
+                        && failed_call_ids.insert(call_id.clone()) =>
+                    {
                         report.failure_count = report.failure_count.saturating_add(1);
                         record_tool_failure(
                             &mut patterns,
@@ -1011,6 +1033,56 @@ mod tests {
         assert_eq!(read_file_stat.call_count, 1);
         assert_eq!(read_file_stat.success_count, 1);
         assert_eq!(read_file_stat.total_duration_ms, 50);
+    }
+
+    #[tokio::test]
+    async fn skipped_invocations_are_not_reported_as_tool_usage_or_failures()
+    -> crate::error::Result<()> {
+        let store = Arc::new(InMemoryRunStore::new());
+        let mut run = make_run("skipped-run", "skipped-session", RunStatus::Completed);
+        run.events = vec![
+            RunEvent::ToolCall {
+                call_id: "future-wave".to_string(),
+                name: "write_file".to_string(),
+                args: None,
+                risk: None,
+                duration_ms: 0,
+            },
+            RunEvent::ToolExecutionSkipped {
+                call_id: "future-wave".to_string(),
+                name: "write_file".to_string(),
+                reason: "cancelled before execution".to_string(),
+            },
+            RunEvent::ToolResult {
+                call_id: "future-wave".to_string(),
+                name: "write_file".to_string(),
+                success: false,
+                output_preview: Some(String::new()),
+                output_truncated: false,
+                duration_ms: 0,
+                original_bytes: 0,
+                returned_bytes: 0,
+                estimated_tokens: 0,
+                output_handling: None,
+                artifact: None,
+            },
+            RunEvent::ToolError {
+                call_id: "future-wave".to_string(),
+                name: "write_file".to_string(),
+                message: "not executed".to_string(),
+                failure: None,
+            },
+        ];
+        store.save(run).await?;
+        let analyzer = TraceAnalyzer::new(store);
+        let session = analyzer.summarize_session("skipped-session").await?;
+        assert!(session.tools_used.is_empty());
+        assert!(analyzer.tool_usage_stats(10).await?.is_empty());
+        let reliability = analyzer.tool_reliability_report(10, None).await?;
+        assert_eq!(reliability.total_calls, 0);
+        assert_eq!(reliability.failure_count, 0);
+        assert!(analyzer.error_pattern_analysis(10).await?.is_empty());
+        Ok(())
     }
 
     #[tokio::test]
