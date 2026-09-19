@@ -610,11 +610,24 @@ impl K8sSandbox {
 
         let start = Instant::now();
 
-        let mut child = cmd.spawn().map_err(|e| {
-            echo_core::error::ReactError::Sandbox(Box::new(SandboxError::StartFailed(format!(
-                "Failed to run kubectl: {e}"
-            ))))
-        })?;
+        let mut start_retries = 0;
+        let mut child = loop {
+            match cmd.spawn() {
+                Ok(child) => break child,
+                Err(error)
+                    if is_retryable_kubectl_start_error(&error)
+                        && start_retries < K8S_CONTROL_START_RETRY_LIMIT =>
+                {
+                    start_retries = start_retries.saturating_add(1);
+                    tokio::time::sleep(K8S_CONTROL_START_RETRY_DELAY).await;
+                }
+                Err(error) => {
+                    return Err(echo_core::error::ReactError::Sandbox(Box::new(
+                        SandboxError::StartFailed(format!("Failed to run kubectl: {error}")),
+                    )));
+                }
+            }
+        };
         let process_group_id = child.id();
         let stdout = spawn_k8s_pipe_reader(child.stdout.take());
         let stderr = spawn_k8s_pipe_reader(child.stderr.take());
