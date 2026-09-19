@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.skill-lifecycle-authority-verification
 kind: evidence
-observed_at: source:3a1ceacf4f7e1214698abf2ea09cc3217e426b87fadb0988c97926eb9dcd2bfa
+observed_at: source:17f0054af370c86c5f9dbca52db70bcaa417b1f08403153c73b7c0fc4e23c4b8
 source_refs:
   - src/evolution/skill_mutation.rs
   - src/evolution/draft.rs
@@ -12,8 +12,8 @@ source_refs:
   - echo-agent-learning/tests/example_contracts/demo51_self_improvement.rs
 supports: [finding.evolution-skill-promotion-audit, finding.evolution-changelog-rollback-authority, behavior.eval-evolution]
 limitations:
-  - Remote-main delivery and post-merge closure remain pending
   - Deterministic restart tests do not simulate physical power loss
+  - Host Rule persistence and product approval UI remain outside the framework contract
 ---
 
 # Skill lifecycle authority verification candidate
@@ -51,5 +51,6 @@ review closed all findings with 0 Critical, 0 Important and 0 Minor remaining.
 
 ## 已知缺口
 
-Remote-main delivery and post-merge closure remain pending. Physical power-loss
-injection and a concrete host Rule persistence owner remain outside this candidate.
+PR #147 passed all seven CI jobs and entered remote main at GitHub verified commit `37b6908c`.
+Post-merge closure rereview found no new issue. Physical power-loss injection and a concrete host
+Rule persistence owner remain outside this framework contract.

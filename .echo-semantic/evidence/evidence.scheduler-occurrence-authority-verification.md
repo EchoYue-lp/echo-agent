@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.scheduler-occurrence-authority-verification
 kind: evidence
-observed_at: source:3a1ceacf4f7e1214698abf2ea09cc3217e426b87fadb0988c97926eb9dcd2bfa
+observed_at: source:17f0054af370c86c5f9dbca52db70bcaa417b1f08403153c73b7c0fc4e23c4b8
 source_refs:
   - echo-orchestration/src/scheduler/mod.rs
   - echo-orchestration/src/scheduler/cron_task.rs

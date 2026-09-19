@@ -5,19 +5,19 @@ kind: audit
 boundary_ref: boundary.eval-evolution
 lens: data_durability
 freshness: examined
-revision: a58bd867e580672f589036a3a0f36f63af367a40
+revision: 37b6908cb2c4884139970c8aed0a0c42bfb366c7
 finding_refs: [finding.evolution-changelog-rollback-authority, finding.evolution-skill-promotion-audit]
 challenges:
   authority-binding-and-recovery:
-    revision: a58bd867e580672f589036a3a0f36f63af367a40
+    revision: 37b6908cb2c4884139970c8aed0a0c42bfb366c7
     source_refs: [src/evolution/skill_mutation.rs, src/evolution/audit.rs, src/evolution/curator.rs]
     evidence_refs: [evidence.skill-lifecycle-authority-repair, evidence.skill-lifecycle-authority-verification]
   approval-and-inverse-lineage:
-    revision: a58bd867e580672f589036a3a0f36f63af367a40
+    revision: 37b6908cb2c4884139970c8aed0a0c42bfb366c7
     source_refs: [src/evolution/skill_mutation.rs, src/evolution/draft.rs, src/evolution/merge.rs, src/evolution/patch.rs]
     evidence_refs: [evidence.skill-lifecycle-authority-repair, evidence.skill-lifecycle-authority-verification]
   concurrency-path-and-secret-fences:
-    revision: a58bd867e580672f589036a3a0f36f63af367a40
+    revision: 37b6908cb2c4884139970c8aed0a0c42bfb366c7
     source_refs: [src/evolution/skill_mutation.rs, src/evolution/candidate.rs, src/agent/snapshot.rs]
     evidence_refs: [evidence.skill-lifecycle-authority-repair, evidence.skill-lifecycle-authority-verification]
 ---
@@ -58,6 +58,10 @@ Evolution 209/209、examples 19/19、documentation 12/12通过；最终head通�
 `./scripts/verify.sh`、17-feature matrix、两套Clippy、no-default、formatter、diff-check与strict
 semantic change-evidence。
 
+PR #147七项CI全部通过，squash结果以GitHub verified commit
+`37b6908cb2c4884139970c8aed0a0c42bfb366c7`进入远端main。post-merge closure复审未发现
+Critical、Important或Minor问题。
+
 ## 问题记录
 
 最终独立复审未发现未解决问题；未新增 Finding。
@@ -69,4 +73,4 @@ embedding host拥有，不由framework从ChangeLog推断。
 
 ## 未检查项
 
-未执行真实断电、host Rule持久化或EKO UI端到端；remote-main交付与post-merge closure待完成。
+未执行真实断电、host Rule持久化或EKO UI端到端；这些不属于framework已声明能力。
