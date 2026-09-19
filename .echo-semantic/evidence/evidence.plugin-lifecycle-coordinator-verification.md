@@ -14,7 +14,7 @@ supports: [behavior.extension-publication, rule.extension-generation-authority]
 limitations:
   - The same-name MCP matrix reuses typed Direct and Plugin identities; transport fault settlement remains covered by the #72 and #75 evidence
   - Hook cancellation proves operation-local at-most-once attempt, not durable delivery
-  - Full workspace gates, independent rereview, remote CI, and mainline delivery remain outstanding
+  - Cross-process durable Hook delivery remains Issue 58
 ---
 
 # Plugin lifecycle coordinator verification
@@ -73,5 +73,9 @@ authority for transport-level MCP cleanup and owner projection details.
 
 ## 已知缺口
 
-Focused tests do not replace the final workspace gates or feature matrix. The candidate does not
-claim durable Hook acknowledgement, external MCP transport E2E, remote CI, or mainline delivery.
+The final candidate passed complete `./scripts/verify.sh`, all 17 independent feature checks,
+strict semantic change-evidence and three independent reviews with 0 Critical, 0 Important and
+0 Minor findings. PR #145 passed all seven CI jobs and entered remote main as GitHub verified
+squash commit `dc61ef0e`. Post-merge closure rereview found no new issues. This evidence does not
+claim durable Hook acknowledgement or external MCP transport E2E; those remain Issue #58 and the
+existing #72/#75 transport evidence.
