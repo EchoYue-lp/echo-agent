@@ -8,7 +8,7 @@ risk: medium
 primary_focus: contract_evidence
 focus: [result_side_effect, data_durability, permission_external, failure_concurrency]
 boundary: boundary.eval-evolution
-observed_at: source:c692702d1e9c1752aa396348037aea8baab1b4a8f1bbc2979fe95fc5ec9c7323
+observed_at: source:5806bd920140828b759fabe868fc1c4af1f26009ed4bf9112b73385cf2ce764e
 code_refs: [src/trace/mod.rs, src/eval/runner.rs, src/eval/replay.rs, echo-orchestration/src/runtime/turn_driver.rs, src/agent/react/run/stream_channel.rs, src/improve/mod.rs, src/improve/loop.rs, src/evolution/mod.rs, src/evolution/background_review.rs, src/evolution/dreaming.rs, src/evolution/layer.rs, src/evolution/mutation.rs, src/evolution/runtime_integration.rs, src/evolution/curator.rs, src/evolution/draft.rs, src/evolution/merge.rs, src/evolution/patch.rs, src/evolution/review.rs, src/evolution/security.rs, echo-state/src/skill_telemetry.rs, docs/adr/0037-eval-timeout-turn-settlement.md, docs/adr/0038-eval-trace-correlation-identity.md, docs/adr/0065-evolution-memory-audit-reconciliation.md]
 rule_refs: [rule.quality-observation-boundary]
 evidence_refs: [evidence.provider-protocol-quality, evidence.persistence-observation, evidence.improve-singleton-split-repair, evidence.improve-singleton-split-verification, evidence.improve-iteration-config-repair, evidence.improve-iteration-config-verification, evidence.eval-workspace-generation-repair, evidence.eval-workspace-generation-verification, evidence.eval-timeout-turn-settlement-repair, evidence.eval-timeout-turn-settlement-verification, evidence.eval-trace-correlation-repair, evidence.eval-trace-correlation-verification, evidence.evolution-memory-audit-repair, evidence.evolution-memory-audit-verification]
@@ -23,7 +23,7 @@ Quality pipeline 消费 trace、test 和人工裁决证据；它可以提出或�
 
 ## 当前行为
 
-EvalRunner为每次case创建唯一workspace generation和run/turn/execution correlation，并通过AgentTurnDriver取得唯一TurnReceipt。Settled后按parent/turn/execution从RunStore解析唯一真实trace，EvalResult、criteria、constraints和metrics共用该Run；零trace合法，歧义或存储不一致失败。Deadline后先请求cancel，再对同一drive future等待共享的6秒settlement grace；未settled timeout跳过RunStore与trace criteria并保留generation，caller-drop同样保留。Replay/Analyzer读取RunStore，Improve复用同一runner generation生成离线建议/轨迹。Criteria单例采用train-only disposition，EvalDrivenImprovement把public max_iterations直接传入唯一ImprovementLoop。Evolution分为Background Review/Dreaming、memory mutation、Skill candidate/draft/review/promote/merge/patch与仅有安全检查的rule-promotion surface。分层记忆候选现以operation journal记录prepare与settled，`ChangeLog`按固定ID幂等提交；已结算投影回退和未结算组都在启动恢复，原始Store读者仍可能暂见中间态。
+EvalRunner为每次case创建唯一workspace generation和run/turn/execution correlation，并通过AgentTurnDriver取得唯一TurnReceipt。Settled后按parent/turn/execution从RunStore解析唯一真实trace，EvalResult、criteria、constraints和metrics共用该Run；零trace合法，歧义或存储不一致失败。Deadline后先请求cancel，再对同一drive future等待共享的6秒settlement grace；未settled timeout跳过RunStore与trace criteria并保留generation，caller-drop同样保留。Replay/Analyzer读取RunStore，Improve复用同一runner generation生成离线建议/轨迹。Criteria单例采用train-only disposition，EvalDrivenImprovement把public max_iterations直接传入唯一ImprovementLoop。Evolution分为Background Review/Dreaming、memory mutation、Skill candidate/draft/review/promote/merge/patch与仅有安全检查的rule-promotion surface。主线 `cb4ee9ed` 的分层记忆以operation journal记录prepare与settled，`ChangeLog`按固定ID幂等提交；已结算投影回退和未结算组都在启动恢复，原始Store读者仍可能暂见中间态。
 
 ## 期望行为
 

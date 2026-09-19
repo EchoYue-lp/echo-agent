@@ -66,6 +66,10 @@ ownership of a pre-existing same-name target.
 
 ## Consequences
 
+Post-merge closure review on `cb4ee9ed3826fd8055f027e84f69b94dbc329267` independently
+confirmed the publication authority; MCP owner isolation and host coordination remain
+Issues #75 and #73.
+
 Explicit registry mutation or invalidation advances generation. The process-wide ordinal also
 advances when an independent integrator prepares its first snapshot. Equivalent bytes retain the same
 identity. Invalid dependency or generation-wide errors make a set non-applicable, while component

@@ -8,7 +8,7 @@ risk: high
 primary_focus: failure_concurrency
 focus: [state_authority, time_lifecycle, result_side_effect, permission_external, data_durability]
 boundary: boundary.extension-lifecycle
-observed_at: source:c692702d1e9c1752aa396348037aea8baab1b4a8f1bbc2979fe95fc5ec9c7323
+observed_at: source:5806bd920140828b759fabe868fc1c4af1f26009ed4bf9112b73385cf2ce764e
 code_refs: [echo-integration/src/mcp/mod.rs, echo-execution/src/skills/hooks.rs, echo-execution/src/skills/registry.rs, echo-core/src/plugin/registry.rs, src/plugin/prepared.rs, src/agent/react/mod.rs, echo-integration/src/lsp/manager.rs]
 rule_refs: [rule.extension-generation-authority]
 evidence_refs: [evidence.effects-extensions, evidence.skill-activation-authority-repair, evidence.skill-activation-authority-verification, evidence.mcp-tool-local-classification-repair, evidence.mcp-tool-local-classification-verification, evidence.mcp-client-capability-advertisement-repair, evidence.mcp-client-capability-advertisement-verification, evidence.lsp-derived-handle-lifecycle-repair, evidence.lsp-derived-handle-lifecycle-verification, evidence.plugin-component-preparation-repair, evidence.plugin-component-preparation-verification, evidence.plugin-generation-publication-authority-repair, evidence.plugin-generation-publication-authority-verification]
@@ -46,7 +46,6 @@ Prepare/apply/rollback、transport close、pending call、LSP EOF/restart、Plug
 ## 裁决记录
 
 Skill activation、Hook permission precedence、MCP capability advertisement/local
-classification、LSP派生handle与ADR 0045 DU-71确认的Plugin component preparation isolation
-均已修复并独立复审。Plugin active generation有本分支修复候选，尚待独立复审与主线交付；
-lifecycle coordination、MCP owner isolation和其它开放Finding仍需各自验收，因此本Behavior
-继续保持needs_review。
+classification、LSP派生handle、Plugin component preparation isolation与Plugin active
+generation均已在主线修复并独立复审。lifecycle coordination、MCP owner isolation和其它
+开放Finding仍需各自验收，因此本Behavior继续保持needs_review。

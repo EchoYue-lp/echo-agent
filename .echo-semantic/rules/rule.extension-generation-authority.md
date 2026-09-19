@@ -7,7 +7,7 @@ expectation: inferred
 risk: high
 primary_focus: failure_concurrency
 focus: [state_authority, time_lifecycle, data_durability, permission_external]
-observed_at: source:c692702d1e9c1752aa396348037aea8baab1b4a8f1bbc2979fe95fc5ec9c7323
+observed_at: source:5806bd920140828b759fabe868fc1c4af1f26009ed4bf9112b73385cf2ce764e
 behavior_refs: [behavior.extension-publication]
 code_refs: [echo-integration/src/mcp/mod.rs, echo-execution/src/skills/hooks.rs, echo-execution/src/skills/registry.rs, echo-core/src/plugin/registry.rs, src/plugin/prepared.rs, src/agent/react/mod.rs, echo-core/src/plugin/lifecycle.rs, echo-integration/src/lsp/manager.rs]
 evidence_refs: [evidence.effects-extensions, evidence.skill-activation-authority-repair, evidence.skill-activation-authority-verification, evidence.mcp-client-capability-advertisement-repair, evidence.mcp-client-capability-advertisement-verification, evidence.lsp-derived-handle-lifecycle-repair, evidence.lsp-derived-handle-lifecycle-verification, evidence.plugin-component-preparation-repair, evidence.plugin-component-preparation-verification, evidence.plugin-generation-publication-authority-repair, evidence.plugin-generation-publication-authority-verification]
@@ -42,5 +42,5 @@ MCP/Hook/Skill/Plugin/LSP 源码、ADR 0012/0023/0026 和 focused tests 提供�
 
 Skill state、MCP capability/local classification与LSP derived ownership已修复复审；ADR 0045
 DU-71与ADR 0012也已统一component isolation和atomic generation合同。Plugin active generation
-已有target-scoped修复候选，但独立复审与主线交付未结算；lifecycle coordination、MCP owner
-isolation及其它开放Finding不由本切片关闭，故本Rule继续待审计。
+已在主线 `cb4ee9ed` 交付target-scoped authority并通过独立复审；lifecycle coordination、MCP
+owner isolation及其它开放Finding不由本切片关闭，故本Rule继续待审计。

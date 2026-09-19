@@ -597,6 +597,15 @@ mod tests {
         struct Capture(Arc<Mutex<String>>);
 
         impl tracing::field::Visit for Capture {
+            fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                use std::fmt::Write;
+                let _ = write!(
+                    self.0.lock().unwrap_or_else(|e| e.into_inner()),
+                    "{}={value:?};",
+                    field.name()
+                );
+            }
+
             fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
                 use std::fmt::Write;
                 let _ = write!(

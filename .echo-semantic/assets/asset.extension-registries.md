@@ -6,7 +6,7 @@ title: MCP、Hook、Skill、Plugin 与 LSP Registries
 asset_type: state_authority
 status: needs_review
 risk: high
-observed_at: source:c692702d1e9c1752aa396348037aea8baab1b4a8f1bbc2979fe95fc5ec9c7323
+observed_at: source:5806bd920140828b759fabe868fc1c4af1f26009ed4bf9112b73385cf2ce764e
 boundary_refs: [boundary.extension-lifecycle]
 code_refs: [echo-integration/src/mcp/mod.rs, echo-execution/src/skills/hooks.rs, echo-execution/src/skills/registry.rs, echo-core/src/plugin/registry.rs, src/plugin/prepared.rs, src/agent/react/mod.rs, echo-core/src/plugin/lifecycle.rs, echo-integration/src/lsp/manager.rs]
 consumer_refs: [src/agent/react/capabilities.rs, echo-sdk-host/src/core_profile/facade/integrations.rs]
@@ -37,4 +37,4 @@ Discover/connect/prepare/apply/activate/start，reload/replace，unwire/deactiva
 
 ## 未知与限制
 
-Plugin generation publication已有候选修复，尚待独立复审与主线交付；MCP owner与其它开放Finding各自保留验收边界。
+Plugin generation publication已在主线 `cb4ee9ed` 交付并通过独立复审；MCP owner与其它开放Finding各自保留验收边界。
