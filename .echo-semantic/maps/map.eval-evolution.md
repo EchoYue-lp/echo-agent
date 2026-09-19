@@ -4,13 +4,13 @@ id: map.eval-evolution
 kind: capability_map
 title: Trace、Eval、Improve 与 Evolution
 risk: high
-observed_at: source:e0466fe1f836ebe116374a7941ec3b4edbab8b0c9346247efa66405841a178f9
+observed_at: source:0d241bfdeeb69882ac21d5647af13f50f25fd491a34dcc6a7dd0f70daf2ac08a
 boundary_refs: [boundary.eval-evolution]
 behavior_refs: [behavior.eval-evolution]
 rule_refs: [rule.quality-observation-boundary, rule.fact-projection-separation]
 evidence_refs: [evidence.provider-protocol-quality, evidence.persistence-observation, evidence.high-risk-audit-frontier, evidence.improve-singleton-split-repair, evidence.improve-singleton-split-verification, evidence.improve-iteration-config-repair, evidence.improve-iteration-config-verification, evidence.eval-workspace-generation-repair, evidence.eval-workspace-generation-verification, evidence.eval-timeout-turn-settlement-repair, evidence.eval-timeout-turn-settlement-verification, evidence.eval-trace-correlation-repair, evidence.eval-trace-correlation-verification, evidence.evolution-memory-audit-repair, evidence.evolution-memory-audit-verification]
 finding_refs: [finding.eval-trace-identity, finding.eval-timeout-settlement, finding.improve-iteration-config, finding.improve-single-case-panic, finding.eval-workspace-generation-isolation, finding.background-review-detached-persistence-settlement, finding.evolution-audit-atomicity, finding.evolution-changelog-rollback-authority, finding.evolution-skill-promotion-audit, finding.skill-candidate-reinforcement-audit-gap, finding.evolution-doc-namespace, finding.pre-compaction-memory-trust-provenance]
-audit_refs: [audit.eval-evolution.data-durability, audit.eval-evolution.failure-concurrency, audit.eval-evolution.permission-external, audit.improve-singleton-split-rereview, audit.improve-iteration-config-rereview, audit.eval-workspace-generation-rereview, audit.eval-timeout-turn-settlement-rereview, audit.eval-trace-correlation-rereview, audit.evolution-memory-audit-atomicity-rereview]
+audit_refs: [audit.eval-evolution.data-durability, audit.eval-evolution.failure-concurrency, audit.eval-evolution.permission-external, audit.improve-singleton-split-rereview, audit.improve-iteration-config-rereview, audit.eval-workspace-generation-rereview, audit.eval-timeout-turn-settlement-rereview, audit.eval-trace-correlation-rereview, audit.evolution-memory-audit-atomicity-rereview, audit.evolution-memory-rollback-rereview]
 related_map_refs: [map.observation-persistence-delivery, map.agent-session-turn, map.llm-provider-runtime, map.extension-lifecycle]
 scenarios:
   trace-record-and-analysis:
@@ -44,10 +44,10 @@ scenarios:
     source_refs: [src/evolution/layer.rs, src/evolution/mutation.rs, src/evolution/audit.rs, src/evolution/review.rs, src/evolution/runtime_integration.rs, src/tools/builtin/memory.rs, src/memory_promoter.rs, src/agent/react/run/context.rs, src/evolution/security.rs, docs/adr/0065-evolution-memory-audit-reconciliation.md]
     finding_refs: [finding.evolution-audit-atomicity, finding.evolution-changelog-rollback-authority, finding.evolution-doc-namespace, finding.pre-compaction-memory-trust-provenance]
     rule_refs: [rule.quality-observation-boundary]
-    evidence_refs: [evidence.evolution-memory-audit-repair, evidence.evolution-memory-audit-verification]
-    audit_refs: [audit.evolution-memory-audit-atomicity-rereview]
-    unknown: durable prepare/reconcile已在主线cb4ee9ed交付并通过独立复审；raw Store读者可暂见中间态，later rollback/旧namespace仍属独立范围
-    next_step: rollback、旧namespace、skill/rule audit分别依其Finding处置，并保留manager发布前reconcile要求
+    evidence_refs: [evidence.evolution-memory-audit-repair, evidence.evolution-memory-audit-verification, evidence.evolution-memory-rollback-repair, evidence.evolution-memory-rollback-verification]
+    audit_refs: [audit.evolution-memory-audit-atomicity-rereview, audit.evolution-memory-rollback-rereview]
+    unknown: durable prepare/reconcile已在主线cb4ee9ed交付并通过独立复审；memory rollback候选已通过advancing-base完整门禁与最终独立复审，尚待远端交付，raw Store读者可暂见中间态，Skill/Rule/host rollback与旧namespace仍属独立范围
+    next_step: memory rollback候选完成远端交付；Skill/Rule/host rollback依#54/#94/host，旧namespace依其Finding处置
   evolution-skill-lifecycle:
     status: needs_review
     source_refs: [src/evolution/curator.rs, src/evolution/draft.rs, src/evolution/merge.rs, src/evolution/patch.rs, src/evolution/review.rs, src/evolution/security.rs]
@@ -93,7 +93,7 @@ Eval cases/constraints、grader、explicit config、memory source/risk/status �
 
 ## 生命周期与失败路径
 
-Trace start/finalize；Eval run/deadline/cancel/bounded settlement/correlate trace/grade/report，未settled timeout跳过RunStore与评分并保留generation；trace缺失保持可选，歧义或存储不一致失败；Improve iterate/stop/export；Evolution detect/review/prepare/project/audit/settle/reconcile；later rollback未实现。
+Trace start/finalize；Eval run/deadline/cancel/bounded settlement/correlate trace/grade/report，未settled timeout跳过RunStore与评分并保留generation；trace缺失保持可选，歧义或存储不一致失败；Improve iterate/stop/export；Evolution detect/review/prepare/project/audit/settle/reconcile；memory later rollback以ChangeId/BatchId解析canonical journal batch并以generation CAS、inverse lineage和request-id幂等结算，Skill/Rule/host rollback未归入本边界。
 
 ## 权限与敏感信息
 

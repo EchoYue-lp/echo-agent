@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.agent-adapter-close-settlement-repair
 kind: evidence
-observed_at: source:e0466fe1f836ebe116374a7941ec3b4edbab8b0c9346247efa66405841a178f9
+observed_at: source:0d241bfdeeb69882ac21d5647af13f50f25fd491a34dcc6a7dd0f70daf2ac08a
 source_refs:
   - src/acp/session.rs
   - src/acp/runtime.rs
