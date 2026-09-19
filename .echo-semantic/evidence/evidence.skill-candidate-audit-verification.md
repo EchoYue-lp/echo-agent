@@ -16,7 +16,7 @@ source_refs:
   - echo-agent-learning/tests/example_contracts/demo51_self_improvement.rs
 supports: [finding.skill-candidate-reinforcement-audit-gap, behavior.eval-evolution]
 limitations:
-  - Full task-branch gate, independent rereview and remote-main delivery remain pending
+  - Remote-main delivery and post-merge closure rereview remain pending
   - Fault injection covers deterministic audit failure and restart, not a physical power cut
 ---
 
@@ -30,6 +30,10 @@ public shape、derived-index CAS 与 private path alias。最终 candidate suite
 path identity 1/1、默认 Store CAS 3/3、sqlite feature Store CAS 4/4 通过。
 demo51 candidate与external SkillMeta contract 2/2、root lib 与 sqlite feature focused clippy `-D warnings`、
 formatter check、semantic strict/change-evidence 均退出 0。
+
+最终冻结代码通过两套 workspace Clippy、all-target/all-feature workspace tests、no-default
+workspace check 与 17 项独立 feature matrix。第四轮独立实现复审为 0 Critical、0 Important、
+0 Minor；本 Evidence 更新未改变生产代码或测试语义。
 
 测试覆盖 create/reinforce stable audit、A journal 对 B Store/ChangeLog 重绑拒绝、默认 Unsupported
 Store 拒绝、read/CAS 之间注入外部更新仍保留外部值、Curator missing 恢复、同 lineage
@@ -46,9 +50,9 @@ lineage sidecar、lock 与 state temporary file 使用完整文件名 suffix 且
 
 ## 来源与范围
 
-命令在独立 `fix/Echoyue/issue-94-candidate-audit` worktree 的当前未提交候选上执行；来源限定为
-candidate owner、通用 journal/audit 原语与 demo51 公共用法。
+命令在独立 `fix/Echoyue/issue-94-candidate-audit` task branch 上执行；来源限定为 candidate
+owner、通用 journal/audit 原语与 demo51 公共用法。
 
 ## 已知缺口
 
-focused 证据不替代 `scripts/verify.sh`、独立复审、PR CI 或 remote-main delivery。
+本地完整门禁与独立复审不替代 PR CI、remote-main delivery 或 post-merge closure rereview。

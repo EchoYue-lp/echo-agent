@@ -10,7 +10,7 @@ source_refs:
   - docs/adr/0068-skill-candidate-mutation-audit-reconciliation.md
 supports: [finding.skill-candidate-reinforcement-audit-gap, behavior.eval-evolution, rule.quality-observation-boundary]
 limitations:
-  - Full task-branch gate, independent rereview and remote-main delivery are pending
+  - Remote-main delivery and post-merge closure rereview remain pending
   - Promotion, approval, draft, merge, patch and public Skill rollback remain outside this repair
 ---
 
@@ -45,4 +45,5 @@ CAS 的 EmbeddingStore、Curator 私有 lifecycle lineage、ChangeLog stable ide
 
 ## 已知缺口
 
-当前材料不证明独立复审、完整分支门禁或远端交付，因此 Finding 保持 open。
+完整分支门禁与独立实现复审已通过；当前材料仍不证明 PR CI、remote-main delivery 或
+post-merge closure rereview，因此 Finding 保持 open。
