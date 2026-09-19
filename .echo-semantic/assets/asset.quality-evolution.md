@@ -6,7 +6,7 @@ title: Trace、Eval、Improve 与 Evolution
 asset_type: state_authority
 status: needs_review
 risk: high
-observed_at: source:5806bd920140828b759fabe868fc1c4af1f26009ed4bf9112b73385cf2ce764e
+observed_at: source:e0466fe1f836ebe116374a7941ec3b4edbab8b0c9346247efa66405841a178f9
 boundary_refs: [boundary.eval-evolution]
 code_refs: [src/trace/mod.rs, src/eval/runner.rs, src/eval/comparator.rs, echo-orchestration/src/runtime/turn_driver.rs, src/agent/react/run/stream_channel.rs, src/improve/mod.rs, src/improve/loop.rs, src/evolution/mod.rs, src/evolution/background_review.rs, src/evolution/dreaming.rs, src/evolution/layer.rs, src/evolution/mutation.rs, src/evolution/runtime_integration.rs, src/evolution/curator.rs, src/evolution/draft.rs, src/evolution/merge.rs, src/evolution/patch.rs, src/evolution/review.rs, src/evolution/security.rs, echo-state/src/skill_telemetry.rs, docs/adr/0036-eval-workspace-generation-lifecycle.md, docs/adr/0037-eval-timeout-turn-settlement.md, docs/adr/0038-eval-trace-correlation-identity.md, docs/adr/0065-evolution-memory-audit-reconciliation.md]
 consumer_refs: [echo-agent-learning/tests/example_contracts/demo50_eval.rs, echo-agent-learning/tests/example_contracts/demo51_self_improvement.rs]
