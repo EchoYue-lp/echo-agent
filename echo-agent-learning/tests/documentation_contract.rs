@@ -943,7 +943,7 @@ fn demos_use_only_the_public_facade_and_safe_string_access()
 }
 
 #[test]
-fn plugin_publication_docs_and_demo_share_the_target_receipt_contract()
+fn plugin_publication_docs_and_demo_share_the_coordinator_receipt_contract()
 -> Result<(), Box<dyn std::error::Error>> {
     let learning_root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let root = learning_root.parent().ok_or_else(|| {
@@ -951,9 +951,10 @@ fn plugin_publication_docs_and_demo_share_the_target_receipt_contract()
     })?;
     let demo = std::fs::read_to_string(learning_root.join("examples/demo56_plugin_system.rs"))?;
     for entry in [
-        "integrator.publication_target(&agent)",
-        "target.wire_prepared(&mut agent, &prepared).await?",
-        "target.rollback(&mut agent, &receipt).await?",
+        "PluginCoordinator::new(registry, PluginIntegrator::new())",
+        "coordinator.reconcile(&mut agent).await?",
+        "coordinator.disable(&mut agent, &plugin_id).await?",
+        "coordinator.shutdown(&mut agent).await?",
         "McpServerId::plugin",
     ] {
         assert!(demo.contains(entry), "plugin demo misses {entry}");
@@ -962,10 +963,10 @@ fn plugin_publication_docs_and_demo_share_the_target_receipt_contract()
         let guide =
             std::fs::read_to_string(root.join(format!("docs/{language}/32-plugin-system.md")))?;
         for entry in [
-            "publication_target(&agent)",
-            "target.wire_prepared(&mut agent, &prepared)",
-            "target.rollback(&mut agent, &receipt)",
-            "pending_cleanup_receipt()",
+            "PluginCoordinator",
+            "coordinator.reconcile(&mut agent)",
+            "coordinator.retry(&mut agent)",
+            "ActualPending",
         ] {
             assert!(
                 guide.contains(entry),

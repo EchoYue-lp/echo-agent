@@ -154,16 +154,33 @@ become visible only after registry mutation or explicit invalidation. See [ADR 0
 Generation ordinals are allocated across all integrators in the process, so independent integrators
 can publish successive snapshots to the same Agent without resetting their order.
 
-Each `ReactAgent` owns one publication target. Obtain its cloneable handle through
-`integrator.publication_target(&agent)` and call `target.wire_prepared(&mut agent, &prepared)`;
-the returned receipt records the generation and identity. Withdraw with
-`target.rollback(&mut agent, &receipt)` before publishing a newer generation. A stale prepared set,
-foreign or altered receipt, or repeated publication is rejected before mutating registries.
-Successful withdrawal can be repeated; after a newer generation publishes, the old receipt becomes
-stale. Failed apply does not advance the active generation, and failed cleanup keeps its receipt
-for retry. A cancelled apply's pending receipt can be obtained with
-`target.pending_cleanup_receipt()` and settled before another publication. Cloned integrators
-preparing for independent Agents do not share active publication state.
+Each `ReactAgent` still owns one publication target, but hosts drive complete lifecycle
+transitions through `PluginCoordinator`. Construct it with the durable registry and integrator,
+then call `coordinator.reconcile(&mut agent)` for current intent or the typed `enable`, `reload`,
+`disable`, `uninstall`, and `shutdown` operations. A failed transition returns `ActualPending`;
+call `coordinator.retry(&mut agent)` to resume its exact receipt and phase before starting another
+operation. The coordinator serializes transitions while the target remains the sole generation,
+publication receipt, and cleanup-debt authority.
+
+The registry dependency graph fixes transition order: dependencies activate and emit
+`PluginLoaded` first, while dependents deactivate and emit `PluginDisabled` first. A converged
+receipt is valid only for the same Agent publication target. Registering lifecycle callbacks after
+convergence invalidates the no-op fast path so the next reconcile activates them. A wrong Agent is
+rejected before registry intent or callbacks can change.
+
+Registry intent commits before runtime convergence. Callback cleanup therefore precedes exact
+receipt withdrawal, immutable generation publication, callback activation, and lifecycle Hook
+notification attempts. Dependency resolution and generation-wide applicability validation happen
+before callback cleanup, so invalid input preserves the old actual generation and retry reparses
+repaired package files under the same operation receipt. Shutdown withdraws process-local effects
+without disabling durable intent.
+Registry refresh commits only after a complete scan and preserves the last successful scope set;
+a restricted Host view is never widened by coordinator retry.
+`PluginLoaded` and `PluginDisabled` attempts are ordered and de-duplicated within one operation;
+they are not a durable cross-process event log. Cancellation or process failure can lose a Hook
+notification, which remains part of the broader Hook producer contract.
+An unfinished receipt reports `ActualPending` at the next retry phase, including after its future
+is cancelled.
 Each successful MCP connection enters the pending receipt before the next server begins. A name
 that was absent before connection is reserved for cleanup across cancellation during its await;
 failed new connections settle that name before the generation may publish. This does not change
@@ -181,24 +198,36 @@ failed initialization requires shutdown but not deactivation, and failed activat
 successful `unregister` cleanup. A failed callback is
 not treated as withdrawn merely because the desired enabled set changed. Failed `shutdown` remains
 unsettled even if a later `deactivate` succeeds, and must be retried through `unregister`. See
-[ADR 0060](../adr/0060-plugin-lifecycle-reconcile-settlement.md). Registry and component wiring
-still require host-level coordination for a complete reload transaction.
+[ADR 0060](../adr/0060-plugin-lifecycle-reconcile-settlement.md). `PluginCoordinator` composes that
+callback authority with durable registry intent and Agent-bound publication receipts; it does not
+copy callback or generation state. See
+[ADR 0069](../adr/0069-plugin-host-lifecycle-coordinator.md).
+An init or activation retry first uses `PluginLifecycleManager::reset_for_retry` to settle the
+failed callback's own deactivate/shutdown debt without replacing its registration.
 
 ## API
 
 ```rust,no_run
-use echo_agent::plugin::{InstallSource, PluginRegistry, PluginScope};
+use echo_agent::agent::ReactAgentBuilder;
+use echo_agent::plugin::{
+    InstallSource, PluginCoordinator, PluginIntegrator, PluginRegistry, PluginScope,
+};
 
-let mut registry = PluginRegistry::new(Some(std::env::current_dir()?));
+# async fn run() -> Result<(), Box<dyn std::error::Error>> {
+let root = std::env::current_dir()?;
+let mut registry = PluginRegistry::new(root.join(".echo-agent"), Some(root));
 registry.scan_all()?;
-
 let id = registry.install(
     &InstallSource::Local("./review-tools".into()),
     PluginScope::Project,
 )?;
-registry.disable(&id)?;
-registry.enable(&id)?;
-# Ok::<(), Box<dyn std::error::Error>>(())
+let mut agent = ReactAgentBuilder::new().model("local-model").build()?;
+let mut coordinator = PluginCoordinator::new(registry, PluginIntegrator::new());
+coordinator.reconcile(&mut agent).await?;
+coordinator.disable(&mut agent, &id).await?;
+coordinator.enable(&mut agent, &id).await?;
+# Ok(())
+# }
 ```
 
 Use `PluginRegistry::validate_plugin_dir` before installation when a validation report is required.
