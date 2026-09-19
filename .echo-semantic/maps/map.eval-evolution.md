@@ -4,13 +4,13 @@ id: map.eval-evolution
 kind: capability_map
 title: Trace、Eval、Improve 与 Evolution
 risk: high
-observed_at: source:b214951ece8e09325efc846ad7bd88a402135000e42fe67d2b917317b2d27923
+observed_at: source:5806bd920140828b759fabe868fc1c4af1f26009ed4bf9112b73385cf2ce764e
 boundary_refs: [boundary.eval-evolution]
 behavior_refs: [behavior.eval-evolution]
 rule_refs: [rule.quality-observation-boundary, rule.fact-projection-separation]
 evidence_refs: [evidence.provider-protocol-quality, evidence.persistence-observation, evidence.high-risk-audit-frontier, evidence.improve-singleton-split-repair, evidence.improve-singleton-split-verification, evidence.improve-iteration-config-repair, evidence.improve-iteration-config-verification, evidence.eval-workspace-generation-repair, evidence.eval-workspace-generation-verification, evidence.eval-timeout-turn-settlement-repair, evidence.eval-timeout-turn-settlement-verification, evidence.eval-trace-correlation-repair, evidence.eval-trace-correlation-verification, evidence.evolution-memory-audit-repair, evidence.evolution-memory-audit-verification]
 finding_refs: [finding.eval-trace-identity, finding.eval-timeout-settlement, finding.improve-iteration-config, finding.improve-single-case-panic, finding.eval-workspace-generation-isolation, finding.background-review-detached-persistence-settlement, finding.evolution-audit-atomicity, finding.evolution-changelog-rollback-authority, finding.evolution-skill-promotion-audit, finding.skill-candidate-reinforcement-audit-gap, finding.evolution-doc-namespace, finding.pre-compaction-memory-trust-provenance]
-audit_refs: [audit.eval-evolution.data-durability, audit.eval-evolution.failure-concurrency, audit.eval-evolution.permission-external, audit.improve-singleton-split-rereview, audit.improve-iteration-config-rereview, audit.eval-workspace-generation-rereview, audit.eval-timeout-turn-settlement-rereview, audit.eval-trace-correlation-rereview]
+audit_refs: [audit.eval-evolution.data-durability, audit.eval-evolution.failure-concurrency, audit.eval-evolution.permission-external, audit.improve-singleton-split-rereview, audit.improve-iteration-config-rereview, audit.eval-workspace-generation-rereview, audit.eval-timeout-turn-settlement-rereview, audit.eval-trace-correlation-rereview, audit.evolution-memory-audit-atomicity-rereview]
 related_map_refs: [map.observation-persistence-delivery, map.agent-session-turn, map.llm-provider-runtime, map.extension-lifecycle]
 scenarios:
   trace-record-and-analysis:
@@ -45,8 +45,9 @@ scenarios:
     finding_refs: [finding.evolution-audit-atomicity, finding.evolution-changelog-rollback-authority, finding.evolution-doc-namespace, finding.pre-compaction-memory-trust-provenance]
     rule_refs: [rule.quality-observation-boundary]
     evidence_refs: [evidence.evolution-memory-audit-repair, evidence.evolution-memory-audit-verification]
-    unknown: durable prepare/reconcile候选尚待独立复审与远端主线门禁；raw Store读者可暂见中间态，later rollback/旧namespace仍属独立范围
-    next_step: 在集成结果复核跨Store可见性、完整门禁与Finding关闭条件；rollback和旧namespace分别依其Finding处置
+    audit_refs: [audit.evolution-memory-audit-atomicity-rereview]
+    unknown: durable prepare/reconcile已在主线cb4ee9ed交付并通过独立复审；raw Store读者可暂见中间态，later rollback/旧namespace仍属独立范围
+    next_step: rollback、旧namespace、skill/rule audit分别依其Finding处置，并保留manager发布前reconcile要求
   evolution-skill-lifecycle:
     status: needs_review
     source_refs: [src/evolution/curator.rs, src/evolution/draft.rs, src/evolution/merge.rs, src/evolution/patch.rs, src/evolution/review.rs, src/evolution/security.rs]
