@@ -4,6 +4,9 @@
 
 Accepted
 
+ADR 0069 composes this immutable publication authority with registry intent and callback
+lifecycle. It does not move generation or cleanup-receipt ownership out of this boundary.
+
 ## Context
 
 Plugin wiring previously reread package files while mutating live Agents and during rollback. One

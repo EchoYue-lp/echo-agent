@@ -167,9 +167,19 @@ impl PluginLifecycleManager {
     pub fn deactivate_all(&mut self) -> Vec<String> {
         let mut ids = self.plugins.keys().cloned().collect::<Vec<_>>();
         ids.sort();
+        self.deactivate_in_order(ids.iter().map(String::as_str))
+    }
+
+    /// Deactivate callbacks in a caller-supplied dependency order.
+    pub fn deactivate_in_order<'a>(
+        &mut self,
+        plugin_ids: impl IntoIterator<Item = &'a str>,
+    ) -> Vec<String> {
         let mut errors = Vec::new();
-        for plugin_id in ids {
-            if let Err(error) = self.deactivate(&plugin_id) {
+        for plugin_id in plugin_ids {
+            if self.plugins.contains_key(plugin_id)
+                && let Err(error) = self.deactivate(plugin_id)
+            {
                 errors.push(error);
             }
         }
@@ -181,6 +191,21 @@ impl PluginLifecycleManager {
     /// Failed cleanup retains ownership so callers can retry instead of
     /// replacing callbacks that may still own live resources.
     pub fn unregister(&mut self, plugin_id: &str) -> Result<bool, String> {
+        if !self.plugins.contains_key(plugin_id) {
+            return Ok(false);
+        }
+        self.reset_for_retry(plugin_id)?;
+        self.plugins.remove(plugin_id);
+        Ok(true)
+    }
+
+    /// Settle callback effects while retaining the registration for a retry.
+    ///
+    /// A failed init or activation may have acquired resources even though the
+    /// callback never became active. The lifecycle authority performs the same
+    /// deactivate/shutdown settlement as unregister, but keeps the callback so
+    /// a coordinator can initialize the next actual generation.
+    pub fn reset_for_retry(&mut self, plugin_id: &str) -> Result<bool, String> {
         let Some(lifecycle) = self.plugins.get_mut(plugin_id) else {
             return Ok(false);
         };
@@ -189,7 +214,7 @@ impl PluginLifecycleManager {
             if let Err(error) = lifecycle.callbacks.deactivate() {
                 lifecycle.cleanup_required = true;
                 errors.push(format!(
-                    "Plugin '{plugin_id}' deactivation failed during unregister: {error}"
+                    "Plugin '{plugin_id}' deactivation failed during lifecycle cleanup: {error}"
                 ));
             } else {
                 lifecycle.active = false;
@@ -200,7 +225,7 @@ impl PluginLifecycleManager {
             if let Err(error) = lifecycle.callbacks.shutdown() {
                 lifecycle.shutdown_required = true;
                 errors.push(format!(
-                    "Plugin '{plugin_id}' shutdown failed during unregister: {error}"
+                    "Plugin '{plugin_id}' shutdown failed during lifecycle cleanup: {error}"
                 ));
             } else {
                 lifecycle.initialized = false;
@@ -208,7 +233,6 @@ impl PluginLifecycleManager {
             }
         }
         if errors.is_empty() {
-            self.plugins.remove(plugin_id);
             Ok(true)
         } else {
             Err(errors.join("; "))
@@ -245,6 +269,37 @@ impl PluginLifecycleManager {
     ) -> Vec<String> {
         let enabled = enabled_plugins.into_iter().collect::<HashSet<_>>();
         self.activate_in_set(&enabled)
+    }
+
+    /// Activate registered callbacks in dependency order, skipping plugins
+    /// that do not define lifecycle callbacks.
+    pub fn activate_in_order<'a>(
+        &mut self,
+        plugin_ids: impl IntoIterator<Item = &'a str>,
+    ) -> Vec<String> {
+        let mut errors = Vec::new();
+        for plugin_id in plugin_ids {
+            if self.plugins.contains_key(plugin_id)
+                && let Err(error) = self.activate(plugin_id)
+            {
+                errors.push(error);
+            }
+        }
+        errors
+    }
+
+    /// Unregister callbacks in a caller-supplied reverse dependency order.
+    pub fn unregister_in_order<'a>(
+        &mut self,
+        plugin_ids: impl IntoIterator<Item = &'a str>,
+    ) -> Vec<String> {
+        let mut errors = Vec::new();
+        for plugin_id in plugin_ids {
+            if let Err(error) = self.unregister(plugin_id) {
+                errors.push(error);
+            }
+        }
+        errors
     }
 
     fn deactivate_not_in_set(&mut self, enabled: &HashSet<&str>) -> Vec<String> {

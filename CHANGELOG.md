@@ -65,6 +65,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added a framework-level `PluginCoordinator` that serializes startup,
+  reconcile, enable, reload, disable, uninstall, retry, and shutdown across
+  durable registry intent, Agent-bound publication receipts, and callback
+  cleanup debt. Failed actual transitions retain phase receipts and block later
+  generations. Dependency topology orders forward activation/loading and
+  reverse withdrawal/disable; no-op receipts are Agent-target-bound, and newly
+  registered callbacks invalidate convergence. Invalid prepared generations
+  fail before old actual withdrawal and are reparsed on same-operation retry.
+  Registry refresh is commit-on-success and preserves restricted scope policy.
+  Lifecycle Hook attempts run only
+  after commit and are de-duplicated within the in-process operation.
+  Cross-process Hook delivery remains tracked separately.
+
 - **Durable layered-memory audit reconciliation.** `MemoryLayerManager` prepares
   warm/hot mutations and approved merge groups in the existing `echo-state`
   file journal before projecting them, then idempotently commits `ChangeLog`

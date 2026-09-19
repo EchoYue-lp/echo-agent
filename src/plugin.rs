@@ -10,7 +10,13 @@ pub use echo_core::plugin::{
     PluginVariables, ResolvedComponents,
 };
 
+mod coordinator;
 mod prepared;
+
+pub use coordinator::{
+    PluginCoordinator, PluginCoordinatorError, PluginOperationKind, PluginOperationPhase,
+    PluginOperationReceipt, PluginRuntimeStatus,
+};
 
 pub use prepared::{
     PluginDiagnosticSeverity, PluginIntegrator, PluginPreparationDiagnostic,

@@ -6,13 +6,13 @@ title: MCP、Hook、Skill、Plugin 与 LSP Registries
 asset_type: state_authority
 status: needs_review
 risk: high
-observed_at: source:da606226e50036419c8df4e353de35d35acb5cc65c605df57764578aaaf04666
+observed_at: source:16e4824bc89e28e36a6c329505451b8ca5c86d6e4f4d1144ea01616535f3ac09
 boundary_refs: [boundary.extension-lifecycle]
-code_refs: [echo-integration/src/mcp/mod.rs, echo-execution/src/skills/hooks.rs, echo-execution/src/skills/registry.rs, echo-core/src/plugin/registry.rs, src/plugin/prepared.rs, src/agent/react/mod.rs, echo-core/src/plugin/lifecycle.rs, echo-integration/src/lsp/manager.rs]
+code_refs: [echo-integration/src/mcp/mod.rs, echo-execution/src/skills/hooks.rs, echo-execution/src/skills/registry.rs, echo-core/src/plugin/registry.rs, src/plugin/coordinator.rs, src/plugin/prepared.rs, src/agent/react/mod.rs, echo-core/src/plugin/lifecycle.rs, echo-integration/src/lsp/manager.rs]
 consumer_refs: [src/agent/react/capabilities.rs, echo-sdk-host/src/core_profile/facade/integrations.rs]
 behavior_refs: [behavior.extension-publication]
 rule_refs: [rule.extension-generation-authority]
-evidence_refs: [evidence.effects-extensions, evidence.plugin-generation-publication-authority-repair, evidence.plugin-generation-publication-authority-verification]
+evidence_refs: [evidence.effects-extensions, evidence.plugin-generation-publication-authority-repair, evidence.plugin-generation-publication-authority-verification, evidence.plugin-lifecycle-coordinator-repair, evidence.plugin-lifecycle-coordinator-verification]
 finding_refs: [finding.skill-activation-authority, finding.hook-permission-precedence, finding.mcp-client-capability-advertisement, finding.plugin-mcp-owner-isolation, finding.plugin-failure-isolation-contract, finding.plugin-lifecycle-coordination, finding.lsp-runtime-state, finding.extension-cleanup-settlement, finding.mcp-version-doc-drift]
 candidate_refs: []
 ---
@@ -37,4 +37,6 @@ Discover/connect/prepare/apply/activate/start，reload/replace，unwire/deactiva
 
 ## 未知与限制
 
-Plugin generation publication已在主线 `cb4ee9ed` 交付并通过独立复审；MCP owner与其它开放Finding各自保留验收边界。
+Plugin generation publication与MCP owner已在主线交付并独立复审；Host coordinator 候选已
+串联 registry、publication 与 callback authority，仍待 #73 独立复审和远端交付。其它开放
+Finding 各自保留验收边界。

@@ -412,6 +412,10 @@ impl PluginPublicationTarget {
         }
     }
 
+    pub(crate) fn is_for_agent(&self, agent: &crate::agent::react::ReactAgent) -> bool {
+        Arc::ptr_eq(&self.authority, &agent.plugin_publication)
+    }
+
     /// A cancelled apply retains a cleanup receipt in the target authority.
     pub async fn pending_cleanup_receipt(&self) -> Option<PluginWiringResult> {
         self.authority.state.lock().await.cleanup_debt.clone()
