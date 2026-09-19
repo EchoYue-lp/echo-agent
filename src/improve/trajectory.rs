@@ -41,7 +41,8 @@ pub struct TrajectoryEntry {
     pub timestamp: DateTime<Utc>,
     /// Total token usage
     pub token_usage: u32,
-    /// Number of tool calls
+    /// Number of admitted tool requests. Requests marked `ToolExecutionSkipped`
+    /// remain included because trajectory export preserves request/result pairing.
     pub tool_call_count: usize,
     /// Duration in milliseconds
     pub duration_ms: u64,
@@ -54,6 +55,7 @@ pub struct TrajectoryStats {
     pub completed: usize,
     pub failed: usize,
     pub total_tokens: u64,
+    /// Total admitted tool requests across exported trajectories.
     pub total_tool_calls: usize,
     pub avg_duration_ms: u64,
 }

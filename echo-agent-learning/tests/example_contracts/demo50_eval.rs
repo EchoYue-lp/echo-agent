@@ -181,6 +181,10 @@ async fn demo_trajectory_replay() {
                 risk: None,
                 duration_ms: 10,
             },
+            RunEvent::FileEdit {
+                tool: "write_file".into(),
+                path: "auth.rs".into(),
+            },
             RunEvent::ToolResult {
                 call_id: "c1".into(),
                 name: "write_file".into(),
@@ -202,6 +206,10 @@ async fn demo_trajectory_replay() {
                 risk: None,
                 duration_ms: 20,
             },
+            RunEvent::FileRead {
+                tool: "read_file".into(),
+                path: "config.toml".into(),
+            },
             RunEvent::ToolResult {
                 call_id: "c2".into(),
                 name: "read_file".into(),
@@ -222,6 +230,10 @@ async fn demo_trajectory_replay() {
                 args: Some(serde_json::json!({"path": "config.toml", "content": "port=9090"})),
                 risk: None,
                 duration_ms: 10,
+            },
+            RunEvent::FileEdit {
+                tool: "write_file".into(),
+                path: "config.toml".into(),
             },
             RunEvent::ToolResult {
                 call_id: "c3".into(),

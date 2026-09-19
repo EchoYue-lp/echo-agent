@@ -604,6 +604,8 @@ pub struct AgentRunSnapshot {
     /// Unique trace invocation ID. This is intentionally distinct from the
     /// product/business run ID in `current_run_id`.
     pub trace_run_id: Option<String>,
+    /// Invocation-local authority for calls that actually entered ExecuteStage.
+    executing_tool_call_ids: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     /// Current user-input/agent turn ID.
     pub current_turn_id: Option<String>,
     /// Private authority for draining the exact active turn incarnation.
@@ -652,7 +654,7 @@ pub struct AgentRunSnapshot {
     pub(crate) memory_store: Option<Arc<dyn crate::memory::Store>>,
     /// Optional Critic for final_answer verification.
     pub critic: Option<Arc<dyn echo_core::agent::Critic>>,
-    /// Optional tool execution pipeline (15-stage middleware).
+    /// Optional tool execution pipeline (16-stage middleware).
     pub tool_execution_pipeline:
         Option<Arc<crate::agent::react::run::pipeline::ToolExecutionPipeline>>,
     /// (stage4 E1) Layered memory manager — used by `pre_compaction_flush` to
@@ -1494,6 +1496,9 @@ impl AgentRunSnapshot {
             } else {
                 agent.capture_current_trace_run_id()
             },
+            executing_tool_call_ids: Arc::new(std::sync::Mutex::new(
+                std::collections::HashSet::new(),
+            )),
             current_turn_id: if invocation.is_some() {
                 runtime.and_then(|context| context.turn_id.clone())
             } else {
@@ -1645,10 +1650,11 @@ impl AgentRunSnapshot {
     }
 
     /// Persist one audit event through the optional Agent callback backend.
-    pub(crate) async fn record_audit_event(&self, event: crate::audit::AuditEvent) {
+    pub(crate) async fn record_audit_event(&self, mut event: crate::audit::AuditEvent) {
         let Some(logger) = self.guard.audit_logger.as_ref() else {
             return;
         };
+        event.apply_retention(&echo_core::utils::retention::ContentRetentionPolicy::default());
         let record_id = event.trace_id.clone().or_else(|| event.session_id.clone());
         if let Err(error) = logger.log(event).await {
             self.report_diagnostic_delivery_failure(DiagnosticDeliveryFailure::new(
@@ -1661,7 +1667,8 @@ impl AgentRunSnapshot {
     }
 
     /// Record a trace event if a run store is attached.
-    pub async fn record_event(&self, event: RunEvent) {
+    pub async fn record_event(&self, mut event: RunEvent) {
+        event.apply_retention(&echo_core::utils::retention::ContentRetentionPolicy::default());
         if let Some(ref store) = self.run_store
             && let Some(ref run_id) = self.trace_run_id
             && let Err(error) = store.append_event(run_id, event).await
@@ -1675,27 +1682,149 @@ impl AgentRunSnapshot {
         }
     }
 
+    /// Project a fact from the tool that owns the effect into this invocation's trace.
+    pub(crate) async fn record_tool_effect(
+        &self,
+        effect: &echo_core::tools::ToolEffect,
+        tool_name: &str,
+        call_id: &str,
+    ) {
+        let event = match effect {
+            echo_core::tools::ToolEffect::FileRead { path } => RunEvent::FileRead {
+                tool: tool_name.to_string(),
+                path: path.clone(),
+            },
+            echo_core::tools::ToolEffect::FileEdit { path } => RunEvent::FileEdit {
+                tool: tool_name.to_string(),
+                path: path.clone(),
+            },
+            echo_core::tools::ToolEffect::TestRun {
+                command,
+                passed,
+                failure_count,
+            } => RunEvent::TestRun {
+                command: command.clone(),
+                passed: *passed,
+                failure_count: *failure_count,
+            },
+            echo_core::tools::ToolEffect::SubagentRun {
+                agent_name,
+                task,
+                outcome,
+            } => RunEvent::SubagentRun {
+                call_id: Some(call_id.to_string()),
+                agent_name: agent_name.clone(),
+                task: task.clone(),
+                outcome: outcome.clone(),
+            },
+        };
+        self.record_event(event).await;
+    }
+
+    pub(crate) fn mark_tool_execution_started(&self, call_id: &str) {
+        self.executing_tool_call_ids
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(call_id.to_string());
+    }
+
+    fn tool_execution_started(&self, call_id: &str) -> bool {
+        self.executing_tool_call_ids
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .contains(call_id)
+    }
+
+    pub(crate) async fn settle_interrupted_tool_call(
+        &self,
+        call_id: &str,
+        tool_name: &str,
+        input: &serde_json::Value,
+        category: crate::tools::ToolFailureCategory,
+        message: &str,
+    ) -> crate::tools::ToolResult {
+        if !self.tool_execution_started(call_id) {
+            // A pre-execution stage or future wave never reached ExecuteStage.
+            // The invocation-local set is authoritative; trace persistence is
+            // only a projection and may be unavailable or eventually visible.
+            self.record_event(RunEvent::new_tool_call(
+                call_id.to_string(),
+                tool_name.to_string(),
+                Some(input.clone()),
+                None,
+                0,
+            ))
+            .await;
+            self.record_event(RunEvent::ToolExecutionSkipped {
+                call_id: call_id.to_string(),
+                name: tool_name.to_string(),
+                reason: category.as_str().to_string(),
+            })
+            .await;
+        }
+        let failure = crate::tools::ToolFailure::new(category)
+            .with_side_effect(crate::tools::ToolSideEffect::Possible)
+            .with_postcondition(
+                "verify the external effect before retrying this interrupted tool call",
+            );
+        let result = crate::tools::ToolResult::error(message).with_failure(failure.clone());
+        self.record_event(crate::trace::RunEvent::ToolResult {
+            call_id: call_id.to_string(),
+            name: tool_name.to_string(),
+            success: false,
+            output_preview: Some(String::new()),
+            output_truncated: false,
+            duration_ms: 0,
+            original_bytes: 0,
+            returned_bytes: 0,
+            estimated_tokens: 0,
+            output_handling: None,
+            artifact: None,
+        })
+        .await;
+        self.record_event(crate::trace::RunEvent::ToolError {
+            call_id: call_id.to_string(),
+            name: tool_name.to_string(),
+            message: message.to_string(),
+            failure: Some(failure),
+        })
+        .await;
+        self.record_audit_event(crate::audit::AuditEvent::now(
+            self.config.session_id.clone(),
+            self.config.agent_name.clone(),
+            crate::audit::AuditEventType::ToolCall {
+                call_id: Some(call_id.to_string()),
+                tool: tool_name.to_string(),
+                input: input.clone(),
+                output: message.to_string(),
+                success: false,
+                duration_ms: 0,
+            },
+        ))
+        .await;
+        let error = crate::error::ReactError::Other(message.to_string());
+        for callback in &self.config.callbacks {
+            callback
+                .on_tool_interrupted_with_id(
+                    &self.config.agent_name,
+                    call_id,
+                    tool_name,
+                    input,
+                    &error,
+                )
+                .await;
+        }
+        result
+    }
+
     /// Finalize the current trace run (completed or failed).
     pub async fn finalize_run(&self, status: RunStatus, output: Option<&str>, error: Option<&str>) {
         if let Some(ref store) = self.run_store
             && let Some(ref run_id) = self.trace_run_id
         {
-            match store.load(run_id).await {
-                Ok(Some(mut run)) => {
-                    run.status = status;
-                    run.final_output = output.map(str::to_string);
-                    run.error = error.map(str::to_string);
-                    run.finished_at = Some(chrono::Utc::now());
-                    if let Err(save_error) = store.save(run).await {
-                        self.report_diagnostic_delivery_failure(DiagnosticDeliveryFailure::new(
-                            DiagnosticRecordKind::Trace,
-                            DiagnosticDeliveryOperation::Finalize,
-                            Some(run_id.clone()),
-                            save_error.to_string(),
-                        ));
-                    }
-                }
-                Ok(None) => {
+            match store.finalize_run(run_id, status, output, error).await {
+                Ok(true) => {}
+                Ok(false) => {
                     self.report_diagnostic_delivery_failure(DiagnosticDeliveryFailure::new(
                         DiagnosticRecordKind::Trace,
                         DiagnosticDeliveryOperation::Load,
@@ -1703,12 +1832,12 @@ impl AgentRunSnapshot {
                         "trace run not found during finalization",
                     ))
                 }
-                Err(load_error) => {
+                Err(finalize_error) => {
                     self.report_diagnostic_delivery_failure(DiagnosticDeliveryFailure::new(
                         DiagnosticRecordKind::Trace,
-                        DiagnosticDeliveryOperation::Load,
+                        DiagnosticDeliveryOperation::Finalize,
                         Some(run_id.clone()),
-                        load_error.to_string(),
+                        finalize_error.to_string(),
                     ))
                 }
             }
@@ -2025,6 +2154,8 @@ impl AgentRunSnapshot {
             } else {
                 check.await?
             };
+            self.record_permission_decision(tool_name, &decision.decision, "permission_service")
+                .await;
             match decision.decision {
                 echo_core::tools::permission::PermissionDecision::Allow => {
                     Ok(decision.updated_input)
@@ -2400,7 +2531,7 @@ impl AgentRunSnapshot {
     /// Execute a single tool call with the full policy pipeline:
     /// PreToolUse hooks → read-before-edit guard → execute → PostToolUse hooks → audit.
     ///
-    /// Uses the unified ToolExecutionPipeline (15 stages) for consistent behavior
+    /// Uses the unified ToolExecutionPipeline (16 stages) for consistent behavior
     /// between streaming and non-streaming paths.
     pub(crate) fn execute_tool_with_policy<'a>(
         &'a self,
@@ -2445,6 +2576,8 @@ impl AgentRunSnapshot {
                 permission_mode_override: None,
                 rewrites: Vec::new(),
                 invocation_emitted: false,
+                callback_started: false,
+                interrupted_execution_error: None,
                 stream_tx,
             };
 

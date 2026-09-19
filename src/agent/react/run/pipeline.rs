@@ -70,6 +70,10 @@ pub(crate) struct ToolExecutionContext {
     pub rewrites: Vec<ToolInvocationRewrite>,
     /// Whether the canonical invocation event has been emitted.
     pub invocation_emitted: bool,
+    /// Whether callbacks observed the start of this invocation.
+    pub callback_started: bool,
+    /// An execution error that interrupted a tool before it returned a result.
+    pub interrupted_execution_error: Option<ReactError>,
     /// Incremental tool events, tagged with their stable invocation identity.
     pub stream_tx: Option<mpsc::Sender<ToolPipelineEvent>>,
 }
@@ -101,6 +105,9 @@ impl ToolExecutionContext {
     }
 
     async fn emit_invocation(&mut self) -> Result<()> {
+        if self.call_id.is_empty() {
+            self.call_id = format!("call_{}", uuid::Uuid::new_v4());
+        }
         if self.invocation_emitted {
             return Ok(());
         }
@@ -293,6 +300,15 @@ impl PipelineStage for PreToolUseHookStage {
             let reason = hook_result
                 .block_reason
                 .unwrap_or_else(|| format!("Tool {} blocked by hook", ctx.tool_name));
+            snapshot
+                .record_permission_decision(
+                    &ctx.tool_name,
+                    &PermissionDecision::Deny {
+                        reason: reason.clone(),
+                    },
+                    "pre_tool_use_hook",
+                )
+                .await;
             ctx.block(crate::tools::ToolFailureCategory::Permanent, reason);
             return Ok(());
         }
@@ -301,6 +317,28 @@ impl PipelineStage for PreToolUseHookStage {
             ctx.replace_input(updated, ToolInvocationRewrite::PreToolUseHook)?;
         }
         Ok(())
+    }
+}
+
+impl crate::agent::snapshot::AgentRunSnapshot {
+    pub(crate) async fn record_permission_decision(
+        &self,
+        tool: &str,
+        decision: &PermissionDecision,
+        source: &str,
+    ) {
+        let (decision, reason) = match decision {
+            PermissionDecision::Allow => ("allow", source.to_string()),
+            PermissionDecision::Deny { reason } => ("deny", format!("{source}: {reason}")),
+            PermissionDecision::RequireApproval => ("ask", format!("{source}: requires approval")),
+            PermissionDecision::Ask { .. } => ("ask", format!("{source}: requires user input")),
+        };
+        self.record_event(crate::trace::RunEvent::PermissionDecision {
+            tool: tool.to_string(),
+            decision: decision.to_string(),
+            reason,
+        })
+        .await;
     }
 }
 
@@ -319,6 +357,9 @@ impl PipelineStage for PermissionStage {
         snapshot: &crate::agent::snapshot::AgentRunSnapshot,
     ) -> Result<()> {
         if let Some(decision) = ctx.permission_decision.take() {
+            snapshot
+                .record_permission_decision(&ctx.tool_name, &decision, "pre_tool_use_hook")
+                .await;
             match decision {
                 PermissionDecision::Allow => return Ok(()),
                 PermissionDecision::Deny { reason } => {
@@ -344,6 +385,15 @@ impl PipelineStage for PermissionStage {
             let reason = permission_hook
                 .block_reason
                 .unwrap_or_else(|| format!("Tool {} blocked by permission hook", ctx.tool_name));
+            snapshot
+                .record_permission_decision(
+                    &ctx.tool_name,
+                    &PermissionDecision::Deny {
+                        reason: reason.clone(),
+                    },
+                    "permission_request_hook",
+                )
+                .await;
             ctx.block(crate::tools::ToolFailureCategory::Permanent, reason);
             return Ok(());
         }
@@ -351,6 +401,9 @@ impl PipelineStage for PermissionStage {
             ctx.permission_mode_override = Some(mode);
         }
         if let Some(decision) = permission_hook.permission_decision {
+            snapshot
+                .record_permission_decision(&ctx.tool_name, &decision, "permission_request_hook")
+                .await;
             match decision {
                 PermissionDecision::Allow => return Ok(()),
                 PermissionDecision::Deny { reason } => {
@@ -453,13 +506,20 @@ impl PipelineStage for SkillPermissionStage {
     ) -> Result<()> {
         // Check if a skill is activated and has tool restrictions
         if !snapshot.tools.is_skill_tool_allowed(&ctx.tool_name) {
-            ctx.block(
-                crate::tools::ToolFailureCategory::Unavailable,
-                format!(
-                    "Tool '{}' is not permitted by the activated skill's allowed_tools whitelist",
-                    ctx.tool_name
-                ),
+            let reason = format!(
+                "Tool '{}' is not permitted by the activated skill's allowed_tools whitelist",
+                ctx.tool_name
             );
+            snapshot
+                .record_permission_decision(
+                    &ctx.tool_name,
+                    &PermissionDecision::Deny {
+                        reason: reason.clone(),
+                    },
+                    "skill_allowed_tools",
+                )
+                .await;
+            ctx.block(crate::tools::ToolFailureCategory::Unavailable, reason);
         }
         Ok(())
     }
@@ -495,6 +555,7 @@ impl PipelineStage for AuditStage {
                 snapshot.config.session_id.clone(),
                 snapshot.config.agent_name.clone(),
                 crate::audit::AuditEventType::ToolCall {
+                    call_id: Some(ctx.call_id.clone()),
                     tool: ctx.tool_name.clone(),
                     input: ctx.input.clone(),
                     output: output.to_string(),
@@ -545,6 +606,7 @@ impl PipelineStage for ExecuteStage {
         if ctx.call_id.is_empty() {
             ctx.call_id = format!("call_{}", uuid::Uuid::new_v4());
         }
+        snapshot.mark_tool_execution_started(&ctx.call_id);
         // Record ToolCall trace event (redaction handled by new_tool_call)
         snapshot
             .record_event(crate::trace::RunEvent::new_tool_call(
@@ -562,6 +624,24 @@ impl PipelineStage for ExecuteStage {
         // Build a per-agent ToolContext from the snapshot's RuntimeConfig so
         // the (shared, stateless) ToolManager receives the correct working_dir
         // for THIS agent/session — avoiding cross-session cwd contamination.
+        let effect_sink: Option<echo_core::tools::ToolEffectSinkFn> =
+            if snapshot.run_store.is_some() && snapshot.trace_run_id.is_some() {
+                let invocation = snapshot.clone();
+                let tool_name = ctx.tool_name.clone();
+                let call_id = ctx.call_id.clone();
+                Some(std::sync::Arc::new(move |effect| {
+                    let invocation = invocation.clone();
+                    let tool_name = tool_name.clone();
+                    let call_id = call_id.clone();
+                    Box::pin(async move {
+                        invocation
+                            .record_tool_effect(&effect, &tool_name, &call_id)
+                            .await;
+                    })
+                }))
+            } else {
+                None
+            };
         let tool_ctx = echo_core::tools::ToolContext {
             working_dir: snapshot.config.working_dir.clone(),
             conversation_id: snapshot.config.conversation_id.clone(),
@@ -570,6 +650,7 @@ impl PipelineStage for ExecuteStage {
             message_id: snapshot.current_message_id.clone(),
             execution_id: snapshot.current_execution_id.clone(),
             call_id: Some(ctx.call_id.clone()),
+            effect_sink,
             active_message: snapshot.current_message.clone(),
             output_artifacts: snapshot.config.tool_output_artifacts.clone(),
             tool_visibility: snapshot.tools.visibility.clone(),
@@ -669,6 +750,15 @@ impl PipelineStage for ExecuteStage {
             Ok(r) => r,
             Err(e) => {
                 let err_msg = e.to_string();
+                let failure = crate::tools::ToolFailure::from_error(&e, may_have_side_effects);
+                if matches!(
+                    failure.category,
+                    crate::tools::ToolFailureCategory::Cancelled
+                        | crate::tools::ToolFailureCategory::Timeout
+                ) && failure.side_effect == crate::tools::ToolSideEffect::Possible
+                {
+                    ctx.interrupted_execution_error = Some(e);
+                }
                 ToolResult {
                     kind: echo_core::tools::ToolResultKind::StructuredError {
                         error_code: "tool_execution_failed".into(),
@@ -676,15 +766,13 @@ impl PipelineStage for ExecuteStage {
                     success: false,
                     output: String::new(),
                     error: Some(err_msg),
-                    failure: Some(crate::tools::ToolFailure::from_error(
-                        &e,
-                        may_have_side_effects,
-                    )),
+                    failure: Some(failure),
                     data: None,
                     truncated: false,
                     mime_type: None,
                     artifact: None,
                     metadata: std::collections::HashMap::new(),
+                    effects: Vec::new(),
                     model_content: Vec::new(),
                 }
             }
@@ -704,12 +792,22 @@ impl PipelineStage for ExecuteStage {
         }
         ctx.result = Some(result.clone());
 
-        // Record file read if tool was read_file and succeeded
-        if result.success
-            && ctx.tool_name == "read_file"
-            && let Some(path) = ctx.params.get("path").and_then(|v| v.as_str())
-        {
-            snapshot.record_file_read(path);
+        // Confirmed effects belong to the tool, not post-use presentation.
+        // Persist them before a hook can stall or reject the returned result.
+        for effect in &result.effects {
+            snapshot
+                .record_tool_effect(effect, &ctx.tool_name, &ctx.call_id)
+                .await;
+        }
+
+        // The resolved path is a tool-owned fact; model arguments may be
+        // relative or rewritten and cannot establish a successful read.
+        if result.success {
+            for effect in &result.effects {
+                if let echo_core::tools::ToolEffect::FileRead { path } = effect {
+                    snapshot.record_file_read(path);
+                }
+            }
         }
 
         Ok(())
@@ -810,19 +908,25 @@ impl PipelineStage for OutputGuardStage {
         ctx: &mut ToolExecutionContext,
         snapshot: &crate::agent::snapshot::AgentRunSnapshot,
     ) -> Result<()> {
+        let mut guard_replaced_output = false;
         if let Some(ref result) = ctx.result {
             if !result.success && result.output.is_empty() {
                 if let Some(error) = result.error.as_deref() {
-                    ctx.audit_error_output = Some(
-                        snapshot
-                            .check_tool_output_guard(error)
-                            .await
-                            .unwrap_or_else(|| error.to_string()),
-                    );
+                    let guarded = snapshot.check_tool_output_guard(error).await;
+                    guard_replaced_output = guarded.is_some();
+                    ctx.audit_error_output = Some(guarded.unwrap_or_else(|| error.to_string()));
                 }
             } else if let Some(guarded) = snapshot.check_tool_output_guard(&result.output).await {
                 ctx.output = Some(guarded);
+                guard_replaced_output = true;
             }
+        }
+        if guard_replaced_output && let Some(result) = ctx.result.as_mut() {
+            result.artifact = None;
+            result.metadata.remove("output_handling");
+            result.metadata.remove("original_bytes");
+            result.metadata.remove("returned_bytes");
+            result.metadata.remove("estimated_tokens");
         }
         Ok(())
     }
@@ -920,7 +1024,7 @@ impl PipelineStage for CallbackStage {
         for cb in &snapshot.config.callbacks {
             match self.phase {
                 CallbackPhase::Start => {
-                    cb.on_tool_start(agent_name, &ctx.tool_name, &ctx.input)
+                    cb.on_tool_start_with_id(agent_name, &ctx.call_id, &ctx.tool_name, &ctx.input)
                         .await;
                 }
                 CallbackPhase::End => {
@@ -929,20 +1033,44 @@ impl PipelineStage for CallbackStage {
                         .as_deref()
                         .or_else(|| ctx.result.as_ref().map(|r| r.output.as_str()))
                         .unwrap_or("");
-                    // #102: the caller terminal must match the real tool
-                    // outcome — failures route to on_tool_error instead of
-                    // being reported as a successful on_tool_end.
+                    // A typed cancellation/timeout before a tool result is an
+                    // interrupted attempt, not a completed tool failure.
                     let failure = ctx.result.as_ref().filter(|result| !result.success);
                     if let Some(result) = failure {
-                        let error = ReactError::Other(
-                            result.error.clone().unwrap_or_else(|| output.to_string()),
-                        );
-                        cb.on_tool_error(agent_name, &ctx.tool_name, &error).await;
+                        if let Some(interruption) = ctx.interrupted_execution_error.as_ref() {
+                            let terminal_message = result.error.as_deref().unwrap_or(output);
+                            let rewritten = (terminal_message != interruption.to_string())
+                                .then(|| ReactError::Other(terminal_message.to_string()));
+                            let error = rewritten.as_ref().unwrap_or(interruption);
+                            cb.on_tool_interrupted_with_id(
+                                agent_name,
+                                &ctx.call_id,
+                                &ctx.tool_name,
+                                &ctx.input,
+                                error,
+                            )
+                            .await;
+                        } else {
+                            let error = ReactError::Other(
+                                result.error.clone().unwrap_or_else(|| output.to_string()),
+                            );
+                            cb.on_tool_error_with_id(
+                                agent_name,
+                                &ctx.call_id,
+                                &ctx.tool_name,
+                                &error,
+                            )
+                            .await;
+                        }
                     } else {
-                        cb.on_tool_end(agent_name, &ctx.tool_name, output).await;
+                        cb.on_tool_end_with_id(agent_name, &ctx.call_id, &ctx.tool_name, output)
+                            .await;
                     }
                 }
             }
+        }
+        if matches!(self.phase, CallbackPhase::Start) {
+            ctx.callback_started = true;
         }
         Ok(())
     }
@@ -976,22 +1104,14 @@ impl PipelineStage for TraceRecordingStage {
                     call_id: ctx.call_id.clone(),
                     name: ctx.tool_name.clone(),
                     success: result.success,
-                    output_preview: Some(if result.success {
+                    output_preview: Some(
                         ctx.output
                             .as_deref()
                             .unwrap_or(&result.output)
                             .chars()
                             .take(200)
-                            .collect()
-                    } else {
-                        result
-                            .error
-                            .clone()
-                            .unwrap_or_default()
-                            .chars()
-                            .take(200)
-                            .collect()
-                    }),
+                            .collect(),
+                    ),
                     output_truncated: result.truncated,
                     duration_ms: ctx.duration_ms,
                     original_bytes: metadata_u64(result, "original_bytes"),
@@ -1078,7 +1198,7 @@ impl ToolExecutionPipeline {
         ctx: &mut ToolExecutionContext,
         snapshot: &crate::agent::snapshot::AgentRunSnapshot,
     ) -> Result<()> {
-        for stage in &self.stages {
+        for (index, stage) in self.stages.iter().enumerate() {
             if ctx.blocked && !stage.runs_after_block() {
                 ctx.emit_invocation().await?;
                 debug!(
@@ -1100,6 +1220,39 @@ impl ToolExecutionPipeline {
             );
             if let Err(error) = stage.run(ctx, snapshot).await {
                 ctx.emit_invocation().await?;
+                if ctx.callback_started {
+                    let message = error.to_string();
+                    let failure = crate::tools::ToolFailure::from_error(&error, true);
+                    if let Some(result) = ctx.result.as_mut() {
+                        result.success = false;
+                        result.error = Some(message.clone());
+                        result.failure = Some(failure);
+                    } else {
+                        ctx.result = Some(crate::tools::ToolResult {
+                            kind: echo_core::tools::ToolResultKind::StructuredError {
+                                error_code: "tool_pipeline_failed".to_string(),
+                            },
+                            success: false,
+                            output: String::new(),
+                            error: Some(message),
+                            failure: Some(failure),
+                            data: None,
+                            truncated: false,
+                            mime_type: None,
+                            artifact: None,
+                            metadata: std::collections::HashMap::new(),
+                            effects: Vec::new(),
+                            model_content: Vec::new(),
+                        });
+                    }
+                    ctx.blocked = true;
+                    for remaining in self.stages.iter().skip(index.saturating_add(1)) {
+                        if remaining.runs_after_block() {
+                            remaining.run(ctx, snapshot).await?;
+                        }
+                    }
+                    return Ok(());
+                }
                 return Err(error);
             }
         }
@@ -1127,10 +1280,20 @@ impl PipelineStage for PlanModeStage {
             return Ok(());
         }
         if !snapshot.tools.is_tool_read_only(&ctx.tool_name) {
-            ctx.block(crate::tools::ToolFailureCategory::Unavailable, format!(
+            let reason = format!(
                 "Plan mode: '{}' is blocked. Read and analyze only. Use /plan off to enable writes.",
                 ctx.tool_name
-            ));
+            );
+            snapshot
+                .record_permission_decision(
+                    &ctx.tool_name,
+                    &PermissionDecision::Deny {
+                        reason: reason.clone(),
+                    },
+                    "plan_mode",
+                )
+                .await;
+            ctx.block(crate::tools::ToolFailureCategory::Unavailable, reason);
         }
         Ok(())
     }
@@ -1184,7 +1347,6 @@ mod tests {
     use crate::agent::AgentEvent;
     use echo_core::tools::{InvocationResourceGuard, Tool, ToolContext, ToolOutputChannel};
     use futures::Stream;
-    #[cfg(feature = "files")]
     use std::collections::HashMap;
     use std::pin::Pin;
     use std::sync::Arc;
@@ -1479,6 +1641,8 @@ mod tests {
             permission_mode_override: None,
             rewrites: Vec::new(),
             invocation_emitted: false,
+            callback_started: false,
+            interrupted_execution_error: None,
             stream_tx: Some(stream_tx),
         }
     }
@@ -1504,8 +1668,232 @@ mod tests {
             permission_mode_override: None,
             rewrites: Vec::new(),
             invocation_emitted: false,
+            callback_started: false,
+            interrupted_execution_error: None,
             stream_tx: None,
         }
+    }
+
+    #[tokio::test]
+    async fn permission_hooks_trace_real_allow_and_deny_on_the_main_path() -> Result<()> {
+        use crate::skills::hooks::{HookAction, HookEvent, HookRule, HooksDefinition};
+        use crate::trace::{InMemoryRunStore, RunEvent, RunStore};
+
+        for event in [HookEvent::PreToolUse, HookEvent::PermissionRequest] {
+            for decision in ["allow", "deny"] {
+                let store = Arc::new(InMemoryRunStore::new());
+                let agent = crate::agent::ReactAgentBuilder::new()
+                    .model("test-model")
+                    .with_run_store(store.clone())
+                    .tool(Box::new(EffectTool))
+                    .build()?;
+                let mut definition = HooksDefinition::default();
+                definition.add_rules(
+                    event,
+                    vec![HookRule {
+                        matcher: "shell".to_string(),
+                        hooks: vec![HookAction::Permission {
+                            decision: decision.to_string(),
+                            reason: Some("reviewed decision".to_string()),
+                            suggestions: Vec::new(),
+                        }],
+                    }],
+                );
+                agent
+                    .hook_registry()
+                    .write()
+                    .await
+                    .register_user_hooks(definition);
+                let legacy = agent.capture_legacy_external_context();
+                let run_id = agent
+                    .start_legacy_trace_run("permission trace", &legacy)
+                    .await
+                    .ok_or_else(|| ReactError::Other("trace did not start".to_string()))?;
+                let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+                let result = snapshot
+                    .execute_tool_with_policy(
+                        "permission-call".to_string(),
+                        "shell",
+                        &ToolParameters::new(),
+                        &serde_json::json!({}),
+                        None,
+                    )
+                    .await;
+                assert_eq!(result.is_ok(), decision == "allow");
+                let run = store
+                    .load(&run_id)
+                    .await?
+                    .ok_or_else(|| ReactError::Other("trace disappeared".to_string()))?;
+                let decisions: Vec<_> = run
+                    .events
+                    .iter()
+                    .filter_map(|event| match event {
+                        RunEvent::PermissionDecision { decision, .. } => Some(decision.as_str()),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(decisions, vec![decision]);
+                let permission = run
+                    .events
+                    .iter()
+                    .position(|event| matches!(event, RunEvent::PermissionDecision { .. }));
+                let execution = run
+                    .events
+                    .iter()
+                    .position(|event| matches!(event, RunEvent::ToolCall { .. }));
+                if decision == "allow" {
+                    assert!(matches!((permission, execution), (Some(p), Some(e)) if p < e));
+                } else {
+                    assert!(execution.is_none());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn tool_outputs_do_not_invent_file_or_test_effects() -> Result<()> {
+        use crate::trace::{InMemoryRunStore, RunEvent, RunStore};
+
+        let store = Arc::new(InMemoryRunStore::new());
+        let agent = crate::agent::ReactAgentBuilder::new()
+            .model("test-model")
+            .with_run_store(store.clone())
+            .build()?;
+        let legacy = agent.capture_legacy_external_context();
+        let run_id = agent
+            .start_legacy_trace_run("effects", &legacy)
+            .await
+            .ok_or_else(|| ReactError::Other("trace did not start".to_string()))?;
+        let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+        for (tool, kind, success) in [
+            ("write_file", echo_core::tools::ToolResultKind::Text, true),
+            (
+                "apply_patch",
+                echo_core::tools::ToolResultKind::Diff {
+                    unified_diff: "--- a/file\n+++ b/file\n-old\n+new".to_string(),
+                },
+                true,
+            ),
+            (
+                "shell",
+                echo_core::tools::ToolResultKind::CommandOutput { exit_code: Some(0) },
+                true,
+            ),
+            (
+                "shell",
+                echo_core::tools::ToolResultKind::CommandOutput { exit_code: Some(1) },
+                false,
+            ),
+        ] {
+            let mut ctx = completed_context("test result: 2 passed; 1 failed".to_string());
+            ctx.tool_name = tool.to_string();
+            ctx.input = serde_json::json!({"command": "cargo test", "path": "file"});
+            if let Some(result) = ctx.result.as_mut() {
+                result.kind = kind;
+                result.success = success;
+            }
+            TraceRecordingStage.run(&mut ctx, &snapshot).await?;
+        }
+        let run = store
+            .load(&run_id)
+            .await?
+            .ok_or_else(|| ReactError::Other("trace disappeared".to_string()))?;
+        assert_eq!(
+            run.events
+                .iter()
+                .filter(|event| matches!(event, RunEvent::ToolResult { .. }))
+                .count(),
+            4
+        );
+        assert!(!run.events.iter().any(|event| matches!(
+            event,
+            RunEvent::FileRead { .. }
+                | RunEvent::FileEdit { .. }
+                | RunEvent::TestRun { .. }
+                | RunEvent::SubagentRun { .. }
+                | RunEvent::Error { .. }
+        )));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn permission_hook_decisions_are_traced_before_execution() -> Result<()> {
+        use crate::trace::{InMemoryRunStore, RunEvent, RunStore};
+
+        for (decision, expected, blocked) in [
+            (PermissionDecision::Allow, "allow", false),
+            (
+                PermissionDecision::Deny {
+                    reason: "explicit denial 中文".to_string(),
+                },
+                "deny",
+                true,
+            ),
+            (PermissionDecision::RequireApproval, "ask", false),
+            (
+                PermissionDecision::Ask {
+                    suggestions: Vec::new(),
+                },
+                "ask",
+                false,
+            ),
+        ] {
+            let store = Arc::new(InMemoryRunStore::new());
+            let agent = crate::agent::ReactAgentBuilder::new()
+                .model("test-model")
+                .with_run_store(store.clone())
+                .build()?;
+            let legacy = agent.capture_legacy_external_context();
+            let run_id = agent
+                .start_legacy_trace_run("permission trace", &legacy)
+                .await
+                .ok_or_else(|| ReactError::Other("trace did not start".to_string()))?;
+            let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+            let mut ctx = completed_context(String::new());
+            ctx.result = None;
+            ctx.permission_decision = Some(decision);
+
+            PermissionStage.run(&mut ctx, &snapshot).await?;
+
+            assert_eq!(ctx.blocked, blocked);
+            let run = store
+                .load(&run_id)
+                .await?
+                .ok_or_else(|| ReactError::Other("trace disappeared".to_string()))?;
+            let decisions: Vec<_> = run
+                .events
+                .iter()
+                .filter_map(|event| match event {
+                    RunEvent::PermissionDecision {
+                        tool,
+                        decision,
+                        reason,
+                    } => Some((tool.as_str(), decision.as_str(), reason.as_str())),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(decisions.len(), 1);
+            let (tool, decision, reason) = decisions
+                .first()
+                .copied()
+                .ok_or_else(|| ReactError::Other("missing permission decision".to_string()))?;
+            assert_eq!(tool, "shell");
+            assert_eq!(decision, expected);
+            assert!(reason.starts_with("pre_tool_use_hook"));
+            if blocked {
+                assert!(reason.contains("explicit denial 中文"));
+            }
+            assert!(!run.events.iter().any(|event| matches!(
+                event,
+                RunEvent::ToolCall { .. }
+                    | RunEvent::FileRead { .. }
+                    | RunEvent::FileEdit { .. }
+                    | RunEvent::TestRun { .. }
+                    | RunEvent::Error { .. }
+            )));
+        }
+        Ok(())
     }
 
     #[tokio::test]
@@ -2052,6 +2440,9 @@ mod tests {
     struct RecordingCallback {
         tool_end_calls: std::sync::atomic::AtomicUsize,
         tool_error_calls: std::sync::atomic::AtomicUsize,
+        tool_interrupted_calls: std::sync::atomic::AtomicUsize,
+        interrupted_inputs: std::sync::Mutex<Vec<Value>>,
+        interrupted_errors: std::sync::Mutex<Vec<String>>,
     }
 
     impl echo_core::agent::AgentCallback for RecordingCallback {
@@ -2078,11 +2469,301 @@ mod tests {
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             })
         }
+
+        fn on_tool_interrupted_with_id<'a>(
+            &'a self,
+            _agent: &'a str,
+            _call_id: &'a str,
+            _tool: &'a str,
+            input: &'a Value,
+            error: &'a ReactError,
+        ) -> futures::future::BoxFuture<'a, ()> {
+            Box::pin(async move {
+                self.tool_interrupted_calls
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                self.interrupted_inputs
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .push(input.clone());
+                self.interrupted_errors
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .push(error.to_string());
+            })
+        }
+    }
+
+    struct InterruptedErrorTool {
+        returns_result: bool,
+    }
+
+    impl Tool for InterruptedErrorTool {
+        fn name(&self) -> &str {
+            "interrupted_error"
+        }
+
+        fn description(&self) -> &str {
+            "test stub for interrupted execution classification"
+        }
+
+        fn parameters(&self) -> Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        fn execute<'a>(
+            &'a self,
+            _parameters: ToolParameters,
+        ) -> futures::future::BoxFuture<'a, Result<ToolResult>> {
+            Box::pin(async move {
+                if self.returns_result {
+                    Ok(ToolResult::failure(
+                        crate::tools::ToolFailureCategory::Cancelled,
+                        "completed cancellation result",
+                    ))
+                } else {
+                    Err(ReactError::from(crate::error::ToolError::Cancelled(
+                        "reverse extension call".into(),
+                    )))
+                }
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn typed_execution_interruption_preserves_input_without_reclassifying_returned_result()
+    -> Result<()> {
+        for returns_result in [false, true] {
+            let callback = Arc::new(RecordingCallback::default());
+            let agent = crate::agent::ReactAgentBuilder::new()
+                .model("test-model")
+                .callback(callback.clone())
+                .tool(Box::new(InterruptedErrorTool { returns_result }))
+                .build()?;
+            let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+            let mut ctx = completed_context(String::new());
+            ctx.result = None;
+            ctx.tool_name = "interrupted_error".to_string();
+            ctx.input = serde_json::json!({"admitted": "canonical input"});
+            ctx.params =
+                HashMap::from([("admitted".to_string(), serde_json::json!("canonical input"))]);
+            ToolExecutionPipeline::default_pipeline()
+                .run(&mut ctx, &snapshot)
+                .await?;
+
+            assert_eq!(
+                ctx.result.as_ref().map(|result| result.success),
+                Some(false)
+            );
+            assert_eq!(
+                callback
+                    .tool_interrupted_calls
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                usize::from(!returns_result)
+            );
+            assert_eq!(
+                callback
+                    .tool_error_calls
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                usize::from(returns_result)
+            );
+            if !returns_result {
+                assert_eq!(
+                    callback
+                        .interrupted_inputs
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .as_slice(),
+                    &[serde_json::json!({"admitted": "canonical input"})]
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn post_use_rejection_keeps_interrupted_callback_and_trace_on_one_terminal_reason()
+    -> Result<()> {
+        use crate::skills::hooks::{HookAction, HookEvent, HookRule, HooksDefinition};
+        use crate::trace::{InMemoryRunStore, RunEvent, RunStore};
+
+        let callback = Arc::new(RecordingCallback::default());
+        let audit = Arc::new(crate::audit::InMemoryAuditLogger::new());
+        let store = Arc::new(InMemoryRunStore::new());
+        let agent = crate::agent::ReactAgentBuilder::new()
+            .model("test-model")
+            .callback(callback.clone())
+            .callback(Arc::new(crate::audit::AuditCallback::new(
+                audit.clone(),
+                "test-agent",
+                None,
+            )))
+            .with_run_store(store.clone())
+            .tool(Box::new(InterruptedErrorTool {
+                returns_result: false,
+            }))
+            .build()?;
+        let (command, shell) = if cfg!(target_os = "windows") {
+            (
+                "[Console]::In.ReadToEnd() | Out-Null; exit 2",
+                Some("powershell".to_string()),
+            )
+        } else {
+            ("read -r hook_context; exit 2", None)
+        };
+        let mut hooks = HooksDefinition::default();
+        hooks.add_rules(
+            HookEvent::PostToolUseFailure,
+            vec![HookRule {
+                matcher: "interrupted_error".to_string(),
+                hooks: vec![HookAction::Command {
+                    command: command.to_string(),
+                    shell,
+                    timeout: 10,
+                }],
+            }],
+        );
+        agent
+            .hook_registry()
+            .write()
+            .await
+            .register_user_hooks(hooks);
+        let legacy = agent.capture_legacy_external_context();
+        let run_id = agent
+            .start_legacy_trace_run("interrupted post-hook", &legacy)
+            .await
+            .ok_or_else(|| ReactError::Other("trace run did not start".into()))?;
+        let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+        let input = serde_json::json!({"admitted": "canonical input"});
+        let params =
+            HashMap::from([("admitted".to_string(), serde_json::json!("canonical input"))]);
+        let failure = snapshot
+            .execute_tool_with_policy(
+                "post-interruption".to_string(),
+                "interrupted_error",
+                &params,
+                &input,
+                None,
+            )
+            .await
+            .err()
+            .ok_or_else(|| ReactError::Other("post-use block was not enforced".into()))?;
+        let final_reason = failure
+            .result
+            .error
+            .as_deref()
+            .ok_or_else(|| ReactError::Other("terminal reason missing".into()))?;
+        assert!(failure.error.to_string().contains(final_reason));
+        assert_eq!(
+            failure.result.failure.as_ref().map(|value| value.category),
+            Some(crate::tools::ToolFailureCategory::Cancelled)
+        );
+        assert_eq!(
+            callback
+                .tool_interrupted_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert_eq!(
+            callback
+                .tool_error_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        assert_eq!(
+            callback
+                .interrupted_errors
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .as_slice(),
+            &[final_reason.to_string()]
+        );
+        assert_eq!(
+            callback
+                .interrupted_inputs
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .as_slice(),
+            &[input]
+        );
+        let run = store
+            .load(&run_id)
+            .await?
+            .ok_or_else(|| ReactError::Other("trace run missing".into()))?;
+        assert!(run.events.iter().any(|event| matches!(
+            event,
+            RunEvent::ToolError { message, failure, .. }
+                if message == final_reason
+                    && failure.as_ref().is_some_and(|value| value.category == crate::tools::ToolFailureCategory::Cancelled)
+        )));
+        assert!(
+            !run.events
+                .iter()
+                .any(|event| matches!(event, RunEvent::ToolExecutionSkipped { .. }))
+        );
+        assert!(audit.snapshot().iter().any(|event| matches!(
+            &event.event_type,
+            crate::audit::AuditEventType::ToolCall { output, success: false, .. }
+                if output == final_reason
+        )));
+        Ok(())
     }
 
     /// Deterministic success tool so the pipeline exercises the success
     /// PostToolUse path without touching the filesystem or shell.
     struct EffectTool;
+
+    struct TypedEffectTool;
+
+    impl Tool for TypedEffectTool {
+        fn name(&self) -> &str {
+            "shell"
+        }
+
+        fn description(&self) -> &str {
+            "test stub returning confirmed typed effects"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        fn execute<'a>(
+            &'a self,
+            _parameters: ToolParameters,
+        ) -> futures::future::BoxFuture<'a, crate::error::Result<ToolResult>> {
+            Box::pin(async {
+                Ok(ToolResult::success("opaque output")
+                    .with_effect(echo_core::tools::ToolEffect::FileRead {
+                        path: "src/read.rs".to_string(),
+                    })
+                    .with_effect(echo_core::tools::ToolEffect::FileEdit {
+                        path: "src/lib.rs".to_string(),
+                    })
+                    .with_effect(echo_core::tools::ToolEffect::TestRun {
+                        command: "cargo test".to_string(),
+                        passed: false,
+                        failure_count: Some(2),
+                    }))
+            })
+        }
+    }
+
+    struct PendingPostStage;
+
+    #[async_trait::async_trait]
+    impl PipelineStage for PendingPostStage {
+        fn name(&self) -> &str {
+            "post_tool_use_hook"
+        }
+
+        async fn run(
+            &self,
+            _ctx: &mut ToolExecutionContext,
+            _snapshot: &crate::agent::snapshot::AgentRunSnapshot,
+        ) -> Result<()> {
+            std::future::pending().await
+        }
+    }
 
     struct EmptyOutputGuard;
 
@@ -2168,6 +2849,131 @@ mod tests {
             })
             .collect();
         assert_eq!(terminal_outputs, vec![(String::new(), true)]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn output_guard_retires_pre_guard_artifact_capability() -> Result<()> {
+        let agent = crate::agent::ReactAgentBuilder::new()
+            .model("test-model")
+            .guard(Arc::new(EmptyOutputGuard))
+            .build()?;
+        let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+        let mut ctx = completed_context("raw secret output".to_string());
+        if let Some(result) = ctx.result.as_mut() {
+            result.artifact = Some(echo_core::tools::artifact::ToolOutputArtifactRef {
+                path: std::path::PathBuf::from("/private/raw-output.txt"),
+                artifact_bytes: 17,
+                payload_bytes: 17,
+                sha256: "a".repeat(64),
+                retention: "test".to_string(),
+            });
+        }
+
+        OutputGuardStage.run(&mut ctx, &snapshot).await?;
+        TruncationStage.run(&mut ctx, &snapshot).await?;
+
+        assert_eq!(ctx.output.as_deref(), Some(""));
+        assert!(
+            ctx.result
+                .as_ref()
+                .is_some_and(|result| result.artifact.is_none())
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn typed_tool_effects_are_projected_without_name_or_output_inference() -> Result<()> {
+        use crate::trace::{InMemoryRunStore, RunEvent, RunStore};
+
+        let store = Arc::new(InMemoryRunStore::new());
+        let agent = crate::agent::ReactAgentBuilder::new()
+            .model("test-model")
+            .with_run_store(store.clone())
+            .tool(Box::new(TypedEffectTool))
+            .build()?;
+        let legacy = agent.capture_legacy_external_context();
+        let run_id = agent
+            .start_legacy_trace_run("typed effects", &legacy)
+            .await
+            .ok_or_else(|| ReactError::Other("trace did not start".to_string()))?;
+        let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+        let mut ctx = completed_context("opaque output".to_string());
+        ExecuteStage.run(&mut ctx, &snapshot).await?;
+        TraceRecordingStage.run(&mut ctx, &snapshot).await?;
+        let run = store
+            .load(&run_id)
+            .await?
+            .ok_or_else(|| ReactError::Other("trace disappeared".to_string()))?;
+        assert!(run.events.iter().any(|event| matches!(
+            event,
+            RunEvent::FileRead { tool, path } if tool == "shell" && path == "src/read.rs"
+        )));
+        assert!(run.events.iter().any(|event| matches!(
+            event,
+            RunEvent::FileEdit { tool, path } if tool == "shell" && path == "src/lib.rs"
+        )));
+        assert!(run.events.iter().any(|event| matches!(
+            event,
+            RunEvent::TestRun { command, passed: false, failure_count: Some(2) }
+            if command == "cargo test"
+        )));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn confirmed_effects_survive_stalled_post_use_stage() -> Result<()> {
+        use crate::trace::{InMemoryRunStore, RunEvent, RunStore};
+
+        let store = Arc::new(InMemoryRunStore::new());
+        let agent = crate::agent::ReactAgentBuilder::new()
+            .model("test-model")
+            .with_run_store(store.clone())
+            .tool(Box::new(TypedEffectTool))
+            .build()?;
+        let legacy = agent.capture_legacy_external_context();
+        let run_id = agent
+            .start_legacy_trace_run("effect before post hook", &legacy)
+            .await
+            .ok_or_else(|| ReactError::Other("trace did not start".to_string()))?;
+        let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+        let mut ctx = completed_context(String::new());
+        let pipeline = ToolExecutionPipeline {
+            stages: vec![Box::new(ExecuteStage), Box::new(PendingPostStage)],
+        };
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(50),
+                pipeline.run(&mut ctx, &snapshot),
+            )
+            .await
+            .is_err()
+        );
+        let run = store
+            .load(&run_id)
+            .await?
+            .ok_or_else(|| ReactError::Other("trace disappeared".to_string()))?;
+        assert_eq!(
+            run.events
+                .iter()
+                .filter(
+                    |event| matches!(event, RunEvent::FileEdit { path, .. } if path == "src/lib.rs")
+                )
+                .count(),
+            1
+        );
+        assert!(run.events.iter().any(|event| matches!(
+            event,
+            RunEvent::TestRun {
+                failure_count: Some(2),
+                ..
+            }
+        )));
+        assert!(
+            !run.events
+                .iter()
+                .any(|event| matches!(event, RunEvent::ToolResult { .. }))
+        );
         Ok(())
     }
 
@@ -2463,6 +3269,11 @@ mod tests {
             })
             .collect();
         assert_eq!(terminals, vec![("call-post-block", false)]);
+        assert!(run.events.iter().any(|event| matches!(
+            event,
+            crate::trace::RunEvent::ToolResult { output_preview: Some(preview), .. }
+            if preview == "real effect"
+        )));
         assert!(run.events.iter().any(|event| matches!(event,
             crate::trace::RunEvent::ToolError { failure, .. } if failure == &result.failure
         )));

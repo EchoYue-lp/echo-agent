@@ -388,13 +388,6 @@ impl Tool for RunCodeTool {
                     "run_code requires a configured SandboxExecutor; unsandboxed execution is disabled",
                 ));
             };
-            if sandbox.isolation_level() < IsolationLevel::OsSandbox {
-                return Ok(sandbox_unavailable_result(format!(
-                    "run_code requires OS-level isolation, but executor '{}' provides {}",
-                    sandbox.name(),
-                    sandbox.isolation_level()
-                )));
-            }
             if ctx
                 .cancel
                 .as_ref()
@@ -404,9 +397,9 @@ impl Tool for RunCodeTool {
                     "run_code was cancelled before sandbox startup",
                 ));
             }
-            if !sandbox.is_available().await {
+            if !sandbox.is_available_at(IsolationLevel::OsSandbox).await {
                 return Ok(sandbox_unavailable_result(format!(
-                    "run_code sandbox '{}' is not available on this host",
+                    "run_code sandbox '{}' has no available OS-isolated backend",
                     sandbox.name()
                 )));
             }
@@ -427,14 +420,14 @@ impl Tool for RunCodeTool {
             }
 
             match sandbox
-                .execute_with_limits_and_cancel(sandbox_cmd, limits, ctx.cancel.clone())
+                .execute_with_isolation_receipt(sandbox_cmd, limits, ctx.cancel.clone())
                 .await
             {
-                Ok(result) => {
+                Ok((result, actual_isolation)) => {
                     let mut tool_result = tool_result_from_execution(
                         result,
                         ctx.working_dir.as_ref(),
-                        sandbox.isolation_level(),
+                        actual_isolation,
                         self.max_output_bytes,
                     )
                     .with_meta("execution_mode", execution_mode);
@@ -582,6 +575,7 @@ mod tests {
 
     struct RecordingSandbox {
         isolation: IsolationLevel,
+        actual_isolation: Option<IsolationLevel>,
         available: bool,
         result: ExecutionResult,
         seen: std::sync::Mutex<Option<RecordedCall>>,
@@ -639,6 +633,21 @@ mod tests {
             let result = self.result.clone();
             Box::pin(async move { Ok(result) })
         }
+
+        fn execute_with_isolation_receipt(
+            &self,
+            command: SandboxCommand,
+            limits: ResourceLimits,
+            cancel: Option<Arc<CancellationToken>>,
+        ) -> BoxFuture<'_, std::result::Result<(ExecutionResult, IsolationLevel), ReactError>>
+        {
+            Box::pin(async move {
+                let result = self
+                    .execute_with_limits_and_cancel(command, limits, cancel)
+                    .await?;
+                Ok((result, self.actual_isolation.unwrap_or(self.isolation)))
+            })
+        }
     }
 
     fn success_execution(stdout: &str) -> ExecutionResult {
@@ -663,6 +672,7 @@ mod tests {
     ) -> Arc<RecordingSandbox> {
         Arc::new(RecordingSandbox {
             isolation,
+            actual_isolation: None,
             available,
             result,
             seen: std::sync::Mutex::new(None),
@@ -796,6 +806,28 @@ mod tests {
                 ));
             }
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn run_code_reports_the_selected_isolation_not_a_composite_maximum() -> Result<()> {
+        let sandbox = Arc::new(RecordingSandbox {
+            isolation: IsolationLevel::Container,
+            actual_isolation: Some(IsolationLevel::OsSandbox),
+            available: true,
+            result: success_execution("selected local OS sandbox"),
+            seen: std::sync::Mutex::new(None),
+        });
+        let result = RunCodeTool::new()
+            .with_sandbox(sandbox)
+            .execute_with_context(code_params("python", "print(1)"), &ToolContext::default())
+            .await?;
+
+        assert!(result.success);
+        assert_eq!(
+            result.metadata.get("isolation_level").map(String::as_str),
+            Some("os-sandbox")
+        );
         Ok(())
     }
 

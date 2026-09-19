@@ -117,6 +117,7 @@
 | [0031 - SDK Identity 治理范围](../adr/0031-sdk-identity-governance-scope.md) | ownership 指引；独立 SDK 将 inventory 作为非阻断漂移遥测 |
 | [0032 - SDK 合同范围分类](../adr/0032-sdk-contract-scope-classification.md) | ownership 指引；只有独立 SDK accepted external contract 阻断语言兼容 |
 | [0041 - 语义治理连续性](../adr/0041-semantic-governance-continuity.md) | 用结果特定的连续性裁决衔接 SDK 基线与全 workspace 治理 |
+| [0049 - MCP Transport Close 结算](../adr/0049-mcp-transport-close-settlement.md) | MCP close 排空 pending call，并有界等待 owned task 与 child，失败可观察 |
 | [0056 - Durable Transcript Projection Settlement](../adr/0056-durable-transcript-projection-settlement.md) | 原子 transcript projection 与 revisioned pending debt 在压缩或终态发布前完成结算 |
 
 ---

@@ -118,6 +118,7 @@ echo-agent is a composable Agent development framework written in Rust, providin
 | [0031 - SDK Identity Governance Scope](../adr/0031-sdk-identity-governance-scope.md) | Ownership pointer; the independent SDK keeps inventory as non-blocking drift telemetry |
 | [0032 - SDK Contract Scope Classification](../adr/0032-sdk-contract-scope-classification.md) | Ownership pointer; only the independent SDK accepted external contract blocks language compatibility |
 | [0041 - Semantic Governance Continuity](../adr/0041-semantic-governance-continuity.md) | Result-specific continuity reconciles the SDK baseline with whole-workspace governance |
+| [0049 - MCP Transport Close Settlement](../adr/0049-mcp-transport-close-settlement.md) | MCP close drains pending calls and awaits owned tasks and children with observable failure |
 | [0056 - Durable Transcript Projection Settlement](../adr/0056-durable-transcript-projection-settlement.md) | Atomic projection and revisioned pending debt settle before compaction or terminal publication |
 
 ---

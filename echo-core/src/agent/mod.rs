@@ -1669,6 +1669,20 @@ pub trait AgentCallback: Send + Sync {
         Box::pin(async {})
     }
 
+    /// Called before a tool invocation begins with its canonical call identity.
+    ///
+    /// The default preserves source compatibility for callbacks that only need
+    /// tool-level lifecycle notifications.
+    fn on_tool_start_with_id<'a>(
+        &'a self,
+        agent: &'a str,
+        _call_id: &'a str,
+        tool: &'a str,
+        args: &'a Value,
+    ) -> BoxFuture<'a, ()> {
+        self.on_tool_start(agent, tool, args)
+    }
+
     /// Called after a tool invocation succeeds.
     fn on_tool_end<'a>(
         &'a self,
@@ -1679,6 +1693,17 @@ pub trait AgentCallback: Send + Sync {
         Box::pin(async {})
     }
 
+    /// Called after a tool invocation succeeds with its canonical call identity.
+    fn on_tool_end_with_id<'a>(
+        &'a self,
+        agent: &'a str,
+        _call_id: &'a str,
+        tool: &'a str,
+        result: &'a str,
+    ) -> BoxFuture<'a, ()> {
+        self.on_tool_end(agent, tool, result)
+    }
+
     /// Called when a tool invocation fails.
     fn on_tool_error<'a>(
         &'a self,
@@ -1687,6 +1712,34 @@ pub trait AgentCallback: Send + Sync {
         _err: &'a ReactError,
     ) -> BoxFuture<'a, ()> {
         Box::pin(async {})
+    }
+
+    /// Called after a tool invocation fails with its canonical call identity.
+    fn on_tool_error_with_id<'a>(
+        &'a self,
+        agent: &'a str,
+        _call_id: &'a str,
+        tool: &'a str,
+        error: &'a ReactError,
+    ) -> BoxFuture<'a, ()> {
+        self.on_tool_error(agent, tool, error)
+    }
+
+    /// Settle an invocation that the runtime interrupted without a captured result.
+    ///
+    /// The full input lets persistence callbacks retain the admitted call even
+    /// when interruption happened before their normal start callback. The
+    /// default emits one error terminal and deliberately does not fabricate a
+    /// duplicate start notification.
+    fn on_tool_interrupted_with_id<'a>(
+        &'a self,
+        agent: &'a str,
+        call_id: &'a str,
+        tool: &'a str,
+        _input: &'a Value,
+        error: &'a ReactError,
+    ) -> BoxFuture<'a, ()> {
+        self.on_tool_error_with_id(agent, call_id, tool, error)
     }
 
     /// Called when the agent emits its final answer.

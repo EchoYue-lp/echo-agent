@@ -36,7 +36,7 @@ let _tasks = TaskRevisionService::new(
 - **Human-in-the-Loop**: Approval gates via Console, Webhook, or WebSocket
 - **Task Management**: revisioned task CRUD plus a single runtime DAG executor
 - **Planning**: Structured plan specifications and validation
-- **Scheduling**: Cron-backed scheduled tasks
+- **Scheduling**: Cron-backed tasks with durable at-least-once callback delivery
 
 ## Feature Flags
 

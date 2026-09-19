@@ -258,8 +258,8 @@ mod tests {
             Box::pin(async { Ok(()) })
         }
 
-        fn close(&self) -> BoxFuture<'_, ()> {
-            Box::pin(async {})
+        fn close(&self) -> BoxFuture<'_, Result<()>> {
+            Box::pin(async { Ok(()) })
         }
 
         fn notification_rx(
@@ -294,8 +294,8 @@ mod tests {
             Box::pin(async { Ok(()) })
         }
 
-        fn close(&self) -> BoxFuture<'_, ()> {
-            Box::pin(async {})
+        fn close(&self) -> BoxFuture<'_, Result<()>> {
+            Box::pin(async { Ok(()) })
         }
 
         fn notification_rx(

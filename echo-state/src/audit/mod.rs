@@ -13,6 +13,7 @@ pub mod memory;
 
 pub use echo_core::audit::*;
 
+use echo_core::utils::retention::ContentRetentionPolicy;
 use futures::future::BoxFuture;
 use serde_json::Value;
 use std::cell::Cell;
@@ -106,13 +107,19 @@ impl DiagnosticDeliveryFailure {
         record_id: Option<String>,
         error: impl Into<String>,
     ) -> Self {
-        Self {
+        let mut failure = Self {
             occurred_at: chrono::Utc::now(),
             record_kind,
             operation,
             record_id,
             error: error.into(),
-        }
+        };
+        failure.apply_retention();
+        failure
+    }
+
+    fn apply_retention(&mut self) {
+        self.error = ContentRetentionPolicy::default().sanitize_text(&self.error);
     }
 }
 
@@ -154,12 +161,13 @@ pub trait DiagnosticDeliveryObserver: Send + Sync {
 struct TracingDiagnosticDeliveryObserver;
 
 impl DiagnosticDeliveryObserver for TracingDiagnosticDeliveryObserver {
-    fn on_failure(&self, failure: DiagnosticDeliveryFailure) {
+    fn on_failure(&self, mut failure: DiagnosticDeliveryFailure) {
+        failure.apply_retention();
         tracing::error!(
             target: "echo_agent::diagnostic_delivery",
             record_kind = failure.record_kind.as_str(),
             operation = failure.operation.as_str(),
-            record_id = failure.record_id.as_deref().unwrap_or(""),
+            record_id_present = failure.record_id.is_some(),
             occurred_at = %failure.occurred_at,
             error = %failure.error,
             "diagnostic persistence delivery failed"
@@ -236,8 +244,9 @@ pub fn initialize_diagnostic_delivery() -> bool {
 #[doc(hidden)]
 pub fn report_diagnostic_delivery_failure(
     observer: Option<Arc<dyn DiagnosticDeliveryObserver>>,
-    failure: DiagnosticDeliveryFailure,
+    mut failure: DiagnosticDeliveryFailure,
 ) {
+    failure.apply_retention();
     if IN_DIAGNOSTIC_DISPATCH.with(Cell::get) {
         increment_diagnostic_delivery_dropped();
         return;
@@ -278,6 +287,7 @@ struct ToolCallInfo {
 /// ```
 pub struct AuditCallback {
     logger: Arc<dyn AuditLogger>,
+    retention: ContentRetentionPolicy,
     diagnostic_delivery_observer: Option<Arc<dyn DiagnosticDeliveryObserver>>,
     agent_name: String,
     session_id: Option<String>,
@@ -298,6 +308,7 @@ impl AuditCallback {
         let _ = initialize_diagnostic_delivery();
         Self {
             logger,
+            retention: ContentRetentionPolicy::default(),
             diagnostic_delivery_observer: None,
             agent_name: agent_name.into(),
             session_id,
@@ -316,7 +327,21 @@ impl AuditCallback {
         self
     }
 
-    async fn record_event(&self, event: AuditEvent) {
+    pub fn with_retention_policy(mut self, retention: ContentRetentionPolicy) -> Self {
+        for info in self
+            .tool_calls
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner())
+            .values_mut()
+        {
+            retention.sanitize_json(&mut info.args);
+        }
+        self.retention = retention;
+        self
+    }
+
+    async fn record_event(&self, mut event: AuditEvent) {
+        event.apply_retention(&self.retention);
         let record_id = event.trace_id.clone().or_else(|| event.session_id.clone());
         if let Err(error) = self.logger.log(event).await {
             report_diagnostic_delivery_failure(
@@ -356,7 +381,10 @@ impl AuditCallback {
     /// with the smallest embedded sequence number.  This is deterministic
     /// even when concurrent calls share a tool name.
     fn pop_tool_call(&self, tool: &str) -> Option<ToolCallInfo> {
-        let mut map = self.tool_calls.lock().ok()?;
+        let mut map = self
+            .tool_calls
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         // Collect all keys matching this tool's tracking prefix ("{tool}#N").
         let candidates: Vec<String> = map
             .keys()
@@ -375,6 +403,28 @@ impl AuditCallback {
         })?;
         map.remove(&key)
     }
+
+    fn remember_tool_call(&self, call_id: String, args: &Value) {
+        let mut args = args.clone();
+        self.retention.sanitize_json(&mut args);
+        self.tool_calls
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(
+                call_id,
+                ToolCallInfo {
+                    args,
+                    started_at: std::time::Instant::now(),
+                },
+            );
+    }
+
+    fn take_tool_call(&self, call_id: &str) -> Option<ToolCallInfo> {
+        self.tool_calls
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(call_id)
+    }
 }
 
 impl echo_core::agent::AgentCallback for AuditCallback {
@@ -386,15 +436,19 @@ impl echo_core::agent::AgentCallback for AuditCallback {
     ) -> BoxFuture<'a, ()> {
         Box::pin(async move {
             let tool_call_id = self.make_tool_call_id(tool);
-            if let Ok(mut calls) = self.tool_calls.lock() {
-                calls.insert(
-                    tool_call_id,
-                    ToolCallInfo {
-                        args: args.clone(),
-                        started_at: std::time::Instant::now(),
-                    },
-                );
-            }
+            self.remember_tool_call(tool_call_id, args);
+        })
+    }
+
+    fn on_tool_start_with_id<'a>(
+        &'a self,
+        _agent: &'a str,
+        call_id: &'a str,
+        _tool: &'a str,
+        args: &'a Value,
+    ) -> BoxFuture<'a, ()> {
+        Box::pin(async move {
+            self.remember_tool_call(call_id.to_string(), args);
         })
     }
 
@@ -411,6 +465,31 @@ impl echo_core::agent::AgentCallback for AuditCallback {
                 .unwrap_or((0, Value::Null));
 
             let event = self.make_event(AuditEventType::ToolCall {
+                call_id: None,
+                tool: tool.to_string(),
+                input,
+                output: result.to_string(),
+                success: true,
+                duration_ms,
+            });
+            self.record_event(event).await;
+        })
+    }
+
+    fn on_tool_end_with_id<'a>(
+        &'a self,
+        _agent: &'a str,
+        call_id: &'a str,
+        tool: &'a str,
+        result: &'a str,
+    ) -> BoxFuture<'a, ()> {
+        Box::pin(async move {
+            let (duration_ms, input) = self
+                .take_tool_call(call_id)
+                .map(|info| (info.started_at.elapsed().as_millis() as u64, info.args))
+                .unwrap_or((0, Value::Null));
+            let event = self.make_event(AuditEventType::ToolCall {
+                call_id: Some(call_id.to_string()),
                 tool: tool.to_string(),
                 input,
                 output: result.to_string(),
@@ -434,9 +513,63 @@ impl echo_core::agent::AgentCallback for AuditCallback {
                 .unwrap_or((0, Value::Null));
 
             let event = self.make_event(AuditEventType::ToolCall {
+                call_id: None,
                 tool: tool.to_string(),
                 input,
                 output: err.to_string(),
+                success: false,
+                duration_ms,
+            });
+            self.record_event(event).await;
+        })
+    }
+
+    fn on_tool_error_with_id<'a>(
+        &'a self,
+        _agent: &'a str,
+        call_id: &'a str,
+        tool: &'a str,
+        error: &'a echo_core::error::ReactError,
+    ) -> BoxFuture<'a, ()> {
+        Box::pin(async move {
+            let (duration_ms, input) = self
+                .take_tool_call(call_id)
+                .map(|info| (info.started_at.elapsed().as_millis() as u64, info.args))
+                .unwrap_or((0, Value::Null));
+            let event = self.make_event(AuditEventType::ToolCall {
+                call_id: Some(call_id.to_string()),
+                tool: tool.to_string(),
+                input,
+                output: error.to_string(),
+                success: false,
+                duration_ms,
+            });
+            self.record_event(event).await;
+        })
+    }
+
+    fn on_tool_interrupted_with_id<'a>(
+        &'a self,
+        _agent: &'a str,
+        call_id: &'a str,
+        tool: &'a str,
+        input: &'a Value,
+        error: &'a echo_core::error::ReactError,
+    ) -> BoxFuture<'a, ()> {
+        Box::pin(async move {
+            let (duration_ms, input) = self
+                .take_tool_call(call_id)
+                .map(|info| (info.started_at.elapsed().as_millis() as u64, info.args))
+                .unwrap_or_else(|| {
+                    let mut input = input.clone();
+                    self.retention.sanitize_json(&mut input);
+                    (0, input)
+                });
+            let event = self.make_event(AuditEventType::ToolCall {
+                call_id: Some(call_id.to_string()),
+                tool: tool.to_string(),
+                input,
+                output: error.to_string(),
                 success: false,
                 duration_ms,
             });
@@ -459,6 +592,443 @@ mod tests {
     use super::*;
     use echo_core::agent::AgentCallback;
     use echo_core::error::{ReactError, Result};
+
+    pub(super) fn capture_audit_logs<T>(action: impl FnOnce() -> T) -> (T, String) {
+        struct Capture(Arc<Mutex<String>>);
+
+        impl tracing::field::Visit for Capture {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                use std::fmt::Write;
+                let _ = write!(
+                    self.0.lock().unwrap_or_else(|e| e.into_inner()),
+                    "{}={value:?};",
+                    field.name()
+                );
+            }
+        }
+
+        impl tracing::Subscriber for Capture {
+            fn register_callsite(
+                &self,
+                _: &'static tracing::Metadata<'static>,
+            ) -> tracing::subscriber::Interest {
+                tracing::subscriber::Interest::always()
+            }
+
+            fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+                true
+            }
+            fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+                tracing::span::Id::from_u64(1)
+            }
+            fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+            fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+            fn event(&self, event: &tracing::Event<'_>) {
+                event.record(&mut Capture(self.0.clone()));
+            }
+            fn enter(&self, _: &tracing::span::Id) {}
+            fn exit(&self, _: &tracing::span::Id) {}
+        }
+
+        let output = Arc::new(Mutex::new(String::new()));
+        let result = tracing::subscriber::with_default(Capture(output.clone()), action);
+        let text = output.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        (result, text)
+    }
+
+    #[test]
+    fn audit_default_diagnostic_logging_sanitizes_mutated_error() {
+        let mut failure = sample_failure();
+        failure.record_id = Some("token=raw-record-identity-secret".into());
+        failure.error = "Bearer abcdefghijklmnopqrstuvwxyz".into();
+        let (_, logs) =
+            capture_audit_logs(|| TracingDiagnosticDeliveryObserver.on_failure(failure));
+        assert!(logs.contains("diagnostic persistence delivery failed"));
+        assert!(logs.contains("[REDACTED]"));
+        assert!(!logs.contains("abcdefghijklmnopqrstuvwxyz"));
+        assert!(!logs.contains("raw-record-identity-secret"));
+    }
+
+    #[tokio::test]
+    async fn audit_memory_default_retention_and_policy_change_sanitize_stored_copies() -> Result<()>
+    {
+        let logger = memory::InMemoryAuditLogger::new();
+        let event = AuditEvent::now(
+            None,
+            "agent".into(),
+            AuditEventType::ToolCall {
+                call_id: Some("retention-call".into()),
+                tool: "shell".into(),
+                input: serde_json::json!({"password":"tiny", "count":9}),
+                output: format!("Bearer abcdefghijklmnopqrstuvwxyz {}", "中".repeat(17_000)),
+                success: true,
+                duration_ms: 100,
+            },
+        );
+        logger.log(event.clone()).await?;
+        let before = serde_json::to_string(&logger.snapshot())?;
+        assert!(!before.contains("tiny"));
+        assert!(!before.contains("abcdefghijklmnopqrstuvwxyz"));
+        assert!(before.contains("[TRUNCATED]"));
+        assert!(serde_json::to_string(&event)?.contains("tiny"));
+        let logger = logger.with_retention_policy(ContentRetentionPolicy {
+            max_string_chars: 0,
+            max_array_items: 0,
+        });
+        let stored = logger.query(AuditFilter::default()).await?;
+        assert!(
+            matches!(stored.first().map(|e| &e.event_type), Some(AuditEventType::ToolCall { input, output, duration_ms: 100, .. }) if input.as_object().is_some_and(|fields| fields.len() == 1 && fields.values().any(|value| value.as_str() == Some("[TRUNCATED OBJECT]"))) && output == "...[TRUNCATED]")
+        );
+        Ok(())
+    }
+
+    #[derive(Default)]
+    struct RecordingAuditLogger(Mutex<Vec<AuditEvent>>);
+
+    impl AuditLogger for RecordingAuditLogger {
+        fn log<'a>(&'a self, event: AuditEvent) -> BoxFuture<'a, Result<()>> {
+            Box::pin(async move {
+                self.0.lock().unwrap_or_else(|e| e.into_inner()).push(event);
+                Ok(())
+            })
+        }
+
+        fn query<'a>(&'a self, _filter: AuditFilter) -> BoxFuture<'a, Result<Vec<AuditEvent>>> {
+            Box::pin(async move { Ok(self.0.lock().unwrap_or_else(|e| e.into_inner()).clone()) })
+        }
+    }
+
+    #[tokio::test]
+    async fn audit_callback_custom_backend_receives_only_retained_copies() -> Result<()> {
+        let logger = Arc::new(RecordingAuditLogger::default());
+        let callback = AuditCallback::new(logger.clone(), "agent", Some("session".into()));
+        let args = serde_json::json!({"password": "tiny", "count": 9});
+        callback.on_tool_start("agent", "shell", &args).await;
+        {
+            let calls = callback
+                .tool_calls
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            assert!(
+                calls
+                    .values()
+                    .all(|info| !info.args.to_string().contains("tiny"))
+            );
+        }
+        assert_eq!(args.get("password"), Some(&Value::String("tiny".into())));
+        callback
+            .on_tool_end("agent", "shell", "Bearer abcdefghijklmnopqrstuvwxyz")
+            .await;
+        callback.on_tool_start("agent", "shell", &args).await;
+        callback
+            .on_tool_error(
+                "agent",
+                "shell",
+                &ReactError::Other("password=abcdefgh".into()),
+            )
+            .await;
+        callback
+            .on_final_answer("agent", r#"{"secret":"short"}"#)
+            .await;
+        let events = logger.query(AuditFilter::default()).await?;
+        assert_eq!(events.len(), 3);
+        let encoded = serde_json::to_string(&events)?;
+        for secret in ["tiny", "abcdefghijklmnopqrstuvwxyz", "abcdefgh", "short"] {
+            assert!(!encoded.contains(secret));
+        }
+        assert!(matches!(
+            events.first().map(|e| &e.event_type),
+            Some(AuditEventType::ToolCall { success: true, .. })
+        ));
+        assert!(matches!(
+            events.get(1).map(|e| &e.event_type),
+            Some(AuditEventType::ToolCall { success: false, .. })
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn audit_callback_correlates_reverse_completion_by_call_id_after_poison() -> Result<()> {
+        let logger = Arc::new(RecordingAuditLogger::default());
+        let callback = AuditCallback::new(logger.clone(), "agent", Some("session".into()));
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = callback
+                .tool_calls
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            std::panic::resume_unwind(Box::new("poison callback correlation".to_string()));
+        }));
+        assert!(poisoned.is_err());
+
+        callback
+            .on_tool_start_with_id(
+                "agent",
+                "call-a",
+                "shell",
+                &serde_json::json!({"label": "a"}),
+            )
+            .await;
+        callback
+            .on_tool_start_with_id(
+                "agent",
+                "call-b",
+                "shell",
+                &serde_json::json!({"label": "b"}),
+            )
+            .await;
+        callback
+            .on_tool_end_with_id("agent", "call-b", "shell", "output-b")
+            .await;
+        callback
+            .on_tool_error_with_id(
+                "agent",
+                "call-a",
+                "shell",
+                &ReactError::Other("error-a".to_string()),
+            )
+            .await;
+
+        let events = logger.query(AuditFilter::default()).await?;
+        assert!(matches!(
+            events.first().map(|event| &event.event_type),
+            Some(AuditEventType::ToolCall { call_id: Some(call_id), input, output, success: true, .. })
+            if call_id == "call-b" && input.get("label") == Some(&serde_json::json!("b")) && output == "output-b"
+        ));
+        assert!(matches!(
+            events.get(1).map(|event| &event.event_type),
+            Some(AuditEventType::ToolCall { call_id: Some(call_id), input, output, success: false, .. })
+            if call_id == "call-a" && input.get("label") == Some(&serde_json::json!("a")) && output == "error-a"
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn audit_callback_interruption_uses_admitted_input_with_or_without_start() -> Result<()> {
+        let logger = Arc::new(RecordingAuditLogger::default());
+        let callback = AuditCallback::new(logger.clone(), "agent", Some("session".into()));
+        let error = ReactError::Other("interrupted".to_string());
+
+        callback
+            .on_tool_interrupted_with_id(
+                "agent",
+                "before-start",
+                "shell",
+                &serde_json::json!({"label": "admitted", "password": "tiny-secret"}),
+                &error,
+            )
+            .await;
+        callback
+            .on_tool_start_with_id(
+                "agent",
+                "after-start",
+                "shell",
+                &serde_json::json!({"label": "started"}),
+            )
+            .await;
+        callback
+            .on_tool_interrupted_with_id(
+                "agent",
+                "after-start",
+                "shell",
+                &serde_json::json!({"label": "must-not-replace-start"}),
+                &error,
+            )
+            .await;
+
+        let events = logger.query(AuditFilter::default()).await?;
+        assert_eq!(events.len(), 2);
+        assert!(matches!(
+            events.first().map(|event| &event.event_type),
+            Some(AuditEventType::ToolCall { call_id: Some(call_id), input, success: false, duration_ms: 0, .. })
+                if call_id == "before-start"
+                    && input.get("label") == Some(&serde_json::json!("admitted"))
+                    && input.get("password") == Some(&serde_json::json!("[REDACTED]"))
+        ));
+        assert!(matches!(
+            events.get(1).map(|event| &event.event_type),
+            Some(AuditEventType::ToolCall { call_id: Some(call_id), input, success: false, .. })
+                if call_id == "after-start"
+                    && input.get("label") == Some(&serde_json::json!("started"))
+        ));
+        assert!(callback.take_tool_call("before-start").is_none());
+        assert!(callback.take_tool_call("after-start").is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn audit_memory_and_file_retention_preserve_typed_contract_at_zero_limits() -> Result<()>
+    {
+        let policy = ContentRetentionPolicy {
+            max_string_chars: 0,
+            max_array_items: 0,
+        };
+        let memory = memory::InMemoryAuditLogger::new().with_retention_policy(policy);
+        let temp = std::env::temp_dir().join(format!("echo-audit-typed-{}", uuid::Uuid::new_v4()));
+        let path = temp.join("audit.jsonl");
+        let file = file::FileAuditLogger::new(&path)?.with_retention_policy(policy);
+        let kinds = vec![
+            AuditEventType::UserInput {
+                content: "Bearer abcdefghijklmnopqrstuvwxyz".into(),
+            },
+            AuditEventType::FinalAnswer {
+                content: "中文字符".repeat(30),
+            },
+            AuditEventType::LlmCall {
+                model: "model-long-name".into(),
+                prompt_tokens: Some(123),
+                completion_tokens: Some(456),
+            },
+            AuditEventType::ToolCall {
+                call_id: Some("zero-limit-call".into()),
+                tool: "shell".into(),
+                input: serde_json::json!({"password":"short", "values": [1, 2], "count": 42}),
+                output: "password=abcdefgh".into(),
+                success: false,
+                duration_ms: 987,
+            },
+            AuditEventType::GuardBlock {
+                guard: "guard".into(),
+                direction: echo_core::guard::GuardDirection::Input,
+                reason: "token=abcdefgh".into(),
+            },
+            AuditEventType::PermissionDenied {
+                tool: "shell".into(),
+                required: vec![
+                    echo_core::tools::permission::ToolPermission::Read,
+                    echo_core::tools::permission::ToolPermission::Write,
+                ],
+                reason: "secret=abcdefgh".into(),
+            },
+            AuditEventType::ApprovalRequested {
+                tool: "shell".into(),
+                args_hash: "hash-long-name".into(),
+                risk_level: "high".into(),
+            },
+            AuditEventType::ApprovalCompleted {
+                tool: "shell".into(),
+                decision: "denied".into(),
+                scope: "session".into(),
+                reason: Some("password=abcdefgh".into()),
+                duration_ms: 654,
+            },
+        ];
+        for kind in kinds {
+            let mut event = AuditEvent::now(
+                Some("session-long-name".into()),
+                "agent-long-name".into(),
+                kind,
+            );
+            event.trace_id = Some("trace-long-name".into());
+            memory.log(event.clone()).await?;
+            file.log(event).await?;
+        }
+        let filter = AuditFilter {
+            session_id: Some("session-long-name".into()),
+            agent_name: Some("agent-long-name".into()),
+            ..Default::default()
+        };
+        let retained = memory.query(filter.clone()).await?;
+        assert_eq!(retained.len(), 8);
+        assert_eq!(
+            serde_json::to_value(&retained)?,
+            serde_json::to_value(file.query(filter).await?)?
+        );
+        for event in &retained {
+            assert_eq!(event.trace_id.as_deref(), Some("trace-long-name"));
+            let encoded = serde_json::to_string(event)?;
+            let _: AuditEvent = serde_json::from_str(&encoded)?;
+            for secret in ["abcdefghijklmnopqrstuvwxyz", "abcdefgh", "short"] {
+                assert!(!encoded.contains(secret));
+            }
+        }
+        assert!(matches!(
+            retained.get(2).map(|e| &e.event_type),
+            Some(AuditEventType::LlmCall {
+                prompt_tokens: Some(123),
+                completion_tokens: Some(456),
+                ..
+            })
+        ));
+        assert!(matches!(
+            retained.get(3).map(|e| &e.event_type),
+            Some(AuditEventType::ToolCall {
+                success: false,
+                duration_ms: 987,
+                ..
+            })
+        ));
+        assert!(
+            matches!(retained.get(5).map(|e| &e.event_type), Some(AuditEventType::PermissionDenied { required, .. }) if required.len() == 2)
+        );
+        drop(file);
+        let reopened = file::FileAuditLogger::new(path)?.with_retention_policy(policy);
+        assert_eq!(reopened.query(AuditFilter::default()).await?.len(), 8);
+        drop(reopened);
+        std::fs::remove_dir_all(temp)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn memory_and_file_audit_redact_complete_private_key_body() -> Result<()> {
+        let directory =
+            std::env::temp_dir().join(format!("echo-audit-private-key-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory)?;
+        let path = directory.join("audit.jsonl");
+        let memory = memory::InMemoryAuditLogger::new();
+        let file = file::FileAuditLogger::new(&path)?;
+        let private_key_body = "MIIEvQIBADANBgkqhkiG9w0B";
+        let event = AuditEvent::now(
+            Some("session-pem".to_string()),
+            "agent".to_string(),
+            AuditEventType::UserInput {
+                content: format!(
+                    "-----BEGIN PRIVATE KEY-----\n{private_key_body}\n-----END PRIVATE KEY-----"
+                ),
+            },
+        );
+        memory.log(event.clone()).await?;
+        file.log(event).await?;
+        let filter = AuditFilter {
+            session_id: Some("session-pem".to_string()),
+            ..Default::default()
+        };
+        let in_memory = memory.query(filter.clone()).await?;
+        let on_disk = file.query(filter).await?;
+        assert_eq!(
+            serde_json::to_value(&in_memory)?,
+            serde_json::to_value(&on_disk)?
+        );
+        let serialized = std::fs::read_to_string(&path)?;
+        assert!(!serialized.contains(private_key_body));
+        assert!(!serialized.contains("BEGIN PRIVATE KEY"));
+        assert!(serialized.contains("[REDACTED]"));
+        drop(file);
+        std::fs::remove_dir_all(directory)?;
+        Ok(())
+    }
+
+    #[test]
+    fn audit_diagnostic_errors_are_retained_before_custom_dispatch() -> Result<()> {
+        let observer = Arc::new(RecordingObserver::default());
+        let mut failure = DiagnosticDeliveryFailure::new(
+            DiagnosticRecordKind::Audit,
+            DiagnosticDeliveryOperation::Record,
+            Some("session".into()),
+            "Bearer abcdefghijklmnopqrstuvwxyz",
+        );
+        assert!(!format!("{failure:?}").contains("abcdefghijklmnopqrstuvwxyz"));
+        failure.error = format!("password=abcdefgh {}", "中".repeat(20_000));
+        report_diagnostic_delivery_failure(Some(observer.clone()), failure);
+        let failures = observer.wait_for_count(1)?;
+        let failure = failures
+            .first()
+            .ok_or_else(|| ReactError::Other("missing failure".into()))?;
+        assert!(!failure.error.contains("abcdefgh"));
+        assert!(failure.error.contains("[TRUNCATED]"));
+        assert_eq!(failure.record_id.as_deref(), Some("session"));
+        assert_eq!(failure.operation, DiagnosticDeliveryOperation::Record);
+        Ok(())
+    }
 
     struct FailingAuditLogger;
 

@@ -29,6 +29,12 @@ pub trait SandboxExecutor: Send + Sync {
     /// Check if the executor is available
     fn is_available(&self) -> BoxFuture<'_, bool>;
 
+    /// Check whether an available backend can meet a caller's isolation floor.
+    /// Composite executors override this to inspect the backend they would use.
+    fn is_available_at(&self, minimum: IsolationLevel) -> BoxFuture<'_, bool> {
+        Box::pin(async move { self.isolation_level() >= minimum && self.is_available().await })
+    }
+
     /// Execute a command
     fn execute(&self, command: SandboxCommand) -> BoxFuture<'_, Result<ExecutionResult>>;
 
@@ -91,6 +97,23 @@ pub trait SandboxExecutor: Send + Sync {
                 ))),
                 result = self.execute_with_limits(command, limits) => result,
             }
+        })
+    }
+
+    /// Execute and report the isolation of the backend that actually ran.
+    /// Composite executors must override this instead of reporting their
+    /// configured maximum; leaf executors can use the default.
+    fn execute_with_isolation_receipt(
+        &self,
+        command: SandboxCommand,
+        limits: ResourceLimits,
+        cancel: Option<Arc<CancellationToken>>,
+    ) -> BoxFuture<'_, Result<(ExecutionResult, IsolationLevel)>> {
+        Box::pin(async move {
+            let result = self
+                .execute_with_limits_and_cancel(command, limits, cancel)
+                .await?;
+            Ok((result, self.isolation_level()))
         })
     }
 

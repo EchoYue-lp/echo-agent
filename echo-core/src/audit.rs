@@ -3,6 +3,7 @@
 use crate::error::Result;
 use crate::guard::GuardDirection;
 use crate::tools::permission::ToolPermission;
+use crate::utils::retention::ContentRetentionPolicy;
 use chrono::{DateTime, Utc};
 use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
@@ -36,6 +37,29 @@ impl AuditEvent {
             trace_id: None,
         }
     }
+
+    pub fn apply_retention(&mut self, retention: &ContentRetentionPolicy) {
+        match &mut self.event_type {
+            AuditEventType::UserInput { content } | AuditEventType::FinalAnswer { content } => {
+                *content = retention.sanitize_text(content);
+            }
+            AuditEventType::LlmCall { .. } => {}
+            AuditEventType::ToolCall { input, output, .. } => {
+                retention.sanitize_json(input);
+                *output = retention.sanitize_text(output);
+            }
+            AuditEventType::GuardBlock { reason, .. } => {
+                *reason = retention.sanitize_text(reason);
+            }
+            AuditEventType::PermissionDenied { reason, .. } => {
+                *reason = retention.sanitize_text(reason);
+            }
+            AuditEventType::ApprovalRequested { .. } => {}
+            AuditEventType::ApprovalCompleted { reason, .. } => {
+                *reason = reason.as_deref().map(|text| retention.sanitize_text(text));
+            }
+        }
+    }
 }
 
 /// Audit event types
@@ -60,6 +84,9 @@ pub enum AuditEventType {
     },
     /// A tool invocation and its observed outcome.
     ToolCall {
+        /// Canonical tool invocation identity when supplied by the runtime.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        call_id: Option<String>,
         /// Tool identifier.
         tool: String,
         /// Serialized tool input.

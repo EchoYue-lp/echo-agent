@@ -114,6 +114,62 @@ struct TurnSlot {
     active: Option<ActiveTurn>,
 }
 
+#[derive(Debug, Clone)]
+enum SessionClosePhase {
+    Prepared,
+    Running,
+    Failed(String),
+    Settled,
+}
+
+#[derive(Debug)]
+struct SessionCloseAttempt {
+    next_generation: u64,
+    current: Option<Arc<SessionCloseReceipt>>,
+}
+
+#[derive(Debug)]
+struct SessionCloseReceipt {
+    generation: u64,
+    phase: StdMutex<SessionClosePhase>,
+    settled: Notify,
+    #[cfg(test)]
+    abort: StdMutex<Option<tokio::task::AbortHandle>>,
+}
+
+/// Typed capability for the second phase of one ACP Session close attempt.
+///
+/// The lease is cloneable so framework and facade waiters can join the same
+/// attempt. A failed attempt remains stable for this generation; callers must
+/// invoke [`SessionRegistry::begin_close_session`] again to obtain a retry.
+#[derive(Clone)]
+pub struct SessionCloseLease {
+    registry_id: String,
+    session_id: SessionId,
+    session: Arc<AcpSession>,
+    receipt: Arc<SessionCloseReceipt>,
+}
+
+impl SessionCloseLease {
+    pub fn session_id(&self) -> &SessionId {
+        &self.session_id
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.receipt.generation
+    }
+}
+
+impl std::fmt::Debug for SessionCloseLease {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SessionCloseLease")
+            .field("session_id", &self.session_id)
+            .field("generation", &self.receipt.generation)
+            .finish_non_exhaustive()
+    }
+}
+
 /// One ACP Session: an independent framework Agent plus the Session-scoped
 /// run slot. Shared by the standard profile and negotiated extension
 /// profiles — there is deliberately no second Session map.
@@ -123,6 +179,7 @@ pub struct AcpSession {
     turn: StdMutex<TurnSlot>,
     turn_settled: Notify,
     closed: AtomicBool,
+    close_attempt: StdMutex<SessionCloseAttempt>,
 }
 
 impl AcpSession {
@@ -136,6 +193,10 @@ impl AcpSession {
             }),
             turn_settled: Notify::new(),
             closed: AtomicBool::new(false),
+            close_attempt: StdMutex::new(SessionCloseAttempt {
+                next_generation: 0,
+                current: None,
+            }),
         }
     }
 
@@ -188,6 +249,52 @@ impl AcpSession {
         self.closed.store(true, Ordering::Release);
     }
 
+    fn prepare_close(self: &Arc<Self>, registry_id: &str) -> Result<SessionCloseLease> {
+        self.mark_closed();
+        self.cancel_active();
+        let mut attempt = self
+            .close_attempt
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let current_phase = attempt.current.as_ref().map(|receipt| {
+            receipt
+                .phase
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone()
+        });
+        let receipt = match current_phase {
+            Some(
+                SessionClosePhase::Prepared
+                | SessionClosePhase::Running
+                | SessionClosePhase::Settled,
+            ) => attempt.current.as_ref().cloned().ok_or_else(|| {
+                ReactError::Other("ACP Session close receipt disappeared".to_string())
+            })?,
+            Some(SessionClosePhase::Failed(_)) | None => {
+                let next = attempt.next_generation.checked_add(1).ok_or_else(|| {
+                    ReactError::Other("ACP Session close generation exhausted".to_string())
+                })?;
+                attempt.next_generation = next;
+                let receipt = Arc::new(SessionCloseReceipt {
+                    generation: next,
+                    phase: StdMutex::new(SessionClosePhase::Prepared),
+                    settled: Notify::new(),
+                    #[cfg(test)]
+                    abort: StdMutex::new(None),
+                });
+                attempt.current = Some(Arc::clone(&receipt));
+                receipt
+            }
+        };
+        Ok(SessionCloseLease {
+            registry_id: registry_id.to_string(),
+            session_id: self.context.session_id.clone(),
+            session: Arc::clone(self),
+            receipt,
+        })
+    }
+
     pub async fn wait_until_idle(&self) {
         loop {
             let notified = self.turn_settled.notified();
@@ -206,6 +313,7 @@ impl AcpSession {
 }
 
 pub struct SessionRegistry {
+    registry_id: String,
     factory: Arc<dyn AcpSessionFactory>,
     max_sessions: usize,
     creation_gate: Mutex<()>,
@@ -213,9 +321,92 @@ pub struct SessionRegistry {
     sessions: RwLock<HashMap<SessionId, Arc<AcpSession>>>,
 }
 
+enum FinishCloseAction {
+    Start,
+    Wait,
+    Settled,
+    Failed(String),
+}
+
+#[cfg(test)]
+struct FinishCloseBarrier {
+    entered: Arc<Notify>,
+    release: Arc<Notify>,
+}
+
+struct SessionCloseTaskOwner {
+    receipt: Arc<SessionCloseReceipt>,
+    armed: bool,
+}
+
+impl SessionCloseTaskOwner {
+    fn new(receipt: Arc<SessionCloseReceipt>) -> Self {
+        Self {
+            receipt,
+            armed: true,
+        }
+    }
+
+    fn settle(&mut self, phase: SessionClosePhase) {
+        *self
+            .receipt
+            .phase
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = phase;
+        #[cfg(test)]
+        {
+            *self
+                .receipt
+                .abort
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = None;
+        }
+        self.armed = false;
+        self.receipt.settled.notify_waiters();
+    }
+}
+
+impl Drop for SessionCloseTaskOwner {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let mut phase = self
+            .receipt
+            .phase
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if matches!(&*phase, SessionClosePhase::Running) {
+            *phase = SessionClosePhase::Failed(
+                "owned Agent close task ended before publishing settlement".to_string(),
+            );
+        }
+        #[cfg(test)]
+        {
+            *self
+                .receipt
+                .abort
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = None;
+        }
+        drop(phase);
+        self.receipt.settled.notify_waiters();
+    }
+}
+
+async fn run_session_close_attempt(session: Arc<AcpSession>, mut owner: SessionCloseTaskOwner) {
+    session.wait_until_idle().await;
+    let result = session.agent.close().await;
+    owner.settle(match result {
+        Ok(()) => SessionClosePhase::Settled,
+        Err(error) => SessionClosePhase::Failed(error.to_string()),
+    });
+}
+
 impl SessionRegistry {
     pub fn new(factory: Arc<dyn AcpSessionFactory>, max_sessions: usize) -> Self {
         Self {
+            registry_id: uuid::Uuid::new_v4().to_string(),
             factory,
             max_sessions,
             creation_gate: Mutex::new(()),
@@ -285,20 +476,132 @@ impl SessionRegistry {
         self.sessions.read().await.get(session_id).cloned()
     }
 
-    /// Close one Session explicitly: cancel its active run, wait for the
-    /// framework receipt, close the Session Agent, and remove it from the
-    /// registry. Returns false when the Session is unknown.
-    pub async fn close_session(&self, session_id: &SessionId) -> Result<bool> {
+    /// Begin closing one Session without waiting for its active run.
+    ///
+    /// The returned lease proves that new turns are fenced and the current
+    /// turn cancellation has been signalled. Facades may drain their own
+    /// operation leases before calling [`Self::finish_close_session`].
+    pub async fn begin_close_session(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<SessionCloseLease>> {
         let _creation = self.creation_gate.lock().await;
         let session = self.sessions.read().await.get(session_id).cloned();
         let Some(session) = session else {
+            return Ok(None);
+        };
+        session.prepare_close(&self.registry_id).map(Some)
+    }
+
+    /// Finish a close attempt after facade-owned operations have drained.
+    ///
+    /// Concurrent callers with the same lease join one Agent close attempt.
+    /// A failed attempt preserves the Session and returns the same failure to
+    /// every waiter. Call `begin_close_session` again to obtain a retry lease.
+    pub async fn finish_close_session(&self, lease: SessionCloseLease) -> Result<()> {
+        self.finish_close_session_inner(lease, None).await
+    }
+
+    async fn finish_close_session_inner(
+        &self,
+        lease: SessionCloseLease,
+        #[cfg(test)] mut barrier: Option<FinishCloseBarrier>,
+        #[cfg(not(test))] _barrier: Option<()>,
+    ) -> Result<()> {
+        if lease.registry_id != self.registry_id {
+            return Err(ReactError::Other(format!(
+                "ACP Session {} close lease belongs to another registry",
+                lease.session_id
+            )));
+        }
+
+        loop {
+            let notified = lease.receipt.settled.notified();
+            let action = {
+                let mut phase = lease
+                    .receipt
+                    .phase
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                match phase.clone() {
+                    SessionClosePhase::Prepared => {
+                        *phase = SessionClosePhase::Running;
+                        FinishCloseAction::Start
+                    }
+                    SessionClosePhase::Running => FinishCloseAction::Wait,
+                    SessionClosePhase::Settled => FinishCloseAction::Settled,
+                    SessionClosePhase::Failed(error) => FinishCloseAction::Failed(error),
+                }
+            };
+            match action {
+                FinishCloseAction::Start => {
+                    let session = Arc::clone(&lease.session);
+                    match tokio::runtime::Handle::try_current() {
+                        Ok(handle) => {
+                            let owner = SessionCloseTaskOwner::new(Arc::clone(&lease.receipt));
+                            let close_task =
+                                handle.spawn(run_session_close_attempt(session, owner));
+                            #[cfg(test)]
+                            {
+                                *lease
+                                    .receipt
+                                    .abort
+                                    .lock()
+                                    .unwrap_or_else(|error| error.into_inner()) =
+                                    Some(close_task.abort_handle());
+                            }
+                            #[cfg(not(test))]
+                            let _close_task = close_task;
+                        }
+                        Err(error) => {
+                            let message = format!(
+                                "ACP Session close requires an active Tokio runtime: {error}"
+                            );
+                            *lease
+                                .receipt
+                                .phase
+                                .lock()
+                                .unwrap_or_else(|lock_error| lock_error.into_inner()) =
+                                SessionClosePhase::Failed(message);
+                            lease.receipt.settled.notify_waiters();
+                        }
+                    }
+                }
+                FinishCloseAction::Wait => {
+                    #[cfg(test)]
+                    if let Some(barrier) = barrier.take() {
+                        barrier.entered.notify_waiters();
+                        barrier.release.notified().await;
+                        continue;
+                    }
+                    notified.await;
+                }
+                FinishCloseAction::Settled => {
+                    let mut sessions = self.sessions.write().await;
+                    if sessions
+                        .get(&lease.session_id)
+                        .is_some_and(|current| Arc::ptr_eq(current, &lease.session))
+                    {
+                        sessions.remove(&lease.session_id);
+                    }
+                    return Ok(());
+                }
+                FinishCloseAction::Failed(error) => {
+                    return Err(ReactError::Other(format!(
+                        "ACP Session {} close did not settle: {error}",
+                        lease.session_id
+                    )));
+                }
+            }
+        }
+    }
+
+    /// Close one Session through the canonical two-phase lifecycle.
+    pub async fn close_session(&self, session_id: &SessionId) -> Result<bool> {
+        let Some(lease) = self.begin_close_session(session_id).await? else {
             return Ok(false);
         };
-        session.mark_closed();
-        session.cancel_active();
-        session.wait_until_idle().await;
-        session.agent.close().await?;
-        self.sessions.write().await.remove(session_id);
+        self.finish_close_session(lease).await?;
         Ok(true)
     }
 
@@ -313,26 +616,33 @@ impl SessionRegistry {
 
     pub async fn close_all(&self) -> Result<()> {
         let _creation = self.creation_gate.lock().await;
-        let sessions = {
-            let mut guard = self.sessions.write().await;
+        let leases = {
+            let guard = self.sessions.read().await;
             guard
-                .drain()
-                .map(|(_, session)| session)
-                .collect::<Vec<_>>()
+                .values()
+                .map(|session| session.prepare_close(&self.registry_id))
+                .collect::<Result<Vec<_>>>()?
         };
-        for session in &sessions {
-            session.mark_closed();
-            session.cancel_active();
-        }
-        let results = join_all(sessions.into_iter().map(|session| async move {
-            session.wait_until_idle().await;
-            session.agent.close().await
+        let results = join_all(leases.into_iter().map(|lease| async move {
+            let id = lease.session_id.clone();
+            (id, self.finish_close_session(lease).await)
         }))
         .await;
-        results
-            .into_iter()
-            .find_map(Result::err)
-            .map_or(Ok(()), Err)
+        let mut failures = Vec::new();
+        for (id, result) in results {
+            if let Err(error) = result {
+                failures.push(format!("{id}: {error}"));
+            }
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(ReactError::Other(format!(
+                "ACP Session close_all failed to settle {} Session(s): {}",
+                failures.len(),
+                failures.join("; ")
+            )))
+        }
     }
 }
 
@@ -367,6 +677,17 @@ mod tests {
         close_started: Arc<AtomicBool>,
     }
 
+    struct RetryCloseProbeAgent {
+        failures_remaining: std::sync::atomic::AtomicUsize,
+        attempts: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    struct ControlledCloseProbeAgent {
+        attempts: Arc<std::sync::atomic::AtomicUsize>,
+        started: Arc<Notify>,
+        release: Arc<Notify>,
+    }
+
     impl Agent for CloseProbeAgent {
         fn name(&self) -> &str {
             "close-probe"
@@ -388,6 +709,95 @@ mod tests {
                 } else {
                     Ok(())
                 }
+            })
+        }
+
+        fn execute<'a>(&'a self, task: &'a str) -> BoxFuture<'a, Result<String>> {
+            Box::pin(async move { Ok(task.to_string()) })
+        }
+
+        fn execute_stream<'a>(
+            &'a self,
+            task: &'a str,
+        ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+            let answer = task.to_string();
+            Box::pin(
+                async move { Ok(stream::iter(vec![Ok(AgentEvent::FinalAnswer(answer))]).boxed()) },
+            )
+        }
+    }
+
+    impl Agent for RetryCloseProbeAgent {
+        fn name(&self) -> &str {
+            "retry-close-probe"
+        }
+
+        fn model_name(&self) -> &str {
+            "test"
+        }
+
+        fn system_prompt(&self) -> &str {
+            "test"
+        }
+
+        fn close<'a>(&'a self) -> BoxFuture<'a, Result<()>> {
+            let attempt = self
+                .attempts
+                .fetch_add(1, Ordering::AcqRel)
+                .saturating_add(1);
+            let fail = self
+                .failures_remaining
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok();
+            Box::pin(async move {
+                if fail {
+                    Err(ReactError::Other(format!(
+                        "injected Session close failure attempt {attempt}"
+                    )))
+                } else {
+                    Ok(())
+                }
+            })
+        }
+
+        fn execute<'a>(&'a self, task: &'a str) -> BoxFuture<'a, Result<String>> {
+            Box::pin(async move { Ok(task.to_string()) })
+        }
+
+        fn execute_stream<'a>(
+            &'a self,
+            task: &'a str,
+        ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+            let answer = task.to_string();
+            Box::pin(
+                async move { Ok(stream::iter(vec![Ok(AgentEvent::FinalAnswer(answer))]).boxed()) },
+            )
+        }
+    }
+
+    impl Agent for ControlledCloseProbeAgent {
+        fn name(&self) -> &str {
+            "controlled-close-probe"
+        }
+
+        fn model_name(&self) -> &str {
+            "test"
+        }
+
+        fn system_prompt(&self) -> &str {
+            "test"
+        }
+
+        fn close<'a>(&'a self) -> BoxFuture<'a, Result<()>> {
+            self.attempts.fetch_add(1, Ordering::AcqRel);
+            let started = Arc::clone(&self.started);
+            let release = Arc::clone(&self.release);
+            Box::pin(async move {
+                started.notify_waiters();
+                release.notified().await;
+                Ok(())
             })
         }
 
@@ -472,6 +882,438 @@ mod tests {
             .await?;
         close_task.abort();
         let _ = close_task.await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn close_all_retains_failed_sessions_for_retry() -> Result<()> {
+        let unused_factory: Arc<dyn AcpSessionFactory> = Arc::new(|_context| async {
+            Err(ReactError::Other(
+                "factory is unused in this test".to_string(),
+            ))
+        });
+        let registry = SessionRegistry::new(unused_factory, 2);
+        let failed_attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let settled_attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let failed = Arc::new(AcpSession::new(
+            context("failed"),
+            Box::new(RetryCloseProbeAgent {
+                failures_remaining: std::sync::atomic::AtomicUsize::new(1),
+                attempts: Arc::clone(&failed_attempts),
+            }),
+        ));
+        let settled = Arc::new(AcpSession::new(
+            context("settled"),
+            Box::new(RetryCloseProbeAgent {
+                failures_remaining: std::sync::atomic::AtomicUsize::new(0),
+                attempts: Arc::clone(&settled_attempts),
+            }),
+        ));
+        {
+            let mut sessions = registry.sessions.write().await;
+            sessions.insert(failed.context.session_id.clone(), Arc::clone(&failed));
+            sessions.insert(settled.context.session_id.clone(), settled);
+        }
+
+        assert!(registry.close_all().await.is_err());
+        let sessions = registry.sessions.read().await;
+        assert_eq!(sessions.len(), 1);
+        assert!(
+            sessions
+                .get(&failed.context.session_id)
+                .is_some_and(|current| Arc::ptr_eq(current, &failed))
+        );
+        drop(sessions);
+        assert_eq!(failed_attempts.load(Ordering::Acquire), 1);
+        assert_eq!(settled_attempts.load(Ordering::Acquire), 1);
+
+        registry.close_all().await?;
+        assert!(registry.sessions.read().await.is_empty());
+        assert_eq!(failed_attempts.load(Ordering::Acquire), 2);
+        assert_eq!(settled_attempts.load(Ordering::Acquire), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn begin_close_cancels_before_external_drain_and_finish() -> Result<()> {
+        let unused_factory: Arc<dyn AcpSessionFactory> = Arc::new(|_context| async {
+            Err(ReactError::Other(
+                "factory is unused in this test".to_string(),
+            ))
+        });
+        let registry = SessionRegistry::new(unused_factory, 1);
+        let close_started = Arc::new(AtomicBool::new(false));
+        let session = Arc::new(AcpSession::new(
+            context("two-phase"),
+            Box::new(CloseProbeAgent {
+                hang: false,
+                close_started: Arc::clone(&close_started),
+            }),
+        ));
+        let turn = session.begin_turn()?;
+        let cancellation = turn.turn.cancel.clone();
+        registry
+            .sessions
+            .write()
+            .await
+            .insert(session.context.session_id.clone(), Arc::clone(&session));
+
+        let lease = registry
+            .begin_close_session(&session.context.session_id)
+            .await?
+            .ok_or_else(|| ReactError::Other("close lease missing".to_string()))?;
+        assert!(cancellation.is_cancelled());
+        assert!(session.begin_turn().is_err());
+        assert!(registry.get(&session.context.session_id).await.is_some());
+        assert!(!close_started.load(Ordering::Acquire));
+
+        // A facade drains its own operation leases here. The framework turn
+        // remains registered until that external drain releases its run owner.
+        drop(turn);
+        registry.finish_close_session(lease).await?;
+        assert!(close_started.load(Ordering::Acquire));
+        assert!(registry.get(&session.context.session_id).await.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn concurrent_finish_joins_one_agent_close_attempt() -> Result<()> {
+        let unused_factory: Arc<dyn AcpSessionFactory> = Arc::new(|_context| async {
+            Err(ReactError::Other(
+                "factory is unused in this test".to_string(),
+            ))
+        });
+        let registry = Arc::new(SessionRegistry::new(unused_factory, 1));
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let session = Arc::new(AcpSession::new(
+            context("single-flight"),
+            Box::new(ControlledCloseProbeAgent {
+                attempts: Arc::clone(&attempts),
+                started: Arc::clone(&started),
+                release: Arc::clone(&release),
+            }),
+        ));
+        registry
+            .sessions
+            .write()
+            .await
+            .insert(session.context.session_id.clone(), Arc::clone(&session));
+        let lease = registry
+            .begin_close_session(&session.context.session_id)
+            .await?
+            .ok_or_else(|| ReactError::Other("close lease missing".to_string()))?;
+
+        let close_started = started.notified();
+        let first = tokio::spawn({
+            let registry = Arc::clone(&registry);
+            let lease = lease.clone();
+            async move { registry.finish_close_session(lease).await }
+        });
+        let second = tokio::spawn({
+            let registry = Arc::clone(&registry);
+            async move { registry.finish_close_session(lease).await }
+        });
+        tokio::time::timeout(Duration::from_secs(1), close_started)
+            .await
+            .map_err(|_| ReactError::Other("Agent close did not start".to_string()))?;
+        assert_eq!(attempts.load(Ordering::Acquire), 1);
+        release.notify_one();
+        first
+            .await
+            .map_err(|error| ReactError::Other(format!("first finish join failed: {error}")))??;
+        second
+            .await
+            .map_err(|error| ReactError::Other(format!("second finish join failed: {error}")))??;
+        assert_eq!(attempts.load(Ordering::Acquire), 1);
+        assert!(registry.get(&session.context.session_id).await.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn aborted_owned_close_task_publishes_failure_and_allows_retry() -> Result<()> {
+        let unused_factory: Arc<dyn AcpSessionFactory> = Arc::new(|_context| async {
+            Err(ReactError::Other(
+                "factory is unused in this test".to_string(),
+            ))
+        });
+        let registry = Arc::new(SessionRegistry::new(unused_factory, 1));
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let session = Arc::new(AcpSession::new(
+            context("aborted-owner"),
+            Box::new(ControlledCloseProbeAgent {
+                attempts: Arc::clone(&attempts),
+                started: Arc::clone(&started),
+                release: Arc::clone(&release),
+            }),
+        ));
+        registry
+            .sessions
+            .write()
+            .await
+            .insert(session.context.session_id.clone(), Arc::clone(&session));
+        let lease = registry
+            .begin_close_session(&session.context.session_id)
+            .await?
+            .ok_or_else(|| ReactError::Other("close lease missing".to_string()))?;
+
+        let close_started = started.notified();
+        let finish = tokio::spawn({
+            let registry = Arc::clone(&registry);
+            let lease = lease.clone();
+            async move { registry.finish_close_session(lease).await }
+        });
+        tokio::time::timeout(Duration::from_secs(1), close_started)
+            .await
+            .map_err(|_| ReactError::Other("Agent close did not start".to_string()))?;
+        let abort = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let abort = lease
+                    .receipt
+                    .abort
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .clone();
+                if let Some(abort) = abort {
+                    return abort;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .map_err(|_| ReactError::Other("owned close abort handle missing".to_string()))?;
+        abort.abort();
+        let error = tokio::time::timeout(Duration::from_secs(1), finish)
+            .await
+            .map_err(|_| ReactError::Other("finish waiter remained stuck".to_string()))?
+            .map_err(|join_error| {
+                ReactError::Other(format!("finish waiter join failed: {join_error}"))
+            })?
+            .err()
+            .ok_or_else(|| ReactError::Other("aborted close unexpectedly settled".to_string()))?;
+        assert!(error.to_string().contains("ended before publishing"));
+        assert_eq!(attempts.load(Ordering::Acquire), 1);
+        assert!(registry.get(&session.context.session_id).await.is_some());
+
+        let retry = registry
+            .begin_close_session(&session.context.session_id)
+            .await?
+            .ok_or_else(|| ReactError::Other("retry close lease missing".to_string()))?;
+        release.notify_one();
+        registry.finish_close_session(retry).await?;
+        assert_eq!(attempts.load(Ordering::Acquire), 2);
+        assert!(registry.get(&session.context.session_id).await.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn late_settled_lease_does_not_conflict_with_same_id_replacement() -> Result<()> {
+        let unused_factory: Arc<dyn AcpSessionFactory> = Arc::new(|_context| async {
+            Err(ReactError::Other(
+                "factory is unused in this test".to_string(),
+            ))
+        });
+        let registry = SessionRegistry::new(unused_factory, 1);
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let original = Arc::new(AcpSession::new(
+            context("reused-id"),
+            Box::new(RetryCloseProbeAgent {
+                failures_remaining: std::sync::atomic::AtomicUsize::new(0),
+                attempts,
+            }),
+        ));
+        registry
+            .sessions
+            .write()
+            .await
+            .insert(original.context.session_id.clone(), Arc::clone(&original));
+        let lease = registry
+            .begin_close_session(&original.context.session_id)
+            .await?
+            .ok_or_else(|| ReactError::Other("close lease missing".to_string()))?;
+        let late = lease.clone();
+        registry.finish_close_session(lease).await?;
+
+        let replacement = Arc::new(AcpSession::new(
+            context("reused-id"),
+            Box::new(CloseProbeAgent {
+                hang: false,
+                close_started: Arc::new(AtomicBool::new(false)),
+            }),
+        ));
+        registry.sessions.write().await.insert(
+            replacement.context.session_id.clone(),
+            Arc::clone(&replacement),
+        );
+
+        registry.finish_close_session(late).await?;
+        let current = registry
+            .get(&replacement.context.session_id)
+            .await
+            .ok_or_else(|| ReactError::Other("replacement Session was removed".to_string()))?;
+        assert!(Arc::ptr_eq(&current, &replacement));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn running_waiter_uses_receipt_after_same_id_replacement_race() -> Result<()> {
+        let unused_factory: Arc<dyn AcpSessionFactory> = Arc::new(|_context| async {
+            Err(ReactError::Other(
+                "factory is unused in this test".to_string(),
+            ))
+        });
+        let registry = Arc::new(SessionRegistry::new(unused_factory, 1));
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let close_started = Arc::new(Notify::new());
+        let close_release = Arc::new(Notify::new());
+        let original = Arc::new(AcpSession::new(
+            context("running-reused-id"),
+            Box::new(ControlledCloseProbeAgent {
+                attempts,
+                started: Arc::clone(&close_started),
+                release: Arc::clone(&close_release),
+            }),
+        ));
+        registry
+            .sessions
+            .write()
+            .await
+            .insert(original.context.session_id.clone(), Arc::clone(&original));
+        let lease = registry
+            .begin_close_session(&original.context.session_id)
+            .await?
+            .ok_or_else(|| ReactError::Other("close lease missing".to_string()))?;
+
+        let started = close_started.notified();
+        let first = tokio::spawn({
+            let registry = Arc::clone(&registry);
+            let lease = lease.clone();
+            async move { registry.finish_close_session(lease).await }
+        });
+        tokio::time::timeout(Duration::from_secs(1), started)
+            .await
+            .map_err(|_| ReactError::Other("Agent close did not start".to_string()))?;
+
+        let waiter_entered = Arc::new(Notify::new());
+        let waiter_release = Arc::new(Notify::new());
+        let entered = waiter_entered.notified();
+        let waiter_entered_for_late = Arc::clone(&waiter_entered);
+        let waiter_release_for_late = Arc::clone(&waiter_release);
+        let late = tokio::spawn({
+            let registry = Arc::clone(&registry);
+            async move {
+                registry
+                    .finish_close_session_inner(
+                        lease,
+                        Some(FinishCloseBarrier {
+                            entered: waiter_entered_for_late,
+                            release: waiter_release_for_late,
+                        }),
+                    )
+                    .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(1), entered)
+            .await
+            .map_err(|_| ReactError::Other("running waiter did not reach barrier".to_string()))?;
+
+        close_release.notify_one();
+        first
+            .await
+            .map_err(|error| ReactError::Other(format!("first finish join failed: {error}")))??;
+        let replacement = Arc::new(AcpSession::new(
+            context("running-reused-id"),
+            Box::new(CloseProbeAgent {
+                hang: false,
+                close_started: Arc::new(AtomicBool::new(false)),
+            }),
+        ));
+        registry.sessions.write().await.insert(
+            replacement.context.session_id.clone(),
+            Arc::clone(&replacement),
+        );
+        waiter_release.notify_one();
+        late.await
+            .map_err(|error| ReactError::Other(format!("late finish join failed: {error}")))??;
+
+        let current = registry
+            .get(&replacement.context.session_id)
+            .await
+            .ok_or_else(|| ReactError::Other("replacement Session was removed".to_string()))?;
+        assert!(Arc::ptr_eq(&current, &replacement));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn failed_finish_requires_new_begin_generation_for_retry() -> Result<()> {
+        let unused_factory: Arc<dyn AcpSessionFactory> = Arc::new(|_context| async {
+            Err(ReactError::Other(
+                "factory is unused in this test".to_string(),
+            ))
+        });
+        let registry = SessionRegistry::new(unused_factory, 1);
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let session = Arc::new(AcpSession::new(
+            context("retry-generation"),
+            Box::new(RetryCloseProbeAgent {
+                failures_remaining: std::sync::atomic::AtomicUsize::new(2),
+                attempts: Arc::clone(&attempts),
+            }),
+        ));
+        registry
+            .sessions
+            .write()
+            .await
+            .insert(session.context.session_id.clone(), Arc::clone(&session));
+        let first = registry
+            .begin_close_session(&session.context.session_id)
+            .await?
+            .ok_or_else(|| ReactError::Other("first close lease missing".to_string()))?;
+        let late_first = first.clone();
+        let first_error = registry
+            .finish_close_session(first)
+            .await
+            .err()
+            .ok_or_else(|| ReactError::Other("first close unexpectedly settled".to_string()))?
+            .to_string();
+        assert!(first_error.contains("attempt 1"));
+        assert_eq!(attempts.load(Ordering::Acquire), 1);
+        assert!(registry.get(&session.context.session_id).await.is_some());
+
+        let second = registry
+            .begin_close_session(&session.context.session_id)
+            .await?
+            .ok_or_else(|| ReactError::Other("second close lease missing".to_string()))?;
+        assert_eq!(second.generation(), 2);
+        let second_error = registry
+            .finish_close_session(second)
+            .await
+            .err()
+            .ok_or_else(|| ReactError::Other("second close unexpectedly settled".to_string()))?
+            .to_string();
+        assert!(second_error.contains("attempt 2"));
+        assert_eq!(attempts.load(Ordering::Acquire), 2);
+
+        let late_first_error = registry
+            .finish_close_session(late_first)
+            .await
+            .err()
+            .ok_or_else(|| ReactError::Other("late first lease unexpectedly settled".to_string()))?
+            .to_string();
+        assert_eq!(late_first_error, first_error);
+        assert_eq!(attempts.load(Ordering::Acquire), 2);
+
+        let retry = registry
+            .begin_close_session(&session.context.session_id)
+            .await?
+            .ok_or_else(|| ReactError::Other("retry close lease missing".to_string()))?;
+        assert_eq!(retry.generation(), 3);
+        registry.finish_close_session(retry).await?;
+        assert_eq!(attempts.load(Ordering::Acquire), 3);
+        assert!(registry.get(&session.context.session_id).await.is_none());
         Ok(())
     }
 }

@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use futures::future::BoxFuture;
 use serde_json::Value;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 
 use super::super::types::{
     JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, MCP_PROTOCOL_VERSION,
@@ -31,6 +31,20 @@ pub struct HttpTransport {
     next_id: Arc<AtomicU64>,
     /// 服务端在 initialize 响应中返回的会话 ID
     session_id: Arc<Mutex<Option<String>>>,
+    closed: AtomicBool,
+    in_flight: AtomicUsize,
+    operations_changed: Notify,
+}
+
+struct HttpOperationGuard<'a> {
+    transport: &'a HttpTransport,
+}
+
+impl Drop for HttpOperationGuard<'_> {
+    fn drop(&mut self) {
+        self.transport.in_flight.fetch_sub(1, Ordering::AcqRel);
+        self.transport.operations_changed.notify_waiters();
+    }
 }
 
 impl HttpTransport {
@@ -49,6 +63,42 @@ impl HttpTransport {
             headers,
             next_id: Arc::new(AtomicU64::new(1)),
             session_id: Arc::new(Mutex::new(None)),
+            closed: AtomicBool::new(false),
+            in_flight: AtomicUsize::new(0),
+            operations_changed: Notify::new(),
+        }
+    }
+
+    fn admit_operation(&self) -> Result<HttpOperationGuard<'_>> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(ReactError::Mcp(Box::new(McpError::TransportClosed)));
+        }
+        self.in_flight.fetch_add(1, Ordering::AcqRel);
+        if self.closed.load(Ordering::Acquire) {
+            self.in_flight.fetch_sub(1, Ordering::AcqRel);
+            self.operations_changed.notify_waiters();
+            return Err(ReactError::Mcp(Box::new(McpError::TransportClosed)));
+        }
+        Ok(HttpOperationGuard { transport: self })
+    }
+
+    async fn close_with_timeout(&self, timeout: Duration) -> Result<()> {
+        self.closed.store(true, Ordering::Release);
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let changed = self.operations_changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if self.in_flight.load(Ordering::Acquire) == 0 {
+                return Ok(());
+            }
+            tokio::time::timeout_at(deadline, changed)
+                .await
+                .map_err(|_| {
+                    ReactError::Mcp(Box::new(McpError::ConnectionFailed(
+                        "HTTP transport close timed out waiting for admitted requests".to_string(),
+                    )))
+                })?;
         }
     }
 }
@@ -56,6 +106,7 @@ impl HttpTransport {
 impl McpTransport for HttpTransport {
     fn send(&self, request: JsonRpcRequest) -> BoxFuture<'_, Result<JsonRpcResponse>> {
         Box::pin(async move {
+            let _operation = self.admit_operation()?;
             let mut request = request;
             let id = self.next_id.fetch_add(1, Ordering::SeqCst);
             request.id = Some(Value::Number(id.into()));
@@ -189,6 +240,7 @@ impl McpTransport for HttpTransport {
 
     fn notify(&self, notification: JsonRpcNotification) -> BoxFuture<'_, Result<()>> {
         Box::pin(async move {
+            let _operation = self.admit_operation()?;
             let mut builder = self
                 .client
                 .post(&self.endpoint)
@@ -207,18 +259,23 @@ impl McpTransport for HttpTransport {
             for (k, v) in &self.headers {
                 builder = builder.header(k, v);
             }
-            // 通知是 fire-and-forget
-            let _ = builder.send().await;
+            let response = builder.send().await.map_err(|error| {
+                ReactError::Mcp(Box::new(McpError::ConnectionFailed(format!(
+                    "HTTP notification failed: {}",
+                    request_error(error, header_secrets(&self.headers))
+                ))))
+            })?;
+            if !response.status().is_success() {
+                return Err(ReactError::Mcp(Box::new(McpError::ConnectionFailed(
+                    format!("HTTP notification rejected with {}", response.status()),
+                ))));
+            }
             Ok(())
         })
     }
 
-    fn close(&self) -> BoxFuture<'_, ()> {
-        Box::pin(async move {
-            // 尝试发送 shutdown/notification 关闭通知
-            let notification = JsonRpcNotification::new("notifications/cancelled", None);
-            let _ = self.notify(notification).await;
-        })
+    fn close(&self) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async move { self.close_with_timeout(Duration::from_secs(5)).await })
     }
 
     fn notification_rx(&self) -> Option<Arc<dyn super::super::types::JsonRpcNotificationReceiver>> {
@@ -249,4 +306,83 @@ fn is_retryable_error(e: &reqwest::Error) -> bool {
         || msg.contains("dns")
         || msg.contains("tls")
         || msg.contains("timed out")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn close_waits_for_admitted_operations_and_fences_new_work() -> Result<()> {
+        let transport = Arc::new(HttpTransport::new(
+            "http://127.0.0.1:1".to_string(),
+            HashMap::new(),
+        ));
+        let operation = transport.admit_operation()?;
+        let close = tokio::spawn({
+            let transport = transport.clone();
+            async move { transport.close_with_timeout(Duration::from_secs(1)).await }
+        });
+        tokio::task::yield_now().await;
+        assert!(!close.is_finished());
+
+        drop(operation);
+        close
+            .await
+            .map_err(|error| ReactError::Other(error.to_string()))??;
+        let rejected = transport
+            .send(JsonRpcRequest::new("tools/list", None))
+            .await;
+        assert!(matches!(
+            rejected,
+            Err(ReactError::Mcp(error)) if matches!(*error, McpError::TransportClosed)
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn timed_out_close_can_be_retried_after_the_operation_settles() -> Result<()> {
+        let transport = HttpTransport::new("http://127.0.0.1:1".to_string(), HashMap::new());
+        let operation = transport.admit_operation()?;
+        let first = transport.close_with_timeout(Duration::from_millis(1)).await;
+        assert!(first.is_err());
+
+        drop(operation);
+        transport.close_with_timeout(Duration::from_secs(1)).await
+    }
+
+    #[tokio::test]
+    async fn notification_delivery_failure_is_observable() {
+        let transport = HttpTransport::new("http://127.0.0.1:1".to_string(), HashMap::new());
+        let result = transport
+            .notify(JsonRpcNotification::new("notifications/test", None))
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn notification_http_rejection_is_observable() -> Result<()> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let response = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await?;
+            let mut buffer = [0u8; 4096];
+            let _ = stream.read(&mut buffer).await?;
+            stream
+                .write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n")
+                .await?;
+            Ok::<(), std::io::Error>(())
+        });
+        let transport = HttpTransport::new(format!("http://{address}"), HashMap::new());
+        let result = transport
+            .notify(JsonRpcNotification::new("notifications/test", None))
+            .await;
+        assert!(matches!(result, Err(ReactError::Mcp(_))));
+        response
+            .await
+            .map_err(|error| ReactError::Other(error.to_string()))??;
+        Ok(())
+    }
 }

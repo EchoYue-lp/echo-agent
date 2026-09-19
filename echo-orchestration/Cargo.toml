@@ -24,6 +24,7 @@ websocket = ["dep:tokio-tungstenite"]
 
 [dependencies]
 echo_core = { version = "0.2.0", path = "../echo-core" }
+echo_state = { version = "0.2.0", path = "../echo-state" }
 
 # From echo-workflow
 tokio = { version = "1", features = ["full"] }

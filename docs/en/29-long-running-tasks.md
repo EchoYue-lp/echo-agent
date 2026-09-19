@@ -144,3 +144,33 @@ not a task-state authority; durable state remains the committed graph.
 The scheduler module provides cron-backed triggers. A scheduled callback may
 start a background future or request a revisioned run, but the schedule itself
 does not create another task graph or execution state machine.
+
+Committed scheduler occurrences use the framework `DeliveryLedger` for durable
+claim, attempt, owner-loss recovery, and terminal settlement. On startup the
+runner drains the pending FIFO before its first periodic tick. A callback that
+was admitted but not durably settled is recorded as `OutcomeUnknown` and
+retried with the same occurrence ID and a new attempt ID. A callback that
+returns an error has a known `Failed` settlement and is not retried by the
+generic scheduler. Dropping or aborting the callback owner in a live process
+also reconciles through `OutcomeUnknown` on the next drain.
+
+`CronTaskStore` assigns an immutable `definition_id` on every add and persists
+a monotonic `control_revision` for status changes. An exact task clone re-added
+after removal is therefore a new definition; queued callbacks from the old
+incarnation cannot pass admission or write its last-run projection.
+
+Use `SchedulerRunner::new_with_occurrence_context` and `OccurrenceFireFn` when
+the callback performs external effects. `SchedulerInvocation::occurrence_id`
+is stable across crash replay and is the idempotency key; `attempt_id` identifies
+only one physical callback execution. The compatibility `FireFn(CronTask)`
+constructor uses the same ledger but discards this context.
+
+File-backed task stores colocate the journal using the complete definition
+filename. A Store-backed `CronTaskStore` must call `with_path()` with a stable,
+backend-specific anchor before constructing the runner; the Store trait has no
+portable backend identity that the framework can safely guess.
+
+This is at-least-once callback delivery, not exactly-once effect execution. A
+crash after an effect succeeds but before settlement can run the callback
+again. Cron polling itself also remains approximate: schedules missed while the
+runner was offline are not replayed without an explicit future misfire policy.

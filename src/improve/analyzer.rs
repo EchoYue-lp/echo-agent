@@ -1,8 +1,7 @@
 //! Pattern detection and improvement suggestion generation from run traces.
 
-use crate::eval::EvalCase;
+use crate::eval::{EvalCase, TrajectoryReplay};
 use crate::improve::{CritiqueIssue, ImprovementSuggestion, RunCritique};
-use crate::tools::{is_read_tool, is_write_tool};
 use crate::trace::{Run, RunEvent, RunStatus};
 use std::collections::HashMap;
 
@@ -40,41 +39,30 @@ impl Analyzer {
 
     // ── Issue detectors ────────────────────────────────────────────
 
-    /// Detect tool calls that wrote files without a preceding read.
+    /// Detect confirmed file edits without a preceding successful read of that path.
     fn detect_write_without_read(run: &Run) -> Vec<CritiqueIssue> {
-        let mut issues = Vec::new();
-        let mut read_tools_seen = 0usize;
-        let mut writes_without_read = 0usize;
-
-        for event in &run.events {
-            match event {
-                RunEvent::ToolCall { name, .. } if is_read_tool(name) => {
-                    read_tools_seen += 1;
-                }
-                RunEvent::ToolCall { name, .. } if is_write_tool(name) && read_tools_seen == 0 => {
-                    writes_without_read += 1;
-                }
-                RunEvent::ToolResult { name, .. } if is_read_tool(name) => {
-                    // read completed successfully
-                }
-                _ => {}
-            }
-        }
+        let writes_without_read = TrajectoryReplay::new(run.clone())
+            .detect_write_without_read()
+            .len();
 
         if writes_without_read > 0 {
-            issues.push(CritiqueIssue::WriteWithoutRead {
+            vec![CritiqueIssue::WriteWithoutRead {
                 tool: "write".into(),
                 count: writes_without_read,
-            });
+            }]
+        } else {
+            Vec::new()
         }
-        issues
     }
 
     /// Detect tools that were called, failed, and retried multiple times.
     fn detect_excessive_retries(run: &Run) -> Vec<CritiqueIssue> {
         let mut tool_errors: HashMap<&str, usize> = HashMap::new();
+        let skipped = crate::trace::skipped_tool_call_ids(&run.events);
         for event in &run.events {
-            if let RunEvent::ToolError { name, .. } = event {
+            if let RunEvent::ToolError { call_id, name, .. } = event
+                && !skipped.contains(call_id.as_str())
+            {
                 *tool_errors.entry(name.as_str()).or_default() += 1;
             }
         }
@@ -90,10 +78,13 @@ impl Analyzer {
 
     /// Detect runs with an unusually high number of tool calls.
     fn detect_excessive_tool_calls(run: &Run) -> Vec<CritiqueIssue> {
+        let skipped = crate::trace::skipped_tool_call_ids(&run.events);
         let total = run
             .events
             .iter()
-            .filter(|e| matches!(e, RunEvent::ToolCall { .. }))
+            .filter(|event| {
+                matches!(event, RunEvent::ToolCall { call_id, .. } if !skipped.contains(call_id.as_str()))
+            })
             .count();
         if total > 20 {
             vec![CritiqueIssue::ExcessiveToolCalls { total }]
@@ -206,6 +197,10 @@ mod tests {
                     risk: None,
                     duration_ms: 10,
                 },
+                RunEvent::FileEdit {
+                    tool: "write_file".into(),
+                    path: "src/lib.rs".into(),
+                },
                 RunEvent::ToolResult {
                     call_id: "test_call".into(),
                     name: "write_file".into(),
@@ -236,6 +231,77 @@ mod tests {
                 .iter()
                 .any(|s| matches!(s, ImprovementSuggestion::PolicyChange { .. }))
         );
+    }
+
+    #[test]
+    fn failed_or_different_path_reads_do_not_suppress_confirmed_edit_critique() {
+        let run = make_run(
+            vec![
+                RunEvent::ToolCall {
+                    call_id: "failed-read".into(),
+                    name: "read_file".into(),
+                    args: Some(serde_json::json!({"path": "src/lib.rs"})),
+                    risk: None,
+                    duration_ms: 1,
+                },
+                RunEvent::ToolError {
+                    call_id: "failed-read".into(),
+                    name: "read_file".into(),
+                    message: "not found".into(),
+                    failure: None,
+                },
+                RunEvent::FileRead {
+                    tool: "read_file".into(),
+                    path: "src/other.rs".into(),
+                },
+                RunEvent::FileEdit {
+                    tool: "write_file".into(),
+                    path: "src/lib.rs".into(),
+                },
+            ],
+            RunStatus::Completed,
+        );
+
+        assert!(
+            Analyzer::analyze(&run)
+                .issues
+                .iter()
+                .any(|issue| { matches!(issue, CritiqueIssue::WriteWithoutRead { count: 1, .. }) })
+        );
+    }
+
+    #[test]
+    fn skipped_invocations_do_not_drive_execution_critiques() {
+        let mut events = Vec::new();
+        for index in 0..21 {
+            let call_id = format!("skipped-{index}");
+            events.push(RunEvent::ToolCall {
+                call_id: call_id.clone(),
+                name: "write_file".into(),
+                args: None,
+                risk: None,
+                duration_ms: 0,
+            });
+            events.push(RunEvent::ToolExecutionSkipped {
+                call_id: call_id.clone(),
+                name: "write_file".into(),
+                reason: "cancelled before execution".into(),
+            });
+            events.push(RunEvent::ToolError {
+                call_id,
+                name: "write_file".into(),
+                message: "cancelled before execution".into(),
+                failure: None,
+            });
+        }
+
+        let critique = Analyzer::analyze(&make_run(events, RunStatus::Failed));
+        assert!(!critique.issues.iter().any(|issue| matches!(
+            issue,
+            CritiqueIssue::WriteWithoutRead { .. }
+                | CritiqueIssue::ExcessiveRetries { .. }
+                | CritiqueIssue::ExcessiveToolCalls { .. }
+        )));
     }
 
     #[test]

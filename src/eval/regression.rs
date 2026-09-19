@@ -50,11 +50,14 @@ impl RegressionSuite {
     /// Build a single eval case from one run.
     fn build_case_from_run(run: &Run) -> EvalCase {
         // Collect tools used in this run
+        let skipped = crate::trace::skipped_tool_call_ids(&run.events);
         let tools_used: Vec<&str> = run
             .events
             .iter()
             .filter_map(|e| match e {
-                RunEvent::ToolCall { name, .. } => Some(name.as_str()),
+                RunEvent::ToolCall { call_id, name, .. } if !skipped.contains(call_id.as_str()) => {
+                    Some(name.as_str())
+                }
                 _ => None,
             })
             .collect();
@@ -188,6 +191,47 @@ mod tests {
         let suite = RegressionSuite::from_traces(&runs);
         assert_eq!(suite.len(), 1);
         assert!(suite.cases[0].id.contains("run1"));
+    }
+
+    #[test]
+    fn skipped_invocation_does_not_generate_a_tool_used_regression_criterion() {
+        let run = make_run(
+            "skipped",
+            "cancelled future wave",
+            vec![
+                RunEvent::ToolCall {
+                    call_id: "future-wave".to_string(),
+                    name: "write_file".to_string(),
+                    args: None,
+                    risk: None,
+                    duration_ms: 0,
+                },
+                RunEvent::ToolExecutionSkipped {
+                    call_id: "future-wave".to_string(),
+                    name: "write_file".to_string(),
+                    reason: "cancelled before execution".to_string(),
+                },
+                RunEvent::ToolResult {
+                    call_id: "future-wave".to_string(),
+                    name: "write_file".to_string(),
+                    success: false,
+                    output_preview: Some(String::new()),
+                    output_truncated: false,
+                    duration_ms: 0,
+                    original_bytes: 0,
+                    returned_bytes: 0,
+                    estimated_tokens: 0,
+                    output_handling: None,
+                    artifact: None,
+                },
+            ],
+            RunStatus::Completed,
+        );
+        let suite = RegressionSuite::from_traces(&[run]);
+        assert!(matches!(
+            suite.cases.first().map(|case| &case.success_criteria),
+            Some(SuccessCriteria::OutputContains { .. })
+        ));
     }
 
     #[test]

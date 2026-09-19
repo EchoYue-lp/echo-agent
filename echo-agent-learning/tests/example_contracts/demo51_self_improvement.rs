@@ -98,6 +98,10 @@ async fn demo_analyzer() {
                 risk: None,
                 duration_ms: 10,
             },
+            RunEvent::FileEdit {
+                tool: "write_file".into(),
+                path: "auth.rs".into(),
+            },
             RunEvent::ToolResult {
                 call_id: "c1".into(),
                 name: "write_file".into(),
@@ -200,6 +204,10 @@ async fn demo_critique_aggregation() {
                 risk: None,
                 duration_ms: 10,
             },
+            RunEvent::FileEdit {
+                tool: "write_file".into(),
+                path: "run1.txt".into(),
+            },
             RunEvent::ToolResult {
                 call_id: "s1".into(),
                 name: "write_file".into(),
@@ -227,6 +235,10 @@ async fn demo_critique_aggregation() {
                 args: None,
                 risk: None,
                 duration_ms: 10,
+            },
+            RunEvent::FileEdit {
+                tool: "write_file".into(),
+                path: "run2.txt".into(),
             },
             RunEvent::ToolResult {
                 call_id: "s2".into(),

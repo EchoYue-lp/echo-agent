@@ -106,7 +106,7 @@ async fn demo_raw_mcp_call() -> echo_agent::error::Result<()> {
         ));
     }
 
-    manager.close_all().await;
+    manager.close_all().await?;
     Ok(())
 }
 
@@ -160,7 +160,7 @@ async fn demo_agent_with_mcp() -> echo_agent::error::Result<()> {
     println!("\n✓ 任务完成！\n{}", result);
 
     // 关闭所有 MCP 连接
-    manager.close_all().await;
+    manager.close_all().await?;
     Ok(())
 }
 

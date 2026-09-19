@@ -1340,6 +1340,61 @@ impl SubagentExecutor {
         Ok(())
     }
 
+    fn terminal_event_for_result(
+        parent: &str,
+        agent: &str,
+        result: &mut SubagentResult,
+        execution_id: Option<String>,
+        run_id: Option<String>,
+    ) -> SubagentEvent {
+        match result.outcome.status {
+            SubagentStatus::Cancelled => SubagentEvent::DispatchCancelled {
+                parent: parent.to_string(),
+                agent: agent.to_string(),
+                outcome: result.outcome.clone(),
+                execution_id,
+                run_id,
+            },
+            SubagentStatus::Completed => SubagentEvent::DispatchCompleted {
+                parent: parent.to_string(),
+                agent: agent.to_string(),
+                duration_ms: u64::try_from(result.duration.as_millis()).unwrap_or(u64::MAX),
+                tokens_used: result
+                    .tokens_used
+                    .map(|tokens| u64::try_from(tokens).unwrap_or(u64::MAX)),
+                iterations: Some(u64::try_from(result.iterations).unwrap_or(u64::MAX)),
+                output: result.output.clone(),
+                outcome: result.outcome.clone(),
+                execution_id,
+                run_id,
+            },
+            status => {
+                let status = if status == SubagentStatus::Running {
+                    result.outcome.status = SubagentStatus::Failed;
+                    result.outcome.summary =
+                        "Subagent returned without a terminal outcome".to_string();
+                    SubagentStatus::Failed
+                } else {
+                    status
+                };
+                let error = if result.outcome.summary.is_empty() {
+                    format!("Subagent '{agent}' reported {}", status.as_str())
+                } else {
+                    result.outcome.summary.clone()
+                };
+                SubagentEvent::DispatchFailed {
+                    parent: parent.to_string(),
+                    agent: agent.to_string(),
+                    error,
+                    status,
+                    outcome: result.outcome.clone(),
+                    execution_id,
+                    run_id,
+                }
+            }
+        }
+    }
+
     #[async_recursion::async_recursion]
     async fn dispatch_inner(
         &self,
@@ -1555,27 +1610,13 @@ impl SubagentExecutor {
                         "subagent_dispatch_complete"
                     );
 
-                    if sub_result.outcome.status == SubagentStatus::Cancelled {
-                        event_publisher.emit(SubagentEvent::DispatchCancelled {
-                            parent: req_parent_agent.clone(),
-                            agent: req_agent_name.clone(),
-                            outcome: sub_result.outcome.clone(),
-                            execution_id: event_execution_id.clone(),
-                            run_id: event_run_id.clone(),
-                        })?;
-                    } else {
-                        event_publisher.emit(SubagentEvent::DispatchCompleted {
-                            parent: req_parent_agent.clone(),
-                            agent: req_agent_name.clone(),
-                            duration_ms: duration.as_millis() as u64,
-                            tokens_used: sub_result.tokens_used.map(|t| t as u64),
-                            iterations: Some(sub_result.iterations as u64),
-                            output: sub_result.output.clone(),
-                            outcome: sub_result.outcome.clone(),
-                            execution_id: event_execution_id.clone(),
-                            run_id: event_run_id.clone(),
-                        })?;
-                    }
+                    event_publisher.emit(Self::terminal_event_for_result(
+                        &req_parent_agent,
+                        &req_agent_name,
+                        &mut sub_result,
+                        event_execution_id.clone(),
+                        event_run_id.clone(),
+                    ))?;
 
                     if self.config.enable_hooks {
                         self.hooks.after_dispatch(&hook_ctx, &sub_result).await;
@@ -2030,7 +2071,7 @@ impl SubagentExecutor {
             let _permit = child_token.clone();
             let start = Instant::now();
 
-            let result = if timeout_secs > 0 {
+            let mut result = if timeout_secs > 0 {
                 // Race between timeout, cancellation, and execution
                 tokio::select! {
                     biased; // Check cancellation first
@@ -2083,28 +2124,15 @@ impl SubagentExecutor {
                 }
             };
             if settle_in_handle {
-                match &result {
-                    Ok(value) if value.outcome.status == SubagentStatus::Cancelled => {
-                        event_publisher.emit(SubagentEvent::DispatchCancelled {
-                            parent: parent_agent.clone(),
-                            agent: agent_name.clone(),
-                            outcome: value.outcome.clone(),
-                            execution_id: event_execution_id.clone(),
-                            run_id: event_run_id.clone(),
-                        })?;
-                    }
+                match &mut result {
                     Ok(value) => {
-                        event_publisher.emit(SubagentEvent::DispatchCompleted {
-                            parent: parent_agent.clone(),
-                            agent: agent_name.clone(),
-                            duration_ms: value.duration.as_millis() as u64,
-                            tokens_used: value.tokens_used.map(|tokens| tokens as u64),
-                            iterations: Some(value.iterations as u64),
-                            output: value.output.clone(),
-                            outcome: value.outcome.clone(),
-                            execution_id: event_execution_id.clone(),
-                            run_id: event_run_id.clone(),
-                        })?;
+                        event_publisher.emit(Self::terminal_event_for_result(
+                            &parent_agent,
+                            &agent_name,
+                            value,
+                            event_execution_id.clone(),
+                            event_run_id.clone(),
+                        ))?;
                     }
                     Err(error) => {
                         let status = subagent_status_from_error(error);
@@ -3593,6 +3621,7 @@ mod tests {
                     mime_type: Some("application/json".to_string()),
                     metadata: HashMap::from([("source".to_string(), "fixture".to_string())]),
                     artifact: None,
+                    effects: Vec::new(),
                     model_content: Vec::new(),
                 };
                 let events = vec![
@@ -3945,6 +3974,63 @@ mod tests {
             }
         }
         terminal_events
+    }
+
+    #[test]
+    fn structured_result_terminal_event_matches_runtime_status() -> Result<()> {
+        for status in [
+            SubagentStatus::Completed,
+            SubagentStatus::Failed,
+            SubagentStatus::TimedOut,
+            SubagentStatus::Cancelled,
+            SubagentStatus::Running,
+        ] {
+            let mut result = SubagentResult::sync_result(
+                "child",
+                "## Summary\nresult".to_string(),
+                std::time::Duration::ZERO,
+            );
+            result.outcome.status = status;
+            let event = SubagentExecutor::terminal_event_for_result(
+                "parent",
+                "child",
+                &mut result,
+                Some("attempt-1".to_string()),
+                Some("run-1".to_string()),
+            );
+            let terminal = match &event {
+                SubagentEvent::DispatchCompleted { outcome, .. }
+                    if status == SubagentStatus::Completed =>
+                {
+                    outcome.status
+                }
+                SubagentEvent::DispatchCancelled { outcome, .. }
+                    if status == SubagentStatus::Cancelled =>
+                {
+                    outcome.status
+                }
+                SubagentEvent::DispatchFailed {
+                    status: emitted,
+                    outcome,
+                    ..
+                } if status == SubagentStatus::Running && *emitted == SubagentStatus::Failed => {
+                    outcome.status
+                }
+                SubagentEvent::DispatchFailed {
+                    status: emitted,
+                    outcome,
+                    ..
+                } if *emitted == status => outcome.status,
+                other => {
+                    return Err(ReactError::Other(format!(
+                        "incorrect terminal event for {status:?}: {other:?}"
+                    )));
+                }
+            };
+            assert_eq!(terminal, result.outcome.status);
+            assert_ne!(terminal, SubagentStatus::Running);
+        }
+        Ok(())
     }
 
     /// Build a SubagentContext with N numbered user messages and no system prompt.

@@ -73,6 +73,9 @@ pub(crate) async fn settle_terminal_projection(
         .save_transcript_projection(context, blocked_reason)
         .await?;
     if snap.conversation_store.is_some() {
+        // The settlement fact was already persisted to the trace by the
+        // coordinator. Event delivery is a separate observer boundary.
+        snap.mark_transcript_settlement_observed();
         if tx
             .send(Ok(AgentEvent::TranscriptProjectionSettlement(
                 settlement.clone(),
@@ -84,7 +87,6 @@ pub(crate) async fn settle_terminal_projection(
                 "transcript settlement observer closed before terminal".to_string(),
             ));
         }
-        snap.mark_transcript_settlement_observed();
     }
     match settlement.status {
         crate::memory::TranscriptProjectionSettlementStatus::Settled
@@ -340,6 +342,75 @@ mod tests {
     use crate::agent::config::AgentConfig;
     use crate::agent::snapshot::AgentRunSnapshot;
     use crate::trace::{InMemoryRunStore, RunStatus, RunStore};
+
+    #[tokio::test]
+    async fn closed_settlement_observer_preserves_persisted_projection_fact() -> Result<()> {
+        use crate::memory::{ConversationStore, FileConversationStore};
+        use crate::state::FileRuntimeStateStore;
+        use crate::trace::RunEvent;
+
+        let root = tempfile::tempdir()?;
+        let conversations = Arc::new(FileConversationStore::new(
+            root.path().join("conversations"),
+        )?);
+        let runtime = Arc::new(FileRuntimeStateStore::new(root.path().join("runtime"))?);
+        let trace = Arc::new(InMemoryRunStore::new());
+        let config =
+            AgentConfig::new("test-model", "agent", "system").conversation_id("closed-observer");
+        let mut agent = ReactAgent::new(config);
+        agent.set_conversation_store(conversations.clone());
+        agent.set_state_store(runtime);
+        agent.set_run_store(trace.clone());
+        agent
+            .memory
+            .context
+            .lock()
+            .await
+            .push(crate::llm::types::Message::user(
+                "durable input".to_string(),
+            ));
+        let legacy = agent.capture_legacy_external_context();
+        let trace_run_id = agent
+            .start_legacy_trace_run("durable input", &legacy)
+            .await
+            .ok_or_else(|| ReactError::Other("trace did not start".to_string()))?;
+        let snap = AgentRunSnapshot::from_agent(&agent);
+        let (tx, rx) = mpsc::channel(1);
+        drop(rx);
+
+        let error = settle_terminal_projection(&snap, &agent.memory.context, None, &tx)
+            .await
+            .err()
+            .ok_or_else(|| {
+                ReactError::Other("closed observer unexpectedly accepted event".to_string())
+            })?;
+        assert!(error.to_string().contains("observer closed"));
+        assert!(snap.transcript_settlement_was_observed());
+        assert!(
+            !conversations
+                .get_messages("closed-observer")
+                .await?
+                .is_empty()
+        );
+        let run = trace
+            .load(&trace_run_id)
+            .await?
+            .ok_or_else(|| ReactError::Other("trace disappeared".to_string()))?;
+        let settlements = run
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                RunEvent::TranscriptProjectionSettlement { settlement } => Some(settlement),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(settlements.len(), 1);
+        assert_eq!(
+            settlements.first().map(|settlement| settlement.status),
+            Some(crate::memory::TranscriptProjectionSettlementStatus::Settled)
+        );
+        Ok(())
+    }
 
     /// Build a snapshot whose `trace_run_id` is wired up so trace
     /// finalization can update the in-memory run store.

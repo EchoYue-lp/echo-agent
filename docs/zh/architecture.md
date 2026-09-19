@@ -36,7 +36,7 @@ Cargo metadata 校验，不维护第二份 package registry。
 | `echo-core` | Agent、LLM、Tool、permission、event 和共享领域契约 | 无 workspace 依赖的基础层 |
 | `echo-execution` | Sandbox、Skill 和执行机制 | 依赖 `echo_core` |
 | `echo-state` | Memory、compression、persistence 和 audit 实现 | 依赖 `echo_core` |
-| `echo-orchestration` | Turn driver、Task、Subagent、Workflow、scheduler 和生命周期原语 | 依赖 `echo_core` |
+| `echo-orchestration` | Turn driver、Task、Subagent、Workflow、scheduler 和生命周期原语 | 依赖 `echo_core`；组合 `echo_state` durable delivery 原语 |
 | `echo-integration` | Provider、MCP、LSP、channel 和外部协议实现 | 依赖 `echo_core` |
 | `echo-tools` | 可复用的 file、shell、web、data、media、database 和 research Tools | 依赖 core 契约和 macros |
 | `echo-macros` | 编译期 Tool、callback、guard 和 handler adapter | 依赖 core 契约和 orchestration 类型 |

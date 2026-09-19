@@ -9,7 +9,7 @@ use crate::runtime::{
     AgentTurnDriver, EventSink, SinkControl, TurnDeliveryOutcome, TurnMode, TurnOutcome,
     TurnReceipt, TurnRequest,
 };
-use crate::trace::Run;
+use crate::trace::{Run, RunEvent};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -291,26 +291,19 @@ impl EvalRunner {
 
         // Populate metrics from trace (all branches — errors/timeouts also have diagnostic trace value)
         if let Some(run) = run.as_ref() {
+            let replay = TrajectoryReplay::new(run.clone());
             let violations = self.evaluate_run_constraints(&case.constraints, run);
             if !violations.is_empty() {
                 result.violations.extend(violations);
                 result.success = false;
             }
-            result.tool_calls = run
-                .events
-                .iter()
-                .filter(|e| matches!(e, crate::trace::RunEvent::ToolCall { .. }))
-                .count();
+            result.tool_calls = replay.total_tool_calls();
             result.tokens_in = run.token_usage.prompt_tokens;
             result.tokens_out = run.token_usage.completion_tokens;
             result.cached_tokens_in = run.token_usage.cached_prompt_tokens;
             result.cache_creation_tokens_in = run.token_usage.cache_creation_prompt_tokens;
             result.cache_hit_rate = run.token_usage.cache_hit_rate();
-            result.tool_errors = run
-                .events
-                .iter()
-                .filter(|event| matches!(event, crate::trace::RunEvent::ToolError { .. }))
-                .count();
+            result.tool_errors = replay.tool_error_count();
             result.max_protected_context_tokens = run
                 .events
                 .iter()
@@ -323,7 +316,6 @@ impl EvalRunner {
                 })
                 .max()
                 .unwrap_or(0);
-            let replay = TrajectoryReplay::new(run.clone());
             result.file_changes = replay.written_files().len();
         }
 
@@ -439,6 +431,32 @@ impl EvalRunner {
         }
     }
 
+    async fn record_test_run(
+        &self,
+        result: &mut EvalResult,
+        run: Option<&Run>,
+        command: &str,
+        passed: bool,
+    ) {
+        let (Some(store), Some(run)) = (self.run_store.as_ref(), run) else {
+            return;
+        };
+        // A command's exit status is authoritative for this test criterion,
+        // not for the number of failing assertions inside its test runner.
+        let mut event = RunEvent::TestRun {
+            command: command.to_string(),
+            passed,
+            failure_count: None,
+        };
+        event.apply_retention(&echo_core::utils::retention::ContentRetentionPolicy::default());
+        if let Err(error) = store.append_event(&run.run_id, event).await {
+            result.success = false;
+            result
+                .violations
+                .push(format!("TestRun trace append failed: {error}"));
+        }
+    }
+
     async fn check_criteria(
         &self,
         criteria: &SuccessCriteria,
@@ -472,8 +490,17 @@ impl EvalRunner {
                 }
             }
             SuccessCriteria::TestPass { command } => {
-                let passed = run_command(command, cwd).await;
+                let command_result = run_command(command, cwd).await;
+                let passed = command_result.as_ref().is_ok_and(|status| *status);
                 let mut result = EvalResult::new("criteria", passed);
+                if let Err(error) = command_result {
+                    result
+                        .violations
+                        .push(format!("Test command could not be launched: {error}"));
+                } else {
+                    self.record_test_run(&mut result, run, command, passed)
+                        .await;
+                }
                 result.metrics.push(crate::eval::EvalMetric {
                     name: "test_pass".into(),
                     score: if passed { 1.0 } else { 0.0 },
@@ -498,11 +525,8 @@ impl EvalRunner {
                 result
             }
             SuccessCriteria::ToolUsed { tool_name } => {
-                let used = run.is_some_and(|run| {
-                    run.events.iter().any(|event| {
-                        matches!(event, crate::trace::RunEvent::ToolCall { name, .. } if name == tool_name)
-                    })
-                });
+                let used = run
+                    .is_some_and(|run| TrajectoryReplay::new(run.clone()).tool_was_used(tool_name));
                 let mut result = EvalResult::new("criteria", used);
                 result.metrics.push(crate::eval::EvalMetric {
                     name: "tool_used".into(),
@@ -520,11 +544,8 @@ impl EvalRunner {
             }
             SuccessCriteria::ToolNotUsed { tool_name } => {
                 let trace_available = run.is_some();
-                let used = run.is_some_and(|run| {
-                    run.events.iter().any(|event| {
-                        matches!(event, crate::trace::RunEvent::ToolCall { name, .. } if name == tool_name)
-                    })
-                });
+                let used = run
+                    .is_some_and(|run| TrajectoryReplay::new(run.clone()).tool_was_used(tool_name));
                 let passed = trace_available && !used;
                 let mut result = EvalResult::new("criteria", passed);
                 result.metrics.push(crate::eval::EvalMetric {
@@ -683,9 +704,18 @@ impl EvalRunner {
                     }
                 }
 
-                let passed = run_command(test_command, &repo_dir).await;
+                let command_result = run_command(test_command, &repo_dir).await;
+                let passed = command_result.as_ref().is_ok_and(|status| *status);
 
                 let mut result = EvalResult::new("criteria", passed);
+                if let Err(error) = command_result {
+                    result
+                        .violations
+                        .push(format!("Test command could not be launched: {error}"));
+                } else {
+                    self.record_test_run(&mut result, run, test_command, passed)
+                        .await;
+                }
                 result.metrics.push(crate::eval::EvalMetric {
                     name: "swe_bench".into(),
                     score: if passed { 1.0 } else { 0.0 },
@@ -939,16 +969,29 @@ fn validate_shell_command(cmd: &str) -> std::result::Result<(), String> {
     Ok(())
 }
 
-/// Run a shell command and return whether it succeeded.
-async fn run_command(cmd: &str, cwd: &Path) -> bool {
-    tokio::process::Command::new("sh")
+/// Run a test command and distinguish a completed failure from an unproven launch.
+async fn run_command(cmd: &str, cwd: &Path) -> std::io::Result<bool> {
+    let output = tokio::process::Command::new("sh")
         .arg("-c")
         .arg(cmd)
         .current_dir(cwd)
         .output()
-        .await
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+        .await?;
+    match output.status.code() {
+        Some(0) => Ok(true),
+        // sh reserves these statuses for command lookup/exec failures. A test
+        // process can also return them, so omit the fact rather than asserting
+        // that the configured test runner definitely executed.
+        Some(126 | 127) => Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "test command execution could not be confirmed",
+        )),
+        Some(_) => Ok(false),
+        None => Err(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "test command ended without an exit status",
+        )),
+    }
 }
 
 /// Try to extract a numeric value near a given key in the output text.
@@ -1959,6 +2002,194 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_criteria_append_only_completed_commands_to_the_correlated_trace()
+    -> Result<(), String> {
+        use crate::trace::{InMemoryRunStore, RunStore};
+
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let store = Arc::new(InMemoryRunStore::new());
+        let current = correlated_run("trace-current", "business-run");
+        let other = correlated_run("trace-other", "other-business-run");
+        store
+            .save(current.clone())
+            .await
+            .map_err(|error| error.to_string())?;
+        store.save(other).await.map_err(|error| error.to_string())?;
+        let runner = EvalRunner::new(root.path().to_path_buf()).with_run_store(store.clone());
+
+        for (command, expected_passed) in [("true", true), ("false", false)] {
+            let result = runner
+                .check_criteria(
+                    &SuccessCriteria::TestPass {
+                        command: command.to_string(),
+                    },
+                    "",
+                    "",
+                    root.path(),
+                    Some(&current),
+                )
+                .await;
+            if result.success != expected_passed {
+                return Err(format!("unexpected {command} criterion: {result:?}"));
+            }
+        }
+        let invalid_cwd = root.path().join("missing-directory");
+        let failed_launch = runner
+            .check_criteria(
+                &SuccessCriteria::TestPass {
+                    command: "true".to_string(),
+                },
+                "",
+                "",
+                &invalid_cwd,
+                Some(&current),
+            )
+            .await;
+        if failed_launch.success
+            || !failed_launch
+                .violations
+                .iter()
+                .any(|violation| violation.contains("could not be launched"))
+        {
+            return Err(format!(
+                "launch failure was not distinct: {failed_launch:?}"
+            ));
+        }
+        let missing_executable = runner
+            .check_criteria(
+                &SuccessCriteria::TestPass {
+                    command: "echo_agent_missing_test_runner_104".to_string(),
+                },
+                "",
+                "",
+                root.path(),
+                Some(&current),
+            )
+            .await;
+        if missing_executable.success
+            || !missing_executable
+                .violations
+                .iter()
+                .any(|violation| violation.contains("could not be launched"))
+        {
+            return Err(format!(
+                "missing executable was treated as a test result: {missing_executable:?}"
+            ));
+        }
+        let current = store
+            .load("trace-current")
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "missing current trace".to_string())?;
+        let tests = current
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                RunEvent::TestRun {
+                    command,
+                    passed,
+                    failure_count,
+                } => Some((command.as_str(), *passed, *failure_count)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if tests != [("true", true, None), ("false", false, None)] {
+            return Err(format!("wrong test facts: {tests:?}"));
+        }
+        let other = store
+            .load("trace-other")
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "missing other trace".to_string())?;
+        if other
+            .events
+            .iter()
+            .any(|event| matches!(event, RunEvent::TestRun { .. }))
+        {
+            return Err("test fact leaked into another trace".to_string());
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_run_is_sanitized_before_custom_store_receives_it() -> Result<(), String> {
+        #[derive(Default)]
+        struct CaptureStore {
+            events: std::sync::Mutex<Vec<(String, RunEvent)>>,
+        }
+
+        #[async_trait::async_trait]
+        impl crate::trace::RunStore for CaptureStore {
+            async fn save(&self, _run: Run) -> crate::error::Result<()> {
+                Ok(())
+            }
+            async fn load(&self, _run_id: &str) -> crate::error::Result<Option<Run>> {
+                Ok(None)
+            }
+            async fn list_by_session(
+                &self,
+                _session_id: &str,
+            ) -> crate::error::Result<Vec<RunSummary>> {
+                Ok(Vec::new())
+            }
+            async fn list_all(&self, _limit: usize) -> crate::error::Result<Vec<RunSummary>> {
+                Ok(Vec::new())
+            }
+            async fn append_event(
+                &self,
+                run_id: &str,
+                event: RunEvent,
+            ) -> crate::error::Result<()> {
+                self.events
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .push((run_id.to_string(), event));
+                Ok(())
+            }
+        }
+
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let store = Arc::new(CaptureStore::default());
+        let runner = EvalRunner::new(root.path().to_path_buf()).with_run_store(store.clone());
+        let mut result = EvalResult::new("case", true);
+        let run = correlated_run("trace-target", "business-run");
+        runner
+            .record_test_run(
+                &mut result,
+                Some(&run),
+                "echo password=supersecretvalue",
+                true,
+            )
+            .await;
+        if !result.success {
+            return Err(format!("trace append unexpectedly failed: {result:?}"));
+        }
+        let events = store
+            .events
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let (id, event) = events
+            .first()
+            .ok_or_else(|| "custom store received no event".to_string())?;
+        if id != "trace-target" || events.len() != 1 {
+            return Err(format!("wrong trace identity or event count: {events:?}"));
+        }
+        match event {
+            RunEvent::TestRun {
+                command,
+                failure_count: None,
+                ..
+            } if command.contains("[REDACTED]") && !command.contains("supersecretvalue") => {}
+            other => {
+                return Err(format!(
+                    "unsanitized TestRun reached custom store: {other:?}"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn trace_tool_criteria_are_enforced() -> Result<(), String> {
         let dir = std::env::temp_dir().join(format!("eval_trace_{}", uuid::Uuid::new_v4()));
         let runner = EvalRunner::new(dir.clone());
@@ -2048,6 +2279,57 @@ mod tests {
             .await;
         if nested_missing.violations.is_empty() {
             return Err("nested tool failure lost its violation detail".into());
+        }
+        let mut skipped = run.clone();
+        skipped.events.extend([
+            RunEvent::ToolCall {
+                call_id: "cancelled-future-wave".to_string(),
+                name: "write_file".to_string(),
+                args: None,
+                risk: None,
+                duration_ms: 0,
+            },
+            RunEvent::ToolExecutionSkipped {
+                call_id: "cancelled-future-wave".to_string(),
+                name: "write_file".to_string(),
+                reason: "cancelled before execution".to_string(),
+            },
+            RunEvent::ToolResult {
+                call_id: "cancelled-future-wave".to_string(),
+                name: "write_file".to_string(),
+                success: false,
+                output_preview: Some(String::new()),
+                output_truncated: false,
+                duration_ms: 0,
+                original_bytes: 0,
+                returned_bytes: 0,
+                estimated_tokens: 0,
+                output_handling: None,
+                artifact: None,
+            },
+            RunEvent::ToolError {
+                call_id: "cancelled-future-wave".to_string(),
+                name: "write_file".to_string(),
+                message: "not executed".to_string(),
+                failure: None,
+            },
+        ]);
+        let skipped_is_not_used = runner
+            .check_criteria(
+                &SuccessCriteria::ToolNotUsed {
+                    tool_name: "write_file".to_string(),
+                },
+                "done",
+                "inspect",
+                dir.as_path(),
+                Some(&skipped),
+            )
+            .await;
+        if !skipped_is_not_used.success {
+            return Err(format!(
+                "skipped tool was treated as executed: {:?}",
+                skipped_is_not_used.violations
+            ));
         }
         let citation = runner
             .check_criteria(

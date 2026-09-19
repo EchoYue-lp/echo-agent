@@ -192,6 +192,10 @@ withdraw request -> component-specific close / cleanup observation
 Plugin publication can compose components without erasing child cleanup
 responsibility. The framework does not currently claim one production
 coordinator, universal generation fence, or awaited close across every extension.
+MCP is one component with a stronger local contract: transport, client, manager,
+and Agent close propagate a `Result`; stdio and legacy SSE settle pending calls
+and owned tasks or child processes before successful return. Manager close
+continues across all clients before aggregating failures.
 Current behavior must be read from [MCP](./08-mcp.md),
 [Hooks](./23-hooks.md), [Skills](./07-skills.md), [Plugins](./32-plugin-system.md),
 and [LSP](./31-lsp-integration.md); this overview does not promise atomic hot reload.

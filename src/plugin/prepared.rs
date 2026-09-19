@@ -183,7 +183,7 @@ struct PluginPreparationCache {
 }
 
 /// Successfully applied framework components grouped by plugin owner.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WiredPluginComponents {
     pub skills: Vec<String>,
     pub hooks_registered: bool,
@@ -191,7 +191,7 @@ pub struct WiredPluginComponents {
 }
 
 /// Apply receipt. It contains no package inventory and owns no reload policy.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PluginWiringResult {
     pub plugins_loaded: Vec<String>,
     pub skills_loaded: Vec<String>,
@@ -213,7 +213,7 @@ impl PluginWiringResult {
     }
 }
 
-/// Typed refusal or atomic apply failure.
+/// Typed refusal or apply failure. An unsettled rollback retains its receipt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PluginWiringError {
     InvalidPreparedSet {
@@ -223,6 +223,29 @@ pub enum PluginWiringError {
         generation: u64,
         diagnostics: String,
     },
+    RollbackFailed {
+        generation: u64,
+        diagnostics: String,
+        receipt: Box<PluginWiringResult>,
+    },
+}
+
+impl PluginWiringError {
+    /// Return the partial apply receipt only when cleanup remains unsettled.
+    pub fn cleanup_receipt(&self) -> Option<&PluginWiringResult> {
+        match self {
+            Self::RollbackFailed { receipt, .. } => Some(receipt),
+            _ => None,
+        }
+    }
+
+    /// Transfer an unsettled receipt to the caller's retry/withdraw owner.
+    pub fn into_cleanup_receipt(self) -> Option<PluginWiringResult> {
+        match self {
+            Self::RollbackFailed { receipt, .. } => Some(*receipt),
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Display for PluginWiringError {
@@ -235,6 +258,11 @@ impl fmt::Display for PluginWiringError {
             Self::ApplyFailed {
                 generation,
                 diagnostics,
+            }
+            | Self::RollbackFailed {
+                generation,
+                diagnostics,
+                ..
             } => write!(
                 formatter,
                 "plugin generation {generation} failed to apply: {diagnostics}"
@@ -722,7 +750,14 @@ impl PluginIntegrator {
         if errors.is_empty() {
             Ok(receipt)
         } else {
-            self.rollback(agent, &receipt).await;
+            if let Err(error) = self.rollback(agent, &receipt).await {
+                errors.push(format!("plugin rollback cleanup: {error}"));
+                return Err(PluginWiringError::RollbackFailed {
+                    generation: prepared.generation(),
+                    diagnostics: errors.join("; "),
+                    receipt: Box::new(receipt),
+                });
+            }
             Err(PluginWiringError::ApplyFailed {
                 generation: prepared.generation(),
                 diagnostics: errors.join("; "),
@@ -735,14 +770,17 @@ impl PluginIntegrator {
         &self,
         agent: &mut crate::agent::react::ReactAgent,
         receipt: &PluginWiringResult,
-    ) {
-        Self::unwire(agent, &receipt.components_by_plugin).await;
+    ) -> crate::error::Result<()> {
+        Self::unwire(agent, &receipt.components_by_plugin).await
     }
 
     pub async fn unwire(
         agent: &mut crate::agent::react::ReactAgent,
         components: &HashMap<String, WiredPluginComponents>,
-    ) {
+    ) -> crate::error::Result<()> {
+        let cleanup_failures: Vec<String> = Vec::new();
+        #[cfg(feature = "mcp")]
+        let mut cleanup_failures = cleanup_failures;
         for (plugin_id, owned) in components {
             let source = format!("plugin:{plugin_id}");
             let _ = agent.unregister_skills_by_source(&source).await;
@@ -755,8 +793,18 @@ impl PluginIntegrator {
             }
             #[cfg(feature = "mcp")]
             for server in &owned.mcp_servers {
-                let _ = agent.disconnect_mcp(server).await;
+                if let Err(error) = agent.disconnect_mcp(server).await {
+                    cleanup_failures.push(format!("{plugin_id}/{server}: {error}"));
+                }
             }
+        }
+        if cleanup_failures.is_empty() {
+            Ok(())
+        } else {
+            Err(crate::error::ReactError::Other(format!(
+                "plugin MCP cleanup did not settle: {}",
+                cleanup_failures.join("; ")
+            )))
         }
     }
 }
@@ -902,6 +950,72 @@ async fn freeze_document(
 mod tests {
     use super::*;
     use crate::plugin::{AGENT_PLUGIN_SCHEMA_V1, InstallSource, PluginScope};
+
+    #[cfg(feature = "mcp")]
+    struct RetryCloseTransport {
+        close_attempts: std::sync::atomic::AtomicUsize,
+    }
+
+    #[cfg(feature = "mcp")]
+    impl echo_integration::mcp::transport::McpTransport for RetryCloseTransport {
+        fn send(
+            &self,
+            request: echo_integration::mcp::types::JsonRpcRequest,
+        ) -> futures::future::BoxFuture<
+            '_,
+            crate::error::Result<echo_integration::mcp::types::JsonRpcResponse>,
+        > {
+            Box::pin(async move {
+                use echo_integration::mcp::types::{InitializeResult, ServerCapabilities};
+                let result = match request.method.as_str() {
+                    "initialize" => serde_json::to_value(InitializeResult {
+                        protocol_version: echo_integration::mcp::types::MCP_PROTOCOL_VERSION
+                            .to_string(),
+                        capabilities: ServerCapabilities::default(),
+                        server_info: None,
+                        instructions: None,
+                    })?,
+                    "tools/list" => serde_json::json!({"tools": []}),
+                    "resources/list" => serde_json::json!({"resources": []}),
+                    _ => serde_json::json!({}),
+                };
+                Ok(echo_integration::mcp::types::JsonRpcResponse {
+                    jsonrpc: "2.0".to_string(),
+                    id: request.id,
+                    result: Some(result),
+                    error: None,
+                })
+            })
+        }
+
+        fn notify(
+            &self,
+            _notification: echo_integration::mcp::types::JsonRpcNotification,
+        ) -> futures::future::BoxFuture<'_, crate::error::Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn close(&self) -> futures::future::BoxFuture<'_, crate::error::Result<()>> {
+            let attempt = self
+                .close_attempts
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            Box::pin(async move {
+                if attempt == 0 {
+                    Err(crate::error::ReactError::Other(
+                        "injected first close failure".to_string(),
+                    ))
+                } else {
+                    Ok(())
+                }
+            })
+        }
+
+        fn notification_rx(
+            &self,
+        ) -> Option<Arc<dyn echo_integration::mcp::types::JsonRpcNotificationReceiver>> {
+            None
+        }
+    }
 
     fn create_plugin(
         parent: &Path,
@@ -1389,7 +1503,82 @@ mod tests {
             .llm_client(Arc::new(crate::testing::MockLlmClient::new()))
             .build()?;
         let receipt = integrator.wire_prepared(&mut agent, &prepared).await?;
-        integrator.rollback(&mut agent, &receipt).await;
+        integrator.rollback(&mut agent, &receipt).await?;
+        Ok(())
+    }
+
+    #[cfg(feature = "mcp")]
+    #[tokio::test]
+    async fn partial_apply_rollback_failure_returns_retryable_receipt()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temporary = tempfile::tempdir()?;
+        let source = create_plugin(temporary.path(), "prepared.test", serde_json::json!([]))?;
+        let mut registry = registry(temporary.path());
+        registry.install(&InstallSource::Local(source), PluginScope::Local)?;
+        let integrator = PluginIntegrator::new();
+        let mut prepared = (*integrator.prepare(&mut registry).await).clone();
+        let valid = crate::mcp::McpConfigFile::parse(
+            r#"{"mcpServers":{"owned":{"command":"unused-test-command"}}}"#,
+        )?;
+        let invalid = crate::mcp::McpConfigFile::parse(r#"{"mcpServers":{"invalid":{}}}"#)?;
+        let plugin = prepared
+            .plugins
+            .first_mut()
+            .ok_or_else(|| missing("prepared plugin missing"))?;
+        plugin.mcp = Some(valid.clone());
+        let mut failing_plugin = plugin.clone();
+        failing_plugin.id = "invalid.test".to_string();
+        failing_plugin.skills.clear();
+        failing_plugin.hooks = None;
+        failing_plugin.mcp = Some(invalid);
+        prepared.plugins.push(failing_plugin);
+
+        let transport = Arc::new(RetryCloseTransport {
+            close_attempts: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let mcp_transport: Arc<dyn echo_integration::mcp::transport::McpTransport> =
+            transport.clone();
+        let client = crate::mcp::McpClient::from_transport("owned", mcp_transport)?.await?;
+        let config = valid
+            .to_server_configs()?
+            .pop()
+            .ok_or_else(|| missing("valid MCP target missing"))?;
+        let mut agent = crate::agent::ReactAgentBuilder::new()
+            .model("prepared-test")
+            .llm_client(Arc::new(crate::testing::MockLlmClient::new()))
+            .build()?;
+        agent
+            .tools
+            .mcp_manager
+            .install_prepared_target("owned", config, client)
+            .await?;
+
+        let error = integrator
+            .wire_prepared(&mut agent, &prepared)
+            .await
+            .err()
+            .ok_or_else(|| missing("partial apply unexpectedly succeeded"))?;
+        assert!(matches!(error, PluginWiringError::RollbackFailed { .. }));
+        let receipt = error
+            .cleanup_receipt()
+            .ok_or_else(|| missing("failed rollback lost cleanup receipt"))?;
+        assert_eq!(receipt.mcp_connected, ["owned"]);
+        assert_eq!(receipt.skills_loaded, ["example"]);
+        assert_eq!(
+            transport
+                .close_attempts
+                .load(std::sync::atomic::Ordering::Acquire),
+            1
+        );
+        assert!(agent.mcp_client("owned").is_none());
+
+        integrator.rollback(&mut agent, receipt).await?;
+        assert_eq!(
+            transport
+                .close_attempts
+                .load(std::sync::atomic::Ordering::Acquire),
+            2
+        );
         Ok(())
     }
 }

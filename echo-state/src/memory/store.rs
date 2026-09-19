@@ -240,6 +240,13 @@ struct FileStoreAuthority {
     _lease: ExclusiveFileLease,
     #[cfg(test)]
     persist_fault: Mutex<Option<PersistFault>>,
+    #[cfg(test)]
+    after_persist: Mutex<
+        Option<(
+            tokio::sync::oneshot::Sender<()>,
+            tokio::sync::oneshot::Receiver<()>,
+        )>,
+    >,
 }
 
 type FileStoreData = HashMap<String, HashMap<String, StoreItem>>;
@@ -310,6 +317,8 @@ impl FileStore {
             _lease: lease,
             #[cfg(test)]
             persist_fault: Mutex::new(None),
+            #[cfg(test)]
+            after_persist: Mutex::new(None),
         });
         registry.insert(path.clone(), Arc::downgrade(&authority));
         Ok(Self { path, authority })
@@ -393,7 +402,7 @@ impl FileStore {
         })?
     }
 
-    fn check_write_authority(&self) -> Result<()> {
+    fn check_authority(&self) -> Result<()> {
         let poison = self
             .authority
             .poison
@@ -447,11 +456,32 @@ impl FileStore {
 
     async fn transact<T, F>(&self, mutate: F) -> Result<T>
     where
-        T: Send,
-        F: FnOnce(&mut FileStoreData) -> (T, bool) + Send,
+        T: Send + 'static,
+        F: FnOnce(&mut FileStoreData) -> (T, bool) + Send + 'static,
+    {
+        let owner = Self {
+            path: self.path.clone(),
+            authority: Arc::clone(&self.authority),
+        };
+        let runtime = tokio::runtime::Handle::try_current().map_err(|error| {
+            MemoryError::IoError(format!(
+                "FileStore transaction requires a Tokio runtime: {error}"
+            ))
+        })?;
+        runtime
+            .spawn(async move { owner.transact_owned(mutate).await })
+            .await
+            .map_err(|error| {
+                MemoryError::IoError(format!("FileStore transaction owner failed: {error}"))
+            })?
+    }
+
+    async fn transact_owned<T, F>(&self, mutate: F) -> Result<T>
+    where
+        F: FnOnce(&mut FileStoreData) -> (T, bool),
     {
         let _transaction = self.authority.transaction.lock().await;
-        self.check_write_authority()?;
+        self.check_authority()?;
         let mut candidate = self.authority.data.read().await.clone();
         let (result, changed) = mutate(&mut candidate);
         if !changed {
@@ -467,6 +497,19 @@ impl FileStore {
             .persist_candidate(candidate, prior_bytes)
             .await
             .map_err(|failure| self.map_persist_failure(failure))?;
+        #[cfg(test)]
+        let after_persist = {
+            self.authority
+                .after_persist
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .take()
+        };
+        #[cfg(test)]
+        if let Some((captured, release)) = after_persist {
+            let _ = captured.send(());
+            let _ = release.await;
+        }
         self.publish_candidate(committed).await;
         Ok(result)
     }
@@ -508,21 +551,7 @@ impl FileStore {
 
     /// Flush in-memory data to disk.
     pub async fn flush_public(&self) -> Result<()> {
-        let _transaction = self.authority.transaction.lock().await;
-        self.check_write_authority()?;
-        let candidate = self.authority.data.read().await.clone();
-        let prior_bytes = self
-            .authority
-            .committed_bytes
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .clone();
-        let committed = self
-            .persist_candidate(candidate, prior_bytes)
-            .await
-            .map_err(|failure| self.map_persist_failure(failure))?;
-        self.publish_candidate(committed).await;
-        Ok(())
+        self.transact(|_| ((), true)).await
     }
 }
 
@@ -558,6 +587,7 @@ impl Store for FileStore {
         key: &'a str,
     ) -> BoxFuture<'a, Result<Option<StoreItem>>> {
         Box::pin(async move {
+            self.check_authority()?;
             let ns_key = namespace_key(namespace);
             let data = self.authority.data.read().await;
             Ok(data.get(&ns_key).and_then(|b| b.get(key)).cloned())
@@ -571,6 +601,7 @@ impl Store for FileStore {
         limit: usize,
     ) -> BoxFuture<'a, Result<Vec<StoreItem>>> {
         Box::pin(async move {
+            self.check_authority()?;
             let ns_key = namespace_key(namespace);
             let data = self.authority.data.read().await;
             let Some(bucket) = data.get(&ns_key) else {
@@ -621,6 +652,7 @@ impl Store for FileStore {
         prefix: Option<&'a [&'a str]>,
     ) -> BoxFuture<'a, Result<Vec<Vec<String>>>> {
         Box::pin(async move {
+            self.check_authority()?;
             let data = self.authority.data.read().await;
             let prefix = prefix.map(|values| {
                 values
@@ -642,6 +674,7 @@ impl Store for FileStore {
 
     fn list<'a>(&'a self, namespace: &'a [&'a str]) -> BoxFuture<'a, Result<Vec<StoreItem>>> {
         Box::pin(async move {
+            self.check_authority()?;
             let ns_key = namespace_key(namespace);
             let data = self.authority.data.read().await;
             Ok(data
@@ -1136,6 +1169,151 @@ mod tests {
         );
         drop(reopened);
         std::fs::remove_dir_all(root).map_err(MemoryError::from)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn poisoned_file_authority_rejects_every_persisted_truth_read_until_reopen() -> Result<()>
+    {
+        let root =
+            std::env::temp_dir().join(format!("echo-store-read-poison-{}", uuid::Uuid::new_v4()));
+        let path = root.join("store.json");
+        let first = FileStore::new(&path)?;
+        let second = FileStore::new(&path)?;
+        first
+            .put(&["authority"], "committed", json!("durable"))
+            .await?;
+        *first
+            .authority
+            .poison
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) =
+            Some("injected ambiguous persisted state".to_string());
+
+        assert!(second.get(&["authority"], "committed").await.is_err());
+        assert!(second.search(&["authority"], "durable", 10).await.is_err());
+        assert!(second.list(&["authority"]).await.is_err());
+        assert!(second.list_namespaces(None).await.is_err());
+        assert!(
+            second
+                .put(&["authority"], "blocked", json!("not accepted"))
+                .await
+                .is_err()
+        );
+
+        drop(first);
+        drop(second);
+        let reopened = FileStore::new(&path)?;
+        assert_eq!(
+            reopened
+                .get(&["authority"], "committed")
+                .await?
+                .map(|item| item.value),
+            Some(json!("durable"))
+        );
+        assert!(reopened.get(&["authority"], "blocked").await?.is_none());
+        drop(reopened);
+        std::fs::remove_dir_all(root).map_err(MemoryError::from)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancelled_caller_cannot_release_transaction_after_physical_commit() -> Result<()> {
+        let root = std::env::temp_dir().join(format!(
+            "echo-store-cancel-after-commit-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let path = root.join("store.json");
+        let store = Arc::new(FileStore::new(&path)?);
+        store.put(&["atomic"], "first", json!("before")).await?;
+        let (captured, committed) = tokio::sync::oneshot::channel();
+        let (release, resume) = tokio::sync::oneshot::channel();
+        *store
+            .authority
+            .after_persist
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some((captured, resume));
+
+        let mutating = tokio::spawn({
+            let store = Arc::clone(&store);
+            async move { store.put(&["atomic"], "first", json!("after")).await }
+        });
+        committed.await.map_err(|error| {
+            MemoryError::IoError(format!("physical commit hook was not reached: {error}"))
+        })?;
+        mutating.abort();
+        assert!(mutating.await.is_err_and(|error| error.is_cancelled()));
+
+        let following = tokio::spawn({
+            let store = Arc::clone(&store);
+            async move { store.put(&["atomic"], "second", json!("later")).await }
+        });
+        tokio::task::yield_now().await;
+        assert!(!following.is_finished());
+        release.send(()).map_err(|_| {
+            MemoryError::IoError("FileStore transaction owner disappeared after commit".into())
+        })?;
+        following
+            .await
+            .map_err(|error| MemoryError::IoError(format!("following write failed: {error}")))??;
+        assert_eq!(
+            store
+                .get(&["atomic"], "first")
+                .await?
+                .map(|item| item.value),
+            Some(json!("after"))
+        );
+        drop(store);
+        let reopened = FileStore::new(&path)?;
+        assert_eq!(
+            reopened
+                .get(&["atomic"], "first")
+                .await?
+                .map(|item| item.value),
+            Some(json!("after"))
+        );
+        assert_eq!(
+            reopened
+                .get(&["atomic"], "second")
+                .await?
+                .map(|item| item.value),
+            Some(json!("later"))
+        );
+        drop(reopened);
+        let output =
+            std::process::Command::new(std::env::current_exe().map_err(MemoryError::from)?)
+                .arg("memory::store::tests::file_store_cancel_restart_probe")
+                .arg("--exact")
+                .env("ECHO_FILE_STORE_CANCEL_RESTART_PROBE", &path)
+                .output()
+                .map_err(MemoryError::from)?;
+        assert!(
+            output.status.success(),
+            "FileStore child reopen failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        std::fs::remove_dir_all(root).map_err(MemoryError::from)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn file_store_cancel_restart_probe() -> Result<()> {
+        let Ok(path) = std::env::var("ECHO_FILE_STORE_CANCEL_RESTART_PROBE") else {
+            return Ok(());
+        };
+        let store = FileStore::new(path)?;
+        for (key, expected) in [("first", "after"), ("second", "later")] {
+            let actual = store
+                .get(&["atomic"], key)
+                .await?
+                .and_then(|item| item.value.as_str().map(str::to_string));
+            if actual.as_deref() != Some(expected) {
+                return Err(MemoryError::IoError(format!(
+                    "FileStore child reopen lost {key}: {actual:?}"
+                ))
+                .into());
+            }
+        }
         Ok(())
     }
 

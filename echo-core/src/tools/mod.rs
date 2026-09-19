@@ -304,6 +304,34 @@ pub enum ToolResultContent {
     ImageUrl { url: String, detail: Option<String> },
 }
 
+/// Authoritative execution facts produced by the tool implementation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "effect", rename_all = "snake_case")]
+pub enum ToolEffect {
+    FileRead {
+        path: String,
+    },
+    FileEdit {
+        path: String,
+    },
+    TestRun {
+        command: String,
+        passed: bool,
+        /// Exact count from a structured test report; absent when unknown.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        failure_count: Option<usize>,
+    },
+    SubagentRun {
+        agent_name: String,
+        task: String,
+        outcome: String,
+    },
+}
+
+/// Invocation-scoped continuation for effects whose producer settles after
+/// the tool call has returned (for example, a background Subagent dispatch).
+pub type ToolEffectSinkFn = Arc<dyn Fn(ToolEffect) -> BoxFuture<'static, ()> + Send + Sync>;
+
 impl std::fmt::Debug for ToolResultContent {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -353,6 +381,9 @@ pub struct ToolResult {
     /// Arbitrary key-value metadata (e.g. source URL, file path, duration, token count).
     #[serde(default)]
     pub metadata: HashMap<String, String>,
+    /// Confirmed execution facts emitted by their owning tool implementation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effects: Vec<ToolEffect>,
     /// Rich content projected only into the live model conversation.
     #[serde(skip)]
     pub model_content: Vec<ToolResultContent>,
@@ -372,6 +403,7 @@ impl ToolResult {
             mime_type: None,
             artifact: None,
             metadata: HashMap::new(),
+            effects: Vec::new(),
             model_content: Vec::new(),
         }
     }
@@ -393,6 +425,7 @@ impl ToolResult {
             mime_type: None,
             artifact: None,
             metadata: HashMap::new(),
+            effects: Vec::new(),
             model_content: Vec::new(),
         }
     }
@@ -410,6 +443,7 @@ impl ToolResult {
             mime_type: None,
             artifact: None,
             metadata: HashMap::new(),
+            effects: Vec::new(),
             model_content: Vec::new(),
         }
     }
@@ -429,6 +463,7 @@ impl ToolResult {
             mime_type: None,
             artifact: None,
             metadata: HashMap::new(),
+            effects: Vec::new(),
             model_content: Vec::new(),
         }
     }
@@ -465,6 +500,11 @@ impl ToolResult {
     pub fn with_failure(mut self, failure: ToolFailure) -> Self {
         self.success = false;
         self.failure = Some(failure);
+        self
+    }
+
+    pub fn with_effect(mut self, effect: ToolEffect) -> Self {
+        self.effects.push(effect);
         self
     }
 
@@ -1492,6 +1532,9 @@ pub struct ToolContext {
     pub execution_id: Option<String>,
     /// Stable identity for this logical tool call and all of its retry attempts.
     pub call_id: Option<String>,
+    /// Optional effect observer bound by the caller to this exact trace run
+    /// and tool call. A shared tool must not retain it across invocations.
+    pub effect_sink: Option<ToolEffectSinkFn>,
     /// User message that triggered the current turn. Delegation tools forward
     /// this typed value so binary attachments remain intact.
     pub active_message: Option<crate::llm::types::Message>,
@@ -1534,6 +1577,7 @@ impl std::fmt::Debug for ToolContext {
             .field("message_id", &self.message_id)
             .field("execution_id", &self.execution_id)
             .field("call_id", &self.call_id)
+            .field("effect_sink", &self.effect_sink.as_ref().map(|_| "<sink>"))
             .field("has_active_message", &self.active_message.is_some())
             .field("output_artifacts", &self.output_artifacts)
             .field(
@@ -1809,6 +1853,24 @@ mod tool_context_tests {
     }
 
     #[test]
+    fn test_effect_without_exact_count_keeps_unknown_distinct_from_zero()
+    -> std::result::Result<(), serde_json::Error> {
+        let effect: ToolEffect = serde_json::from_value(serde_json::json!({
+            "effect": "test_run",
+            "command": "cargo test",
+            "passed": false
+        }))?;
+        assert!(matches!(
+            effect,
+            ToolEffect::TestRun {
+                failure_count: None,
+                ..
+            }
+        ));
+        Ok(())
+    }
+
+    #[test]
     fn permanent_and_partial_failures_cannot_be_made_automatically_retryable() {
         let permanent = ToolFailure::new(ToolFailureCategory::Permanent).retryable();
         let partial = ToolFailure::new(ToolFailureCategory::PartialSideEffect)
@@ -1854,6 +1916,7 @@ mod tool_context_tests {
             message_id: None,
             execution_id: None,
             call_id: None,
+            effect_sink: None,
             output_artifacts: None,
             tool_visibility: None,
             script_execution_profile: None,

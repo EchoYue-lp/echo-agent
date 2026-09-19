@@ -66,6 +66,14 @@ impl SandboxExecutor for SandboxManager {
         })
     }
 
+    fn is_available_at(&self, minimum: IsolationLevel) -> BoxFuture<'_, bool> {
+        Box::pin(async move {
+            self.select_executor(minimum)
+                .await
+                .is_ok_and(|executor| executor.isolation_level() >= minimum)
+        })
+    }
+
     fn execute(&self, command: SandboxCommand) -> BoxFuture<'_, Result<ExecutionResult>> {
         Box::pin(async move { SandboxManager::execute(self, command).await })
     }
@@ -78,7 +86,12 @@ impl SandboxExecutor for SandboxManager {
             let required = self.policy.evaluate(&command);
             let executor = self.select_executor(required).await?;
             let actual = executor.isolation_level();
-            if actual < required && !self.allow_fallback {
+            if actual < required
+                && (!self.allow_fallback
+                    || command
+                        .minimum_isolation
+                        .is_some_and(|minimum| actual < minimum))
+            {
                 return Err(echo_core::error::ReactError::Sandbox(Box::new(
                     SandboxError::PermissionDenied(format!(
                         "Cannot downgrade from {required} to {actual}: no executor meets the required isolation level"
@@ -152,6 +165,19 @@ impl SandboxExecutor for SandboxManager {
         Box::pin(async move {
             let required = self.policy.evaluate_with_limits(&command, Some(&limits));
             self.execute_at_level(command, required, Some(limits), cancel)
+                .await
+        })
+    }
+
+    fn execute_with_isolation_receipt(
+        &self,
+        command: SandboxCommand,
+        limits: ResourceLimits,
+        cancel: Option<Arc<CancellationToken>>,
+    ) -> BoxFuture<'_, Result<(ExecutionResult, IsolationLevel)>> {
+        Box::pin(async move {
+            let required = self.policy.evaluate_with_limits(&command, Some(&limits));
+            self.execute_at_level_with_receipt(command, required, Some(limits), cancel)
                 .await
         })
     }
@@ -295,13 +321,29 @@ impl SandboxManager {
         limits: Option<ResourceLimits>,
         cancel: Option<Arc<CancellationToken>>,
     ) -> Result<ExecutionResult> {
+        self.execute_at_level_with_receipt(command, required, limits, cancel)
+            .await
+            .map(|(result, _actual)| result)
+    }
+
+    async fn execute_at_level_with_receipt(
+        &self,
+        command: SandboxCommand,
+        required: IsolationLevel,
+        limits: Option<ResourceLimits>,
+        cancel: Option<Arc<CancellationToken>>,
+    ) -> Result<(ExecutionResult, IsolationLevel)> {
         // 选择满足要求的最佳执行器
         let executor = self.select_executor(required).await?;
 
         // 当允许 fallback 时，可能会选择低于所需隔离级别的执行器。
         let actual = executor.isolation_level();
         if actual < required {
-            if !self.allow_fallback {
+            if !self.allow_fallback
+                || command
+                    .minimum_isolation
+                    .is_some_and(|minimum| actual < minimum)
+            {
                 return Err(echo_core::error::ReactError::Sandbox(Box::new(
                     SandboxError::PermissionDenied(format!(
                         "Cannot downgrade from {} to {}: no executor meets the required isolation level",
@@ -325,14 +367,15 @@ impl SandboxManager {
             "Sandbox routing"
         );
 
-        match limits {
+        let result = match limits {
             Some(limits) => {
                 executor
                     .execute_with_limits_and_cancel(command, limits, cancel)
                     .await
             }
             None => executor.execute(command).await,
-        }
+        }?;
+        Ok((result, actual))
     }
 
     /// 选择最佳执行器
@@ -493,6 +536,66 @@ mod tests {
             SandboxCommand::shell("echo unsafe").with_minimum_isolation(IsolationLevel::OsSandbox);
         let result = manager.execute(command).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn explicit_minimum_never_falls_back_to_process() {
+        let mut manager = SandboxManager::local_only();
+        manager.set_allow_fallback(true);
+        assert!(manager.is_available().await);
+        assert!(manager.is_available_at(IsolationLevel::Process).await);
+        assert!(!manager.is_available_at(IsolationLevel::OsSandbox).await);
+        let command = SandboxCommand::shell("echo must-not-run")
+            .with_minimum_isolation(IsolationLevel::OsSandbox);
+        assert!(manager.execute(command.clone()).await.is_err());
+        assert!(
+            manager
+                .execute_with_limits(command.clone(), ResourceLimits::default())
+                .await
+                .is_err()
+        );
+        assert!(manager.execute_stream(command).await.is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unavailable_configured_container_does_not_claim_available_os_isolation() -> Result<()>
+    {
+        let mut manager = SandboxManager::local_only();
+        manager.docker = Some(Arc::new(DockerSandbox::with_program(
+            DockerConfig::default(),
+            std::env::temp_dir().join(format!(
+                "missing-echo-docker-{}",
+                uuid::Uuid::new_v4().simple()
+            )),
+        )));
+        manager.set_allow_fallback(true);
+
+        assert!(manager.isolation_level() >= IsolationLevel::Container);
+        assert!(manager.is_available().await);
+        assert!(!manager.is_available_at(IsolationLevel::OsSandbox).await);
+        assert!(
+            manager
+                .execute(
+                    SandboxCommand::shell("echo must-not-run")
+                        .with_minimum_isolation(IsolationLevel::OsSandbox)
+                )
+                .await
+                .is_err()
+        );
+
+        manager.set_policy(SandboxPolicy::strict());
+        let (result, actual) = manager
+            .execute_with_isolation_receipt(
+                SandboxCommand::shell("echo fallback")
+                    .with_minimum_isolation(IsolationLevel::Process),
+                ResourceLimits::default(),
+                None,
+            )
+            .await?;
+        assert_eq!(actual, IsolationLevel::Process);
+        assert_eq!(result.sandbox_type, "local");
+        Ok(())
     }
 
     #[tokio::test]
