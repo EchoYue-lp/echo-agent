@@ -11,7 +11,7 @@ challenges:
   memory-mutation-and-audit:
     revision: f1e9027246760661144786e9e35615cd46d580c6
     source_refs: [src/evolution/layer.rs, src/evolution/audit.rs, src/evolution/review.rs]
-    evidence_refs: [evidence.provider-protocol-quality, evidence.persistence-observation]
+    evidence_refs: [evidence.provider-protocol-quality, evidence.persistence-observation, evidence.evolution-memory-rollback-repair, evidence.evolution-memory-rollback-verification]
   namespace-and-cold-tier:
     revision: f1e9027246760661144786e9e35615cd46d580c6
     source_refs: [src/evolution/layer.rs, docs/en/25-self-improvement.md, docs/zh/25-self-improvement.md]

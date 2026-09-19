@@ -49,7 +49,7 @@ explicit user-save/correction paths may write automatically, but the system **ne
 - Applies skill merges, patches, or rule promotions (it only generates proposals, applied by humans via commands)
 - Promotes memory from untrusted sources (tool output) into the hot layer or rules
 
-Layered memory mutations use a durable recovery operation before writing Store or `MEMORY.md`; their committed business changes are queryable in `change-log.jsonl`. This does not provide a later rollback API for arbitrary memory, skill, or rule changes (tracked separately as #52). Memory writes also undergo secret scanning and prompt-injection detection.
+Layered memory mutations use a durable recovery operation before writing Store or `MEMORY.md`; their committed business changes are queryable in `change-log.jsonl`. Canonical layered memory also supports later rollback by settled `ChangeId` or `BatchId`; Skill and Rule rollback remain separate contracts (#54/#94/host owner). Memory writes also undergo secret scanning and prompt-injection detection.
 
 ---
 
@@ -64,7 +64,7 @@ Layered memory mutations use a durable recovery operation before writing Store o
 | **TrajectorySaver** | Convert runs into ShareGPT fine-tune data | `improve/` |
 | **TypedMemoryStore** | Typed memory read/write with metadata | `echo-state` |
 | **MemoryLayerManager** | Hot/warm/cold tiered memory management | `evolution/` |
-| **ChangeLog** | Queryable business change audit (later rollback is not implemented) | `evolution/` |
+| **ChangeLog** | Append-only queryable business audit; `MemoryLayerManager` owns generation-fenced later memory rollback | `evolution/` |
 | **TriggerDetector** | Online conversation signals → new memory | `evolution/` |
 | **MemoryReviewer** | Staleness scoring, conflict detection, merge, archival (GC) | `evolution/` |
 | **Curator** | Skill lifecycle state machine | `evolution/` |
@@ -404,7 +404,15 @@ for report in monitor.analyze_all_skills().await? {
 - **Pre-write**: secret scanning (AWS `AKIA...`, GitHub `ghp_...`, `BEGIN PRIVATE KEY`, etc.; matches replaced with `[REDACTED]`) + prompt-injection detection (e.g. "ignore previous" patterns)
 - **Untrusted-input isolation**: memory from tool output gets `risk = High` and cannot be promoted to hot layer or rules without human approval
 - **Rate limiting**: max 50 memory writes per session, max 5 skill patches per day
-- `ChangeLog` records committed changes; later rollback requires a separate implementation (#52)
+- `ChangeLog` remains an append-only audit. Later memory rollback is owned by
+  `MemoryLayerManager::preview_rollback` and `rollback_memory`: target a
+  `ChangeId` or complete `BatchId`, require every affected key to remain at the
+  batch's latest journal generation, then commit a durable inverse batch.
+  Results distinguish `Ready`, `Conflict`, and `HistoryUnavailable`; a stable
+  request ID makes retries return the original receipt. Its append-only audit
+  records the actual inverse type and exact before/after warm/hot projection.
+  Merge members are always rolled back as one batch. Skill and Rule rollback
+  remain outside this memory-only contract (#54/#94/host owner).
 
 ---
 

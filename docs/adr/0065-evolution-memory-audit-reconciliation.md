@@ -113,6 +113,46 @@ at startup, and pass that manager to the merger. This deliberately removes the
 second write authority; a thin adapter preserving the old constructor would
 still permit unaudited partial merges.
 
+## Later Rollback Extension (#52)
+
+The earlier decision deliberately left later rollback open. This extension
+keeps `ChangeLog` append-only and adds rollback only to the canonical
+`MemoryLayerManager` journal. A caller targets a typed `ChangeId` or `BatchId`;
+the manager resolves that target to one retained, settled journal batch. A
+merge member always expands to the complete merge batch. The target is
+rollbackable only when every affected key still points to that batch's latest
+journal generation. This is a generation/CAS check, so an ABA value that happens
+to compare equal is still rejected after a newer journal fact.
+
+The manager first exposes a preview (`Ready`, `Conflict`, or
+`HistoryUnavailable`). Applying a ready preview writes one durable inverse
+batch whose private serde-default lineage contains the stable request ID,
+target batch ID, and target generation. That inverse goes through the existing
+Prepared -> projection -> idempotent audit -> Settled path. Retrying an already
+settled request returns the original receipt; reusing a request ID for another
+target fails closed. A rollback is itself a new batch, so rollback-of-rollback
+uses a new request ID and the same tip check. The old snapshot-only
+`restore_merge_snapshots` entry point is retired because it cannot prove the
+journal tip; `AppliedMemoryMerge` now exposes the durable merge batch ID.
+
+Each inverse `ChangeEntry` describes the compensation that actually occurred:
+Create becomes Delete, Delete becomes Create, Promote becomes Demote, Demote
+becomes Promote, and Update or Merge restoration becomes Update. Its existing
+`before` and `after` JSON values hold the exact warm/hot projection summaries,
+layer names, original change ID, target batch ID, and target generation. This
+keeps the public `ChangeEntry` schema compatible while making the append-only
+business audit usable for machine review.
+
+This follows the durable intent of [Git's `revert`](https://git-scm.com/docs/git-revert)
+(a compensating commit rather than history erasure), Kubernetes
+[`resourceVersion`](https://kubernetes.io/docs/reference/using-api/api-concepts/#resource-versions)
+(optimistic concurrency against a specific observed version), Temporal's
+[idempotent activity guidance](https://docs.temporal.io/activity-definition#idempotency),
+and KurrentDB's [expected stream version and retention model](https://docs.kurrent.io/server/latest/concepts/streams)
+(append-only facts, expected version, explicit history retention). We keep the
+framework boundary narrower: Skill and Rule rollback policy remains with #54,
+#94 and the host owner; this extension covers memory canonical state only.
+
 ## Consequences
 
 There is no cross-file atomic visibility. An independent holder of the raw
@@ -128,15 +168,18 @@ preserved when the projection must be repaired. The journal can rebuild
 ephemeral stores for every retained operation; retaining the complete history
 is therefore required until a future, explicitly verified compaction scheme.
 
-The journal retains prepared/settled history and full target values. Reconcile
+The journal retains prepared/settled history and full target values, including
+rollback lineage. Reconcile
 currently scans the full history on each manager operation/read to prove that
 even an already-settled Store projection did not roll back; this is linear in
 retained journal length and can become expensive. Any bounded checkpoint must
 prove its own durable generation/sequence binding and retained recovery window
-before replacing that scan. Journal growth, retention, multi-key later rollback, raw Store readers, and mutations
-outside the layered manager have separate ownership; this ADR does not close
-the `ChangeLog` later-rollback Finding (#52). Existing `ChangeLog` audit
-content remains unchanged. Framework mechanics live in `echo-agent`; EKO
+before replacing that scan. Raw Store readers can still observe a projection
+before reconciliation, and rollback is unavailable after journal history is
+explicitly compacted or lost. Skill/Rule rollback, host approval policy, and
+mutations outside the layered manager have separate ownership. Existing
+`ChangeLog` audit content remains unchanged. Framework mechanics live in
+`echo-agent`; EKO
 startup/scheduling/UI policy stays in the application.
 
 ## Verification
@@ -151,4 +194,8 @@ lint, and workspace gates remain the delivery boundary.
 Additional two-manager interleavings prove that a stale warm promotion, hot
 demotion, or warm archival decision cannot overwrite a newer write; unusual
 whitespace and multiline content survive hot read, restart recovery, demotion,
-and the next operation.
+and the next operation. The #52 candidate additionally covers single-key and
+multi-key later rollback, restart receipt recovery, request-id retry/conflict,
+non-tip and ABA fencing, rollback-of-rollback, legacy lineage decode, and the
+public demo51 rollback contract. Finding #52 remains open until independent
+review, final semantic gates, and remote-main delivery.

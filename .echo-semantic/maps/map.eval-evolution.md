@@ -44,9 +44,9 @@ scenarios:
     source_refs: [src/evolution/layer.rs, src/evolution/mutation.rs, src/evolution/audit.rs, src/evolution/review.rs, src/evolution/runtime_integration.rs, src/tools/builtin/memory.rs, src/memory_promoter.rs, src/agent/react/run/context.rs, src/evolution/security.rs, docs/adr/0065-evolution-memory-audit-reconciliation.md]
     finding_refs: [finding.evolution-audit-atomicity, finding.evolution-changelog-rollback-authority, finding.evolution-doc-namespace, finding.pre-compaction-memory-trust-provenance]
     rule_refs: [rule.quality-observation-boundary]
-    evidence_refs: [evidence.evolution-memory-audit-repair, evidence.evolution-memory-audit-verification]
-    unknown: durable prepare/reconcile候选尚待独立复审与远端主线门禁；raw Store读者可暂见中间态，later rollback/旧namespace仍属独立范围
-    next_step: 在集成结果复核跨Store可见性、完整门禁与Finding关闭条件；rollback和旧namespace分别依其Finding处置
+    evidence_refs: [evidence.evolution-memory-audit-repair, evidence.evolution-memory-audit-verification, evidence.evolution-memory-rollback-repair, evidence.evolution-memory-rollback-verification]
+    unknown: durable prepare/reconcile候选尚待独立复审与远端主线门禁；raw Store读者可暂见中间态，Skill/Rule/host rollback与旧namespace仍属独立范围
+    next_step: 在集成结果复核跨Store可见性、完整门禁与Finding关闭条件；memory rollback候选依#52独立复审，Skill/Rule/host rollback依#54/#94
   evolution-skill-lifecycle:
     status: needs_review
     source_refs: [src/evolution/curator.rs, src/evolution/draft.rs, src/evolution/merge.rs, src/evolution/patch.rs, src/evolution/review.rs, src/evolution/security.rs]
@@ -92,7 +92,7 @@ Eval cases/constraints、grader、explicit config、memory source/risk/status �
 
 ## 生命周期与失败路径
 
-Trace start/finalize；Eval run/deadline/cancel/bounded settlement/correlate trace/grade/report，未settled timeout跳过RunStore与评分并保留generation；trace缺失保持可选，歧义或存储不一致失败；Improve iterate/stop/export；Evolution detect/review/prepare/project/audit/settle/reconcile；later rollback未实现。
+Trace start/finalize；Eval run/deadline/cancel/bounded settlement/correlate trace/grade/report，未settled timeout跳过RunStore与评分并保留generation；trace缺失保持可选，歧义或存储不一致失败；Improve iterate/stop/export；Evolution detect/review/prepare/project/audit/settle/reconcile；memory later rollback以ChangeId/BatchId解析canonical journal batch并以generation CAS、inverse lineage和request-id幂等结算，Skill/Rule/host rollback未归入本边界。
 
 ## 权限与敏感信息
 

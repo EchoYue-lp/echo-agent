@@ -36,12 +36,30 @@ pub(super) struct MemoryOperation {
 pub(super) struct MemoryOperationBatch {
     pub id: String,
     pub operations: Vec<MemoryOperation>,
+    /// Forward/rollback lineage is private journal metadata. `None` is the
+    /// legacy forward form so old journal records remain decodable.
+    #[serde(default)]
+    pub origin: Option<MemoryOperationOrigin>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(super) struct MemoryOperationOrigin {
+    pub request_id: String,
+    pub target_batch_id: String,
+    pub target_generation: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 enum MemoryOperationEvent {
     Prepared(MemoryOperationBatch),
     Settled { id: String },
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct MemoryOperationHistory {
+    pub batch: MemoryOperationBatch,
+    pub settled: bool,
+    pub generation: u64,
 }
 
 pub(super) struct MemoryOperationJournal {
@@ -98,6 +116,7 @@ impl MemoryOperationJournal {
         self.prepare_batch(MemoryOperationBatch {
             id: operation.id.clone(),
             operations: vec![operation],
+            origin: None,
         })
     }
 
@@ -128,10 +147,18 @@ impl MemoryOperationJournal {
     }
 
     pub fn history(&self) -> Result<Vec<(MemoryOperationBatch, bool)>> {
+        Ok(self
+            .history_with_generations()?
+            .into_iter()
+            .map(|item| (item.batch, item.settled))
+            .collect())
+    }
+
+    pub fn history_with_generations(&self) -> Result<Vec<MemoryOperationHistory>> {
         self.journal.sync_data()?;
         let mut identities = HashMap::<String, usize>::new();
         let mut known_ids = HashSet::<String>::new();
-        let mut history = Vec::<(MemoryOperationBatch, bool)>::new();
+        let mut history = Vec::<MemoryOperationHistory>::new();
         let mut sequence = 0_u64;
         loop {
             let records = self.journal.replay_after(sequence, 512)?;
@@ -149,7 +176,11 @@ impl MemoryOperationJournal {
                             )));
                         }
                         identities.insert(batch.id.clone(), index);
-                        history.push((batch.clone(), false));
+                        history.push(MemoryOperationHistory {
+                            batch: batch.clone(),
+                            settled: false,
+                            generation: record.sequence,
+                        });
                     }
                     MemoryOperationEvent::Settled { id } => {
                         let Some(index) = identities.remove(id) else {
@@ -157,17 +188,33 @@ impl MemoryOperationJournal {
                                 "memory operation {id} has no pending prepare fact"
                             )));
                         };
-                        let Some((_, settled)) = history.get_mut(index) else {
+                        let Some(item) = history.get_mut(index) else {
                             return Err(ReactError::Other(format!(
                                 "memory operation {id} history index is invalid"
                             )));
                         };
-                        *settled = true;
+                        item.settled = true;
                     }
                 }
                 sequence = record.sequence;
             }
         }
         Ok(history)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MemoryOperationBatch;
+
+    #[test]
+    fn legacy_batch_without_lineage_decodes_as_forward_history() -> Result<(), serde_json::Error> {
+        let legacy = serde_json::json!({
+            "id": "legacy-batch",
+            "operations": []
+        });
+        let decoded = serde_json::from_value::<MemoryOperationBatch>(legacy)?;
+        assert!(decoded.origin.is_none());
+        Ok(())
     }
 }

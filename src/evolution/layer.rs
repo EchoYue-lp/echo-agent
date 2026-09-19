@@ -50,8 +50,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::Mutex;
 
-use super::audit::{ChangeEntryBuilder, ChangeLog, ChangeType, EntityType};
-use super::mutation::{HotValue, MemoryOperation, MemoryOperationBatch, MemoryOperationJournal};
+use super::audit::{ChangeEntryBuilder, ChangeFilter, ChangeLog, ChangeType, EntityType};
+use super::mutation::{
+    HotValue, MemoryOperation, MemoryOperationBatch, MemoryOperationHistory,
+    MemoryOperationJournal, MemoryOperationOrigin,
+};
 use super::review::{
     AppliedMemoryMerge, ConflictDetector, ConflictGroup, MemoryConflictProposal,
     MemoryMergeSnapshot, MemoryMerger, MergeResult, ordered_conflict_entries,
@@ -221,6 +224,73 @@ pub struct LayerChangeResult {
     pub to_layer: MemoryLayer,
     /// Reason for the change.
     pub reason: String,
+}
+
+/// A typed, stable target for a later memory rollback.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MemoryRollbackTarget {
+    /// Roll back the durable batch containing this ChangeLog entry.
+    ChangeId(String),
+    /// Roll back a complete durable journal batch.
+    BatchId(String),
+}
+
+impl MemoryRollbackTarget {
+    pub fn change_id(value: impl Into<String>) -> Self {
+        Self::ChangeId(value.into())
+    }
+
+    pub fn batch_id(value: impl Into<String>) -> Self {
+        Self::BatchId(value.into())
+    }
+}
+
+/// A stable explanation for a rollback target that cannot safely be applied.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryRollbackConflict {
+    pub target_batch_id: Option<String>,
+    pub affected_keys: Vec<String>,
+    pub reason: String,
+}
+
+/// A stable explanation for unavailable or expired journal history.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryRollbackHistoryUnavailable {
+    pub target: MemoryRollbackTarget,
+    pub reason: String,
+}
+
+/// Preview of a later rollback before it creates an inverse batch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryRollbackPreview {
+    pub target_batch_id: String,
+    pub target_generation: u64,
+    pub affected_keys: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MemoryRollbackPreviewOutcome {
+    Ready(MemoryRollbackPreview),
+    Conflict(MemoryRollbackConflict),
+    HistoryUnavailable(MemoryRollbackHistoryUnavailable),
+}
+
+/// Durable receipt for a committed inverse batch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryRollbackReceipt {
+    pub request_id: String,
+    pub target_batch_id: String,
+    pub inverse_batch_id: String,
+    pub target_generation: u64,
+    pub affected_keys: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MemoryRollbackOutcome {
+    Applied(MemoryRollbackReceipt),
+    AlreadyApplied(MemoryRollbackReceipt),
+    Conflict(MemoryRollbackConflict),
+    HistoryUnavailable(MemoryRollbackHistoryUnavailable),
 }
 
 // ── MemoryLayerManager ─────────────────────────────────────────────────
@@ -579,6 +649,330 @@ impl MemoryLayerManager {
         self.reconcile_pending_locked().await
     }
 
+    fn rollback_target_batch_id(
+        &self,
+        target: &MemoryRollbackTarget,
+        history: &[MemoryOperationHistory],
+    ) -> Result<Option<String>> {
+        match target {
+            MemoryRollbackTarget::BatchId(batch_id) => Ok(history
+                .iter()
+                .find(|item| item.batch.id == *batch_id)
+                .map(|item| item.batch.id.clone())),
+            MemoryRollbackTarget::ChangeId(change_id) => {
+                let known = self
+                    .change_log
+                    .query(&ChangeFilter::new())?
+                    .into_iter()
+                    .any(|entry| entry.change_id == *change_id);
+                if !known {
+                    return Ok(None);
+                }
+                Ok(history
+                    .iter()
+                    .find(|item| {
+                        item.batch
+                            .operations
+                            .iter()
+                            .any(|operation| operation.audit.change_id == *change_id)
+                    })
+                    .map(|item| item.batch.id.clone()))
+            }
+        }
+    }
+
+    fn rollback_resolution<'a>(
+        &self,
+        target: &MemoryRollbackTarget,
+        history: &'a [MemoryOperationHistory],
+    ) -> Result<std::result::Result<&'a MemoryOperationHistory, MemoryRollbackPreviewOutcome>> {
+        let Some(batch_id) = self.rollback_target_batch_id(target, history)? else {
+            return Ok(Err(MemoryRollbackPreviewOutcome::HistoryUnavailable(
+                MemoryRollbackHistoryUnavailable {
+                    target: target.clone(),
+                    reason: "target is absent from the retained ChangeLog or operation journal"
+                        .to_string(),
+                },
+            )));
+        };
+        let Some(item) = history.iter().find(|item| item.batch.id == batch_id) else {
+            return Ok(Err(MemoryRollbackPreviewOutcome::HistoryUnavailable(
+                MemoryRollbackHistoryUnavailable {
+                    target: target.clone(),
+                    reason: "target journal batch is unavailable".to_string(),
+                },
+            )));
+        };
+        let keys = item
+            .batch
+            .operations
+            .iter()
+            .map(|operation| operation.key.clone())
+            .collect::<Vec<_>>();
+        if !item.settled {
+            return Ok(Err(MemoryRollbackPreviewOutcome::HistoryUnavailable(
+                MemoryRollbackHistoryUnavailable {
+                    target: target.clone(),
+                    reason: "target batch is not settled".to_string(),
+                },
+            )));
+        }
+        for key in &keys {
+            let latest = history
+                .iter()
+                .filter(|candidate| {
+                    candidate
+                        .batch
+                        .operations
+                        .iter()
+                        .any(|operation| operation.key == *key)
+                })
+                .max_by_key(|candidate| candidate.generation);
+            if latest.map(|candidate| candidate.batch.id.as_str()) != Some(batch_id.as_str()) {
+                return Ok(Err(MemoryRollbackPreviewOutcome::Conflict(
+                    MemoryRollbackConflict {
+                        target_batch_id: Some(batch_id),
+                        affected_keys: keys.clone(),
+                        reason: format!(
+                            "target is not the latest journal generation for memory key {key}"
+                        ),
+                    },
+                )));
+            }
+        }
+        Ok(Ok(item))
+    }
+
+    /// Preview a later rollback without creating an inverse batch.
+    pub async fn preview_rollback(
+        &self,
+        target: &MemoryRollbackTarget,
+    ) -> Result<MemoryRollbackPreviewOutcome> {
+        let _serial = self.operation_lock.lock().await;
+        self.reconcile_pending_locked().await?;
+        let history = self.operation_journal()?.history_with_generations()?;
+        match self.rollback_resolution(target, &history)? {
+            Ok(item) => Ok(MemoryRollbackPreviewOutcome::Ready(MemoryRollbackPreview {
+                target_batch_id: item.batch.id.clone(),
+                target_generation: item.generation,
+                affected_keys: item
+                    .batch
+                    .operations
+                    .iter()
+                    .map(|operation| operation.key.clone())
+                    .collect(),
+            })),
+            Err(outcome) => Ok(outcome),
+        }
+    }
+
+    /// Alias for callers that use the shorter rollback vocabulary.
+    pub async fn preview(
+        &self,
+        target: &MemoryRollbackTarget,
+    ) -> Result<MemoryRollbackPreviewOutcome> {
+        self.preview_rollback(target).await
+    }
+
+    fn rollback_receipt(
+        request_id: &str,
+        target_batch_id: &str,
+        target_generation: u64,
+        inverse: &MemoryOperationHistory,
+    ) -> MemoryRollbackReceipt {
+        MemoryRollbackReceipt {
+            request_id: request_id.to_owned(),
+            target_batch_id: target_batch_id.to_owned(),
+            inverse_batch_id: inverse.batch.id.clone(),
+            target_generation,
+            affected_keys: inverse
+                .batch
+                .operations
+                .iter()
+                .map(|operation| operation.key.clone())
+                .collect(),
+        }
+    }
+
+    fn inverse_change_type(change_type: ChangeType) -> ChangeType {
+        match change_type {
+            ChangeType::Create => ChangeType::Delete,
+            ChangeType::Delete => ChangeType::Create,
+            ChangeType::Promote => ChangeType::Demote,
+            ChangeType::Demote => ChangeType::Promote,
+            ChangeType::Update | ChangeType::Merge => ChangeType::Update,
+        }
+    }
+
+    fn rollback_projection_summary(
+        warm: &Option<serde_json::Value>,
+        hot: &Option<HotValue>,
+        original_change_id: &str,
+        target_batch_id: &str,
+        target_generation: u64,
+    ) -> serde_json::Value {
+        let layer = if hot.is_some() {
+            "hot"
+        } else if warm.is_some() {
+            "warm"
+        } else {
+            "absent"
+        };
+        serde_json::json!({
+            "layer": layer,
+            "warm": warm,
+            "hot": hot,
+            "rollback_of": original_change_id,
+            "target_batch_id": target_batch_id,
+            "target_generation": target_generation,
+        })
+    }
+
+    /// Create and settle one durable inverse batch for a settled memory batch.
+    ///
+    /// The request ID is persisted in the inverse batch lineage. Replaying the
+    /// same request returns `AlreadyApplied`; reusing it for another target
+    /// fails closed. Each inverse is a new batch, so rollback-of-rollback is
+    /// ordinary later rollback with a fresh request ID.
+    pub async fn rollback_memory(
+        &self,
+        request_id: &str,
+        target: MemoryRollbackTarget,
+    ) -> Result<MemoryRollbackOutcome> {
+        if request_id.is_empty() {
+            return Err(ReactError::Other(
+                "rollback request ID must not be empty".into(),
+            ));
+        }
+        let _serial = self.operation_lock.lock().await;
+        self.reconcile_pending_locked().await?;
+        let history = self.operation_journal()?.history_with_generations()?;
+
+        if let Some(existing) = history.iter().find(|item| {
+            item.batch
+                .origin
+                .as_ref()
+                .is_some_and(|origin| origin.request_id == request_id)
+        }) {
+            let requested_batch = self.rollback_target_batch_id(&target, &history)?;
+            let origin = existing.batch.origin.as_ref().ok_or_else(|| {
+                ReactError::Other("rollback lineage disappeared from journal history".into())
+            })?;
+            if requested_batch.as_deref() != Some(origin.target_batch_id.as_str()) {
+                return Ok(MemoryRollbackOutcome::Conflict(MemoryRollbackConflict {
+                    target_batch_id: requested_batch,
+                    affected_keys: existing
+                        .batch
+                        .operations
+                        .iter()
+                        .map(|operation| operation.key.clone())
+                        .collect(),
+                    reason: "request ID was already used for a different rollback target"
+                        .to_string(),
+                }));
+            }
+            let receipt = Self::rollback_receipt(
+                request_id,
+                &origin.target_batch_id,
+                origin.target_generation,
+                existing,
+            );
+            return if existing.settled {
+                Ok(MemoryRollbackOutcome::AlreadyApplied(receipt))
+            } else {
+                Err(ReactError::Other(
+                    "rollback request remained unsettled after reconciliation".into(),
+                ))
+            };
+        }
+
+        let item = match self.rollback_resolution(&target, &history)? {
+            Ok(item) => item,
+            Err(MemoryRollbackPreviewOutcome::Conflict(conflict)) => {
+                return Ok(MemoryRollbackOutcome::Conflict(conflict));
+            }
+            Err(MemoryRollbackPreviewOutcome::HistoryUnavailable(unavailable)) => {
+                return Ok(MemoryRollbackOutcome::HistoryUnavailable(unavailable));
+            }
+            Err(MemoryRollbackPreviewOutcome::Ready(_)) => {
+                return Err(ReactError::Other(
+                    "rollback resolution returned an invalid ready state".into(),
+                ));
+            }
+        };
+        let inverse_batch_id = uuid::Uuid::new_v4().to_string();
+        let mut operations = Vec::with_capacity(item.batch.operations.len());
+        for operation in &item.batch.operations {
+            let operation_id = uuid::Uuid::new_v4().to_string();
+            let audit = ChangeEntryBuilder::new(
+                EntityType::Memory,
+                &operation.key,
+                Self::inverse_change_type(operation.audit.change_type),
+            )
+            .before(Self::rollback_projection_summary(
+                &operation.warm_after,
+                &operation.hot_after,
+                &operation.audit.change_id,
+                &item.batch.id,
+                item.generation,
+            ))
+            .after(Self::rollback_projection_summary(
+                &operation.warm_before,
+                &operation.hot_before,
+                &operation.audit.change_id,
+                &item.batch.id,
+                item.generation,
+            ))
+            .reason(format!(
+                "rollback of {:?} memory change in batch {}",
+                operation.audit.change_type, item.batch.id
+            ))
+            .trigger("memory_rollback")
+            .build_with(operation_id.clone(), chrono::Utc::now());
+            operations.push(MemoryOperation {
+                id: operation_id,
+                key: operation.key.clone(),
+                warm_before: operation.warm_after.clone(),
+                warm_after: operation.warm_before.clone(),
+                hot_before: operation.hot_after.clone(),
+                hot_after: operation.hot_before.clone(),
+                audit,
+            });
+        }
+        let inverse = MemoryOperationBatch {
+            id: inverse_batch_id,
+            operations,
+            origin: Some(MemoryOperationOrigin {
+                request_id: request_id.to_owned(),
+                target_batch_id: item.batch.id.clone(),
+                target_generation: item.generation,
+            }),
+        };
+        self.operation_journal()?.prepare_batch(inverse.clone())?;
+        self.settle_batch(&inverse).await?;
+        let inverse_history = self
+            .operation_journal()?
+            .history_with_generations()?
+            .into_iter()
+            .find(|candidate| candidate.batch.id == inverse.id)
+            .ok_or_else(|| ReactError::Other("rollback receipt batch disappeared".into()))?;
+        Ok(MemoryRollbackOutcome::Applied(Self::rollback_receipt(
+            request_id,
+            &item.batch.id,
+            item.generation,
+            &inverse_history,
+        )))
+    }
+
+    /// Alias for callers that use the shorter rollback vocabulary.
+    pub async fn rollback(
+        &self,
+        request_id: &str,
+        target: MemoryRollbackTarget,
+    ) -> Result<MemoryRollbackOutcome> {
+        self.rollback_memory(request_id, target).await
+    }
+
     async fn transition(
         &self,
         key: &str,
@@ -652,6 +1046,7 @@ impl MemoryLayerManager {
         self.settle_batch(&MemoryOperationBatch {
             id: operation.id.clone(),
             operations: vec![operation],
+            origin: None,
         })
         .await
     }
@@ -993,6 +1388,7 @@ impl MemoryLayerManager {
             primary_key: result.primary_key,
             superseded_keys: result.superseded_keys,
             before,
+            batch_id: result.batch_id,
         })
     }
 
@@ -1002,12 +1398,14 @@ impl MemoryLayerManager {
             return Ok(MergeResult {
                 primary_key: String::new(),
                 superseded_keys: Vec::new(),
+                batch_id: None,
             });
         };
         if ordered.len() < 2 {
             return Ok(MergeResult {
                 primary_key: primary.key.clone(),
                 superseded_keys: Vec::new(),
+                batch_id: None,
             });
         }
         let _serial = self.operation_lock.lock().await;
@@ -1072,6 +1470,7 @@ impl MemoryLayerManager {
         let batch = MemoryOperationBatch {
             id: uuid::Uuid::new_v4().to_string(),
             operations,
+            origin: None,
         };
         self.operation_journal()?.prepare_batch(batch.clone())?;
         self.settle_batch(&batch).await?;
@@ -1082,34 +1481,21 @@ impl MemoryLayerManager {
                 .skip(1)
                 .map(|entry| entry.key.clone())
                 .collect(),
+            batch_id: Some(batch.id),
         })
     }
 
-    /// Restore the warm-layer content and typed metadata captured before a merge.
-    pub async fn restore_merge_snapshots(&self, snapshots: &[MemoryMergeSnapshot]) -> Result<()> {
-        if snapshots.len() < 2 {
-            return Err(merge_plan_error(
-                "memory merge undo requires at least two snapshots",
-            ));
-        }
-        for snapshot in snapshots {
-            self.transition(
-                &snapshot.key,
-                Some(Self::typed_value(&snapshot.content, snapshot.meta.clone())?),
-                None,
-                Self::change_builder(
-                    &snapshot.key,
-                    ChangeType::Update,
-                    Some("merged"),
-                    Some("warm"),
-                    "user undid an approved memory merge",
-                    "review_inbox_undo",
-                ),
-                None,
-            )
-            .await?;
-        }
-        Ok(())
+    /// Legacy merge undo entry point.
+    ///
+    /// Snapshot-only restoration cannot prove a journal tip and is therefore
+    /// retired. Call [`Self::rollback_memory`] with the `batch_id` returned by
+    /// [`Self::apply_merge_proposal`] so the complete merge group is reverted
+    /// through the canonical journal authority.
+    #[deprecated(note = "use rollback_memory with AppliedMemoryMerge::batch_id")]
+    pub async fn restore_merge_snapshots(&self, _snapshots: &[MemoryMergeSnapshot]) -> Result<()> {
+        Err(merge_plan_error(
+            "snapshot-only merge restore is retired; use rollback_memory with the merge batch ID",
+        ))
     }
 
     /// Consider promoting a warm entry to hot if eligible and space exists.
@@ -1911,6 +2297,59 @@ mod tests {
         MemoryLayerManager::new(dir_path, store, change_log)
     }
 
+    fn latest_memory_audit(path: &std::path::Path, key: &str) -> Result<ChangeEntry> {
+        JsonlChangeLog::new(path.to_path_buf())?
+            .latest_for(EntityType::Memory, key)?
+            .ok_or_else(|| merge_plan_error(format!("expected audit for memory key {key}")))
+    }
+
+    fn audit_projection_layer(entry: &ChangeEntry, before: bool) -> Option<&str> {
+        let projection = if before {
+            entry.before.as_ref()
+        } else {
+            entry.after.as_ref()
+        };
+        projection
+            .and_then(|value| value.get("layer"))
+            .and_then(serde_json::Value::as_str)
+    }
+
+    fn assert_machine_readable_rollback_summary(entry: &ChangeEntry) -> Result<()> {
+        let before = entry.before.as_ref().and_then(serde_json::Value::as_object);
+        let after = entry.after.as_ref().and_then(serde_json::Value::as_object);
+        for summary in [before, after] {
+            let summary = summary.ok_or_else(|| {
+                merge_plan_error("rollback audit must contain an object projection summary")
+            })?;
+            for field in [
+                "layer",
+                "warm",
+                "hot",
+                "rollback_of",
+                "target_batch_id",
+                "target_generation",
+            ] {
+                assert!(
+                    summary.contains_key(field),
+                    "missing rollback field {field}"
+                );
+            }
+        }
+        assert_eq!(
+            before.and_then(|summary| summary.get("rollback_of")),
+            after.and_then(|summary| summary.get("rollback_of"))
+        );
+        assert_eq!(
+            before.and_then(|summary| summary.get("target_batch_id")),
+            after.and_then(|summary| summary.get("target_batch_id"))
+        );
+        assert_eq!(
+            before.and_then(|summary| summary.get("target_generation")),
+            after.and_then(|summary| summary.get("target_generation"))
+        );
+        Ok(())
+    }
+
     #[test]
     fn test_parse_memory_file_with_frontmatter() {
         let raw = "\
@@ -2629,6 +3068,7 @@ entries:
         let batch = MemoryOperationBatch {
             id: uuid::Uuid::new_v4().to_string(),
             operations,
+            origin: None,
         };
         manager.operation_journal()?.prepare_batch(batch.clone())?;
         let first = batch
@@ -3018,7 +3458,21 @@ entries:
             .ok_or_else(|| merge_plan_error("expected secondary"))?;
         assert_eq!(secondary.meta.status, MemoryStatus::Superseded);
 
-        manager.restore_merge_snapshots(&applied.before).await?;
+        let batch_id = applied
+            .batch_id
+            .clone()
+            .ok_or_else(|| merge_plan_error("merge did not return a durable batch ID"))?;
+        let rollback = manager
+            .rollback_memory("merge-undo-1", MemoryRollbackTarget::batch_id(batch_id))
+            .await?;
+        assert!(matches!(rollback, MemoryRollbackOutcome::Applied(_)));
+        let primary = manager
+            .typed_store
+            .get_typed(WARM_NAMESPACE, "build_a")
+            .await?
+            .ok_or_else(|| merge_plan_error("expected restored primary"))?;
+        assert_eq!(primary.meta.status, MemoryStatus::Active);
+        assert_eq!(primary.content, "Build uses cargo");
         let restored = manager
             .typed_store
             .get_typed(WARM_NAMESPACE, "build_b")
@@ -3026,6 +3480,474 @@ entries:
             .ok_or_else(|| merge_plan_error("expected restored secondary"))?;
         assert_eq!(restored.meta.status, MemoryStatus::Active);
         assert_eq!(restored.content, "Build uses make");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn later_rollback_restores_a_settled_memory_change_idempotently()
+    -> crate::error::Result<()> {
+        let store = Arc::new(InMemoryStore::new());
+        let dir = tempfile::tempdir()
+            .map_err(|error| merge_plan_error(format!("tempdir failed: {error}")))?
+            .keep();
+        let audit_path = dir.join("evolution").join("change-log.jsonl");
+        let manager = MemoryLayerManager::new(
+            dir,
+            store,
+            Box::new(JsonlChangeLog::new(audit_path.clone())?),
+        );
+        let meta = MemoryMeta::new(
+            MemoryType::ProjectFact,
+            MemorySource::ExplicitSave,
+            "rollback",
+        )
+        .with_confidence(0.40);
+        manager
+            .write_memory("rollback/key", "before", meta.clone())
+            .await?;
+        manager.write_memory("rollback/key", "after", meta).await?;
+        let changes =
+            JsonlChangeLog::new(audit_path)?.query(&super::super::audit::ChangeFilter::new())?;
+        let target = MemoryRollbackTarget::change_id(
+            changes
+                .first()
+                .ok_or_else(|| merge_plan_error("expected update audit"))?
+                .change_id
+                .clone(),
+        );
+
+        let preview = manager.preview_rollback(&target).await?;
+        assert!(matches!(preview, MemoryRollbackPreviewOutcome::Ready(_)));
+        let applied = manager.rollback_memory("request-1", target.clone()).await?;
+        assert!(matches!(applied, MemoryRollbackOutcome::Applied(_)));
+        let (_, restored) = manager
+            .locate("rollback/key")
+            .await?
+            .ok_or_else(|| merge_plan_error("expected restored memory"))?;
+        assert_eq!(restored.content, "before");
+
+        let retry = manager.rollback_memory("request-1", target).await?;
+        assert!(matches!(retry, MemoryRollbackOutcome::AlreadyApplied(_)));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn later_rollback_rejects_non_tip_and_aba_targets() -> crate::error::Result<()> {
+        let store = Arc::new(InMemoryStore::new());
+        let dir = tempfile::tempdir()
+            .map_err(|error| merge_plan_error(format!("tempdir failed: {error}")))?
+            .keep();
+        let audit_path = dir.join("evolution").join("change-log.jsonl");
+        let manager = MemoryLayerManager::new(
+            dir,
+            store,
+            Box::new(JsonlChangeLog::new(audit_path.clone())?),
+        );
+        let meta = MemoryMeta::new(
+            MemoryType::ProjectFact,
+            MemorySource::ExplicitSave,
+            "rollback",
+        )
+        .with_confidence(0.40);
+        manager.write_memory("aba", "same", meta.clone()).await?;
+        manager
+            .write_memory("aba", "different", meta.clone())
+            .await?;
+        manager.write_memory("aba", "same", meta).await?;
+        let changes = JsonlChangeLog::new(audit_path)?.query(&ChangeFilter::new())?;
+        let first = changes
+            .get(2)
+            .ok_or_else(|| merge_plan_error("expected three memory changes"))?;
+        let outcome = manager
+            .preview_rollback(&MemoryRollbackTarget::change_id(&first.change_id))
+            .await?;
+        assert!(matches!(
+            outcome,
+            MemoryRollbackPreviewOutcome::Conflict(MemoryRollbackConflict { .. })
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rollback_of_rollback_is_a_new_batch_and_request_conflicts_fail_closed()
+    -> crate::error::Result<()> {
+        let store = Arc::new(InMemoryStore::new());
+        let dir = tempfile::tempdir()
+            .map_err(|error| merge_plan_error(format!("tempdir failed: {error}")))?
+            .keep();
+        let audit_path = dir.join("evolution").join("change-log.jsonl");
+        let manager = MemoryLayerManager::new(
+            dir,
+            store,
+            Box::new(JsonlChangeLog::new(audit_path.clone())?),
+        );
+        let meta = MemoryMeta::new(
+            MemoryType::ProjectFact,
+            MemorySource::ExplicitSave,
+            "rollback",
+        )
+        .with_confidence(0.40);
+        manager
+            .write_memory("lineage", "before", meta.clone())
+            .await?;
+        manager.write_memory("lineage", "after", meta).await?;
+        let changes = JsonlChangeLog::new(audit_path)?.query(&ChangeFilter::new())?;
+        let target = MemoryRollbackTarget::change_id(
+            changes
+                .first()
+                .ok_or_else(|| merge_plan_error("expected target change"))?
+                .change_id
+                .clone(),
+        );
+        let applied = manager.rollback_memory("rollback-a", target).await?;
+        let receipt = match applied {
+            MemoryRollbackOutcome::Applied(receipt) => receipt,
+            other => return Err(merge_plan_error(format!("unexpected outcome: {other:?}"))),
+        };
+        let conflict = manager
+            .rollback_memory(
+                "rollback-a",
+                MemoryRollbackTarget::batch_id(receipt.inverse_batch_id.clone()),
+            )
+            .await?;
+        assert!(matches!(
+            conflict,
+            MemoryRollbackOutcome::Conflict(MemoryRollbackConflict { .. })
+        ));
+
+        let reverted = manager
+            .rollback_memory(
+                "rollback-b",
+                MemoryRollbackTarget::batch_id(receipt.inverse_batch_id),
+            )
+            .await?;
+        assert!(matches!(reverted, MemoryRollbackOutcome::Applied(_)));
+        let (_, current) = manager
+            .locate("lineage")
+            .await?
+            .ok_or_else(|| merge_plan_error("expected lineage memory"))?;
+        assert_eq!(current.content, "after");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rollback_receipt_survives_manager_restart() -> crate::error::Result<()> {
+        let dir = tempfile::tempdir()
+            .map_err(|error| merge_plan_error(format!("tempdir failed: {error}")))?;
+        let root = dir.path().join(".echo-agent");
+        let store_path = dir.path().join("store.json");
+        let audit_path = root.join("evolution").join("change-log.jsonl");
+        let meta = MemoryMeta::new(
+            MemoryType::ProjectFact,
+            MemorySource::ExplicitSave,
+            "rollback",
+        )
+        .with_confidence(0.40);
+        let target;
+        {
+            let store = Arc::new(FileStore::new(&store_path)?);
+            let manager = MemoryLayerManager::try_new(
+                root.clone(),
+                store,
+                Box::new(JsonlChangeLog::new(audit_path.clone())?),
+            )?;
+            manager
+                .write_memory("restart", "before", meta.clone())
+                .await?;
+            manager.write_memory("restart", "after", meta).await?;
+            let changes = JsonlChangeLog::new(audit_path.clone())?.query(&ChangeFilter::new())?;
+            target = MemoryRollbackTarget::change_id(
+                changes
+                    .first()
+                    .ok_or_else(|| merge_plan_error("expected restart target"))?
+                    .change_id
+                    .clone(),
+            );
+            let applied = manager
+                .rollback_memory("restart-request", target.clone())
+                .await?;
+            assert!(matches!(applied, MemoryRollbackOutcome::Applied(_)));
+        }
+        let store = Arc::new(FileStore::new(&store_path)?);
+        let manager =
+            MemoryLayerManager::try_new(root, store, Box::new(JsonlChangeLog::new(audit_path)?))?;
+        manager.reconcile_pending().await?;
+        let (_, restored) = manager
+            .locate("restart")
+            .await?
+            .ok_or_else(|| merge_plan_error("expected restarted memory"))?;
+        assert_eq!(restored.content, "before");
+        let retry = manager.rollback_memory("restart-request", target).await?;
+        assert!(matches!(retry, MemoryRollbackOutcome::AlreadyApplied(_)));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rollback_audit_failure_reconciles_inverse_after_restart() -> crate::error::Result<()> {
+        let dir = tempfile::tempdir()
+            .map_err(|error| merge_plan_error(format!("tempdir failed: {error}")))?;
+        let root = dir.path().join(".echo-agent");
+        let store_path = dir.path().join("store.json");
+        let audit_path = root.join("evolution").join("change-log.jsonl");
+        let meta = MemoryMeta::new(
+            MemoryType::ProjectFact,
+            MemorySource::ExplicitSave,
+            "rollback",
+        )
+        .with_confidence(0.40);
+        let target;
+        {
+            let manager = MemoryLayerManager::try_new(
+                root.clone(),
+                Arc::new(FileStore::new(&store_path)?),
+                Box::new(JsonlChangeLog::new(audit_path.clone())?),
+            )?;
+            manager
+                .write_memory("audit-crash", "before", meta.clone())
+                .await?;
+            manager.write_memory("audit-crash", "after", meta).await?;
+            let changes = JsonlChangeLog::new(audit_path.clone())?.query(&ChangeFilter::new())?;
+            target = MemoryRollbackTarget::change_id(
+                changes
+                    .first()
+                    .ok_or_else(|| merge_plan_error("expected audit-crash target"))?
+                    .change_id
+                    .clone(),
+            );
+        }
+        {
+            let failing_log = FailOnceChangeLog {
+                inner: JsonlChangeLog::new(audit_path.clone())?,
+                fail_next: AtomicBool::new(true),
+            };
+            let manager = MemoryLayerManager::try_new(
+                root.clone(),
+                Arc::new(FileStore::new(&store_path)?),
+                Box::new(failing_log),
+            )?;
+            assert!(
+                manager
+                    .rollback_memory("audit-crash-request", target.clone())
+                    .await
+                    .is_err()
+            );
+        }
+        let manager = MemoryLayerManager::try_new(
+            root,
+            Arc::new(FileStore::new(&store_path)?),
+            Box::new(JsonlChangeLog::new(audit_path.clone())?),
+        )?;
+        manager.reconcile_pending().await?;
+        let (_, restored) = manager
+            .locate("audit-crash")
+            .await?
+            .ok_or_else(|| merge_plan_error("expected audit-crash memory"))?;
+        assert_eq!(restored.content, "before");
+        let retry = manager
+            .rollback_memory("audit-crash-request", target)
+            .await?;
+        assert!(matches!(retry, MemoryRollbackOutcome::AlreadyApplied(_)));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn inverse_projection_and_audit_matrix_matches_real_memory_outcomes()
+    -> crate::error::Result<()> {
+        let store = Arc::new(InMemoryStore::new());
+        let root = tempfile::tempdir()
+            .map_err(|error| merge_plan_error(format!("tempdir failed: {error}")))?
+            .keep();
+        let audit_path = root.join("evolution").join("change-log.jsonl");
+        let manager = MemoryLayerManager::new(
+            root,
+            store,
+            Box::new(JsonlChangeLog::new(audit_path.clone())?),
+        );
+        let warm_meta = MemoryMeta::new(
+            MemoryType::ProjectFact,
+            MemorySource::ExplicitSave,
+            "rollback-matrix",
+        )
+        .with_confidence(0.40);
+        let hot_meta = MemoryMeta::new(
+            MemoryType::UserPreference,
+            MemorySource::ExplicitSave,
+            "rollback-matrix",
+        )
+        .with_confidence(0.95)
+        .with_stability(0.90);
+
+        manager
+            .write_memory("matrix-create", "created", warm_meta.clone())
+            .await?;
+        let create = latest_memory_audit(&audit_path, "matrix-create")?;
+        manager
+            .rollback_memory(
+                "matrix-create-request",
+                MemoryRollbackTarget::change_id(create.change_id),
+            )
+            .await?;
+        let inverse_create = latest_memory_audit(&audit_path, "matrix-create")?;
+        assert_machine_readable_rollback_summary(&inverse_create)?;
+        assert_eq!(inverse_create.change_type, ChangeType::Delete);
+        assert_eq!(audit_projection_layer(&inverse_create, true), Some("warm"));
+        assert_eq!(
+            audit_projection_layer(&inverse_create, false),
+            Some("absent")
+        );
+        assert!(manager.locate("matrix-create").await?.is_none());
+
+        manager
+            .write_memory("matrix-update", "before", warm_meta.clone())
+            .await?;
+        manager
+            .write_memory("matrix-update", "after", warm_meta.clone())
+            .await?;
+        let update = latest_memory_audit(&audit_path, "matrix-update")?;
+        manager
+            .rollback_memory(
+                "matrix-update-request",
+                MemoryRollbackTarget::change_id(update.change_id),
+            )
+            .await?;
+        let inverse_update = latest_memory_audit(&audit_path, "matrix-update")?;
+        assert_machine_readable_rollback_summary(&inverse_update)?;
+        assert_eq!(inverse_update.change_type, ChangeType::Update);
+        assert_eq!(audit_projection_layer(&inverse_update, true), Some("warm"));
+        assert_eq!(audit_projection_layer(&inverse_update, false), Some("warm"));
+        let (_, updated) = manager
+            .locate("matrix-update")
+            .await?
+            .ok_or_else(|| merge_plan_error("matrix update memory disappeared"))?;
+        assert_eq!(updated.content, "before");
+
+        manager
+            .write_memory("matrix-delete", "deleted", warm_meta.clone())
+            .await?;
+        assert!(manager.delete_memory("matrix-delete").await?);
+        let delete = latest_memory_audit(&audit_path, "matrix-delete")?;
+        manager
+            .rollback_memory(
+                "matrix-delete-request",
+                MemoryRollbackTarget::change_id(delete.change_id),
+            )
+            .await?;
+        let inverse_delete = latest_memory_audit(&audit_path, "matrix-delete")?;
+        assert_machine_readable_rollback_summary(&inverse_delete)?;
+        assert_eq!(inverse_delete.change_type, ChangeType::Create);
+        assert_eq!(
+            audit_projection_layer(&inverse_delete, true),
+            Some("absent")
+        );
+        assert_eq!(audit_projection_layer(&inverse_delete, false), Some("warm"));
+        let (_, restored_delete) = manager
+            .locate("matrix-delete")
+            .await?
+            .ok_or_else(|| merge_plan_error("matrix delete memory was not restored"))?;
+        assert_eq!(restored_delete.content, "deleted");
+
+        manager
+            .write_memory("matrix-promote", "promoted", hot_meta.clone())
+            .await?;
+        let promote = latest_memory_audit(&audit_path, "matrix-promote")?;
+        assert_eq!(promote.change_type, ChangeType::Promote);
+        manager
+            .rollback_memory(
+                "matrix-promote-request",
+                MemoryRollbackTarget::change_id(promote.change_id),
+            )
+            .await?;
+        let inverse_promote = latest_memory_audit(&audit_path, "matrix-promote")?;
+        assert_machine_readable_rollback_summary(&inverse_promote)?;
+        assert_eq!(inverse_promote.change_type, ChangeType::Demote);
+        assert_eq!(audit_projection_layer(&inverse_promote, true), Some("hot"));
+        assert_eq!(
+            audit_projection_layer(&inverse_promote, false),
+            Some("warm")
+        );
+        assert!(matches!(
+            manager.locate("matrix-promote").await?,
+            Some((MemoryLayer::Warm, _))
+        ));
+
+        manager
+            .write_memory("matrix-demote", "demoted", hot_meta)
+            .await?;
+        manager.demote("matrix-demote", "matrix demotion").await?;
+        let demote = latest_memory_audit(&audit_path, "matrix-demote")?;
+        assert_eq!(demote.change_type, ChangeType::Demote);
+        manager
+            .rollback_memory(
+                "matrix-demote-request",
+                MemoryRollbackTarget::change_id(demote.change_id),
+            )
+            .await?;
+        let inverse_demote = latest_memory_audit(&audit_path, "matrix-demote")?;
+        assert_machine_readable_rollback_summary(&inverse_demote)?;
+        assert_eq!(inverse_demote.change_type, ChangeType::Promote);
+        assert_eq!(audit_projection_layer(&inverse_demote, true), Some("warm"));
+        assert_eq!(audit_projection_layer(&inverse_demote, false), Some("hot"));
+        assert!(matches!(
+            manager.locate("matrix-demote").await?,
+            Some((MemoryLayer::Hot, _))
+        ));
+
+        manager
+            .write_memory("matrix-meta", "metadata", warm_meta.clone())
+            .await?;
+        manager.demote("matrix-meta", "archive metadata").await?;
+        let meta_change = latest_memory_audit(&audit_path, "matrix-meta")?;
+        manager
+            .rollback_memory(
+                "matrix-meta-request",
+                MemoryRollbackTarget::change_id(meta_change.change_id),
+            )
+            .await?;
+        let inverse_meta = latest_memory_audit(&audit_path, "matrix-meta")?;
+        assert_machine_readable_rollback_summary(&inverse_meta)?;
+        assert_eq!(inverse_meta.change_type, ChangeType::Promote);
+        assert_eq!(audit_projection_layer(&inverse_meta, true), Some("warm"));
+        assert_eq!(audit_projection_layer(&inverse_meta, false), Some("warm"));
+        let (_, restored_meta) = manager
+            .locate("matrix-meta")
+            .await?
+            .ok_or_else(|| merge_plan_error("matrix metadata memory disappeared"))?;
+        assert_eq!(restored_meta.meta.status, MemoryStatus::Active);
+
+        let multiline = "  first line\nsecond line  \n";
+        manager
+            .write_memory("matrix-multiline", multiline, warm_meta)
+            .await?;
+        let multiline_create = latest_memory_audit(&audit_path, "matrix-multiline")?;
+        manager
+            .rollback_memory(
+                "matrix-multiline-delete",
+                MemoryRollbackTarget::change_id(multiline_create.change_id),
+            )
+            .await?;
+        let multiline_delete = latest_memory_audit(&audit_path, "matrix-multiline")?;
+        manager
+            .rollback_memory(
+                "matrix-multiline-restore",
+                MemoryRollbackTarget::change_id(multiline_delete.change_id),
+            )
+            .await?;
+        let multiline_restore = latest_memory_audit(&audit_path, "matrix-multiline")?;
+        assert_machine_readable_rollback_summary(&multiline_restore)?;
+        assert_eq!(multiline_restore.change_type, ChangeType::Create);
+        assert_eq!(
+            audit_projection_layer(&multiline_restore, true),
+            Some("absent")
+        );
+        assert_eq!(
+            audit_projection_layer(&multiline_restore, false),
+            Some("warm")
+        );
+        let (_, restored_multiline) = manager
+            .locate("matrix-multiline")
+            .await?
+            .ok_or_else(|| merge_plan_error("matrix multiline memory disappeared"))?;
+        assert_eq!(restored_multiline.content, multiline);
         Ok(())
     }
 

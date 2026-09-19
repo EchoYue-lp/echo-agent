@@ -5,7 +5,8 @@
 //!
 //! - **Auditing**: review what changed and why
 //! - **Reconciliation**: stable change IDs let a prepared memory operation
-//!   finish its audit after restart. Later rollback remains separate (#52).
+//!   finish its audit after restart; the canonical memory journal can later
+//!   append a typed inverse change while this log remains append-only.
 //! - **Trending**: detect patterns in evolution activity
 
 use chrono::{DateTime, Utc};

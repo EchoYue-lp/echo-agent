@@ -299,6 +299,9 @@ pub struct AppliedMemoryMerge {
     pub primary_key: String,
     pub superseded_keys: Vec<String>,
     pub before: Vec<MemoryMergeSnapshot>,
+    /// Durable operation batch that can be passed to later rollback.
+    #[serde(default)]
+    pub batch_id: Option<String>,
 }
 
 impl MemoryConflictProposal {
@@ -374,6 +377,8 @@ pub struct MergeResult {
     pub primary_key: String,
     /// Keys of the entries superseded by the primary.
     pub superseded_keys: Vec<String>,
+    /// Durable operation batch identity for a later rollback.
+    pub batch_id: Option<String>,
 }
 
 impl<'a> MemoryMerger<'a> {

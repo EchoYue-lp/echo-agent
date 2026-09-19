@@ -48,7 +48,7 @@
 - 应用技能合并、补丁或规则晋升（仅生成提案，由人通过命令应用）
 - 把来自不可信来源（工具输出）的记忆晋升到热层或规则
 
-分层记忆变更先写入持久恢复操作，再修改 Store 或 `MEMORY.md`；已提交的业务变更可在 `change-log.jsonl` 查询。任意记忆、技能和规则的事后回滚 API 尚未实现（另由 #52 跟踪）。记忆写入还会进行密钥扫描与提示注入检测。
+分层记忆变更先写入持久恢复操作，再修改 Store 或 `MEMORY.md`；已提交的业务变更可在 `change-log.jsonl` 查询。canonical 分层记忆支持按已结算 `ChangeId` 或 `BatchId` 事后回滚；Skill 与 Rule 回滚仍由独立契约负责（#54/#94/host owner）。记忆写入还会进行密钥扫描与提示注入检测。
 
 ---
 
@@ -63,7 +63,7 @@
 | **TrajectorySaver** | 将运行转为 ShareGPT 微调数据 | `improve/` |
 | **TypedMemoryStore** | 带元数据的结构化记忆读写 | `echo-state` |
 | **MemoryLayerManager** | 热/暖/冷三层记忆管理 | `evolution/` |
-| **ChangeLog** | 可查询的业务变更审计（尚无事后回滚） | `evolution/` |
+| **ChangeLog** | append-only 业务变更审计；`MemoryLayerManager` 负责带 generation fencing 的记忆事后回滚 | `evolution/` |
 | **TriggerDetector** | 在线对话信号→新记忆 | `evolution/` |
 | **MemoryReviewer** | 陈旧评分、冲突检测、合并、归档（GC） | `evolution/` |
 | **Curator** | 技能生命周期状态机 | `evolution/` |
@@ -375,7 +375,13 @@ for report in monitor.analyze_all_skills().await? {
 - **写入前**：密钥扫描（AWS `AKIA...`、GitHub `ghp_...`、`BEGIN PRIVATE KEY` 等，匹配项替换为 `[REDACTED]`）+ 提示注入检测（如 "ignore previous" 模式）
 - **不可信输入隔离**：工具输出来源的记忆 `risk = High`，未经人工批准不可晋升到热层或规则
 - **速率限制**：每会话最多 50 次记忆写入，每天最多 5 次技能补丁
-- `ChangeLog` 记录已提交变更；事后回滚另由 #52 实现
+- `ChangeLog` 保持 append-only 审计。记忆事后回滚由
+  `MemoryLayerManager::preview_rollback` 与 `rollback_memory` 负责：目标可用
+  `ChangeId` 或完整 `BatchId`，所有受影响 key 必须仍处于该批次最新 journal
+  generation，随后写入一个持久 inverse batch。结果区分 `Ready`、`Conflict`
+  和 `HistoryUnavailable`；稳定 request ID 让重试返回原 receipt。append-only
+  audit 记录真实 inverse 类型和精确 before/after warm/hot 投影。merge 成员始终
+  整批回滚。Skill/Rule 回滚仍属于 #54/#94/host owner，不在本记忆契约内。
 
 ---
 

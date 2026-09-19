@@ -5,8 +5,8 @@
 //!
 //! - **Skill lifecycle**: [`Curator`] manages skill transitions (Candidate → Draft → Active → Stale → Deprecated → Archived)
 //! - **Typed memory**: Structured metadata (type, confidence, stability, risk) for every memory
-//! - **Change audit**: Queryable memory changes with durable reconciliation;
-//!   later rollback is a separate capability (#52)
+//! - **Change audit**: Append-only queryable changes with durable memory
+//!   reconciliation and generation-fenced later memory rollback
 //! - **Security**: Secret scanning, untrusted input isolation, injection detection
 //! - **Memory review**: Staleness scoring, conflict detection, merge, and archival
 //! - **Skill creation**: Candidate detection from observed patterns, draft SKILL.md generation
@@ -54,7 +54,9 @@ pub use dreaming::{Dreaming, DreamingAction, DreamingConfig, DreamingDecision, D
 pub use health::{HealthBreakdown, HealthStatus, SkillHealthMonitor, SkillHealthReport};
 pub use layer::{
     EvolutionObserver, HotEntryMeta, LayerChangeResult, MemoryFile, MemoryLayer,
-    MemoryLayerManager, is_stale_memory_proposal_error,
+    MemoryLayerManager, MemoryRollbackConflict, MemoryRollbackHistoryUnavailable,
+    MemoryRollbackOutcome, MemoryRollbackPreview, MemoryRollbackPreviewOutcome,
+    MemoryRollbackReceipt, MemoryRollbackTarget, is_stale_memory_proposal_error,
 };
 pub use merge::{SimilarityBreakdown, SkillMergeProposal, SkillMerger, SkillSimilarityDetector};
 pub use patch::{PatchType, SkillPatch, SkillPatcher};
