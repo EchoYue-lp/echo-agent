@@ -18,8 +18,8 @@ source_refs:
   - echo-agent-learning/tests/example_contracts/demo51_self_improvement.rs
 supports: [finding.skill-candidate-reinforcement-audit-gap, behavior.eval-evolution]
 limitations:
-  - Remote-main delivery and post-merge closure rereview remain pending
   - Fault injection covers deterministic audit failure and restart, not a physical power cut
+  - Skill promotion, approval, file mutation and later rollback remain Issue 54
 ---
 
 # Issue 94 focused verification
@@ -68,4 +68,7 @@ owner、通用 journal/audit 原语与 demo51 公共用法。
 
 ## 已知缺口
 
-本地完整门禁与独立复审不替代 PR CI、remote-main delivery 或 post-merge closure rereview。
+PR #143 七项 CI 全绿，并以 GitHub verified squash commit `d0d1e975` 进入远端 main。
+post-merge closure rereview 未发现 Critical、Important 或 Minor 问题。该证据关闭 candidate
+create/reinforcement 的 mutation/audit 缺口；Skill promotion、approval、file mutation 与
+later rollback 仍由 Issue #54 负责。

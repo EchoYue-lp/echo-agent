@@ -10,7 +10,7 @@ behavior_refs: [behavior.eval-evolution]
 rule_refs: [rule.quality-observation-boundary, rule.fact-projection-separation]
 evidence_refs: [evidence.provider-protocol-quality, evidence.persistence-observation, evidence.high-risk-audit-frontier, evidence.improve-singleton-split-repair, evidence.improve-singleton-split-verification, evidence.improve-iteration-config-repair, evidence.improve-iteration-config-verification, evidence.eval-workspace-generation-repair, evidence.eval-workspace-generation-verification, evidence.eval-timeout-turn-settlement-repair, evidence.eval-timeout-turn-settlement-verification, evidence.eval-trace-correlation-repair, evidence.eval-trace-correlation-verification, evidence.evolution-memory-audit-repair, evidence.evolution-memory-audit-verification, evidence.skill-candidate-audit-repair, evidence.skill-candidate-audit-verification]
 finding_refs: [finding.eval-trace-identity, finding.eval-timeout-settlement, finding.improve-iteration-config, finding.improve-single-case-panic, finding.eval-workspace-generation-isolation, finding.background-review-detached-persistence-settlement, finding.evolution-audit-atomicity, finding.evolution-changelog-rollback-authority, finding.evolution-skill-promotion-audit, finding.skill-candidate-reinforcement-audit-gap, finding.evolution-doc-namespace, finding.pre-compaction-memory-trust-provenance]
-audit_refs: [audit.eval-evolution.data-durability, audit.eval-evolution.failure-concurrency, audit.eval-evolution.permission-external, audit.improve-singleton-split-rereview, audit.improve-iteration-config-rereview, audit.eval-workspace-generation-rereview, audit.eval-timeout-turn-settlement-rereview, audit.eval-trace-correlation-rereview, audit.evolution-memory-audit-atomicity-rereview, audit.evolution-memory-rollback-rereview]
+audit_refs: [audit.eval-evolution.data-durability, audit.eval-evolution.failure-concurrency, audit.eval-evolution.permission-external, audit.improve-singleton-split-rereview, audit.improve-iteration-config-rereview, audit.eval-workspace-generation-rereview, audit.eval-timeout-turn-settlement-rereview, audit.eval-trace-correlation-rereview, audit.evolution-memory-audit-atomicity-rereview, audit.evolution-memory-rollback-rereview, audit.skill-candidate-audit-rereview]
 related_map_refs: [map.observation-persistence-delivery, map.agent-session-turn, map.llm-provider-runtime, map.extension-lifecycle]
 scenarios:
   trace-record-and-analysis:
@@ -54,8 +54,9 @@ scenarios:
     finding_refs: [finding.evolution-skill-promotion-audit, finding.skill-candidate-reinforcement-audit-gap]
     rule_refs: [rule.quality-observation-boundary]
     evidence_refs: [evidence.skill-candidate-audit-repair, evidence.skill-candidate-audit-verification]
-    unknown: "#94 candidate repair以reserved authority marker、Store atomic CAS、Curator private lineage及injective private paths回应三轮独立复审，最终复审、完整门禁与remote delivery待完成；promotion approval policy仍归#54"
-    next_step: 完成candidate create/reinforce durable audit候选；promotion/approval/draft/merge/patch继续依#54及各自合同
+    audit_refs: [audit.skill-candidate-audit-rereview]
+    unknown: "#94 candidate create/reinforce durable audit已通过四轮独立复审、完整门禁及remote delivery，并在verified main commit d0d1e975闭合；promotion approval与later rollback仍归#54"
+    next_step: promotion/approval/draft/merge/patch与Skill later rollback继续依#54及其唯一mutation authority合同
   evolution-rule-promotion-surface:
     status: needs_review
     source_refs: [src/evolution/security.rs, src/evolution/mod.rs]
