@@ -13,8 +13,8 @@ rule_refs: [rule.quality-observation-boundary]
 evidence_refs: [evidence.provider-protocol-quality]
 audit_refs: [audit.eval-evolution.data-durability]
 decision_refs: []
-repair_evidence_refs: []
-verification_evidence_refs: []
+repair_evidence_refs: [evidence.skill-candidate-audit-repair]
+verification_evidence_refs: [evidence.skill-candidate-audit-verification]
 rereview_audit_refs: []
 discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 ---

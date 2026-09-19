@@ -614,4 +614,48 @@ mod tests {
         assert!(index.get_namespace(&nested_key).is_some());
         Ok(())
     }
+
+    #[tokio::test]
+    async fn compare_and_put_is_unsupported_without_mutating_payload_or_index() -> Result<()> {
+        let store = make_store()?;
+        let namespace = &["cas"];
+        store
+            .put(namespace, "key", json!({"content": "first"}))
+            .await?;
+        let before_vector = store
+            .index
+            .read()
+            .await
+            .get_namespace(&namespace_key(namespace))
+            .and_then(|items| items.get("key"))
+            .cloned();
+        let error = store
+            .compare_and_put(
+                namespace,
+                "key",
+                Some(json!({"content": "first"})),
+                json!({"content": "second"}),
+            )
+            .await
+            .err()
+            .ok_or_else(|| {
+                MemoryError::Unsupported("EmbeddingStore unexpectedly accepted CAS".to_string())
+            })?;
+        assert!(error.to_string().contains("compare-and-put"));
+        assert_eq!(
+            store.get(namespace, "key").await?.map(|item| item.value),
+            Some(json!({"content": "first"}))
+        );
+        assert_eq!(
+            store
+                .index
+                .read()
+                .await
+                .get_namespace(&namespace_key(namespace))
+                .and_then(|items| items.get("key"))
+                .cloned(),
+            before_vector
+        );
+        Ok(())
+    }
 }

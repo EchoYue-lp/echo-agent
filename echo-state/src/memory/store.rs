@@ -5,7 +5,7 @@
 
 use crate::util::expand_tilde;
 use echo_core::error::{MemoryError, Result};
-pub use echo_core::memory::store::{Store, StoreItem};
+pub use echo_core::memory::store::{Store, StoreCompareAndPutOutcome, StoreItem};
 use echo_core::utils::fs::{ExclusiveFileLease, try_exclusive_file_lease};
 use echo_core::utils::time::now_secs;
 use futures::future::BoxFuture;
@@ -75,6 +75,41 @@ impl Store for InMemoryStore {
                     )
                 });
             Ok(())
+        })
+    }
+
+    fn compare_and_put<'a>(
+        &'a self,
+        namespace: &'a [&'a str],
+        key: &'a str,
+        expected: Option<Value>,
+        value: Value,
+    ) -> BoxFuture<'a, Result<StoreCompareAndPutOutcome>> {
+        Box::pin(async move {
+            let ns_key = namespace_key(namespace);
+            let mut data = self.data.write().await;
+            let current = data
+                .get(&ns_key)
+                .and_then(|bucket| bucket.get(key))
+                .map(|item| &item.value);
+            if current != expected.as_ref() {
+                return Ok(StoreCompareAndPutOutcome::Mismatch);
+            }
+            let bucket = data.entry(ns_key).or_default();
+            bucket
+                .entry(key.to_string())
+                .and_modify(|item| {
+                    item.value = value.clone();
+                    item.updated_at = now_secs();
+                })
+                .or_insert_with(|| {
+                    StoreItem::new(
+                        namespace.iter().map(|part| (*part).to_string()).collect(),
+                        key.to_string(),
+                        value,
+                    )
+                });
+            Ok(StoreCompareAndPutOutcome::Applied)
         })
     }
 
@@ -581,6 +616,39 @@ impl Store for FileStore {
         })
     }
 
+    fn compare_and_put<'a>(
+        &'a self,
+        namespace: &'a [&'a str],
+        key: &'a str,
+        expected: Option<Value>,
+        value: Value,
+    ) -> BoxFuture<'a, Result<StoreCompareAndPutOutcome>> {
+        Box::pin(async move {
+            let ns_key = namespace_key(namespace);
+            let ns_vec: Vec<String> = namespace.iter().map(|part| (*part).to_string()).collect();
+            let key = key.to_string();
+            self.transact(move |data| {
+                let current = data
+                    .get(&ns_key)
+                    .and_then(|bucket| bucket.get(&key))
+                    .map(|item| &item.value);
+                if current != expected.as_ref() {
+                    return (StoreCompareAndPutOutcome::Mismatch, false);
+                }
+                let bucket = data.entry(ns_key).or_default();
+                bucket
+                    .entry(key.clone())
+                    .and_modify(|item| {
+                        item.value = value.clone();
+                        item.updated_at = now_secs();
+                    })
+                    .or_insert_with(|| StoreItem::new(ns_vec, key, value));
+                (StoreCompareAndPutOutcome::Applied, true)
+            })
+            .await
+        })
+    }
+
     fn get<'a>(
         &'a self,
         namespace: &'a [&'a str],
@@ -830,6 +898,53 @@ mod tests {
     use super::*;
     use echo_core::memory::SearchQuery;
     use serde_json::json;
+
+    async fn assert_compare_and_put_contract(store: &dyn Store) -> Result<()> {
+        let namespace = &["cas"];
+        assert_eq!(
+            store
+                .compare_and_put(namespace, "key", None, json!("first"))
+                .await?,
+            StoreCompareAndPutOutcome::Applied
+        );
+        assert_eq!(
+            store
+                .compare_and_put(namespace, "key", Some(json!("stale")), json!("lost-update"),)
+                .await?,
+            StoreCompareAndPutOutcome::Mismatch
+        );
+        assert_eq!(
+            store.get(namespace, "key").await?.map(|item| item.value),
+            Some(json!("first"))
+        );
+        assert_eq!(
+            store
+                .compare_and_put(namespace, "key", Some(json!("first")), json!("second"),)
+                .await?,
+            StoreCompareAndPutOutcome::Applied
+        );
+        assert_eq!(
+            store.get(namespace, "key").await?.map(|item| item.value),
+            Some(json!("second"))
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn in_memory_store_compare_and_put_is_exact_and_atomic() -> Result<()> {
+        assert_compare_and_put_contract(&InMemoryStore::new()).await
+    }
+
+    #[tokio::test]
+    async fn file_store_compare_and_put_is_exact_and_atomic() -> Result<()> {
+        let directory =
+            std::env::temp_dir().join(format!("echo-store-cas-{}", uuid::Uuid::new_v4()));
+        let store = FileStore::new(directory.join("store.json"))?;
+        assert_compare_and_put_contract(&store).await?;
+        drop(store);
+        std::fs::remove_dir_all(directory).map_err(MemoryError::from)?;
+        Ok(())
+    }
 
     #[tokio::test]
     async fn test_in_memory_store_put_and_get() {

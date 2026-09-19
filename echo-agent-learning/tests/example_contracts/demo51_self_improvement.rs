@@ -15,12 +15,13 @@
 
 use chrono::Utc;
 use echo_agent::evolution::{
-    ChangeFilter, ChangeLog, Curator, CuratorConfig, JsonlChangeLog, MemoryLayer,
+    ChangeFilter, ChangeLog, ChangeType, Curator, CuratorConfig, JsonlChangeLog, MemoryLayer,
     MemoryRollbackOutcome, MemoryRollbackPreviewOutcome, MemoryRollbackTarget,
-    MemoryRuntimeIntegrationBuilder, SkillLifecycle,
+    MemoryRuntimeIntegrationBuilder, SkillCandidateDetector, SkillLifecycle, SkillMeta,
 };
 use echo_agent::improve::*;
 use echo_agent::memory::store::FileStore;
+use echo_agent::memory::typed_store::TypedMemoryStore;
 use echo_agent::prelude::{MemoryMeta, MemorySource, MemoryType};
 use echo_agent::trace::{Run, RunEvent, RunStatus, RunTimings, TokenUsage};
 use std::sync::Arc;
@@ -192,6 +193,73 @@ async fn contract_demo51_memory_later_rollback() -> Result<(), Box<dyn std::erro
         MemoryRollbackOutcome::AlreadyApplied(_)
     ));
     Ok(())
+}
+
+#[tokio::test]
+async fn contract_demo51_skill_candidate_reinforcement_audit()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let store = Arc::new(FileStore::new(dir.path().join("candidate-store.json"))?);
+    let typed = TypedMemoryStore::new(store);
+    let log = JsonlChangeLog::new(dir.path().join("candidate-changes.jsonl"))?;
+    let detector = SkillCandidateDetector::new(Curator::new(
+        CuratorConfig::default(),
+        dir.path().join("curator-state.json"),
+    ));
+    let meta = MemoryMeta::new(
+        MemoryType::WorkflowPattern,
+        MemorySource::RepeatedWorkflow,
+        "cargo-build",
+    )
+    .with_confidence(0.75);
+
+    for index in 0..3 {
+        typed
+            .put_typed(
+                &["agent", "memories"],
+                &format!("workflow-{index}"),
+                "Run cargo check before cargo build",
+                meta.clone(),
+            )
+            .await?;
+    }
+    assert_eq!(detector.detect(&typed, &log).await?.new_candidates.len(), 1);
+
+    typed
+        .put_typed(
+            &["agent", "memories"],
+            "workflow-3",
+            "Run cargo test after cargo build",
+            meta,
+        )
+        .await?;
+    assert_eq!(detector.detect(&typed, &log).await?.reinforced.len(), 1);
+    let changes = log.query(&ChangeFilter::new())?;
+    assert_eq!(changes.len(), 3);
+    assert_eq!(changes[0].change_type, ChangeType::Update);
+    assert_eq!(changes[1].change_type, ChangeType::Create);
+
+    let no_growth = detector.detect(&typed, &log).await?;
+    assert!(no_growth.new_candidates.is_empty());
+    assert!(no_growth.reinforced.is_empty());
+    assert_eq!(log.len(), 3);
+    Ok(())
+}
+
+#[test]
+fn contract_demo51_skill_meta_external_struct_literal_remains_compatible() {
+    let now = Utc::now();
+    let _meta = SkillMeta {
+        name: "external-skill".to_string(),
+        path: None,
+        lifecycle: SkillLifecycle::Candidate,
+        created_at: now,
+        last_used_at: now,
+        last_modified_at: now,
+        pinned: false,
+        agent_created: true,
+        superseded_by: None,
+    };
 }
 
 /// 场景 1：Analyzer — 失败模式检测

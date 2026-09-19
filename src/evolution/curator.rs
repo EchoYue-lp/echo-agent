@@ -19,10 +19,16 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::error::Result;
 use fs2::FileExt;
+
+fn append_path_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut suffixed = path.as_os_str().to_os_string();
+    suffixed.push(suffix);
+    PathBuf::from(suffixed)
+}
 
 // ── SkillLifecycle ─────────────────────────────────────────────────
 
@@ -137,7 +143,7 @@ impl CuratorState {
             std::fs::create_dir_all(parent)?;
         }
         let data = serde_json::to_string_pretty(self)?;
-        let tmp_path = path.with_extension("json.tmp");
+        let tmp_path = append_path_suffix(path, ".tmp");
         {
             let mut file = std::fs::File::create(&tmp_path)?;
             use std::io::Write;
@@ -147,6 +153,30 @@ impl CuratorState {
             file.sync_all()?;
         }
         std::fs::rename(&tmp_path, path)?;
+        Ok(())
+    }
+}
+
+#[derive(Default, Serialize, Deserialize)]
+struct CandidateAuthorityState {
+    bindings: HashMap<String, String>,
+}
+
+impl CandidateAuthorityState {
+    fn try_load(path: &Path) -> Result<Self> {
+        match std::fs::read_to_string(path) {
+            Ok(data) => serde_json::from_str(&data).map_err(Into::into),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn save(&self, path: &Path) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let data = serde_json::to_vec_pretty(self)?;
+        echo_core::utils::fs::atomic_write(path, &data)?;
         Ok(())
     }
 }
@@ -190,6 +220,22 @@ impl Curator {
             config,
             state_path: state_path.into(),
         }
+    }
+
+    /// Private recovery journal used by candidate payload mutation.
+    ///
+    /// The path follows the consumer-supplied lifecycle state identity without
+    /// making candidate recovery part of the public Curator contract.
+    pub(crate) fn candidate_operation_journal_path(&self) -> PathBuf {
+        append_path_suffix(&self.state_path, ".candidate-operations.jsonl")
+    }
+
+    fn candidate_authority_path(&self) -> PathBuf {
+        append_path_suffix(&self.state_path, ".candidate-authorities.json")
+    }
+
+    fn lock_path(&self) -> PathBuf {
+        append_path_suffix(&self.state_path, ".lock")
     }
 
     /// Load the current state under an advisory file lock.
@@ -250,7 +296,7 @@ impl Curator {
     /// it after unlock could let another process create a different inode and
     /// bypass an existing lock.
     fn acquire_lock(&self) -> Result<CuratorLockGuard> {
-        let lock_path = self.state_path.with_extension("json.lock");
+        let lock_path = self.lock_path();
         if let Some(parent) = lock_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -368,17 +414,70 @@ impl Curator {
         })
     }
 
-    pub(crate) fn remove_candidate(&self, name: &str) -> Result<bool> {
-        self.with_locked_state(|state| {
-            let removable = state
-                .skills
-                .get(name)
-                .is_some_and(|meta| meta.lifecycle == SkillLifecycle::Candidate);
-            if removable {
-                state.skills.remove(name);
+    pub(crate) fn register_candidate_with_authority(
+        &self,
+        name: &str,
+        authority_id: &str,
+    ) -> Result<()> {
+        if authority_id.is_empty() {
+            return Err(crate::error::ReactError::Other(
+                "candidate authority identity must not be empty".into(),
+            ));
+        }
+        let _guard = self.acquire_lock()?;
+        let mut state = CuratorState::try_load(&self.state_path)?;
+        let authority_path = self.candidate_authority_path();
+        let mut authorities = CandidateAuthorityState::try_load(&authority_path)?;
+        if state.skills.contains_key(name) {
+            return if authorities.bindings.get(name).map(String::as_str) == Some(authority_id) {
+                Ok(())
+            } else {
+                Err(crate::error::ReactError::Other(format!(
+                    "skill candidate {name} belongs to another or unbound lifecycle authority"
+                )))
+            };
+        }
+        match authorities.bindings.get(name) {
+            Some(existing) if existing != authority_id => {
+                return Err(crate::error::ReactError::Other(format!(
+                    "skill candidate {name} belongs to another lifecycle authority"
+                )));
             }
-            Ok((removable, removable))
-        })
+            Some(_) => {}
+            None => {
+                authorities
+                    .bindings
+                    .insert(name.to_string(), authority_id.to_string());
+                authorities.save(&authority_path)?;
+            }
+        }
+        let now = chrono::Utc::now();
+        state.skills.insert(
+            name.to_string(),
+            SkillMeta {
+                name: name.to_string(),
+                path: None,
+                lifecycle: SkillLifecycle::Candidate,
+                created_at: now,
+                last_used_at: now,
+                last_modified_at: now,
+                pinned: false,
+                agent_created: true,
+                superseded_by: None,
+            },
+        );
+        state.save(&self.state_path)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn candidate_authority(&self, name: &str) -> Result<Option<String>> {
+        let _guard = self.acquire_lock()?;
+        Ok(
+            CandidateAuthorityState::try_load(&self.candidate_authority_path())?
+                .bindings
+                .get(name)
+                .cloned(),
+        )
     }
 
     pub(crate) fn revert_draft_to_candidate(&self, name: &str) -> Result<bool> {
@@ -665,6 +764,40 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("echo_curator_test_{}", uuid::Uuid::new_v4()));
         let path = dir.join("curator_state.json");
         Curator::new(CuratorConfig::default(), path)
+    }
+
+    #[test]
+    fn same_stem_different_extensions_have_injective_private_paths() {
+        let root = std::env::temp_dir().join(format!(
+            "echo-curator-path-identity-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let json_path = root.join("state.json");
+        let toml_path = root.join("state.toml");
+        let json = Curator::new(CuratorConfig::default(), json_path.clone());
+        let toml = Curator::new(CuratorConfig::default(), toml_path.clone());
+
+        assert_ne!(
+            json.candidate_operation_journal_path(),
+            toml.candidate_operation_journal_path()
+        );
+        assert_ne!(
+            json.candidate_authority_path(),
+            toml.candidate_authority_path()
+        );
+        assert_ne!(json.lock_path(), toml.lock_path());
+        assert_ne!(
+            append_path_suffix(&json_path, ".tmp"),
+            append_path_suffix(&toml_path, ".tmp")
+        );
+        assert_eq!(
+            json.candidate_operation_journal_path(),
+            root.join("state.json.candidate-operations.jsonl")
+        );
+        assert_eq!(
+            toml.candidate_authority_path(),
+            root.join("state.toml.candidate-authorities.json")
+        );
     }
 
     #[test]
@@ -986,7 +1119,7 @@ mod tests {
         let path = dir.join("curator_state.json");
 
         // Pre-create a stale sidecar lock file (as if a prior process crashed).
-        let lock_path = path.with_extension("json.lock");
+        let lock_path = append_path_suffix(&path, ".lock");
         std::fs::create_dir_all(&dir)?;
         std::fs::write(&lock_path, b"")?;
         assert!(lock_path.exists(), "precondition: stale sidecar exists");

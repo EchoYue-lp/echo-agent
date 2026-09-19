@@ -46,10 +46,12 @@ use super::store::{namespace_key, parse_namespace_key};
 use crate::util::{expand_tilde, memory_io_error};
 use echo_core::error::{MemoryError, Result};
 pub use echo_core::memory::embedder::Embedder;
-pub use echo_core::memory::store::{SearchMode, SearchQuery, Store, StoreItem};
+pub use echo_core::memory::store::{
+    SearchMode, SearchQuery, Store, StoreCompareAndPutOutcome, StoreItem,
+};
 use echo_core::utils::time::now_secs;
 use futures::future::BoxFuture;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -66,6 +68,14 @@ use tracing::{debug, info, warn};
 pub struct SqliteStore {
     embedder: Option<Arc<dyn Embedder>>,
     conn: Arc<Mutex<Connection>>,
+}
+
+struct PreparedStoreWrite {
+    value: Value,
+    value_json: String,
+    search_text: String,
+    now: i64,
+    vector_bytes: Option<Vec<u8>>,
 }
 
 impl SqliteStore {
@@ -136,6 +146,69 @@ impl SqliteStore {
         .map_err(|error| {
             MemoryError::IoError(format!("SQLite store operation task failed: {error}"))
         })?
+    }
+
+    fn write_transaction_value(
+        transaction: &Transaction<'_>,
+        namespace: &str,
+        key: &str,
+        prepared: &PreparedStoreWrite,
+    ) -> Result<()> {
+        let importance = prepared
+            .value
+            .get("importance")
+            .and_then(Value::as_f64)
+            .unwrap_or(5.0);
+        let expires_at = prepared
+            .value
+            .get("expires_at")
+            .and_then(Value::as_u64)
+            .map(i64::try_from)
+            .transpose()
+            .map_err(|_| {
+                MemoryError::SerializationError("expires_at exceeds SQLite range".to_string())
+            })?;
+        transaction
+            .execute(
+                "INSERT INTO store_items (namespace, key, value, created_at, updated_at, importance, expires_at)
+                 VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?6)
+                 ON CONFLICT(namespace, key) DO UPDATE SET
+                    value = excluded.value,
+                    updated_at = excluded.updated_at,
+                    importance = excluded.importance,
+                    expires_at = excluded.expires_at",
+                params![namespace, key, prepared.value_json, prepared.now, importance, expires_at],
+            )
+            .map_err(|error| memory_io_error("failed to write to main table", error))?;
+        transaction
+            .execute(
+                "DELETE FROM store_fts WHERE namespace = ?1 AND key = ?2",
+                params![namespace, key],
+            )
+            .map_err(|error| memory_io_error("failed to delete FTS index", error))?;
+        transaction
+            .execute(
+                "INSERT INTO store_fts (namespace, key, content) VALUES (?1, ?2, ?3)",
+                params![namespace, key, prepared.search_text],
+            )
+            .map_err(|error| memory_io_error("failed to write FTS index", error))?;
+        match prepared.vector_bytes.as_deref() {
+            Some(bytes) => transaction
+                .execute(
+                    "INSERT INTO store_vectors (namespace, key, vector)
+                     VALUES (?1, ?2, ?3)
+                     ON CONFLICT(namespace, key) DO UPDATE SET vector = excluded.vector",
+                    params![namespace, key, bytes],
+                )
+                .map_err(|error| memory_io_error("failed to write to vector table", error))?,
+            None => transaction
+                .execute(
+                    "DELETE FROM store_vectors WHERE namespace = ?1 AND key = ?2",
+                    params![namespace, key],
+                )
+                .map_err(|error| memory_io_error("failed to clear stale vector", error))?,
+        };
+        Ok(())
     }
 
     fn init_tables(conn: &Connection) -> Result<()> {
@@ -618,75 +691,99 @@ impl Store for SqliteStore {
             };
 
             let key = key.to_string();
+            let prepared = PreparedStoreWrite {
+                value,
+                value_json,
+                search_text,
+                now,
+                vector_bytes,
+            };
             self.run_db(move |conn| {
-                // Wrap main table write, FTS update, and vector table update in a transaction.
-                // If any step fails, the whole transaction rolls back.
-                let tx = conn
+                let transaction = conn
                     .transaction()
-                    .map_err(|e| memory_io_error("failed to begin transaction", e))?;
-
-                // Upsert into main table (extract metadata from JSON value for columns)
-                let importance: f64 = value
-                    .get("importance")
-                    .and_then(|v| v.as_f64())
-                    .unwrap_or(5.0);
-                let expires_at: Option<i64> = value
-                    .get("expires_at")
-                    .and_then(|v| v.as_u64())
-                    .map(i64::try_from)
-                    .transpose()
-                    .map_err(|_| {
-                        MemoryError::SerializationError(
-                            "expires_at exceeds SQLite range".to_string(),
-                        )
-                    })?;
-
-                tx.execute(
-                    "INSERT INTO store_items (namespace, key, value, created_at, updated_at, importance, expires_at)
-                     VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?6)
-                     ON CONFLICT(namespace, key) DO UPDATE SET
-                        value = excluded.value,
-                        updated_at = excluded.updated_at,
-                        importance = excluded.importance,
-                        expires_at = excluded.expires_at",
-                    params![ns_key, key, value_json, now, importance, expires_at],
-                )
-                .map_err(|e| memory_io_error("failed to write to main table", e))?;
-
-                // Update FTS5 index (delete then insert)
-                tx.execute(
-                    "DELETE FROM store_fts WHERE namespace = ?1 AND key = ?2",
-                    params![ns_key, key],
-                )
-                .map_err(|e| memory_io_error("failed to delete FTS index", e))?;
-
-                tx.execute(
-                    "INSERT INTO store_fts (namespace, key, content) VALUES (?1, ?2, ?3)",
-                    params![ns_key, key, search_text],
-                )
-                .map_err(|e| memory_io_error("failed to write FTS index", e))?;
-
-                // Vector index update (if embedding succeeded above) — included in the
-                // same transaction so a failure rolls back the FTS/main writes too.
-                if let Some(bytes) = vector_bytes {
-                    tx.execute(
-                        "INSERT INTO store_vectors (namespace, key, vector)
-                         VALUES (?1, ?2, ?3)
-                         ON CONFLICT(namespace, key) DO UPDATE SET vector = excluded.vector",
-                        params![ns_key, key, bytes],
-                    )
-                    .map_err(|e| memory_io_error("failed to write to vector table", e))?;
-                } else {
-                    tx.execute(
-                        "DELETE FROM store_vectors WHERE namespace = ?1 AND key = ?2",
-                        params![ns_key, key],
-                    )
-                    .map_err(|e| memory_io_error("failed to clear stale vector", e))?;
-                }
-
-                tx.commit()
-                    .map_err(|e| memory_io_error("failed to commit transaction", e))?;
+                    .map_err(|error| memory_io_error("failed to begin transaction", error))?;
+                Self::write_transaction_value(&transaction, &ns_key, &key, &prepared)?;
+                transaction
+                    .commit()
+                    .map_err(|error| memory_io_error("failed to commit transaction", error))?;
                 Ok(())
+            })
+            .await
+        })
+    }
+
+    fn compare_and_put<'a>(
+        &'a self,
+        namespace: &'a [&'a str],
+        key: &'a str,
+        expected: Option<Value>,
+        value: Value,
+    ) -> BoxFuture<'a, Result<StoreCompareAndPutOutcome>> {
+        Box::pin(async move {
+            let ns_key = namespace_key(namespace);
+            let value_json = serde_json::to_string(&value)
+                .map_err(|error| MemoryError::SerializationError(error.to_string()))?;
+            let search_text = Self::extract_searchable_text(&value);
+            let now = i64::try_from(now_secs()).map_err(|_| {
+                MemoryError::SerializationError(
+                    "current timestamp exceeds SQLite range".to_string(),
+                )
+            })?;
+            let vector_bytes = if let Some(ref embedder) = self.embedder {
+                match embedder.embed(&search_text).await {
+                    Ok(vector) => {
+                        if vector.is_empty() || vector.iter().any(|value| !value.is_finite()) {
+                            return Err(MemoryError::SerializationError(
+                                "embedder returned an empty or non-finite vector".to_string(),
+                            )
+                            .into());
+                        }
+                        Some(Self::vec_to_bytes(&vector))
+                    }
+                    Err(error) => {
+                        warn!(key = %key, error = %error, "Embedding calculation failed, item will not be added to vector index");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            let key = key.to_string();
+            let prepared = PreparedStoreWrite {
+                value,
+                value_json,
+                search_text,
+                now,
+                vector_bytes,
+            };
+            self.run_db(move |connection| {
+                let transaction = connection
+                    .transaction()
+                    .map_err(|error| memory_io_error("failed to begin transaction", error))?;
+                let current_json = transaction
+                    .query_row(
+                        "SELECT value FROM store_items WHERE namespace = ?1 AND key = ?2",
+                        params![ns_key, key],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional()
+                    .map_err(|error| {
+                        memory_io_error("failed to read compare-and-put value", error)
+                    })?;
+                let current = current_json
+                    .map(|json| {
+                        serde_json::from_str::<Value>(&json)
+                            .map_err(|error| MemoryError::SerializationError(error.to_string()))
+                    })
+                    .transpose()?;
+                if current != expected {
+                    return Ok(StoreCompareAndPutOutcome::Mismatch);
+                }
+                Self::write_transaction_value(&transaction, &ns_key, &key, &prepared)?;
+                transaction
+                    .commit()
+                    .map_err(|error| memory_io_error("failed to commit transaction", error))?;
+                Ok(StoreCompareAndPutOutcome::Applied)
             })
             .await
         })
@@ -1610,5 +1707,28 @@ mod tests {
         assert!(text.contains("hello"));
         assert!(text.contains("tag1"));
         assert!(text.contains("tag2"));
+    }
+
+    #[tokio::test]
+    async fn compare_and_put_checks_and_writes_in_one_transaction() -> Result<()> {
+        let store = temp_db();
+        let namespace = &["cas"];
+        assert_eq!(
+            store
+                .compare_and_put(namespace, "key", None, json!("first"))
+                .await?,
+            StoreCompareAndPutOutcome::Applied
+        );
+        assert_eq!(
+            store
+                .compare_and_put(namespace, "key", Some(json!("stale")), json!("lost"),)
+                .await?,
+            StoreCompareAndPutOutcome::Mismatch
+        );
+        assert_eq!(
+            store.get(namespace, "key").await?.map(|item| item.value),
+            Some(json!("first"))
+        );
+        Ok(())
     }
 }
