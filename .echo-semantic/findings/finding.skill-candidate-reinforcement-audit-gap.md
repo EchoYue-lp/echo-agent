@@ -13,8 +13,8 @@ rule_refs: [rule.quality-observation-boundary]
 evidence_refs: [evidence.provider-protocol-quality]
 audit_refs: [audit.eval-evolution.data-durability]
 decision_refs: []
-repair_evidence_refs: []
-verification_evidence_refs: []
+repair_evidence_refs: [evidence.skill-candidate-audit-repair]
+verification_evidence_refs: [evidence.skill-candidate-audit-verification]
 rereview_audit_refs: []
 discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 ---
@@ -39,4 +39,7 @@ GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/94
 
 ## 处理记录
 
-Data-durability Audit确认；后续repair把reinforcement纳入同一durable mutation/audit identity。
+Data-durability Audit确认；候选 repair 已把 create/reinforcement 纳入同一 durable
+mutation/audit identity，并通过完整分支门禁与四轮独立实现复审。Finding 在 PR CI、
+remote-main delivery 与 post-merge closure rereview 前保持 open；#54 Skill promotion/approval
+与 #52 memory rollback 继续保持独立。

@@ -640,7 +640,14 @@ mod tests {
         }
 
         let output = Arc::new(Mutex::new(String::new()));
-        let result = tracing::subscriber::with_default(Capture(output.clone()), action);
+        let capture = tracing::Dispatch::new(Capture(output.clone()));
+        // tracing-core 0.1.36 can cache `Interest::never` when a callsite is
+        // first observed on another thread while only one Dispatch exists.
+        // Keep a second Dispatch registered so cache rebuilds use the
+        // multi-dispatch path. Remove this after tokio-rs/tracing#3611 lands.
+        let _callsite_cache_guard =
+            tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+        let result = tracing::dispatcher::with_default(&capture, action);
         let text = output.lock().unwrap_or_else(|e| e.into_inner()).clone();
         (result, text)
     }
@@ -650,8 +657,18 @@ mod tests {
         let mut failure = sample_failure();
         failure.record_id = Some("token=raw-record-identity-secret".into());
         failure.error = "Bearer abcdefghijklmnopqrstuvwxyz".into();
-        let (_, logs) =
-            capture_audit_logs(|| TracingDiagnosticDeliveryObserver.on_failure(failure));
+        let (_, logs) = capture_audit_logs(|| {
+            // Exercise the upstream race deterministically: after Capture is
+            // registered, another thread without a subscriber sees this
+            // static callsite before the Capture thread does.
+            let uncaptured = sample_failure();
+            std::thread::spawn(move || {
+                TracingDiagnosticDeliveryObserver.on_failure(uncaptured);
+            })
+            .join()
+            .unwrap_or(());
+            TracingDiagnosticDeliveryObserver.on_failure(failure);
+        });
         assert!(logs.contains("diagnostic persistence delivery failed"));
         assert!(logs.contains("[REDACTED]"));
         assert!(!logs.contains("abcdefghijklmnopqrstuvwxyz"));

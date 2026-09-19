@@ -325,11 +325,22 @@ let transitions = curator.apply_transitions()?; // 按闲置时间自动转换
 1. **`SkillCandidateDetector`** 扫描 `TypedMemoryStore` 中 `WorkflowPattern`/`DebuggingLesson` 记忆；当同一主题 ≥3 条且来源为 `RepeatedWorkflow` → 提出技能候选。
 
    ```rust
-   use echo_agent::evolution::SkillCandidateDetector;
-   let detector = SkillCandidateDetector::new();
+   use echo_agent::evolution::{Curator, CuratorConfig, SkillCandidateDetector};
+   let curator = Curator::new(CuratorConfig::default(), "<application-data>/evolution/curator-state.json");
+   let detector = SkillCandidateDetector::new(curator);
    let report = detector.detect(&typed_store, &change_log).await?;
    // report.new_candidates / report.reinforced
    ```
+
+   create 与 reinforce 共用一个私有 durable operation journal。每次 detect 会先恢复已 prepare
+   的 candidate payload，并用固定 ID 幂等补齐 `ChangeLog`，再开始本轮扫描。只有 settled 后才会
+   发布 report；观察数量没有增长时不写 payload 或 audit。`TypedMemoryStore`、`Curator`、
+   `ChangeLog` 仍分别是 payload、lifecycle 与 append-only audit 权威。Store 与 ChangeLog 的
+   reserved marker 把 journal 绑定到具体权威；Store 投影使用 exact atomic compare-and-put；
+   Curator 在合法 Draft/Active 晋升中保留 candidate authority lineage。不支持原子 CAS 的 Store
+   会被拒绝，不会退回有竞态的 get-then-put；`EmbeddingStore` 的派生向量索引无法与 inner
+   payload 共用一次原子提交，因此明确属于 Unsupported。详见
+   [ADR 0068](../adr/0068-skill-candidate-mutation-audit-reconciliation.md)。
 
 2. **`SkillDraftGenerator`** 从候选用模板生成草稿 `SKILL.md`，保存到消费方传入的 evolution root 下 `skills/_drafts/<name>/SKILL.md`。
 

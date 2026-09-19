@@ -4,11 +4,11 @@ id: map.eval-evolution
 kind: capability_map
 title: Trace、Eval、Improve 与 Evolution
 risk: high
-observed_at: source:1793556b87f7275872eba5723d9643e2ec78e14e5e11cbdfc5c3f7a3c1a3ce70
+observed_at: source:3131a2a66cf2c665575e853a3ae3b43620bafd243e2a60e61fdeaa886c34f846
 boundary_refs: [boundary.eval-evolution]
 behavior_refs: [behavior.eval-evolution]
 rule_refs: [rule.quality-observation-boundary, rule.fact-projection-separation]
-evidence_refs: [evidence.provider-protocol-quality, evidence.persistence-observation, evidence.high-risk-audit-frontier, evidence.improve-singleton-split-repair, evidence.improve-singleton-split-verification, evidence.improve-iteration-config-repair, evidence.improve-iteration-config-verification, evidence.eval-workspace-generation-repair, evidence.eval-workspace-generation-verification, evidence.eval-timeout-turn-settlement-repair, evidence.eval-timeout-turn-settlement-verification, evidence.eval-trace-correlation-repair, evidence.eval-trace-correlation-verification, evidence.evolution-memory-audit-repair, evidence.evolution-memory-audit-verification]
+evidence_refs: [evidence.provider-protocol-quality, evidence.persistence-observation, evidence.high-risk-audit-frontier, evidence.improve-singleton-split-repair, evidence.improve-singleton-split-verification, evidence.improve-iteration-config-repair, evidence.improve-iteration-config-verification, evidence.eval-workspace-generation-repair, evidence.eval-workspace-generation-verification, evidence.eval-timeout-turn-settlement-repair, evidence.eval-timeout-turn-settlement-verification, evidence.eval-trace-correlation-repair, evidence.eval-trace-correlation-verification, evidence.evolution-memory-audit-repair, evidence.evolution-memory-audit-verification, evidence.skill-candidate-audit-repair, evidence.skill-candidate-audit-verification]
 finding_refs: [finding.eval-trace-identity, finding.eval-timeout-settlement, finding.improve-iteration-config, finding.improve-single-case-panic, finding.eval-workspace-generation-isolation, finding.background-review-detached-persistence-settlement, finding.evolution-audit-atomicity, finding.evolution-changelog-rollback-authority, finding.evolution-skill-promotion-audit, finding.skill-candidate-reinforcement-audit-gap, finding.evolution-doc-namespace, finding.pre-compaction-memory-trust-provenance]
 audit_refs: [audit.eval-evolution.data-durability, audit.eval-evolution.failure-concurrency, audit.eval-evolution.permission-external, audit.improve-singleton-split-rereview, audit.improve-iteration-config-rereview, audit.eval-workspace-generation-rereview, audit.eval-timeout-turn-settlement-rereview, audit.eval-trace-correlation-rereview, audit.evolution-memory-audit-atomicity-rereview, audit.evolution-memory-rollback-rereview]
 related_map_refs: [map.observation-persistence-delivery, map.agent-session-turn, map.llm-provider-runtime, map.extension-lifecycle]
@@ -50,11 +50,12 @@ scenarios:
     next_step: memory rollback候选完成远端交付；Skill/Rule/host rollback依#54/#94/host，旧namespace依其Finding处置
   evolution-skill-lifecycle:
     status: needs_review
-    source_refs: [src/evolution/curator.rs, src/evolution/draft.rs, src/evolution/merge.rs, src/evolution/patch.rs, src/evolution/review.rs, src/evolution/security.rs]
+    source_refs: [src/evolution/candidate.rs, src/evolution/curator.rs, src/evolution/draft.rs, src/evolution/merge.rs, src/evolution/patch.rs, src/evolution/review.rs, src/evolution/security.rs, docs/adr/0068-skill-candidate-mutation-audit-reconciliation.md]
     finding_refs: [finding.evolution-skill-promotion-audit, finding.skill-candidate-reinforcement-audit-gap]
     rule_refs: [rule.quality-observation-boundary]
-    unknown: Curator public promotion 可直接持久化 active 状态，未携带可验证 human approval 或 ChangeLog；其它 draft/merge/patch 各自有审计合同
-    next_step: audit skill candidate/draft/review/promote/merge/patch 的唯一 lifecycle 与授权证据
+    evidence_refs: [evidence.skill-candidate-audit-repair, evidence.skill-candidate-audit-verification]
+    unknown: "#94 candidate repair以reserved authority marker、Store atomic CAS、Curator private lineage及injective private paths回应三轮独立复审，最终复审、完整门禁与remote delivery待完成；promotion approval policy仍归#54"
+    next_step: 完成candidate create/reinforce durable audit候选；promotion/approval/draft/merge/patch继续依#54及各自合同
   evolution-rule-promotion-surface:
     status: needs_review
     source_refs: [src/evolution/security.rs, src/evolution/mod.rs]
