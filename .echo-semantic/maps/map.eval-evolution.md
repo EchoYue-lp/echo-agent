@@ -4,7 +4,7 @@ id: map.eval-evolution
 kind: capability_map
 title: Trace、Eval、Improve 与 Evolution
 risk: high
-observed_at: source:5806bd920140828b759fabe868fc1c4af1f26009ed4bf9112b73385cf2ce764e
+observed_at: source:d42fc47f5751f400deae0b7def222a520f9ed3fb4caf2225096f138a5cb5c044
 boundary_refs: [boundary.eval-evolution]
 behavior_refs: [behavior.eval-evolution]
 rule_refs: [rule.quality-observation-boundary, rule.fact-projection-separation]
@@ -46,8 +46,8 @@ scenarios:
     rule_refs: [rule.quality-observation-boundary]
     evidence_refs: [evidence.evolution-memory-audit-repair, evidence.evolution-memory-audit-verification, evidence.evolution-memory-rollback-repair, evidence.evolution-memory-rollback-verification]
     audit_refs: [audit.evolution-memory-audit-atomicity-rereview]
-    unknown: durable prepare/reconcile已在主线cb4ee9ed交付并通过独立复审；memory rollback候选已通过首次独立复审但尚待最新main门禁与远端交付，raw Store读者可暂见中间态，Skill/Rule/host rollback与旧namespace仍属独立范围
-    next_step: memory rollback候选完成advancing-base门禁与交付；Skill/Rule/host rollback依#54/#94/host，旧namespace依其Finding处置
+    unknown: durable prepare/reconcile已在主线cb4ee9ed交付并通过独立复审；memory rollback候选已通过advancing-base完整门禁，尚待最终独立复审与远端交付，raw Store读者可暂见中间态，Skill/Rule/host rollback与旧namespace仍属独立范围
+    next_step: memory rollback候选完成最终独立复审与远端交付；Skill/Rule/host rollback依#54/#94/host，旧namespace依其Finding处置
   evolution-skill-lifecycle:
     status: needs_review
     source_refs: [src/evolution/curator.rs, src/evolution/draft.rs, src/evolution/merge.rs, src/evolution/patch.rs, src/evolution/review.rs, src/evolution/security.rs]

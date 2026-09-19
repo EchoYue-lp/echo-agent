@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.evolution-memory-rollback-repair
 kind: evidence
-observed_at: source:5f1004796277c714cad2bf5280fc86520c6459b24330dd6a931a52a59e72f971
+observed_at: source:d42fc47f5751f400deae0b7def222a520f9ed3fb4caf2225096f138a5cb5c044
 source_refs:
   - src/evolution/mutation.rs
   - src/evolution/layer.rs
@@ -15,7 +15,7 @@ source_refs:
   - CHANGELOG.md
 supports: [finding.evolution-changelog-rollback-authority, behavior.eval-evolution]
 limitations:
-  - Finding #52 remains open until independent review and remote-main delivery
+  - Finding #52 remains open because Skill/Rule/host rollback is not delivered by this memory slice
   - This repair covers canonical layered memory only; Skill/Rule rollback remains #54/#94/host owner
   - Raw Store readers still require manager reconciliation fencing
 ---
@@ -46,5 +46,6 @@ the merge batch handle, public docs, and the demo51 contract.
 
 ## 已知缺口
 
-The Finding remains open pending independent review, final gates, and remote-main
-delivery. Skill/Rule/host rollback is intentionally outside this candidate.
+The memory slice remains pending final advancing-base review and remote-main
+delivery. The Finding remains open after that delivery because Skill/Rule/host
+rollback is intentionally outside this candidate.

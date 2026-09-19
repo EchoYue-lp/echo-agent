@@ -39,4 +39,4 @@ ChangeLog只有record/query/latest/len，没有rollback apply API；模块和文
 
 ## 处理记录
 
-Data-durability Audit确认；#52 候选已提供 memory canonical durable inverse batch、generation CAS、preview、receipt 与 request-id 幂等，但 Finding 仍保持 open，直到独立复审、完整门禁和 remote-main 交付完成。Skill/Rule/host rollback 仍不属于本修复。
+Data-durability Audit确认；#52 候选已提供 memory canonical durable inverse batch、generation CAS、preview、receipt 与 request-id 幂等，并已通过 advancing-base 完整门禁，尚待最终独立复审与 remote-main 交付。即使本 memory slice 交付，Finding 仍保持 open，因为 Skill/Rule/host rollback 不属于本修复。
