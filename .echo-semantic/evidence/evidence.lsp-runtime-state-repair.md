@@ -10,7 +10,7 @@ source_refs:
   - docs/adr/0043-lsp-derived-handle-lifecycle.md
 supports: [behavior.extension-publication, rule.extension-generation-authority]
 limitations:
-  - SDK Host and EKO consumers must adopt the changed load_config contract before cross-repository delivery
+  - SDK Host and EKO consumer adaptation is outside this framework-only repair scope
   - This evidence does not cover MCP transport close or other extension lifecycles
 ---
 
@@ -45,10 +45,9 @@ Implementation is fixed at commit `c04ab97fdbdc7712af36360de5db10cfeeccfec1`,
 including the initial `67abe61da2dab1dbd58168f2a32ee91df678d362` repair and
 the `ee1ebb6aca5a6ed45fa2510a8c517d7d18090a7c` atomic-settlement follow-up.
 ADR 0043 records the process owner and configuration API choice. This evidence
-describes the framework source and does not assert SDK or EKO consumer delivery.
+describes the framework source; SDK and EKO consumer delivery is outside this Finding.
 
 ## 已知缺口
 
-Independent rereview, all applicable merge gates, website documentation sync,
-SDK/EKO consumer alignment, and remote `main` delivery remain necessary before
-the Finding can be resolved.
+No framework repair obligation remains. SDK/EKO adapter evolution and MCP lifecycle
+work retain their own repository and Finding ownership.
