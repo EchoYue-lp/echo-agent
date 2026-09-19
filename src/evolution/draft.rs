@@ -11,12 +11,16 @@
 //! refinement through the optional eval-driven improvement pipeline.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use echo_state::memory::typed_store::TypedMemoryStore;
 
-use super::audit::{ChangeEntryBuilder, ChangeLog, ChangeType, EntityType};
 use super::candidate::{CANDIDATE_NAMESPACE, SkillCandidate};
-use super::curator::{Curator, CuratorConfig};
+use super::curator::SkillLifecycle;
+use super::skill_mutation::{
+    SkillApprovalArtifact, SkillFileMutation, SkillMutationAuthority, SkillMutationKind,
+    SkillMutationOutcome, SkillMutationPreview, SkillMutationRequest,
+};
 use crate::error::Result;
 use echo_core::error::ReactError;
 
@@ -38,6 +42,13 @@ pub struct DraftResult {
     pub created: bool,
 }
 
+/// Exact reviewed draft request and its digest-bound preview.
+pub struct SkillDraftPreview {
+    pub result: DraftResult,
+    pub request: SkillMutationRequest,
+    pub preview: SkillMutationPreview,
+}
+
 // ── SkillDraftGenerator ────────────────────────────────────────────────
 
 /// Generates draft SKILL.md files from skill candidates.
@@ -45,41 +56,26 @@ pub struct DraftResult {
 /// The generator writes template-based SKILL.md files to the `_drafts`
 /// directory and promotes the candidate to `Draft` lifecycle state via
 /// the [`Curator`].
-pub struct SkillDraftGenerator<'a> {
+pub struct SkillDraftGenerator {
     /// Consumer-supplied evolution storage root.
     storage_root: PathBuf,
-    /// ChangeLog for recording mutations.
-    change_log: &'a dyn ChangeLog,
-    curator: Curator,
-    require_curator_transition: bool,
+    authority: Arc<SkillMutationAuthority>,
 }
 
-impl<'a> SkillDraftGenerator<'a> {
+impl SkillDraftGenerator {
     /// Create a new generator.
-    pub fn new(storage_root: PathBuf, change_log: &'a dyn ChangeLog) -> Self {
-        let curator = Curator::new(
-            CuratorConfig::default(),
-            storage_root.join("curator_state.json"),
-        );
+    pub fn new(storage_root: PathBuf, authority: Arc<SkillMutationAuthority>) -> Self {
         Self {
             storage_root,
-            change_log,
-            curator,
-            require_curator_transition: false,
+            authority,
         }
     }
 
-    /// Use a consumer-supplied curator state file.
-    pub fn with_curator(mut self, curator: Curator) -> Self {
-        self.curator = curator;
-        self.require_curator_transition = true;
-        self
-    }
-
-    /// Generate a draft SKILL.md from a named candidate.
-    ///
-    /// Reads the candidate from the Store, generates the SKILL.md file,
-    /// and promotes the candidate from `Candidate` to `Draft` lifecycle state.
+    /// Legacy named-candidate entry point. It reads the candidate but fails
+    /// closed because no reviewed approval artifact is available.
+    #[deprecated(
+        note = "load the candidate, call preview_generate_from_candidate, then generate_from_preview with approval"
+    )]
     pub async fn generate(
         &self,
         name: &str,
@@ -97,11 +93,27 @@ impl<'a> SkillDraftGenerator<'a> {
             ReactError::Other(format!("Failed to parse candidate '{}': {}", name, e))
         })?;
 
-        self.generate_from_candidate(&candidate).await
+        Err(ReactError::Other(format!(
+            "draft mutation for {:?} requires preview_generate_from_candidate followed by generate_from_preview with approval",
+            candidate.name
+        )))
     }
 
-    /// Generate a draft SKILL.md directly from a [`SkillCandidate`] struct.
+    /// Legacy direct entry point; it fails closed without an approval artifact.
+    #[deprecated(note = "use preview_generate_from_candidate followed by generate_from_preview")]
     pub async fn generate_from_candidate(&self, candidate: &SkillCandidate) -> Result<DraftResult> {
+        Err(ReactError::Other(format!(
+            "draft mutation for {:?} requires preview_generate_from_candidate followed by generate_from_preview with approval",
+            candidate.name
+        )))
+    }
+
+    /// Build the exact file/lifecycle mutation reviewed by the host.
+    pub async fn preview_generate_from_candidate(
+        &self,
+        candidate: &SkillCandidate,
+        request_id: impl Into<String>,
+    ) -> Result<SkillDraftPreview> {
         let name = &candidate.name;
         let drafts_root = self.storage_root.join(DRAFTS_DIR);
         let dir = echo_core::utils::fs::join_path_segment(&drafts_root, name).map_err(|error| {
@@ -109,69 +121,79 @@ impl<'a> SkillDraftGenerator<'a> {
         })?;
         let skill_md_path = dir.join("SKILL.md");
 
-        // 2. Generate SKILL.md content.
         let content = render_skill_md(candidate);
-
-        // 3. Write to disk.
         let previous = match std::fs::read(&skill_md_path) {
             Ok(bytes) => Some(bytes),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => return Err(error.into()),
         };
         let created = previous.is_none();
-        echo_core::utils::fs::atomic_write(&skill_md_path, content.as_bytes())?;
-
-        // 4. Promote in the evolution-owned Curator lifecycle.
-        match self.curator.promote_to_draft_at(name, Some(&skill_md_path)) {
-            Ok(true) => {}
-            Ok(false) if self.require_curator_transition => {
-                restore_draft_file(&skill_md_path, previous.as_deref())?;
-                return Err(ReactError::Other(format!(
-                    "candidate '{name}' is not in Candidate lifecycle state"
-                )));
-            }
-            Err(error) if self.require_curator_transition => {
-                restore_draft_file(&skill_md_path, previous.as_deref())?;
-                return Err(error);
-            }
-            Ok(false) => tracing::warn!("Candidate '{}' was not registered with Curator", name),
-            Err(error) => {
-                tracing::warn!("Failed to promote '{}' to draft: {}", name, error);
-            }
+        let file_mutation =
+            SkillFileMutation::new(&skill_md_path, previous, Some(content.into_bytes()))?;
+        let canonical_skill_path = file_mutation.path.clone();
+        let canonical_drafts_root = SkillFileMutation::canonical_path(&drafts_root)?;
+        if !canonical_skill_path.starts_with(&canonical_drafts_root) {
+            return Err(ReactError::Other(format!(
+                "skill draft path escapes the drafts root: {}",
+                canonical_skill_path.display()
+            )));
         }
-
-        // 5. Record in audit log.
-        let action = if created { "created" } else { "updated" };
-        let entry = ChangeEntryBuilder::new(EntityType::Skill, name, ChangeType::Create)
-            .reason(format!(
-                "draft SKILL.md {} for candidate '{}' from {} observations",
-                action, name, candidate.sample_count
-            ))
-            .trigger("skill_draft_generator".to_string())
-            .build(self.change_log);
-        if let Err(error) = self.change_log.record(entry) {
-            let _ = self.curator.revert_draft_to_candidate(name);
-            restore_draft_file(&skill_md_path, previous.as_deref())?;
-            return Err(error);
+        let curator_before = self.authority.curator().load_state()?;
+        let mut curator_after = curator_before.clone();
+        let meta = curator_after.skills.get_mut(name).ok_or_else(|| {
+            ReactError::Other(format!("candidate '{name}' is not registered with Curator"))
+        })?;
+        if !matches!(
+            meta.lifecycle,
+            SkillLifecycle::Candidate | SkillLifecycle::Draft
+        ) {
+            return Err(ReactError::Other(format!(
+                "candidate '{name}' is not in Candidate lifecycle state"
+            )));
         }
-
-        Ok(DraftResult {
-            name: name.clone(),
-            skill_md_path,
-            created,
+        meta.lifecycle = SkillLifecycle::Draft;
+        meta.path = Some(canonical_skill_path.clone());
+        meta.last_modified_at = chrono::Utc::now();
+        let request = SkillMutationRequest {
+            request_id: request_id.into(),
+            entity_key: name.clone(),
+            kind: SkillMutationKind::Draft,
+            reason: format!(
+                "draft SKILL.md for candidate '{}' from {} observations",
+                name, candidate.sample_count
+            ),
+            files: vec![file_mutation],
+            curator_before,
+            curator_after,
+            rollback_of: None,
+        };
+        let preview = self.authority.preview(&request)?;
+        Ok(SkillDraftPreview {
+            result: DraftResult {
+                name: name.clone(),
+                skill_md_path: canonical_skill_path,
+                created,
+            },
+            request,
+            preview,
         })
     }
-}
 
-fn restore_draft_file(path: &std::path::Path, previous: Option<&[u8]>) -> Result<()> {
-    if let Some(bytes) = previous {
-        echo_core::utils::fs::atomic_write(path, bytes)?;
-    } else if let Err(error) = std::fs::remove_file(path)
-        && error.kind() != std::io::ErrorKind::NotFound
-    {
-        return Err(error.into());
+    /// Apply an exact preview using a one-use digest-bound approval artifact.
+    pub async fn generate_from_preview(
+        &self,
+        preview: SkillDraftPreview,
+        approval: SkillApprovalArtifact,
+    ) -> Result<DraftResult> {
+        match self.authority.apply(preview.request, approval).await? {
+            SkillMutationOutcome::Applied(_) | SkillMutationOutcome::AlreadyApplied(_) => {
+                Ok(preview.result)
+            }
+            outcome => Err(ReactError::Other(format!(
+                "draft mutation did not apply: {outcome:?}"
+            ))),
+        }
     }
-    Ok(())
 }
 
 // ── Template rendering ─────────────────────────────────────────────────
@@ -303,38 +325,9 @@ fn yaml_escape(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::evolution::{Curator, CuratorConfig, JsonlChangeLog};
     use chrono::Utc;
     use echo_core::memory::types::MemoryType;
-
-    /// A no-op ChangeLog for testing.
-    struct NullChangeLog;
-    impl ChangeLog for NullChangeLog {
-        fn record(&self, _entry: super::super::audit::ChangeEntry) -> Result<()> {
-            Ok(())
-        }
-        fn record_idempotent(
-            &self,
-            _entry: super::super::audit::ChangeEntry,
-        ) -> Result<super::super::audit::ChangeRecordOutcome> {
-            Ok(super::super::audit::ChangeRecordOutcome::AlreadyRecorded)
-        }
-        fn query(
-            &self,
-            _filter: &super::super::audit::ChangeFilter,
-        ) -> Result<Vec<super::super::audit::ChangeEntry>> {
-            Ok(Vec::new())
-        }
-        fn latest_for(
-            &self,
-            _entity_type: EntityType,
-            _entity_key: &str,
-        ) -> Result<Option<super::super::audit::ChangeEntry>> {
-            Ok(None)
-        }
-        fn len(&self) -> usize {
-            0
-        }
-    }
 
     fn sample_candidate() -> SkillCandidate {
         SkillCandidate {
@@ -354,14 +347,42 @@ mod tests {
         }
     }
 
+    fn make_generator(root: PathBuf) -> Result<SkillDraftGenerator> {
+        let curator = Curator::new(CuratorConfig::default(), root.join("curator_state.json"));
+        let authority = Arc::new(SkillMutationAuthority::open(
+            curator,
+            Arc::new(JsonlChangeLog::new(root.join("draft-changes.jsonl"))?),
+        )?);
+        Ok(SkillDraftGenerator::new(root, authority))
+    }
+
+    async fn generate_approved(
+        generator: &SkillDraftGenerator,
+        candidate: &SkillCandidate,
+    ) -> Result<DraftResult> {
+        generator
+            .authority
+            .curator()
+            .register_candidate(&candidate.name)?;
+        let preview = generator
+            .preview_generate_from_candidate(candidate, uuid::Uuid::new_v4().to_string())
+            .await?;
+        let approval = SkillApprovalArtifact::new(
+            uuid::Uuid::new_v4().to_string(),
+            &preview.preview.operation_digest,
+            "test-reviewer",
+            Utc::now(),
+        );
+        generator.generate_from_preview(preview, approval).await
+    }
+
     #[tokio::test]
     async fn test_draft_generation_creates_file() {
         let dir = tempfile::tempdir().expect("tempdir").keep();
-        let log = NullChangeLog;
-        let generator = SkillDraftGenerator::new(dir.clone(), &log);
+        let generator = make_generator(dir.clone()).unwrap();
 
         let candidate = sample_candidate();
-        let result = generator.generate_from_candidate(&candidate).await.unwrap();
+        let result = generate_approved(&generator, &candidate).await.unwrap();
 
         assert_eq!(result.name, "cargo-build");
         assert!(result.created);
@@ -376,11 +397,15 @@ mod tests {
     async fn draft_generation_rejects_path_escape_name() {
         let dir = tempfile::tempdir().expect("tempdir").keep();
         let outside = dir.parent().map(|parent| parent.join("escaped-skill"));
-        let log = NullChangeLog;
-        let generator = SkillDraftGenerator::new(dir, &log);
+        let generator = make_generator(dir).unwrap();
         let mut candidate = sample_candidate();
         candidate.name = "../escaped-skill".to_string();
-        assert!(generator.generate_from_candidate(&candidate).await.is_err());
+        assert!(
+            generator
+                .preview_generate_from_candidate(&candidate, "escape-test")
+                .await
+                .is_err()
+        );
         assert!(outside.is_none_or(|path| !path.exists()));
     }
 
@@ -394,12 +419,11 @@ mod tests {
         let drafts = root.path().join(DRAFTS_DIR);
         std::fs::create_dir_all(&drafts)?;
         symlink(outside.path(), drafts.join("cargo-build"))?;
-        let log = NullChangeLog;
-        let generator = SkillDraftGenerator::new(root.path().to_path_buf(), &log);
+        let generator = make_generator(root.path().to_path_buf())?;
 
         assert!(
             generator
-                .generate_from_candidate(&sample_candidate())
+                .preview_generate_from_candidate(&sample_candidate(), "symlink-test")
                 .await
                 .is_err()
         );
@@ -410,11 +434,10 @@ mod tests {
     #[tokio::test]
     async fn test_draft_yaml_frontmatter_valid() {
         let dir = tempfile::tempdir().expect("tempdir").keep();
-        let log = NullChangeLog;
-        let generator = SkillDraftGenerator::new(dir, &log);
+        let generator = make_generator(dir).unwrap();
 
         let candidate = sample_candidate();
-        let result = generator.generate_from_candidate(&candidate).await.unwrap();
+        let result = generate_approved(&generator, &candidate).await.unwrap();
 
         let content = std::fs::read_to_string(&result.skill_md_path).unwrap();
 
@@ -440,20 +463,29 @@ mod tests {
     #[tokio::test]
     async fn test_draft_idempotent_update() {
         let dir = tempfile::tempdir().expect("tempdir").keep();
-        let log = NullChangeLog;
-        let generator = SkillDraftGenerator::new(dir, &log);
+        let generator = make_generator(dir).unwrap();
 
         let candidate = sample_candidate();
 
         // First generation: created.
-        let result1 = generator.generate_from_candidate(&candidate).await.unwrap();
+        let result1 = generate_approved(&generator, &candidate).await.unwrap();
         assert!(result1.created);
 
         // Second generation: updated, not created.
         let mut candidate2 = candidate.clone();
         candidate2.sample_count = 7;
+        let preview = generator
+            .preview_generate_from_candidate(&candidate2, uuid::Uuid::new_v4().to_string())
+            .await
+            .unwrap();
+        let approval = SkillApprovalArtifact::new(
+            uuid::Uuid::new_v4().to_string(),
+            &preview.preview.operation_digest,
+            "test-reviewer",
+            Utc::now(),
+        );
         let result2 = generator
-            .generate_from_candidate(&candidate2)
+            .generate_from_preview(preview, approval)
             .await
             .unwrap();
         assert!(!result2.created);

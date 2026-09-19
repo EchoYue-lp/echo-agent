@@ -10,12 +10,12 @@ focus: [contract_evidence, failure_concurrency, state_authority]
 boundary_ref: boundary.eval-evolution
 behavior_refs: [behavior.eval-evolution]
 rule_refs: [rule.quality-observation-boundary]
-evidence_refs: [evidence.evolution-memory-rollback-repair, evidence.evolution-memory-rollback-verification]
+evidence_refs: [evidence.evolution-memory-rollback-repair, evidence.evolution-memory-rollback-verification, evidence.skill-lifecycle-authority-repair, evidence.skill-lifecycle-authority-verification]
 audit_refs: [audit.eval-evolution.data-durability]
 decision_refs: []
-repair_evidence_refs: [evidence.evolution-memory-rollback-repair]
-verification_evidence_refs: [evidence.evolution-memory-rollback-verification]
-rereview_audit_refs: [audit.evolution-memory-rollback-rereview]
+repair_evidence_refs: [evidence.evolution-memory-rollback-repair, evidence.skill-lifecycle-authority-repair]
+verification_evidence_refs: [evidence.evolution-memory-rollback-verification, evidence.skill-lifecycle-authority-verification]
+rereview_audit_refs: [audit.evolution-memory-rollback-rereview, audit.skill-lifecycle-authority-rereview]
 discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 ---
 
@@ -39,4 +39,7 @@ ChangeLog只有record/query/latest/len，没有rollback apply API；模块和文
 
 ## 处理记录
 
-Data-durability Audit确认；#52 候选已提供 memory canonical durable inverse batch、generation CAS、preview、receipt 与 request-id 幂等，并已通过 advancing-base 完整门禁与最终独立复审，尚待 remote-main 交付。即使本 memory slice 交付，Finding 仍保持 open，因为 Skill/Rule/host rollback 不属于本修复。
+Data-durability Audit确认；memory rollback 已由 PR #140 交付远端主线。ADR 0069 候选补充
+framework Skill lifecycle 的 owner-applied inverse、generation CAS 与 approval，并通过四轮独立
+复审、完整 workspace 门禁及17-feature matrix。Finding 仍保持 open，等待 remote-main 交付，
+并保留 Rule persistence/rollback 的 typed HostOwned 边界。

@@ -4,11 +4,11 @@ id: map.eval-evolution
 kind: capability_map
 title: Trace、Eval、Improve 与 Evolution
 risk: high
-observed_at: source:e2f708d5ddfba82cdb921b3559e440532246d4f9b679a4fa104b7f8f173b3a6b
+observed_at: source:3a1ceacf4f7e1214698abf2ea09cc3217e426b87fadb0988c97926eb9dcd2bfa
 boundary_refs: [boundary.eval-evolution]
 behavior_refs: [behavior.eval-evolution]
 rule_refs: [rule.quality-observation-boundary, rule.fact-projection-separation]
-evidence_refs: [evidence.provider-protocol-quality, evidence.persistence-observation, evidence.high-risk-audit-frontier, evidence.improve-singleton-split-repair, evidence.improve-singleton-split-verification, evidence.improve-iteration-config-repair, evidence.improve-iteration-config-verification, evidence.eval-workspace-generation-repair, evidence.eval-workspace-generation-verification, evidence.eval-timeout-turn-settlement-repair, evidence.eval-timeout-turn-settlement-verification, evidence.eval-trace-correlation-repair, evidence.eval-trace-correlation-verification, evidence.evolution-memory-audit-repair, evidence.evolution-memory-audit-verification, evidence.skill-candidate-audit-repair, evidence.skill-candidate-audit-verification]
+evidence_refs: [evidence.provider-protocol-quality, evidence.persistence-observation, evidence.high-risk-audit-frontier, evidence.improve-singleton-split-repair, evidence.improve-singleton-split-verification, evidence.improve-iteration-config-repair, evidence.improve-iteration-config-verification, evidence.eval-workspace-generation-repair, evidence.eval-workspace-generation-verification, evidence.eval-timeout-turn-settlement-repair, evidence.eval-timeout-turn-settlement-verification, evidence.eval-trace-correlation-repair, evidence.eval-trace-correlation-verification, evidence.evolution-memory-audit-repair, evidence.evolution-memory-audit-verification, evidence.skill-candidate-audit-repair, evidence.skill-candidate-audit-verification, evidence.skill-lifecycle-authority-repair, evidence.skill-lifecycle-authority-verification]
 finding_refs: [finding.eval-trace-identity, finding.eval-timeout-settlement, finding.improve-iteration-config, finding.improve-single-case-panic, finding.eval-workspace-generation-isolation, finding.background-review-detached-persistence-settlement, finding.evolution-audit-atomicity, finding.evolution-changelog-rollback-authority, finding.evolution-skill-promotion-audit, finding.skill-candidate-reinforcement-audit-gap, finding.evolution-doc-namespace, finding.pre-compaction-memory-trust-provenance]
 audit_refs: [audit.eval-evolution.data-durability, audit.eval-evolution.failure-concurrency, audit.eval-evolution.permission-external, audit.improve-singleton-split-rereview, audit.improve-iteration-config-rereview, audit.eval-workspace-generation-rereview, audit.eval-timeout-turn-settlement-rereview, audit.eval-trace-correlation-rereview, audit.evolution-memory-audit-atomicity-rereview, audit.evolution-memory-rollback-rereview, audit.skill-candidate-audit-rereview]
 related_map_refs: [map.observation-persistence-delivery, map.agent-session-turn, map.llm-provider-runtime, map.extension-lifecycle]
@@ -46,22 +46,22 @@ scenarios:
     rule_refs: [rule.quality-observation-boundary]
     evidence_refs: [evidence.evolution-memory-audit-repair, evidence.evolution-memory-audit-verification, evidence.evolution-memory-rollback-repair, evidence.evolution-memory-rollback-verification]
     audit_refs: [audit.evolution-memory-audit-atomicity-rereview, audit.evolution-memory-rollback-rereview]
-    unknown: durable prepare/reconcile已在主线cb4ee9ed交付并通过独立复审；memory rollback候选已通过advancing-base完整门禁与最终独立复审，尚待远端交付，raw Store读者可暂见中间态，Skill/Rule/host rollback与旧namespace仍属独立范围
-    next_step: memory rollback候选完成远端交付；Skill/Rule/host rollback依#54/#94/host，旧namespace依其Finding处置
+    unknown: durable prepare/reconcile与memory later rollback已在主线交付并通过独立复审；raw Store读者仍可暂见prepared中间态，Skill lifecycle authority待最终门禁与远端交付，Rule rollback保持host-owned，旧namespace仍属独立范围
+    next_step: 完成Skill lifecycle authority的advancing-base门禁与交付；Rule owner在application boundary验收，旧namespace依其Finding处置
   evolution-skill-lifecycle:
     status: needs_review
-    source_refs: [src/evolution/candidate.rs, src/evolution/curator.rs, src/evolution/draft.rs, src/evolution/merge.rs, src/evolution/patch.rs, src/evolution/review.rs, src/evolution/security.rs, docs/adr/0068-skill-candidate-mutation-audit-reconciliation.md]
+    source_refs: [src/evolution/candidate.rs, src/evolution/curator.rs, src/evolution/skill_mutation.rs, src/evolution/draft.rs, src/evolution/merge.rs, src/evolution/patch.rs, src/evolution/review.rs, src/evolution/security.rs, src/agent/snapshot.rs, docs/adr/0068-skill-candidate-mutation-audit-reconciliation.md, docs/adr/0069-skill-lifecycle-mutation-authority.md]
     finding_refs: [finding.evolution-skill-promotion-audit, finding.skill-candidate-reinforcement-audit-gap]
     rule_refs: [rule.quality-observation-boundary]
-    evidence_refs: [evidence.skill-candidate-audit-repair, evidence.skill-candidate-audit-verification]
+    evidence_refs: [evidence.skill-candidate-audit-repair, evidence.skill-candidate-audit-verification, evidence.skill-lifecycle-authority-repair, evidence.skill-lifecycle-authority-verification]
     audit_refs: [audit.skill-candidate-audit-rereview]
-    unknown: "#94 candidate create/reinforce durable audit已通过四轮独立复审、完整门禁及remote delivery，并在verified main commit d0d1e975闭合；promotion approval与later rollback仍归#54"
-    next_step: promotion/approval/draft/merge/patch与Skill later rollback继续依#54及其唯一mutation authority合同
+    unknown: "#94 candidate create/reinforce durable audit已在verified main commit d0d1e975闭合；ADR 0069 lifecycle authority候选覆盖Draft/Promote/Touch/Deprecate/Merge/Patch、approval、audit/reconcile与later rollback，并已通过四轮独立复审，advancing-base完整门禁与remote delivery待完成"
+    next_step: 完成Skill lifecycle authority的advancing-base门禁与#54/#52远端交付；Rule persistence/rollback保持host-owned
   evolution-rule-promotion-surface:
     status: needs_review
     source_refs: [src/evolution/security.rs, src/evolution/mod.rs]
-    unknown: 仅发现 rule-promotion 安全检查，未发现 framework 内规则 mutation/持久 authority，不能声明 rule evolution 已 mapped
-    next_step: 在 application boundary audit 中确认 consumer；若无实现则收窄公开文档与 capability 名称
+    unknown: framework没有Rule mutation/persistence owner；SkillMutationAuthority对Rule rollback返回typed HostOwned，不能声明rule evolution已由framework实现
+    next_step: 在application boundary审查host Rule owner、approval与持久化；framework不从ChangeLog猜回写
     rule_refs: [rule.quality-observation-boundary]
   runtime-trigger-and-human-review:
     status: needs_review
@@ -83,7 +83,7 @@ ReactAgent 可选记录 trace；显式 Eval/Improve API 和 runtime/app trigger 
 
 ## 行为关系
 
-Trace 是 observation，Eval/Improve 消费但不驱动业务 commit；Evolution 可写持久状态，分层记忆用独立业务audit与journal恢复，事后rollback仍单独跟踪。
+Trace 是 observation，Eval/Improve 消费但不驱动业务 commit；Evolution 可写持久状态，分层记忆与Skill lifecycle分别用资源owner的journal恢复和owner-applied inverse；ChangeLog保持append-only，Rule mutation/rollback归host。
 
 ## 状态与数据流
 
@@ -95,7 +95,7 @@ Eval cases/constraints、grader、explicit config、memory source/risk/status �
 
 ## 生命周期与失败路径
 
-Trace start/finalize；Eval run/deadline/cancel/bounded settlement/correlate trace/grade/report，未settled timeout跳过RunStore与评分并保留generation；trace缺失保持可选，歧义或存储不一致失败；Improve iterate/stop/export；Evolution detect/review/prepare/project/audit/settle/reconcile；memory later rollback以ChangeId/BatchId解析canonical journal batch并以generation CAS、inverse lineage和request-id幂等结算，Skill/Rule/host rollback未归入本边界。
+Trace start/finalize；Eval run/deadline/cancel/bounded settlement/correlate trace/grade/report，未settled timeout跳过RunStore与评分并保留generation；trace缺失保持可选，歧义或存储不一致失败；Improve iterate/stop/export；Evolution detect/review/prepare/project/audit/settle/reconcile；memory与Skill later rollback由各自resource owner以generation fencing、inverse lineage和request-id幂等结算，Rule rollback保持host-owned。
 
 ## 权限与敏感信息
 

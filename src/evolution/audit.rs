@@ -86,6 +86,15 @@ pub struct ChangeEntry {
 
 /// Trait for recording and querying evolution changes.
 pub trait ChangeLog: Send + Sync {
+    /// Stable durable identity of the concrete audit destination.
+    ///
+    /// Mutation journals use this to prevent pending operations from being
+    /// replayed into another ChangeLog. Implementations without a stable
+    /// destination must reject durable mutation authority binding.
+    fn durable_destination_identity(&self) -> Result<Option<String>> {
+        Ok(None)
+    }
+
     /// Record a change entry.
     fn record(&self, entry: ChangeEntry) -> Result<()>;
 
@@ -432,6 +441,13 @@ impl JsonlChangeLog {
 }
 
 impl ChangeLog for JsonlChangeLog {
+    fn durable_destination_identity(&self) -> Result<Option<String>> {
+        Ok(Some(format!(
+            "jsonl:{}",
+            canonical_destination_path(&self.path)?.display()
+        )))
+    }
+
     fn record(&self, entry: ChangeEntry) -> Result<()> {
         self.record_idempotent_inner(entry)?;
         Ok(())
@@ -470,6 +486,42 @@ impl ChangeLog for JsonlChangeLog {
     fn len(&self) -> usize {
         self.entries.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
+}
+
+fn canonical_destination_path(path: &Path) -> std::io::Result<PathBuf> {
+    if path.exists() {
+        return std::fs::canonicalize(path);
+    }
+    let absolute = std::path::absolute(path)?;
+    let mut probe = absolute.as_path();
+    let mut suffix = Vec::new();
+    while !probe.exists() {
+        suffix.push(
+            probe
+                .file_name()
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!(
+                            "ChangeLog path has no existing ancestor: {}",
+                            path.display()
+                        ),
+                    )
+                })?
+                .to_os_string(),
+        );
+        probe = probe.parent().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("ChangeLog path has no parent: {}", path.display()),
+            )
+        })?;
+    }
+    let mut canonical = std::fs::canonicalize(probe)?;
+    for segment in suffix.into_iter().rev() {
+        canonical.push(segment);
+    }
+    Ok(canonical)
 }
 
 // ── Helper for creating change entries ──────────────────────────────────

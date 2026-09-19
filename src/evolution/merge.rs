@@ -12,7 +12,11 @@ use echo_state::skill_telemetry::{SkillTelemetry, SkillTelemetryStore};
 use serde::{Deserialize, Serialize};
 
 use super::audit::{ChangeEntryBuilder, ChangeLog, ChangeType, EntityType};
-use super::curator::Curator;
+use super::curator::SkillLifecycle;
+use super::skill_mutation::{
+    SkillApprovalArtifact, SkillFileMutation, SkillMutationAuthority, SkillMutationKind,
+    SkillMutationOutcome, SkillMutationPreview, SkillMutationRequest,
+};
 use crate::error::Result;
 
 // Re-export SkillDescriptor from echo-execution for use in this module.
@@ -209,17 +213,23 @@ impl SkillSimilarityDetector {
 
 /// Executes skill merges by updating descriptors and marking skills as deprecated.
 pub struct SkillMerger {
-    curator: Curator,
+    authority: Arc<SkillMutationAuthority>,
+}
+
+pub struct SkillMergePreview {
+    pub request: SkillMutationRequest,
+    pub preview: SkillMutationPreview,
+    pub merged_descriptor: SkillDescriptor,
 }
 
 impl SkillMerger {
     /// Create a new merger.
-    pub fn new(curator: Curator) -> Self {
-        Self { curator }
+    pub fn new(authority: Arc<SkillMutationAuthority>) -> Self {
+        Self { authority }
     }
 
-    /// Execute a merge proposal: update the primary skill descriptor and
-    /// deprecate the secondary skill.
+    /// Legacy direct merge entry point. It fails closed because no reviewed
+    /// approval artifact is available; use `preview_merge` + `execute_preview`.
     ///
     /// The `primary_descriptor` is updated in-place with merged triggers, paths,
     /// and tools. The deprecated skill is marked via the Curator.
@@ -228,79 +238,120 @@ impl SkillMerger {
         proposal: &SkillMergeProposal,
         primary_descriptor: &mut SkillDescriptor,
         deprecated_descriptor: Option<&SkillDescriptor>,
-        change_log: &dyn ChangeLog,
     ) -> Result<()> {
+        let _ = (proposal, primary_descriptor, deprecated_descriptor);
+        Err(echo_core::error::ReactError::Other(
+            "skill merge requires preview_merge followed by execute_preview with approval".into(),
+        ))
+    }
+
+    pub async fn preview_merge(
+        &self,
+        request_id: impl Into<String>,
+        proposal: &SkillMergeProposal,
+        primary_descriptor: &SkillDescriptor,
+        deprecated_descriptor: Option<&SkillDescriptor>,
+    ) -> Result<SkillMergePreview> {
+        let mut merged = primary_descriptor.clone();
         // Merge triggers from deprecated skill into primary.
         if let Some(dep_desc) = deprecated_descriptor {
-            let mut merged_triggers: HashSet<String> =
-                primary_descriptor.triggers.iter().cloned().collect();
+            let mut merged_triggers: HashSet<String> = merged.triggers.iter().cloned().collect();
             for trigger in &dep_desc.triggers {
                 merged_triggers.insert(trigger.clone());
             }
-            primary_descriptor.triggers = merged_triggers.into_iter().collect();
+            merged.triggers = merged_triggers.into_iter().collect();
 
             // Merge paths.
-            let mut merged_paths: HashSet<String> =
-                primary_descriptor.paths.iter().cloned().collect();
+            let mut merged_paths: HashSet<String> = merged.paths.iter().cloned().collect();
             for path in &dep_desc.paths {
                 merged_paths.insert(path.clone());
             }
-            primary_descriptor.paths = merged_paths.into_iter().collect();
+            merged.paths = merged_paths.into_iter().collect();
 
             // Merge allowed_tools.
-            let mut merged_tools: HashSet<String> =
-                primary_descriptor.allowed_tools.iter().cloned().collect();
+            let mut merged_tools: HashSet<String> = merged.allowed_tools.iter().cloned().collect();
             for tool in &dep_desc.allowed_tools {
                 merged_tools.insert(tool.clone());
             }
-            primary_descriptor.allowed_tools = merged_tools.into_iter().collect();
+            merged.allowed_tools = merged_tools.into_iter().collect();
         }
 
-        primary_descriptor.triggers.sort();
-        primary_descriptor.paths.sort();
-        primary_descriptor.allowed_tools.sort();
+        merged.triggers.sort();
+        merged.paths.sort();
+        merged.allowed_tools.sort();
 
-        let original = tokio::fs::read_to_string(&primary_descriptor.location).await?;
-        let updated = update_skill_frontmatter(&original, primary_descriptor)?;
-        echo_core::utils::fs::atomic_write(&primary_descriptor.location, updated.as_bytes())?;
-
-        let previous_meta = self.curator.skill(&proposal.deprecated_skill)?;
-        let deprecated = self
-            .curator
-            .deprecate_skill(&proposal.deprecated_skill, Some(&proposal.primary_skill))?;
-        if !deprecated {
-            echo_core::utils::fs::atomic_write(&primary_descriptor.location, original.as_bytes())?;
+        let original = tokio::fs::read(&merged.location).await?;
+        let original_text = String::from_utf8(original.clone()).map_err(|error| {
+            echo_core::error::ReactError::Other(format!("SKILL.md is not UTF-8: {error}"))
+        })?;
+        let updated = update_skill_frontmatter(&original_text, &merged)?;
+        let curator_before = self.authority.curator().load_state()?;
+        let mut curator_after = curator_before.clone();
+        let meta = curator_after
+            .skills
+            .get_mut(&proposal.deprecated_skill)
+            .ok_or_else(|| {
+                echo_core::error::ReactError::Other(format!(
+                    "skill {:?} is not tracked by Curator",
+                    proposal.deprecated_skill
+                ))
+            })?;
+        if !matches!(
+            meta.lifecycle,
+            SkillLifecycle::Active | SkillLifecycle::Stale
+        ) {
             return Err(echo_core::error::ReactError::Other(format!(
                 "skill {:?} is not in a lifecycle state that can be deprecated",
                 proposal.deprecated_skill
             )));
         }
-
-        // Record the merge in the change log.
+        meta.lifecycle = SkillLifecycle::Deprecated;
+        meta.superseded_by = Some(proposal.primary_skill.clone());
+        if let Some(path) = &meta.path {
+            meta.path = Some(SkillFileMutation::canonical_path(path)?);
+        }
+        meta.last_modified_at = Utc::now();
         let merge_key = format!("{}__{}", proposal.skill_a, proposal.skill_b);
-        let entry = ChangeEntryBuilder::new(EntityType::Skill, &merge_key, ChangeType::Merge)
-            .before(serde_json::json!({"primary_path": primary_descriptor.location, "primary_content": original, "deprecated_meta": previous_meta}))
-            .after(serde_json::json!({"primary_path": primary_descriptor.location, "primary_content": updated, "deprecated_by": proposal.primary_skill}))
-            .reason(format!(
+        let file_mutation =
+            SkillFileMutation::new(&merged.location, Some(original), Some(updated.into_bytes()))?;
+        merged.location = file_mutation.path.clone();
+        let request = SkillMutationRequest {
+            request_id: request_id.into(),
+            entity_key: merge_key,
+            kind: SkillMutationKind::Merge,
+            reason: format!(
                 "Merged {} into {}",
                 proposal.deprecated_skill, proposal.primary_skill
-            ))
-            .trigger("skill_merger".to_string())
-            .build(change_log);
-        if let Err(error) = change_log.record(entry) {
-            let file_restore = echo_core::utils::fs::atomic_write(
-                &primary_descriptor.location,
-                original.as_bytes(),
-            );
-            let state_restore = self
-                .curator
-                .restore_skill(&proposal.deprecated_skill, previous_meta);
-            file_restore?;
-            state_restore?;
-            return Err(error);
-        }
+            ),
+            files: vec![file_mutation],
+            curator_before,
+            curator_after,
+            rollback_of: None,
+        };
+        let preview = self.authority.preview(&request)?;
+        Ok(SkillMergePreview {
+            request,
+            preview,
+            merged_descriptor: merged,
+        })
+    }
 
-        Ok(())
+    pub async fn execute_preview(
+        &self,
+        preview: SkillMergePreview,
+        approval: SkillApprovalArtifact,
+        primary_descriptor: &mut SkillDescriptor,
+    ) -> Result<crate::evolution::SkillMutationReceipt> {
+        match self.authority.apply(preview.request, approval).await? {
+            SkillMutationOutcome::Applied(receipt)
+            | SkillMutationOutcome::AlreadyApplied(receipt) => {
+                *primary_descriptor = preview.merged_descriptor;
+                Ok(receipt)
+            }
+            outcome => Err(echo_core::error::ReactError::Other(format!(
+                "skill merge did not apply: {outcome:?}"
+            ))),
+        }
     }
 }
 
@@ -361,6 +412,7 @@ fn word_similarity(text_a: &str, text_b: &str) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::evolution::{JsonlChangeLog, SkillRollbackPreviewOutcome, SkillRollbackTarget};
     use echo_state::memory::store::InMemoryStore;
     use std::collections::HashMap;
 
@@ -557,8 +609,16 @@ mod tests {
             "echo-agent-test-curator-state-{}.json",
             uuid::Uuid::new_v4()
         ));
+        let change_path = state_path.with_extension("changes.jsonl");
         let curator = Curator::new(config, state_path);
-        SkillMerger::new(curator)
+        let authority = Arc::new(
+            SkillMutationAuthority::open(
+                curator,
+                Arc::new(JsonlChangeLog::new(change_path).unwrap()),
+            )
+            .unwrap(),
+        );
+        SkillMerger::new(authority)
     }
 
     #[tokio::test]
@@ -591,7 +651,8 @@ mod tests {
         primary.location = primary_path.clone();
 
         merger
-            .curator
+            .authority
+            .curator()
             .touch_skill("git-ops", true)
             .map_err(|error| error.to_string())?;
 
@@ -610,9 +671,23 @@ mod tests {
             created_at: Utc::now(),
         };
 
-        let change_log = NullChangeLog;
-        merger
-            .execute_merge(&proposal, &mut primary, Some(&deprecated), &change_log)
+        let preview = merger
+            .preview_merge(
+                uuid::Uuid::new_v4().to_string(),
+                &proposal,
+                &primary,
+                Some(&deprecated),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        let approval = SkillApprovalArtifact::new(
+            uuid::Uuid::new_v4().to_string(),
+            &preview.preview.operation_digest,
+            "test-reviewer",
+            Utc::now(),
+        );
+        let receipt = merger
+            .execute_preview(preview, approval, &mut primary)
             .await
             .map_err(|error| error.to_string())?;
 
@@ -633,9 +708,45 @@ mod tests {
         // The persisted file is standard-format: the merged tool surface is
         // written as a space-separated string, while routing triggers have
         // no standard field and stay in the in-memory descriptor only.
-        let persisted = std::fs::read_to_string(primary_path).map_err(|error| error.to_string())?;
+        let persisted =
+            std::fs::read_to_string(&primary_path).map_err(|error| error.to_string())?;
         assert!(persisted.contains("allowed-tools: Bash Read Write"));
         assert!(!persisted.contains("\ntriggers:"));
+        let authority = merger.authority.clone();
+        let target = SkillRollbackTarget::BatchId(receipt.batch_id);
+        let SkillRollbackPreviewOutcome::Ready(rollback_preview) = authority
+            .preview_rollback("merge-rollback", &target)
+            .await
+            .map_err(|error| error.to_string())?
+        else {
+            return Err("merge rollback preview was not ready".into());
+        };
+        let rollback_approval = SkillApprovalArtifact::new(
+            "merge-rollback-approval",
+            &rollback_preview.operation_digest,
+            "test-reviewer",
+            Utc::now(),
+        );
+        authority
+            .rollback("merge-rollback", target, rollback_approval)
+            .await
+            .map_err(|error| error.to_string())?;
+        let restored = std::fs::read_to_string(&primary_path).map_err(|error| error.to_string())?;
+        assert_eq!(
+            restored,
+            "---\nname: git-workflow\ndescription: Git workflow\n---\nBody\n"
+        );
+        assert_eq!(
+            merger
+                .authority
+                .curator()
+                .load_state()
+                .map_err(|error| error.to_string())?
+                .skills
+                .get("git-ops")
+                .map(|meta| meta.lifecycle),
+            Some(SkillLifecycle::Active)
+        );
         std::fs::remove_dir_all(root).map_err(|error| error.to_string())?;
         Ok::<(), String>(())
     }

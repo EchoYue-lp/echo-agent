@@ -4,7 +4,7 @@ id: map.extension-lifecycle
 kind: capability_map
 title: MCP、Hook、Skill、Plugin 与 LSP 生命周期
 risk: high
-observed_at: source:e2f708d5ddfba82cdb921b3559e440532246d4f9b679a4fa104b7f8f173b3a6b
+observed_at: source:3a1ceacf4f7e1214698abf2ea09cc3217e426b87fadb0988c97926eb9dcd2bfa
 boundary_refs: [boundary.extension-lifecycle]
 behavior_refs: [behavior.extension-publication]
 rule_refs: [rule.extension-generation-authority, rule.permission-effect-order]

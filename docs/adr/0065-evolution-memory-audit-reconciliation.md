@@ -201,7 +201,6 @@ and the next operation. The #52 candidate additionally covers single-key and
 multi-key later rollback, restart receipt recovery, request-id retry/conflict,
 non-tip and ABA fencing, rollback-of-rollback, legacy lineage decode, and the
 public demo51 rollback contract. The advancing-base candidate passed the full
-workspace, feature, formatting, lint, and strict semantic gates. Final
-independent review passed without findings; remote-main delivery remains
-pending for this memory slice. Finding #52 stays open after that delivery because Skill/Rule/host
-rollback remains outside the slice.
+workspace, feature, formatting, lint, strict semantic, and independent review
+gates, then reached remote main through PR #140. Finding #52 remains open for
+the separately owned Skill lifecycle and host-owned Rule rollback boundaries.

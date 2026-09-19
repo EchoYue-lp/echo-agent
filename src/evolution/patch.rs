@@ -12,7 +12,10 @@ use echo_state::skill_telemetry::SkillTelemetryStore;
 use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
-use crate::evolution::audit::{ChangeEntryBuilder, ChangeLog, ChangeType, EntityType};
+use crate::evolution::skill_mutation::{
+    SkillApprovalArtifact, SkillFileMutation, SkillMutationAuthority, SkillMutationKind,
+    SkillMutationOutcome, SkillMutationPreview, SkillMutationRequest,
+};
 
 // Re-export SkillDescriptor for use in this module.
 pub use echo_execution::skills::external::SkillDescriptor;
@@ -198,13 +201,27 @@ impl SkillPatch {
 /// Generates skill patches based on telemetry analysis.
 pub struct SkillPatcher {
     telemetry_store: SkillTelemetryStore,
+    authority: Option<Arc<SkillMutationAuthority>>,
+}
+
+pub struct SkillPatchPreview {
+    pub request: SkillMutationRequest,
+    pub preview: SkillMutationPreview,
 }
 
 impl SkillPatcher {
     /// Create a new skill patcher.
     pub fn new(store: Arc<dyn Store>) -> Self {
         let telemetry_store = SkillTelemetryStore::new(store);
-        Self { telemetry_store }
+        Self {
+            telemetry_store,
+            authority: None,
+        }
+    }
+
+    pub fn with_authority(mut self, authority: Arc<SkillMutationAuthority>) -> Self {
+        self.authority = Some(authority);
+        self
     }
 
     /// Analyze a skill's failure patterns and generate patch proposals.
@@ -268,18 +285,34 @@ impl SkillPatcher {
     ///
     /// Appends the patch instructions as a markdown section to the body
     /// (after any existing frontmatter). Does NOT modify the YAML frontmatter.
-    /// Records the change in the audit log.
+    /// The legacy direct entry point fails closed; use `preview_patch` and
+    /// `apply_preview` on the bound authority.
     ///
     /// # Arguments
     /// * `patch` — The patch to apply (from `analyze_and_propose`).
     /// * `descriptor` — The skill descriptor (provides `.location` = SKILL.md path).
-    /// * `change_log` — Audit log to record the mutation.
     pub async fn apply_patch(
         &self,
         patch: &SkillPatch,
         descriptor: &SkillDescriptor,
-        change_log: &dyn ChangeLog,
     ) -> Result<()> {
+        let _ = (patch, descriptor);
+        Err(crate::error::ReactError::Other(
+            "skill patch requires preview_patch followed by apply_preview with approval".into(),
+        ))
+    }
+
+    pub async fn preview_patch(
+        &self,
+        request_id: impl Into<String>,
+        patch: &SkillPatch,
+        descriptor: &SkillDescriptor,
+    ) -> Result<SkillPatchPreview> {
+        let authority = self.authority.as_ref().ok_or_else(|| {
+            crate::error::ReactError::Other(
+                "skill patch requires a Curator-bound mutation authority".into(),
+            )
+        })?;
         let path = &descriptor.location;
         let lock_path = path.with_extension("md.patch.lock");
         let lock_file = std::fs::OpenOptions::new()
@@ -336,33 +369,45 @@ impl SkillPatcher {
             format!("{frontmatter}\n{new_body}\n")
         };
 
-        echo_core::utils::fs::atomic_write(path, new_content.as_bytes())?;
+        let state = authority.curator().load_state()?;
+        let request = SkillMutationRequest {
+            request_id: request_id.into(),
+            entity_key: patch.skill_name.clone(),
+            kind: SkillMutationKind::Patch,
+            reason: format!(
+                "Applied patch: {} (confidence: {:.0}%)",
+                patch.patch_type.label(),
+                patch.confidence * 100.0
+            ),
+            files: vec![SkillFileMutation::new(
+                path,
+                Some(content.into_bytes()),
+                Some(new_content.into_bytes()),
+            )?],
+            curator_before: state.clone(),
+            curator_after: state,
+            rollback_of: None,
+        };
+        let preview = authority.preview(&request)?;
+        Ok(SkillPatchPreview { request, preview })
+    }
 
-        // Record in audit log.
-        let entry =
-            ChangeEntryBuilder::new(EntityType::Skill, &patch.skill_name, ChangeType::Update)
-                .before(serde_json::json!({"path": path, "sha256": current_hash, "content": content}))
-                .after(serde_json::json!({"path": path, "sha256": sha256_hex(new_content.as_bytes()), "content": new_content}))
-                .reason(format!(
-                    "Applied patch: {} (confidence: {:.0}%)",
-                    patch.patch_type.label(),
-                    patch.confidence * 100.0
-                ))
-                .trigger("skill_patcher".to_string())
-                .build(change_log);
-        if let Err(error) = change_log.record(entry) {
-            echo_core::utils::fs::atomic_write(path, content.as_bytes())?;
-            return Err(error);
+    pub async fn apply_preview(
+        &self,
+        preview: SkillPatchPreview,
+        approval: SkillApprovalArtifact,
+    ) -> Result<()> {
+        let authority = self.authority.as_ref().ok_or_else(|| {
+            crate::error::ReactError::Other(
+                "skill patch requires a Curator-bound mutation authority".into(),
+            )
+        })?;
+        match authority.apply(preview.request, approval).await? {
+            SkillMutationOutcome::Applied(_) | SkillMutationOutcome::AlreadyApplied(_) => Ok(()),
+            outcome => Err(crate::error::ReactError::Other(format!(
+                "skill patch did not apply: {outcome:?}"
+            ))),
         }
-
-        tracing::info!(
-            skill = %patch.skill_name,
-            patch_type = patch.patch_type.label(),
-            "Patch applied to {}",
-            path.display()
-        );
-
-        Ok(())
     }
 
     /// Generate a patch proposal for a specific failure pattern.
@@ -513,8 +558,11 @@ fn sha256_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::evolution::audit::JsonlChangeLog;
+    use crate::evolution::curator::{Curator, CuratorConfig};
     use echo_state::memory::store::InMemoryStore;
     use echo_state::skill_telemetry::SkillExecutionRecord;
+    use std::collections::HashMap;
 
     fn make_record(skill_name: &str, success: bool, error: Option<&str>) -> SkillExecutionRecord {
         SkillExecutionRecord {
@@ -527,6 +575,57 @@ mod tests {
             success,
             error_message: error.map(|s| s.to_string()),
         }
+    }
+
+    #[tokio::test]
+    async fn approved_patch_uses_canonical_authority() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("SKILL.md");
+        std::fs::write(&path, "---\nname: test\ndescription: test\n---\nbody\n")?;
+        let descriptor = SkillDescriptor {
+            name: "test".into(),
+            description: "test".into(),
+            location: path.clone(),
+            license: None,
+            compatibility: None,
+            metadata: HashMap::new(),
+            source: None,
+            allowed_tools: Vec::new(),
+            shell: None,
+            paths: Vec::new(),
+            triggers: Vec::new(),
+            hooks: None,
+            sandbox: None,
+            depends_on: Vec::new(),
+        };
+        let patch = SkillPatch {
+            skill_name: "test".into(),
+            patch_type: PatchType::InstructionEnhancement {
+                target_section: "body".into(),
+                enhancement: "add recovery guidance".into(),
+            },
+            rationale: "test".into(),
+            confidence: 0.9,
+            priority: 8,
+            proposed_at: Utc::now(),
+            source_hash: Some(sha256_hex(&std::fs::read(&path)?)),
+        };
+        let curator = Curator::new(CuratorConfig::default(), dir.path().join("curator.json"));
+        let log = Arc::new(JsonlChangeLog::new(dir.path().join("changes.jsonl"))?);
+        let authority = Arc::new(SkillMutationAuthority::open(curator, log)?);
+        let patcher = SkillPatcher::new(Arc::new(InMemoryStore::new())).with_authority(authority);
+        let preview = patcher
+            .preview_patch("patch-request", &patch, &descriptor)
+            .await?;
+        let approval = SkillApprovalArtifact::new(
+            "patch-approval",
+            &preview.preview.operation_digest,
+            "reviewer",
+            Utc::now(),
+        );
+        patcher.apply_preview(preview, approval).await?;
+        assert!(std::fs::read_to_string(path)?.contains("add recovery guidance"));
+        Ok(())
     }
 
     #[tokio::test]

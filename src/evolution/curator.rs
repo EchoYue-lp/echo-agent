@@ -53,7 +53,7 @@ pub enum SkillLifecycle {
 // ── SkillMeta ──────────────────────────────────────────────────────
 
 /// Metadata tracked by the curator for each skill.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SkillMeta {
     /// Skill name.
     pub name: String,
@@ -106,7 +106,7 @@ impl Default for CuratorConfig {
 // ── CuratorState ───────────────────────────────────────────────────
 
 /// Persisted state of the curator.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct CuratorState {
     /// Metadata for each tracked skill.
     pub skills: HashMap<String, SkillMeta>,
@@ -138,7 +138,7 @@ impl CuratorState {
     /// atomic on POSIX, so a crash mid-write never leaves a truncated or
     /// partially-written state file — readers either see the old or the new
     /// file in full, never a torn mix.
-    pub fn save(&self, path: &PathBuf) -> Result<()> {
+    pub(crate) fn save(&self, path: &PathBuf) -> Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -230,6 +230,44 @@ impl Curator {
         append_path_suffix(&self.state_path, ".candidate-operations.jsonl")
     }
 
+    pub(crate) fn skill_operation_journal_path(&self) -> PathBuf {
+        append_path_suffix(&self.state_path, ".skill-operations.jsonl")
+    }
+
+    pub(crate) fn replace_skill_entries_if_current(
+        &self,
+        expected: &CuratorState,
+        replacement: &CuratorState,
+        affected_names: &[String],
+    ) -> Result<()> {
+        self.with_locked_state(|state| {
+            let mut dirty = false;
+            for name in affected_names {
+                let current = state.skills.get(name);
+                let before = expected.skills.get(name);
+                let after = replacement.skills.get(name);
+                if current != before && current != after {
+                    return Err(crate::error::ReactError::Other(format!(
+                        "skill lifecycle {name} changed after preview"
+                    )));
+                }
+                if current == after {
+                    continue;
+                }
+                match after {
+                    Some(meta) => {
+                        state.skills.insert(name.clone(), meta.clone());
+                    }
+                    None => {
+                        state.skills.remove(name);
+                    }
+                }
+                dirty = true;
+            }
+            Ok(((), dirty))
+        })
+    }
+
     fn candidate_authority_path(&self) -> PathBuf {
         append_path_suffix(&self.state_path, ".candidate-authorities.json")
     }
@@ -260,7 +298,8 @@ impl Curator {
     ///
     /// Holds an exclusive lock for the duration of the write only. Callers that
     /// need load-mutate-save atomicity must use `with_locked_state`.
-    pub fn save_state(&self, state: &CuratorState) -> Result<()> {
+    #[cfg(test)]
+    pub(crate) fn save_state(&self, state: &CuratorState) -> Result<()> {
         let _guard = self.acquire_lock()?;
         state.save(&self.state_path)
     }
@@ -338,12 +377,14 @@ impl Curator {
     }
 
     /// Register a new skill or update an existing one's last-used timestamp.
-    pub fn touch_skill(&self, name: &str, agent_created: bool) -> Result<()> {
+    #[cfg(test)]
+    pub(crate) fn touch_skill(&self, name: &str, agent_created: bool) -> Result<()> {
         self.touch_skill_at(name, None, agent_created)
     }
 
     /// Register or touch a skill while binding its concrete `SKILL.md` path.
-    pub fn touch_skill_at(
+    #[cfg(test)]
+    pub(crate) fn touch_skill_at(
         &self,
         name: &str,
         path: Option<&std::path::Path>,
@@ -379,12 +420,18 @@ impl Curator {
     }
 
     /// Register a new skill candidate (discovered from memory patterns).
-    pub fn register_candidate(&self, name: &str) -> Result<()> {
+    #[cfg(test)]
+    pub(crate) fn register_candidate(&self, name: &str) -> Result<()> {
         self.register_candidate_at(name, None)
     }
 
     /// Register a candidate and optionally bind a future draft path.
-    pub fn register_candidate_at(&self, name: &str, path: Option<&std::path::Path>) -> Result<()> {
+    #[cfg(test)]
+    pub(crate) fn register_candidate_at(
+        &self,
+        name: &str,
+        path: Option<&std::path::Path>,
+    ) -> Result<()> {
         let normalized_path = path.map(normalize_skill_path);
         self.with_locked_state(|state| {
             if let Some(meta) = state.skills.get_mut(name) {
@@ -480,21 +527,7 @@ impl Curator {
         )
     }
 
-    pub(crate) fn revert_draft_to_candidate(&self, name: &str) -> Result<bool> {
-        self.with_locked_state(|state| {
-            let Some(meta) = state.skills.get_mut(name) else {
-                return Ok((false, false));
-            };
-            if meta.lifecycle != SkillLifecycle::Draft {
-                return Ok((false, false));
-            }
-            meta.lifecycle = SkillLifecycle::Candidate;
-            meta.path = None;
-            meta.last_modified_at = chrono::Utc::now();
-            Ok((true, true))
-        })
-    }
-
+    #[cfg(test)]
     pub(crate) fn skill(&self, name: &str) -> Result<Option<SkillMeta>> {
         let _guard = self.acquire_lock()?;
         Ok(CuratorState::try_load(&self.state_path)?
@@ -503,27 +536,19 @@ impl Curator {
             .cloned())
     }
 
-    pub(crate) fn restore_skill(&self, name: &str, previous: Option<SkillMeta>) -> Result<()> {
-        self.with_locked_state(|state| {
-            match previous {
-                Some(meta) => {
-                    state.skills.insert(name.to_string(), meta);
-                }
-                None => {
-                    state.skills.remove(name);
-                }
-            }
-            Ok(((), true))
-        })
-    }
-
     /// Promote a Candidate skill to Draft.
-    pub fn promote_to_draft(&self, name: &str) -> Result<bool> {
+    #[cfg(test)]
+    pub(crate) fn promote_to_draft(&self, name: &str) -> Result<bool> {
         self.promote_to_draft_at(name, None)
     }
 
     /// Promote a Candidate to Draft and bind the generated draft path.
-    pub fn promote_to_draft_at(&self, name: &str, path: Option<&std::path::Path>) -> Result<bool> {
+    #[cfg(test)]
+    pub(crate) fn promote_to_draft_at(
+        &self,
+        name: &str,
+        path: Option<&std::path::Path>,
+    ) -> Result<bool> {
         let normalized_path = path.map(normalize_skill_path);
         self.with_locked_state(|state| {
             let now = chrono::Utc::now();
@@ -542,12 +567,18 @@ impl Curator {
     }
 
     /// Promote a Draft skill to Active.
-    pub fn promote_to_active(&self, name: &str) -> Result<bool> {
+    #[cfg(test)]
+    pub(crate) fn promote_to_active(&self, name: &str) -> Result<bool> {
         self.promote_to_active_at(name, None)
     }
 
     /// Promote a Draft to Active and bind the authoritative runtime path.
-    pub fn promote_to_active_at(&self, name: &str, path: Option<&std::path::Path>) -> Result<bool> {
+    #[cfg(test)]
+    pub(crate) fn promote_to_active_at(
+        &self,
+        name: &str,
+        path: Option<&std::path::Path>,
+    ) -> Result<bool> {
         let normalized_path = path.map(normalize_skill_path);
         self.with_locked_state(|state| {
             let now = chrono::Utc::now();
@@ -576,7 +607,8 @@ impl Curator {
     }
 
     /// Deprecate a skill, optionally specifying which skill supersedes it.
-    pub fn deprecate_skill(&self, name: &str, superseded_by: Option<&str>) -> Result<bool> {
+    #[cfg(test)]
+    pub(crate) fn deprecate_skill(&self, name: &str, superseded_by: Option<&str>) -> Result<bool> {
         self.with_locked_state(|state| {
             let now = chrono::Utc::now();
             if let Some(meta) = state.skills.get_mut(name)
@@ -595,7 +627,8 @@ impl Curator {
     }
 
     /// Pin a skill (exempt from auto-transitions).
-    pub fn pin_skill(&self, name: &str) -> Result<()> {
+    #[cfg(test)]
+    pub(crate) fn pin_skill(&self, name: &str) -> Result<()> {
         self.with_locked_state(|state| {
             if let Some(meta) = state.skills.get_mut(name) {
                 meta.pinned = true;
@@ -606,7 +639,8 @@ impl Curator {
     }
 
     /// Unpin a skill.
-    pub fn unpin_skill(&self, name: &str) -> Result<()> {
+    #[cfg(test)]
+    pub(crate) fn unpin_skill(&self, name: &str) -> Result<()> {
         self.with_locked_state(|state| {
             if let Some(meta) = state.skills.get_mut(name) {
                 meta.pinned = false;
@@ -619,7 +653,10 @@ impl Curator {
     /// Apply automatic lifecycle transitions based on inactivity.
     ///
     /// Returns a list of transitions that were applied.
-    pub fn apply_transitions(&self) -> Result<Vec<(String, SkillLifecycle, SkillLifecycle)>> {
+    #[cfg(test)]
+    pub(crate) fn apply_transitions(
+        &self,
+    ) -> Result<Vec<(String, SkillLifecycle, SkillLifecycle)>> {
         if !self.config.enabled {
             return Ok(vec![]);
         }
