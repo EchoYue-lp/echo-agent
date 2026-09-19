@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Added canonical later rollback for layered memory (`MemoryRollbackTarget`,
+  preview outcomes, durable inverse batches, tip-generation/ABA fencing, and
+  request-id idempotency). Merge rollback always covers the complete prepared
+  batch; inverse audit entries record the real reverse change type and exact
+  warm/hot projection. The legacy snapshot-only merge restore is retired.
+  `ChangeLog` remains append-only and Skill/Rule rollback stays outside this
+  memory contract.
+
 - Agent adapters now fence new work, cancel and drain accepted invocations,
   and await resource close: ACP retains unsettled Run receipts and retries
   failed connection cleanup, Headless reports Agent close errors, and Channels

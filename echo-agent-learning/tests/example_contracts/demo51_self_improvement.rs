@@ -16,6 +16,7 @@
 use chrono::Utc;
 use echo_agent::evolution::{
     ChangeFilter, ChangeLog, Curator, CuratorConfig, JsonlChangeLog, MemoryLayer,
+    MemoryRollbackOutcome, MemoryRollbackPreviewOutcome, MemoryRollbackTarget,
     MemoryRuntimeIntegrationBuilder, SkillLifecycle,
 };
 use echo_agent::improve::*;
@@ -141,6 +142,55 @@ async fn contract_demo51_layered_memory_recovery_api() -> Result<(), Box<dyn std
     assert_eq!(recovered.content, exact_content);
     let log = JsonlChangeLog::new(root.join("evolution/change-log.jsonl"))?;
     assert_eq!(log.query(&ChangeFilter::new())?.len(), 3);
+    Ok(())
+}
+
+#[tokio::test]
+async fn contract_demo51_memory_later_rollback() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join(".echo-agent");
+    let store_path = dir.path().join("store.json");
+    let store = Arc::new(FileStore::new(&store_path)?);
+    let manager = MemoryRuntimeIntegrationBuilder::new(root.clone(), store)
+        .build_layer_manager_reconciled()
+        .await?;
+    let meta = MemoryMeta::new(
+        MemoryType::ProjectFact,
+        MemorySource::ExplicitSave,
+        "rollback",
+    )
+    .with_confidence(0.40);
+    manager
+        .write_memory("rollback", "before", meta.clone())
+        .await?;
+    manager.write_memory("rollback", "after", meta).await?;
+    let log = JsonlChangeLog::new(root.join("evolution/change-log.jsonl"))?;
+    let change_id = log
+        .query(&ChangeFilter::new())?
+        .first()
+        .ok_or("missing rollback ChangeLog entry")?
+        .change_id
+        .clone();
+    let target = MemoryRollbackTarget::change_id(change_id);
+    assert!(matches!(
+        manager.preview_rollback(&target).await?,
+        MemoryRollbackPreviewOutcome::Ready(_)
+    ));
+    assert!(matches!(
+        manager
+            .rollback_memory("demo51-rollback", target.clone())
+            .await?,
+        MemoryRollbackOutcome::Applied(_)
+    ));
+    let (_, restored) = manager
+        .locate("rollback")
+        .await?
+        .ok_or("missing rolled-back memory")?;
+    assert_eq!(restored.content, "before");
+    assert!(matches!(
+        manager.rollback_memory("demo51-rollback", target).await?,
+        MemoryRollbackOutcome::AlreadyApplied(_)
+    ));
     Ok(())
 }
 
