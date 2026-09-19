@@ -4,7 +4,7 @@ id: map.protocol-surfaces
 kind: capability_map
 title: ACP、A2A、Channels、Headless 与 SDK Surfaces
 risk: high
-observed_at: source:f4b876a02bb253bb7d9dd92aca7982dbd352bab4f641a3646ff9bc5cb3304c05
+observed_at: source:b28c584ece690cbed560ee12938634abe9ccfe9d73658c45a1c4ea5579020735
 boundary_refs: [boundary.protocol-surfaces]
 behavior_refs: [behavior.protocol-projection]
 rule_refs: [rule.protocol-role-separation, rule.sdk-rust-authority]

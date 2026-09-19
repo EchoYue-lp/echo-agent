@@ -141,6 +141,15 @@ pub struct SearchQuery<'a> {
     pub mode: SearchMode,
 }
 
+/// Outcome of an exact-value conditional Store write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StoreCompareAndPutOutcome {
+    /// The current value matched `expected` and the replacement was committed.
+    Applied,
+    /// The current value did not match `expected`; no mutation occurred.
+    Mismatch,
+}
+
 impl<'a> SearchQuery<'a> {
     pub fn keyword(text: &'a str, limit: usize) -> Self {
         Self {
@@ -187,6 +196,27 @@ pub trait Store: Send + Sync {
         key: &'a str,
         value: Value,
     ) -> BoxFuture<'a, Result<()>>;
+
+    /// Atomically replace one exact value when its current JSON value matches.
+    ///
+    /// `expected = None` means the key must be absent. Implementations that
+    /// cannot serialize the comparison and write under one authority must
+    /// return `Unsupported`; callers must not emulate this with `get` + `put`.
+    fn compare_and_put<'a>(
+        &'a self,
+        namespace: &'a [&'a str],
+        key: &'a str,
+        expected: Option<Value>,
+        value: Value,
+    ) -> BoxFuture<'a, Result<StoreCompareAndPutOutcome>> {
+        let _ = (namespace, key, expected, value);
+        Box::pin(async move {
+            Err(MemoryError::Unsupported(
+                "atomic compare-and-put is not supported by this Store".to_string(),
+            )
+            .into())
+        })
+    }
 
     /// Exact fetch by key
     fn get<'a>(

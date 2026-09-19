@@ -354,11 +354,26 @@ let transitions = curator.apply_transitions()?; // auto-transition by idle time
 1. **`SkillCandidateDetector`** scans `TypedMemoryStore` for `WorkflowPattern`/`DebuggingLesson` memory; when ≥3 entries share a topic with source `RepeatedWorkflow` → proposes a skill candidate.
 
    ```rust
-   use echo_agent::evolution::SkillCandidateDetector;
-   let detector = SkillCandidateDetector::new();
+   use echo_agent::evolution::{Curator, CuratorConfig, SkillCandidateDetector};
+   let curator = Curator::new(CuratorConfig::default(), "<application-data>/evolution/curator-state.json");
+   let detector = SkillCandidateDetector::new(curator);
    let report = detector.detect(&typed_store, &change_log).await?;
    // report.new_candidates / report.reinforced
    ```
+
+   Creation and reinforcement share one private durable operation journal. Each
+   detection pass reconciles prepared candidate payloads and stable idempotent
+   `ChangeLog` entries before scanning. Report items are published only after
+   settlement; a scan with no observation growth writes no payload or audit.
+   `TypedMemoryStore`, `Curator`, and `ChangeLog` remain the payload, lifecycle,
+   and append-only audit authorities respectively. Reserved Store and ChangeLog
+   markers bind the journal to those concrete authorities, Store projection uses
+   exact atomic compare-and-put, and Curator preserves the candidate authority
+   lineage across legitimate Draft/Active transitions. Stores without atomic
+   compare-and-put are rejected instead of falling back to a racy write;
+   `EmbeddingStore` is one such wrapper because its derived vector index cannot
+   share the inner payload commit. See
+   [ADR 0068](../adr/0068-skill-candidate-mutation-audit-reconciliation.md).
 
 2. **`SkillDraftGenerator`** generates a draft `SKILL.md` from a candidate via template, saved under the consumer-supplied evolution root at `skills/_drafts/<name>/SKILL.md`.
 

@@ -5,7 +5,7 @@
 //! untyped entries (raw JSON without the `meta` field) are read with default metadata.
 
 use echo_core::error::Result;
-use echo_core::memory::store::{Store, StoreItem};
+use echo_core::memory::store::{Store, StoreCompareAndPutOutcome, StoreItem};
 use echo_core::memory::types::{
     MemoryMeta, MemoryRisk, MemorySource, MemoryStatus, MemoryType, TypedMemoryValue,
 };
@@ -221,6 +221,28 @@ impl TypedMemoryStore {
             }
         };
         self.inner.put(namespace, key, json_value)
+    }
+
+    /// Atomically project a typed value when the raw current value matches.
+    pub fn compare_and_put_typed<'a>(
+        &'a self,
+        namespace: &'a [&'a str],
+        key: &'a str,
+        expected: Option<serde_json::Value>,
+        content: &'a str,
+        meta: MemoryMeta,
+    ) -> BoxFuture<'a, Result<StoreCompareAndPutOutcome>> {
+        let value = TypedMemoryValue::new(content, meta);
+        let json_value = match value.to_value() {
+            Ok(value) => value,
+            Err(error) => {
+                return Box::pin(async move {
+                    Err(echo_core::error::MemoryError::SerializationError(error.to_string()).into())
+                });
+            }
+        };
+        self.inner
+            .compare_and_put(namespace, key, expected, json_value)
     }
 
     /// Read a typed memory entry by key.

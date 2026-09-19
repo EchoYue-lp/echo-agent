@@ -4,13 +4,13 @@ id: map.eval-evolution
 kind: capability_map
 title: Trace、Eval、Improve 与 Evolution
 risk: high
-observed_at: source:f4b876a02bb253bb7d9dd92aca7982dbd352bab4f641a3646ff9bc5cb3304c05
+observed_at: source:b28c584ece690cbed560ee12938634abe9ccfe9d73658c45a1c4ea5579020735
 boundary_refs: [boundary.eval-evolution]
 behavior_refs: [behavior.eval-evolution]
 rule_refs: [rule.quality-observation-boundary, rule.fact-projection-separation]
-evidence_refs: [evidence.provider-protocol-quality, evidence.persistence-observation, evidence.high-risk-audit-frontier, evidence.improve-singleton-split-repair, evidence.improve-singleton-split-verification, evidence.improve-iteration-config-repair, evidence.improve-iteration-config-verification, evidence.eval-workspace-generation-repair, evidence.eval-workspace-generation-verification, evidence.eval-timeout-turn-settlement-repair, evidence.eval-timeout-turn-settlement-verification, evidence.eval-trace-correlation-repair, evidence.eval-trace-correlation-verification, evidence.evolution-memory-audit-repair, evidence.evolution-memory-audit-verification]
+evidence_refs: [evidence.provider-protocol-quality, evidence.persistence-observation, evidence.high-risk-audit-frontier, evidence.improve-singleton-split-repair, evidence.improve-singleton-split-verification, evidence.improve-iteration-config-repair, evidence.improve-iteration-config-verification, evidence.eval-workspace-generation-repair, evidence.eval-workspace-generation-verification, evidence.eval-timeout-turn-settlement-repair, evidence.eval-timeout-turn-settlement-verification, evidence.eval-trace-correlation-repair, evidence.eval-trace-correlation-verification, evidence.evolution-memory-audit-repair, evidence.evolution-memory-audit-verification, evidence.skill-candidate-audit-repair, evidence.skill-candidate-audit-verification]
 finding_refs: [finding.eval-trace-identity, finding.eval-timeout-settlement, finding.improve-iteration-config, finding.improve-single-case-panic, finding.eval-workspace-generation-isolation, finding.background-review-detached-persistence-settlement, finding.evolution-audit-atomicity, finding.evolution-changelog-rollback-authority, finding.evolution-skill-promotion-audit, finding.skill-candidate-reinforcement-audit-gap, finding.evolution-doc-namespace, finding.pre-compaction-memory-trust-provenance]
-audit_refs: [audit.eval-evolution.data-durability, audit.eval-evolution.failure-concurrency, audit.eval-evolution.permission-external, audit.improve-singleton-split-rereview, audit.improve-iteration-config-rereview, audit.eval-workspace-generation-rereview, audit.eval-timeout-turn-settlement-rereview, audit.eval-trace-correlation-rereview, audit.evolution-memory-audit-atomicity-rereview, audit.evolution-memory-rollback-rereview]
+audit_refs: [audit.eval-evolution.data-durability, audit.eval-evolution.failure-concurrency, audit.eval-evolution.permission-external, audit.improve-singleton-split-rereview, audit.improve-iteration-config-rereview, audit.eval-workspace-generation-rereview, audit.eval-timeout-turn-settlement-rereview, audit.eval-trace-correlation-rereview, audit.evolution-memory-audit-atomicity-rereview, audit.evolution-memory-rollback-rereview, audit.skill-candidate-audit-rereview]
 related_map_refs: [map.observation-persistence-delivery, map.agent-session-turn, map.llm-provider-runtime, map.extension-lifecycle]
 scenarios:
   trace-record-and-analysis:
@@ -50,11 +50,13 @@ scenarios:
     next_step: memory rollback候选完成远端交付；Skill/Rule/host rollback依#54/#94/host，旧namespace依其Finding处置
   evolution-skill-lifecycle:
     status: needs_review
-    source_refs: [src/evolution/curator.rs, src/evolution/draft.rs, src/evolution/merge.rs, src/evolution/patch.rs, src/evolution/review.rs, src/evolution/security.rs]
+    source_refs: [src/evolution/candidate.rs, src/evolution/curator.rs, src/evolution/draft.rs, src/evolution/merge.rs, src/evolution/patch.rs, src/evolution/review.rs, src/evolution/security.rs, docs/adr/0068-skill-candidate-mutation-audit-reconciliation.md]
     finding_refs: [finding.evolution-skill-promotion-audit, finding.skill-candidate-reinforcement-audit-gap]
     rule_refs: [rule.quality-observation-boundary]
-    unknown: Curator public promotion 可直接持久化 active 状态，未携带可验证 human approval 或 ChangeLog；其它 draft/merge/patch 各自有审计合同
-    next_step: audit skill candidate/draft/review/promote/merge/patch 的唯一 lifecycle 与授权证据
+    evidence_refs: [evidence.skill-candidate-audit-repair, evidence.skill-candidate-audit-verification]
+    audit_refs: [audit.skill-candidate-audit-rereview]
+    unknown: "#94 candidate create/reinforce durable audit已通过四轮独立复审、完整门禁及remote delivery，并在verified main commit d0d1e975闭合；promotion approval与later rollback仍归#54"
+    next_step: promotion/approval/draft/merge/patch与Skill later rollback继续依#54及其唯一mutation authority合同
   evolution-rule-promotion-surface:
     status: needs_review
     source_refs: [src/evolution/security.rs, src/evolution/mod.rs]

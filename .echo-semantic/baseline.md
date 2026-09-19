@@ -4,7 +4,7 @@ id: baseline.repository
 kind: baseline
 source_snapshot:
   base_revision: ab3ed7d23f0a3fbe2bb859a7537df2546531239e
-  content_digest: f4b876a02bb253bb7d9dd92aca7982dbd352bab4f641a3646ff9bc5cb3304c05
+  content_digest: b28c584ece690cbed560ee12938634abe9ccfe9d73658c45a1c4ea5579020735
 inventory_closure: closed
 behavior_model_closure: closed
 map_refs:

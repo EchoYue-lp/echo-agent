@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Skill candidate creation and reinforcement now share one durable private
+  mutation journal. Detection reconciles candidate payloads, Curator
+  registration, and stable idempotent ChangeLog entries before scanning;
+  reserved Store/audit markers reject authority rebinding, atomic Store CAS
+  fences external writers, and Curator lineage distinguishes legitimate
+  promotion from same-name conflicts. Private files append suffixes to the full
+  Curator state filename, so same-stem paths with different extensions remain
+  isolated. No-growth scans remain write-free. See ADR 0068.
+
+- The public `Store` contract now exposes exact `compare_and_put`. Unsupported
+  implementations fail explicitly; InMemoryStore, FileStore, and SqliteStore
+  provide atomic payload paths. EmbeddingStore remains explicitly unsupported
+  because its payload and derived vector index cannot share one atomic commit.
+
 - MCP connections now use owner-qualified `McpServerId` identities. Direct
   string APIs remain compatible, while plugin wiring uses the stable prepared
   plugin id so same-named servers, cleanup debt, tools, and resources cannot
