@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.plugin-mcp-owner-isolation-verification
 kind: evidence
-observed_at: source:e0466fe1f836ebe116374a7941ec3b4edbab8b0c9346247efa66405841a178f9
+observed_at: source:1793556b87f7275872eba5723d9643e2ec78e14e5e11cbdfc5c3f7a3c1a3ce70
 source_refs:
   - echo-integration/src/mcp/identity.rs
   - echo-integration/src/mcp/mod.rs
@@ -14,7 +14,7 @@ source_refs:
 supports: [behavior.extension-publication, rule.extension-generation-authority]
 limitations:
   - Tests use in-process transports and local stdio fixtures rather than remote MCP servers
-  - Full workspace gates, independent rereview and remote-main delivery are recorded separately
+  - Final advancing-base independent rereview and remote-main delivery remain pending
 ---
 
 # Plugin MCP owner-qualified identity verification
@@ -40,13 +40,15 @@ manager cancellation/debt behavior.
 
 ## 工程验证
 
-`cargo test -p echo_integration --features mcp --lib --locked` passed 188/188 after the review fixes.
+`cargo test -p echo_integration --features mcp --lib --locked` passed 189/189 after the review fixes.
 `cargo test -p echo_agent --features mcp --lib plugin::prepared::tests --locked` passed 20/20.
 `cargo test -p echo_agent --features mcp --lib agent::react::capabilities::tests --locked` passed 7/7.
 Focused panic-lint Clippy and default `echo_agent` check exited 0. MCP facade tests passed 10/10,
 documentation contracts passed 12/12, and demo56 completed its publish/rollback lifecycle while
-printing the owner-qualified MCP selector. Formatter and semantic strict/change-evidence checks
-also exited 0 on the final candidate.
+printing the owner-qualified MCP selector. After merging remote main through `ed7d6028`, both
+required Clippy passes, the all-target/all-feature workspace test suite, the no-default workspace
+check, all 16 independent root feature checks, formatter, and diff checks exited 0. Strict semantic
+snapshot/change-evidence is rerun after this evidence update.
 
 ## 来源与范围
 
@@ -56,5 +58,6 @@ an embedding application's Registry transaction or a remote MCP interoperability
 
 ## 已知缺口
 
-This candidate evidence does not mark the Finding resolved. Independent rereview, complete applicable
-AGENTS gates, semantic verification and remote-main delivery remain required.
+This candidate evidence does not mark the Finding resolved. Complete applicable AGENTS gates passed
+on the advancing-base tree; final independent rereview, semantic change-evidence confirmation, and
+remote-main delivery remain required.

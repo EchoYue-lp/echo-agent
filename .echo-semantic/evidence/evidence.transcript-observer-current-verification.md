@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.transcript-observer-current-verification
 kind: evidence
-observed_at: source:0d241bfdeeb69882ac21d5647af13f50f25fd491a34dcc6a7dd0f70daf2ac08a
+observed_at: source:1793556b87f7275872eba5723d9643e2ec78e14e5e11cbdfc5c3f7a3c1a3ce70
 source_refs:
   - src/agent/react/run/phases/finalize.rs
   - src/agent/react/run/phases/compact.rs

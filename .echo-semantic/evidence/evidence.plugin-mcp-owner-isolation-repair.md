@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.plugin-mcp-owner-isolation-repair
 kind: evidence
-observed_at: source:e0466fe1f836ebe116374a7941ec3b4edbab8b0c9346247efa66405841a178f9
+observed_at: source:1793556b87f7275872eba5723d9643e2ec78e14e5e11cbdfc5c3f7a3c1a3ce70
 source_refs:
   - echo-integration/src/mcp/identity.rs
   - echo-integration/src/mcp/mod.rs
@@ -15,7 +15,7 @@ source_refs:
 supports: [behavior.extension-publication, rule.extension-generation-authority]
 limitations:
   - Plugin Registry persistence and full host reload coordination remain outside this identity repair (#73)
-  - Independent rereview and remote-main delivery remain outstanding
+  - Final advancing-base independent rereview and remote-main delivery remain outstanding
 ---
 
 # Plugin MCP owner-qualified identity repair
@@ -53,4 +53,4 @@ typed key 而保留 owner-qualified receipt 或 projection。
 
 ## 已知缺口
 
-Finding 在独立复审、完整门禁与远端主线交付前保持 open。
+完整门禁已在包含 `main@ed7d6028` 的候选树通过；Finding 在最终独立复审与远端主线交付前保持 open。

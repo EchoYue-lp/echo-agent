@@ -39,5 +39,5 @@ Plugin parser 与 McpManager 都用裸 server name；多个 Plugin 同名 reconc
 
 ## 处理记录
 
-候选修复已建立 owner-qualified identity、投影与 focused 验证证据。Finding 在独立复审、
-完整门禁和远端主线交付前保持 open。
+候选修复已建立 owner-qualified identity、投影与 focused 验证证据，并在包含
+`main@ed7d6028` 的组合树通过完整门禁。Finding 在最终独立复审和远端主线交付前保持 open。
