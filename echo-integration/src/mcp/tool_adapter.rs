@@ -3,6 +3,7 @@ use std::sync::Arc;
 use futures::future::BoxFuture;
 
 use super::client::McpClient;
+use super::identity::{McpServerId, McpServerOwner, plugin_tool_projection};
 use super::types::{McpContent, McpTool, McpToolCallResult};
 use echo_core::error::Result;
 use echo_core::tools::{
@@ -47,6 +48,38 @@ impl McpToolAdapter {
             server_name: Some(server_name),
             exposed_name,
             local_capabilities: Self::conservative_capabilities(),
+        }
+    }
+
+    /// Adapt a tool with its canonical owner-qualified server identity.
+    /// Direct servers retain the historical projection; plugin servers use a
+    /// stable namespace so equal local names from different plugins coexist.
+    pub fn with_server_identity(
+        client: Arc<McpClient>,
+        tool: McpTool,
+        server_id: &McpServerId,
+    ) -> Self {
+        let exposed_name = match &server_id.owner {
+            McpServerOwner::Direct => Self::exposed_name_for(&server_id.local_name, &tool.name),
+            McpServerOwner::Plugin(plugin) => {
+                plugin_tool_projection(plugin, &server_id.local_name, &tool.name)
+            }
+        };
+        Self {
+            client,
+            tool,
+            server_name: Some(server_id.selector()),
+            exposed_name,
+            local_capabilities: Self::conservative_capabilities(),
+        }
+    }
+
+    pub fn exposed_name_for_identity(server_id: &McpServerId, tool_name: &str) -> String {
+        match &server_id.owner {
+            McpServerOwner::Direct => Self::exposed_name_for(&server_id.local_name, tool_name),
+            McpServerOwner::Plugin(plugin) => {
+                plugin_tool_projection(plugin, &server_id.local_name, tool_name)
+            }
         }
     }
 

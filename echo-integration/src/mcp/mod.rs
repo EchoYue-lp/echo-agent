@@ -15,6 +15,7 @@
 
 pub mod client;
 pub mod config_loader;
+pub mod identity;
 pub mod resource_tool;
 pub mod server;
 pub mod server_config;
@@ -31,9 +32,10 @@ pub use client::{
 pub use config_loader::{
     AGENT_PLUGIN_MCP_SCHEMA_V1, AgentPluginMcpLoad, McpConfigFile, McpServerEntry,
 };
+pub use identity::{McpServerId, McpServerOwner, plugin_tool_projection};
 pub use resource_tool::{
     LIST_MCP_RESOURCE_TEMPLATES_TOOL, LIST_MCP_RESOURCES_TOOL, MCP_RESOURCE_TOOL_NAMES,
-    READ_MCP_RESOURCE_TOOL, build_mcp_resource_tools,
+    READ_MCP_RESOURCE_TOOL, build_mcp_resource_tools, build_mcp_resource_tools_by_id,
 };
 pub use server::McpServer;
 pub use server_config::{McpServerConfig, TransportConfig};
@@ -70,11 +72,11 @@ pub struct McpManager {
 
 #[derive(Default)]
 struct McpManagerState {
-    clients: HashMap<String, Arc<McpClient>>,
-    configs: HashMap<String, McpServerConfig>,
-    cleanup_debt: Vec<(String, Arc<McpClient>)>,
-    prepared: HashMap<u64, (String, Arc<McpClient>)>,
-    closing_debt: HashSet<String>,
+    clients: HashMap<McpServerId, Arc<McpClient>>,
+    configs: HashMap<McpServerId, McpServerConfig>,
+    cleanup_debt: Vec<(McpServerId, Arc<McpClient>)>,
+    prepared: HashMap<u64, (McpServerId, Arc<McpClient>)>,
+    closing_debt: HashSet<McpServerId>,
     next_prepared_ticket: u64,
     close_callers: usize,
 }
@@ -102,7 +104,7 @@ impl Drop for CloseAllOwner<'_> {
 
 struct PreparedClientOwner<'a> {
     manager: &'a McpManager,
-    name: String,
+    id: McpServerId,
     client: Arc<McpClient>,
     ticket: u64,
     armed: bool,
@@ -130,7 +132,7 @@ impl Drop for PreparedClientOwner<'_> {
         if self.armed {
             let mut state = self.manager.state();
             if state.prepared.remove(&self.ticket).is_some() {
-                McpManager::retain_cleanup_debt(&mut state, &self.name, &self.client);
+                McpManager::retain_cleanup_debt(&mut state, &self.id, &self.client);
             }
         }
     }
@@ -148,6 +150,7 @@ pub enum McpTargetChange {
 
 /// Typed receipt for reconciling one named MCP target.
 pub struct McpTargetReceipt {
+    pub id: McpServerId,
     pub name: String,
     pub change: McpTargetChange,
     pub tools: Vec<Box<dyn Tool>>,
@@ -176,6 +179,15 @@ impl McpManager {
         Ok(self.reconcile_target(&name, Some(config)).await?.tools)
     }
 
+    /// Connect or reconcile a server under an explicit owner authority.
+    pub async fn connect_owned(
+        &mut self,
+        id: McpServerId,
+        config: McpServerConfig,
+    ) -> Result<Vec<Box<dyn Tool>>> {
+        Ok(self.reconcile_server(&id, Some(config)).await?.tools)
+    }
+
     /// Reconcile one named server against an optional desired configuration.
     ///
     /// An unchanged target keeps its live connection. A replacement is fully
@@ -187,19 +199,32 @@ impl McpManager {
         name: &str,
         desired: Option<McpServerConfig>,
     ) -> Result<McpTargetReceipt> {
+        self.reconcile_server(&McpServerId::direct(name), desired)
+            .await
+    }
+
+    /// Reconcile a target using its canonical owner-qualified identity.
+    pub async fn reconcile_server(
+        &mut self,
+        id: &McpServerId,
+        desired: Option<McpServerConfig>,
+    ) -> Result<McpTargetReceipt> {
+        let name = &id.local_name;
+        let key = id.clone();
         let Some(config) = desired else {
-            let change = if self.disconnect(name).await? {
+            let change = if self.disconnect_server(id).await? {
                 McpTargetChange::Disconnected
             } else {
                 McpTargetChange::Absent
             };
             return Ok(McpTargetReceipt {
+                id: id.clone(),
                 name: name.to_string(),
                 change,
                 tools: Vec::new(),
             });
         };
-        if config.name != name {
+        if config.name != name.as_str() {
             return Err(echo_core::error::ReactError::Other(format!(
                 "MCP reconcile target '{name}' does not match config name '{}'",
                 config.name
@@ -207,12 +232,12 @@ impl McpManager {
         }
         {
             let _close_guard = self.close_gate.lock().await;
-            self.settle_active_close_debt(name).await?;
+            self.settle_active_close_debt(&key).await?;
         }
         let unchanged = {
             let state = self.state();
-            if state.configs.get(name) == Some(&config)
-                && let Some(client) = state.clients.get(name)
+            if state.configs.get(&key) == Some(&config)
+                && let Some(client) = state.clients.get(&key)
             {
                 Some(Arc::clone(client))
             } else {
@@ -220,19 +245,21 @@ impl McpManager {
             }
         };
         if let Some(client) = unchanged {
-            self.settle_same_name_cleanup_debt(name).await?;
+            self.settle_same_name_cleanup_debt(&key).await?;
             return Ok(McpTargetReceipt {
+                id: id.clone(),
                 name: name.to_string(),
                 change: McpTargetChange::Unchanged,
-                tools: Self::tools_for_client(name, &client),
+                tools: Self::tools_for_server(id, &client),
             });
         }
 
         let client = match McpClient::new(config.clone()).await {
             Ok(client) => client,
-            Err(error) => return Err(self.retain_preparation_failure(name, error)),
+            Err(error) => return Err(self.retain_preparation_failure(id, error)),
         };
-        self.install_prepared_target(name, config, client).await
+        self.install_prepared_server(id.clone(), config, client)
+            .await
     }
 
     /// Publish an already-prepared client as the named target.
@@ -246,13 +273,24 @@ impl McpManager {
         config: McpServerConfig,
         client: Arc<McpClient>,
     ) -> impl std::future::Future<Output = Result<McpTargetReceipt>> + Send + 'a {
+        self.install_prepared_server(McpServerId::direct(name), config, client)
+    }
+
+    /// Publish an already-prepared client under a canonical owner-qualified id.
+    pub fn install_prepared_server<'a>(
+        &'a self,
+        id: McpServerId,
+        config: McpServerConfig,
+        client: Arc<McpClient>,
+    ) -> impl std::future::Future<Output = Result<McpTargetReceipt>> + Send + 'a {
+        let key = id.clone();
         // This owner must exist before the future's first poll. An embedding
         // adapter may cancel an already prepared target without polling us.
         let admission = {
             let mut state = self.state();
             if let Some(authority) = Self::client_authority(&state, &client) {
                 Err(ReactError::Other(format!(
-                    "MCP prepared target '{name}' aliases a client already owned by {authority}"
+                    "MCP prepared target '{id}' aliases a client already owned by {authority}"
                 )))
             } else {
                 let mut ticket = state.next_prepared_ticket;
@@ -262,13 +300,13 @@ impl McpManager {
                 state.next_prepared_ticket = ticket.wrapping_add(1);
                 state
                     .prepared
-                    .insert(ticket, (name.to_string(), Arc::clone(&client)));
+                    .insert(ticket, (key.clone(), Arc::clone(&client)));
                 Ok(ticket)
             }
         };
         let prepared_owner = admission.map(|ticket| PreparedClientOwner {
             manager: self,
-            name: name.to_string(),
+            id: id.clone(),
             client: Arc::clone(&client),
             ticket,
             armed: true,
@@ -278,10 +316,11 @@ impl McpManager {
                 Ok(owner) => owner,
                 Err(error) => return Err(error),
             };
+            let key = id.clone();
             let _close_guard = self.close_gate.lock().await;
             if !prepared_owner.is_registered() {
                 return Err(ReactError::Other(format!(
-                    "MCP prepared target '{name}' was closed before installation"
+                    "MCP prepared target '{id}' was closed before installation"
                 )));
             }
             if self.state().close_callers > 0 {
@@ -290,33 +329,74 @@ impl McpManager {
                     .map(|error| format!("; prepared client cleanup failed: {error}"))
                     .unwrap_or_default();
                 return Err(ReactError::Other(format!(
-                    "MCP prepared target '{name}' was rejected while close_all fenced admission{cleanup_detail}"
+                    "MCP prepared target '{id}' was rejected while close_all fenced admission{cleanup_detail}"
                 )));
             }
-            if config.name != name || client.server_name() != name {
+            if config.name != id.local_name || client.server_name() != id.local_name {
                 let error = ReactError::Other("MCP prepared target identity mismatch".into());
                 return Err(Self::reject_prepared(&mut prepared_owner, error).await);
             }
-            if let Err(error) = self.settle_active_close_debt(name).await {
+            if let Err(error) = self.settle_active_close_debt(&key).await {
                 return Err(Self::reject_prepared(&mut prepared_owner, error).await);
             }
-            if let Err(error) = self.settle_same_name_cleanup_debt(name).await {
+            if let Err(error) = self.settle_same_name_cleanup_debt(&key).await {
                 return Err(Self::reject_prepared(&mut prepared_owner, error).await);
             }
-            if self.same_name_prepared_conflict(name, prepared_owner.ticket) {
+            if self.same_name_prepared_conflict(&key, prepared_owner.ticket) {
                 let error = ReactError::Other(format!(
-                    "MCP target '{name}' has another unsettled prepared client"
+                    "MCP target '{id}' has another unsettled prepared client"
                 ));
                 return Err(Self::reject_prepared(&mut prepared_owner, error).await);
             }
-            let tools = Self::tools_for_client(name, &client);
+            let selector_collision = {
+                self.state()
+                    .clients
+                    .keys()
+                    .find(|existing| *existing != &id && existing.selector() == id.selector())
+                    .cloned()
+            };
+            if let Some(existing) = selector_collision {
+                let error = ReactError::Other(format!(
+                    "MCP resource selector collision between '{id}' and '{existing}'"
+                ));
+                return Err(Self::reject_prepared(&mut prepared_owner, error).await);
+            }
+            let collisions = {
+                let state = self.state();
+                let proposed = Self::projected_tool_names(&id, &client);
+                state
+                    .clients
+                    .iter()
+                    .filter(|(existing_key, _)| *existing_key != &key)
+                    .flat_map(|(existing_key, existing_client)| {
+                        let existing_id = existing_key.clone();
+                        let existing_names =
+                            Self::projected_tool_names(&existing_id, existing_client);
+                        proposed.iter().filter_map(move |name| {
+                            existing_names
+                                .iter()
+                                .find(|existing_name| *existing_name == name)
+                                .map(|_| format!("{name} ({existing_id})"))
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            };
+            if !collisions.is_empty() {
+                let error = ReactError::Other(format!(
+                    "MCP tool projection collision for '{}': {}",
+                    id,
+                    collisions.join(", ")
+                ));
+                return Err(Self::reject_prepared(&mut prepared_owner, error).await);
+            }
+            let tools = Self::tools_for_server(&id, &client);
             let previous = {
                 let mut state = self.state();
-                state.configs.remove(name);
-                let previous = state.clients.remove(name);
-                state.closing_debt.remove(name);
+                state.configs.remove(&key);
+                let previous = state.clients.remove(&key);
+                state.closing_debt.remove(&key);
                 if let Some(previous) = &previous {
-                    Self::retain_cleanup_debt(&mut state, name, previous);
+                    Self::retain_cleanup_debt(&mut state, &key, previous);
                 }
                 previous
             };
@@ -329,7 +409,7 @@ impl McpManager {
                         .unwrap_or_default();
                     return Err(ReactError::Mcp(Box::new(McpError::ConnectionFailed(
                         format!(
-                            "MCP target '{name}' was withdrawn, but the previous transport did not settle: {error}{prepared_detail}"
+                            "MCP target '{id}' was withdrawn, but the previous transport did not settle: {error}{prepared_detail}"
                         ),
                     ))));
                 }
@@ -340,29 +420,30 @@ impl McpManager {
             };
             let published = {
                 let mut state = self.state();
-                if Self::has_same_name_prepared_conflict(&state, name, prepared_owner.ticket)
+                if Self::has_same_name_prepared_conflict(&state, &key, prepared_owner.ticket)
                     || state
                         .cleanup_debt
                         .iter()
-                        .any(|(debt_name, _)| debt_name == name)
+                        .any(|(debt_id, _)| debt_id == &key)
                 {
                     false
                 } else {
                     state.prepared.remove(&prepared_owner.ticket);
-                    state.clients.insert(name.to_string(), Arc::clone(&client));
-                    state.configs.insert(name.to_string(), config);
+                    state.clients.insert(key.clone(), Arc::clone(&client));
+                    state.configs.insert(key, config);
                     true
                 }
             };
             if !published {
                 let error = ReactError::Other(format!(
-                    "MCP target '{name}' gained unsettled cleanup debt before publication"
+                    "MCP target '{id}' gained unsettled cleanup debt before publication"
                 ));
                 return Err(Self::reject_prepared(&mut prepared_owner, error).await);
             }
             prepared_owner.disarm();
             Ok(McpTargetReceipt {
-                name: name.to_string(),
+                id: id.clone(),
+                name: id.local_name.clone(),
                 change,
                 tools,
             })
@@ -371,16 +452,17 @@ impl McpManager {
 
     fn has_same_name_prepared_conflict(
         state: &McpManagerState,
-        name: &str,
+        id: &McpServerId,
         current_ticket: u64,
     ) -> bool {
-        state.prepared.iter().any(|(ticket, (candidate_name, _))| {
-            *ticket != current_ticket && candidate_name == name
-        })
+        state
+            .prepared
+            .iter()
+            .any(|(ticket, (candidate_name, _))| *ticket != current_ticket && candidate_name == id)
     }
 
-    fn same_name_prepared_conflict(&self, name: &str, current_ticket: u64) -> bool {
-        Self::has_same_name_prepared_conflict(&self.state(), name, current_ticket)
+    fn same_name_prepared_conflict(&self, id: &McpServerId, current_ticket: u64) -> bool {
+        Self::has_same_name_prepared_conflict(&self.state(), id, current_ticket)
     }
 
     fn client_authority(state: &McpManagerState, client: &Arc<McpClient>) -> Option<String> {
@@ -409,20 +491,33 @@ impl McpManager {
     /// A newer owner may already have published a different client under that name.
     pub async fn retry_cleanup_debt(&self, name: &str) -> Result<()> {
         let _close_guard = self.close_gate.lock().await;
-        self.settle_same_name_cleanup_debt(name).await
+        self.settle_same_name_cleanup_debt(&McpServerId::direct(name))
+            .await
+    }
+
+    /// Retry cleanup for one owner-qualified identity without touching any
+    /// other owner that happens to use the same local server name.
+    pub async fn retry_cleanup_server(&self, id: &McpServerId) -> Result<()> {
+        let _close_guard = self.close_gate.lock().await;
+        self.settle_same_name_cleanup_debt(id).await
+    }
+
+    /// Disconnect one owner-qualified identity.
+    pub async fn disconnect_server(&mut self, id: &McpServerId) -> Result<bool> {
+        self.disconnect_id(id).await
     }
 
     /// Settle every cleanup debt owed by `name` before a new target publishes.
     ///
     /// Returns Ok only when no same-name debt remains (either none existed or
     /// every retry close succeeded). Errors aggregate but never publish.
-    async fn settle_same_name_cleanup_debt(&self, name: &str) -> Result<()> {
+    async fn settle_same_name_cleanup_debt(&self, id: &McpServerId) -> Result<()> {
         let debt_clients = {
             let state = self.state();
             state
                 .cleanup_debt
                 .iter()
-                .filter(|(debt_name, _)| debt_name == name)
+                .filter(|(debt_name, _)| debt_name == id)
                 .map(|(_, client)| Arc::clone(client))
                 .collect::<Vec<_>>()
         };
@@ -432,7 +527,7 @@ impl McpManager {
                 Ok(()) => Self::remove_cleanup_debt(&mut self.state(), &client),
                 Err(error) => {
                     failures.push(error.to_string());
-                    Self::retain_cleanup_debt(&mut self.state(), name, &client);
+                    Self::retain_cleanup_debt(&mut self.state(), id, &client);
                 }
             }
         }
@@ -441,23 +536,23 @@ impl McpManager {
         } else {
             Err(ReactError::Mcp(Box::new(McpError::ConnectionFailed(
                 format!(
-                    "MCP target '{name}' replacement blocked: previous cleanup debt did not settle: {}",
+                    "MCP target '{id}' replacement blocked: previous cleanup debt did not settle: {}",
                     failures.join("; ")
                 ),
             ))))
         }
     }
 
-    async fn settle_active_close_debt(&self, name: &str) -> Result<()> {
+    async fn settle_active_close_debt(&self, id: &McpServerId) -> Result<()> {
         let client = {
             let state = self.state();
-            if !state.closing_debt.contains(name) {
+            if !state.closing_debt.contains(id) {
                 return Ok(());
             }
-            state.clients.get(name).cloned()
+            state.clients.get(id).cloned()
         };
         let Some(client) = client else {
-            self.state().closing_debt.remove(name);
+            self.state().closing_debt.remove(id);
             return Ok(());
         };
         match client.close().await {
@@ -465,17 +560,17 @@ impl McpManager {
                 let mut state = self.state();
                 if state
                     .clients
-                    .get(name)
+                    .get(id)
                     .is_some_and(|active| Arc::ptr_eq(active, &client))
                 {
-                    state.clients.remove(name);
-                    state.configs.remove(name);
+                    state.clients.remove(id);
+                    state.configs.remove(id);
                 }
-                state.closing_debt.remove(name);
+                state.closing_debt.remove(id);
                 Ok(())
             }
             Err(error) => Err(ReactError::Mcp(Box::new(McpError::ConnectionFailed(
-                format!("MCP target '{name}' close debt did not settle: {error}"),
+                format!("MCP target '{id}' close debt did not settle: {error}"),
             )))),
         }
     }
@@ -492,30 +587,28 @@ impl McpManager {
         }
     }
 
-    fn retain_cleanup_debt(state: &mut McpManagerState, name: &str, client: &Arc<McpClient>) {
+    fn retain_cleanup_debt(state: &mut McpManagerState, id: &McpServerId, client: &Arc<McpClient>) {
         if !state
             .cleanup_debt
             .iter()
             .any(|(_, existing)| Arc::ptr_eq(existing, client))
         {
-            state
-                .cleanup_debt
-                .push((name.to_string(), Arc::clone(client)));
+            state.cleanup_debt.push((id.clone(), Arc::clone(client)));
         }
     }
 
     fn retain_preparation_failure(
         &self,
-        name: &str,
+        id: &McpServerId,
         error: McpClientPreparationError,
     ) -> ReactError {
         let (initialization_error, cleanup_debt) = error.into_parts();
         let Some((cleanup_error, cleanup_owner)) = cleanup_debt else {
             return initialization_error;
         };
-        Self::retain_cleanup_debt(&mut self.state(), name, &cleanup_owner.into_client());
+        Self::retain_cleanup_debt(&mut self.state(), id, &cleanup_owner.into_client());
         ReactError::Mcp(Box::new(McpError::ConnectionFailed(format!(
-            "MCP target '{name}' preparation failed: {initialization_error}; transport cleanup remains retryable after: {cleanup_error}"
+            "MCP target '{id}' preparation failed: {initialization_error}; transport cleanup remains retryable after: {cleanup_error}"
         ))))
     }
 
@@ -525,16 +618,31 @@ impl McpManager {
             .retain(|(_, existing)| !Arc::ptr_eq(existing, client));
     }
 
-    fn tools_for_client(name: &str, client: &Arc<McpClient>) -> Vec<Box<dyn Tool>> {
+    fn tools_for_server(id: &McpServerId, client: &Arc<McpClient>) -> Vec<Box<dyn Tool>> {
         client
             .tools()
             .iter()
             .map(|tool| {
-                Box::new(McpToolAdapter::with_server_name(
+                Box::new(McpToolAdapter::with_server_identity(
                     Arc::clone(client),
                     tool.clone(),
-                    name.to_string(),
+                    id,
                 )) as Box<dyn Tool>
+            })
+            .collect()
+    }
+
+    fn projected_tool_names(id: &McpServerId, client: &Arc<McpClient>) -> Vec<String> {
+        client
+            .tools()
+            .iter()
+            .map(|tool| match &id.owner {
+                McpServerOwner::Direct => {
+                    McpToolAdapter::exposed_name_for(&id.local_name, &tool.name)
+                }
+                McpServerOwner::Plugin(plugin) => {
+                    plugin_tool_projection(plugin, &id.local_name, &tool.name)
+                }
             })
             .collect()
     }
@@ -570,36 +678,59 @@ impl McpManager {
         self.state()
             .clients
             .iter()
-            .flat_map(|(server_name, client)| {
-                client.tools().iter().map(|tool| {
-                    Box::new(McpToolAdapter::with_server_name(
-                        client.clone(),
-                        tool.clone(),
-                        server_name.clone(),
-                    )) as Box<dyn Tool>
-                })
-            })
+            .flat_map(|(id, client)| Self::tools_for_server(id, client))
             .collect()
     }
 
     /// 获取指定服务端的客户端引用
     pub fn get_client(&self, name: &str) -> Option<Arc<McpClient>> {
-        self.state().clients.get(name).cloned()
+        self.state()
+            .clients
+            .get(&McpServerId::direct(name))
+            .cloned()
+    }
+
+    pub fn get_client_by_id(&self, id: &McpServerId) -> Option<Arc<McpClient>> {
+        self.state().clients.get(id).cloned()
     }
 
     /// 获取所有已连接客户端的快照（用于 hook 执行器等场景）。
     pub fn get_clients(&self) -> HashMap<String, Arc<McpClient>> {
-        self.state().clients.clone()
+        self.state()
+            .clients
+            .iter()
+            .map(|(id, client)| (id.selector(), Arc::clone(client)))
+            .collect()
+    }
+
+    /// Snapshot clients keyed by canonical owner-qualified identity.
+    pub fn get_clients_by_id(&self) -> HashMap<McpServerId, Arc<McpClient>> {
+        self.state()
+            .clients
+            .iter()
+            .map(|(id, client)| (id.clone(), Arc::clone(client)))
+            .collect()
     }
 
     /// Build the canonical model-callable Resource tools for current connections.
     pub fn resource_tools(&self) -> Vec<Box<dyn Tool>> {
-        build_mcp_resource_tools(self.get_clients())
+        build_mcp_resource_tools_by_id(self.get_clients_by_id())
     }
 
     /// 列出所有已连接的服务端名称
     pub fn server_names(&self) -> Vec<String> {
-        self.state().clients.keys().cloned().collect()
+        self.state()
+            .clients
+            .keys()
+            .map(|id| id.local_name.clone())
+            .collect()
+    }
+
+    /// Return all owner-qualified identities, sorted deterministically.
+    pub fn server_ids(&self) -> Vec<McpServerId> {
+        let mut ids = self.state().clients.keys().cloned().collect::<Vec<_>>();
+        ids.sort();
+        ids
     }
 
     #[cfg(test)]
@@ -714,17 +845,21 @@ impl McpManager {
     ///
     /// 关闭连接并从管理器中移除。成功返回 true，服务端不存在返回 false。
     pub async fn disconnect(&mut self, name: &str) -> Result<bool> {
+        self.disconnect_id(&McpServerId::direct(name)).await
+    }
+
+    async fn disconnect_id(&mut self, id: &McpServerId) -> Result<bool> {
         let clients = {
             let mut state = self.state();
-            state.configs.remove(name);
+            state.configs.remove(id);
             let mut clients = state
                 .clients
-                .get(name)
+                .get(id)
                 .into_iter()
-                .map(|client| (name.to_string(), Arc::clone(client)))
+                .map(|client| (id.clone(), Arc::clone(client)))
                 .collect::<Vec<_>>();
             for (debt_name, client) in &state.cleanup_debt {
-                if debt_name == name
+                if debt_name == id
                     && !clients
                         .iter()
                         .any(|(_, existing)| Arc::ptr_eq(existing, client))
@@ -739,16 +874,16 @@ impl McpManager {
         }
         let mut failures = Vec::new();
         for (debt_name, client) in clients {
-            tracing::info!("MCP: 断开服务端 '{}'", name);
+            tracing::info!("MCP: 断开服务端 '{}'", debt_name);
             let close_result = client.close().await;
             let mut state = self.state();
             if state
                 .clients
-                .get(name)
+                .get(id)
                 .is_some_and(|active| Arc::ptr_eq(active, &client))
             {
-                state.clients.remove(name);
-                state.closing_debt.remove(name);
+                state.clients.remove(id);
+                state.closing_debt.remove(id);
             }
             Self::remove_cleanup_debt(&mut state, &client);
             if let Err(error) = close_result {
@@ -761,7 +896,7 @@ impl McpManager {
         } else {
             Err(ReactError::Mcp(Box::new(McpError::ConnectionFailed(
                 format!(
-                    "MCP target '{name}' cleanup did not settle: {}",
+                    "MCP target '{id}' cleanup did not settle: {}",
                     failures.join("; ")
                 ),
             ))))
@@ -890,7 +1025,7 @@ mod tests {
         assert!(manager.resource_tools().is_empty());
 
         manager.state().clients.insert(
-            "context".to_string(),
+            McpServerId::direct("context"),
             McpClient::with_test_transport("context", Arc::new(InertTransport)),
         );
         let mut names = manager
@@ -908,8 +1043,172 @@ mod tests {
             ]
         );
 
-        manager.state().clients.remove("context");
+        manager
+            .state()
+            .clients
+            .remove(&McpServerId::direct("context"));
         assert!(manager.resource_tools().is_empty());
+    }
+
+    #[tokio::test]
+    async fn owner_qualified_same_name_servers_disconnect_independently() -> Result<()> {
+        let mut manager = McpManager::new();
+        let config = McpServerConfig::stdio("shared", "unused", Vec::<String>::new());
+        let direct = McpClient::with_test_transport("shared", Arc::new(InertTransport));
+        let first = McpClient::with_test_transport("shared", Arc::new(InertTransport));
+        let second = McpClient::with_test_transport("shared", Arc::new(InertTransport));
+        let direct_id = McpServerId::direct("shared");
+        let first_id = McpServerId::plugin("plugin-a", "shared");
+        let second_id = McpServerId::plugin("plugin-b", "shared");
+        manager
+            .install_prepared_server(direct_id.clone(), config.clone(), direct)
+            .await?;
+        manager
+            .install_prepared_server(first_id.clone(), config.clone(), first)
+            .await?;
+        manager
+            .install_prepared_server(second_id.clone(), config, second)
+            .await?;
+        assert_eq!(
+            manager.server_ids(),
+            vec![direct_id.clone(), first_id.clone(), second_id.clone()]
+        );
+        assert!(manager.disconnect_server(&first_id).await?);
+        assert!(manager.get_client_by_id(&first_id).is_none());
+        assert!(manager.get_client_by_id(&direct_id).is_some());
+        assert!(manager.get_client_by_id(&second_id).is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn strict_direct_lookup_does_not_fallback_to_plugin_owner() -> Result<()> {
+        let manager = McpManager::new();
+        let id = McpServerId::plugin("plugin-a", "shared");
+        let client = McpClient::with_test_transport("shared", Arc::new(InertTransport));
+        manager
+            .install_prepared_server(
+                id.clone(),
+                McpServerConfig::stdio("shared", "unused", Vec::<String>::new()),
+                client,
+            )
+            .await?;
+        assert!(manager.get_client("shared").is_none());
+        assert!(manager.get_client_by_id(&id).is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn plugin_cleanup_retry_and_wrong_owner_are_isolated() -> Result<()> {
+        let mut manager = McpManager::new();
+        let owner_a = McpServerId::plugin("plugin-a", "shared");
+        let owner_b = McpServerId::plugin("plugin-b", "shared");
+        let active_close_count = Arc::new(AtomicUsize::new(0));
+        let active = McpClient::with_test_transport(
+            "shared",
+            Arc::new(RecordingCloseTransport {
+                close_count: Arc::clone(&active_close_count),
+                failures_remaining: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+        manager
+            .install_prepared_server(
+                owner_b.clone(),
+                McpServerConfig::stdio("shared", "active", Vec::<String>::new()),
+                active,
+            )
+            .await?;
+        let debt_close_count = Arc::new(AtomicUsize::new(0));
+        let debt = McpClient::with_test_transport(
+            "shared",
+            Arc::new(RecordingCloseTransport {
+                close_count: Arc::clone(&debt_close_count),
+                failures_remaining: Arc::new(AtomicUsize::new(1)),
+            }),
+        );
+        let unpolled = manager.install_prepared_server(
+            owner_a.clone(),
+            McpServerConfig::stdio("shared", "debt", Vec::<String>::new()),
+            debt,
+        );
+        drop(unpolled);
+
+        assert!(
+            !manager
+                .disconnect_server(&McpServerId::plugin("wrong", "shared"))
+                .await?
+        );
+        assert!(manager.retry_cleanup_server(&owner_a).await.is_err());
+        assert_eq!(active_close_count.load(Ordering::Acquire), 0);
+        assert_eq!(debt_close_count.load(Ordering::Acquire), 1);
+        manager.retry_cleanup_server(&owner_a).await?;
+        assert_eq!(active_close_count.load(Ordering::Acquire), 0);
+        assert!(manager.get_client_by_id(&owner_b).is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn same_owner_reload_and_close_all_preserve_owner_boundaries() -> Result<()> {
+        let manager = McpManager::new();
+        let owner = McpServerId::plugin("plugin-a", "shared");
+        let config = McpServerConfig::stdio("shared", "first", Vec::<String>::new());
+        manager
+            .install_prepared_server(
+                owner.clone(),
+                config,
+                McpClient::with_test_transport("shared", Arc::new(InertTransport)),
+            )
+            .await?;
+        let replacement = manager
+            .install_prepared_server(
+                owner.clone(),
+                McpServerConfig::stdio("shared", "second", Vec::<String>::new()),
+                McpClient::with_test_transport("shared", Arc::new(InertTransport)),
+            )
+            .await?;
+        assert_eq!(replacement.change, McpTargetChange::Replaced);
+        assert_eq!(manager.server_ids(), vec![owner]);
+        manager.close_all().await?;
+        assert!(manager.server_ids().is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn close_all_traverses_plugin_active_and_cancelled_prepared_debt() -> Result<()> {
+        let manager = McpManager::new();
+        let active_close_count = Arc::new(AtomicUsize::new(0));
+        let active_id = McpServerId::plugin("plugin-a", "shared");
+        manager
+            .install_prepared_server(
+                active_id,
+                McpServerConfig::stdio("shared", "active", Vec::<String>::new()),
+                McpClient::with_test_transport(
+                    "shared",
+                    Arc::new(RecordingCloseTransport {
+                        close_count: Arc::clone(&active_close_count),
+                        failures_remaining: Arc::new(AtomicUsize::new(0)),
+                    }),
+                ),
+            )
+            .await?;
+        let debt_close_count = Arc::new(AtomicUsize::new(0));
+        let debt = manager.install_prepared_server(
+            McpServerId::plugin("plugin-b", "shared"),
+            McpServerConfig::stdio("shared", "prepared", Vec::<String>::new()),
+            McpClient::with_test_transport(
+                "shared",
+                Arc::new(RecordingCloseTransport {
+                    close_count: Arc::clone(&debt_close_count),
+                    failures_remaining: Arc::new(AtomicUsize::new(0)),
+                }),
+            ),
+        );
+        drop(debt);
+        manager.close_all().await?;
+        assert_eq!(active_close_count.load(Ordering::Acquire), 1);
+        assert_eq!(debt_close_count.load(Ordering::Acquire), 1);
+        assert!(manager.server_ids().is_empty());
+        assert_eq!(manager.cleanup_debt_count(), 0);
+        Ok(())
     }
 
     #[tokio::test]
@@ -921,8 +1220,10 @@ mod tests {
             let mut state = manager.state();
             state
                 .clients
-                .insert("context".to_string(), Arc::clone(&client));
-            state.configs.insert("context".to_string(), config.clone());
+                .insert(McpServerId::direct("context"), Arc::clone(&client));
+            state
+                .configs
+                .insert(McpServerId::direct("context"), config.clone());
         }
 
         let unchanged = manager.reconcile_target("context", Some(config)).await?;
@@ -949,8 +1250,10 @@ mod tests {
             let mut state = manager.state();
             state
                 .clients
-                .insert("context".to_string(), Arc::clone(&active));
-            state.configs.insert("context".to_string(), config.clone());
+                .insert(McpServerId::direct("context"), Arc::clone(&active));
+            state
+                .configs
+                .insert(McpServerId::direct("context"), config.clone());
         }
         let debt_close_count = Arc::new(AtomicUsize::new(0));
         let prepared = McpClient::with_test_transport(
@@ -1007,8 +1310,10 @@ mod tests {
             let mut state = manager.state();
             state
                 .clients
-                .insert("shared".to_string(), Arc::clone(&active));
-            state.cleanup_debt.push(("shared".to_string(), debt));
+                .insert(McpServerId::direct("shared"), Arc::clone(&active));
+            state
+                .cleanup_debt
+                .push((McpServerId::direct("shared"), debt));
         }
 
         assert!(manager.retry_cleanup_debt("shared").await.is_err());
@@ -1052,7 +1357,7 @@ mod tests {
         manager
             .state()
             .clients
-            .insert("context".to_string(), Arc::clone(&client));
+            .insert(McpServerId::direct("context"), Arc::clone(&client));
 
         assert!(
             manager
@@ -1087,7 +1392,7 @@ mod tests {
         manager
             .state()
             .clients
-            .insert("source".to_string(), Arc::clone(&client));
+            .insert(McpServerId::direct("source"), Arc::clone(&client));
         let config = McpServerConfig::stdio("destination", "test-command", Vec::<String>::new());
 
         assert!(
@@ -1180,8 +1485,10 @@ mod tests {
             let mut state = manager.state();
             state
                 .clients
-                .insert("context".to_string(), Arc::clone(&original));
-            state.configs.insert("context".to_string(), config.clone());
+                .insert(McpServerId::direct("context"), Arc::clone(&original));
+            state
+                .configs
+                .insert(McpServerId::direct("context"), config.clone());
         }
 
         manager.close_all().await?;
@@ -1209,7 +1516,7 @@ mod tests {
         {
             let mut state = manager.state();
             state.clients.insert(
-                "failed".to_string(),
+                McpServerId::direct("failed"),
                 McpClient::with_test_transport(
                     "failed",
                     Arc::new(RecordingCloseTransport {
@@ -1219,7 +1526,7 @@ mod tests {
                 ),
             );
             state.clients.insert(
-                "healthy".to_string(),
+                McpServerId::direct("healthy"),
                 McpClient::with_test_transport(
                     "healthy",
                     Arc::new(RecordingCloseTransport {
@@ -1257,7 +1564,7 @@ mod tests {
         {
             let mut state = manager.state();
             state.clients.insert(
-                "context".to_string(),
+                McpServerId::direct("context"),
                 McpClient::with_test_transport(
                     "context",
                     Arc::new(RecordingCloseTransport {
@@ -1266,11 +1573,18 @@ mod tests {
                     }),
                 ),
             );
-            state.configs.insert("context".to_string(), config.clone());
+            state
+                .configs
+                .insert(McpServerId::direct("context"), config.clone());
         }
 
         assert!(manager.close_all().await.is_err());
-        assert!(manager.state().closing_debt.contains("context"));
+        assert!(
+            manager
+                .state()
+                .closing_debt
+                .contains(&McpServerId::direct("context"))
+        );
         assert_eq!(close_count.load(Ordering::Acquire), 1);
 
         // Reconciliation first settles the fenced active transport. It then
@@ -1284,7 +1598,12 @@ mod tests {
         );
         assert_eq!(close_count.load(Ordering::Acquire), 2);
         assert!(manager.get_client("context").is_none());
-        assert!(!manager.state().closing_debt.contains("context"));
+        assert!(
+            !manager
+                .state()
+                .closing_debt
+                .contains(&McpServerId::direct("context"))
+        );
         Ok(())
     }
 
@@ -1303,7 +1622,7 @@ mod tests {
             let manager = manager.lock().await;
             let mut state = manager.state();
             state.clients.insert(
-                "context".to_string(),
+                McpServerId::direct("context"),
                 McpClient::with_test_transport(
                     "context",
                     Arc::new(BlockingCloseTransport {
@@ -1313,7 +1632,9 @@ mod tests {
                     }),
                 ),
             );
-            state.configs.insert("context".to_string(), config.clone());
+            state
+                .configs
+                .insert(McpServerId::direct("context"), config.clone());
         }
 
         let close_started = started.notified();
@@ -1335,7 +1656,12 @@ mod tests {
         assert!(join_error.is_cancelled());
 
         let mut manager = manager.lock().await;
-        assert!(manager.state().closing_debt.contains("context"));
+        assert!(
+            manager
+                .state()
+                .closing_debt
+                .contains(&McpServerId::direct("context"))
+        );
         release.notify_one();
         assert!(
             manager
@@ -1345,7 +1671,12 @@ mod tests {
         );
         assert_eq!(close_count.load(Ordering::Acquire), 2);
         assert!(manager.get_client("context").is_none());
-        assert!(!manager.state().closing_debt.contains("context"));
+        assert!(
+            !manager
+                .state()
+                .closing_debt
+                .contains(&McpServerId::direct("context"))
+        );
         Ok(())
     }
 
@@ -1363,7 +1694,8 @@ mod tests {
             .await
             .err()
             .ok_or_else(|| ReactError::Other("failed construction was accepted".to_string()))?;
-        let error = manager.retain_preparation_failure("context", preparation_error);
+        let error =
+            manager.retain_preparation_failure(&McpServerId::direct("context"), preparation_error);
 
         assert!(error.to_string().contains("cleanup remains retryable"));
         assert_eq!(manager.cleanup_debt_count(), 1);
@@ -1379,7 +1711,7 @@ mod tests {
         let mut manager = McpManager::new();
         let close_count = Arc::new(AtomicUsize::new(0));
         manager.state().clients.insert(
-            "context".to_string(),
+            McpServerId::direct("context"),
             McpClient::with_test_transport(
                 "context",
                 Arc::new(RecordingCloseTransport {
@@ -1404,7 +1736,7 @@ mod tests {
         let config = McpServerConfig::stdio("context", "test-command", Vec::<String>::new());
         let old_close_count = Arc::new(AtomicUsize::new(0));
         manager.state().clients.insert(
-            "context".to_string(),
+            McpServerId::direct("context"),
             McpClient::with_test_transport(
                 "context",
                 Arc::new(RecordingCloseTransport {
@@ -1446,7 +1778,7 @@ mod tests {
         // settles on the second retry.
         let old_close_count = Arc::new(AtomicUsize::new(0));
         manager.state().clients.insert(
-            "context".to_string(),
+            McpServerId::direct("context"),
             McpClient::with_test_transport(
                 "context",
                 Arc::new(RecordingCloseTransport {
@@ -1509,7 +1841,7 @@ mod tests {
         let started = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Notify::new());
         manager.state().clients.insert(
-            "context".to_string(),
+            McpServerId::direct("context"),
             McpClient::with_test_transport(
                 "context",
                 Arc::new(BlockingCloseTransport {
@@ -1558,7 +1890,7 @@ mod tests {
         {
             let mut state = manager.state();
             state.clients.insert(
-                "context".to_string(),
+                McpServerId::direct("context"),
                 McpClient::with_test_transport(
                     "context",
                     Arc::new(BlockingCloseTransport {
@@ -1568,7 +1900,9 @@ mod tests {
                     }),
                 ),
             );
-            state.configs.insert("context".to_string(), config.clone());
+            state
+                .configs
+                .insert(McpServerId::direct("context"), config.clone());
         }
         let prepared = McpClient::with_test_transport("context", Arc::new(InertTransport));
         let first_started = started.notified();
@@ -1685,7 +2019,7 @@ mod tests {
         let close_count = Arc::new(AtomicUsize::new(0));
         let config = McpServerConfig::stdio("context", "test-command", Vec::<String>::new());
         manager.state().clients.insert(
-            "context".to_string(),
+            McpServerId::direct("context"),
             McpClient::with_test_transport(
                 "context",
                 Arc::new(BlockingCloseTransport {
@@ -1735,7 +2069,7 @@ mod tests {
         let started = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Notify::new());
         manager.state().clients.insert(
-            "context".to_string(),
+            McpServerId::direct("context"),
             McpClient::with_test_transport(
                 "context",
                 Arc::new(BlockingCloseTransport {

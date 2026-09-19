@@ -19,7 +19,7 @@ use crate::llm::{LlmClient, LlmConfig, ThinkingConfig};
 #[cfg(feature = "mcp")]
 use crate::mcp::McpServerEntry;
 #[cfg(feature = "mcp")]
-use crate::mcp::{McpClient, McpConfigFile, McpServerConfig, McpTargetChange};
+use crate::mcp::{McpClient, McpConfigFile, McpServerConfig, McpServerId, McpTargetChange};
 use crate::skills::external::SkillDescriptor;
 use crate::skills::external::activate_tool::ActivateSkillTool;
 use crate::skills::external::loader::{DiscoveryScope, SkillLoader};
@@ -1565,6 +1565,72 @@ impl ReactAgent {
         Ok(client)
     }
 
+    /// Connect a plugin-owned MCP server without collapsing its authority into
+    /// the direct server namespace.
+    #[cfg(feature = "mcp")]
+    pub async fn connect_mcp_owned(
+        &mut self,
+        id: McpServerId,
+        config: McpServerConfig,
+    ) -> crate::error::Result<Arc<McpClient>> {
+        let previous_client = self.tools.mcp_manager.get_client_by_id(&id);
+        let previous_tool_names = previous_client
+            .as_ref()
+            .map(|client| {
+                client
+                    .tools()
+                    .iter()
+                    .map(|tool| {
+                        crate::mcp::McpToolAdapter::exposed_name_for_identity(&id, &tool.name)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let result = self
+            .tools
+            .mcp_manager
+            .reconcile_server(&id, Some(config))
+            .await;
+        let withdrawn = result.is_err()
+            && previous_client.is_some()
+            && !self
+                .tools
+                .mcp_manager
+                .get_client_by_id(&id)
+                .is_some_and(|current| {
+                    previous_client
+                        .as_ref()
+                        .is_some_and(|previous| Arc::ptr_eq(&current, previous))
+                });
+        match (result, withdrawn) {
+            (Ok(mut receipt), _) => {
+                for tool_name in previous_tool_names {
+                    self.remove_tool(&tool_name);
+                }
+                self.add_tools(std::mem::take(&mut receipt.tools));
+                self.sync_mcp_resource_tools();
+                self.setup_hook_mcp_executor().await;
+                self.tools.mcp_manager.get_client_by_id(&id).ok_or_else(|| {
+                    crate::error::ReactError::Agent(Box::new(
+                        crate::error::AgentError::InitializationFailed(format!(
+                            "MCP client '{}' not found after connection",
+                            id
+                        )),
+                    ))
+                })
+            }
+            (Err(error), true) => {
+                for tool_name in previous_tool_names {
+                    self.remove_tool(&tool_name);
+                }
+                self.sync_mcp_resource_tools();
+                self.setup_hook_mcp_executor().await;
+                Err(error)
+            }
+            (Err(error), false) => Err(error),
+        }
+    }
+
     #[cfg(feature = "mcp")]
     /// Reconcile one named MCP entry without tearing down a working target
     /// before the replacement has been prepared.
@@ -1843,10 +1909,65 @@ impl ReactAgent {
         }
     }
 
+    /// Disconnect one owner-qualified MCP server and revoke only its exposed
+    /// tool projections.
+    #[cfg(feature = "mcp")]
+    pub async fn disconnect_mcp_owned(&mut self, id: &McpServerId) -> Result<bool> {
+        let previous_client = self.tools.mcp_manager.get_client_by_id(id);
+        let tool_names = previous_client
+            .as_ref()
+            .map(|client| {
+                client
+                    .tools()
+                    .iter()
+                    .map(|tool| {
+                        crate::mcp::McpToolAdapter::exposed_name_for_identity(id, &tool.name)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let result = self.tools.mcp_manager.disconnect_server(id).await;
+        let withdrawn = result.is_err()
+            && previous_client.is_some()
+            && !self
+                .tools
+                .mcp_manager
+                .get_client_by_id(id)
+                .is_some_and(|current| {
+                    previous_client
+                        .as_ref()
+                        .is_some_and(|previous| Arc::ptr_eq(&current, previous))
+                });
+        match (result, withdrawn) {
+            (Ok(disconnected), _) => {
+                for tool_name in &tool_names {
+                    self.remove_tool(tool_name);
+                }
+                self.sync_mcp_resource_tools();
+                self.setup_hook_mcp_executor().await;
+                Ok(disconnected)
+            }
+            (Err(error), true) => {
+                for tool_name in &tool_names {
+                    self.remove_tool(tool_name);
+                }
+                self.sync_mcp_resource_tools();
+                self.setup_hook_mcp_executor().await;
+                Err(error)
+            }
+            (Err(error), false) => Err(error),
+        }
+    }
+
     /// Retry withdrawn MCP cleanup without touching a newer active client.
     #[cfg(feature = "mcp")]
     pub async fn retry_mcp_cleanup_debt(&self, name: &str) -> Result<()> {
         self.tools.mcp_manager.retry_cleanup_debt(name).await
+    }
+
+    #[cfg(feature = "mcp")]
+    pub async fn retry_mcp_cleanup_owned(&self, id: &McpServerId) -> Result<()> {
+        self.tools.mcp_manager.retry_cleanup_server(id).await
     }
 
     // ── System Prompt ────────────────────────────────────────────────────────
@@ -2078,7 +2199,29 @@ mod tests {
     }
 
     #[cfg(feature = "mcp")]
-    async fn assert_mcp_projections(agent: &ReactAgent, connected: bool) {
+    async fn registered_owned_target(
+        agent: &mut ReactAgent,
+        id: &crate::mcp::McpServerId,
+        client: &Arc<crate::mcp::McpClient>,
+    ) -> crate::error::Result<()> {
+        let config = crate::mcp::McpServerConfig::stdio(
+            &id.local_name,
+            "test-command",
+            Vec::<String>::new(),
+        );
+        let receipt = agent
+            .tools
+            .mcp_manager
+            .install_prepared_server(id.clone(), config, Arc::clone(client))
+            .await?;
+        agent.add_tools(receipt.tools);
+        agent.sync_mcp_resource_tools();
+        agent.setup_hook_mcp_executor().await;
+        Ok(())
+    }
+
+    #[cfg(feature = "mcp")]
+    async fn assert_mcp_projections(agent: &ReactAgent, server: &str, connected: bool) {
         use crate::skills::hooks::{HookAction, HookEvent, HookRule, HooksDefinition};
         let names = agent.tools.tool_manager.list_tools();
         for name in crate::mcp::MCP_RESOURCE_TOOL_NAMES {
@@ -2090,7 +2233,7 @@ mod tests {
             vec![HookRule {
                 matcher: "probe".into(),
                 hooks: vec![HookAction::McpTool {
-                    server: "context".into(),
+                    server: server.into(),
                     tool: "probe".into(),
                     arguments: None,
                     timeout: 1,
@@ -2120,7 +2263,7 @@ mod tests {
         registered_target(&mut agent, "context", &old).await?;
         let exposed = crate::mcp::McpToolAdapter::exposed_name_for("context", "probe");
         assert!(agent.tools.tool_manager.list_tools().contains(&exposed));
-        assert_mcp_projections(&agent, true).await;
+        assert_mcp_projections(&agent, "context", true).await;
 
         // Replacement with a different config (so the manager prepares a real
         // replacement) and failing old-close: target withdrawn, error
@@ -2143,15 +2286,59 @@ mod tests {
         );
         assert!(agent.tools.mcp_manager.get_client("context").is_none());
         assert!(!agent.tools.tool_manager.list_tools().contains(&exposed));
-        assert_mcp_projections(&agent, false).await;
+        assert_mcp_projections(&agent, "context", false).await;
 
         // Disconnect with failing old-close revokes projections as well.
         let again = failing_close_client("context", 1).await?;
         registered_target(&mut agent, "context", &again).await?;
         assert!(agent.tools.tool_manager.list_tools().contains(&exposed));
-        assert_mcp_projections(&agent, true).await;
+        assert_mcp_projections(&agent, "context", true).await;
         assert!(agent.disconnect_mcp("context").await.is_err());
         assert!(!agent.tools.tool_manager.list_tools().contains(&exposed));
+        Ok(())
+    }
+
+    #[cfg(all(feature = "mcp", unix))]
+    #[tokio::test]
+    async fn owned_cleanup_failures_revoke_only_the_withdrawn_projections()
+    -> crate::error::Result<()> {
+        let mut agent = ReactAgent::new(AgentConfig::minimal("test-model", "helper"));
+        let id = crate::mcp::McpServerId::plugin("plugin-a", "context");
+        let selector = id.selector();
+        let old = failing_close_client("context", 1).await?;
+        registered_owned_target(&mut agent, &id, &old).await?;
+        let exposed = crate::mcp::McpToolAdapter::exposed_name_for_identity(&id, "probe");
+        assert!(agent.tools.tool_manager.list_tools().contains(&exposed));
+        assert_mcp_projections(&agent, &selector, true).await;
+
+        let mut different = replacement_config("context");
+        different.transport = crate::mcp::TransportConfig::Stdio {
+            command: "/bin/sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                "while IFS= read -r line; do id=$(printf '%s' \"$line\" | sed -n 's/.*\"id\": *\\([0-9]*\\).*/\\1/p'); if [ -n \"$id\" ]; then printf '{\"jsonrpc\":\"2.0\",\"id\":%s,\"result\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"t\",\"version\":\"1\"},\"tools\":[{\"name\":\"replacement\",\"inputSchema\":{\"type\":\"object\"}}]}}\\n' \"$id\"; fi; done".to_string(),
+            ],
+            env: Vec::new(),
+            cwd: None,
+        };
+        assert!(
+            agent
+                .connect_mcp_owned(id.clone(), different)
+                .await
+                .is_err()
+        );
+        assert!(agent.tools.mcp_manager.get_client_by_id(&id).is_none());
+        assert!(!agent.tools.tool_manager.list_tools().contains(&exposed));
+        assert_mcp_projections(&agent, &selector, false).await;
+
+        let again = failing_close_client("context", 1).await?;
+        registered_owned_target(&mut agent, &id, &again).await?;
+        assert!(agent.tools.tool_manager.list_tools().contains(&exposed));
+        assert_mcp_projections(&agent, &selector, true).await;
+        assert!(agent.disconnect_mcp_owned(&id).await.is_err());
+        assert!(!agent.tools.tool_manager.list_tools().contains(&exposed));
+        assert_mcp_projections(&agent, &selector, false).await;
+        assert!(agent.retry_mcp_cleanup_owned(&id).await.is_ok());
         Ok(())
     }
 
@@ -2200,7 +2387,7 @@ mod tests {
         registered_target(&mut agent, "context", &client).await?;
         let exposed = crate::mcp::McpToolAdapter::exposed_name_for("context", "probe");
         assert!(agent.tools.tool_manager.list_tools().contains(&exposed));
-        assert_mcp_projections(&agent, true).await;
+        assert_mcp_projections(&agent, "context", true).await;
 
         assert!(crate::agent::Agent::close(&agent).await.is_err());
         let retained = agent
@@ -2210,12 +2397,12 @@ mod tests {
             .ok_or_else(|| crate::error::ReactError::Other("failed target was withdrawn".into()))?;
         assert!(Arc::ptr_eq(&retained, &client));
         assert!(agent.tools.tool_manager.list_tools().contains(&exposed));
-        assert_mcp_projections(&agent, true).await;
+        assert_mcp_projections(&agent, "context", true).await;
 
         crate::agent::Agent::close(&agent).await?;
         assert!(agent.tools.mcp_manager.get_client("context").is_none());
         assert!(!agent.tools.tool_manager.list_tools().contains(&exposed));
-        assert_mcp_projections(&agent, false).await;
+        assert_mcp_projections(&agent, "context", false).await;
         Ok(())
     }
 
@@ -2232,7 +2419,7 @@ mod tests {
         registered_target(&mut agent, "context", &existing).await?;
         let exposed = crate::mcp::McpToolAdapter::exposed_name_for("context", "probe");
         assert!(agent.tools.tool_manager.list_tools().contains(&exposed));
-        assert_mcp_projections(&agent, true).await;
+        assert_mcp_projections(&agent, "context", true).await;
 
         // A replacement whose preparation fails (empty stdio command) keeps
         // the old target and its projections untouched.
@@ -2250,7 +2437,7 @@ mod tests {
                 .is_err()
         );
         assert!(agent.tools.tool_manager.list_tools().contains(&exposed));
-        assert_mcp_projections(&agent, true).await;
+        assert_mcp_projections(&agent, "context", true).await;
         Ok(())
     }
 }

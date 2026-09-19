@@ -13,8 +13,8 @@ rule_refs: [rule.extension-generation-authority]
 evidence_refs: [evidence.effects-extensions]
 audit_refs: [audit.extension-lifecycle.state-authority]
 decision_refs: []
-repair_evidence_refs: []
-verification_evidence_refs: []
+repair_evidence_refs: [evidence.plugin-mcp-owner-isolation-repair]
+verification_evidence_refs: [evidence.plugin-mcp-owner-isolation-verification]
 rereview_audit_refs: []
 discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 ---
@@ -39,4 +39,5 @@ Plugin parser 与 McpManager 都用裸 server name；多个 Plugin 同名 reconc
 
 ## 处理记录
 
-Discovery 记录；下一阶段审计 owner-qualified identity 或 conflict rejection。
+候选修复已建立 owner-qualified identity、投影与 focused 验证证据，并在包含
+`main@ed7d6028` 的组合树通过完整门禁。Finding 在最终独立复审和远端主线交付前保持 open。

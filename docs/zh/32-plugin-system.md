@@ -95,6 +95,21 @@ EchoAgent 向 stdio 子进程提供 `PLUGIN_ROOT` 和 `PLUGIN_DATA`。`${PLUGIN_
 
 顶层 `mcp.json` 无效时，只禁用该插件的 MCP；单个服务配置无效、不可连接或重名时，只跳过该服务。
 
+### MCP 所有权与投影
+
+`name` 仍是可移植配置中的本地 server 名称。运行时框架会注入所有者：普通配置使用
+`McpServerOwner::Direct`，插件 wiring 使用稳定的 `PreparedPlugin.id`。因此两个插件都声明
+`filesystem` 时仍会拥有不同连接、工具和清理债务。需要区分所有者时使用类型化的
+`McpServerId`/`server_ids()`；旧字符串 API 继续指向 Direct server。
+
+Direct 工具保持 `mcp__<server>__<tool>`。插件工具使用
+`mcp__plugin_<plugin>_<server>__<tool>`；规范 Unicode 或标点被有损归一化时追加稳定摘要。
+资源 selector 使用不透明的 `plugin:<base64url-plugin>:<base64url-server>`。资源目录保存
+类型化 identity，不从工具名或 URI 反推 owner。
+Direct 名称通常保持旧 selector；以保留的 `plugin:`/`direct:` 开头时，会可逆转义为
+`direct:<base64url-name>`。插件 Hook 的 `mcp_tool.server` 在包内仍写本地名称，注册前由
+Integrator 注入 prepared plugin owner。
+
 ## 固定本地组件
 
 其余组件从固定根位置发现：

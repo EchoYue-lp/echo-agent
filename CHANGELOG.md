@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- MCP connections now use owner-qualified `McpServerId` identities. Direct
+  string APIs remain compatible, while plugin wiring uses the stable prepared
+  plugin id so same-named servers, cleanup debt, tools, and resources cannot
+  interfere. Plugin projections are namespaced and resource selectors are
+  reversible; see ADR 0067.
+
 - Added canonical later rollback for layered memory (`MemoryRollbackTarget`,
   preview outcomes, durable inverse batches, tip-generation/ABA fencing, and
   request-id idempotency). Merge rollback always covers the complete prepared

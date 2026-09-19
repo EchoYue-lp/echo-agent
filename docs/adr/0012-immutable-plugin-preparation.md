@@ -40,7 +40,9 @@ sets and stale, altered, or foreign receipts before registry mutation. Applying 
 again is a typed refusal. Apply failure does not advance the published generation, and failed
 cleanup retains the issued receipt for retry. A cancelled apply leaves a pending receipt and blocks
 later publication until its owner explicitly settles it. The target does not coordinate registry
-persistence with callbacks, nor does it add MCP owner isolation; those remain #73 and #75.
+persistence with callbacks. Owner-qualified MCP identity is defined by
+[ADR 0067](0067-mcp-owner-qualified-identity.md); #73 remains the coordinator
+boundary.
 Each successfully connected MCP server is recorded in the canonical receipt before the next
 server begins. For a previously absent name, the pending receipt reserves its cleanup scope before
 the awaited connection, covering cancellation after the manager publishes but before the Agent

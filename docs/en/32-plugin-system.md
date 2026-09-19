@@ -95,6 +95,25 @@ EchoAgent provides `PLUGIN_ROOT` and `PLUGIN_DATA` to stdio subprocesses. `${PLU
 
 An invalid top-level `mcp.json` disables only MCP for that plugin. An invalid, unavailable, or colliding server disables only that entry.
 
+### MCP ownership and projections
+
+The `name` key remains the portable local server name. At runtime the framework
+qualifies it with its owner: direct configuration uses `McpServerOwner::Direct`,
+while plugin wiring uses the stable `PreparedPlugin.id`. Thus two plugins may
+both declare `filesystem` without sharing a connection or cleanup debt. Use the
+typed `McpServerId`/`server_ids()` APIs when the owner matters; legacy string
+APIs continue to address direct servers.
+
+Direct tools retain `mcp__<server>__<tool>`. Plugin tools use
+`mcp__plugin_<plugin>_<server>__<tool>` with a stable digest suffix when the
+canonical Unicode or punctuation name is lossy. Resource selectors are opaque
+`plugin:<base64url-plugin>:<base64url-server>` values. The resource directory
+keeps the typed identity and does not infer an owner from a tool name or URI.
+Direct names keep their legacy selector except reserved `plugin:`/`direct:`
+prefixes, which are reversibly escaped as `direct:<base64url-name>`. A plugin
+Hook `mcp_tool.server` remains a local name in the package and is qualified by
+the prepared plugin owner before registration.
+
 ## Fixed local components
 
 The remaining components are discovered from fixed root locations:

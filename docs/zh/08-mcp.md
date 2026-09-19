@@ -290,6 +290,14 @@ async fn main() -> echo_agent::error::Result<()> {
 判断交给 framework `McpManager`。替换准备失败时会保留 last-known-good 连接；应用只需
 在调用前后协调自己的文件和作用域策略。
 
+插件拥有的 MCP server 使用 `McpServerId::plugin(plugin_id, local_name)`。`McpServerConfig.name`
+和可移植的 `mcp.json` 保持不变，但 manager 的类型化 map 与 cleanup receipt 使用带 owner 的
+selector。旧字符串 API 仍映射到 `McpServerOwner::Direct`。插件工具名带 namespace，资源
+selector 是不透明且可逆的值，因此一个插件撤销同名 server 不会关闭另一个插件的连接。
+Direct selector 保持普通旧名称；以保留的 `plugin:`/`direct:` 开头时进行可逆转义。
+`build_mcp_resource_tools(HashMap<String, ...>)` 保持为兼容旧调用方的 Direct builder；
+携带 owner identity 的 integration 使用 `build_mcp_resource_tools_by_id`。
+
 ### 方式二：通过 McpManager 管理连接
 
 ```rust

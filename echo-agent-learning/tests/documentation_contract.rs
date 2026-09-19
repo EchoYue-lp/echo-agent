@@ -954,6 +954,7 @@ fn plugin_publication_docs_and_demo_share_the_target_receipt_contract()
         "integrator.publication_target(&agent)",
         "target.wire_prepared(&mut agent, &prepared).await?",
         "target.rollback(&mut agent, &receipt).await?",
+        "McpServerId::plugin",
     ] {
         assert!(demo.contains(entry), "plugin demo misses {entry}");
     }
