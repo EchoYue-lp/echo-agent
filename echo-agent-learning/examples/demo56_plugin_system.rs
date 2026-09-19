@@ -4,7 +4,8 @@
 
 use echo_agent::agent::ReactAgentBuilder;
 use echo_agent::plugin::{
-    AGENT_PLUGIN_SCHEMA_V1, InstallSource, PluginIntegrator, PluginRegistry, PluginScope,
+    AGENT_PLUGIN_SCHEMA_V1, InstallSource, PluginCoordinator, PluginIntegrator, PluginRegistry,
+    PluginScope,
 };
 use std::path::{Path, PathBuf};
 
@@ -60,23 +61,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(temporary.path().to_path_buf()),
     );
     let plugin_id = registry.install(&InstallSource::Local(source), PluginScope::Local)?;
-    let integrator = PluginIntegrator::new();
-    let prepared = integrator.prepare(&mut registry).await;
-    println!(
-        "Prepared generation {} ({})",
-        prepared.generation(),
-        prepared.identity()
-    );
     let mut agent = ReactAgentBuilder::new().model("plugin-demo").build()?;
-    let target = integrator.publication_target(&agent);
-    let receipt = target.wire_prepared(&mut agent, &prepared).await?;
+    let mut coordinator = PluginCoordinator::new(registry, PluginIntegrator::new());
+    let receipt = coordinator.reconcile(&mut agent).await?;
     println!(
-        "Published generation {} ({})",
-        receipt.generation(),
-        receipt.identity()
+        "Published operation {} at generation {}",
+        receipt.operation_id(),
+        receipt
+            .actual_generation()
+            .ok_or("plugin coordinator did not publish a generation")?
     );
-    target.rollback(&mut agent, &receipt).await?;
-    let entry = registry
+    let entry = coordinator
+        .registry()
         .get(&plugin_id)
         .ok_or_else(|| format!("installed plugin '{plugin_id}' was not registered"))?;
     println!(
@@ -100,9 +96,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    registry.disable(&plugin_id)?;
-    registry.enable(&plugin_id)?;
-    registry.uninstall(&plugin_id, false)?;
+    coordinator.disable(&mut agent, &plugin_id).await?;
+    coordinator.enable(&mut agent, &plugin_id).await?;
+    coordinator.uninstall(&mut agent, &plugin_id, false).await?;
+    coordinator.shutdown(&mut agent).await?;
     println!("Lifecycle complete");
     Ok(())
 }

@@ -141,6 +141,8 @@ pub struct PluginRegistry {
     preparation_cache_id: String,
     /// Monotonic revision advanced by every explicit reload or committed mutation.
     revision: u64,
+    /// Scope policy from the last complete discovery view.
+    last_successful_scopes: Vec<PluginScope>,
     scan_diagnostics: Vec<PluginRegistryDiagnostic>,
 }
 
@@ -167,6 +169,7 @@ impl PluginRegistry {
             project_root,
             preparation_cache_id: uuid::Uuid::new_v4().to_string(),
             revision: 0,
+            last_successful_scopes: PluginScope::all().to_vec(),
             scan_diagnostics: Vec::new(),
         }
     }
@@ -189,6 +192,7 @@ impl PluginRegistry {
             project_root,
             preparation_cache_id: uuid::Uuid::new_v4().to_string(),
             revision: 0,
+            last_successful_scopes: PluginScope::all().to_vec(),
             scan_diagnostics: Vec::new(),
         }
     }
@@ -242,6 +246,31 @@ impl PluginRegistry {
         self.scan_scopes(PluginScope::all())
     }
 
+    /// Refresh the last successful scope view and commit it only on success.
+    ///
+    /// A normal scan clears the receiver before walking package directories,
+    /// so an I/O error can leave a partially discovered in-memory view. A
+    /// lifecycle retry must keep its previous desired-state authority until a
+    /// complete replacement view is available. Retaining the selected scopes
+    /// also prevents a restricted host view from widening during retry.
+    pub fn refresh_current_view(&mut self) -> std::io::Result<usize> {
+        let scopes = self.last_successful_scopes.clone();
+        let mut refreshed = Self {
+            plugins: HashMap::new(),
+            state_file: self.state_file.clone(),
+            data_dir: self.data_dir.clone(),
+            user_plugins_dir: self.user_plugins_dir.clone(),
+            project_root: self.project_root.clone(),
+            preparation_cache_id: self.preparation_cache_id.clone(),
+            revision: self.revision,
+            last_successful_scopes: scopes.clone(),
+            scan_diagnostics: Vec::new(),
+        };
+        let count = refreshed.scan_scopes(&scopes)?;
+        *self = refreshed;
+        Ok(count)
+    }
+
     /// Scan only the requested installation scopes.
     ///
     /// This is useful for embedded runtimes and isolated integration tests
@@ -261,6 +290,7 @@ impl PluginRegistry {
 
         // Load persisted enabled/disabled state
         self.load_state()?;
+        self.last_successful_scopes = scopes.to_vec();
         Ok(total)
     }
 

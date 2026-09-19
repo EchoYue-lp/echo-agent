@@ -4,6 +4,9 @@
 
 Accepted
 
+ADR 0069 reuses this typed identity while coordinating plugin transitions. The coordinator does
+not derive, parse, or store a second MCP owner key.
+
 ## Context
 
 The MCP manager historically keyed clients, configuration, prepared cleanup,

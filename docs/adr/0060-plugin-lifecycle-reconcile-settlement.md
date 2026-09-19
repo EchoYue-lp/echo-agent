@@ -4,6 +4,9 @@
 
 Accepted
 
+ADR 0069 adds the host coordinator that orders this callback authority around exact publication
+receipts. Callback debt and retry settlement remain owned by `PluginLifecycleManager`.
+
 ## Context
 
 `PluginLifecycleManager::reconcile` deactivated callbacks absent from the desired set and then
