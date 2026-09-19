@@ -5,19 +5,19 @@ kind: audit
 boundary_ref: boundary.extension-lifecycle
 lens: failure_concurrency
 freshness: examined
-revision: source:bc45db0f4d95af798280da901278b1f70c372807c5606c1281f4f92145c2dedd
+revision: source:b5a13ba1045ca78323b1837a5c96d038b4c7c9a9b0ce2f4ebd5c8056e20d85fa
 finding_refs: [finding.extension-cleanup-settlement]
 challenges:
   pending-and-post-settlement:
-    revision: source:bc45db0f4d95af798280da901278b1f70c372807c5606c1281f4f92145c2dedd
+    revision: source:b5a13ba1045ca78323b1837a5c96d038b4c7c9a9b0ce2f4ebd5c8056e20d85fa
     source_refs: [echo-integration/src/mcp/transport/mod.rs, echo-integration/src/mcp/transport/sse.rs, echo-integration/src/mcp/transport/stdio.rs]
     evidence_refs: [evidence.extension-cleanup-settlement-repair, evidence.extension-cleanup-settlement-verification]
   cancellation-resilient-close-owner:
-    revision: source:bc45db0f4d95af798280da901278b1f70c372807c5606c1281f4f92145c2dedd
+    revision: source:b5a13ba1045ca78323b1837a5c96d038b4c7c9a9b0ce2f4ebd5c8056e20d85fa
     source_refs: [echo-integration/src/mcp/transport/sse.rs, echo-integration/src/mcp/transport/stdio.rs]
     evidence_refs: [evidence.extension-cleanup-settlement-repair, evidence.extension-cleanup-settlement-verification]
   manager-and-sdk-debt-retry:
-    revision: source:bc45db0f4d95af798280da901278b1f70c372807c5606c1281f4f92145c2dedd
+    revision: source:b5a13ba1045ca78323b1837a5c96d038b4c7c9a9b0ce2f4ebd5c8056e20d85fa
     source_refs: [echo-integration/src/mcp/mod.rs]
     evidence_refs: [evidence.extension-cleanup-settlement-repair, evidence.extension-cleanup-settlement-verification]
 ---

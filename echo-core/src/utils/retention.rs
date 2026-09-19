@@ -352,7 +352,7 @@ mod tests {
             22,
             "a secret pattern failed to compile"
         );
-        let stripe_live_key = format!("{}{}", "sk_", format!("live_{}", "x".repeat(24)));
+        let stripe_live_key = format!("{}{}{}", "sk_", "live_", "x".repeat(24));
         for secret in [
             "aws_secret_key=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmn",
             "ssh-rsa AAAAabcdefghijklmnopqrstuvwxyz1234567890",

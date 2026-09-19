@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.trace-effect-producers-current-verification
 kind: evidence
-observed_at: source:bc45db0f4d95af798280da901278b1f70c372807c5606c1281f4f92145c2dedd
+observed_at: source:b5a13ba1045ca78323b1837a5c96d038b4c7c9a9b0ce2f4ebd5c8056e20d85fa
 source_refs:
   - echo-tools/src/files/files.rs
   - echo-tools/src/files/apply_patch.rs
