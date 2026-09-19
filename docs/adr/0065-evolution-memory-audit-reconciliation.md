@@ -115,6 +115,9 @@ still permit unaudited partial merges.
 
 ## Consequences
 
+Post-merge closure review on `cb4ee9ed3826fd8055f027e84f69b94dbc329267` independently
+confirmed the layered-memory contract; later rollback remains Issue #52.
+
 There is no cross-file atomic visibility. An independent holder of the raw
 `Store`, or a reader opening `MEMORY.md` directly, can observe a prepared
 intermediate projection before reconciliation. Consumers needing a settled

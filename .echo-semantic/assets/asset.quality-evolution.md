@@ -6,7 +6,7 @@ title: Trace、Eval、Improve 与 Evolution
 asset_type: state_authority
 status: needs_review
 risk: high
-observed_at: source:b214951ece8e09325efc846ad7bd88a402135000e42fe67d2b917317b2d27923
+observed_at: source:5806bd920140828b759fabe868fc1c4af1f26009ed4bf9112b73385cf2ce764e
 boundary_refs: [boundary.eval-evolution]
 code_refs: [src/trace/mod.rs, src/eval/runner.rs, src/eval/comparator.rs, echo-orchestration/src/runtime/turn_driver.rs, src/agent/react/run/stream_channel.rs, src/improve/mod.rs, src/improve/loop.rs, src/evolution/mod.rs, src/evolution/background_review.rs, src/evolution/dreaming.rs, src/evolution/layer.rs, src/evolution/mutation.rs, src/evolution/runtime_integration.rs, src/evolution/curator.rs, src/evolution/draft.rs, src/evolution/merge.rs, src/evolution/patch.rs, src/evolution/review.rs, src/evolution/security.rs, echo-state/src/skill_telemetry.rs, docs/adr/0036-eval-workspace-generation-lifecycle.md, docs/adr/0037-eval-timeout-turn-settlement.md, docs/adr/0038-eval-trace-correlation-identity.md, docs/adr/0065-evolution-memory-audit-reconciliation.md]
 consumer_refs: [echo-agent-learning/tests/example_contracts/demo50_eval.rs, echo-agent-learning/tests/example_contracts/demo51_self_improvement.rs]
@@ -37,4 +37,4 @@ Quality observation 不替代业务 commit；Evolution 持久 mutation 需要独
 
 ## 未知与限制
 
-Trace correlation、timeout settlement、workspace generation、singleton split与iteration config已闭合；memory audit durable reconciliation是待独立复审和交付的候选，raw Store直接读取的中间态、Skill promotion audit与文档namespace仍需明确边界。
+Trace correlation、timeout settlement、workspace generation、singleton split与iteration config已闭合；memory audit durable reconciliation已在主线 `cb4ee9ed` 交付并通过独立复审，raw Store直接读取的中间态、later rollback、Skill promotion audit与文档namespace仍需明确边界。

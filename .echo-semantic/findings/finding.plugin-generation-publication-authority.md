@@ -3,7 +3,7 @@ schema_version: 1
 id: finding.plugin-generation-publication-authority
 kind: finding
 type: authority_conflict
-status: open
+status: resolved
 severity: high
 primary_focus: state_authority
 focus: [failure_concurrency, time_lifecycle, contract_evidence]
@@ -11,11 +11,11 @@ boundary_ref: boundary.extension-lifecycle
 behavior_refs: [behavior.extension-publication]
 rule_refs: [rule.extension-generation-authority]
 evidence_refs: [evidence.effects-extensions]
-audit_refs: [audit.extension-lifecycle.state-authority]
+audit_refs: [audit.extension-lifecycle.state-authority, audit.plugin-generation-publication-authority-rereview]
 decision_refs: []
 repair_evidence_refs: [evidence.plugin-generation-publication-authority-repair]
 verification_evidence_refs: [evidence.plugin-generation-publication-authority-verification, evidence.foundation-36-72-51-integration-verification]
-rereview_audit_refs: []
+rereview_audit_refs: [audit.plugin-generation-publication-authority-rereview]
 discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 ---
 
@@ -39,6 +39,7 @@ PreparedPluginSet 有 generation/identity，但 PluginWiringResult 不携带 gen
 
 ## 处理记录
 
-State-authority Audit 确认。本候选在每个ReactAgent内绑定唯一target authority，增加
-active generation、receipt token与stale apply/receipt测试；独立复审、整合门禁和远端主线交付
-尚未完成，Finding保持open。
+主线 `cb4ee9ed` 在每个 ReactAgent 内绑定唯一 target authority，并增加 process-wide
+generation、receipt token、stale/foreign/altered receipt、独立 Integrator、取消与 cleanup debt
+测试。repair、verification、独立 rereview、完整工程门禁、PR #138 七项 CI 与远端主线交付
+均已闭合。MCP owner isolation 与统一 plugin coordinator 分别继续由 #75 与 #73 负责。
