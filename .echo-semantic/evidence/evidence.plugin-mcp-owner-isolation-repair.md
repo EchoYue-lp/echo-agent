@@ -15,7 +15,7 @@ source_refs:
 supports: [behavior.extension-publication, rule.extension-generation-authority]
 limitations:
   - Plugin Registry persistence and full host reload coordination remain outside this identity repair (#73)
-  - Final advancing-base independent rereview and remote-main delivery remain outstanding
+  - Tests do not establish real remote MCP interoperability
 ---
 
 # Plugin MCP owner-qualified identity repair
@@ -53,4 +53,5 @@ typed key 而保留 owner-qualified receipt 或 projection。
 
 ## 已知缺口
 
-完整门禁已在包含 `main@ed7d6028` 的候选树通过；Finding 在最终独立复审与远端主线交付前保持 open。
+完整门禁与最终独立复审已通过；PR #141 七项 CI 全绿并以 verified squash commit
+`c327f2d0` 进入远端 main。#75 owner-isolation Finding 已闭合，#73 host coordinator 保持独立。

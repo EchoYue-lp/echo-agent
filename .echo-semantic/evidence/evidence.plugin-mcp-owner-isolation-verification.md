@@ -14,7 +14,7 @@ source_refs:
 supports: [behavior.extension-publication, rule.extension-generation-authority]
 limitations:
   - Tests use in-process transports and local stdio fixtures rather than remote MCP servers
-  - Final advancing-base independent rereview and remote-main delivery remain pending
+  - Registry-wide host reload coordination remains outside this verification (#73)
 ---
 
 # Plugin MCP owner-qualified identity verification
@@ -58,6 +58,7 @@ an embedding application's Registry transaction or a remote MCP interoperability
 
 ## 已知缺口
 
-This candidate evidence does not mark the Finding resolved. Complete applicable AGENTS gates passed
-on the advancing-base tree; final independent rereview, semantic change-evidence confirmation, and
-remote-main delivery remain required.
+Complete applicable AGENTS gates and strict semantic change-evidence passed on the advancing-base
+tree. Final independent rereview found no Critical, Important, or Minor issue. PR #141 then passed
+all seven CI checks and entered remote main as verified squash commit `c327f2d0`; its tree is identical
+to the reviewed head. This evidence now supports resolving the owner-isolation Finding.

@@ -3,19 +3,19 @@ schema_version: 1
 id: finding.plugin-mcp-owner-isolation
 kind: finding
 type: authority_conflict
-status: open
+status: resolved
 severity: high
 primary_focus: state_authority
 focus: [failure_concurrency, time_lifecycle, result_side_effect]
 boundary_ref: boundary.extension-lifecycle
 behavior_refs: [behavior.extension-publication]
 rule_refs: [rule.extension-generation-authority]
-evidence_refs: [evidence.effects-extensions]
+evidence_refs: [evidence.effects-extensions, evidence.plugin-mcp-owner-isolation-repair, evidence.plugin-mcp-owner-isolation-verification]
 audit_refs: [audit.extension-lifecycle.state-authority]
 decision_refs: []
 repair_evidence_refs: [evidence.plugin-mcp-owner-isolation-repair]
 verification_evidence_refs: [evidence.plugin-mcp-owner-isolation-verification]
-rereview_audit_refs: []
+rereview_audit_refs: [audit.plugin-mcp-owner-isolation-rereview]
 discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 ---
 
@@ -39,5 +39,6 @@ Plugin parser 与 McpManager 都用裸 server name；多个 Plugin 同名 reconc
 
 ## 处理记录
 
-候选修复已建立 owner-qualified identity、投影与 focused 验证证据，并在包含
-`main@ed7d6028` 的组合树通过完整门禁。Finding 在最终独立复审和远端主线交付前保持 open。
+owner-qualified identity、投影、完整门禁与四轮独立复审已完成。PR #141 七项 CI 全绿，
+reviewed tree 与远端 `main@c327f2d0` tree 完全一致，GitHub 签名验证有效；本 Finding 已 resolved。
+Registry/wiring/callback 的统一 host coordinator 仍由 #73 独立追踪。
