@@ -2,13 +2,14 @@
 schema_version: 1
 id: evidence.skill-candidate-audit-verification
 kind: evidence
-observed_at: source:512b2adda3fbd65e8d7e3c2f4d23a036338d495ab4c3b276f09a15af58ed99f9
+observed_at: source:3a8aba9cee4bdf94c17e2039bb9bc22ebcf6fb112bfe26ce5686002569409849
 source_refs:
   - echo-core/src/memory/store.rs
   - echo-state/src/memory/store.rs
   - echo-state/src/memory/typed_store.rs
   - echo-state/src/memory/sqlite_store.rs
   - echo-state/src/memory/embedding_store.rs
+  - echo-state/src/audit/mod.rs
   - src/evolution/candidate.rs
   - src/evolution/curator.rs
   - src/evolution/audit.rs
@@ -34,6 +35,12 @@ formatter check、semantic strict/change-evidence 均退出 0。
 最终冻结代码通过两套 workspace Clippy、all-target/all-feature workspace tests、no-default
 workspace check 与 17 项独立 feature matrix。第四轮独立实现复审为 0 Critical、0 Important、
 0 Minor；本 Evidence 更新未改变生产代码或测试语义。
+
+PR #143 首轮 Linux foundations 暴露 `tracing-core 0.1.36` 已知的单 Dispatch callsite
+interest-cache race（tokio-rs/tracing#3611）：后台 diagnostic thread 可在 Capture thread 前把
+静态 error callsite 缓存为 never。测试 helper 采用 upstream issue 的 multi-Dispatch workaround，
+并加入无 subscriber thread 先触发同一 callsite 的确定性交错回归；该变化只稳定测试观察，
+不改变 production diagnostic delivery。
 
 测试覆盖 create/reinforce stable audit、A journal 对 B Store/ChangeLog 重绑拒绝、默认 Unsupported
 Store 拒绝、read/CAS 之间注入外部更新仍保留外部值、Curator missing 恢复、同 lineage
