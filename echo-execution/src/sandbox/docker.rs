@@ -1862,12 +1862,16 @@ exit 64
         let fake = FakeDocker::new("global-first-fail")?;
         let error = DockerSandbox::cleanup_sandbox_containers_with_program(
             &fake.program,
-            Duration::from_millis(100),
+            Duration::from_secs(2),
         )
         .await
         .err()
         .ok_or("partial global cleanup unexpectedly succeeded")?;
-        assert!(error.to_string().contains("first-container"));
+        let message = error.to_string();
+        assert!(
+            message.contains("first-container"),
+            "unexpected cleanup error: {message}"
+        );
         assert_eq!(fake.operations()?, ["ps", "rm", "rm"]);
         Ok(())
     }

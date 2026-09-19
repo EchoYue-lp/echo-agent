@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.plugin-lifecycle-coordinator-verification
 kind: evidence
-observed_at: source:b28c584ece690cbed560ee12938634abe9ccfe9d73658c45a1c4ea5579020735
+observed_at: source:e2f708d5ddfba82cdb921b3559e440532246d4f9b679a4fa104b7f8f173b3a6b
 source_refs:
   - tests/plugin_coordinator.rs
   - echo-core/src/plugin/lifecycle.rs
@@ -59,6 +59,11 @@ scan failure also preserves the old Registry and actual generation until same-op
 - `cargo clippy -p echo_agent --lib --all-features --locked -- -D warnings -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic -D clippy::unreachable`: passed.
 - `cargo clippy -p echo_core --lib --all-features --locked -- -D warnings -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic -D clippy::unreachable`: passed.
 - `cargo fmt --all -- --check`: passed.
+
+PR #145 Linux foundations exposed a pre-existing FakeDocker cleanup test that used the dedicated
+hung-stage 100ms deadline for an ordinary `ps` plus two `rm` business scenario. The test now uses
+the repository's existing two-second ordinary cleanup precedent and reports the actual error on
+failure; dedicated hung-stage tests retain 100ms. Production Docker control behavior is unchanged.
 
 ## 来源与范围
 
