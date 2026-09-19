@@ -15,7 +15,7 @@ audit_refs: [audit.eval-evolution.data-durability, audit.eval-evolution.permissi
 decision_refs: []
 repair_evidence_refs: [evidence.skill-lifecycle-authority-repair]
 verification_evidence_refs: [evidence.skill-lifecycle-authority-verification]
-rereview_audit_refs: []
+rereview_audit_refs: [audit.skill-lifecycle-authority-rereview]
 discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 ---
 
@@ -39,4 +39,6 @@ Curator promotion/touch可直接Active且无approval/ChangeLog/security；SkillM
 
 ## 处理记录
 
-ADR 0069 候选已建立 Skill lifecycle 唯一 owner、digest-bound approval、durable audit/reconcile 与 later rollback；Finding 保持 open，等待独立复审、完整门禁与 remote-main 交付。Rule persistence/rollback 仍归 host。
+ADR 0069 候选已建立 Skill lifecycle 唯一 owner、digest-bound approval、durable audit/reconcile
+与 later rollback，并通过四轮独立复审、完整 workspace 门禁及17-feature matrix；Finding 保持
+open，等待 remote-main 交付。Rule persistence/rollback 仍归 host。

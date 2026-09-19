@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.skill-lifecycle-authority-repair
 kind: evidence
-observed_at: source:16e4824bc89e28e36a6c329505451b8ca5c86d6e4f4d1144ea01616535f3ac09
+observed_at: source:3a1ceacf4f7e1214698abf2ea09cc3217e426b87fadb0988c97926eb9dcd2bfa
 source_refs:
   - src/evolution/skill_mutation.rs
   - src/evolution/curator.rs
@@ -13,8 +13,8 @@ source_refs:
   - docs/adr/0069-skill-lifecycle-mutation-authority.md
 supports: [finding.evolution-skill-promotion-audit, finding.evolution-changelog-rollback-authority, behavior.eval-evolution, rule.quality-observation-boundary]
 limitations:
-  - Finding #54 and #52 stay open until independent review, full gates, and remote-main delivery
-  - Candidate Store payload remains under the ADR 0068 CAS journal and its open #94 closure lifecycle
+  - Finding #54 and #52 stay open until remote-main delivery and post-merge closure
+  - Candidate Store payload remains under the independently delivered ADR 0068 CAS journal; Issue 94 is resolved
   - Rule persistence and rollback are host-owned
 ---
 
@@ -50,6 +50,6 @@ The repair does not introduce a memory/skill/rule aggregate state machine.
 
 ## 已知缺口
 
-The candidate has not received final independent rereview or remote-main delivery.
-Host UI and policy, Rule persistence, and the final #94 closure remain outside
-this branch.
+The candidate passed final independent rereview and complete local gates; remote-main delivery and
+post-merge closure remain pending. Host UI and policy plus Rule persistence remain outside this
+framework branch. Issue #94 is resolved and its candidate authority remains independent.

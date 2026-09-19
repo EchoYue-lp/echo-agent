@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.skill-lifecycle-authority-verification
 kind: evidence
-observed_at: source:16e4824bc89e28e36a6c329505451b8ca5c86d6e4f4d1144ea01616535f3ac09
+observed_at: source:3a1ceacf4f7e1214698abf2ea09cc3217e426b87fadb0988c97926eb9dcd2bfa
 source_refs:
   - src/evolution/skill_mutation.rs
   - src/evolution/draft.rs
@@ -12,7 +12,7 @@ source_refs:
   - echo-agent-learning/tests/example_contracts/demo51_self_improvement.rs
 supports: [finding.evolution-skill-promotion-audit, finding.evolution-changelog-rollback-authority, behavior.eval-evolution]
 limitations:
-  - Full workspace gates and independent rereview are owned by the integration lane
+  - Remote-main delivery and post-merge closure remain pending
   - Deterministic restart tests do not simulate physical power loss
 ---
 
@@ -44,9 +44,12 @@ After the fourth review repair, `cargo test -p echo_agent evolution:: --lib
 --locked` passed 209/209; the authority suite passed 24/24;
 `example_contracts` passed 19/19 and `documentation_contract` passed 12/12.
 Both focused Clippy commands, no-default lib check, formatter/diff check, and
-strict semantic snapshot plus change-evidence verification exited zero.
+strict semantic snapshot plus change-evidence verification exited zero. After
+merging latest main, complete `./scripts/verify.sh` and all 17 independent
+feature checks passed. Four implementation review rounds plus advancing-base
+review closed all findings with 0 Critical, 0 Important and 0 Minor remaining.
 
 ## 已知缺口
 
-Final independent rereview, complete workspace gates, and remote-main delivery
-remain pending. Focused strict semantic verification is complete.
+Remote-main delivery and post-merge closure remain pending. Physical power-loss
+injection and a concrete host Rule persistence owner remain outside this candidate.

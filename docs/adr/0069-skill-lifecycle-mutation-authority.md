@@ -5,7 +5,8 @@
 
 ## Status
 
-Accepted candidate; independent review and remote-main delivery are pending.
+Accepted candidate; independent review and complete local gates passed. Remote-main delivery and
+post-merge closure are pending.
 
 ## Context
 
@@ -123,7 +124,7 @@ readers can observe an intermediate projection.
 Runtime usage now enters through the shared authority-owned `SkillUsageHandle`: it
 updates only an existing Skill, never creates Active state for an unknown name,
 and uses the same journal/audit/reconcile ordering. Findings #54 and #52 remain
-open until independent review, complete gates, and remote-main delivery close.
+open until remote-main delivery and post-merge closure complete.
 
 ## Verification
 
