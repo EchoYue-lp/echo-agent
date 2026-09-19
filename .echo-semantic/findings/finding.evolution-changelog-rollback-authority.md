@@ -15,7 +15,7 @@ audit_refs: [audit.eval-evolution.data-durability]
 decision_refs: []
 repair_evidence_refs: [evidence.evolution-memory-rollback-repair]
 verification_evidence_refs: [evidence.evolution-memory-rollback-verification]
-rereview_audit_refs: []
+rereview_audit_refs: [audit.evolution-memory-rollback-rereview]
 discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 ---
 
@@ -39,4 +39,4 @@ ChangeLog只有record/query/latest/len，没有rollback apply API；模块和文
 
 ## 处理记录
 
-Data-durability Audit确认；#52 候选已提供 memory canonical durable inverse batch、generation CAS、preview、receipt 与 request-id 幂等，但 Finding 仍保持 open，直到独立复审、完整门禁和 remote-main 交付完成。Skill/Rule/host rollback 仍不属于本修复。
+Data-durability Audit确认；#52 候选已提供 memory canonical durable inverse batch、generation CAS、preview、receipt 与 request-id 幂等，并已通过 advancing-base 完整门禁与最终独立复审，尚待 remote-main 交付。即使本 memory slice 交付，Finding 仍保持 open，因为 Skill/Rule/host rollback 不属于本修复。
