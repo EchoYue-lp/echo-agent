@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.skill-candidate-audit-verification
 kind: evidence
-observed_at: source:4c4bf7193da92bb6a7830e5a6f769ca18e2ed021db517cbf7050ac8d81769b78
+observed_at: source:3131a2a66cf2c665575e853a3ae3b43620bafd243e2a60e61fdeaa886c34f846
 source_refs:
   - echo-core/src/memory/store.rs
   - echo-state/src/memory/store.rs
@@ -10,6 +10,7 @@ source_refs:
   - echo-state/src/memory/sqlite_store.rs
   - echo-state/src/memory/embedding_store.rs
   - echo-state/src/audit/mod.rs
+  - echo-execution/src/sandbox/docker.rs
   - src/evolution/candidate.rs
   - src/evolution/curator.rs
   - src/evolution/audit.rs
@@ -41,6 +42,11 @@ interest-cache race（tokio-rs/tracing#3611）：后台 diagnostic thread 可在
 静态 error callsite 缓存为 never。测试 helper 采用 upstream issue 的 multi-Dispatch workaround，
 并加入无 subscriber thread 先触发同一 callsite 的确定性交错回归；该变化只稳定测试观察，
 不改变 production diagnostic delivery。
+
+第二轮 Linux foundations 暴露 Docker fake 依赖外部 `sleep` 的环境敏感性：命令解析失败时
+fake 会在 100ms control timeout 前退出。fixture 改用 POSIX shell builtin 无限循环，并在
+断言中携带实际错误。目标测试在正常环境及 `PATH=/definitely-missing` 下均通过，完整
+`echo_execution` 325 项测试通过；production Docker timeout/error contract 未改变。
 
 测试覆盖 create/reinforce stable audit、A journal 对 B Store/ChangeLog 重绑拒绝、默认 Unsupported
 Store 拒绝、read/CAS 之间注入外部更新仍保留外部值、Curator missing 恢复、同 lineage

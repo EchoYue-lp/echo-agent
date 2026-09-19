@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.diagnostic-delivery-current-repair
 kind: evidence
-observed_at: source:4c4bf7193da92bb6a7830e5a6f769ca18e2ed021db517cbf7050ac8d81769b78
+observed_at: source:3131a2a66cf2c665575e853a3ae3b43620bafd243e2a60e61fdeaa886c34f846
 source_refs:
   - src/trace/mod.rs
   - src/agent/react/mod.rs

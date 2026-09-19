@@ -1403,14 +1403,17 @@ mod tests {
                 r#"#!/bin/sh
 LOG="$0.log"
 printf '%s\n' "$1" >> "$LOG"
+hang_forever() {{
+  while :; do :; done
+}}
 case "$1" in
   info)
-    if [ "{mode}" = "hung-info" ]; then exec sleep 10; fi
+    if [ "{mode}" = "hung-info" ]; then hang_forever; fi
     exit 0
     ;;
   create)
     case "{mode}" in
-      hung-create) exec sleep 10 ;;
+      hung-create) hang_forever ;;
       create-empty) exit 0 ;;
       create-bad) printf 'not-a-container-id\n'; exit 0 ;;
       *) printf '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n'; exit 0 ;;
@@ -1431,7 +1434,7 @@ case "$1" in
     ;;
   rm)
     case "{mode}" in
-      hung-rm) exec sleep 10 ;;
+      hung-rm) hang_forever ;;
       global-first-fail)
         if [ "$3" = "first-container" ]; then
           printf 'forced first cleanup failure\n' >&2
@@ -1808,7 +1811,11 @@ exit 64
             .err()
             .ok_or("hung info unexpectedly succeeded")?;
         assert!(info_started.elapsed() < Duration::from_secs(2));
-        assert!(info_error.to_string().contains("probe timed out"));
+        let info_message = info_error.to_string();
+        assert!(
+            info_message.contains("probe timed out"),
+            "unexpected info error: {info_message}"
+        );
         assert_eq!(hung_info.operations()?, ["info"]);
 
         let hung_create = FakeDocker::new("hung-create")?;
@@ -1820,10 +1827,10 @@ exit 64
             .err()
             .ok_or("hung create unexpectedly succeeded")?;
         assert!(create_started.elapsed() < Duration::from_secs(2));
+        let create_message = create_error.to_string();
         assert!(
-            create_error
-                .to_string()
-                .contains("create control stage timed out")
+            create_message.contains("create control stage timed out"),
+            "unexpected create error: {create_message}"
         );
         assert_eq!(hung_create.operations()?, ["info", "create", "rm"]);
 
@@ -1836,7 +1843,11 @@ exit 64
             .err()
             .ok_or("hung rm unexpectedly succeeded")?;
         assert!(rm_started.elapsed() < Duration::from_secs(2));
-        assert!(rm_error.to_string().contains("cleanup timed out"));
+        let rm_message = rm_error.to_string();
+        assert!(
+            rm_message.contains("cleanup timed out"),
+            "unexpected cleanup error: {rm_message}"
+        );
         assert_eq!(
             hung_rm.operations()?,
             ["info", "create", "start", "rm", "rm", "rm"]
