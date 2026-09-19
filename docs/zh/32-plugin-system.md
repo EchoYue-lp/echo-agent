@@ -150,14 +150,29 @@ Integrator 注入 prepared plugin owner。
 generation 序号在同一进程的所有 Integrator 间统一分配，因此两个独立 Integrator 为同一 Agent
 准备的新旧快照仍有可比较的顺序。
 
-每个 `ReactAgent` 独立拥有一个 publication target。通过
-`integrator.publication_target(&agent)` 取得可克隆句柄，再调用
-`target.wire_prepared(&mut agent, &prepared)`；receipt 携带 generation 和 identity。发布新代前
-先用 `target.rollback(&mut agent, &receipt)` 撤销当前代。旧 prepared、外来或被修改的 receipt、
-同代重复发布都会在 registry 副作用前被拒绝。成功撤销可重复调用；发布新代后，旧 receipt
-变成 stale。apply 失败不推进 active generation，清理失败保留 receipt 供重试；取消中的 apply
-留下的 pending receipt 可通过 `target.pending_cleanup_receipt()` 获取并结算。共享 cloned
-Integrator 的两个 Agent 各有自己的 active publication 状态。
+每个 `ReactAgent` 仍拥有唯一 publication target，但 Host 通过 `PluginCoordinator` 驱动完整
+生命周期。用 durable registry 与 integrator 构造 coordinator 后，调用
+`coordinator.reconcile(&mut agent)` 收敛当前意图，或使用 `enable`、`reload`、`disable`、
+`uninstall`、`shutdown` typed operation。失败返回 `ActualPending`；必须先调用
+`coordinator.retry(&mut agent)` 从原 operation receipt 与 phase 继续，再开始后续 operation。
+Coordinator 只串行化 transition；target 仍是 generation、publication receipt 与 cleanup debt
+的唯一权威。
+
+Registry dependency graph 决定 transition 顺序：dependency 先 init/activate 并发出
+`PluginLoaded`，dependent 先 deactivate 并发出 `PluginDisabled`。Converged receipt 只对同一
+Agent publication target 有效；收敛后新增 lifecycle callback 会使 no-op 快径失效，下一次
+reconcile 必须初始化并激活它。错误 Agent 会在 registry intent 或 callback 改变前被拒绝。
+
+Registry 意图先于 runtime 收敛提交。实际顺序固定为 callback cleanup、精确 receipt withdrawal、
+immutable generation publication、callback activation，最后才尝试 lifecycle Hook 通知。
+dependency resolution 与 generation-wide applicability validation 会先于 callback cleanup；
+无效输入保留旧 actual generation，retry 在同一 operation receipt 下重新读取修复后的插件文件。
+Shutdown 只撤销进程内 effect，不改变 durable enabled intent。`PluginLoaded` 与
+`PluginDisabled` 在单个 operation 内有序且去重，但不是跨进程 durable event log；取消或崩溃
+仍可能丢失通知，该缺口继续属于更广泛的 Hook producer contract。
+Registry refresh 只在完整 scan 成功后提交，并保留上一次成功的 scope 集合；受限 Host view
+不会因 coordinator retry 被扩大。
+未完成 receipt 始终投影为下一 retry phase 的 `ActualPending`，包括 transition future 被取消后。
 每个成功的 MCP 连接在开始下一个 server 前立即进入 pending receipt。原本不存在的名字在
 连接 await 前预留清理范围，覆盖 manager 已发布而 Agent 尚未返回时的取消；新连接失败须先
 结算该名字才能发布 generation。这不代替 #75 独立处理的 MCP owner-qualified identity。
@@ -171,24 +186,36 @@ callback 激活。失败注册项保留供重试；已激活 callback 成功撤�
 激活失败则须成功执行 `unregister` 清理；初始化失败只需 shutdown，不调用尚未进入的
 deactivate 阶段。期望 enabled 集合变化本身不表示旧资源已撤销。
 `shutdown` 失败的债务不会被后续成功的 `deactivate` 清除，仍需通过 `unregister` 重试。见
-[ADR 0060](../adr/0060-plugin-lifecycle-reconcile-settlement.md)。完整 reload 事务仍需宿主
-协调 Registry 与组件 wiring。
+[ADR 0060](../adr/0060-plugin-lifecycle-reconcile-settlement.md)。`PluginCoordinator` 将该
+callback authority 与 durable registry intent、Agent-bound publication receipt 串联起来，
+不复制 callback 或 generation 状态。见
+[ADR 0069](../adr/0069-plugin-host-lifecycle-coordinator.md)。
+init 或 activate 失败后，retry 先调用 `PluginLifecycleManager::reset_for_retry`，由原 authority
+结算 callback 自身的 deactivate/shutdown debt，并保留同一 registration。
 
 ## API
 
 ```rust,no_run
-use echo_agent::plugin::{InstallSource, PluginRegistry, PluginScope};
+use echo_agent::agent::ReactAgentBuilder;
+use echo_agent::plugin::{
+    InstallSource, PluginCoordinator, PluginIntegrator, PluginRegistry, PluginScope,
+};
 
-let mut registry = PluginRegistry::new(Some(std::env::current_dir()?));
+# async fn run() -> Result<(), Box<dyn std::error::Error>> {
+let root = std::env::current_dir()?;
+let mut registry = PluginRegistry::new(root.join(".echo-agent"), Some(root));
 registry.scan_all()?;
-
 let id = registry.install(
     &InstallSource::Local("./review-tools".into()),
     PluginScope::Project,
 )?;
-registry.disable(&id)?;
-registry.enable(&id)?;
-# Ok::<(), Box<dyn std::error::Error>>(())
+let mut agent = ReactAgentBuilder::new().model("local-model").build()?;
+let mut coordinator = PluginCoordinator::new(registry, PluginIntegrator::new());
+coordinator.reconcile(&mut agent).await?;
+coordinator.disable(&mut agent, &id).await?;
+coordinator.enable(&mut agent, &id).await?;
+# Ok(())
+# }
 ```
 
 需要安装前报告时，使用 `PluginRegistry::validate_plugin_dir`。
