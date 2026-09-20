@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.scheduler-occurrence-authority-verification
 kind: evidence
-observed_at: source:17f0054af370c86c5f9dbca52db70bcaa417b1f08403153c73b7c0fc4e23c4b8
+observed_at: source:0a91548f9c8d3f6e6a19bc2025fd2d21a46b656162f50b44aedfba5b6d5bf1bb
 source_refs:
   - echo-orchestration/src/scheduler/mod.rs
   - echo-orchestration/src/scheduler/cron_task.rs
@@ -12,11 +12,11 @@ source_refs:
   - docs/adr/0042-scheduler-occurrence-authority.md
 supports: [behavior.task-subagent-execution]
 limitations:
-  - observed_at标记集成基线；以下结果针对其上的未提交worktree，不是main已完成修复的证据
+  - 历史命令记录durable occurrence candidate；当前main状态由framework-only rereview重新核对
   - 未执行操作系统kill或断电注入；crash通过保留EffectStarted并重开file authority模拟
   - 不证明跨进程CronTaskStore writer线性一致
-  - 完整workspace、17-feature矩阵、远端CI与共享semantic snapshot留给集成owner
-  - 最终独立rereview、外部SDK契约与CLI stable data-root adapter尚待完成
+  - 后续integration/main已完成workspace、17-feature矩阵、远端CI与shared semantic snapshot
+  - 当前独立rereview发现public Store mutation/cache同步缺口
   - 首次crate全量测试出现一次非scheduler workflow lease测试失败；未修改该owner代码
 ---
 
@@ -63,20 +63,16 @@ control lock获得后检查cancel，不将未开始的effect伪装成OutcomeUnkn
 
 ## 分层、重复性搜索与研究
 
-搜索framework与echo-agent-cli中的CronTaskStore、SchedulerRunner、DeliveryLedger与
-OccurrenceFireFn：framework DeliveryLedger已有通用claim/attempt/settlement权威；CLI
-scheduler/runner.rs是framework runner的type alias及callback adapter，并非另一套scheduler。
+搜索 framework 中的 CronTaskStore、SchedulerRunner、DeliveryLedger 与 OccurrenceFireFn：
+framework DeliveryLedger 已有通用 claim/attempt/settlement 权威。
 复用ADR 0042的Kubernetes CronJob近似调度与Temporal Activity幂等研究，不重设计ledger。
-框架负责durable occurrence与恢复；EKO负责data-root、Agent调用及业务effect幂等策略。
+框架负责 durable occurrence 与恢复；embedding application 负责 data-root、Agent 调用及业务
+effect 幂等策略。
 
 ## 已知缺口
 
-- Public contracts：CronTask.definition_id/control_revision、SchedulerInvocation、
-  SchedulerTrigger、OccurrenceFireFn、SchedulerRunner::new_with_occurrence_context。
-  SDK已提取到独立仓库，契约更新由SDK owner处理。
-- CLI app_state.rs:985的Store-backed构造必须绑定稳定data-root `with_path()`，补重开/隔离测试；
-  runner.rs:243可保留FireFn adapter，但外部effect去重需要向callback传递occurrence_id。
-- 官网en/zh `29-long-running-tasks.md`副本仍需网站owner同步；此任务仅拥有framework worktree。
-- 17-feature条件矩阵、完整workspace门禁、最终独立rereview与shared semantic snapshot未执行。
-  不宣称main-ready、不关闭#84。#120与#55 SDK/MCP部分不属于scheduler owner。
-- 未commit、cherry-pick、push或修改其它worktree；保留共享target供并行构建使用。
+- Public `CronTaskStore` clone 可在 runner 构造后直接 disable/remove/update，runner cache 不会自动
+  刷新；这是 #84 当前唯一 blocking framework gap。
+- Consumer stable data-root、callback idempotency、SDK mapping 与 website 同步由各自 owner 追踪，
+  不阻塞 #84。
+- Cron offline misfire 与跨进程 Store writer 不属于当前合同。

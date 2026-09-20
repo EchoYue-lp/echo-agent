@@ -95,9 +95,10 @@ Consumers with only `ConversationStore` must add a compatible
 to `Unsupported`, preserving source compatibility for external adapters, but
 admission fails closed when durable projection is requested.
 
-The independent SDK must carry the new operations, receipts, deadlines, and
-settlement event without recreating retry or terminal logic. Product surfaces
-consume the same framework status.
+An independent SDK can carry the operations, receipts, deadlines, and
+settlement event without recreating retry or terminal logic. That consumer
+adoption is verified and released by the SDK repository; it is not part of the
+framework Finding's completion boundary.
 
 ## Verification
 
@@ -105,5 +106,6 @@ File/SQLite parity covers concurrent generations, replay, managed CAS,
 tombstone retention, epoch recreation, stale-writer fencing, rollback, and
 restart. Agent tests cover admission, prepare/apply/ack crash cuts, warm/cold
 recovery, pre-compaction blocking, terminal classes, consumer disconnect, and
-observation-before-terminal ordering. Framework and SDK pass their own merge
-gates before Issue #106 closes.
+observation-before-terminal ordering. Issue #106 closes when these framework
+paths, evidence, documentation, examples, and framework merge gates are
+complete on framework `main`.

@@ -5,15 +5,15 @@ kind: audit
 boundary_ref: boundary.task-subagent-workflow
 lens: state_authority
 freshness: examined
-revision: f310825c418932cde02f661f0686f83f216771d6
+revision: source:0a91548f9c8d3f6e6a19bc2025fd2d21a46b656162f50b44aedfba5b6d5bf1bb
 finding_refs: [finding.task-subagent-attempt-link]
 challenges:
   exact-attempt-authority:
-    revision: f310825c418932cde02f661f0686f83f216771d6
+    revision: source:0a91548f9c8d3f6e6a19bc2025fd2d21a46b656162f50b44aedfba5b6d5bf1bb
     source_refs: [echo-orchestration/src/tasks/runtime.rs, echo-orchestration/src/tasks/runtime_executor.rs, src/agent/subagent/team/mod.rs]
     evidence_refs: [evidence.task-subagent-attempt-link-repair, evidence.task-subagent-attempt-link-verification]
   cancellation-and-recovery:
-    revision: f310825c418932cde02f661f0686f83f216771d6
+    revision: source:0a91548f9c8d3f6e6a19bc2025fd2d21a46b656162f50b44aedfba5b6d5bf1bb
     source_refs: [echo-orchestration/src/tasks/runtime_service.rs, src/agent/subagent/control.rs, src/agent/subagent/executor.rs]
     evidence_refs: [evidence.task-subagent-attempt-link-repair, evidence.task-subagent-attempt-link-verification]
 ---
@@ -23,7 +23,7 @@ challenges:
 ## 审查范围
 
 独立 reviewer 读取完整 #99 framework diff、Design、Plan、ADR 0058，以及 Task runtime、
-Subagent control/executor、Team runtime、tests 与 focused 验证结果。SDK worktree 与其它 OpenCode
+Subagent control/executor、Team runtime、tests 与 focused 验证结果。Consumer worktree 与其它
 并行 finding 被排除。
 
 ## 已检查故障假设
@@ -49,11 +49,15 @@ Critical 0、Important 0、Minor 0。
 
 ## 残余风险
 
-已被远端接纳的外部 effect 不能由本地 cancellation 撤回。完整合并门禁、17-feature matrix 与
-semantic strict gate 已由主流程通过；远端 CI 仍需在 PR 上确认。SDK Host command replay/E2E
-未交付，因此 Finding 与 GitHub Issue #99 继续保持 open。
+已被远端接纳的外部 effect 不能由本地 cancellation 撤回。完整合并门禁、17-feature matrix、
+semantic strict gate 与 PR #133 远端 CI 已通过。Consumer Host command replay/E2E 由其所属
+仓库独立追踪，不阻塞 Finding 或 GitHub Issue #99。
 
 ## 未检查项
 
-未执行 SDK Host durable command replay、跨仓库 E2E、真实远端 provider/effect 撤回或 EKO
-GUI/TUI 投影。远端 Linux/Windows CI 留给 PR 交付核实。
+未执行 consumer Host durable command replay、跨仓库 E2E、真实远端 provider/effect 撤回或
+EKO GUI/TUI 投影；它们不属于本 framework Finding。
+
+Framework-only closure 在最终 source digest 上复核 claim-derived identity、targeted abort、
+recovery reconciliation、双语 identity 文档、focused tests、完整门禁和 17-feature matrix，
+没有发现新的 framework blocker。

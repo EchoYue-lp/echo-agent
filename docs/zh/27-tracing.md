@@ -152,15 +152,28 @@ pub trait RunStore: Send + Sync {
 
     // 默认实现：load → push event → save
     async fn append_event(&self, run_id: &str, event: RunEvent) -> Result<()>;
+
+    // 默认实现：load → 提交首个终态 → save
+    async fn finalize_run(
+        &self,
+        run_id: &str,
+        status: RunStatus,
+        output: Option<&str>,
+        error: Option<&str>,
+    ) -> Result<bool>;
 }
 ```
+
+允许 event append 与 finalization 并发的 backend 必须在同一个 mutation authority
+下覆盖这两个方法。run 不存在时 `finalize_run` 返回 `false`；内置 store 会保留晚到
+event，并以第一个 terminal result 为准。
 
 ### 内置实现
 
 | 实现 | 存储方式 | 使用场景 |
 |------|---------|----------|
 | `InMemoryRunStore` | `RwLock<HashMap>` | 测试、短期会话 |
-| `JsonlRunStore` | 追加写入 `.jsonl` 文件 | 生产环境、持久化轨迹 |
+| `JsonlRunStore` | snapshot 加 event line 的 `.jsonl` 文件 | 生产环境、持久化轨迹 |
 
 #### InMemoryRunStore
 
@@ -172,7 +185,9 @@ let store = InMemoryRunStore::new();
 
 #### JsonlRunStore
 
-基于文件的持久化。每个运行存储为 `{dir}/{run_id}.jsonl`（追加写入；最后一行为当前状态）。构造时扫描已有文件填充内存缓存。
+基于文件的持久化。每个运行存储为 `{dir}/{run_id}.jsonl`：第一行是压缩后的
+`Run` snapshot，后续行是单个 `RunEvent`。追加 event 时增加一行；save 与
+finalization 会原子压缩回一个当前 snapshot。构造时扫描已有文件填充内存缓存。
 
 ```rust
 let store = JsonlRunStore::new(PathBuf::from("./traces"))?;
@@ -223,7 +238,7 @@ Store/Logger 直接方法返回 `Result`，要求持久化的调用方必须处�
 
 Agent producer 只通过有界、非阻塞的 `try_send` 提交 failure。进程内诊断 dispatcher
 发送 tracing target `echo_agent::diagnostic_delivery`，包含稳定的 `record_kind`、
-`operation`、`record_id`、`occurred_at` 与 `error` 字段。应用还可以安装一个结构化 observer；
+`operation`、`record_id_present`、`occurred_at` 与 `error` 字段。应用还可以安装一个结构化 observer；
 它会从同一 dispatcher 收到 failure fact：
 
 ```rust

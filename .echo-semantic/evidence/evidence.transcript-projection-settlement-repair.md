@@ -20,7 +20,7 @@ source_refs:
   - docs/adr/0056-durable-transcript-projection-settlement.md
 supports: [finding.transcript-projection-settlement, behavior.context-memory-lifecycle, behavior.observation-persistence, rule.context-persistence-separation, rule.fact-projection-separation]
 limitations:
-  - Independent SDK protocol, Host bridge and TypeScript/Python/Java contracts remain a separate Issue 106 outcome
+  - Independent consumer protocol, Host bridge and language contracts are verified in their owner repositories and do not block this framework Finding
   - Legacy unmanaged Store helpers retain their pre-existing direct-await behavior and reject context-aware deadline calls
 ---
 
@@ -50,5 +50,5 @@ backend；应用只选择非零 settlement timeout 和具体 Store。
 
 ## 已知缺口
 
-本 Evidence 只关闭 framework Finding。独立 SDK 尚需无损映射 call context、batch、receipt、settlement
-event 与 retirement operation；Issue #106 在 SDK 和跨仓证据合并前保持开放。
+本 Evidence 关闭 framework Finding。独立 consumer 若映射 call context、batch、receipt、settlement
+event 与 retirement operation，须在其所属仓库验证无损转换；该采用结果不控制 Issue #106。

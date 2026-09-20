@@ -61,6 +61,18 @@ workspace members.
 - The extraction is a repository ownership change, not a runtime behavior
   change. SDK Host and protocol semantics are repaired in the SDK repository
   after this framework baseline is frozen.
+- Framework semantic completion is evaluated inside this repository. A framework
+  Finding reaches `resolved` when its production path is on framework `main`, its
+  focused scenarios and repository gates pass, repair/verification/independent
+  rereview evidence closes, and framework docs and executable examples agree.
+  SDK Host adoption, protocol inventory, language bindings, EKO integration, and
+  website publication are separate consumer outcomes and cannot keep a completed
+  framework Finding open.
+- Consumer review can still discover a framework defect and open or reopen the
+  corresponding framework Finding. A missing consumer adapter, stale framework
+  pin, or unmapped Host-only API remains owned by the consumer repository. SDK
+  Host Finding #120 is therefore not a prerequisite for framework Finding
+  closure.
 - The pushed source-continuity commit is the lossless SDK rollback/source
   checkpoint. It retains the initial-import commit as an ancestor; reverting
   the extraction commit restores framework paths without rewriting either

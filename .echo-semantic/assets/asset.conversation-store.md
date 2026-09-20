@@ -6,13 +6,13 @@ title: Conversation Transcript Store
 asset_type: state_authority
 status: active
 risk: high
-observed_at: 44b2ed68772c7c016d09af6c2e1adac9fe4fea70
+observed_at: source:0a91548f9c8d3f6e6a19bc2025fd2d21a46b656162f50b44aedfba5b6d5bf1bb
 boundary_refs: [boundary.context-memory, boundary.observation-persistence-delivery]
 code_refs: [echo-core/src/memory/conversation.rs, echo-state/src/memory/conversation.rs, echo-state/src/memory/file_conversation.rs, echo-state/src/memory/sqlite_conversation.rs, src/agent/snapshot.rs]
 consumer_refs: [src/agent/react/run/phases/compact.rs, src/agent/react/run/phases/finalize.rs, docs/en/03-memory.md]
 behavior_refs: [behavior.context-memory-lifecycle, behavior.observation-persistence]
 rule_refs: [rule.context-persistence-separation, rule.fact-projection-separation]
-evidence_refs: [evidence.agent-context-execution, evidence.persistence-observation, evidence.transcript-projection-settlement-repair, evidence.transcript-projection-settlement-verification]
+evidence_refs: [evidence.agent-context-execution, evidence.persistence-observation, evidence.transcript-projection-settlement-repair, evidence.transcript-projection-settlement-verification, evidence.transcript-observer-current-repair, evidence.transcript-observer-current-verification, evidence.framework-only-finding-closure-verification]
 finding_refs: [finding.transcript-projection-settlement]
 candidate_refs: []
 ---
@@ -38,5 +38,5 @@ Ensure epoch、atomic apply/AlreadyApplied、managed import/metadata/delete、qu
 
 ## 未知与限制
 
-外部 adapter 必须显式声明 AtomicV1 与 AbsoluteDeadlineV1；独立 SDK 尚未映射的新 public contract
-继续由 Issue #106 后续 outcome 跟踪。EKO 不采用 SQLite 不影响 framework option。
+外部 adapter 必须显式声明 AtomicV1 与 AbsoluteDeadlineV1；consumer 对新 public contract 的
+映射由其所属仓库追踪，不阻塞 Issue #106。EKO 不采用 SQLite 不影响 framework option。

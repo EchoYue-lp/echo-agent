@@ -57,9 +57,10 @@ pub enum SubagentEvent {
         mode: ExecutionMode,
         /// Task description being dispatched.
         task: String,
-        /// Stable execution id from the caller's `ExternalRunContext`
-        /// (format `{task_id}:{attempt}` in embedding application). `None` = legacy caller that
-        /// has not opted in; bridges fall back to temp id allocation.
+        /// Opaque stable execution id from the caller's `ExternalRunContext`.
+        /// Task-backed dispatch derives it from the exact claim lineage; callers
+        /// must not parse or reconstruct it. `None` means a legacy caller that
+        /// has not opted in; bridges fall back to temporary id allocation.
         /// Frontends should use this as the canonical `subagent_run_id`.
         execution_id: Option<String>,
         /// Parent run id from the caller's `ExternalRunContext`. `None` =

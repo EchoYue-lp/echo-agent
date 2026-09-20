@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.plugin-mcp-owner-isolation-verification
 kind: evidence
-observed_at: source:17f0054af370c86c5f9dbca52db70bcaa417b1f08403153c73b7c0fc4e23c4b8
+observed_at: source:0a91548f9c8d3f6e6a19bc2025fd2d21a46b656162f50b44aedfba5b6d5bf1bb
 source_refs:
   - echo-integration/src/mcp/identity.rs
   - echo-integration/src/mcp/mod.rs

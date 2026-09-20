@@ -31,10 +31,11 @@ acceptance, context drain, and owning-turn settlement. A turn ID alone is not a
 delivery-complete result.
 
 `SubagentAttemptIdentity` is a framework-owned, serializable value containing
-only the logical task, physical execution, and attempt number. Persist this
-value directly when a consumer needs to correlate a command or recovery record;
-no product identity mirror is required. Deserialization enforces the same
-non-empty task/execution and positive-attempt invariants as `new`.
+the logical task, opaque physical execution, attempt number, and optional run
+and control-scope identities. Persist this value directly when a consumer needs
+to correlate a command or recovery record; no product identity mirror is
+required. Deserialization enforces the same non-empty task/execution,
+non-empty optional run/scope, and positive-attempt invariants as `new`.
 Unknown identity fields are rejected as well.
 
 `SubagentResult::usage()` returns the serializable `ExecutionUsage`

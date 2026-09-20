@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.diagnostic-delivery-current-verification
 kind: evidence
-observed_at: source:17f0054af370c86c5f9dbca52db70bcaa417b1f08403153c73b7c0fc4e23c4b8
+observed_at: source:0a91548f9c8d3f6e6a19bc2025fd2d21a46b656162f50b44aedfba5b6d5bf1bb
 source_refs:
   - echo-state/src/audit/file.rs
   - echo-state/src/audit/mod.rs
@@ -10,8 +10,8 @@ source_refs:
   - src/trace/mod.rs
 supports: [finding.diagnostic-persistence-failure-visibility]
 limitations:
-  - All previously recorded package results predate final atomic RunStore finalization
-  - SDK inventory, root/workspace gate and independent rereview are pending
+  - Historical package results that predate atomic RunStore finalization are not reused as current evidence
+  - Current root/workspace gates and independent rereview are recorded by the framework-only closure evidence
 ---
 
 # Issue 46 verification frontier
@@ -20,7 +20,7 @@ limitations:
 
 最终验证须覆盖 FileAuditLogger child-process 独占/reacquire、custom backend diagnostic error
 retention、InMemory/JSONL append 与 finalize 并发下保留 late event、重复 finalize 不覆盖
-第一个 terminal、缺失 run receipt，以及 SDK public inventory/Host consumer。所有
+第一个 terminal 与缺失 run receipt。Consumer public inventory/Host mapping 由其所属仓库验证。所有
 `source:09ee...` 前的 package/root 日志早于 atomic finalization，不能证明当前源码。
 
 ## 来源与范围
@@ -29,4 +29,4 @@ retention、InMemory/JSONL append 与 finalize 并发下保留 late event、重�
 
 ## 已知缺口
 
-最终-digest focused/root/workspace、custom producer、SDK consumer 与独立复审尚无收据。
+最终-digest focused/root/workspace、custom producer 与独立复审由当前 closure evidence 记录。

@@ -12,8 +12,8 @@ source_refs:
   - tests/facade_smoke.rs
 supports: [behavior.task-subagent-execution, rule.task-subagent-authority]
 limitations:
-  - remote CI remains a delivery gate after the pull request is opened
-  - echo-agent-sdk command replay and cross-repository E2E are outside this framework phase
+  - PR #133 remote CI passed; current closure evidence records the final framework snapshot
+  - Consumer command replay and cross-repository E2E are outside the framework Finding
 ---
 
 # TaskClaim 与 SubagentAttempt framework 验证证据
@@ -55,4 +55,4 @@ learning contracts 与 workspace tests；存在既有 opt-in ignored tests，未
 
 ## 已知缺口
 
-远端 CI 需在 PR 创建后确认。SDK command replay 与跨仓库 E2E 仍是独立第二阶段。
+PR #133 远端 CI 已通过。Consumer command replay 与跨仓库 E2E 是独立 outcome，不阻塞 #99。

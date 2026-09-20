@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.diagnostic-delivery-current-repair
 kind: evidence
-observed_at: source:17f0054af370c86c5f9dbca52db70bcaa417b1f08403153c73b7c0fc4e23c4b8
+observed_at: source:0a91548f9c8d3f6e6a19bc2025fd2d21a46b656162f50b44aedfba5b6d5bf1bb
 source_refs:
   - src/trace/mod.rs
   - src/agent/react/mod.rs
@@ -14,8 +14,8 @@ source_refs:
 supports: [finding.diagnostic-persistence-failure-visibility, behavior.observation-persistence, rule.fact-projection-separation]
 limitations:
   - This incremental repair does not replace the historical Issue 46 candidate evidence
-  - SDK public API inventory and cross-language contract are in another repository and remain open
-  - Current source digest and final gates are pending
+  - Consumer public API inventory and cross-language contracts remain independently owned
+  - Current source digest and final gates are recorded by the framework-only closure evidence
 ---
 
 # Issue 46 current consumer and persistence repair candidate
@@ -26,7 +26,7 @@ FileAuditLogger 的子进程 lease/close-reopen 回归检查互斥边界，文�
 输出原始 payload。Producer 在交给自定义 diagnostic Store/Logger 之前应用 retention，
 但诊断持久化失败仍只进入 typed diagnostic delivery、drop counter 与可配置 observer，
 不得反向覆盖 Agent 业务终态。新的 `AuditEvent::apply_retention` 公共方法和既有
-DiagnosticDelivery API 必须进入独立 SDK inventory，framework 修复不能替代 Host 合同。
+DiagnosticDelivery API 的 consumer inventory 与 Host 合同由其所属仓库验证，不阻塞 framework 修复。
 
 `RunStore::finalize_run` 是公开终态 mutation boundary。InMemory 与 JSONL backend 在与
 append 相同的排他 mutation authority 下 finalize，保留并发 late event、只接受第一个
@@ -35,9 +35,9 @@ load/update/save，不对外部并发 backend 宣称原子性；这类 backend �
 
 ## 来源与范围
 
-Framework FileAuditLogger、RunStore、producer 与诊断 observer 是本 Evidence 范围；SDK 为独立仓库。
+Framework FileAuditLogger、RunStore、producer 与诊断 observer 是本 Evidence 范围。
 
 ## 已知缺口
 
-SDK inventory 必须分类 finalize 的 missing-run boolean receipt；最终源码测试、全门禁与
-独立复审均未取得当前轮次通过收据。
+Consumer inventory 应分类 finalize 的 missing-run boolean receipt；framework 最终源码测试、
+全门禁与独立复审由当前 closure evidence 绑定。

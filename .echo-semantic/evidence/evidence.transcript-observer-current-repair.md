@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.transcript-observer-current-repair
 kind: evidence
-observed_at: source:17f0054af370c86c5f9dbca52db70bcaa417b1f08403153c73b7c0fc4e23c4b8
+observed_at: source:0a91548f9c8d3f6e6a19bc2025fd2d21a46b656162f50b44aedfba5b6d5bf1bb
 source_refs:
   - src/agent/react/run/phases/compact.rs
   - src/agent/react/run/phases/tools.rs
@@ -13,11 +13,11 @@ source_refs:
 supports: [finding.transcript-projection-settlement, behavior.observation-persistence, rule.fact-projection-separation]
 limitations:
   - Framework settlement fact and stream observer delivery are distinct outcomes
-  - SDK protocol, Host and language projections remain cross-repository Issue 106 scope
-  - Current source is uncommitted and final regression gate is pending
+  - Consumer protocol, Host and language projections remain outside the framework Finding
+  - Current closure verification records final source and gate results separately
 ---
 
-# Issue 106 observer disconnect repair candidate
+# Issue 106 observer disconnect repair
 
 ## 支持的结论
 
@@ -33,4 +33,4 @@ pending intent、receipt、CAS 与 managed delete 继续由既有 coordinator �
 
 ## 已知缺口
 
-SDK Host/语言消费和最终源码复验还没有当前轮次的通过收据。
+Consumer Host/语言投影由其所属仓库验证；framework 最终源码复验由当前 closure evidence 记录。

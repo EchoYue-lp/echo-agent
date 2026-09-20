@@ -12,7 +12,7 @@ source_refs:
 supports: [behavior.task-subagent-execution, rule.task-subagent-authority]
 limitations:
   - The handle is process-local and does not provide durable TaskClaim validation or command replay
-  - echo-agent-sdk still requires a framework pin, persistent Task graph, command journal, language contract update, and cross-process E2E
+  - Consumer repositories independently own their framework pin, persistent Task graph, command journal, language contract, and cross-process E2E
 ---
 
 # External Task adapter attempt-control handle 修复证据
@@ -36,5 +36,5 @@ ADR 0058与双语长任务文档记录了live capability和durable authority边�
 
 ## 已知缺口
 
-本证据只覆盖framework public adapter capability。SDK Host当前仍使用旧framework pin和内存Task store，
-且没有durable task-control command ledger；这些后续Outcome完成前Finding与Issue #99保持open。
+本证据只覆盖 framework public adapter capability。Consumer Host 的 framework pin、持久 Task
+store 与 durable task-control command ledger 由其所属仓库追踪，不阻塞 Finding 或 Issue #99。

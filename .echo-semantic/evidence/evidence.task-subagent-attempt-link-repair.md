@@ -13,7 +13,7 @@ source_refs:
   - docs/adr/0058-task-claim-subagent-attempt-control.md
 supports: [behavior.task-subagent-execution, rule.task-subagent-authority]
 limitations:
-  - echo-agent-sdk Host adapter and durable command replay remain pending
+  - Consumer Host adapters and durable command replay remain independently owned
   - remote effects accepted before cancellation cannot be retracted by a local token
 ---
 
@@ -40,5 +40,6 @@ abort handle、watch 与 retained Team runtime 都是有界进程投影；它们
 
 ## 已知缺口
 
-SDK Host 仍负责 durable command ledger 与重放，本次 framework commit 不宣称跨进程 command
-恢复已经完成。已被远端接纳的 effect 也不能由本地 cancellation 撤回。
+Host 仍负责 durable command ledger 与重放，本次 framework repair 不宣称跨进程 command
+恢复已经完成；该 consumer outcome 不阻塞 framework Finding 或 Issue #99。已被远端接纳的
+effect 也不能由本地 cancellation 撤回。

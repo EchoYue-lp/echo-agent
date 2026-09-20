@@ -4,11 +4,11 @@ id: map.task-subagent-workflow
 kind: capability_map
 title: Task、Subagent、Workflow 与 Scheduler
 risk: high
-observed_at: 44b2ed68772c7c016d09af6c2e1adac9fe4fea70
+observed_at: source:0a91548f9c8d3f6e6a19bc2025fd2d21a46b656162f50b44aedfba5b6d5bf1bb
 boundary_refs: [boundary.task-subagent-workflow]
 behavior_refs: [behavior.task-subagent-execution]
 rule_refs: [rule.task-subagent-authority]
-evidence_refs: [evidence.task-subagent-workflow, evidence.high-risk-audit-frontier, evidence.task-patch-claim-cas-repair, evidence.task-patch-claim-cas-verification, evidence.subagent-factory-singleflight-repair, evidence.subagent-factory-singleflight-verification, evidence.background-task-terminal-authority-repair, evidence.background-task-terminal-authority-verification, evidence.command-cell-cancel-artifact-settlement-repair, evidence.command-cell-cancel-artifact-settlement-verification, evidence.workflow-parallel-failure-settlement-repair, evidence.workflow-parallel-failure-settlement-verification, evidence.workflow-checkpoint-claim-settlement-repair, evidence.workflow-checkpoint-claim-settlement-verification, evidence.workflow-entry-loop-authority-repair, evidence.workflow-entry-loop-authority-verification, evidence.scheduler-occurrence-authority-repair, evidence.scheduler-occurrence-authority-verification, evidence.framework-concept-navigation]
+evidence_refs: [evidence.task-subagent-workflow, evidence.high-risk-audit-frontier, evidence.task-patch-claim-cas-repair, evidence.task-patch-claim-cas-verification, evidence.subagent-factory-singleflight-repair, evidence.subagent-factory-singleflight-verification, evidence.task-subagent-attempt-link-repair, evidence.task-subagent-attempt-link-verification, evidence.task-subagent-external-control-handle-repair, evidence.task-subagent-external-control-handle-verification, evidence.framework-only-finding-closure-verification, evidence.background-task-terminal-authority-repair, evidence.background-task-terminal-authority-verification, evidence.command-cell-cancel-artifact-settlement-repair, evidence.command-cell-cancel-artifact-settlement-verification, evidence.workflow-parallel-failure-settlement-repair, evidence.workflow-parallel-failure-settlement-verification, evidence.workflow-checkpoint-claim-settlement-repair, evidence.workflow-checkpoint-claim-settlement-verification, evidence.workflow-entry-loop-authority-repair, evidence.workflow-entry-loop-authority-verification, evidence.scheduler-occurrence-authority-repair, evidence.scheduler-occurrence-authority-verification, evidence.framework-concept-navigation]
 finding_refs: [finding.task-patch-claim-race, finding.task-subagent-attempt-link, finding.subagent-factory-cancellation, finding.subagent-factory-publication-race, finding.workflow-dag-authority, finding.workflow-entry-loop-drift, finding.workflow-checkpoint-claim-recovery, finding.workflow-checkpoint-resurrection-race, finding.workflow-parallel-failure-settlement, finding.scheduler-cache-delivery, finding.scheduler-task-id-uniqueness, finding.scheduler-control-fire-race, finding.background-task-wait, finding.command-cell-retention-lease-prune-race, finding.command-cell-cancel-artifact-settlement, finding.subagent-definition-catalog]
 audit_refs: [audit.task-subagent-workflow.state-authority, audit.task-subagent-workflow.failure-concurrency, audit.task-subagent-workflow.data-durability, audit.task-subagent-workflow.time-lifecycle, audit.task-patch-claim-cas-rereview, audit.subagent-factory-singleflight-rereview, audit.background-task-terminal-authority-rereview, audit.workflow-parallel-failure-settlement-rereview, audit.workflow-checkpoint-claim-settlement-rereview, audit.workflow-entry-loop-authority-rereview, audit.scheduler-occurrence-authority-rereview]
 related_map_refs: [map.agent-session-turn, map.observation-persistence-delivery, map.tool-permission-sandbox]
@@ -28,10 +28,10 @@ scenarios:
     source_refs: [src/agent/subagent/registry.rs, src/agent/subagent/executor.rs, src/agent/subagent/control.rs, src/agent/subagent/events.rs]
     finding_refs: [finding.task-subagent-attempt-link, finding.subagent-factory-cancellation, finding.subagent-factory-publication-race, finding.subagent-definition-catalog]
     rule_refs: [rule.task-subagent-authority]
-    evidence_refs: [evidence.subagent-factory-singleflight-repair, evidence.subagent-factory-singleflight-verification]
-    audit_refs: [audit.subagent-factory-singleflight-rereview]
-    unknown: TaskClaim与SubagentAttempt identity及definition catalog仍未闭合；factory cancellation/publication已关闭
-    next_step: 分别处理Task/Subagent attempt route与definition catalog裁决
+    evidence_refs: [evidence.subagent-factory-singleflight-repair, evidence.subagent-factory-singleflight-verification, evidence.task-subagent-attempt-link-repair, evidence.task-subagent-attempt-link-verification, evidence.task-subagent-external-control-handle-repair, evidence.task-subagent-external-control-handle-verification, evidence.framework-only-finding-closure-verification]
+    audit_refs: [audit.subagent-factory-singleflight-rereview, audit.task-subagent-attempt-link-rereview, audit.task-subagent-external-control-handle-rereview]
+    unknown: TaskClaim到SubagentAttempt identity、factory cancellation/publication已闭合；definition catalog的产品预期仍未裁决
+    next_step: 仅处理definition catalog裁决，不重建attempt identity或第二套live control registry
   workflow-graph-and-events:
     status: needs_review
     source_refs: [echo-orchestration/src/workflow/graph.rs, echo-orchestration/src/workflow/checkpoint_store.rs, echo-orchestration/src/workflow/dag.rs]
@@ -46,8 +46,8 @@ scenarios:
     finding_refs: [finding.scheduler-cache-delivery, finding.scheduler-task-id-uniqueness, finding.scheduler-control-fire-race]
     evidence_refs: [evidence.task-subagent-workflow, evidence.scheduler-occurrence-authority-repair, evidence.scheduler-occurrence-authority-verification]
     audit_refs: [audit.scheduler-occurrence-authority-rereview]
-    unknown: store/cache、唯一ID、migration collision与control/admission已闭合；callback durable occurrence claim与crash replay仍未定义
-    next_step: 为#84裁决并实现持久claim/ledger及崩溃恢复语义
+    unknown: durable occurrence、唯一ID、migration collision与runner自身control/admission已闭合；public CronTaskStore clone mutation仍可绕过runner cache同步
+    next_step: 在scheduler-store-cache-authority Outcome中统一mutation owner或建立可靠store-to-runner同步并覆盖直接mutation竞态
   process-local-background-task:
     status: mapped
     source_refs: [echo-orchestration/src/tasks/background_task.rs, docs/en/29-long-running-tasks.md, docs/zh/29-long-running-tasks.md, docs/adr/0039-background-task-terminal-authority.md]

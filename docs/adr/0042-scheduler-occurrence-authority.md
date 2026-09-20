@@ -150,12 +150,21 @@ framework contracts. The SDK has been extracted into an independent repository;
 its owner must update the consumer contracts there. No extracted SDK files or
 shared generated inventories are restored by this scheduler integration.
 
-The EKO consumer currently constructs a Store-backed scheduler without the new
-stable path anchor. Its application data-root adapter and tests must migrate in
-a separate CLI worktree, with framework delivery merged first and the CLI
-consumer immediately after it. This framework branch is not independently
-main-ready until that cross-repository sequence and the Cargo feature matrix
-are complete.
+An embedding application that constructs a Store-backed scheduler supplies its
+own stable data-root anchor and validates its callback idempotency. Those
+consumer adaptations do not control the framework Finding's completion.
+
+## Current Implementation Gap
+
+`CronTaskStore` is public and clonable. A caller can currently retain a clone,
+mutate the durable definition directly after constructing `SchedulerRunner`,
+and leave the runner's in-memory cache stale until an explicit reload. That
+path can make `list_tasks`, `tick`, or `run_once` observe an old enabled
+definition, so the implementation does not yet satisfy the decision that the
+store is authoritative and successful mutations refresh or invalidate the
+derived cache. Issue #84 remains open until one mutation owner or an equivalent
+store-to-runner synchronization contract closes this bypass and its failure
+and cancellation races.
 
 ## References
 
