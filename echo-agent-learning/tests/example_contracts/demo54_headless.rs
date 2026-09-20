@@ -8,6 +8,7 @@
 //! 3. Text output mode — plain string output
 //! 4. JSON output mode — structured JSON with success, model, output fields
 //! 5. Empty-prompt error handling
+//! 6. `HeadlessRunHandle` — cancellation-safe result and close ownership
 //!
 //! **Note:** Actual agent execution requires an LLM API key.
 //! This demo shows the configuration and result-handling APIs
@@ -18,6 +19,18 @@
 //! ```
 
 use echo_agent::headless::{HeadlessConfig, HeadlessResult};
+
+#[allow(dead_code)]
+async fn cancellation_safe_headless_pattern(
+    config: HeadlessConfig,
+) -> echo_agent::error::Result<HeadlessResult> {
+    let run = echo_agent::headless::start_headless(config, |builder| builder);
+    let result = run.wait().await;
+    if !result.success {
+        run.retry_close().await?;
+    }
+    Ok(result)
+}
 
 macro_rules! section {
     ($n:expr, $title:expr) => {

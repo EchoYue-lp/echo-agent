@@ -167,7 +167,9 @@ impl K8sSandbox {
         Self {
             config,
             kubectl_program,
-            control_timeout: Duration::from_millis(250),
+            // The fake client starts several real child processes per cleanup.
+            // Leave scheduler headroom when the all-feature suite runs in parallel.
+            control_timeout: Duration::from_secs(1),
         }
     }
 

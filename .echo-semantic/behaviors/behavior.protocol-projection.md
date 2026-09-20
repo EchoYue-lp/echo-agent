@@ -8,10 +8,10 @@ risk: high
 primary_focus: contract_evidence
 focus: [state_authority, time_lifecycle, permission_external, failure_concurrency]
 boundary: boundary.protocol-surfaces
-observed_at: source:0a91548f9c8d3f6e6a19bc2025fd2d21a46b656162f50b44aedfba5b6d5bf1bb
+observed_at: source:3d3fb558349d604e3762588a5db974417956f949c929c8d8cae30ab94558379b
 code_refs: [src/acp/adapter.rs, src/acp/runtime.rs, src/a2a/server.rs, echo-integration/src/channels/manager.rs, echo-integration/src/lsp/manager.rs, src/channels.rs, src/headless.rs]
 rule_refs: [rule.protocol-role-separation, rule.sdk-rust-authority]
-evidence_refs: [evidence.provider-protocol-quality, evidence.sdk-contracts, evidence.lsp-derived-handle-lifecycle-repair, evidence.lsp-derived-handle-lifecycle-verification, evidence.channel-generation-delivery-fence-repair, evidence.channel-generation-delivery-fence-verification]
+evidence_refs: [evidence.provider-protocol-quality, evidence.sdk-contracts, evidence.lsp-derived-handle-lifecycle-repair, evidence.lsp-derived-handle-lifecycle-verification, evidence.channel-generation-delivery-fence-repair, evidence.channel-generation-delivery-fence-verification, evidence.agent-adapter-close-settlement-repair, evidence.agent-adapter-close-settlement-verification]
 finding_refs: [finding.a2a-terminal-authority, finding.a2a-stream-cleanup, finding.channel-attachment-projection, finding.turn-driver-entry-coverage, finding.lsp-manager-derived-handle-resurrection]
 ---
 
@@ -23,7 +23,7 @@ ACP 连接 Client 与 coding Agent，MCP 连接 Agent 与 tools/resources，A2A 
 
 ## 当前行为
 
-ACP Session/Prompt/update/cancel 投影同一 driven Agent Turn，并在关闭时保留无receipt的Run；A2A保持当前自持task/terminal与开放Finding；Channels以generation fence阻止reset后的旧delivery，并由AgentChannelHandler进入driven Turn、SessionHandler关闭sender Agent；Headless聚合driven Turn且在返回前await Agent close；SDK Host以ACP和`_echo_agent/*`暴露Rust authority。
+ACP Session/Prompt/update/cancel 投影同一 driven Agent Turn，并在关闭时保留无receipt的Run；A2A保持当前自持task/terminal与开放Finding；Channels以generation fence阻止reset后的旧delivery，并由AgentChannelHandler进入driven Turn、SessionHandler关闭sender Agent；Headless通过owned task/handle聚合driven Turn并保留Agent close retry；SDK Host以ACP和`_echo_agent/*`暴露Rust authority。
 
 ## 期望行为
 

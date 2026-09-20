@@ -4,13 +4,13 @@ id: map.protocol-surfaces
 kind: capability_map
 title: ACP、A2A、Channels、Headless 与 SDK Surfaces
 risk: high
-observed_at: source:0a91548f9c8d3f6e6a19bc2025fd2d21a46b656162f50b44aedfba5b6d5bf1bb
+observed_at: source:3d3fb558349d604e3762588a5db974417956f949c929c8d8cae30ab94558379b
 boundary_refs: [boundary.protocol-surfaces]
 behavior_refs: [behavior.protocol-projection]
 rule_refs: [rule.protocol-role-separation, rule.sdk-rust-authority]
-evidence_refs: [evidence.provider-protocol-quality, evidence.sdk-contracts, evidence.high-risk-audit-frontier, evidence.framework-concept-navigation, evidence.sdk-deferred-backlog-count-repair, evidence.sdk-deferred-backlog-count-verification]
+evidence_refs: [evidence.provider-protocol-quality, evidence.sdk-contracts, evidence.high-risk-audit-frontier, evidence.framework-concept-navigation, evidence.agent-adapter-close-settlement-repair, evidence.agent-adapter-close-settlement-verification, evidence.sdk-deferred-backlog-count-repair, evidence.sdk-deferred-backlog-count-verification]
 finding_refs: [finding.a2a-terminal-authority, finding.a2a-stream-cleanup, finding.a2a-task-id-admission-authority, finding.a2a-advertised-capability-binding, finding.channel-attachment-projection, finding.channel-reset-stale-generation-delivery, finding.turn-driver-entry-coverage, finding.agent-adapter-close-settlement, finding.turn-terminal-commit-projection-order, finding.sdk-gap-generation-validation-parity, finding.sdk-gap-ack-replay-watermark, finding.sdk-deferred-backlog-count-drift]
-audit_refs: [audit.protocol-surfaces.state-authority, audit.protocol-surfaces.time-lifecycle, audit.protocol-surfaces.contract-evidence, audit.semantic-governance-final-rereview]
+audit_refs: [audit.protocol-surfaces.state-authority, audit.protocol-surfaces.time-lifecycle, audit.protocol-surfaces.contract-evidence, audit.semantic-governance-final-rereview, audit.agent-adapter-close-settlement-rereview]
 related_map_refs: [map.agent-session-turn, map.observation-persistence-delivery, map.extension-lifecycle, map.sdk-facade-parity]
 scenarios:
   acp-session-run-projection:
@@ -27,15 +27,16 @@ scenarios:
   channel-session-and-message:
     status: needs_review
     source_refs: [echo-integration/src/channels/session.rs, echo-integration/src/channels/types.rs, src/channels.rs]
-    finding_refs: [finding.channel-attachment-projection, finding.channel-reset-stale-generation-delivery, finding.turn-driver-entry-coverage, finding.agent-adapter-close-settlement]
-    evidence_refs: [evidence.provider-protocol-quality, evidence.channel-generation-delivery-fence-repair, evidence.channel-generation-delivery-fence-verification]
-    unknown: Channel session/incarnation与reset delivery fence已映射，但handler仍丢弃attachments、直接raw chat且close不结算Agent
-    next_step: 分别repair attachment投影、driven Turn入口与close owner；reset generation fencing已闭合待交付
+    finding_refs: [finding.channel-attachment-projection, finding.channel-reset-stale-generation-delivery, finding.turn-driver-entry-coverage]
+    evidence_refs: [evidence.provider-protocol-quality, evidence.channel-generation-delivery-fence-repair, evidence.channel-generation-delivery-fence-verification, evidence.agent-adapter-close-settlement-repair, evidence.agent-adapter-close-settlement-verification]
+    unknown: Channel session/incarnation、reset delivery fence与Agent close已映射，但handler仍丢弃attachments并直接raw chat
+    next_step: 分别repair attachment投影与driven Turn入口；不重建close owner
   headless-turn:
     status: mapped
     source_refs: [src/headless.rs, echo-orchestration/src/runtime/turn_driver.rs]
     behavior_refs: [behavior.protocol-projection]
     rule_refs: [rule.turn-terminal-authority]
+    evidence_refs: [evidence.agent-adapter-close-settlement-repair, evidence.agent-adapter-close-settlement-verification]
   sdk-host-and-language-clients:
     status: needs_review
     source_refs: [.echo-semantic/assets/asset.external-sdk-repository.md, docs/adr/0031-sdk-identity-governance-scope.md]
@@ -97,7 +98,8 @@ ACP permission 与 Agent policy 只在协商后调用；channel/provider credent
 
 ## 场景处置清单
 
-五类入口均有路由；A2A/Channel/SDK gap保持needs_review并进入Finding，SDK deferred capability backlog独立needs_review，产品层excluded。
+五类入口均有路由；非A2A adapter close已闭合，A2A/Channel/SDK其它gap保持needs_review并进入
+各自Finding，SDK deferred capability backlog独立needs_review，产品层excluded。
 
 ## 未展开项
 

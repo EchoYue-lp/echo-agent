@@ -6,13 +6,13 @@ title: Raw Agent Execution Contract
 asset_type: protocol
 status: active
 risk: high
-observed_at: 81e2756cee9127fa23a9bb1023bd56aa8f954964
+observed_at: source:3d3fb558349d604e3762588a5db974417956f949c929c8d8cae30ab94558379b
 boundary_refs: [boundary.agent-session-turn]
-code_refs: [echo-core/src/agent/mod.rs, echo-core/src/tools/mod.rs, src/agent/react/mod.rs, src/agent/handle.rs, src/eval/runner.rs, docs/adr/0038-eval-trace-correlation-identity.md]
+code_refs: [echo-core/src/agent/mod.rs, echo-core/src/tools/mod.rs, src/lib.rs, src/agent/react/mod.rs, src/agent/react/lifecycle.rs, src/agent/handle.rs, src/headless.rs, src/eval/runner.rs, docs/adr/0038-eval-trace-correlation-identity.md, docs/adr/0066-agent-adapter-close-ownership.md]
 consumer_refs: [src/channels.rs, src/a2a/server.rs, echo-orchestration/src/runtime/turn_driver.rs]
 behavior_refs: [behavior.agent-turn-lifecycle]
 rule_refs: []
-evidence_refs: [evidence.agent-context-execution, evidence.eval-timeout-turn-settlement-repair, evidence.eval-timeout-turn-settlement-verification, evidence.eval-trace-correlation-repair, evidence.eval-trace-correlation-verification]
+evidence_refs: [evidence.agent-context-execution, evidence.eval-timeout-turn-settlement-repair, evidence.eval-timeout-turn-settlement-verification, evidence.eval-trace-correlation-repair, evidence.eval-trace-correlation-verification, evidence.agent-adapter-close-settlement-repair, evidence.agent-adapter-close-settlement-verification]
 finding_refs: [finding.turn-driver-entry-coverage, finding.a2a-terminal-authority, finding.eval-trace-identity]
 candidate_refs: [asset.driven-turn-authority]
 ---
@@ -29,7 +29,10 @@ Channel、A2A与直接Rust callers可调用raw execution；Eval已迁移为Agent
 
 ## 生命周期
 
-Construct/configure Agent、value-scoped runtime identity、execute/chat/stream、cancel、close；ReactAgent managed stream terminal不领先于其自有producer settlement，product correlation不替代producer-owned trace ID，具体Invocation resource和effect由相关运行边界结算。
+Construct/configure Agent、value-scoped runtime identity、execute/chat/stream、cancel、close；ReactAgent
+close fence admission并等待既有Turn terminal，managed stream terminal不领先于其自有producer
+settlement；preparation或producer异常Drop形成persistent close debt并阻断资源释放。product
+correlation不替代producer-owned trace ID，具体Invocation resource和effect由相关运行边界结算。
 
 ## 候选关系
 

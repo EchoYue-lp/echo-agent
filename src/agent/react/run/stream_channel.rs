@@ -194,16 +194,40 @@ impl ReactAgent {
         let mut text = init.text.clone();
         let mut message = init.message.clone();
         let label = init.label.clone();
-        let invocation = init.invocation;
+        let mut invocation = init.invocation;
         // Capture value-carried run metadata before the execution mutex wait.
         // Concurrent callers may update/clear the agent's shared external
         // context while this invocation is queued, but this snapshot belongs
         // to the invocation that entered here.
-        let legacy_runtime = if invocation.is_none() {
+        let mut legacy_runtime = if invocation.is_none() {
             Some(self.capture_legacy_external_context())
         } else {
             None
         };
+        let requested_cancel = invocation
+            .as_ref()
+            .and_then(|context| {
+                context
+                    .runtime
+                    .as_ref()
+                    .and_then(|runtime| runtime.cancel.as_deref().cloned())
+                    .or_else(|| context.cancel.clone())
+            })
+            .or_else(|| {
+                legacy_runtime
+                    .as_ref()
+                    .and_then(|runtime| runtime.cancel.as_deref().cloned())
+            });
+        let (mut turn_lease, lifecycle_cancel) = self.close_authority.admit(requested_cancel)?;
+        if let Some(context) = invocation.as_mut() {
+            context.cancel = Some(lifecycle_cancel.clone());
+            if let Some(runtime) = context.runtime.as_mut() {
+                runtime.cancel = Some(Arc::new(lifecycle_cancel.clone()));
+            }
+        }
+        if let Some(runtime) = legacy_runtime.as_mut() {
+            runtime.cancel = Some(Arc::new(lifecycle_cancel.clone()));
+        }
         let runtime_state_id = crate::agent::snapshot::effective_runtime_state_id(
             self.config.conversation_id.as_deref(),
             invocation.as_ref(),
@@ -221,55 +245,88 @@ impl ReactAgent {
         // so the guard can be moved into the spawned task and held for the
         // entire stream lifetime.
         let execution_guard = self.execution_mutex.clone().lock_owned().await;
+        if lifecycle_cancel.is_cancelled() {
+            return Err(crate::error::ReactError::Agent(Box::new(
+                crate::error::AgentError::Cancelled(
+                    "Agent close cancelled queued turn".to_string(),
+                ),
+            )));
+        }
+        // Preparation below may reconcile persistence, hydrate state, emit
+        // diagnostics, or start a trace. Abandoning this caller future after
+        // admission must therefore remain visible as close debt.
+        turn_lease.mark_started();
 
         let admission_snapshot = match (invocation.as_ref(), legacy_runtime.as_ref()) {
             (Some(invocation), _) => AgentSnapshot::from_agent_with_invocation(self, invocation),
             (None, Some(legacy)) => AgentSnapshot::from_agent_with_legacy_context(self, legacy),
             (None, None) => make_snapshot(self),
         };
-        if let Some(settlement) = admission_snapshot
+        let pending_settlement = match admission_snapshot
             .reconcile_pending_transcript_projection()
-            .await?
+            .await
         {
-            if settlement.status != crate::memory::TranscriptProjectionSettlementStatus::Settled {
-                return Err(
-                    crate::agent::snapshot::transcript_settlement_admission_error(&settlement),
-                );
+            Ok(settlement) => settlement,
+            Err(error) => {
+                turn_lease.settle();
+                return Err(error);
             }
-            tx.send(Ok(AgentEvent::TranscriptProjectionSettlement(settlement)))
+        };
+        if let Some(settlement) = pending_settlement {
+            if settlement.status != crate::memory::TranscriptProjectionSettlementStatus::Settled {
+                let error =
+                    crate::agent::snapshot::transcript_settlement_admission_error(&settlement);
+                turn_lease.settle();
+                return Err(error);
+            }
+            if tx
+                .send(Ok(AgentEvent::TranscriptProjectionSettlement(settlement)))
                 .await
-                .map_err(|_| {
-                    crate::error::ReactError::Other(
-                        "event consumer closed during transcript recovery".to_string(),
-                    )
-                })?;
+                .is_err()
+            {
+                turn_lease.settle();
+                return Err(crate::error::ReactError::Other(
+                    "event consumer closed during transcript recovery".to_string(),
+                ));
+            }
         }
         if admission_snapshot.conversation_store.is_some() {
-            let scope_id = admission_snapshot
-                .config
-                .conversation_id
-                .as_deref()
-                .ok_or_else(|| {
-                    crate::error::ConfigError::ConfigFileError(
-                        "managed transcript persistence requires a conversation identity"
-                            .to_string(),
-                    )
-                })?;
-            let runtime_state_id = runtime_state_id.ok_or_else(|| {
-                crate::error::ConfigError::ConfigFileError(
+            let Some(scope_id) = admission_snapshot.config.conversation_id.as_deref() else {
+                turn_lease.settle();
+                return Err(crate::error::ConfigError::ConfigFileError(
+                    "managed transcript persistence requires a conversation identity".to_string(),
+                )
+                .into());
+            };
+            let Some(runtime_state_id) = runtime_state_id else {
+                turn_lease.settle();
+                return Err(crate::error::ConfigError::ConfigFileError(
                     "managed transcript persistence requires a runtime-state identity".to_string(),
                 )
-            })?;
-            self.hydrate_managed_runtime_before_input_guard(scope_id, runtime_state_id)
-                .await?;
+                .into());
+            };
+            if let Err(error) = self
+                .hydrate_managed_runtime_before_input_guard(scope_id, runtime_state_id)
+                .await
+            {
+                turn_lease.settle();
+                return Err(error);
+            }
         }
 
         // Guard raw input before trace, hooks, memory, or conversation context
         // can retain it. Transformations become the authoritative turn input.
         if let Some(gm) = &self.guard.guard_manager {
-            let result = gm
+            let result = match gm
                 .check_all(&text, crate::guard::GuardDirection::Input)
-                .await?;
+                .await
+            {
+                Ok(result) => result,
+                Err(error) => {
+                    turn_lease.settle();
+                    return Err(error);
+                }
+            };
             match result {
                 crate::guard::GuardResult::Block { reason } => {
                     let agent = self.config.agent_name.clone();
@@ -323,6 +380,7 @@ impl ReactAgent {
                         AgentEvent::FinalAnswer(terminal_reason),
                     )
                     .await;
+                    turn_lease.settle();
                     drop(execution_guard);
                     return Ok(Box::pin(futures::stream::iter(events)));
                 }
@@ -439,6 +497,7 @@ impl ReactAgent {
                 )
                 .await;
                 active_turn_lease.settle(outcome);
+                turn_lease.settle();
                 drop(execution_guard);
                 return Ok(Box::pin(futures::stream::iter(events)));
             }
@@ -462,6 +521,7 @@ impl ReactAgent {
                 )
                 .await;
                 active_turn_lease.settle(outcome);
+                turn_lease.settle();
                 drop(execution_guard);
                 return Ok(Box::pin(futures::stream::iter(events)));
             }
@@ -551,13 +611,20 @@ impl ReactAgent {
         let terminal_cancel = consumer_cancel.clone();
         let failure_snapshot = snap.clone();
 
-        let runtime = tokio::runtime::Handle::try_current().map_err(|error| {
-            crate::error::ReactError::Other(format!(
-                "stream execution requires a Tokio runtime: {error}"
-            ))
-        })?;
+        let runtime = match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                active_turn_lease.settle(crate::agent::AgentSteerTurnOutcome::Failed);
+                turn_lease.settle();
+                return Err(crate::error::ReactError::Other(format!(
+                    "stream execution requires a Tokio runtime: {error}"
+                )));
+            }
+        };
         let task = runtime.spawn(async move {
-            // Move the guard into the spawned task — held for full stream duration
+            // The task owns both the execution guard and close lease for its
+            // full lifetime, even if the caller drops the returned stream.
+            let turn_lease = turn_lease;
             let _execution_guard = execution_guard;
             match snap
                 .run_core_loop(
@@ -605,6 +672,7 @@ impl ReactAgent {
                         .await;
                 }
             }
+            turn_lease.settle();
         });
 
         Ok(Box::pin(ManagedAgentEventStream {
@@ -1209,6 +1277,27 @@ mod tests {
                 } else {
                     Ok(GuardResult::Pass)
                 }
+            })
+        }
+    }
+
+    struct AwaitingGuard {
+        started: Arc<tokio::sync::Notify>,
+    }
+
+    impl Guard for AwaitingGuard {
+        fn name(&self) -> &str {
+            "awaiting-guard"
+        }
+
+        fn check<'a>(
+            &'a self,
+            _content: &'a str,
+            _direction: GuardDirection,
+        ) -> BoxFuture<'a, Result<GuardResult>> {
+            Box::pin(async move {
+                self.started.notify_one();
+                std::future::pending::<Result<GuardResult>>().await
             })
         }
     }
@@ -2458,6 +2547,194 @@ mod tests {
             run_ids,
             vec![Some("run-a".to_string()), Some("run-b".to_string())]
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn close_cancels_active_and_queued_turns_and_remains_retryable() -> Result<()> {
+        let llm = MockLlmClient::new().with_responses(["first", "second"]);
+        let agent = Arc::new(agent_with_mock_llm(llm));
+        let projector = Arc::new(BlockingRunIdProjection::new());
+        agent.set_pre_model_context_projector(Some(projector.clone()));
+
+        let first_stream = agent
+            .execute_stream_with_cancel("first", crate::agent::CancellationToken::new())
+            .await?;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            projector.first_started.notified(),
+        )
+        .await
+        .map_err(|_| {
+            crate::error::ReactError::Other("first projection did not start".to_string())
+        })?;
+
+        let mut queued = Box::pin(
+            agent.execute_stream_with_cancel("second", crate::agent::CancellationToken::new()),
+        );
+        tokio::select! {
+            result = &mut queued => {
+                return Err(crate::error::ReactError::Other(format!(
+                    "queued stream unexpectedly bypassed execution mutex: {:?}",
+                    result.is_ok()
+                )));
+            }
+            _ = tokio::task::yield_now() => {}
+        }
+
+        let close_agent = Arc::clone(&agent);
+        let close_task = tokio::spawn(async move { close_agent.close().await });
+        tokio::task::yield_now().await;
+        if close_task.is_finished() {
+            return Err(crate::error::ReactError::Other(
+                "Agent close returned before active and queued turns settled".to_string(),
+            ));
+        }
+
+        close_task.abort();
+        let _ = close_task.await;
+        projector.release_first.notify_one();
+
+        let _: Vec<_> = first_stream.collect().await;
+        let queued_result = tokio::time::timeout(std::time::Duration::from_secs(2), &mut queued)
+            .await
+            .map_err(|_| {
+                crate::error::ReactError::Other(
+                    "queued turn did not settle after close cancellation".to_string(),
+                )
+            })?;
+        if queued_result.is_ok() {
+            return Err(crate::error::ReactError::Other(
+                "queued turn was admitted after Agent close began".to_string(),
+            ));
+        }
+
+        agent.close().await?;
+        if agent.execute("after close").await.is_ok() {
+            return Err(crate::error::ReactError::Other(
+                "Agent accepted a new turn after close".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn abort_during_input_guard_becomes_persistent_close_debt() -> Result<()> {
+        let started = Arc::new(tokio::sync::Notify::new());
+        let mut agent = agent_with_mock_llm(MockLlmClient::new().with_response("unreachable"));
+        let mut guards = GuardManager::new();
+        guards.add(Arc::new(AwaitingGuard {
+            started: started.clone(),
+        }));
+        agent.set_guard_manager(guards);
+        let agent = Arc::new(agent);
+        let run_agent = Arc::clone(&agent);
+        let caller = tokio::spawn(async move {
+            let stream = run_agent
+                .execute_stream_with_cancel(
+                    "abort during input guard",
+                    crate::agent::CancellationToken::new(),
+                )
+                .await?;
+            drop(stream);
+            Result::Ok(())
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), started.notified())
+            .await
+            .map_err(|_| {
+                crate::error::ReactError::Other(
+                    "input guard did not enter its awaited phase".to_string(),
+                )
+            })?;
+        caller.abort();
+        let _ = caller.await;
+
+        for attempt in 1..=2 {
+            let close_error = agent.close().await.err().ok_or_else(|| {
+                crate::error::ReactError::Other(format!(
+                    "Agent close attempt {attempt} ignored abandoned preparation debt"
+                ))
+            })?;
+            assert!(
+                close_error
+                    .to_string()
+                    .contains("without canonical settlement")
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn forced_producer_abort_becomes_persistent_close_debt() -> Result<()> {
+        let agent = Arc::new(agent_with_mock_llm(
+            MockLlmClient::new().with_response("unreachable"),
+        ));
+        let projector = Arc::new(BlockingRunIdProjection::new());
+        agent.set_pre_model_context_projector(Some(projector.clone()));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| {
+                crate::error::ReactError::Other(format!("test runtime failed: {error}"))
+            })?;
+        let stream = runtime.block_on(async {
+            let stream = agent
+                .execute_stream_with_cancel(
+                    "abort blocked producer",
+                    crate::agent::CancellationToken::new(),
+                )
+                .await?;
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                projector.first_started.notified(),
+            )
+            .await
+            .map_err(|_| {
+                crate::error::ReactError::Other(
+                    "blocked producer did not enter projection".to_string(),
+                )
+            })?;
+            Result::Ok(stream)
+        })?;
+        // Releasing the consumer requests cancellation, but this injected
+        // projector ignores it. Runtime shutdown then drops the producer.
+        drop(stream);
+        drop(runtime);
+
+        let retry_runtime = tokio::runtime::Runtime::new().map_err(|error| {
+            crate::error::ReactError::Other(format!("retry runtime failed: {error}"))
+        })?;
+        for attempt in 1..=2 {
+            let close_error = retry_runtime.block_on(agent.close()).err().ok_or_else(|| {
+                crate::error::ReactError::Other(format!(
+                    "Agent close attempt {attempt} ignored unsettled producer debt"
+                ))
+            })?;
+            assert!(
+                close_error
+                    .to_string()
+                    .contains("without canonical settlement")
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn provider_failure_settles_close_lease_and_close_is_idempotent() -> Result<()> {
+        let agent = agent_with_mock_llm(MockLlmClient::new().with_error(
+            crate::error::ReactError::Other("injected provider failure".to_string()),
+        ));
+        let events = agent
+            .execute_stream_with_cancel("provider failure", crate::agent::CancellationToken::new())
+            .await?
+            .collect::<Vec<_>>()
+            .await;
+        assert!(events.iter().any(|event| {
+            matches!(event, Ok(AgentEvent::Error { message, .. }) if message.contains("injected provider failure"))
+        }));
+
+        agent.close().await?;
+        agent.close().await?;
         Ok(())
     }
 

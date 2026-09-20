@@ -46,7 +46,7 @@ pub struct HeadlessConfig {
 | `exit_on_error` | `bool` | `true` | When `true`, the process exits with code 1 on agent failure. |
 | `output_format` | `String` | `"text"` | Controls `format_output()`: `"text"` returns raw output; `"json"` wraps the result in a structured JSON envelope. |
 | `max_iterations` | `Option<usize>` | `None` | Safety cap on ReAct loop iterations. Prevents runaway execution in unattended environments. |
-| `cancel_token` | `Option<CancellationToken>` | `None` | Requests cancellation of the current driven Turn. |
+| `cancel_token` | `Option<CancellationToken>` | `None` | Parent cancellation scope observed by the run. Headless owns a child token, so cancelling this run does not cancel the parent or siblings. |
 
 ---
 
@@ -138,14 +138,27 @@ Returns `0` on success, `1` on failure — suitable for direct use with `std::pr
 When `exit_on_error` is `false`, failures still set `success: false` and remain
 visible in `output`, but `exit_code()` returns `0` by explicit caller policy.
 
-The one-shot Headless owner awaits `Agent::close` after the Turn receipt even
-when execution failed or was cancelled. A close error is returned in the
-`HeadlessResult` output and cannot be retried through this one-shot API after
-the function returns. If the caller times out, aborts, or drops the outer
-`run_headless` future before it reaches close, the local Agent owner is dropped
-and awaited cleanup is not guaranteed. Code that requires cancellation-safe
-cleanup must keep a long-lived Agent or adapter owner instead of abandoning
-the one-shot future. See
+Headless execution uses an owned task that awaits `Agent::close` after the Turn
+receipt even when execution failed or was cancelled. If the caller aborts or
+drops the `run_headless` waiter, the wrapper requests Turn cancellation and the
+owned task continues through close. Callers that need to stop waiting, observe
+the same result later, or retry a failed close use `start_headless` and retain
+its `HeadlessRunHandle`:
+
+```rust
+let run = start_headless(config, |builder| builder);
+let result = run.wait().await;
+if !result.success {
+    run.retry_close().await?;
+}
+```
+
+Call `retry_close` only after `wait` publishes the result receipt. It returns a
+phase error while execution is active and becomes idempotent after close has
+succeeded. If the runtime drops the owned task before its first poll, the
+handle publishes a failure receipt and retains the same Agent for close retry.
+
+See
 [ADR 0066](../adr/0066-agent-adapter-close-ownership.md).
 
 #### format_output()

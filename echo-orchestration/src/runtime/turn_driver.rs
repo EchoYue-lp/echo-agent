@@ -524,9 +524,25 @@ impl TurnReceipt {
         last_event_sequence: u64,
         started: Instant,
     ) -> Self {
+        Self::terminal_receipt(
+            turn_id,
+            TurnOutcome::Failed(failure),
+            delivery,
+            last_event_sequence,
+            started,
+        )
+    }
+
+    fn terminal_receipt(
+        turn_id: TurnId,
+        outcome: TurnOutcome,
+        delivery: TurnDeliveryOutcome,
+        last_event_sequence: u64,
+        started: Instant,
+    ) -> Self {
         Self {
             turn_id,
-            outcome: TurnOutcome::Failed(failure),
+            outcome,
             delivery,
             final_answer: None,
             final_message_id: None,
@@ -678,10 +694,16 @@ impl AgentTurnDriver {
         let raw = match raw {
             Ok(stream) => stream,
             Err(error) => {
-                if let Some(lifecycle) = input_lifecycle.as_ref() {
-                    lifecycle.settle(AgentSteerTurnOutcome::Failed);
-                }
                 let failure = AgentFailure::from(&error);
+                let cancelled =
+                    failure.terminal_kind == echo_core::error::AgentTerminalKind::Cancelled;
+                if let Some(lifecycle) = input_lifecycle.as_ref() {
+                    lifecycle.settle(if cancelled {
+                        AgentSteerTurnOutcome::Cancelled
+                    } else {
+                        AgentSteerTurnOutcome::Failed
+                    });
+                }
                 let mut delivery = TurnDeliveryOutcome::NotAttempted;
                 let next_sequence = request.last_persisted_sequence.checked_add(1);
                 let mut last_event_sequence = request.last_persisted_sequence;
@@ -706,9 +728,13 @@ impl AgentTurnDriver {
                         }
                     }
                 }
-                return TurnReceipt::failure_receipt(
+                return TurnReceipt::terminal_receipt(
                     turn_id,
-                    failure,
+                    if cancelled {
+                        TurnOutcome::Cancelled
+                    } else {
+                        TurnOutcome::Failed(failure)
+                    },
                     delivery,
                     last_event_sequence,
                     started,
@@ -1454,6 +1480,44 @@ mod tests {
         }
     }
 
+    struct CancelledStartAgent;
+
+    impl Agent for CancelledStartAgent {
+        fn name(&self) -> &str {
+            "cancelled-start"
+        }
+
+        fn model_name(&self) -> &str {
+            "test-model"
+        }
+
+        fn system_prompt(&self) -> &str {
+            ""
+        }
+
+        fn execute<'a>(
+            &'a self,
+            _task: &'a str,
+        ) -> BoxFuture<'a, echo_core::error::Result<String>> {
+            Box::pin(async { Ok(String::new()) })
+        }
+
+        fn execute_stream<'a>(
+            &'a self,
+            _task: &'a str,
+        ) -> BoxFuture<
+            'a,
+            echo_core::error::Result<BoxStream<'a, echo_core::error::Result<AgentEvent>>>,
+        > {
+            Box::pin(async {
+                Err(echo_core::error::AgentError::Cancelled(
+                    "cancelled before stream start".to_string(),
+                )
+                .into())
+            })
+        }
+    }
+
     #[tokio::test]
     async fn stream_start_failure_maps_to_failed_receipt() {
         let agent: Arc<dyn Agent> = Arc::new(FailingAgent);
@@ -1469,6 +1533,28 @@ mod tests {
                 .lock()
                 .unwrap_or_else(|error| error.into_inner()),
             vec![1]
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_start_cancellation_maps_to_cancelled_receipt() {
+        let (request, mut input) = TurnRequest::new(identity("start-cancelled"), "hello")
+            .mode(TurnMode::Execute)
+            .with_input_receipt();
+        let sink = RecordingSink::default();
+        let receipt = AgentTurnDriver
+            .drive(&CancelledStartAgent, request, &sink)
+            .await;
+
+        assert_eq!(receipt.outcome, TurnOutcome::Cancelled);
+        assert_eq!(receipt.delivery, TurnDeliveryOutcome::Delivered);
+        assert_eq!(receipt.last_event_sequence, 1);
+        assert_eq!(
+            input.wait_for_turn_settled().await,
+            TurnInputState::TurnSettled {
+                outcome: AgentSteerTurnOutcome::Cancelled,
+                drained: false,
+            }
         );
     }
 

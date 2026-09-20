@@ -2,7 +2,7 @@
 
 use super::types::{ChannelPlugin, MessageHandler};
 use echo_core::error::Result;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tracing::{info, warn};
 
@@ -18,10 +18,11 @@ pub struct ChannelLifecycleResult {
 /// - Registering multiple ChannelPlugins (QQ Bot, Feishu, etc.)
 /// - Unified start / stop
 /// - Query or send by ID
-/// - Auto-stop all channels on Drop
+/// - Explicit awaited shutdown through [`Self::stop_all`]
 pub struct ChannelManager {
     channels: HashMap<String, Box<dyn ChannelPlugin>>,
     handlers: HashMap<String, Arc<dyn MessageHandler>>,
+    stopped_transports: HashSet<String>,
 }
 
 impl Default for ChannelManager {
@@ -35,6 +36,7 @@ impl ChannelManager {
         Self {
             channels: HashMap::new(),
             handlers: HashMap::new(),
+            stopped_transports: HashSet::new(),
         }
     }
 
@@ -86,6 +88,7 @@ impl ChannelManager {
                 });
                 continue;
             }
+            self.stopped_transports.remove(id);
             let handler = handler_factory(id);
             self.handlers.insert(id.clone(), Arc::clone(&handler));
             match plugin.start(Arc::clone(&handler)).await {
@@ -101,23 +104,26 @@ impl ChannelManager {
                     // A failed start may have retained the handler or opened a
                     // transport. Keep ownership whenever rollback is incomplete.
                     let failure = match plugin.stop().await {
-                        Ok(()) => match handler.close().await {
-                            Ok(()) => {
-                                self.handlers.remove(id);
-                                e
+                        Ok(()) => {
+                            self.stopped_transports.insert(id.clone());
+                            match handler.close().await {
+                                Ok(()) => {
+                                    self.handlers.remove(id);
+                                    e
+                                }
+                                Err(close_error) => {
+                                    warn!(
+                                        "Channel '{}' handler close after failed start: {}",
+                                        id, close_error
+                                    );
+                                    echo_core::error::ReactError::Channel(Box::new(
+                                        echo_core::error::ChannelError::Other(format!(
+                                            "Channel '{id}' start failed: {e}; handler close failed: {close_error}"
+                                        )),
+                                    ))
+                                }
                             }
-                            Err(close_error) => {
-                                warn!(
-                                    "Channel '{}' handler close after failed start: {}",
-                                    id, close_error
-                                );
-                                echo_core::error::ReactError::Channel(Box::new(
-                                    echo_core::error::ChannelError::Other(format!(
-                                        "Channel '{id}' start failed: {e}; handler close failed: {close_error}"
-                                    )),
-                                ))
-                            }
-                        },
+                        }
                         Err(stop_error) => {
                             warn!("Channel '{}' stop after failed start: {}", id, stop_error);
                             echo_core::error::ReactError::Channel(Box::new(
@@ -142,7 +148,10 @@ impl ChannelManager {
     pub async fn stop(&mut self, channel_id: &str) -> Result<()> {
         if let Some(plugin) = self.channels.get_mut(channel_id) {
             info!("Stopping channel: {}", channel_id);
-            plugin.stop().await?;
+            if !self.stopped_transports.contains(channel_id) {
+                plugin.stop().await?;
+                self.stopped_transports.insert(channel_id.to_string());
+            }
             if let Some(handler) = self.handlers.get(channel_id) {
                 handler.close().await?;
                 self.handlers.remove(channel_id);
@@ -195,6 +204,9 @@ impl ChannelManager {
 
     /// Get a mutable channel reference by ID
     pub fn get_mut(&mut self, id: &str) -> Option<&mut (dyn ChannelPlugin + '_)> {
+        // External mutable access may restart or otherwise change transport
+        // state, so the next managed stop must call the plugin again.
+        self.stopped_transports.remove(id);
         match self.channels.get_mut(id) {
             Some(plugin) => Some(plugin.as_mut()),
             None => None,
@@ -209,11 +221,11 @@ impl ChannelManager {
 
 impl Drop for ChannelManager {
     fn drop(&mut self) {
-        if !self.channels.is_empty() {
+        if !self.handlers.is_empty() {
             info!(
-                "ChannelManager dropped with {} channels remaining, \
+                "ChannelManager dropped with {} unsettled handlers remaining, \
                  consider calling stop_all() before drop",
-                self.channels.len()
+                self.handlers.len()
             );
         }
     }
@@ -259,6 +271,8 @@ mod close_tests {
 
     struct ClosingPlugin {
         stopped: Arc<AtomicBool>,
+        stops: Arc<AtomicUsize>,
+        fail_repeated_stop: bool,
         handler: Option<Arc<dyn MessageHandler>>,
     }
 
@@ -284,6 +298,10 @@ mod close_tests {
         }
 
         async fn stop(&mut self) -> Result<()> {
+            let attempt = self.stops.fetch_add(1, Ordering::AcqRel);
+            if self.fail_repeated_stop && attempt > 0 {
+                return Err(ReactError::Other("transport already stopped".to_string()));
+            }
             self.stopped.store(true, Ordering::Release);
             self.handler = None;
             Ok(())
@@ -299,10 +317,13 @@ mod close_tests {
     #[tokio::test]
     async fn stop_retains_handler_until_awaited_close_succeeds() -> Result<()> {
         let stopped = Arc::new(AtomicBool::new(false));
+        let stops = Arc::new(AtomicUsize::new(0));
         let closes = Arc::new(AtomicUsize::new(0));
         let mut manager = ChannelManager::new();
         manager.register(Box::new(ClosingPlugin {
             stopped: Arc::clone(&stopped),
+            stops: Arc::clone(&stops),
+            fail_repeated_stop: true,
             handler: None,
         }))?;
         let results = manager
@@ -321,6 +342,8 @@ mod close_tests {
         assert_eq!(closes.load(Ordering::Acquire), 1);
         manager.stop("close-test").await?;
         assert_eq!(closes.load(Ordering::Acquire), 2);
+        assert_eq!(stops.load(Ordering::Acquire), 1);
+        assert!(manager.handlers.is_empty());
         Ok(())
     }
 
@@ -349,11 +372,14 @@ mod close_tests {
         }
 
         let stopped = Arc::new(AtomicBool::new(false));
+        let stops = Arc::new(AtomicUsize::new(0));
         let entered = Arc::new(Notify::new());
         let closes = Arc::new(AtomicUsize::new(0));
         let mut manager = ChannelManager::new();
         manager.register(Box::new(ClosingPlugin {
             stopped,
+            stops: Arc::clone(&stops),
+            fail_repeated_stop: true,
             handler: None,
         }))?;
         let results = manager
@@ -374,6 +400,7 @@ mod close_tests {
         assert_eq!(closes.load(Ordering::Acquire), 1);
         manager.stop("close-test").await?;
         assert_eq!(closes.load(Ordering::Acquire), 2);
+        assert_eq!(stops.load(Ordering::Acquire), 1);
         Ok(())
     }
 

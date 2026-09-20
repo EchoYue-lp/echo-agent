@@ -63,6 +63,7 @@
 //! for result in manager.start_all(handler_factory).await {
 //!     result.result?;
 //! }
+//! manager.stop_all().await?;
 //! # Ok(())
 //! # }
 //! ```
