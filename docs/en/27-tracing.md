@@ -152,15 +152,29 @@ pub trait RunStore: Send + Sync {
 
     // Default implementation: load → push event → save
     async fn append_event(&self, run_id: &str, event: RunEvent) -> Result<()>;
+
+    // Default implementation: load → apply first terminal → save
+    async fn finalize_run(
+        &self,
+        run_id: &str,
+        status: RunStatus,
+        output: Option<&str>,
+        error: Option<&str>,
+    ) -> Result<bool>;
 }
 ```
+
+Backends that allow concurrent append and finalization override both mutation
+methods under one authority. `finalize_run` returns `false` when the run does
+not exist; the built-in stores retain late events and preserve the first
+terminal result.
 
 ### Built-in Implementations
 
 | Implementation | Storage | Use Case |
 |---------------|---------|----------|
 | `InMemoryRunStore` | `RwLock<HashMap>` | Testing, short-lived sessions |
-| `JsonlRunStore` | Append-only `.jsonl` files | Production, persistent traces |
+| `JsonlRunStore` | Snapshot plus event-line `.jsonl` files | Production, persistent traces |
 
 #### InMemoryRunStore
 
@@ -172,7 +186,11 @@ let store = InMemoryRunStore::new();
 
 #### JsonlRunStore
 
-File-based persistence. Each run stored as `{dir}/{run_id}.jsonl` (append-only; latest line is current state). Has an in-memory cache populated on construction.
+File-based persistence. Each run is stored as `{dir}/{run_id}.jsonl`: the first
+line is a compacted `Run` snapshot and later lines are individual `RunEvent`
+values. Event appends add a line; save and finalization atomically compact the
+file back to one current snapshot. Construction scans existing files into an
+in-memory cache.
 
 ```rust
 let store = JsonlRunStore::new(PathBuf::from("./traces"))?;
@@ -225,7 +243,7 @@ fails and sends a structured `DiagnosticDeliveryFailure` to its observer.
 The Agent producer submits each failure with a bounded, non-blocking `try_send`.
 A process-local diagnostic dispatcher emits the tracing target
 `echo_agent::diagnostic_delivery` with stable `record_kind`, `operation`,
-`record_id`, `occurred_at`, and `error` fields. Applications can also install a
+`record_id_present`, `occurred_at`, and `error` fields. Applications can also install a
 structured observer; it receives the same fact from that dispatcher:
 
 ```rust

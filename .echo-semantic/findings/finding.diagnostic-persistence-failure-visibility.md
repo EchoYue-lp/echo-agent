@@ -3,18 +3,18 @@ schema_version: 1
 id: finding.diagnostic-persistence-failure-visibility
 kind: finding
 type: intent_gap
-status: open
+status: resolved
 severity: high
 primary_focus: data_durability
 focus: [contract_evidence, failure_concurrency, state_authority]
 boundary_ref: boundary.observation-persistence-delivery
 behavior_refs: [behavior.observation-persistence, behavior.effect-permission-execution]
 rule_refs: [rule.fact-projection-separation]
-evidence_refs: [evidence.persistence-observation, evidence.effects-extensions, evidence.diagnostic-persistence-failure-visibility-repair]
-audit_refs: [audit.observation-persistence-delivery.data-durability]
-decision_refs: []
+evidence_refs: [evidence.persistence-observation, evidence.effects-extensions, evidence.diagnostic-persistence-failure-visibility-repair, evidence.diagnostic-persistence-failure-visibility-verification, evidence.diagnostic-delivery-current-repair, evidence.diagnostic-delivery-current-verification, evidence.framework-only-finding-closure-verification]
+audit_refs: [audit.observation-persistence-delivery.data-durability, audit.diagnostic-persistence-failure-visibility-rereview]
+decision_refs: [decision-adr-0053-trace-audit-persistence-visibility]
 repair_evidence_refs: [evidence.diagnostic-persistence-failure-visibility-repair]
-verification_evidence_refs: [evidence.diagnostic-persistence-failure-visibility-verification]
+verification_evidence_refs: [evidence.diagnostic-persistence-failure-visibility-verification, evidence.framework-only-finding-closure-verification]
 rereview_audit_refs: [audit.diagnostic-persistence-failure-visibility-rereview]
 discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 ---
@@ -39,9 +39,9 @@ RunStore 默认 append 对缺失 run 返回成功，trace 初始 save 失败仍�
 
 ## 处理记录
 
-Data-durability Audit 确认；本 Finding 与secret retention、InMemory audit成功丢写和tool terminal authority分离。
-当前repair候选明确direct Store/Logger Result、diagnostic delivery与best-effort telemetry三层，
-独立源码复审未发现阻断；类型修正和canonical finalizer测试已通过focused验证与cargo check。
-main b71f03ba集成、17项feature矩阵、完整门禁（exit 0，2813 passed、0 failed、3 ignored）
-与revision-bound独立复审已完成，框架切片可进入PR交付。外部SDK inventory仍未刷新，
-因此Finding与Issue保持open，不把责任迁出当作完成。
+Data-durability Audit 确认；本 Finding 与 secret retention、InMemory audit 成功丢写和
+tool terminal authority 分离。Framework main 现明确 direct Store/Logger Result、diagnostic
+delivery 与 best-effort telemetry 三层，并让 `RunStore::finalize_run` 与 append 共享 backend
+mutation authority。PR #131 及后续 main 增量已通过 focused tests、17 项 feature matrix、完整
+framework 门禁、远端 CI 与 revision-bound 独立复审。SDK inventory 属于独立 consumer，不是
+本 Finding 或 Issue #46 的关闭条件。

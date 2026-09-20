@@ -74,7 +74,7 @@ MCP close is an awaited and observable settlement boundary.
   public close Future waits on a shared receipt while an internal single-flight
   task owns cleanup, so caller timeout or cancellation cannot detach the task or
   child owner.
-- Manager and SDK resource maps retain active clients until close succeeds.
+- Manager resource maps retain active clients until close succeeds.
   Failed close becomes retryable cleanup debt under the same authority;
   concurrent manager close calls share one gate, and replacement is not
   published when the previous transport fails to settle.
@@ -106,3 +106,13 @@ close, and manager aggregation that continues after a failing client. Focused
 tests, formatting, and `echo_integration` Clippy run before branch handoff; the
 workspace-wide merge gate runs only on the integration branch before its MR to
 `main`.
+
+## Current Implementation Gap
+
+The transport close paths above are merged, but construction cancellation is
+not yet an awaited boundary. Dropping `McpPreparationOwner` or an in-progress
+SSE construction future currently spawns cleanup work without returning a
+join handle or receipt to a durable caller. Runtime shutdown can therefore
+terminate that work before settlement. Issue #55 remains open until the
+construction owner is retained, cancellation is awaitable and retryable, and
+runtime-shutdown fault injection proves the same ownership rule.

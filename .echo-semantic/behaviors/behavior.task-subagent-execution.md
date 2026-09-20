@@ -8,10 +8,10 @@ risk: high
 primary_focus: state_authority
 focus: [time_lifecycle, failure_concurrency, result_side_effect, contract_evidence]
 boundary: boundary.task-subagent-workflow
-observed_at: eb8744566dcd5a734531869ebde9f3506b132163
+observed_at: source:0a91548f9c8d3f6e6a19bc2025fd2d21a46b656162f50b44aedfba5b6d5bf1bb
 code_refs: [echo-orchestration/src/tasks/revisioned.rs, echo-orchestration/src/tasks/runtime_service.rs, echo-orchestration/src/tasks/runtime_executor.rs, src/agent/subagent/registry.rs, src/agent/subagent/executor.rs, echo-orchestration/src/workflow/graph.rs, echo-orchestration/src/workflow/dag.rs, echo-orchestration/src/workflow/concurrent.rs, echo-orchestration/src/workflow/mod.rs, echo-orchestration/src/scheduler/runner.rs, echo-orchestration/src/scheduler/cron_task.rs, echo-orchestration/src/tasks/background_task.rs, echo-orchestration/src/tasks/background_state.rs, echo-orchestration/src/tasks/command_cell.rs, docs/adr/0039-background-task-terminal-authority.md, docs/adr/0040-workflow-checkpoint-lease-and-sibling-settlement.md]
 rule_refs: [rule.task-subagent-authority]
-evidence_refs: [evidence.task-subagent-workflow, evidence.subagent-factory-singleflight-repair, evidence.subagent-factory-singleflight-verification, evidence.background-task-terminal-authority-repair, evidence.background-task-terminal-authority-verification, evidence.workflow-parallel-failure-settlement-repair, evidence.workflow-parallel-failure-settlement-verification, evidence.workflow-checkpoint-claim-settlement-repair, evidence.workflow-checkpoint-claim-settlement-verification, evidence.scheduler-occurrence-authority-repair, evidence.scheduler-occurrence-authority-verification]
+evidence_refs: [evidence.task-subagent-workflow, evidence.subagent-factory-singleflight-repair, evidence.subagent-factory-singleflight-verification, evidence.task-subagent-attempt-link-repair, evidence.task-subagent-attempt-link-verification, evidence.task-subagent-external-control-handle-repair, evidence.task-subagent-external-control-handle-verification, evidence.framework-only-finding-closure-verification, evidence.background-task-terminal-authority-repair, evidence.background-task-terminal-authority-verification, evidence.workflow-parallel-failure-settlement-repair, evidence.workflow-parallel-failure-settlement-verification, evidence.workflow-checkpoint-claim-settlement-repair, evidence.workflow-checkpoint-claim-settlement-verification, evidence.scheduler-occurrence-authority-repair, evidence.scheduler-occurrence-authority-verification]
 finding_refs: [finding.task-patch-claim-race, finding.task-subagent-attempt-link, finding.subagent-factory-cancellation, finding.subagent-factory-publication-race, finding.workflow-dag-authority, finding.workflow-entry-loop-drift, finding.workflow-checkpoint-claim-recovery, finding.workflow-checkpoint-resurrection-race, finding.workflow-parallel-failure-settlement, finding.scheduler-cache-delivery, finding.scheduler-control-fire-race, finding.scheduler-task-id-uniqueness, finding.background-task-wait, finding.subagent-definition-catalog]
 ---
 
@@ -23,7 +23,7 @@ finding_refs: [finding.task-patch-claim-race, finding.task-subagent-attempt-link
 
 ## 当前行为
 
-`TaskRevisionService`提交完整revision，`RuntimeTaskService`计算ready frontier、claim、retry/pause/cancel/settle；Subagent attempt使用typed identity、control、events和outcome。Registry lazy factory以registration revision scoped OnceCell统一构造与发布。Process-local TaskSpawner用BackgroundTaskHandleState原子发布status/result，Clone handle共享cancel与notification；admission和execution共享absolute deadline，child execution task由JoinHandle监督。公开BackgroundTaskState checkpoint类型保持独立。TaskClaim到SubagentAttempt的关联仍有Finding，Team intent编译到同一graph。
+`TaskRevisionService`提交完整revision，`RuntimeTaskService`计算ready frontier、claim、retry/pause/cancel/settle；Subagent attempt使用TaskClaim-derived typed identity、control、events和outcome。Registry lazy factory以registration revision scoped OnceCell统一构造与发布。Process-local TaskSpawner用BackgroundTaskHandleState原子发布status/result，Clone handle共享cancel与notification；admission和execution共享absolute deadline，child execution task由JoinHandle监督。公开BackgroundTaskState checkpoint类型保持独立。Team intent编译到同一graph。
 
 ## 期望行为
 

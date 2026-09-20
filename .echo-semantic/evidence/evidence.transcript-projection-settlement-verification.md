@@ -18,8 +18,8 @@ source_refs:
   - docs/adr/0056-durable-transcript-projection-settlement.md
 supports: [finding.transcript-projection-settlement, behavior.context-memory-lifecycle, behavior.observation-persistence, rule.context-persistence-separation, rule.fact-projection-separation]
 limitations:
-  - Remote Linux and Windows CI remain pending until the pull request is opened
-  - SDK verification is explicitly outside this framework evidence
+  - Remote Linux and Windows CI for the original framework repair passed on PR #129; current closure verification is recorded separately
+  - Consumer SDK verification is outside this framework evidence and outside Issue #106 closure
 command_results:
   - { command: "cargo test -p echo_agent --lib transcript --locked", exit_code: 0 }
   - { command: "cargo test -p echo_agent state:: --lib --features sqlite --locked", exit_code: 0 }
@@ -54,4 +54,4 @@ all-feature tests、examples/learning contracts 与 no-default lib check，最�
 
 ## 已知缺口
 
-当前证据不代表 SDK parity 或远端平台 CI 已完成，因此不能关闭 GitHub Issue #106。
+当前证据只证明 framework parity；独立 consumer parity 不属于 GitHub Issue #106 的关闭条件。

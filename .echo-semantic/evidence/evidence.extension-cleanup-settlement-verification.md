@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.extension-cleanup-settlement-verification
 kind: evidence
-observed_at: source:17f0054af370c86c5f9dbca52db70bcaa417b1f08403153c73b7c0fc4e23c4b8
+observed_at: source:0a91548f9c8d3f6e6a19bc2025fd2d21a46b656162f50b44aedfba5b6d5bf1bb
 source_refs:
   - echo-integration/src/mcp/transport/mod.rs
   - echo-integration/src/mcp/transport/sse.rs
@@ -12,7 +12,8 @@ source_refs:
   - docs/zh/08-mcp.md
 supports: [behavior.extension-publication, rule.extension-generation-authority]
 limitations:
-  - 完整 workspace 合并门禁和远端 CI 留给整合 MR
+  - Transport close的完整workspace门禁与远端CI已由后续integration/main交付
+  - 当前验证不证明preparation/construction Drop cleanup可在runtime shutdown前await
   - 未连接外部 MCP server；真实子进程与本地 HTTP fault server 覆盖 transport owner 和网络时序
 ---
 
@@ -26,8 +27,11 @@ limitations:
 
 ## 来源与范围
 
-Fault tests 位于 transport 与 manager 同模块；真实 `/bin/sh` child 验证 close 返回前 process 已不可达，本地 TCP server 用 accept/read readiness 同步真实 notification POST 后再触发 close。上层 SDK adapter 不属于本 framework evidence 的验证范围。
+Fault tests 位于 transport 与 manager 同模块；真实 `/bin/sh` child 验证 close 返回前 process 已不可达，
+本地 TCP server 用 accept/read readiness 同步真实 notification POST 后再触发 close。Consumer adapter
+不属于本 framework evidence 的验证范围。
 
 ## 已知缺口
 
-未运行完整 workspace all-target/all-feature 门禁，遵循用户要求只在整合 MR/main 前执行；SDK inventory 与 semantic shared snapshot 由整合分支统一刷新。
+当前缺少 runtime shutdown/caller cancellation 下可等待 construction owner 的反例与修复；因此本
+transport-close 验证不能关闭完整 #55 Finding。

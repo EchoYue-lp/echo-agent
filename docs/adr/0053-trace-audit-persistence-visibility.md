@@ -135,8 +135,9 @@ clearing, append/load failure observation, Audit callback failure observation,
 successful producer completion despite Trace and Audit failures, blocking,
 reentrant and unwinding observers, `SyncData`-backed file writes, path
 replacement, crash-torn final record recovery, valid non-newline tails, and
-complete corruption rejection. Full workspace and SDK contract gates remain
-required before closing Finding #46 on main.
+complete corruption rejection. Full framework workspace gates and the
+applicable feature matrix remain required before closing Finding #46 on
+framework `main`.
 
 Final-save failure coverage uses the canonical `AgentRunSnapshot::finalize_run`:
 the initial save and subsequent load succeed, while the terminal save fails.
@@ -148,7 +149,7 @@ initial save and running appends but rejects the terminal save. It returns the
 producer final answer and emits exactly one Finalize delivery failure. Both
 injectors remain test-only; neither owns a production execution terminal.
 
-The public inventory generation and review now belong to the independent
-`echo-agent-sdk` repository. Framework verification does not complete that
-obligation or close Issue #46; process-local observer/control APIs remain
-Host/Rust-only or deferred until the SDK owner refreshes and classifies them.
+Public inventory generation and review belong to the independent
+`echo-agent-sdk` repository. Process-local observer/control APIs remain
+Host/Rust-only or deferred until that repository classifies them, but this
+consumer work is not part of Issue #46's framework completion boundary.

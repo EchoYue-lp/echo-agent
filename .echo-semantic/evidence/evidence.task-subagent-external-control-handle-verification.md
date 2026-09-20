@@ -9,8 +9,8 @@ source_refs:
   - tests/facade_smoke.rs
 supports: [behavior.task-subagent-execution, rule.task-subagent-authority]
 limitations:
-  - Remote CI remains a final delivery gate after the pull request is opened
-  - No SDK Host or cross-process command replay behavior is claimed by these framework-focused checks
+  - PR #134 and main-push remote CI passed; current closure evidence records the final framework snapshot
+  - No consumer Host or cross-process command replay behavior is claimed by these framework-focused checks
 ---
 
 # External Task adapter attempt-control handle 验证证据
@@ -46,4 +46,4 @@ exit 0；`acp`、`a2a`、`mcp`、`lsp`、`sqlite`、`telemetry`、`topology`、`
 
 ## 已知缺口
 
-semantic strict/change evidence与独立implementation rereview已通过。远端CI仍需在PR创建后核实。
+semantic strict/change evidence、独立 implementation rereview、PR #134 与 main-push remote CI 已通过。

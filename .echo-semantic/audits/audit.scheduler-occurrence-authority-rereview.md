@@ -4,30 +4,34 @@ id: audit.scheduler-occurrence-authority-rereview
 kind: audit
 boundary_ref: boundary.task-subagent-workflow
 lens: failure_concurrency
-freshness: stale
-revision: 8c8d8aa469233732276df8d313495a5dce67961d
+freshness: examined
+revision: source:0a91548f9c8d3f6e6a19bc2025fd2d21a46b656162f50b44aedfba5b6d5bf1bb
 finding_refs: [finding.scheduler-control-fire-race, finding.scheduler-task-id-uniqueness, finding.scheduler-cache-delivery]
 challenges:
   control-admission-linearization:
-    revision: 8c8d8aa469233732276df8d313495a5dce67961d
+    revision: source:0a91548f9c8d3f6e6a19bc2025fd2d21a46b656162f50b44aedfba5b6d5bf1bb
     source_refs: [echo-orchestration/src/scheduler/runner.rs]
     evidence_refs: [evidence.scheduler-occurrence-authority-repair, evidence.scheduler-occurrence-authority-verification]
   unique-definition-identity:
-    revision: 8c8d8aa469233732276df8d313495a5dce67961d
+    revision: source:0a91548f9c8d3f6e6a19bc2025fd2d21a46b656162f50b44aedfba5b6d5bf1bb
     source_refs: [echo-orchestration/src/scheduler/cron_task.rs, echo-orchestration/src/scheduler/runner.rs]
     evidence_refs: [evidence.scheduler-occurrence-authority-repair, evidence.scheduler-occurrence-authority-verification]
-  crash-replay-residual:
-    revision: 8c8d8aa469233732276df8d313495a5dce67961d
+  durable-occurrence-replay:
+    revision: source:0a91548f9c8d3f6e6a19bc2025fd2d21a46b656162f50b44aedfba5b6d5bf1bb
     source_refs: [echo-orchestration/src/scheduler/runner.rs, docs/adr/0042-scheduler-occurrence-authority.md]
-    evidence_refs: [evidence.scheduler-occurrence-authority-repair]
+    evidence_refs: [evidence.scheduler-occurrence-authority-repair, evidence.scheduler-occurrence-authority-verification]
+  public-store-cache-bypass:
+    revision: source:0a91548f9c8d3f6e6a19bc2025fd2d21a46b656162f50b44aedfba5b6d5bf1bb
+    source_refs: [echo-orchestration/src/scheduler/cron_task.rs, echo-orchestration/src/scheduler/runner.rs]
+    evidence_refs: [evidence.scheduler-occurrence-authority-repair, evidence.scheduler-occurrence-authority-verification]
 ---
 
 # Scheduler occurrence authority独立复审
 
 ## 审查范围
 
-独立reviewer检查CronTask ID、store/cache刷新、control/admission线性化、definition identity、
-remove/re-add fencing和callback settlement；durable occurrence crash replay作为残余单元保留。
+独立 reviewer 检查 CronTask ID、public store/cache 刷新、control/admission 线性化、definition
+identity、remove/re-add fencing、durable occurrence replay 和 callback settlement。
 
 ## 已检查故障假设
 
@@ -36,27 +40,21 @@ remove/re-add fencing和callback settlement；durable occurrence crash replay作
 
 ## 实际实现路径与证据
 
-唯一ID、control epoch、definition identity和control-lock admission均有确定性反例。Reviewer确认
-#85/#86闭合；因为没有durable claim/ledger，#84明确保持open。
+唯一 ID、control epoch、definition identity、control-lock admission 与 DeliveryLedger occurrence
+均已进入 main。当前反例显示：caller 保留 `CronTaskStore` clone 后直接 disable/remove/update，
+runner cache 不会自动刷新，`list_tasks`、`tick` 与 `run_once` 仍可观察旧 definition。
 
 ## 问题记录
 
-#85与#86无剩余Critical/Important/Minor；#84不是被忽略的测试缺口，而是独立未实现合同。
+#85 与 #86 无剩余 blocker；#84 有一个 Important framework gap：public store mutation 可以绕过
+runner mutation owner 与 cache synchronization。
 
 ## 残余风险
 
-进程崩溃位于callback effect与last_run持久化之间时，系统仍没有明确at-most-once或
-at-least-once语义。
+callback effect 与 terminal receipt 之间的 crash window 采用 at-least-once，并要求 callback 按
+`occurrence_id` 幂等。Cron offline misfire 和跨进程 Store writer 仍是明确非目标。
 
 ## 未检查项
 
-未执行跨进程Store并发或进程崩溃注入。
-
-## 当前失效原因
-
-候选`573ee8b2`的DeliveryLedger组合、durable callback context、owner-loss replay与terminal
-settlement已集成到基线`b71f03ba`的新worktree，另补取消后禁止callback构造的修复及反例。
-这些变更超出本Audit绑定的`8c8d8aa469233732276df8d313495a5dce67961d`范围。
-旧候选记载的独立review不代表当前未提交集成版本已独立复审。当前验证详见verification
-Evidence；SDK/CLI consumer、17-feature/full gates、shared snapshot与最终revision复审
-尚未闭合，因此本Audit保持stale、`rereview_audit_refs`保持空且#84保持open。
+未执行跨进程 Store 并发或真实进程 kill。当前 review 只将 #84 保持 open 于 public
+store/cache framework gap，不等待 SDK、CLI、website 或其它 consumer。

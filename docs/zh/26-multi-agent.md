@@ -26,10 +26,11 @@ Active Subagent 消息使用 `SubagentExecutor::send_message_tracked`。返回�
 `AgentSteerReceipt`；mailbox 接收、上下文 drain 和所属 turn 结算只由嵌套
 receipt 负责。单独的 turn ID 不代表投递完成。
 
-`SubagentAttemptIdentity` 是 framework 所有的可序列化值，只包含逻辑 task、物理
-execution 和 attempt 编号。消费者需要关联 command 或 recovery 记录时可直接持久化
-此值，不需要再建立产品 identity 镜像。反序列化与 `new` 使用相同的不变量：task 和
-execution 非空，attempt 必须为正数。
+`SubagentAttemptIdentity` 是 framework 所有的可序列化值，包含逻辑 task、不透明的
+物理 execution、attempt 编号，以及可选的 run 与 control-scope identity。消费者需要
+关联 command 或 recovery 记录时可直接持久化此值，不需要再建立产品 identity 镜像。
+反序列化与 `new` 使用相同的不变量：task、execution 和出现时的 run/scope 非空，
+attempt 必须为正数。
 未知 identity 字段也会被拒绝。
 
 `SubagentResult::usage()` 返回所有消费者共用的可序列化 `ExecutionUsage`

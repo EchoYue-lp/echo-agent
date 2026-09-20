@@ -14,7 +14,7 @@ source_refs:
 supports: [finding.diagnostic-persistence-failure-visibility, behavior.observation-persistence, rule.fact-projection-separation]
 limitations:
   - 框架最终集成快照的focused验证、17项feature矩阵、完整合并门禁与独立复审均已完成；远端CI由PR交付继续核实
-  - 新公共API的外部SDK inventory未刷新，Issue保持open
+  - 新公共API的外部consumer inventory由其所属仓库刷新，不阻塞framework Issue
   - 未验证真实断电、sync_data设备故障、panic-abort或外部非配合进程
 ---
 
@@ -66,4 +66,4 @@ observer只收到一条带identity的Finalize失败。
 ## 已知缺口
 
 main集成、feature矩阵、最终完整门禁与revision-bound独立复审已完成，源码摘要为本Evidence的observed_at。
-SDK inventory 仅完成只读核实，不代表生成、映射或SDK交付完成；Issue #46 不自动关闭。
+Consumer inventory 的生成、映射或交付不由本 Evidence 证明，也不属于 Issue #46 的关闭条件。

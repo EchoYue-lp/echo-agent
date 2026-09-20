@@ -6,8 +6,8 @@
 
 ## Status
 
-Accepted for the framework phase. The independent SDK adapter and inventory
-remain pending and Issue #99 stays open until that second phase is delivered.
+Accepted. Independent SDK adapters and inventories are consumer-owned outcomes
+and do not control completion of the framework TaskClaim/attempt contract.
 
 ## Context
 
@@ -128,8 +128,9 @@ effect contract; cancellation cannot retract an external side effect.
 source compatible while adapters that promise exact control can bind their live
 registry. Team runtime APIs expose a stable handle. External handles are only
 live capability objects: `RuntimeTaskService` still owns durable claim checks
-and terminal settlement. SDK adapters must pin the framework revision and
-preserve this identity rather than implementing another attempt mapping.
+and terminal settlement. External adapters preserve this identity rather than
+implementing another attempt mapping; their pin, wire mapping, and durable
+command replay are verified in their own repository.
 
 ## Verification
 

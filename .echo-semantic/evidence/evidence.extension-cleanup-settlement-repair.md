@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.extension-cleanup-settlement-repair
 kind: evidence
-observed_at: source:17f0054af370c86c5f9dbca52db70bcaa417b1f08403153c73b7c0fc4e23c4b8
+observed_at: source:0a91548f9c8d3f6e6a19bc2025fd2d21a46b656162f50b44aedfba5b6d5bf1bb
 source_refs:
   - echo-integration/src/mcp/transport/mod.rs
   - echo-integration/src/mcp/transport/sse.rs
@@ -14,7 +14,8 @@ source_refs:
   - docs/adr/0049-mcp-transport-close-settlement.md
 supports: [behavior.extension-publication, rule.extension-generation-authority]
 limitations:
-  - SDK public inventory and shared source digest are intentionally deferred to the integration branch
+  - Consumer public inventory is independently owned and does not block the framework Finding
+  - Preparation and SSE construction cancellation still lack an externally awaitable cleanup owner
   - LSP runtime state and derived-handle lifecycle remain owned by their separate Findings
 ---
 
@@ -34,4 +35,6 @@ ADR 0049 绑定官方 MCP 2024-11-05 shutdown、官方 Rust SDK fallible gracefu
 
 ## 已知缺口
 
-完整 workspace 合并门禁、SDK inventory/source contract 刷新与远端 CI 由最终整合分支执行；本切片不关闭其它 Plugin、LSP 或 Agent adapter lifecycle Finding。
+Transport close 的完整 workspace 门禁与远端 CI 已由后续 integration/main 交付。当前剩余缺口是
+preparation/SSE construction Drop 派生的不可等待 cleanup owner；Plugin、LSP 与 Agent adapter
+lifecycle 仍由各自 Finding 持有。

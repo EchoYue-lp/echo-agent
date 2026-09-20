@@ -6,13 +6,13 @@ title: Subagent Registry、Executor 与 Control
 asset_type: state_authority
 status: active
 risk: high
-observed_at: 6d66479fd520da9cbbb66723faa35ce69a8963a8
+observed_at: source:0a91548f9c8d3f6e6a19bc2025fd2d21a46b656162f50b44aedfba5b6d5bf1bb
 boundary_refs: [boundary.task-subagent-workflow]
 code_refs: [src/agent/subagent/registry.rs, src/agent/subagent/executor.rs, src/agent/subagent/control.rs, src/agent/subagent/events.rs, docs/adr/0033-subagent-factory-singleflight-publication.md]
 consumer_refs: [src/tools/builtin/agent_dispatch.rs, src/agent/subagent/team/mod.rs]
 behavior_refs: [behavior.task-subagent-execution]
 rule_refs: [rule.task-subagent-authority]
-evidence_refs: [evidence.task-subagent-workflow, evidence.subagent-factory-singleflight-repair, evidence.subagent-factory-singleflight-verification]
+evidence_refs: [evidence.task-subagent-workflow, evidence.subagent-factory-singleflight-repair, evidence.subagent-factory-singleflight-verification, evidence.task-subagent-attempt-link-repair, evidence.task-subagent-attempt-link-verification, evidence.task-subagent-external-control-handle-repair, evidence.task-subagent-external-control-handle-verification, evidence.framework-only-finding-closure-verification]
 finding_refs: [finding.task-subagent-attempt-link, finding.subagent-factory-cancellation, finding.subagent-factory-publication-race, finding.subagent-definition-catalog]
 candidate_refs: []
 ---
@@ -37,4 +37,6 @@ Register/revision-scoped factory resolve、compile prompt/isolate、dispatch、m
 
 ## 未知与限制
 
-Team/SDK dispatch丢失TaskClaim到SubagentAttempt identity和definition catalog漂移仍为开放Finding；factory cancellation/publication已具备闭合证据。
+TaskClaim 到 SubagentAttempt identity、factory cancellation/publication 已具备闭合证据；
+definition catalog 漂移仍是独立开放 Finding。Consumer adapter 通过 scope-bound handle 复用同一
+live control，不由本 Asset 追踪其 wire mapping。

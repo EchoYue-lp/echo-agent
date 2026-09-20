@@ -5,15 +5,15 @@ kind: audit
 boundary_ref: boundary.task-subagent-workflow
 lens: state_authority
 freshness: examined
-revision: 0415ba15eb8d348f357fe55df4448897677e6960
+revision: source:0a91548f9c8d3f6e6a19bc2025fd2d21a46b656162f50b44aedfba5b6d5bf1bb
 finding_refs: [finding.task-subagent-attempt-link]
 challenges:
   scope-bound-live-authority:
-    revision: 0415ba15eb8d348f357fe55df4448897677e6960
+    revision: source:0a91548f9c8d3f6e6a19bc2025fd2d21a46b656162f50b44aedfba5b6d5bf1bb
     source_refs: [src/agent/subagent/control.rs, src/agent/subagent/executor.rs, src/agent/subagent/team/mod.rs]
     evidence_refs: [evidence.task-subagent-external-control-handle-repair, evidence.task-subagent-external-control-handle-verification]
   external-context-preservation:
-    revision: 0415ba15eb8d348f357fe55df4448897677e6960
+    revision: source:0a91548f9c8d3f6e6a19bc2025fd2d21a46b656162f50b44aedfba5b6d5bf1bb
     source_refs: [src/agent/subagent/executor.rs, tests/facade_smoke.rs]
     evidence_refs: [evidence.task-subagent-external-control-handle-verification]
 ---
@@ -23,7 +23,7 @@ challenges:
 ## 审查范围
 
 独立reviewer读取plan_02、相关Design章节、完整未提交diff、control registry、executor、Team两条真实
-主路径、public facade与定向验证日志；SDK与其它OpenCode worktree被排除。
+主路径、public facade 与定向验证日志；consumer 与其它并行 worktree 被排除。
 
 ## 已检查故障假设
 
@@ -44,10 +44,14 @@ conversation/isolation/message/trace/resource guards/uplink丢失。
 
 ## 残余风险
 
-public facade没有独立构造真实`TaskSubagentContext`完成全生命周期，但registry、binder、programmatic Team与
-React Team真实路径已直接覆盖。SDK pin、durable Task store、command journal与crash replay仍未交付。
+public facade 没有独立构造真实 `TaskSubagentContext` 完成全生命周期，但 registry、binder、
+programmatic Team 与 React Team 真实路径已直接覆盖。Consumer pin、durable Task store、command
+journal 与 crash replay 由其所属仓库独立追踪。
 
 ## 未检查项
 
-完整workspace合并门禁与17-feature matrix已由主流程通过。未检查远端CI或SDK Host跨进程E2E；前者由
-PR交付核实，后者属于delivery map的后续Outcome。
+完整 workspace 合并门禁、17-feature matrix、PR #134 与 main-push remote CI 已由主流程通过。
+未检查 consumer Host 跨进程 E2E；该项不属于本 framework Finding。
+
+Framework-only closure 在最终 source digest 上确认 public handle 与 canonical registry 仍是一条
+live-control 路径，当前文档与 Evidence 没有重新引入 consumer completion blocker。

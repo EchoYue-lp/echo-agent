@@ -5,19 +5,19 @@ kind: audit
 boundary_ref: boundary.observation-persistence-delivery
 lens: data_durability
 freshness: examined
-revision: ab3ed7d23f0a3fbe2bb859a7537df2546531239e
+revision: source:0a91548f9c8d3f6e6a19bc2025fd2d21a46b656162f50b44aedfba5b6d5bf1bb
 finding_refs: [finding.diagnostic-persistence-failure-visibility]
 challenges:
   canonical-finalize-failure:
-    revision: ab3ed7d23f0a3fbe2bb859a7537df2546531239e
+    revision: source:0a91548f9c8d3f6e6a19bc2025fd2d21a46b656162f50b44aedfba5b6d5bf1bb
     source_refs: [src/trace/mod.rs, src/agent/snapshot.rs, src/agent/react/run/stream_channel.rs]
     evidence_refs: [evidence.diagnostic-persistence-failure-visibility-repair, evidence.diagnostic-persistence-failure-visibility-verification]
   delivery-not-terminal-authority:
-    revision: ab3ed7d23f0a3fbe2bb859a7537df2546531239e
+    revision: source:0a91548f9c8d3f6e6a19bc2025fd2d21a46b656162f50b44aedfba5b6d5bf1bb
     source_refs: [echo-state/src/audit/mod.rs, src/agent/react/run/pipeline.rs, src/agent/snapshot.rs]
     evidence_refs: [evidence.diagnostic-persistence-failure-visibility-verification]
   file-durability-and-sdk-boundary:
-    revision: ab3ed7d23f0a3fbe2bb859a7537df2546531239e
+    revision: source:0a91548f9c8d3f6e6a19bc2025fd2d21a46b656162f50b44aedfba5b6d5bf1bb
     source_refs: [echo-state/src/audit/file.rs, docs/adr/0053-trace-audit-persistence-visibility.md]
     evidence_refs: [evidence.diagnostic-persistence-failure-visibility-verification, evidence.diagnostic-persistence-sdk-inventory]
 ---
@@ -28,7 +28,7 @@ challenges:
 
 独立 reviewer `review_issue46_diagnostic_persistence` 审查完整候选 diff，结论技术 pass、
 0 源码 findings，绑定 ee92b495cdd7ba395638b498339ff744001b677f / main b71f03ba。
-源码摘要为本 Audit 的 revision；该结论不等于 Issue #46 全部关闭或最终门禁通过。
+源码摘要为本 Audit 的 revision；最终门禁由 verification evidence 独立记录。
 ee92b495 后唯一源码增量是 record_event 的等价 let-chain；reviewer 核对 store/run ID
 求值顺序与单次 append、同一 Append failure fact，确认原 pass 延续至 a80fd166 摘要，0 新 findings。
 合并期间 index 多阶段条目造成的临时摘要已弃用，当前摘要由干净 index 下的现有工具核实。
@@ -43,7 +43,7 @@ ee92b495 后唯一源码增量是 record_event 的等价 let-chain；reviewer �
 
 缺失 run 的 append、初始 save 幻影 ID、canonical finalizer load 成功/最终 save 失败、
 真实 stream producer 终态被诊断错误覆盖、阻塞 observer、文件 durability/recovery/lease、
-与 #130 集成后恢复重复 Execute 审计，以及 SDK inventory 残项被迁出责任后误记完成。
+与 #130 集成后恢复重复 Execute 审计，以及把 consumer inventory 残项误记为 framework blocker。
 
 ## 实际实现路径与证据
 
@@ -56,14 +56,17 @@ reviewer 核对 stream 1/1、pipeline 20/20、trace 25、audit 11、diagnostic 3
 
 ## 问题记录
 
-框架源码未发现新的阻断；Finding 继续 open，外部 SDK inventory 尚未刷新。
+框架源码未发现新的阻断；Finding 在 current closure verification 通过后可保持 resolved。
 
 ## 残余风险
 
-SDK source-import checkpoint 未吸收新增 DiagnosticDelivery public inventory，不能宣布 Issue 关闭。
+Consumer source-import checkpoint 是否吸收 DiagnosticDelivery public inventory，由其所属仓库独立追踪。
 独立 secret retention/backend error 脱敏与 InMemoryAuditLogger successful-drop Finding 不在本切片闭合。
 
 ## 未检查项
 
-reviewer 未运行 Cargo；最终工程门禁与远端 CI 由主代理执行。
+原 repair reviewer 未运行 Cargo；最终工程门禁与 current main 远端 CI 已由 closure Evidence 核实。
 未模拟真实断电、设备 sync_data 失败、panic-abort 或非配合外部进程。
+
+Framework-only closure 在最终 source digest 上复核 public `RunStore::finalize_run`、双语 tracing
+文档、focused tests、完整门禁和 17-feature matrix，没有发现新的 framework blocker。

@@ -10,11 +10,11 @@ focus: [time_lifecycle, failure_concurrency, contract_evidence]
 boundary_ref: boundary.context-memory
 behavior_refs: [behavior.context-memory-lifecycle]
 rule_refs: [rule.context-persistence-separation]
-evidence_refs: [evidence.agent-context-execution, evidence.persistence-observation, evidence.transcript-projection-settlement-repair, evidence.transcript-projection-settlement-verification]
+evidence_refs: [evidence.agent-context-execution, evidence.persistence-observation, evidence.transcript-projection-settlement-repair, evidence.transcript-projection-settlement-verification, evidence.framework-only-finding-closure-verification]
 audit_refs: [audit.context-memory.data-durability, audit.transcript-projection-settlement-rereview]
-decision_refs: []
+decision_refs: [decision-adr-0056-durable-transcript-projection-settlement]
 repair_evidence_refs: [evidence.transcript-projection-settlement-repair]
-verification_evidence_refs: [evidence.transcript-projection-settlement-verification]
+verification_evidence_refs: [evidence.transcript-projection-settlement-verification, evidence.framework-only-finding-closure-verification]
 rereview_audit_refs: [audit.transcript-projection-settlement-rereview]
 discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 ---
@@ -46,5 +46,6 @@ coordinator。只配置 ConversationStore 会在 admission 副作用前拒绝；
 Blocked/Conflict 抑制原业务终态。
 
 File/SQLite parity、deadline authority lock、attempt/retry、lost-ack、scope retirement、recreate、
-direct/stream 终态与独立复审均已通过。该 Finding 关闭 framework 实现缺陷；独立 SDK 的 protocol、
-Host 与三语言映射仍是 Issue #106 的后续交付，不由本 Finding 的 resolved 状态代替。
+direct/stream 终态与独立复审均已通过。`44b2ed68` 的 durable coordinator 与
+`3735f7e0` 的 observer ordering 都已进入 framework main；独立 consumer 的 protocol、Host
+与语言映射由其所属仓库验证，不是本 Finding 或 Issue #106 的关闭条件。

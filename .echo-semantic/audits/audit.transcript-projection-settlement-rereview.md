@@ -5,23 +5,23 @@ kind: audit
 boundary_ref: boundary.context-memory
 lens: data_durability
 freshness: examined
-revision: 44b2ed68772c7c016d09af6c2e1adac9fe4fea70
+revision: source:0a91548f9c8d3f6e6a19bc2025fd2d21a46b656162f50b44aedfba5b6d5bf1bb
 finding_refs: [finding.transcript-projection-settlement]
 challenges:
   authority-and-attempt:
-    revision: 44b2ed68772c7c016d09af6c2e1adac9fe4fea70
+    revision: source:0a91548f9c8d3f6e6a19bc2025fd2d21a46b656162f50b44aedfba5b6d5bf1bb
     source_refs: [src/state/mod.rs, src/state/file.rs, src/state/sqlite.rs, src/agent/snapshot.rs]
     evidence_refs: [evidence.transcript-projection-settlement-repair, evidence.transcript-projection-settlement-verification]
   deadline-and-recovery:
-    revision: 44b2ed68772c7c016d09af6c2e1adac9fe4fea70
+    revision: source:0a91548f9c8d3f6e6a19bc2025fd2d21a46b656162f50b44aedfba5b6d5bf1bb
     source_refs: [echo-core/src/memory/conversation.rs, echo-state/src/memory/file_conversation.rs, echo-state/src/memory/sqlite_conversation.rs, src/state/mod.rs]
     evidence_refs: [evidence.transcript-projection-settlement-repair, evidence.transcript-projection-settlement-verification]
   terminal-and-observation:
-    revision: 44b2ed68772c7c016d09af6c2e1adac9fe4fea70
+    revision: source:0a91548f9c8d3f6e6a19bc2025fd2d21a46b656162f50b44aedfba5b6d5bf1bb
     source_refs: [src/agent/react/run/stream_channel.rs, src/agent/react/run/react_loop.rs, src/agent/react/run/phases/compact.rs, src/agent/react/run/phases/tools.rs, src/agent/react/run/phases/finalize.rs]
     evidence_refs: [evidence.transcript-projection-settlement-repair, evidence.transcript-projection-settlement-verification]
   clear-delete-recreate:
-    revision: 44b2ed68772c7c016d09af6c2e1adac9fe4fea70
+    revision: source:0a91548f9c8d3f6e6a19bc2025fd2d21a46b656162f50b44aedfba5b6d5bf1bb
     source_refs: [src/state/mod.rs, src/state/file.rs, src/state/sqlite.rs, docs/adr/0056-durable-transcript-projection-settlement.md]
     evidence_refs: [evidence.transcript-projection-settlement-repair, evidence.transcript-projection-settlement-verification]
 ---
@@ -57,9 +57,13 @@ observation、max-iteration hook ordering、delete/clear lost-ack recreate 等�
 
 ## 残余风险
 
-独立 SDK 尚未承接 public Store、deadline、receipt 与 settlement event；这不会重开 framework Finding，
-但 GitHub Issue #106 必须保持开放直到 SDK 与跨仓语义证据合并。
+独立 consumer 尚未承接 public Store、deadline、receipt 与 settlement event 时，应在其所属仓库
+保留采用 Finding；这不会重开 framework Finding，也不阻塞 GitHub Issue #106 关闭。
 
 ## 未检查项
 
-远端 Linux/Windows CI 尚未运行；应用 UI 如何展示 Deferred 属于 embedding product policy。
+原 repair reviewer 未直接运行远端 Linux/Windows CI；current main 的七项 CI 已由 closure Evidence
+核实。应用 UI 如何展示 Deferred 属于 embedding product policy。
+
+Framework-only closure 在最终 source digest 上复核 `3735f7e0` observer ordering、双语文档、
+focused tests、完整门禁和 17-feature matrix，没有发现新的 framework blocker。

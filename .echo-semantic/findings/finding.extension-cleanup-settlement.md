@@ -19,7 +19,7 @@ rereview_audit_refs: [audit.extension-cleanup-settlement-rereview]
 discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 ---
 
-# MCP SSE 与 SDK LSP cleanup 未等待结算
+# MCP construction 与 transport cleanup 未完全等待结算
 
 ## 外部 Issue
 
@@ -27,28 +27,30 @@ GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/55
 
 ## 问题
 
-SSE endpoint/POST/timeout 失败可遗留 pending sender，close 只 cancel 不 drain/await；SDK Host LSP close 清 Arc map 而未调用 manager shutdown_all。
+Transport close 已能排空 pending request 并等待 task/child，但取消 in-progress MCP preparation
+或 SSE construction 仍通过 `Drop` 派生无 receipt 的后台清理。
 
 ## 触发条件与影响
 
-Transport 建立失败、连接关闭或 Host shutdown 时，pending request/child process 可能在终态后继续存在或只依赖 Drop。
+Runtime shutdown、caller cancellation 或重复 close 发生在 transport 建立阶段时，cleanup task
+可能在调用方无法等待、观察或重试的情况下继续存在或被进程退出截断。
 
 ## 证据
 
-`echo-integration/src/mcp/transport/sse.rs` 与 `echo-sdk-host/src/core_profile/facade/integrations.rs` 显示当前 close 路径。
+`echo-integration/src/mcp/client.rs` 的 `McpPreparationOwner::drop` 与
+`echo-integration/src/mcp/transport/sse.rs` 的 construction owner 显示当前缺口。
 
-## 修复范围（框架 vs SDK 所有权）
+## Framework 修复范围
 
 本仓库（echo-agent 框架）修复 MCP transport/client/manager 侧：`McpTransport::close`、
 `McpClient::close`、`McpManager::disconnect`/`close_all` 传播 `Result`，SSE/stdio 排空
 pending 并有界等待 owned task/child（详见 `docs/adr/0049-mcp-transport-close-settlement.md`）。
-SDK Host 的 LSP resource-map close（原 `echo-sdk-host/src/core_profile/facade/integrations.rs`）
-已随 SDK 抽取（ADR 0051）迁移到独立 `echo-agent-sdk` 仓库，由 main agent 在 SDK 侧处理；
-本框架不拥有 SDK Host 代码，SDK 侧需要对其 Host facade 做同等 close `Result` 适配。
+剩余 repair 必须让 preparation/construction cancellation 也交付可保留、可等待和可重试的 owner；
+SDK Host 或 LSP adapter 不属于本 Finding 的完成边界。
 
 ## 处理记录
 
-Discovery 记录；修复与验证证据见 `evidence.extension-cleanup-settlement-repair.md` /
-`evidence.extension-cleanup-settlement-verification.md`，复用干净修复提交 dbbfff27
-（`.worktrees/mcp-transport-close-settlement`）的框架部分，并保留 main 较新的 MCP
-redaction/protocol/tool-classification 改动。
+Transport close 主体已进入 framework main，修复与验证证据见
+`evidence.extension-cleanup-settlement-repair.md` /
+`evidence.extension-cleanup-settlement-verification.md`。当前 independent rereview 在
+`main@e15cc17f` 发现 construction Drop owner 仍不可等待，因此 Finding 与 Issue #55 保持 open。

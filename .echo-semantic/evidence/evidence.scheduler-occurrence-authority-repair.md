@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.scheduler-occurrence-authority-repair
 kind: evidence
-observed_at: source:17f0054af370c86c5f9dbca52db70bcaa417b1f08403153c73b7c0fc4e23c4b8
+observed_at: source:0a91548f9c8d3f6e6a19bc2025fd2d21a46b656162f50b44aedfba5b6d5bf1bb
 source_refs:
   - echo-orchestration/src/scheduler/mod.rs
   - echo-orchestration/src/scheduler/cron_task.rs
@@ -25,8 +25,8 @@ limitations:
 
 `CronTaskStore` 在 load、add、save 和 legacy migration 入口校验非空且唯一的
 CronTask ID；重复定义 fail closed，Store backend 已存在的目标值不会被 legacy
-文件覆盖。SchedulerRunner 在每次成功 store mutation 后重新加载完整快照，使
-`tasks` 只作为 derived cache，不再保留旧的 `last_run` projection。
+文件覆盖。SchedulerRunner 自身的成功 mutation 会重新加载完整快照，使 `tasks` 只作为
+derived cache；public Store clone 的直接 mutation 尚未接入同一同步边界。
 
 Tick 保存 `task.id + created_at + scheduled_at` occurrence identity，并将持久
 `control_revision` 写入 payload。每次 status control 都在 CronTaskStore 中递增 revision；
@@ -94,5 +94,6 @@ disabled/removed recovery 以及三种管理操作的 post-commit reload failure
 
 迁移保护只覆盖同一 Store
 backend 的目标 key 已存在场景；跨进程 CronTaskStore writer 不在本次 closure 内。
-新增 public framework identity/API 将触发 SDK inventory drift；按并行 extraction 所有权，本
-分支不修改 SDK contracts，Finding 保持open并等待集成分支生成与审核。
+当前 Finding 保持 open 的原因是 public `CronTaskStore` clone 可在 runner 构造后直接 mutation，
+绕过 runner cache 同步。Consumer inventory、data-root adapter 与 website 不属于本 Finding 的
+关闭条件。
