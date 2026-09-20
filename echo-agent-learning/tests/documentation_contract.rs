@@ -978,6 +978,41 @@ fn plugin_publication_docs_and_demo_share_the_coordinator_receipt_contract()
 }
 
 #[test]
+fn public_lifecycle_snippets_retain_awaited_close_owners() -> Result<(), Box<dyn std::error::Error>>
+{
+    let learning_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = learning_root.parent().ok_or_else(|| {
+        std::io::Error::other("learning package has no workspace parent directory")
+    })?;
+    for readme in ["README.md", "README.zh.md"] {
+        let content = std::fs::read_to_string(root.join(readme))?;
+        assert!(
+            content.contains("for started in manager.start_all(handler).await"),
+            "{readme} must inspect per-channel startup receipts"
+        );
+        assert!(
+            content.contains("manager.stop_all().await?;"),
+            "{readme} must await ChannelManager shutdown"
+        );
+        assert!(
+            !content.contains("manager.start_all(handler).await?;"),
+            "{readme} must not treat Vec<ChannelLifecycleResult> as Result"
+        );
+    }
+    for language in ["en", "zh"] {
+        let guide =
+            std::fs::read_to_string(root.join(format!("docs/{language}/33-headless-mode.md")))?;
+        for contract in ["start_headless", "HeadlessRunHandle", "retry_close"] {
+            assert!(
+                guide.contains(contract),
+                "{language} Headless guide misses {contract}"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn package_identity_is_consolidated() -> Result<(), Box<dyn std::error::Error>> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let manifest = std::fs::read_to_string(root.join("Cargo.toml"))?;

@@ -100,7 +100,10 @@ use echo_agent::channels::{ChannelManager, QqChannel, QqConfig, FeishuChannel, F
 let mut manager = ChannelManager::new();
 manager.register(Box::new(QqChannel::new(QqConfig::new("app_id", "secret"))?));
 manager.register(Box::new(FeishuChannel::new(FeishuConfig::new_long_poll("app_id".into(), "secret".into()))?));
-manager.start_all(handler).await?;
+for started in manager.start_all(handler).await {
+    started.result?;
+}
+manager.stop_all().await?;
 ```
 
 ### Run examples
@@ -798,7 +801,10 @@ async fn main() -> echo_agent::error::Result<()> {
     let mut manager = ChannelManager::new();
     manager.register(Box::new(qq));
     manager.register(Box::new(feishu));
-    manager.start_all(handler).await?;
+    for started in manager.start_all(handler).await {
+        started.result?;
+    }
+    manager.stop_all().await?;
     Ok(())
 }
 ```

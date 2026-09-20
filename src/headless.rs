@@ -31,6 +31,7 @@ use crate::runtime::{
     AgentTurnDriver, EventSink, SinkControl, TurnDeliveryOutcome, TurnMode, TurnOutcome,
     TurnReceipt, TurnRequest,
 };
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 struct HeadlessEventSink;
@@ -60,6 +61,9 @@ pub struct HeadlessConfig {
     pub max_iterations: Option<usize>,
 
     /// Optional caller-owned cancellation token.
+    ///
+    /// Headless derives a child token for this run, so cancelling the run does
+    /// not cancel the caller's parent scope or sibling work.
     pub cancel_token: Option<CancellationToken>,
 }
 
@@ -76,6 +80,7 @@ impl Default for HeadlessConfig {
 }
 
 /// Result of a headless execution.
+#[derive(Debug, Clone)]
 pub struct HeadlessResult {
     /// The agent's final output text.
     pub output: String,
@@ -91,6 +96,155 @@ pub struct HeadlessResult {
 
     /// Whether a failed run should produce a non-zero process exit code.
     pub exit_on_error: bool,
+}
+
+struct HeadlessRunState {
+    result: std::sync::Mutex<Option<HeadlessResult>>,
+    result_ready: tokio::sync::Notify,
+    cancel: CancellationToken,
+    close_gate: tokio::sync::Mutex<()>,
+    close_owner: std::sync::Mutex<Option<Arc<dyn Agent>>>,
+}
+
+impl HeadlessRunState {
+    fn new(cancel: CancellationToken, agent: Option<Arc<dyn Agent>>) -> Self {
+        Self {
+            result: std::sync::Mutex::new(None),
+            result_ready: tokio::sync::Notify::new(),
+            cancel,
+            close_gate: tokio::sync::Mutex::new(()),
+            close_owner: std::sync::Mutex::new(agent),
+        }
+    }
+
+    fn publish(&self, result: HeadlessResult) {
+        let mut slot = self
+            .result
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if slot.is_none() {
+            *slot = Some(result);
+            drop(slot);
+            self.result_ready.notify_waiters();
+        }
+    }
+
+    fn result(&self) -> Option<HeadlessResult> {
+        self.result
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    async fn close_once(&self) -> crate::error::Result<()> {
+        let _gate = self.close_gate.lock().await;
+        let agent = self
+            .close_owner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let Some(agent) = agent else {
+            return Ok(());
+        };
+        agent.close().await?;
+        let mut owner = self
+            .close_owner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if owner
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, &agent))
+        {
+            owner.take();
+        }
+        Ok(())
+    }
+}
+
+/// Retained owner and result receipt for one Headless execution.
+///
+/// `wait` may be cancelled without cancelling the owned cleanup task. Use
+/// [`Self::cancel`] to request Turn cancellation, and [`Self::retry_close`] if
+/// the first resource-close attempt is reported as failed.
+#[derive(Clone)]
+pub struct HeadlessRunHandle {
+    state: Arc<HeadlessRunState>,
+}
+
+impl HeadlessRunHandle {
+    fn completed(result: HeadlessResult) -> Self {
+        let state = Arc::new(HeadlessRunState::new(CancellationToken::new(), None));
+        state.publish(result);
+        Self { state }
+    }
+
+    /// Request cancellation of the owned Turn.
+    pub fn cancel(&self) {
+        self.state.cancel.cancel();
+    }
+
+    /// Wait for execution and the first Agent close attempt to settle.
+    pub async fn wait(&self) -> HeadlessResult {
+        loop {
+            let notified = self.state.result_ready.notified();
+            if let Some(result) = self.state.result() {
+                return result;
+            }
+            notified.await;
+        }
+    }
+
+    /// Retry the same Agent owner after a reported close failure.
+    ///
+    /// Returns an error until [`Self::wait`] has observed the run receipt.
+    /// After close succeeds, repeated calls are idempotent.
+    pub async fn retry_close(&self) -> crate::error::Result<()> {
+        if self.state.result().is_none() {
+            return Err(crate::error::ReactError::Other(
+                "Agent close cannot be retried before Headless execution settles".to_string(),
+            ));
+        }
+        self.state.close_once().await
+    }
+}
+
+struct HeadlessTaskOwner {
+    state: Arc<HeadlessRunState>,
+    fallback: Option<HeadlessResult>,
+}
+
+impl HeadlessTaskOwner {
+    fn publish(&mut self, result: HeadlessResult) {
+        self.state.publish(result);
+        self.fallback.take();
+    }
+}
+
+impl Drop for HeadlessTaskOwner {
+    fn drop(&mut self) {
+        if let Some(result) = self.fallback.take() {
+            self.state.publish(result);
+        }
+    }
+}
+
+struct HeadlessWaitCancellationGuard {
+    cancel: CancellationToken,
+    active: bool,
+}
+
+impl HeadlessWaitCancellationGuard {
+    fn disarm(&mut self) {
+        self.active = false;
+    }
+}
+
+impl Drop for HeadlessWaitCancellationGuard {
+    fn drop(&mut self) {
+        if self.active {
+            self.cancel.cancel();
+        }
+    }
 }
 
 impl HeadlessResult {
@@ -136,15 +290,37 @@ pub async fn run_headless<F>(config: HeadlessConfig, configure: F) -> HeadlessRe
 where
     F: FnOnce(ReactAgentBuilder) -> ReactAgentBuilder,
 {
+    let handle = start_headless(config, configure);
+    wait_headless_handle(handle).await
+}
+
+async fn wait_headless_handle(handle: HeadlessRunHandle) -> HeadlessResult {
+    let mut cancellation_guard = HeadlessWaitCancellationGuard {
+        cancel: handle.state.cancel.clone(),
+        active: true,
+    };
+    let result = handle.wait().await;
+    cancellation_guard.disarm();
+    result
+}
+
+/// Start Headless execution and synchronously return its retained owner.
+///
+/// This is the cancellation-safe entry point for callers that may stop waiting
+/// and later observe the same result or retry a failed Agent close.
+pub fn start_headless<F>(config: HeadlessConfig, configure: F) -> HeadlessRunHandle
+where
+    F: FnOnce(ReactAgentBuilder) -> ReactAgentBuilder,
+{
     let exit_on_error = config.exit_on_error;
     if config.prompt.is_empty() {
-        return HeadlessResult {
+        return HeadlessRunHandle::completed(HeadlessResult {
             output: "Error: empty prompt".into(),
             success: false,
             model: String::new(),
             format: config.output_format,
             exit_on_error,
-        };
+        });
     }
 
     // Build the agent
@@ -161,23 +337,86 @@ where
     let agent = match builder.build() {
         Ok(a) => a,
         Err(e) => {
-            return HeadlessResult {
+            return HeadlessRunHandle::completed(HeadlessResult {
                 output: format!("Error building agent: {}", e),
                 success: false,
                 model: String::new(),
                 format: config.output_format,
                 exit_on_error,
-            };
+            });
         }
     };
 
-    run_headless_agent(config, &agent).await
+    start_headless_agent(config, Arc::new(agent))
 }
 
-async fn run_headless_agent(config: HeadlessConfig, agent: &dyn Agent) -> HeadlessResult {
+fn start_headless_agent(config: HeadlessConfig, agent: Arc<dyn Agent>) -> HeadlessRunHandle {
+    // The caller owns the configured token. Headless cancellation must remain
+    // inside this run and must not cancel sibling work in the caller's scope.
+    let cancel = config
+        .cancel_token
+        .as_ref()
+        .map(CancellationToken::child_token)
+        .unwrap_or_default();
+    let state = Arc::new(HeadlessRunState::new(cancel.clone(), Some(agent.clone())));
+    let handle = HeadlessRunHandle {
+        state: Arc::clone(&state),
+    };
+    let runtime = match tokio::runtime::Handle::try_current() {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            state.publish(HeadlessResult {
+                output: format!("Error starting headless run: {error}"),
+                success: false,
+                model: agent.model_name().to_string(),
+                format: config.output_format,
+                exit_on_error: config.exit_on_error,
+            });
+            return handle;
+        }
+    };
+    // Construct the owner before spawn so dropping an unpolled task still
+    // publishes a failure receipt and retains the Agent for close retry.
+    let task_owner = HeadlessTaskOwner {
+        state: Arc::clone(&state),
+        fallback: Some(HeadlessResult {
+            output: "Error: headless execution owner ended before settlement".to_string(),
+            success: false,
+            model: agent.model_name().to_string(),
+            format: config.output_format.clone(),
+            exit_on_error: config.exit_on_error,
+        }),
+    };
+    let task = runtime.spawn(async move {
+        let mut task_owner = task_owner;
+        let mut result = execute_headless_agent(config, agent.as_ref(), cancel).await;
+        if let Err(error) = state.close_once().await {
+            if !result.success {
+                result.output.push_str("; ");
+            } else {
+                result.output.clear();
+            }
+            result
+                .output
+                .push_str(&format!("Error closing agent: {error}"));
+            result.success = false;
+        }
+        task_owner.publish(result);
+    });
+    // The task retains the shared state and Agent until the first close
+    // attempt, and publishes a result receipt even if a waiter is cancelled.
+    // Dropping only the JoinHandle does not abandon that logical owner.
+    std::mem::drop(task);
+    handle
+}
+
+async fn execute_headless_agent(
+    config: HeadlessConfig,
+    agent: &dyn Agent,
+    cancel: CancellationToken,
+) -> HeadlessResult {
     let model = agent.model_name().to_string();
     let exit_on_error = config.exit_on_error;
-    let cancel = config.cancel_token.unwrap_or_default();
     let identity_value = format!("headless-{}", uuid::Uuid::new_v4());
     let execution = match crate::agent::EventIdentity::new(&identity_value, &identity_value) {
         Ok(identity) => {
@@ -191,16 +430,7 @@ async fn run_headless_agent(config: HeadlessConfig, agent: &dyn Agent) -> Headle
         }
         Err(error) => (format!("Error: {error}"), false),
     };
-    let (mut output, mut success) = execution;
-    if let Err(error) = agent.close().await {
-        if !success {
-            output.push_str("; ");
-        } else {
-            output.clear();
-        }
-        output.push_str(&format!("Error closing agent: {error}"));
-        success = false;
-    }
+    let (output, success) = execution;
     HeadlessResult {
         output,
         success,
@@ -249,12 +479,12 @@ mod tests {
     use futures::future::BoxFuture;
     use futures::stream::BoxStream;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::Duration;
 
     struct ClosingAgent {
         closes: Arc<AtomicUsize>,
-        close_error: bool,
+        fail_first_close: Arc<AtomicBool>,
     }
 
     impl Agent for ClosingAgent {
@@ -290,11 +520,58 @@ mod tests {
         fn close(&self) -> BoxFuture<'_, crate::error::Result<()>> {
             Box::pin(async move {
                 self.closes.fetch_add(1, Ordering::AcqRel);
-                if self.close_error {
+                if self.fail_first_close.swap(false, Ordering::AcqRel) {
                     Err(ReactError::Other("close failed".to_string()))
                 } else {
                     Ok(())
                 }
+            })
+        }
+    }
+
+    struct CancellableHeadlessAgent {
+        started: Arc<tokio::sync::Notify>,
+        closes: Arc<AtomicUsize>,
+        closed: Arc<tokio::sync::Notify>,
+    }
+
+    impl Agent for CancellableHeadlessAgent {
+        fn name(&self) -> &str {
+            "cancellable-headless-agent"
+        }
+
+        fn model_name(&self) -> &str {
+            "cancellable-model"
+        }
+
+        fn system_prompt(&self) -> &str {
+            "test"
+        }
+
+        fn execute<'a>(&'a self, _task: &'a str) -> BoxFuture<'a, crate::error::Result<String>> {
+            Box::pin(async { Ok("done".to_string()) })
+        }
+
+        fn execute_stream<'a>(
+            &'a self,
+            _task: &'a str,
+        ) -> BoxFuture<'a, crate::error::Result<BoxStream<'a, crate::error::Result<AgentEvent>>>>
+        {
+            let started = Arc::clone(&self.started);
+            Box::pin(async move {
+                Ok(futures::stream::once(async move {
+                    started.notify_one();
+                    futures::future::pending::<crate::error::Result<AgentEvent>>().await
+                })
+                .boxed())
+            })
+        }
+
+        fn close(&self) -> BoxFuture<'_, crate::error::Result<()>> {
+            Box::pin(async move {
+                self.closes.fetch_add(1, Ordering::AcqRel);
+                self.closed.notify_waiters();
+                Ok(())
             })
         }
     }
@@ -408,22 +685,140 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn headless_awaits_agent_close_and_surfaces_cleanup_failure() {
+    async fn headless_awaits_agent_close_and_surfaces_cleanup_failure() -> crate::error::Result<()>
+    {
         let closes = Arc::new(AtomicUsize::new(0));
-        let result = run_headless_agent(
+        let fail_first_close = Arc::new(AtomicBool::new(true));
+        let handle = start_headless_agent(
             HeadlessConfig {
                 prompt: "close after settlement".to_string(),
                 ..HeadlessConfig::default()
             },
-            &ClosingAgent {
+            Arc::new(ClosingAgent {
                 closes: Arc::clone(&closes),
-                close_error: true,
-            },
-        )
-        .await;
+                fail_first_close,
+            }),
+        );
+        let result = handle.wait().await;
 
         assert_eq!(closes.load(Ordering::Acquire), 1);
         assert!(!result.success);
         assert!(result.output.contains("close failed"));
+        handle.retry_close().await?;
+        assert_eq!(closes.load(Ordering::Acquire), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancelled_headless_waiter_keeps_owned_cleanup_running() -> crate::error::Result<()> {
+        let started = Arc::new(tokio::sync::Notify::new());
+        let closes = Arc::new(AtomicUsize::new(0));
+        let closed = Arc::new(tokio::sync::Notify::new());
+        let parent_cancel = CancellationToken::new();
+        let sibling_cancel = parent_cancel.child_token();
+        let handle = start_headless_agent(
+            HeadlessConfig {
+                prompt: "wait until cancelled".to_string(),
+                cancel_token: Some(parent_cancel.clone()),
+                ..HeadlessConfig::default()
+            },
+            Arc::new(CancellableHeadlessAgent {
+                started: Arc::clone(&started),
+                closes: Arc::clone(&closes),
+                closed: Arc::clone(&closed),
+            }),
+        );
+        let waiter_handle = handle.clone();
+        let waiter = tokio::spawn(async move { wait_headless_handle(waiter_handle).await });
+        tokio::time::timeout(Duration::from_secs(2), started.notified())
+            .await
+            .map_err(|_| ReactError::Other("Headless turn did not start".to_string()))?;
+        let retry_error = handle.retry_close().await.err().ok_or_else(|| {
+            ReactError::Other("close retry was accepted before execution settled".to_string())
+        })?;
+        assert!(
+            retry_error
+                .to_string()
+                .contains("before Headless execution settles")
+        );
+        assert_eq!(closes.load(Ordering::Acquire), 0);
+        let closed_wait = closed.notified();
+        tokio::pin!(closed_wait);
+        closed_wait.as_mut().enable();
+        waiter.abort();
+        let _ = waiter.await;
+        tokio::time::timeout(Duration::from_secs(2), closed_wait)
+            .await
+            .map_err(|_| ReactError::Other("cancelled waiter abandoned Agent close".to_string()))?;
+        assert_eq!(closes.load(Ordering::Acquire), 1);
+        assert!(!parent_cancel.is_cancelled());
+        assert!(!sibling_cancel.is_cancelled());
+        let result = handle.wait().await;
+        assert!(!result.success);
+        assert!(result.output.contains("Cancelled"));
+        Ok(())
+    }
+
+    #[test]
+    fn missing_runtime_returns_failure_without_dropping_close_owner() -> crate::error::Result<()> {
+        let closes = Arc::new(AtomicUsize::new(0));
+        let handle = start_headless_agent(
+            HeadlessConfig {
+                prompt: "requires a runtime".to_string(),
+                ..HeadlessConfig::default()
+            },
+            Arc::new(ClosingAgent {
+                closes: Arc::clone(&closes),
+                fail_first_close: Arc::new(AtomicBool::new(false)),
+            }),
+        );
+        let result = handle.state.result().ok_or_else(|| {
+            ReactError::Other("missing-runtime failure was not published".to_string())
+        })?;
+        assert!(!result.success);
+        assert!(result.output.contains("Error starting headless run"));
+        assert_eq!(closes.load(Ordering::Acquire), 0);
+
+        let runtime = tokio::runtime::Runtime::new()
+            .map_err(|error| ReactError::Other(format!("test runtime failed: {error}")))?;
+        runtime.block_on(handle.retry_close())?;
+        assert_eq!(closes.load(Ordering::Acquire), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_drop_before_first_poll_publishes_failure_and_retains_owner()
+    -> crate::error::Result<()> {
+        let closes = Arc::new(AtomicUsize::new(0));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| ReactError::Other(format!("test runtime failed: {error}")))?;
+        let enter_guard = runtime.enter();
+        let handle = start_headless_agent(
+            HeadlessConfig {
+                prompt: "runtime drops before polling".to_string(),
+                ..HeadlessConfig::default()
+            },
+            Arc::new(ClosingAgent {
+                closes: Arc::clone(&closes),
+                fail_first_close: Arc::new(AtomicBool::new(false)),
+            }),
+        );
+        drop(enter_guard);
+        drop(runtime);
+
+        let result = handle.state.result().ok_or_else(|| {
+            ReactError::Other("unpolled task did not publish a failure receipt".to_string())
+        })?;
+        assert!(!result.success);
+        assert!(result.output.contains("owner ended before settlement"));
+        assert_eq!(closes.load(Ordering::Acquire), 0);
+
+        let retry_runtime = tokio::runtime::Runtime::new()
+            .map_err(|error| ReactError::Other(format!("retry runtime failed: {error}")))?;
+        retry_runtime.block_on(handle.retry_close())?;
+        assert_eq!(closes.load(Ordering::Acquire), 1);
+        Ok(())
     }
 }

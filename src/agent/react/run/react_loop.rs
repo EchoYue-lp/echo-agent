@@ -122,30 +122,59 @@ impl ReactAgent {
         // Capture legacy mutable context before queueing. A later caller may
         // update or clear the shared setters while this invocation waits for
         // the execution mutex, but cannot change this invocation's ownership.
-        let legacy_runtime = self.capture_legacy_external_context();
+        let mut legacy_runtime = self.capture_legacy_external_context();
+        let (mut turn_lease, lifecycle_cancel) = self
+            .close_authority
+            .admit(legacy_runtime.cancel.as_deref().cloned())?;
+        legacy_runtime.cancel = Some(std::sync::Arc::new(lifecycle_cancel.clone()));
         // ★ Serialize all execution on this agent — only one run at a time.
         let _execution_guard = self.execution_mutex.lock().await;
+        if lifecycle_cancel.is_cancelled() {
+            return Err(ReactError::Agent(Box::new(
+                crate::error::AgentError::Cancelled(
+                    "Agent close cancelled queued turn".to_string(),
+                ),
+            )));
+        }
+        // From this point, cancellation of the caller future can abandon
+        // observable preparation work. Only explicit return paths may settle
+        // the close lease without recording debt.
+        turn_lease.mark_started();
 
         let admission_snapshot =
             AgentRunSnapshot::from_agent_with_legacy_context(self, &legacy_runtime);
-        if let Some(settlement) = admission_snapshot
+        let pending_settlement = match admission_snapshot
             .reconcile_pending_transcript_projection()
-            .await?
+            .await
+        {
+            Ok(settlement) => settlement,
+            Err(error) => {
+                turn_lease.settle();
+                return Err(error);
+            }
+        };
+        if let Some(settlement) = pending_settlement
             && settlement.status != crate::memory::TranscriptProjectionSettlementStatus::Settled
         {
-            return Err(crate::agent::snapshot::transcript_settlement_admission_error(&settlement));
+            let error = crate::agent::snapshot::transcript_settlement_admission_error(&settlement);
+            turn_lease.settle();
+            return Err(error);
         }
         let scope_id = admission_snapshot.config.conversation_id.as_deref();
         let runtime_state_id = admission_snapshot.config.runtime_state_id.as_deref();
-        match mode {
+        let restore_result = match mode {
             StreamMode::Execute => {
                 self.restore_thread_context_for(scope_id, runtime_state_id)
-                    .await?
+                    .await
             }
             StreamMode::Chat => {
                 self.restore_chat_context_if_cold_for(scope_id, runtime_state_id)
-                    .await?
+                    .await
             }
+        };
+        if let Err(error) = restore_result {
+            turn_lease.settle();
+            return Err(error);
         }
 
         // Prepare context (guard check, memory recall, push message, start trace)
@@ -178,6 +207,7 @@ impl ReactAgent {
                                         Some(&error.to_string()),
                                     )
                                     .await;
+                                turn_lease.settle();
                                 return Err(error);
                             }
                         };
@@ -197,13 +227,16 @@ impl ReactAgent {
                                     Some(&error.to_string()),
                                 )
                                 .await;
+                            turn_lease.settle();
                             return Err(error);
                         }
                         terminal_snapshot
                             .finalize_run(crate::trace::RunStatus::Failed, None, Some(&msg))
                             .await;
+                        turn_lease.settle();
                         return Ok(msg);
                     }
+                    turn_lease.settle();
                     return Err(e);
                 }
             };
@@ -266,19 +299,25 @@ impl ReactAgent {
             .map(|cancel| cancel.as_ref().clone());
         let failure_snapshot = snap.clone();
 
-        // Run the shared core loop in a spawned task
+        // The core task owns the close lease. If the caller drops this outer
+        // future, Agent::close can still cancel the task and await lease release.
         let context = self.memory.context.clone();
         let text = effective_message;
-        let core = tokio::spawn(snap.run_core_loop(
-            context,
-            text,
-            None,
-            String::new(),
-            StreamMode::Chat,
-            recalled,
-            false,
-            tx,
-        ));
+        let core = tokio::spawn(async move {
+            let result = snap
+                .run_core_loop(
+                    context,
+                    text,
+                    None,
+                    String::new(),
+                    StreamMode::Chat,
+                    recalled,
+                    false,
+                    tx,
+                )
+                .await;
+            (result, turn_lease)
+        });
 
         // Collect events, extract FinalAnswer
         let mut terminal = None;
@@ -306,12 +345,12 @@ impl ReactAgent {
             }
         }
 
-        let core_result = core.await.map_err(|error| {
-            ReactError::Other(format!("Core loop task failed before terminal: {error}"))
-        });
-        match core_result {
-            Ok(Ok(outcome)) => active_turn_lease.settle(outcome),
-            Ok(Err(error)) => {
+        match core.await {
+            Ok((Ok(outcome), turn_lease)) => {
+                active_turn_lease.settle(outcome);
+                turn_lease.settle();
+            }
+            Ok((Err(error), turn_lease)) => {
                 let outcome = if turn_cancel
                     .as_ref()
                     .is_some_and(crate::agent::CancellationToken::is_cancelled)
@@ -337,9 +376,13 @@ impl ReactAgent {
                         Some(&error.to_string()),
                     )
                     .await;
+                turn_lease.settle();
                 return Err(error);
             }
-            Err(error) => {
+            Err(join_error) => {
+                let error = ReactError::Other(format!(
+                    "Core loop task failed before terminal: {join_error}"
+                ));
                 failure_snapshot
                     .finalize_run(
                         crate::trace::RunStatus::Failed,

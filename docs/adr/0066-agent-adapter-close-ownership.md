@@ -60,14 +60,17 @@ owner until work settles, and await the resource close result.
   succeeds; dropping it after admission forfeits retry ownership and violates
   this API contract. An early drop before connection starts fails closed. The
   framework receipt remains the only driven Turn terminal.
-- Headless awaits its single driven Turn and then `Agent::close`. A close error
-  makes the returned result unsuccessful and remains visible beside an earlier
-  Turn error. Headless owns its Agent only for this one call; once it returns,
-  the API cannot retry the same failed Agent close. If the caller drops or
-  aborts the outer `run_headless` future before it reaches the close phase, the
-  local Agent owner is dropped and this one-shot API cannot guarantee awaited
-  cleanup. Callers that require cancellation-safe retained ownership must use
-  a long-lived Agent/adaptor owner rather than abandon the one-shot future.
+- Headless starts an owned task and synchronously exposes `HeadlessRunHandle`
+  through `start_headless`. The handle owns cancellation, result observation,
+  and retry of the same Agent after a failed close. The `run_headless`
+  convenience wrapper awaits that handle; dropping or aborting the wrapper
+  requests Turn cancellation while the owned task continues through
+  `Agent::close` and publishes its receipt. A close error makes the result
+  unsuccessful and retains the Agent on the handle for `retry_close`.
+  Headless derives a child from a caller-provided cancellation token, so
+  wrapper cancellation cannot cancel the caller's parent scope or siblings.
+  `retry_close` is valid only after the result receipt is published; once
+  close succeeds it is idempotent.
 - ChannelManager retains each started `MessageHandler`. A successful transport
   stop precedes awaited handler close, and an interrupted or failed close
   leaves the same handler owned for retry. `SessionHandler` fences creation,
@@ -80,9 +83,20 @@ owner until work settles, and await the resource close result.
   their previous handler before publishing a replacement. Custom stateless
   handlers inherit a no-op `MessageHandler::close`; resourceful handlers must
   override it. `AgentChannelHandler` delegates to its `Agent::close`.
-- `ReactAgent::drop` does not spawn cleanup. It warns when live MCP server
-  names remain; owners must await `Agent::close` while they still hold the
-  Agent. MCP transport/client/manager settlement remains under
+- `ReactAgent::close` permanently fences Turn admission, cancels every active
+  or queued Turn, waits for their existing terminal paths to release close
+  leases, and only then closes MCP resources. Each admission derives a child
+  cancellation token, so closing one Agent does not cancel the caller's parent
+  scope. Once preparation may reconcile, hydrate, audit, trace, or mutate
+  context, the close lease requires explicit settlement. Panic, forced abort,
+  or caller cancellation that drops this path records persistent close debt;
+  close returns that error and does not proceed to MCP cleanup. Cancelling a
+  close waiter leaves the fence, Turn cancellation, leases, and debt in force;
+  a later close waits on or reports the same state. If cancellation is observed
+  before a driven stream is created, `AgentTurnDriver` preserves its typed
+  `Cancelled` terminal instead of wrapping it as `Failed`. `ReactAgent::drop` does not spawn
+  cleanup. It warns when live MCP server names remain; owners must await
+  `Agent::close` while they still hold the Agent. MCP transport/client/manager settlement remains under
   [ADR 0049](./0049-mcp-transport-close-settlement.md).
 
 ## Consequences
@@ -91,8 +105,8 @@ Adapter close is a resource fact separate from the Agent Turn terminal and
 delivery outcome. A failed close does not reopen admission. Callers must retain
 long-lived owners for retry and should not infer settled resources from a
 timeout. `Agent::close` errors are now surfaced by Headless, Channel and ACP
-adapter owners. The one-shot Headless boundary reports errors but cannot
-retain an Agent after returning. ACP's mandatory
+adapter owners. `HeadlessRunHandle` retains a failed Agent close for retry.
+ACP's mandatory
 close handle is a breaking lifecycle contract for framework and independent
 SDK consumers: direct transport callers can use
 `let (close_owner, connection) = adapter.connect_retaining_close_owner(transport);`
@@ -110,6 +124,10 @@ retained receipts, profile error followed by Agent close, EOF retry, mandatory
 handle rejection before resource creation, connection-future cancellation,
 post-return third close, Channel start/stop cancellation,
 transport-before-handler close, legacy stream drop-before-handler-close,
-sender session retry, and cancelled close.
+sender session retry, cancelled close, ReactAgent active/queued Turn close,
+cancelled close retry, child-token isolation, early guard-future abort,
+forced producer abort, provider failure settlement, Headless waiter
+cancellation, pre-poll runtime shutdown, start-time cancellation
+classification, retry phase validation, and retained Headless close retry.
 A2A remains unverified and outside this ADR. Full workspace and independent review are required before
 the corresponding semantic Finding can be resolved on main.

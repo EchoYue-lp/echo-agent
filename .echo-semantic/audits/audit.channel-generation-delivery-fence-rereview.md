@@ -5,19 +5,19 @@ kind: audit
 boundary_ref: boundary.protocol-surfaces
 lens: time_lifecycle
 freshness: examined
-revision: source:0a91548f9c8d3f6e6a19bc2025fd2d21a46b656162f50b44aedfba5b6d5bf1bb
+revision: source:3d3fb558349d604e3762588a5db974417956f949c929c8d8cae30ab94558379b
 finding_refs: [finding.channel-reset-stale-generation-delivery]
 challenges:
   transport-admission-barrier:
-    revision: source:0a91548f9c8d3f6e6a19bc2025fd2d21a46b656162f50b44aedfba5b6d5bf1bb
+    revision: source:3d3fb558349d604e3762588a5db974417956f949c929c8d8cae30ab94558379b
     source_refs: [echo-integration/src/channels/channels/mod.rs, echo-integration/src/channels/channels/qq/channel.rs, echo-integration/src/channels/channels/feishu/channel.rs]
     evidence_refs: [evidence.channel-generation-delivery-fence-repair, evidence.channel-generation-delivery-fence-verification]
   setup-and-stream-cancellation:
-    revision: source:0a91548f9c8d3f6e6a19bc2025fd2d21a46b656162f50b44aedfba5b6d5bf1bb
+    revision: source:3d3fb558349d604e3762588a5db974417956f949c929c8d8cae30ab94558379b
     source_refs: [echo-integration/src/channels/session.rs]
     evidence_refs: [evidence.channel-generation-delivery-fence-verification]
   rotation-shared-authority:
-    revision: source:0a91548f9c8d3f6e6a19bc2025fd2d21a46b656162f50b44aedfba5b6d5bf1bb
+    revision: source:3d3fb558349d604e3762588a5db974417956f949c929c8d8cae30ab94558379b
     source_refs: [echo-integration/src/channels/types.rs, echo-integration/src/channels/session.rs]
     evidence_refs: [evidence.channel-generation-delivery-fence-repair, evidence.channel-generation-delivery-fence-verification]
 ---

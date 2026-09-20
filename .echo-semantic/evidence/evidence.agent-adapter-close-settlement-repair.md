@@ -2,13 +2,15 @@
 schema_version: 1
 id: evidence.agent-adapter-close-settlement-repair
 kind: evidence
-observed_at: source:0a91548f9c8d3f6e6a19bc2025fd2d21a46b656162f50b44aedfba5b6d5bf1bb
+observed_at: source:3d3fb558349d604e3762588a5db974417956f949c929c8d8cae30ab94558379b
 source_refs:
   - src/acp/session.rs
   - src/acp/runtime.rs
   - src/acp/adapter.rs
   - src/acp/mod.rs
+  - echo-orchestration/src/runtime/turn_driver.rs
   - src/headless.rs
+  - src/lib.rs
   - echo-integration/src/channels/manager.rs
   - echo-integration/src/channels/session.rs
   - echo-integration/src/channels/types.rs
@@ -17,14 +19,12 @@ source_refs:
   - docs/adr/0066-agent-adapter-close-ownership.md
 supports: [behavior.agent-turn-lifecycle, behavior.protocol-projection, rule.turn-terminal-authority]
 limitations:
-  - Headless reports close errors but cannot return a retry owner after its one-shot call
-  - Dropping or aborting the outer run_headless future before its close phase cannot guarantee awaited cleanup
   - ACP requires a caller-retained AcpAdapterCloseHandle; consumers without one fail before Agent creation
-  - A2A remains untouched; its close, terminal authority and stream cleanup findings remain open
+  - A2A remains untouched and owned by its separate Findings
   - Agent implementations that ignore cancellation can exceed one close attempt and require the caller to retain the owner
 ---
 
-# Agent adapter close settlement repair candidate
+# Agent adapter close settlement repair
 
 ## 支持的结论
 
@@ -44,12 +44,29 @@ handle before its connection future is polled. Manual official Client
 callers must keep their handle until cleanup succeeds. No adapter-generated
 Turn terminal is introduced.
 
-Headless awaits its driven Turn receipt then `Agent::close` and marks a close
-error unsuccessful. A2A is untouched and none of its close, terminal or stream
-lifecycle Findings are claimed by this evidence.
+Headless synchronously publishes `HeadlessRunHandle` before its owned task runs.
+Dropping or aborting a `run_headless` waiter requests Turn cancellation while
+the task retains the Agent through close and publishes one result receipt. A
+failed close remains owned by the handle for `retry_close`. Missing runtime
+startup and runtime shutdown before first poll also return a failure receipt
+without dropping the close owner. A caller token is observed through a child
+scope, and `retry_close` rejects calls before the result receipt exists.
 
-ChannelManager retains handlers from successful start until transport stop
-and handler close both succeed. SessionHandler fences session creation, cancels
+ReactAgent has one close authority that atomically fences admission, owns the
+child cancellation token for every accepted direct or streaming Turn, and
+waits for the Turn's existing terminal path before MCP cleanup. Preparation
+becomes settlement-bearing before reconcile, hydrate, guard, audit, trace, or
+context awaits. Normal pre-turn rejection releases the lease explicitly;
+caller abort, producer abort, or panic records persistent close debt and blocks
+MCP cleanup. A cancelled close waiter does not reopen admission or discard
+leases; a later close waits or reports the same debt. The existing
+`AgentTurnDriver` classifies a typed cancellation before stream creation as
+`TurnOutcome::Cancelled`, preserving the same terminal kind at every phase.
+
+ChannelManager records transport-stopped and handler-close as separate phases,
+then retains handlers until both succeed. A retry after transport success goes
+directly to the same handler even when `ChannelPlugin::stop` is non-idempotent.
+SessionHandler fences session creation, cancels
 sender generations, waits for every accepted stream and delivery lease during
 shutdown, and closes each inner Agent before removing it or publishing a
 timeout/reset replacement. Legacy/custom stream receipts are resource lifetime
@@ -71,9 +88,8 @@ transport/client cleanup authority.
 
 ## 已知缺口
 
-Headless cannot return a retry owner. ACP now requires
-external consumers (including the independent SDK Host) to retain its close
-handle before `ConnectTo` consumes the adapter. Dropping a manual handle after
-admission forfeits retry ownership and violates this contract. A2A remains
-open and untouched. Integration gates, independent rereview, and mainline
-delivery are separate obligations.
+ACP requires external consumers to retain its close handle before `ConnectTo`
+consumes the adapter. Dropping a manual handle after admission forfeits retry
+ownership and violates this contract. A2A remains outside this Evidence.
+Integration gates, independent rereview, and mainline delivery are separate
+obligations.

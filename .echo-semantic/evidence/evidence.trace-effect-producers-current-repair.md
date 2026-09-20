@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.trace-effect-producers-current-repair
 kind: evidence
-observed_at: source:0a91548f9c8d3f6e6a19bc2025fd2d21a46b656162f50b44aedfba5b6d5bf1bb
+observed_at: source:3d3fb558349d604e3762588a5db974417956f949c929c8d8cae30ab94558379b
 source_refs:
   - echo-core/src/tools/mod.rs
   - echo-tools/src/files/files.rs

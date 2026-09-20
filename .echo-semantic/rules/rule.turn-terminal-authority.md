@@ -7,9 +7,9 @@ expectation: human_confirmed
 risk: high
 primary_focus: time_lifecycle
 focus: [state_authority, failure_concurrency, contract_evidence]
-observed_at: source:0a91548f9c8d3f6e6a19bc2025fd2d21a46b656162f50b44aedfba5b6d5bf1bb
+observed_at: source:3d3fb558349d604e3762588a5db974417956f949c929c8d8cae30ab94558379b
 behavior_refs: [behavior.agent-turn-lifecycle]
-code_refs: [echo-orchestration/src/runtime/turn_driver.rs, echo-core/src/agent/event_envelope.rs, src/headless.rs, src/acp/runtime.rs, src/eval/runner.rs, src/channels.rs, src/agent/react/mod.rs, docs/adr/0009-tracked-input-receipts.md, docs/adr/0010-canonical-turn-receipt-accounting.md, docs/adr/0037-eval-timeout-turn-settlement.md, docs/adr/0046-turn-execution-delivery-settlement.md, docs/adr/0066-agent-adapter-close-ownership.md]
+code_refs: [echo-orchestration/src/runtime/turn_driver.rs, echo-core/src/agent/event_envelope.rs, src/headless.rs, src/acp/runtime.rs, src/eval/runner.rs, src/channels.rs, src/agent/react/mod.rs, src/agent/react/lifecycle.rs, docs/adr/0009-tracked-input-receipts.md, docs/adr/0010-canonical-turn-receipt-accounting.md, docs/adr/0037-eval-timeout-turn-settlement.md, docs/adr/0046-turn-execution-delivery-settlement.md, docs/adr/0066-agent-adapter-close-ownership.md]
 evidence_refs: [evidence.agent-context-execution, evidence.eval-timeout-turn-settlement-repair, evidence.eval-timeout-turn-settlement-verification, evidence.turn-terminal-delivery-settlement-repair, evidence.turn-terminal-delivery-settlement-verification, evidence.agent-adapter-close-settlement-repair, evidence.agent-adapter-close-settlement-verification]
 finding_refs: [finding.turn-driver-entry-coverage, finding.eval-timeout-settlement, finding.turn-terminal-commit-projection-order]
 ---
@@ -27,7 +27,10 @@ finding_refs: [finding.turn-driver-entry-coverage, finding.eval-timeout-settleme
 ## 当前实现
 
 Driver先由producer terminal确定Completed/Cancelled/Failed，再独立结算sink的Delivered、Closed或Failed；delivery不得覆盖已提交的执行终态和final facts。ReactAgent managed stream在producer task settled后才释放terminal；提前drop才走bounded reaper。Eval deadline只发出cancel request，必须继续等待同一driver future取得receipt，或在共享bounded grace后显式标记未settled。
-Adapter resource close由各自owner等待`Agent::close`，其错误不反向改写同一TurnReceipt执行终态，也不能用新的adapter terminal替代它。
+stream start在创建producer前返回typed cancellation时，Driver仍发布Cancelled receipt，不包装成Failed。
+Adapter resource close由各自owner等待`Agent::close`；React close authority只fence/cancel/wait既有
+Turn终态，不提交第二终态。它以child token隔离caller scope，并把preparation/producer异常Drop记录为
+persistent close debt；debt阻断后续资源释放。close错误不反向改写同一TurnReceipt执行终态，也不能用新的adapter terminal替代它。
 
 ## 期望行为
 

@@ -329,7 +329,9 @@ pub mod prelude {
     pub use crate::error::Result;
 
     // Headless
-    pub use crate::headless::{HeadlessConfig, HeadlessResult, run_headless};
+    pub use crate::headless::{
+        HeadlessConfig, HeadlessResult, HeadlessRunHandle, run_headless, start_headless,
+    };
 
     // Trace
     pub use crate::trace::{

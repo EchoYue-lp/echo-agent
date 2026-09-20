@@ -6,13 +6,13 @@ title: Framework 通用 ACP Agent adapter
 asset_type: protocol
 status: active
 risk: high
-observed_at: 44b2ed68772c7c016d09af6c2e1adac9fe4fea70
+observed_at: source:3d3fb558349d604e3762588a5db974417956f949c929c8d8cae30ab94558379b
 boundary_refs: [boundary.protocol-surfaces, boundary.workspace-architecture]
 code_refs: [src/acp/adapter.rs, src/acp/runtime.rs, src/acp/projection.rs, src/acp/mod.rs, tests/acp_agent_adapter.rs, tests/fixtures/acp/v1/prompt-resource-link-valid.json, tests/fixtures/acp/v1/session-relative-cwd-invalid.json]
 consumer_refs: [tests/acp_agent_adapter.rs, echo-agent-learning/examples/demo72_acp_agent_adapter.rs]
 behavior_refs: [behavior.protocol-projection, behavior.agent-turn-lifecycle]
 rule_refs: [rule.protocol-role-separation, rule.turn-terminal-authority, rule.framework-layer-ownership]
-evidence_refs: [evidence.provider-protocol-quality, evidence.workspace-structure]
+evidence_refs: [evidence.provider-protocol-quality, evidence.workspace-structure, evidence.agent-adapter-close-settlement-repair, evidence.agent-adapter-close-settlement-verification]
 finding_refs: [finding.sdk-repository-extraction]
 candidate_refs: [asset.sdk-source-product]
 ---

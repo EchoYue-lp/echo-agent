@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.k8s-sandbox-cleanup-settlement-verification
 kind: evidence
-observed_at: 44b2ed68772c7c016d09af6c2e1adac9fe4fea70
+observed_at: source:3d3fb558349d604e3762588a5db974417956f949c929c8d8cae30ab94558379b
 source_refs:
   - echo-execution/src/sandbox/k8s.rs
   - docs/adr/0002-sandbox-cancellation-cleanup.md
@@ -19,7 +19,7 @@ limitations:
 修复前回归`caller_abort_after_pod_submission_keeps_cleanup_owner`以exit 101失败：fake-kubectl
 观察到`run`后，caller abort在1.66秒内未产生`delete`。首次集成复审又用
 `delayed_api_commit_is_deleted_before_cleanup_returns`稳定复现首次delete为NotFound、随后Pod才
-可见的竞态，旧实现exit 101。最终K8s定向测试18项全部通过，
+可见的竞态，旧实现exit 101。最终K8s定向测试19项全部通过，
 证明成功、非零退出、timeout、cancel和caller drop均在terminal前到达delete；delete spawn、
 非零退出和timeout均成为可见typed cleanup debt，且success/nonzero/timeout/cancel facts被保留。
 新增反例还证明kubectl leader退出后遗留的pipe holder被进程组结算、stdin失败与blocked stdin
@@ -29,6 +29,8 @@ caller drop进入同一cleanup、delete完成/失败可被观察，以及JoinErr
 kubectl 控制命令启动还对 Linux `ETXTBSY` 瞬态错误执行共享 deadline 内的有界重试；其它启动
 错误仍立即进入 typed failure，避免 runner 或滚动替换期间的瞬态可执行文件占用破坏 terminal
 结算。
+完整 all-feature gate 还证明原 test-only 250ms control deadline 在高并发进程调度下会误报；
+harness 改为1秒后，19项测试全部通过，生产默认10秒不变，delete-timeout故障注入仍返回typed debt。
 独立review首轮发现并阻断无界pipe drain、cleanup debt交接窗口和stdin/settlement测试缺口；修复后
 第二轮复审PASS，Critical、Important、Minor均为0。
 

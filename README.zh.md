@@ -97,7 +97,10 @@ async fn main() -> Result<()> {
 let mut manager = ChannelManager::new();
 manager.register(Box::new(QqChannel::new(qq_config)?));
 manager.register(Box::new(FeishuChannel::new(feishu_config)?));
-manager.start_all(handler).await?;
+for started in manager.start_all(handler).await {
+    started.result?;
+}
+manager.stop_all().await?;
 ```
 
 ### 运行示例
@@ -561,22 +564,24 @@ let result = graph.run(state).await?;
 
 ```rust
 // QQ Bot — WebSocket 网关
-let qq = QqChannel::new(QqConfig {
-    app_id, client_secret,
-})?;
+let qq = QqChannel::new(QqConfig::new(app_id, client_secret))?;
 
 // 飞书 — HTTP Webhook
-let feishu = FeishuChannel::new(FeishuConfig {
-    app_id, app_secret,
-    webhook_bind: "0.0.0.0:8080",
-    webhook_path: "/webhook",
-    verification_token: None,
-})?;
+let feishu = FeishuChannel::new(FeishuConfig::new_webhook(
+    app_id,
+    app_secret,
+    "0.0.0.0:8080".into(),
+    "/webhook".into(),
+    None,
+))?;
 
 let mut manager = ChannelManager::new();
 manager.register(Box::new(qq));
 manager.register(Box::new(feishu));
-manager.start_all(handler).await?;
+for started in manager.start_all(handler).await {
+    started.result?;
+}
+manager.stop_all().await?;
 ```
 
 功能特性：

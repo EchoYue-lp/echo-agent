@@ -4,13 +4,13 @@ id: map.agent-session-turn
 kind: capability_map
 title: Agent、Session、Invocation 与 Turn
 risk: high
-observed_at: c5f7688212d45d5bdcdbf60342605e8bfb176cae
+observed_at: source:3d3fb558349d604e3762588a5db974417956f949c929c8d8cae30ab94558379b
 boundary_refs: [boundary.agent-session-turn]
 behavior_refs: [behavior.agent-turn-lifecycle]
 rule_refs: [rule.turn-terminal-authority, rule.context-persistence-separation]
-evidence_refs: [evidence.agent-context-execution, evidence.high-risk-audit-frontier, evidence.eval-timeout-turn-settlement-repair, evidence.eval-timeout-turn-settlement-verification, evidence.eval-trace-correlation-repair, evidence.eval-trace-correlation-verification, evidence.framework-concept-navigation]
+evidence_refs: [evidence.agent-context-execution, evidence.high-risk-audit-frontier, evidence.eval-timeout-turn-settlement-repair, evidence.eval-timeout-turn-settlement-verification, evidence.eval-trace-correlation-repair, evidence.eval-trace-correlation-verification, evidence.agent-adapter-close-settlement-repair, evidence.agent-adapter-close-settlement-verification, evidence.framework-concept-navigation]
 finding_refs: [finding.turn-driver-entry-coverage, finding.agent-adapter-close-settlement, finding.eval-timeout-settlement, finding.eval-trace-identity]
-audit_refs: [audit.agent-session-turn.state-authority]
+audit_refs: [audit.agent-session-turn.state-authority, audit.agent-adapter-close-settlement-rereview]
 related_map_refs: [map.context-memory, map.task-subagent-workflow, map.observation-persistence-delivery, map.protocol-surfaces]
 scenarios:
   agent-definition-and-instance:
@@ -33,12 +33,13 @@ scenarios:
   direct-and-channel-execution:
     status: needs_review
     source_refs: [src/agent/react/mod.rs, src/channels.rs]
-    finding_refs: [finding.turn-driver-entry-coverage, finding.agent-adapter-close-settlement]
-    unknown: Raw ReactAgent API 是合理低层 contract；Channel adapter 绕过 AgentTurnDriver，且 adapter close/Agent resource settlement 尚无统一合同
-    next_step: 对 Channel terminal projection 与各 adapter awaited close 分别形成 repair/decision
+    finding_refs: [finding.turn-driver-entry-coverage]
+    evidence_refs: [evidence.agent-adapter-close-settlement-repair, evidence.agent-adapter-close-settlement-verification]
+    unknown: Raw ReactAgent API 是合理低层 contract，且close已闭合；Channel adapter仍绕过AgentTurnDriver
+    next_step: 单独处理Channel terminal projection，不重建adapter close owner
   agent-revision:
     status: needs_review
-    source_refs: [echo-orchestration/src/tasks/revisioned.rs, echo-orchestration/src/workflow/graph.rs, echo-core/src/plugin/registry.rs, echo-sdk-host/src/core_profile/state.rs]
+    source_refs: [echo-orchestration/src/tasks/revisioned.rs, echo-orchestration/src/workflow/graph.rs, echo-core/src/plugin/registry.rs]
     unknown: 仓库不存在通用 AgentRevision；Task/Workflow/Plugin/schema/generation revisions 是否需要共同 glossary 而非新 aggregate
     next_step: 在 architecture audit 中确认限定术语并禁止新增裸 Revision authority
   agent-factory-naming:
@@ -80,11 +81,13 @@ Agent 自动 effect 交给 permission map；Session scope 与 secret-bearing con
 
 ## 用户侧投影
 
-ACP/Headless/SDK/Eval可投影不同结果并共享driven Turn terminal；Channel与直接Rust调用的覆盖缺口已进入Finding。
+ACP/Headless/SDK/Eval可投影不同结果并共享driven Turn terminal；Channel与直接Rust调用的
+Turn-driver覆盖缺口已进入独立Finding，adapter close已闭合。
 
 ## 场景处置清单
 
-Agent/Session与driven Turn已映射，Eval timeout与trace correlation已闭合；Channel/direct route、AgentRevision与factory同名保持needs_review。
+Agent/Session与driven Turn已映射，Eval timeout、trace correlation与非A2A adapter close已闭合；
+Channel/direct route、AgentRevision与factory同名保持needs_review。
 
 ## 未展开项
 

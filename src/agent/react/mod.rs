@@ -72,6 +72,7 @@ pub use capabilities::{
     PreparedTokenLimit,
 };
 mod extract;
+mod lifecycle;
 pub mod run;
 pub mod structured;
 pub(crate) mod subsystems;
@@ -253,6 +254,10 @@ pub struct ReactAgent {
     /// full duration. This prevents concurrent access to the
     /// `ContextManager` and other internal mutable state.
     pub(crate) execution_mutex: Arc<tokio::sync::Mutex<()>>,
+
+    /// Fences new turns and retains cancellation ownership until every
+    /// accepted turn reaches its existing terminal path.
+    pub(crate) close_authority: Arc<lifecycle::ReactAgentCloseAuthority>,
 
     /// Canonical publication authority for this Agent's plugin registries.
     pub(crate) plugin_publication: Arc<crate::plugin::PluginPublicationAuthority>,
@@ -691,6 +696,7 @@ impl ReactAgent {
             recently_read_files: Arc::new(std::sync::Mutex::new(HashMap::new())),
             mutable_system_prompt: std::sync::RwLock::new(None),
             execution_mutex: Arc::new(tokio::sync::Mutex::new(())),
+            close_authority: Arc::new(lifecycle::ReactAgentCloseAuthority::default()),
             plugin_publication: Arc::new(crate::plugin::PluginPublicationAuthority::default()),
             token_tracker: Arc::new(echo_core::tokenizer::TokenUsageTracker::new(model_name)),
             calibrated_tokenizer: Arc::new(echo_core::tokenizer::CalibratedTokenizer::new(
@@ -3633,6 +3639,8 @@ impl Agent for ReactAgent {
 
     fn close(&self) -> BoxFuture<'_, Result<()>> {
         Box::pin(async move {
+            self.close_authority.begin_close();
+            self.close_authority.wait_until_idle().await?;
             #[cfg(feature = "mcp")]
             {
                 let previous = self.tools.mcp_manager.get_clients_by_id();
