@@ -8,9 +8,11 @@
 //! - **ConversationStore** — User-visible transcript projection (one row per
 //!   message, `StoredMessage` shape). Drives the application UI history panes.
 //!   The framework persists this automatically at `run_core_loop` finalization.
-//! - **RuntimeStateStore** — ReAct runtime checkpoint (messages + plan +
-//!   active_skills + blocked_reason) used to resume an
-//!   in-flight conversation across process restarts. See [`crate::state`].
+//! - **RuntimeStateStore** — ReAct runtime checkpoint (messages +
+//!   active_skills + blocked_reason) used to resume an in-flight conversation
+//!   across process restarts. The public `current_plan` field only supports
+//!   legacy Store round trips and is not restored by ReactAgent. See
+//!   [`crate::state`].
 //!
 //! # Quick Start
 //!

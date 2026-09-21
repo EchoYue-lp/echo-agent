@@ -177,7 +177,7 @@ agent.chat("第二轮：我是谁？").await?;       // Agent 不再记得"张�
 
 ### 结合 RuntimeStateStore 跨进程续接
 
-`chat()` 的多轮历史可以通过 [`RuntimeStateStore`](../../src/state/mod.rs) 持久化（`SqliteRuntimeStateStore` 实现保存完整 `AgentCheckpoint`：消息 + 计划 + 激活技能 + 阻塞原因）。下次启动时，使用相同的 `conversation_id` 即可由运行时自动恢复先前状态。完整示例参见 [03-memory.md](./03-memory.md)。
+`chat()` 的多轮历史可以通过 [`RuntimeStateStore`](../../src/state/mod.rs) 持久化（`SqliteRuntimeStateStore` 实现保存包含消息、激活技能和阻塞原因的 `AgentCheckpoint`）。下次启动时，使用相同的 `conversation_id` 即可由运行时恢复这些字段。任务计划归版本化任务图持有，不从 ReAct checkpoint 恢复。完整示例参见 [03-memory.md](./03-memory.md)。
 
 ---
 

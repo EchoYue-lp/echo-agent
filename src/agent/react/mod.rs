@@ -275,9 +275,6 @@ pub struct ReactAgent {
     /// Optional intent router for pre-ReAct classification and routing.
     pub(crate) intent_router: Option<crate::intent::IntentRouter>,
 
-    /// Current plan text (set by PlanTool, captured in checkpoints).
-    pub(crate) plan_state: Arc<tokio::sync::RwLock<Option<String>>>,
-
     /// Optional Critic for final_answer verification.
     pub(crate) critic: Option<Arc<dyn echo_core::agent::Critic>>,
     /// Named owner allowed to refresh the current critic during a prepared
@@ -703,7 +700,6 @@ impl ReactAgent {
                 Arc::new(echo_core::tokenizer::HeuristicTokenizer),
             )),
             intent_router: None,
-            plan_state: Arc::new(tokio::sync::RwLock::new(None)),
             critic: None,
             critic_owner: None,
             memory_layer_manager: None,
@@ -2052,9 +2048,9 @@ impl ReactAgent {
     /// the configured `conversation_id`, deserializes the saved messages, and
     /// restores them into the context manager.
     ///
-    /// Returns the checkpoint metadata (plan, skills, blocked_reason) if a
-    /// checkpoint was found and restored, or `None` if no state store is
-    /// configured or no checkpoint exists.
+    /// Returns checkpoint metadata if a checkpoint was found and restored, or
+    /// `None` if no state store is configured or no checkpoint exists. Legacy
+    /// plan data remains in the returned record but is not restored into ReAct.
     pub async fn resume_from_state_store(&self) -> Result<Option<crate::state::AgentCheckpoint>> {
         self.validate_persistence_configuration()?;
         let _execution_guard = self.execution_mutex.lock().await;
@@ -2140,13 +2136,6 @@ impl ReactAgent {
             let msg_count = messages.len();
             self.memory.context.lock().await.set_messages(messages);
             *self.memory.runtime_state_version.lock().await = runtime_version.clone();
-
-            // Restore identity-local plan state exactly; `None` must not retain
-            // the previous runtime identity's plan.
-            *self.plan_state.write().await = cp.current_plan.clone();
-            if let Some(ref plan) = cp.current_plan {
-                tracing::debug!(plan_len = plan.len(), "Restored plan state from checkpoint");
-            }
 
             // Restore one atomic activation snapshot. Missing definitions are
             // ignored, and policies are rebuilt from the current descriptors.

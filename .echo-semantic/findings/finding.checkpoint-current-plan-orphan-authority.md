@@ -3,19 +3,19 @@ schema_version: 1
 id: finding.checkpoint-current-plan-orphan-authority
 kind: finding
 type: authority_conflict
-status: open
+status: resolved
 severity: medium
 primary_focus: data_durability
 focus: [state_authority, contract_evidence]
 boundary_ref: boundary.context-memory
 behavior_refs: [behavior.context-memory-lifecycle, behavior.task-subagent-execution]
 rule_refs: [rule.context-persistence-separation, rule.task-subagent-authority]
-evidence_refs: [evidence.agent-context-execution, evidence.task-subagent-workflow]
-audit_refs: [audit.context-memory.data-durability]
+evidence_refs: [evidence.agent-context-execution, evidence.task-subagent-workflow, evidence.checkpoint-plan-authority-repair, evidence.checkpoint-plan-authority-verification]
+audit_refs: [audit.context-memory.data-durability, audit.checkpoint-plan-authority-rereview]
 decision_refs: []
-repair_evidence_refs: []
-verification_evidence_refs: []
-rereview_audit_refs: []
+repair_evidence_refs: [evidence.checkpoint-plan-authority-repair]
+verification_evidence_refs: [evidence.checkpoint-plan-authority-verification]
+rereview_audit_refs: [audit.checkpoint-plan-authority-rereview]
 discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 ---
 
@@ -39,4 +39,7 @@ GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/42
 
 ## 处理记录
 
-Data-durability Audit 确认孤立性；后续 consolidation/decision 需选择接通 canonical Task artifact 或退役字段。
+ADR 0008 选择保留公开字段的历史读写合同，退役 ReAct 私有 plan 状态及恢复/写回路径。
+File/SQLite 重启、旧值、受管 transcript 结算、取消 hydration 和 A -> B -> A 隔离
+已有 focused 回归；完整门禁、17-feature matrix、strict semantic 与独立复审均通过。
+外部 Issue 仍等待 PR CI、远端 main 交付及 post-merge 复验。

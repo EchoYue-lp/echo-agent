@@ -19,6 +19,79 @@ use serde_json::json;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+async fn assert_legacy_plan_is_not_republished(
+    store: Arc<dyn crate::state::RuntimeStateStore>,
+    reopen: impl FnOnce() -> crate::error::Result<Arc<dyn crate::state::RuntimeStateStore>>,
+) -> crate::error::Result<()> {
+    use crate::state::AgentCheckpoint;
+
+    let mut legacy = AgentCheckpoint::new("legacy-plan");
+    legacy.messages_json = serde_json::to_string(&vec![Message::system("system".to_string())])?;
+    legacy.current_plan = Some("stale task plan".to_string());
+    store.save_checkpoint(&legacy).await?;
+    drop(store);
+    let reopened = reopen()?;
+
+    assert_eq!(
+        reopened
+            .get_checkpoint("legacy-plan")
+            .await?
+            .and_then(|checkpoint| checkpoint.current_plan)
+            .as_deref(),
+        Some("stale task plan")
+    );
+
+    let mut agent = ReactAgent::new(
+        AgentConfig::new("test-model", "legacy-plan-agent", "system")
+            .conversation_id("legacy-plan"),
+    );
+    agent.set_state_store(reopened.clone());
+    let restored = agent.resume_from_state_store().await?.ok_or_else(|| {
+        crate::error::ReactError::Other("legacy checkpoint was not restored".to_string())
+    })?;
+    assert_eq!(restored.current_plan.as_deref(), Some("stale task plan"));
+
+    agent.force_checkpoint().await?;
+    let saved = reopened
+        .get_checkpoint("legacy-plan")
+        .await?
+        .ok_or_else(|| crate::error::ReactError::Other("checkpoint was not saved".to_string()))?;
+    assert!(
+        saved.current_plan.is_none(),
+        "ReAct republished a stale plan"
+    );
+    assert_eq!(saved.restore_messages()?.len(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn file_checkpoint_legacy_plan_is_readable_but_not_republished() -> crate::error::Result<()> {
+    let root = tempfile::tempdir()?;
+    let store = Arc::new(crate::state::FileRuntimeStateStore::new(root.path())?);
+    assert_legacy_plan_is_not_republished(store, || {
+        Ok(Arc::new(crate::state::FileRuntimeStateStore::new(
+            root.path(),
+        )?))
+    })
+    .await
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn sqlite_checkpoint_legacy_plan_is_readable_but_not_republished() -> crate::error::Result<()>
+{
+    let root = tempfile::tempdir()?;
+    let store = Arc::new(crate::state::SqliteRuntimeStateStore::new(
+        root.path().join("checkpoint.sqlite"),
+    )?);
+    assert_legacy_plan_is_not_republished(store, || {
+        Ok(Arc::new(crate::state::SqliteRuntimeStateStore::new(
+            root.path().join("checkpoint.sqlite"),
+        )?))
+    })
+    .await
+}
+
 fn external_context_with_guards(
     resource_guards: Vec<echo_core::tools::InvocationResourceGuard>,
 ) -> echo_core::tools::ExternalRunContext {
@@ -3011,6 +3084,18 @@ async fn managed_force_checkpoint_settles_transcript_before_returning() -> crate
     let mut agent = ReactAgent::new(config);
     agent.set_conversation_store(conversations.clone());
     agent.set_state_store(runtime.clone());
+    let mut legacy = crate::state::AgentCheckpoint::new("managed-force-checkpoint");
+    legacy.current_plan = Some("stale plan".to_string());
+    legacy.messages_json = serde_json::to_string(&vec![Message::system("system".to_string())])?;
+    crate::state::RuntimeStateStore::save_checkpoint(runtime.as_ref(), &legacy).await?;
+    assert_eq!(
+        agent
+            .resume_from_state_store()
+            .await?
+            .and_then(|checkpoint| checkpoint.current_plan)
+            .as_deref(),
+        Some("stale plan")
+    );
     agent
         .memory
         .context
@@ -3044,6 +3129,12 @@ async fn managed_force_checkpoint_settles_transcript_before_returning() -> crate
         .as_ref()
         .ok_or_else(|| crate::error::ReactError::Other("checkpoint payload missing".to_string()))?
         .restore_managed_runtime_payload()?;
+    assert!(
+        state
+            .checkpoint
+            .as_ref()
+            .is_some_and(|checkpoint| checkpoint.current_plan.is_none())
+    );
     assert!(payload.pending_transcript_projection.is_none());
     assert!(
         payload

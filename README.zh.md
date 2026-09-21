@@ -329,7 +329,7 @@ async fn weather(city: String) -> Result<ToolResult> {
 ### 3. 记忆系统 — Store + RuntimeStateStore + ConversationStore
 
 - **Store**：长期键值存储，支持命名空间隔离（`InMemoryStore`、`FileStore`、`SqliteStore`）
-- **RuntimeStateStore**：完整运行时检查点（消息 + 计划 + 激活技能 + 阻塞原因），用于跨进程崩溃恢复（`SqliteRuntimeStateStore`）
+- **RuntimeStateStore**：ReAct 运行时检查点（消息 + 激活技能 + 阻塞原因），用于跨进程崩溃恢复（`SqliteRuntimeStateStore`）。公开的 `current_plan` 字段只保留旧 Store 记录的原样读写；ReactAgent 忽略历史值，并在新 safe point 写入 `None`。
 - **ConversationStore**：用户可见的对话历史投影，与 `RuntimeStateStore` 配对并在压缩或终态发布前原子结算
 
 一行代码让 Agent 拥有持久记忆——无需手动工具接线：

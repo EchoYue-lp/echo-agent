@@ -10,7 +10,7 @@ echo-agent 的记忆系统包含三个正交层次，每层解决不同的"记�
 | **历史投影** | `ConversationStore` | 聊天记录 | 用户可见的消息历史投影（驱动 GUI/TUI 历史面板） |
 | **长期知识** | `Store` | 笔记本 | 跨会话保留用户偏好、领域知识、任务结果 |
 
-运行时检查点和历史投影针对同一段对话从不同角度切入：检查点保存 ReAct 循环状态（消息 + 当前计划文本 + 激活技能 + 阻塞原因），用于重启循环；历史投影是**用户可见**的消息流投影。版本化任务关系与生命周期只属于 canonical task runtime，不进入该检查点。Store 是正交的长期知识后端。
+运行时检查点和历史投影针对同一段对话从不同角度切入：检查点保存 ReAct 循环状态（消息 + 激活技能 + 阻塞原因），用于重启循环；历史投影是**用户可见**的消息流投影。版本化任务关系、计划 artifact 与生命周期只属于 canonical task runtime，不进入该检查点。Store 是正交的长期知识后端。
 
 ---
 
@@ -26,7 +26,7 @@ echo-agent 的记忆系统包含三个正交层次，每层解决不同的"记�
 
 LLM 的上下文窗口在每次请求结束后就消失了，进程也可能在循环中途崩溃。没有运行时检查点，长任务被中断就需要从头开始；用户想在明天继续昨天的对话也只能重新输入。
 
-`RuntimeStateStore` 在 run 推进过程中持续保存完整的 `AgentCheckpoint`（消息 + 当前计划 + 激活技能 + 阻塞原因 + 时间戳）。下次使用同一 `conversation_id` 启动时，运行时自动恢复先前状态，实现**线程连续性**。
+`RuntimeStateStore` 在 run 推进过程中持续保存 `AgentCheckpoint` 的运行时字段（消息 + 激活技能 + 阻塞原因 + 时间戳）。下次使用同一 `conversation_id` 启动时，运行时自动恢复先前状态，实现**线程连续性**。公开的 `current_plan` 字段仍可读取旧 checkpoint，但 ReactAgent 不把它恢复成任务计划，也不会将它写入新 checkpoint。
 
 ### 工作原理
 
@@ -42,7 +42,7 @@ FileRuntimeStateStore (./agent-data/runtime_state/_runtime_owners/):
   "phase": "active",
   "checkpoint": {
     "messages_json":  "...完整消息历史...",
-    "current_plan":   "Step 3: draft the haiku",
+    "current_plan":   null,
     "active_skills":  ["doc-writing"],
     "blocked_reason": null,
     "timestamp":      "2026-06-14T..."

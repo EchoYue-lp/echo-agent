@@ -5,6 +5,9 @@
 //! 2. chat_stream() —— 流式多轮对话
 //! 3. reset() —— 清除上下文开始新会话
 //!
+//! RuntimeStateStore 可恢复对话上下文；任务计划由版本化任务图持有，
+//! 不从 AgentCheckpoint.current_plan 恢复。
+//!
 //! 运行方式：
 //! ```bash
 //! cargo run -p echo-agent-learning --example demo17_chat

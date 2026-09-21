@@ -100,7 +100,9 @@ pub struct AgentCheckpoint {
     pub conversation_id: String,
     /// Serialized message history.
     pub messages_json: String,
-    /// Current plan text (optional).
+    /// Legacy plan text retained for checkpoint decoding and Store round trips.
+    /// ReactAgent neither restores this as task state nor writes new values;
+    /// the revisioned Task graph is the planning authority.
     pub current_plan: Option<String>,
     /// Names of currently active skills.
     pub active_skills: Vec<String>,

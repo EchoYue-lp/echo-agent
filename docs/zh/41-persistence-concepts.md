@@ -80,7 +80,7 @@ Checkpoint:   journal=A, state@7
 
 ### AgentCheckpoint
 
-`AgentCheckpoint` 是另一种 checkpoint：它保存 ReAct 继续运行所需的消息、当前 plan 文本、激活技能、blocked reason、working directory 和时间戳，并由 `RuntimeStateStore` 持久化。
+`AgentCheckpoint` 是另一种 checkpoint：它保存 ReAct 继续运行所需的消息、激活技能、blocked reason、working directory 和时间戳，并由 `RuntimeStateStore` 持久化。公开的 `current_plan` 字段为旧记录和 Store 读写保留；ReactAgent 恢复时忽略历史值，新 safe point 写入 `None`。版本化任务图与计划 artifact 由 `TaskRevisionService` 持有。
 
 恢复前会校验 assistant tool call 与 tool result 是否成对，避免恢复出 provider 无法接受的上下文，或重复执行已经完成的副作用。
 

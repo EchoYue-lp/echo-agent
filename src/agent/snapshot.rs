@@ -383,8 +383,6 @@ pub struct ToolRuntime {
     /// Allowed tool patterns from activated skills (captured at snapshot time).
     /// `None` = unrestricted (no skill restricts tools).
     pub skill_allowed_tools: Option<std::collections::HashSet<String>>,
-    /// Current plan state (shared with ReactAgent).
-    pub plan_state: Arc<tokio::sync::RwLock<Option<String>>>,
     /// Effective disabled tools captured for this invocation.
     pub disabled_tools: std::collections::HashSet<String>,
     /// Mutable schema visibility for deferred tools in this invocation.
@@ -466,7 +464,6 @@ impl ToolRuntime {
             hook_registry: agent.tools.hook_registry.clone(),
             intervention_callbacks: agent.tools.intervention_callbacks.clone(),
             skill_allowed_tools,
-            plan_state: Arc::clone(&agent.plan_state),
             disabled_tools,
             visibility,
             plan_mode,
@@ -642,7 +639,8 @@ pub struct AgentRunSnapshot {
     /// phase feeds real `usage.prompt_tokens` back into it so context-window
     /// and compression estimates converge to the model's actual tokenization.
     pub calibrated_tokenizer: Arc<echo_core::tokenizer::CalibratedTokenizer>,
-    /// Runtime state store for rich checkpointing (messages + plan + skills).
+    /// Runtime state store for ReAct checkpointing (messages + skills).
+    /// Legacy `current_plan` values remain raw Store data and are not restored.
     pub state_store: Option<Arc<dyn crate::state::RuntimeStateStore>>,
     /// Conversation store for user-visible transcript projection. When both
     /// this and `config.conversation_id` are set, the run loop persists
@@ -817,7 +815,7 @@ impl<'a> AgentPersistenceCoordinator<'a> {
         Ok(crate::state::AgentCheckpoint {
             conversation_id: runtime_state_id.clone(),
             messages_json,
-            current_plan: self.snapshot.tools.plan_state.read().await.clone(),
+            current_plan: None,
             active_skills: self.snapshot.active_skill_names(),
             blocked_reason,
             working_dir: self.snapshot.config.working_dir.clone(),
@@ -1869,8 +1867,8 @@ impl AgentRunSnapshot {
 
     /// Save a rich checkpoint to the [`RuntimeStateStore`](crate::state::RuntimeStateStore).
     ///
-    /// Persists the full [`crate::state::AgentCheckpoint`] (messages, active skills, current
-    /// plan, and blocked reason) so an in-flight conversation can resume
+    /// Persists the [`crate::state::AgentCheckpoint`] runtime state (messages,
+    /// active skills, and blocked reason) so an in-flight conversation can resume
     /// across process restarts.
     ///
     /// Silently no-ops if no state store or runtime-state identity is configured.
@@ -3463,7 +3461,6 @@ mod transcript_filter_tests {
                 "final_answer".to_string(),
                 "mcp__malicious__write".to_string(),
             ])),
-            plan_state: Arc::new(tokio::sync::RwLock::new(None)),
             disabled_tools: HashSet::from(["final_answer".to_string()]),
             visibility: None,
             plan_mode: true,

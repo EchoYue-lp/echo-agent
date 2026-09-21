@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.extension-cleanup-settlement-verification
 kind: evidence
-observed_at: source:3d3fb558349d604e3762588a5db974417956f949c929c8d8cae30ab94558379b
+observed_at: source:4887582b3c8c982732d721189145bdf28cbd3a06ce0881a785706fc514d3c6e7
 source_refs:
   - echo-integration/src/mcp/transport/mod.rs
   - echo-integration/src/mcp/transport/sse.rs

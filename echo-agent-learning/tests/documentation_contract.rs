@@ -437,6 +437,67 @@ fn root_readme_feature_tables_match_cargo_metadata() -> Result<(), Box<dyn std::
 }
 
 #[test]
+fn public_checkpoint_docs_do_not_claim_plan_recovery() -> Result<(), Box<dyn std::error::Error>> {
+    let learning_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let workspace_root = learning_root.parent().ok_or_else(|| {
+        std::io::Error::other("learning package has no workspace parent directory")
+    })?;
+    let contracts = [
+        (
+            "README.md",
+            "current_plan",
+            ["messages + plan", "messages + current plan"].as_slice(),
+        ),
+        (
+            "README.zh.md",
+            "current_plan",
+            ["消息 + 计划", "消息 + 当前计划"].as_slice(),
+        ),
+        (
+            "src/memory.rs",
+            "legacy Store round trips",
+            ["messages + plan", "messages + current plan"].as_slice(),
+        ),
+        (
+            "src/agent/snapshot.rs",
+            "Legacy `current_plan` values remain raw Store data",
+            ["messages + plan", "messages + current plan"].as_slice(),
+        ),
+        (
+            "CHANGELOG.md",
+            "current_plan",
+            ["messages + plan", "messages + current plan"].as_slice(),
+        ),
+    ];
+    let mut violations = Vec::new();
+    for (path, required, forbidden) in contracts {
+        let content = std::fs::read_to_string(workspace_root.join(path))?;
+        if !content.contains(required) {
+            violations.push(format!(
+                "{path} must describe the legacy checkpoint plan field"
+            ));
+        }
+        for stale in forbidden {
+            if content.contains(stale) {
+                violations.push(format!(
+                    "{path} still claims ReAct plan recovery with {stale:?}"
+                ));
+            }
+        }
+    }
+
+    if violations.is_empty() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(format!(
+            "public checkpoint documentation drift:\n{}",
+            violations.join("\n")
+        ))
+        .into())
+    }
+}
+
+#[test]
 fn root_readme_learning_commands_reference_cargo_targets() -> Result<(), Box<dyn std::error::Error>>
 {
     let (workspace_root, packages) = workspace_packages()?;

@@ -11,7 +11,7 @@ boundary: boundary.context-memory
 observed_at: 44b2ed68772c7c016d09af6c2e1adac9fe4fea70
 code_refs: [echo-state/src/compression/mod.rs, src/context/mod.rs, src/agent/snapshot.rs, src/agent/react/run/phases/compact.rs, src/agent/react/run/phases/tools.rs, src/agent/react/run/phases/finalize.rs, src/state/mod.rs, src/state/file.rs, src/state/sqlite.rs, echo-core/src/memory/conversation.rs, echo-core/src/memory/store.rs]
 rule_refs: [rule.context-persistence-separation]
-evidence_refs: [evidence.agent-context-execution, evidence.persistence-observation, evidence.transcript-generation-runtime-identity-repair, evidence.transcript-generation-runtime-identity-verification, evidence.transcript-projection-settlement-repair, evidence.transcript-projection-settlement-verification]
+evidence_refs: [evidence.agent-context-execution, evidence.persistence-observation, evidence.transcript-generation-runtime-identity-repair, evidence.transcript-generation-runtime-identity-verification, evidence.transcript-projection-settlement-repair, evidence.transcript-projection-settlement-verification, evidence.checkpoint-plan-authority-repair, evidence.checkpoint-plan-authority-verification]
 finding_refs: [finding.transcript-projection-settlement, finding.transcript-generation-runtime-identity]
 ---
 
@@ -44,4 +44,5 @@ ContextManager、RuntimeStateStore、file backends、ConversationStore、Store�
 ## 裁决记录
 
 Transcript projection 失败结算已由 ADR 0056 与 Finding #106 的 framework outcome 闭合；当前仍需复核
-ContextAssembler 与默认路径的策略关系，以及 `AgentCheckpoint.current_plan` 的生产写入来源。
+ContextAssembler 与默认路径的策略关系。旧 `AgentCheckpoint.current_plan` 的生产恢复与写回
+已退役；公开字段及 File/SQLite 读写保留，TaskRevisionService 为计划图唯一权威。
