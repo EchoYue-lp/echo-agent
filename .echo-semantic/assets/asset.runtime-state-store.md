@@ -12,7 +12,7 @@ code_refs: [src/state/mod.rs, src/state/file.rs, src/state/sqlite.rs, src/agent/
 consumer_refs: [src/agent/react/run/context.rs, src/agent/react/run/phases/compact.rs, src/agent/react/run/phases/tools.rs, src/agent/react/run/phases/finalize.rs, docs/en/03-memory.md]
 behavior_refs: [behavior.context-memory-lifecycle, behavior.observation-persistence]
 rule_refs: [rule.context-persistence-separation, rule.fact-projection-separation]
-evidence_refs: [evidence.agent-context-execution, evidence.persistence-observation, evidence.transcript-projection-settlement-repair, evidence.transcript-projection-settlement-verification]
+evidence_refs: [evidence.agent-context-execution, evidence.persistence-observation, evidence.transcript-projection-settlement-repair, evidence.transcript-projection-settlement-verification, evidence.checkpoint-plan-authority-repair, evidence.checkpoint-plan-authority-verification]
 finding_refs: [finding.transcript-projection-settlement]
 candidate_refs: []
 ---
@@ -39,4 +39,5 @@ conversation delete saga。Attempt result 与 dispatch 归属由 CAS revision �
 
 ## 未知与限制
 
-`current_plan` 的生产写入来源仍需审查。
+`current_plan` 仅为公开 checkpoint 的历史兼容字段；File/SQLite 保持原样读写，
+ReactAgent 不再从中恢复或向新 checkpoint 发布计划。Task graph 由 TaskRevisionService 持有。

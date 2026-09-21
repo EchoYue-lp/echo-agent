@@ -6,7 +6,7 @@ title: Subagent Registry、Executor 与 Control
 asset_type: state_authority
 status: active
 risk: high
-observed_at: source:3d3fb558349d604e3762588a5db974417956f949c929c8d8cae30ab94558379b
+observed_at: source:4887582b3c8c982732d721189145bdf28cbd3a06ce0881a785706fc514d3c6e7
 boundary_refs: [boundary.task-subagent-workflow]
 code_refs: [src/agent/subagent/registry.rs, src/agent/subagent/executor.rs, src/agent/subagent/control.rs, src/agent/subagent/events.rs, docs/adr/0033-subagent-factory-singleflight-publication.md]
 consumer_refs: [src/tools/builtin/agent_dispatch.rs, src/agent/subagent/team/mod.rs]

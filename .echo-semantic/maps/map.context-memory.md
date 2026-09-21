@@ -8,9 +8,9 @@ observed_at: 44b2ed68772c7c016d09af6c2e1adac9fe4fea70
 boundary_refs: [boundary.context-memory]
 behavior_refs: [behavior.context-memory-lifecycle]
 rule_refs: [rule.context-persistence-separation]
-evidence_refs: [evidence.agent-context-execution, evidence.persistence-observation, evidence.high-risk-audit-frontier, evidence.framework-concept-navigation, evidence.transcript-projection-settlement-repair, evidence.transcript-projection-settlement-verification]
+evidence_refs: [evidence.agent-context-execution, evidence.persistence-observation, evidence.high-risk-audit-frontier, evidence.framework-concept-navigation, evidence.transcript-projection-settlement-repair, evidence.transcript-projection-settlement-verification, evidence.checkpoint-plan-authority-repair, evidence.checkpoint-plan-authority-verification]
 finding_refs: [finding.transcript-projection-settlement, finding.transcript-generation-runtime-identity, finding.checkpoint-current-plan-orphan-authority]
-audit_refs: [audit.context-memory.data-durability, audit.transcript-generation-runtime-identity-rereview, audit.transcript-projection-settlement-rereview]
+audit_refs: [audit.context-memory.data-durability, audit.transcript-generation-runtime-identity-rereview, audit.transcript-projection-settlement-rereview, audit.checkpoint-plan-authority-rereview]
 related_map_refs: [map.agent-session-turn, map.observation-persistence-delivery, map.eval-evolution]
 scenarios:
   active-context-and-compression:
@@ -48,11 +48,13 @@ scenarios:
     unknown: ContextAssembler 只服务自定义 loop，与默认 ContextManager 的 source ordering/budget/projection 不变量未声明完全对等或明确不同
     next_step: 在 context audit 中比较相同输入并决定共享 contract 还是文档化差异
   checkpoint-current-plan:
-    status: needs_review
-    source_refs: [src/agent/snapshot.rs, src/agent/react/mod.rs, src/state/mod.rs]
+    status: mapped
+    source_refs: [src/agent/snapshot.rs, src/agent/react/mod.rs, src/agent/react/run/context.rs, src/agent/react/run/stream_channel.rs, src/agent/react/tests.rs, src/state/mod.rs, src/state/file.rs, src/state/sqlite.rs, docs/adr/0008-canonical-runtime-task-authority.md]
     finding_refs: [finding.checkpoint-current-plan-orphan-authority]
-    unknown: AgentCheckpoint.current_plan 可保存恢复，但未发现 production writer 建立 canonical Task plan state
-    next_step: consolidation/decision 选择接通 canonical Task artifact 或退役该 checkpoint 字段
+    behavior_refs: [behavior.context-memory-lifecycle, behavior.task-subagent-execution]
+    rule_refs: [rule.context-persistence-separation, rule.task-subagent-authority]
+    evidence_refs: [evidence.checkpoint-plan-authority-repair, evidence.checkpoint-plan-authority-verification]
+    audit_refs: [audit.checkpoint-plan-authority-rereview]
 ---
 
 # Context、Memory、Compression 与 Checkpoint
@@ -91,8 +93,9 @@ ConversationStore 供 history UI；active context 与 checkpoint 默认不直接
 
 ## 场景处置清单
 
-四层 authority、transcript settlement 与 clear/delete 已映射；assembler alignment 和 current_plan writer
-保持 needs_review。
+四层 authority、transcript settlement、clear/delete 与旧 current_plan 退役路径已映射；
+assembler alignment 仍保持 needs_review。Finding #42 已完成 framework 候选复审，
+外部 Issue 等待远端交付。
 
 ## 未展开项
 

@@ -604,9 +604,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   already absent from public re-exports as of 0.2.0, and its setters were
   no-ops on `ReactAgent`. New code should use:
   - [`RuntimeStateStore`](src/state/mod.rs) — ReAct runtime checkpoint
-    (messages + current plan + active skills + blocked reason) for crash
-    recovery; concrete implementations: `FileRuntimeStateStore` and the
-    optional `SqliteRuntimeStateStore`. Revisioned task graphs are persisted
+    (messages + active skills + blocked reason) for crash recovery; concrete
+    implementations: `FileRuntimeStateStore` and the optional
+    `SqliteRuntimeStateStore`. The public `current_plan` field remains only
+    for legacy Store round trips; ReactAgent ignores historical values and
+    writes `None` at new safe points. Revisioned task graphs are persisted
     separately by the canonical task runtime.
   - `ConversationStore` — user-visible transcript projection;
     concrete implementations include `FileConversationStore` and the optional

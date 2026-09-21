@@ -7,7 +7,7 @@ expectation: human_confirmed
 risk: high
 primary_focus: state_authority
 focus: [data_durability, contract_evidence, failure_concurrency]
-observed_at: source:3d3fb558349d604e3762588a5db974417956f949c929c8d8cae30ab94558379b
+observed_at: source:4887582b3c8c982732d721189145bdf28cbd3a06ce0881a785706fc514d3c6e7
 behavior_refs: [behavior.observation-persistence]
 code_refs: [echo-core/src/agent/event_envelope.rs, echo-state/src/journal/mod.rs, echo-state/src/journal/file.rs, echo-state/src/journal/segmented.rs, echo-state/src/delivery.rs, src/trace/mod.rs, src/eval/runner.rs, docs/en/41-persistence-concepts.md, docs/zh/41-persistence-concepts.md, docs/adr/0038-eval-trace-correlation-identity.md, docs/adr/0046-turn-execution-delivery-settlement.md, docs/adr/0055-checkpoint-journal-identity.md, echo-state/src/audit/mod.rs, echo-state/src/audit/file.rs, docs/adr/0053-trace-audit-persistence-visibility.md]
 evidence_refs: [evidence.persistence-observation, evidence.checkpoint-journal-binding-repair, evidence.checkpoint-journal-binding-verification, evidence.checkpoint-journal-sdk-inventory, evidence.eval-trace-correlation-repair, evidence.eval-trace-correlation-verification, evidence.turn-terminal-delivery-settlement-repair, evidence.turn-terminal-delivery-settlement-verification, evidence.transcript-projection-settlement-repair, evidence.transcript-projection-settlement-verification, evidence.diagnostic-persistence-failure-visibility-repair, evidence.diagnostic-persistence-failure-visibility-verification, evidence.framework-only-finding-closure-verification]

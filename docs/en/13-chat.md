@@ -177,7 +177,7 @@ agent.chat("Turn 2: Who am I?").await?;           // Agent no longer knows "Alic
 
 ### Cross-process session restoration with RuntimeStateStore
 
-The multi-turn history from `chat()` can be persisted with a [`RuntimeStateStore`](../../src/state/mod.rs) (the `SqliteRuntimeStateStore` implementation persists a full `AgentCheckpoint`: messages + plan + active skills + blocked reason). On the next launch, configure the same `conversation_id` and the runtime restores the prior state automatically. See [03-memory.md](./03-memory.md) for the full example.
+The multi-turn history from `chat()` can be persisted with a [`RuntimeStateStore`](../../src/state/mod.rs) (the `SqliteRuntimeStateStore` implementation persists an `AgentCheckpoint` with messages, active skills, and blocked reason). On the next launch, configure the same `conversation_id` and the runtime restores those fields. Task plans belong to the revisioned task graph, not the ReAct checkpoint. See [03-memory.md](./03-memory.md) for the full example.
 
 ---
 

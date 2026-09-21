@@ -4103,7 +4103,15 @@ mod tests {
                     ReactError::Other("runtime A snapshot was not captured".to_string())
                 })?;
                 assert!(!snapshot_id.is_empty());
-                *agent.plan_state.write().await = Some("runtime-a-only-plan".to_string());
+                let mut legacy_a = store.get_checkpoint("runtime-a").await?.ok_or_else(|| {
+                    ReactError::Other(
+                        "runtime A checkpoint missing before legacy write".to_string(),
+                    )
+                })?;
+                legacy_a.current_plan = Some("runtime-a-only-plan".to_string());
+                store
+                    .save_checkpoint_for_scope("product-conversation", &legacy_a)
+                    .await?;
                 agent
                     .tools
                     .skill_registry
@@ -4167,11 +4175,12 @@ mod tests {
         assert!(!contains(configured_call, "user-a-one"));
         assert!(!contains(configured_call, "user-b-one"));
 
-        let runtime_a = store
+        let runtime_a_checkpoint = store
             .get_checkpoint("runtime-a")
             .await?
-            .ok_or_else(|| ReactError::Other("runtime A checkpoint missing".to_string()))?
-            .restore_messages()?;
+            .ok_or_else(|| ReactError::Other("runtime A checkpoint missing".to_string()))?;
+        assert!(runtime_a_checkpoint.current_plan.is_none());
+        let runtime_a = runtime_a_checkpoint.restore_messages()?;
         let runtime_b_checkpoint = store
             .get_checkpoint("runtime-b")
             .await?
@@ -4196,6 +4205,7 @@ mod tests {
         let root = tempfile::tempdir().map_err(|error| ReactError::Other(error.to_string()))?;
         let store = Arc::new(crate::state::FileRuntimeStateStore::new(root.path())?);
         let mut runtime_b = crate::state::AgentCheckpoint::new("runtime-b");
+        runtime_b.current_plan = Some("stale runtime B plan".to_string());
         runtime_b.messages_json = serde_json::to_string(&vec![
             Message::system("system".to_string()),
             Message::user("runtime-b-checkpoint-marker".to_string()),
@@ -4213,7 +4223,7 @@ mod tests {
                 .llm_client(llm.clone())
                 .system_prompt("system")
                 .conversation_id("configured-state")
-                .state_store(store)
+                .state_store(store.clone())
                 .build()?,
         );
         let invocation =
@@ -4310,6 +4320,14 @@ mod tests {
             .err()
             .ok_or_else(|| ReactError::Other("runtime B switch was not cancelled".to_string()))?;
         assert!(cancelled.is_cancelled());
+        assert_eq!(
+            store
+                .get_checkpoint("runtime-b")
+                .await?
+                .and_then(|checkpoint| checkpoint.current_plan)
+                .as_deref(),
+            Some("stale runtime B plan")
+        );
 
         agent
             .run_stream_channel(
@@ -4342,6 +4360,12 @@ mod tests {
                 .text_content()
                 .is_some_and(|content| content == "runtime-b-checkpoint-marker")
         }));
+        assert!(
+            store
+                .get_checkpoint("runtime-a")
+                .await?
+                .is_some_and(|checkpoint| checkpoint.current_plan.is_none())
+        );
         Ok(())
     }
 

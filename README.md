@@ -346,7 +346,7 @@ Built-in data tools (feature `data`): Polars-powered read/filter/aggregate/stats
 ### 3. Memory — Store + RuntimeStateStore + ConversationStore
 
 - **Store**: Long-term key-value storage with namespace isolation (`InMemoryStore`, `FileStore`, `SqliteStore`)
-- **RuntimeStateStore**: Full runtime checkpoint (messages + plan + active skills + blocked reason) for crash recovery (`SqliteRuntimeStateStore`)
+- **RuntimeStateStore**: ReAct runtime checkpoint (messages + active skills + blocked reason) for crash recovery (`SqliteRuntimeStateStore`). The public `current_plan` field is retained only for legacy Store round trips; ReactAgent ignores historical values and writes `None` at new safe points.
 - **ConversationStore**: User-visible transcript projection, atomically settled with a paired `RuntimeStateStore` before compaction or terminal publication
 
 One line to give your agent persistent memory — no manual tool wiring:

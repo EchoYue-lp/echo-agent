@@ -5,23 +5,23 @@ kind: audit
 boundary_ref: boundary.extension-lifecycle
 lens: failure_concurrency
 freshness: examined
-revision: source:3d3fb558349d604e3762588a5db974417956f949c929c8d8cae30ab94558379b
+revision: source:4887582b3c8c982732d721189145bdf28cbd3a06ce0881a785706fc514d3c6e7
 finding_refs: [finding.extension-cleanup-settlement]
 challenges:
   pending-and-post-settlement:
-    revision: source:3d3fb558349d604e3762588a5db974417956f949c929c8d8cae30ab94558379b
+    revision: source:4887582b3c8c982732d721189145bdf28cbd3a06ce0881a785706fc514d3c6e7
     source_refs: [echo-integration/src/mcp/transport/mod.rs, echo-integration/src/mcp/transport/sse.rs, echo-integration/src/mcp/transport/stdio.rs]
     evidence_refs: [evidence.extension-cleanup-settlement-repair, evidence.extension-cleanup-settlement-verification]
   cancellation-resilient-close-owner:
-    revision: source:3d3fb558349d604e3762588a5db974417956f949c929c8d8cae30ab94558379b
+    revision: source:4887582b3c8c982732d721189145bdf28cbd3a06ce0881a785706fc514d3c6e7
     source_refs: [echo-integration/src/mcp/transport/sse.rs, echo-integration/src/mcp/transport/stdio.rs]
     evidence_refs: [evidence.extension-cleanup-settlement-repair, evidence.extension-cleanup-settlement-verification]
   construction-cancellation-owner:
-    revision: source:3d3fb558349d604e3762588a5db974417956f949c929c8d8cae30ab94558379b
+    revision: source:4887582b3c8c982732d721189145bdf28cbd3a06ce0881a785706fc514d3c6e7
     source_refs: [echo-integration/src/mcp/client.rs, echo-integration/src/mcp/transport/sse.rs]
     evidence_refs: [evidence.extension-cleanup-settlement-repair, evidence.extension-cleanup-settlement-verification]
   manager-debt-retry:
-    revision: source:3d3fb558349d604e3762588a5db974417956f949c929c8d8cae30ab94558379b
+    revision: source:4887582b3c8c982732d721189145bdf28cbd3a06ce0881a785706fc514d3c6e7
     source_refs: [echo-integration/src/mcp/mod.rs]
     evidence_refs: [evidence.extension-cleanup-settlement-repair, evidence.extension-cleanup-settlement-verification]
 ---

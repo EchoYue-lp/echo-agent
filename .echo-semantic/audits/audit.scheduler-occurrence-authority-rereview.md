@@ -5,23 +5,23 @@ kind: audit
 boundary_ref: boundary.task-subagent-workflow
 lens: failure_concurrency
 freshness: examined
-revision: source:3d3fb558349d604e3762588a5db974417956f949c929c8d8cae30ab94558379b
+revision: source:4887582b3c8c982732d721189145bdf28cbd3a06ce0881a785706fc514d3c6e7
 finding_refs: [finding.scheduler-control-fire-race, finding.scheduler-task-id-uniqueness, finding.scheduler-cache-delivery]
 challenges:
   control-admission-linearization:
-    revision: source:3d3fb558349d604e3762588a5db974417956f949c929c8d8cae30ab94558379b
+    revision: source:4887582b3c8c982732d721189145bdf28cbd3a06ce0881a785706fc514d3c6e7
     source_refs: [echo-orchestration/src/scheduler/runner.rs]
     evidence_refs: [evidence.scheduler-occurrence-authority-repair, evidence.scheduler-occurrence-authority-verification]
   unique-definition-identity:
-    revision: source:3d3fb558349d604e3762588a5db974417956f949c929c8d8cae30ab94558379b
+    revision: source:4887582b3c8c982732d721189145bdf28cbd3a06ce0881a785706fc514d3c6e7
     source_refs: [echo-orchestration/src/scheduler/cron_task.rs, echo-orchestration/src/scheduler/runner.rs]
     evidence_refs: [evidence.scheduler-occurrence-authority-repair, evidence.scheduler-occurrence-authority-verification]
   durable-occurrence-replay:
-    revision: source:3d3fb558349d604e3762588a5db974417956f949c929c8d8cae30ab94558379b
+    revision: source:4887582b3c8c982732d721189145bdf28cbd3a06ce0881a785706fc514d3c6e7
     source_refs: [echo-orchestration/src/scheduler/runner.rs, docs/adr/0042-scheduler-occurrence-authority.md]
     evidence_refs: [evidence.scheduler-occurrence-authority-repair, evidence.scheduler-occurrence-authority-verification]
   public-store-cache-bypass:
-    revision: source:3d3fb558349d604e3762588a5db974417956f949c929c8d8cae30ab94558379b
+    revision: source:4887582b3c8c982732d721189145bdf28cbd3a06ce0881a785706fc514d3c6e7
     source_refs: [echo-orchestration/src/scheduler/cron_task.rs, echo-orchestration/src/scheduler/runner.rs]
     evidence_refs: [evidence.scheduler-occurrence-authority-repair, evidence.scheduler-occurrence-authority-verification]
 ---

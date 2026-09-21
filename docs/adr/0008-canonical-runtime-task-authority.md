@@ -77,6 +77,11 @@ boundaries over that same authority.
   the same Subagent registry/executor.
 - A plan remains an editable, versioned artifact. Todo and surface progress are
   read-only projections and cannot become execution inputs or separate stores.
+- `AgentCheckpoint.current_plan` remains decodable and round-trippable in the
+  public File/SQLite RuntimeStateStore contracts for historical checkpoints.
+  ReactAgent neither restores it into a private plan state nor captures it at
+  new safe points. A legacy value cannot become an alternate Task graph writer
+  or override a later graph revision.
 
 Dependency DAGs, revision safe points, claims, retry, cancellation, and generic
 Subagent dispatch are reusable framework mechanisms. EKO worktrees, reviewer
@@ -96,6 +101,9 @@ Legacy `TaskManager`, `TaskStore`, `TaskExecutor`, `TaskScheduler`, manager-owne
 ready loops, and Team-specific checkpoint nodes were removed. Applications
 must adapt product data through `TaskSpec::extension` and the controller rather
 than restoring compatibility fields or parallel task CRUD.
+Retiring the ReAct plan projection does not delete the public checkpoint field
+or rewrite existing File/SQLite records; consumers can still inspect historical
+data, while only the revisioned Task service can publish current task plans.
 
 ## Verification
 

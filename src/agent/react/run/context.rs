@@ -153,7 +153,6 @@ impl ReactAgent {
 
     async fn reset_runtime_context(&self) {
         self.reset_messages().await;
-        *self.plan_state.write().await = None;
         self.tools.skill_registry.reset_activation_state();
         *self.memory.transcript_projection_cursor.lock().await =
             crate::agent::snapshot::TranscriptProjectionCursor::default();
@@ -254,7 +253,7 @@ impl ReactAgent {
         let agent = self.config.agent_name.clone();
         let mut session_matcher = "startup";
 
-        // Try RuntimeStateStore checkpoint (messages + plan + skills)
+        // Try RuntimeStateStore checkpoint (messages + skills).
         if self.memory.state_store.is_some() {
             let restored = match runtime_state_id {
                 Some(runtime_state_id) => {

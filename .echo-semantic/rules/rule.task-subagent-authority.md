@@ -7,7 +7,7 @@ expectation: human_confirmed
 risk: high
 primary_focus: state_authority
 focus: [time_lifecycle, failure_concurrency, contract_evidence]
-observed_at: source:3d3fb558349d604e3762588a5db974417956f949c929c8d8cae30ab94558379b
+observed_at: source:4887582b3c8c982732d721189145bdf28cbd3a06ce0881a785706fc514d3c6e7
 behavior_refs: [behavior.task-subagent-execution]
 code_refs: [echo-orchestration/src/tasks/revisioned.rs, echo-orchestration/src/tasks/runtime_service.rs, echo-orchestration/src/tasks/runtime_executor.rs, echo-orchestration/src/tasks/background_task.rs, echo-orchestration/src/tasks/background_state.rs, src/agent/subagent/registry.rs, src/agent/subagent/executor.rs, docs/adr/0008-canonical-runtime-task-authority.md, docs/adr/0033-subagent-factory-singleflight-publication.md, docs/adr/0039-background-task-terminal-authority.md]
 evidence_refs: [evidence.task-subagent-workflow, evidence.subagent-factory-singleflight-repair, evidence.subagent-factory-singleflight-verification, evidence.task-subagent-attempt-link-repair, evidence.task-subagent-attempt-link-verification, evidence.task-subagent-external-control-handle-repair, evidence.task-subagent-external-control-handle-verification, evidence.framework-only-finding-closure-verification, evidence.background-task-terminal-authority-repair, evidence.background-task-terminal-authority-verification, evidence.workflow-checkpoint-claim-settlement-repair, evidence.workflow-checkpoint-claim-settlement-verification]

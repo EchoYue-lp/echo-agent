@@ -10,7 +10,7 @@ echo-agent's memory system has three orthogonal layers, each solving a different
 | **Transcript** | `ConversationStore` | Chat log | User-visible message history projection (drives GUI/TUI history panes) |
 | **Long-term knowledge** | `Store` | Notebook | Persist user preferences, domain facts, task results across sessions |
 
-Runtime checkpoint and transcript address the same conversation from different angles: the checkpoint contains the ReAct loop state (messages + current plan text + active skills + blocked reason) used to restart the loop; the transcript is the *user-visible* projection of just the message stream. Revisioned task relations and lifecycle state live in the canonical task runtime, not in this checkpoint. The Store is the orthogonal long-term knowledge backend.
+Runtime checkpoint and transcript address the same conversation from different angles: the checkpoint contains the ReAct loop state (messages + active skills + blocked reason) used to restart the loop; the transcript is the *user-visible* projection of just the message stream. Revisioned task relations, plan artifacts, and lifecycle state live in the canonical task runtime, not in this checkpoint. The Store is the orthogonal long-term knowledge backend.
 
 ---
 
@@ -27,7 +27,7 @@ Capability and preference profiles are available from the stable
 
 An LLM's context window vanishes after each request ends, and a process can crash mid-loop. Without a runtime checkpoint, a long task interrupted halfway requires starting over, and a user wanting to continue yesterday's conversation must repeat themselves.
 
-`RuntimeStateStore` saves the full `AgentCheckpoint` (messages + current plan + active skills + blocked reason + timestamp) as the run progresses. The next time an Agent is launched with the same `conversation_id`, it automatically restores the previous runtime state — providing **thread continuity**.
+`RuntimeStateStore` saves the `AgentCheckpoint` runtime fields (messages + active skills + blocked reason + timestamp) as the run progresses. The next time an Agent is launched with the same `conversation_id`, it restores the previous runtime state — providing **thread continuity**. The public `current_plan` field remains readable in older checkpoints, but ReactAgent does not restore it as a task plan or write it into new checkpoints.
 
 ### How It Works
 
@@ -43,7 +43,7 @@ FileRuntimeStateStore (./agent-data/runtime_state/_runtime_owners/):
   "phase": "active",
   "checkpoint": {
     "messages_json":  "...full message history...",
-    "current_plan":   "Step 3: draft the haiku",
+    "current_plan":   null,
     "active_skills":  ["doc-writing"],
     "blocked_reason": null,
     "timestamp":      "2026-06-14T..."

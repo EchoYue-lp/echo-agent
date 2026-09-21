@@ -72,7 +72,7 @@ File Journal batches, checkpoints, and segmented retention markers use identity-
 
 ### AgentCheckpoint
 
-`AgentCheckpoint` is a different checkpoint type. It stores messages, current plan text, active skills, blocked reason, working directory, and capture time for resuming a ReAct execution through `RuntimeStateStore`.
+`AgentCheckpoint` is a different checkpoint type. It stores messages, active skills, blocked reason, working directory, and capture time for resuming a ReAct execution through `RuntimeStateStore`. Its public `current_plan` field remains in the stored format for legacy readers and writers. ReactAgent ignores a historical value on restore and writes `None` at new safe points; `TaskRevisionService` owns the revisioned task graph and plan artifact.
 
 Restoration validates assistant tool calls and tool results as paired messages. This prevents provider-invalid context and avoids replaying already completed side effects.
 
