@@ -3,7 +3,7 @@ schema_version: 1
 id: finding.hook-event-producer-contract
 kind: finding
 type: evidence_gap
-status: open
+status: resolved
 severity: medium
 primary_focus: contract_evidence
 focus: [state_authority, result_side_effect]
@@ -13,9 +13,9 @@ rule_refs: [rule.fact-projection-separation, rule.extension-generation-authority
 evidence_refs: [evidence.persistence-observation, evidence.effects-extensions]
 audit_refs: [audit.observation-persistence-delivery.contract-evidence, audit.extension-lifecycle.state-authority]
 decision_refs: []
-repair_evidence_refs: []
-verification_evidence_refs: []
-rereview_audit_refs: []
+repair_evidence_refs: [evidence.hook-event-producer-contract-repair]
+verification_evidence_refs: [evidence.hook-event-producer-contract-verification]
+rereview_audit_refs: [audit.hook-event-producer-contract-rereview]
 discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 ---
 

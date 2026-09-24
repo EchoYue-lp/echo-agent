@@ -40,7 +40,7 @@ challenges:
 
 ADR 0041逐项列出20个非保全义务，并明确退役对象仅为旧unknown或旧blob依赖。Behavior-equivalence覆盖Rust authority、source route、SDK scope和三语言contract gate；continuity对428个义务得到408 preserved、4 replaced、16 retired。Manifest重算确认deferred为1441，workspace discovery与protocol map使用同一capability级口径，其它scope不属于parity backlog。
 
-Concept Evidence/Audit改绑可恢复的`1cb25e80`，当前Map/Behavior/Asset和新Evidence绑定`source:269f99e8...`。Plan 13提交范围覆盖全部child受控产物，Plan 14和Issue #116独立追踪review发现的漂移。最终复审结果为PASS，Critical、Important、Minor均为0。
+Concept Evidence/Audit改绑可恢复的`1cb25e80`，当前Map/Behavior/Asset和新Evidence绑定`source:983de91986bfb711ff3bf6586ef34bdcfad12189905d4a6a8551ddea697f82f9...`。Plan 13提交范围覆盖全部child受控产物，Plan 14和Issue #116独立追踪review发现的漂移。最终复审结果为PASS，Critical、Important、Minor均为0。
 
 ## 问题记录
 

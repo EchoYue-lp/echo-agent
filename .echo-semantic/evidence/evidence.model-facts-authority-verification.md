@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.model-facts-authority-verification
 kind: evidence
-observed_at: source:46382a3fd5e3196b9c5c541945609af9ca0bed79299d0786e1fbb4f7e375024a
+observed_at: source:983de91986bfb711ff3bf6586ef34bdcfad12189905d4a6a8551ddea697f82f9
 source_refs:
   - echo-core/src/llm/capabilities.rs
   - echo-core/src/llm/mod.rs
