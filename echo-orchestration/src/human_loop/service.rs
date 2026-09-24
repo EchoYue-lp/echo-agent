@@ -315,6 +315,45 @@ impl PermissionService {
         self
     }
 
+    /// Return and audit a non-overridable denial for the effective tool input.
+    /// Both normal policy and Hook approval use this single protected-path path.
+    pub fn protected_path_decision(
+        &self,
+        tool_name: &str,
+        tool_input: &Value,
+    ) -> Option<PermissionDecision> {
+        self.protected_path_decision_since(tool_name, tool_input, std::time::Instant::now())
+    }
+
+    fn protected_path_decision_since(
+        &self,
+        tool_name: &str,
+        tool_input: &Value,
+        pipeline_start: std::time::Instant,
+    ) -> Option<PermissionDecision> {
+        match self.protected_paths.check(tool_name, tool_input) {
+            ProtectedPathResult::Protected {
+                matched_pattern,
+                path,
+            } => {
+                let decision = PermissionDecision::Deny {
+                    reason: format!("受保护路径 '{}'（匹配规则 '{}'）", path, matched_pattern),
+                };
+                self.record_audit(
+                    tool_name,
+                    tool_input,
+                    &decision,
+                    "protected_path",
+                    "protected_paths",
+                    pipeline_start,
+                    pipeline_start.elapsed(),
+                );
+                Some(decision)
+            }
+            ProtectedPathResult::Safe => None,
+        }
+    }
+
     /// 设置审计 Sink
     pub fn with_audit_sink(mut self, sink: Arc<dyn PermissionAuditSink>) -> Self {
         self.audit_sink = Some(sink);
@@ -608,20 +647,10 @@ impl PermissionService {
 
         // 0. 受保护路径检查（最高优先级，在任何权限模式之前）
         // 即使在 BypassPermissions 模式下，.git/.ssh/.env 等也必须被保护
-        match self.protected_paths.check(tool_name, tool_input) {
-            ProtectedPathResult::Protected {
-                matched_pattern,
-                path,
-            } => {
-                audit_return!(
-                    PermissionDecision::Deny {
-                        reason: format!("受保护路径 '{}'（匹配规则 '{}'）", path, matched_pattern),
-                    },
-                    "protected_path",
-                    "protected_paths"
-                );
-            }
-            ProtectedPathResult::Safe => {}
+        if let Some(decision) =
+            self.protected_path_decision_since(tool_name, tool_input, pipeline_start)
+        {
+            return Ok(PermissionCheck::from_decision(decision));
         }
 
         // 1. Bypass 模式（可被管理员禁用）
@@ -670,7 +699,8 @@ impl PermissionService {
             {
                 return self
                     .check_with_handler(tool_name, tool_input, permissions, invocation)
-                    .await;
+                    .await
+                    .map(|(check, _)| check);
             }
             audit_return!(decision, "rule_match", "rules");
         }
@@ -689,7 +719,8 @@ impl PermissionService {
                 if self.has_real_handler() {
                     return self
                         .check_with_handler(tool_name, tool_input, permissions, invocation)
-                        .await;
+                        .await
+                        .map(|(check, _)| check);
                 }
                 audit_return!(
                     PermissionDecision::RequireApproval,
@@ -715,6 +746,7 @@ impl PermissionService {
         }
 
         // 6. 模式分发
+        let mut protected_path_audited = false;
         let check = match effective_mode {
             PermissionMode::Auto => {
                 let decision = self
@@ -731,16 +763,22 @@ impl PermissionService {
                     PermissionDecision::RequireApproval | PermissionDecision::Ask { .. }
                 ) && self.has_real_handler()
                 {
-                    self.check_with_handler(tool_name, tool_input, permissions, invocation)
-                        .await?
+                    let (check, audited) = self
+                        .check_with_handler(tool_name, tool_input, permissions, invocation)
+                        .await?;
+                    protected_path_audited = audited;
+                    check
                 } else {
                     PermissionCheck::from_decision(decision)
                 }
             }
             PermissionMode::Default => {
                 if Self::default_confirmation_required(permissions) {
-                    self.check_with_handler(tool_name, tool_input, permissions, invocation)
-                        .await?
+                    let (check, audited) = self
+                        .check_with_handler(tool_name, tool_input, permissions, invocation)
+                        .await?;
+                    protected_path_audited = audited;
+                    check
                 } else {
                     PermissionCheck::from_decision(PermissionDecision::Allow)
                 }
@@ -751,16 +789,22 @@ impl PermissionService {
             }
             PermissionMode::AcceptEdits => {
                 if Self::accept_edits_confirmation_required(permissions) {
-                    self.check_with_handler(tool_name, tool_input, permissions, invocation)
-                        .await?
+                    let (check, audited) = self
+                        .check_with_handler(tool_name, tool_input, permissions, invocation)
+                        .await?;
+                    protected_path_audited = audited;
+                    check
                 } else {
                     PermissionCheck::from_decision(PermissionDecision::Allow)
                 }
             }
             PermissionMode::StrictConfirm => {
                 if Self::strict_confirmation_required(permissions) {
-                    self.check_with_handler(tool_name, tool_input, permissions, invocation)
-                        .await?
+                    let (check, audited) = self
+                        .check_with_handler(tool_name, tool_input, permissions, invocation)
+                        .await?;
+                    protected_path_audited = audited;
+                    check
                 } else {
                     PermissionCheck::from_decision(PermissionDecision::Allow)
                 }
@@ -777,8 +821,11 @@ impl PermissionService {
             ),
             PermissionMode::Bubble => {
                 if self.has_real_handler() {
-                    self.check_with_handler(tool_name, tool_input, permissions, invocation)
-                        .await?
+                    let (check, audited) = self
+                        .check_with_handler(tool_name, tool_input, permissions, invocation)
+                        .await?;
+                    protected_path_audited = audited;
+                    check
                 } else {
                     PermissionCheck::from_decision(PermissionDecision::RequireApproval)
                 }
@@ -810,15 +857,17 @@ impl PermissionService {
             PermissionDecision::RequireApproval => "require_approval",
             PermissionDecision::Ask { .. } => "ask",
         };
-        self.record_audit(
-            tool_name,
-            tool_input,
-            decision,
-            reason,
-            "mode_dispatch",
-            pipeline_start,
-            pipeline_start.elapsed(),
-        );
+        if !protected_path_audited {
+            self.record_audit(
+                tool_name,
+                tool_input,
+                decision,
+                reason,
+                "mode_dispatch",
+                pipeline_start,
+                pipeline_start.elapsed(),
+            );
+        }
 
         Ok(check)
     }
@@ -855,7 +904,7 @@ impl PermissionService {
         tool_input: &Value,
         permissions: &[ToolPermission],
         invocation: Option<&PermissionInvocationContext>,
-    ) -> Result<PermissionCheck> {
+    ) -> Result<(PermissionCheck, bool)> {
         let risk_level = RiskLevel::from_permissions(permissions);
 
         let mut request = PermissionRequest::new(tool_name, tool_input.clone())
@@ -880,17 +929,10 @@ impl PermissionService {
 
         let updated_input = response.updated_input.clone();
         let final_input = updated_input.as_ref().unwrap_or(tool_input);
-        if let ProtectedPathResult::Protected {
-            matched_pattern,
-            path,
-        } = self.protected_paths.check(tool_name, final_input)
+        if updated_input.is_some()
+            && let Some(decision) = self.protected_path_decision(tool_name, final_input)
         {
-            return Ok(PermissionCheck::from_decision(PermissionDecision::Deny {
-                reason: format!(
-                    "修改后的输入指向受保护路径 '{}'（匹配规则 '{}'）",
-                    path, matched_pattern
-                ),
-            }));
+            return Ok((PermissionCheck::from_decision(decision), true));
         }
 
         // 处理审批缓存。缓存范围是响应中的显式字段，不能从通用规则更新猜测。
@@ -919,10 +961,13 @@ impl PermissionService {
                 suggestions: vec![question],
             },
         };
-        Ok(PermissionCheck {
-            decision,
-            updated_input,
-        })
+        Ok((
+            PermissionCheck {
+                decision,
+                updated_input,
+            },
+            false,
+        ))
     }
 
     /// 解析规则
@@ -1169,6 +1214,15 @@ mod tests {
     struct EchoModifiedInputHandler;
     struct ProtectedModifiedInputHandler;
 
+    struct AuditChannel(tokio::sync::mpsc::UnboundedSender<PermissionAuditEntry>);
+
+    #[async_trait::async_trait]
+    impl PermissionAuditSink for AuditChannel {
+        async fn record(&self, entry: PermissionAuditEntry) {
+            let _ = self.0.send(entry);
+        }
+    }
+
     #[async_trait::async_trait]
     impl PermissionRequestHandler for CountingAllowHandler {
         async fn handle(&self, _request: PermissionRequest) -> EchoResult<PermissionResponse> {
@@ -1360,6 +1414,58 @@ mod tests {
 
         assert!(check.decision.is_denied());
         assert!(check.updated_input.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn handler_rewrite_protected_path_audits_effective_input_once() -> EchoResult<()> {
+        let (audit_tx, mut audit_rx) = tokio::sync::mpsc::unbounded_channel();
+        let service = PermissionService::new()
+            .with_request_handler(Arc::new(ProtectedModifiedInputHandler))
+            .with_audit_sink(Arc::new(AuditChannel(audit_tx)))
+            .with_mode(PermissionMode::StrictConfirm);
+        let original = serde_json::json!({"path": "notes.txt"});
+        let rewritten = serde_json::json!({"path": ".git/config"});
+
+        let check = service
+            .check_with_permissions_result_in_mode_and_context(
+                "Write",
+                &original,
+                &[ToolPermission::Write],
+                None,
+                Some(&invocation("agent-a:conversation-a")),
+            )
+            .await?;
+        assert!(check.decision.is_denied());
+        assert!(check.updated_input.is_none());
+
+        let audit = tokio::time::timeout(Duration::from_secs(1), audit_rx.recv())
+            .await
+            .map_err(|_| {
+                echo_core::error::ReactError::Other("protected-path audit missing".to_string())
+            })?
+            .ok_or_else(|| {
+                echo_core::error::ReactError::Other("audit channel closed".to_string())
+            })?;
+        let expected = PermissionAuditEntry::new(
+            "Write",
+            &rewritten,
+            &check.decision,
+            "protected_path",
+            "protected_paths",
+            std::time::Instant::now(),
+            Duration::ZERO,
+        );
+        assert_eq!(audit.args_hash, expected.args_hash);
+        assert_eq!(audit.reason, expected.reason);
+        assert_eq!(audit.source, expected.source);
+        assert_eq!(audit.decision, "deny");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), audit_rx.recv())
+                .await
+                .is_err(),
+            "handler rewrite produced duplicate audit records"
+        );
         Ok(())
     }
 

@@ -241,26 +241,28 @@ impl AgentHandle {
 impl ReactAgent {
     // ── Tool registration ────────────────────────────────────────────────────
 
-    /// Register a single tool. Automatically enables tool capability.
+    /// Register a single tool. Mutating tools are skipped in read-only Agents.
+    /// Accepted tools automatically enable tool capability.
     pub fn add_tool(&mut self, tool: Box<dyn Tool>) {
+        if self.config.readonly_tools && !tool.capabilities().is_read_only() {
+            return;
+        }
         self.config.enable_tool = true;
         self.tools.tool_manager.register(tool);
     }
 
-    /// Register multiple tools. Automatically enables tool capability.
+    /// Register multiple tools, skipping mutating tools in read-only Agents.
     pub fn add_tools(&mut self, tools: Vec<Box<dyn Tool>>) {
         if tools.is_empty() {
             return;
         }
         self.config.enable_tool = true;
         let allowed = &self.config.allowed_tools;
-        if allowed.is_empty() {
-            self.tools.tool_manager.register_tools(tools);
-        } else {
-            for tool in tools {
-                if allowed.contains(&tool.name().to_string()) {
-                    self.tools.tool_manager.register(tool);
-                }
+        for tool in tools {
+            if (allowed.is_empty() || allowed.contains(&tool.name().to_string()))
+                && (!self.config.readonly_tools || tool.capabilities().is_read_only())
+            {
+                self.tools.tool_manager.register(tool);
             }
         }
     }
@@ -276,8 +278,12 @@ impl ReactAgent {
     /// Replace an existing tool with a new one of the same name.
     ///
     /// If a tool with the same name exists, it is removed and the new tool is registered.
-    /// Returns the old tool if it was replaced.
+    /// Returns the old tool if it was replaced. A mutating replacement is
+    /// ignored in a read-only Agent, leaving the old tool registered.
     pub fn replace_tool(&mut self, tool: Box<dyn Tool>) -> Option<Arc<dyn Tool>> {
+        if self.config.readonly_tools && !tool.capabilities().is_read_only() {
+            return None;
+        }
         self.tools.tool_manager.replace(tool)
     }
 

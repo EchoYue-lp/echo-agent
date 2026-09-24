@@ -4,23 +4,23 @@ id: map.tool-permission-sandbox
 kind: capability_map
 title: Tool、Permission、Sandbox 与外部 Effect
 risk: high
-observed_at: 44b2ed68772c7c016d09af6c2e1adac9fe4fea70
+observed_at: source:13ff9de40ae621e1201c111201fda28402a397d7104e90595be0c5106482dbc0
 boundary_refs: [boundary.tool-permission-sandbox]
 behavior_refs: [behavior.effect-permission-execution]
 rule_refs: [rule.permission-effect-order]
-evidence_refs: [evidence.effects-extensions, evidence.high-risk-audit-frontier, evidence.streaming-tool-validation-repair, evidence.streaming-tool-validation-verification, evidence.tool-read-cache-authority-repair, evidence.tool-read-cache-authority-verification, evidence.tool-registry-owned-handle-repair, evidence.tool-registry-owned-handle-verification, evidence.framework-concept-navigation, evidence.mcp-tool-local-classification-repair, evidence.mcp-tool-local-classification-verification, evidence.k8s-sandbox-cleanup-settlement-repair, evidence.k8s-sandbox-cleanup-settlement-verification]
+evidence_refs: [evidence.effects-extensions, evidence.high-risk-audit-frontier, evidence.streaming-tool-validation-repair, evidence.streaming-tool-validation-verification, evidence.tool-read-cache-authority-repair, evidence.tool-read-cache-authority-verification, evidence.tool-registry-owned-handle-repair, evidence.tool-registry-owned-handle-verification, evidence.framework-concept-navigation, evidence.mcp-tool-local-classification-repair, evidence.mcp-tool-local-classification-verification, evidence.hook-protected-path-repair, evidence.hook-protected-path-verification, evidence.readonly-tool-capability-repair, evidence.readonly-tool-capability-verification, evidence.k8s-sandbox-cleanup-settlement-repair, evidence.k8s-sandbox-cleanup-settlement-verification]
 finding_refs: [finding.tool-read-cache-scope, finding.tool-read-cache-inflight-invalidation-race, finding.tool-registry-mutation-active-call-deadlock, finding.streaming-tool-validation, finding.plan-mode-write-surface, finding.readonly-tools-custom-registration-bypass, finding.approval-authority, finding.hook-protected-path, finding.hook-permission-precedence, finding.sandbox-minimum-isolation, finding.sandbox-manager-stream-failure-typing, finding.guard-direction-contract, finding.trace-effect-event-producers, finding.trace-audit-secret-boundary, finding.effect-cleanup-owner, finding.k8s-sandbox-cleanup-settlement, finding.tool-terminal-observation-divergence, finding.command-cell-retention-lease-prune-race, finding.command-cell-cancel-artifact-settlement, finding.tool-pipeline-example-drift]
-audit_refs: [audit.tool-permission-sandbox.permission-external, audit.tool-permission-sandbox.failure-concurrency, audit.tool-permission-sandbox.result-side-effect, audit.streaming-tool-validation-rereview, audit.tool-read-cache-authority-rereview, audit.tool-registry-owned-handle-rereview, audit.mcp-tool-local-classification-rereview, audit.k8s-sandbox-cleanup-settlement-rereview]
+audit_refs: [audit.tool-permission-sandbox.permission-external, audit.tool-permission-sandbox.failure-concurrency, audit.tool-permission-sandbox.result-side-effect, audit.streaming-tool-validation-rereview, audit.tool-read-cache-authority-rereview, audit.tool-registry-owned-handle-rereview, audit.mcp-tool-local-classification-rereview, audit.hook-protected-path-rereview, audit.readonly-tool-capability-rereview, audit.k8s-sandbox-cleanup-settlement-rereview]
 related_map_refs: [map.agent-session-turn, map.task-subagent-workflow, map.observation-persistence-delivery, map.extension-lifecycle]
 scenarios:
   agent-automated-policy-pipeline:
     status: needs_review
     source_refs: [echo-core/src/tools/mod.rs, echo-execution/src/tools.rs, src/agent/react/run/pipeline.rs, src/agent/snapshot.rs]
     behavior_refs: [behavior.effect-permission-execution]
-    evidence_refs: [evidence.effects-extensions, evidence.streaming-tool-validation-repair, evidence.streaming-tool-validation-verification]
+    evidence_refs: [evidence.effects-extensions, evidence.streaming-tool-validation-repair, evidence.streaming-tool-validation-verification, evidence.hook-protected-path-repair, evidence.hook-protected-path-verification]
     finding_refs: [finding.streaming-tool-validation, finding.plan-mode-write-surface, finding.approval-authority, finding.hook-protected-path, finding.trace-audit-secret-boundary, finding.tool-terminal-observation-divergence, finding.tool-pipeline-example-drift]
-    audit_refs: [audit.streaming-tool-validation-rereview]
-    unknown: ReactAgent自动工具路径有确定stage顺序，streaming validation已关闭；permission precedence、secret retention与示例合同尚未闭合
+    audit_refs: [audit.streaming-tool-validation-rereview, audit.hook-protected-path-rereview]
+    unknown: ReactAgent自动工具路径有确定stage顺序，streaming validation与Hook Allow protected-path反例已闭合；其它permission precedence、secret retention与示例合同尚未闭合
     next_step: 沿真实 15-stage pipeline 执行 focused audit，不以静态示例数组作为权威
   programmatic-tool-manager:
     status: mapped
@@ -38,13 +38,17 @@ scenarios:
     status: needs_review
     source_refs: [src/agent/react/mod.rs, src/agent/react/run/pipeline.rs, echo-tools/src/registry.rs]
     finding_refs: [finding.plan-mode-write-surface, finding.readonly-tools-custom-registration-bypass]
-    unknown: 运行期 Plan gate 与构造期 readonly_tools 都可漏 Write/Execute Tool
-    next_step: 复用 typed ToolPermission/visibility 建立同一 mutation classification，不影响 direct-user surface
+    evidence_refs: [evidence.readonly-tool-capability-repair, evidence.readonly-tool-capability-verification]
+    audit_refs: [audit.readonly-tool-capability-rereview]
+    unknown: 构造期 readonly_tools 的 custom registration、晚注入可见性与执行反例已闭合；Plan mode 的独立 Finding 仍待专项复审
+    next_step: 按原 Plan mode 故障反例复审运行期边界，不影响 direct-user surface
   permission-and-approval:
     status: mapped
     source_refs: [echo-core/src/tools/permission.rs, echo-orchestration/src/human_loop/service.rs, echo-tools/src/shell.rs]
     finding_refs: [finding.approval-authority, finding.hook-protected-path, finding.hook-permission-precedence]
     rule_refs: [rule.permission-effect-order]
+    evidence_refs: [evidence.hook-protected-path-repair, evidence.hook-protected-path-verification]
+    audit_refs: [audit.hook-protected-path-rereview]
   sandbox-and-resource-cleanup:
     status: mapped
     source_refs: [echo-core/src/sandbox.rs, echo-execution/src/sandbox/manager.rs, echo-execution/src/sandbox/local.rs, echo-core/src/tools/artifact.rs, echo-tools/src/git_worktree.rs]
@@ -101,7 +105,7 @@ ReactAgent requested/effective invocation在执行前固定；owned Arc Tool gen
 
 ## 策略来源与优先级
 
-Intervention、visibility、plan、Hook、Permission、read-before-edit、Skill allowlist、execute、post Hook、Guard、artifact、trace/callback 依序作用。
+Intervention、visibility、plan/readonly、PreToolUse Hook rewrite、protected-path、Hook permission、read-before-edit、Skill allowlist、execute、post Hook、Guard、artifact、trace/callback 依序作用。protected-path 拒绝不能被 Hook Allow 短路；readonly Agent 的 LLM surface 与执行门禁使用同一 ToolCapabilities 分类。
 
 ## 生命周期与失败路径
 
@@ -117,7 +121,7 @@ Permission prompt、Tool progress/result、CommandCell snapshot 与 artifact ref
 
 ## 场景处置清单
 
-Agent pipeline、programmatic primitive、trusted Hook effect 与 CommandCell 已拆分；已知缺口进入 Findings，K8s caller-drop已由detached owner、typed cleanup debt和故障注入映射，direct-user surface明确excluded。
+Agent pipeline、programmatic primitive、trusted Hook effect 与 CommandCell 已拆分；#60 protected-path 和 #81 readonly custom Tool 反例在当前任务分支闭合，其他已知缺口继续保留 Finding；K8s caller-drop 已由detached owner、typed cleanup debt和故障注入映射，direct-user surface明确excluded。
 
 ## 未展开项
 

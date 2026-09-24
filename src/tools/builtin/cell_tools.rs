@@ -8,7 +8,7 @@
 //! subagents).
 
 use echo_core::tools::cell::CommandCellRegistry;
-use echo_core::tools::{Tool, ToolParameters, ToolResult};
+use echo_core::tools::{Tool, ToolParameters, ToolResult, ToolRiskLevel};
 use futures::future::BoxFuture;
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -185,6 +185,10 @@ impl Tool for ListCellsTool {
 
     fn description(&self) -> &str {
         "List all background command cells with their phase, exit code, and output size."
+    }
+
+    fn risk_level(&self) -> ToolRiskLevel {
+        ToolRiskLevel::ReadOnly
     }
 
     fn parameters(&self) -> Value {
