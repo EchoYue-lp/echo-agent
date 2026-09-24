@@ -1093,6 +1093,12 @@ async fn wait_for_k8s_cancel(
 }
 
 fn k8s_control_deadline_error(stage: &str, timeout: Duration) -> echo_core::error::ReactError {
+    if stage == "pod absence confirmation" {
+        return echo_core::error::ReactError::Sandbox(Box::new(SandboxError::IoError(format!(
+            "K8s Pod cleanup could not confirm absence within {}ms after an ambiguous delete; the create request may still commit",
+            timeout.as_millis()
+        ))));
+    }
     echo_core::error::ReactError::Sandbox(Box::new(SandboxError::IoError(format!(
         "kubectl {stage} did not settle within the shared {}ms control deadline",
         timeout.as_millis()

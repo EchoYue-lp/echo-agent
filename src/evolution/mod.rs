@@ -48,7 +48,8 @@ pub use audit::{
     EntityType, JsonlChangeLog,
 };
 pub use background_review::{
-    BackgroundReviewConfig, BackgroundReviewer, ReviewCandidate, ReviewCandidateKind, ReviewOutcome,
+    BackgroundReviewConfig, BackgroundReviewHandle, BackgroundReviewer, ReviewCandidate,
+    ReviewCandidateKind, ReviewIdentity, ReviewOutcome,
 };
 pub use candidate::{CandidateReport, SkillCandidate, SkillCandidateDetector};
 pub use curator::{Curator, CuratorConfig, CuratorState, CuratorStatus, SkillLifecycle, SkillMeta};

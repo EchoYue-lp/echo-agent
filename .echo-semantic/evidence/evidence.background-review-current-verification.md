@@ -16,9 +16,9 @@ limitations:
 
 ## 支持的结论
 
-`background_review.rs` 的测试入口覆盖未 poll、取消、panic、部分持久化、零预算与三个公开
-review 入口；这些是待在最终源码摘要上运行的回归目标。应用侧还须证明 admission 前不 spawn，
-drop observer 不 abort，shutdown drain 使已接收任务及其 evidence settlement 完成。
+`background_review.rs` 的测试入口覆盖未 poll、caller executor 驱动、identity 绑定、取消、panic、
+部分持久化、零预算与三个公开 review 入口。应用侧还须证明 poll 前记录 identity、generation
+admission、shutdown cancel/drain 以及 evidence settlement 在同一 owner 内闭合。
 
 ## 来源与范围
 
@@ -26,5 +26,6 @@ drop observer 不 abort，shutdown drain 使已接收任务及其 evidence settl
 
 ## 已知缺口
 
-测试源码存在不等于最终命令通过；当前 Finding 保持 open。进程 abort 的 durable recovery 不在
-此候选内，必须保留该限制。
+测试源码存在不等于最终命令通过；本候选已在 `origin/main@151dc609` 上完成 focused suite、
+focused Clippy、fmt 与 diff-check，但 full gate、consumer gate 和 independent rereview 尚未完成，
+因此 Finding 保持 open。进程 abort 的 durable recovery 不在此候选内，必须保留该限制。

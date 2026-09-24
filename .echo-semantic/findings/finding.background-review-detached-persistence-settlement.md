@@ -44,3 +44,9 @@ BackgroundReviewer返回JoinHandle且文档允许discard；任务可auto-persist
 memory 已写、observer 未完成时 drop review future：`shutdown_can_drain_or_drop_but_drop_does_not_rollback_partial_write`
 固定了这一行为，caller 此时拿不到 outcome/receipt。故旧 detached 路径已消失，但持久
 mutation 的取消结算缺口仍在，本 Finding 保持 open。
+
+当前 framework-only 候选不再引入 detached receipt owner：`BackgroundReviewHandle` 直接由 caller
+驱动，首次 poll 前可读取 `ReviewIdentity`（run ID 与 persistence key），且所有失败/unknown
+outcome 保留该 identity。应用必须在自己的 generation/admission/shutdown/evidence owner 中保存
+identity、驱动或取消 operation，并按 memory journal 重试恢复；跨仓 consumer 尚未接入，Finding
+继续保持 open。

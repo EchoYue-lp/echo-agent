@@ -321,7 +321,7 @@ let report = reviewer
 
 ### 带证据的运行回顾 — `BackgroundReviewer`
 
-`BackgroundReviewer` 把 run transcript 当作不可信证据，只接受包含精确引用的严格 JSON，返回结构化 `ReviewCandidate`。默认只提案，不写长期记忆。只有框架复用方显式开启 `auto_persist_user_preferences` 时，才可能把高置信用户偏好写成 Draft memory。单次回顾输出上限为 512 token。
+`BackgroundReviewer` 把 run transcript 当作不可信证据，只接受包含精确引用的严格 JSON，返回结构化 `ReviewCandidate`。默认只提案，不写长期记忆。只有框架复用方显式开启 `auto_persist_user_preferences` 时，才可能把高置信用户偏好写成 Draft memory。review 方法返回惰性的 `BackgroundReviewHandle`；首次 poll 前即可取得 `ReviewIdentity`，它把 run ID 与稳定的 persistence key 绑定。handle 直接由 caller 驱动 operation，framework 不创建 Tokio detached task、receipt registry，也不拥有 shutdown；应用负责 admission、代次 fence、取消、evidence settlement 和 retry reconciliation。单次回顾输出上限为 512 token。
 
 ### 技能生命周期与自创建
 
