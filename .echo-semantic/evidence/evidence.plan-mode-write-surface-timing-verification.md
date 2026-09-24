@@ -12,7 +12,7 @@ supports: [finding.plan-mode-write-surface, behavior.effect-permission-execution
 limitations:
   - The deterministic failing probe was a temporary uncommitted test and is not part of the docs-only deliverable
   - Existing Plan tests cover mode active before invocation; they do not close the late-switch interleaving
-  - No production repair, full workspace gate, or remote delivery is claimed
+  - The e8371e58 branch passed a full local gate without this temporary red probe; no production repair or remote delivery is claimed
 command_results:
   - { command: "cargo test -p echo_agent --features mcp,human-loop permission_plan --locked", exit_code: 0 }
   - { command: "cargo test -p echo_agent --features mcp,human-loop plan_switch_during_pre_tool_hook_blocks_mutating_mcp_tool --locked", exit_code: 101 }
@@ -58,4 +58,6 @@ test is removed from this evidence-only branch to keep its test suite runnable.
 ## 已知缺口
 
 The effect-boundary repair and its regression test belong to a separate implementation lane.
-An independent reviewer, full gate, and remote Issue acceptance remain pending.
+The independent reviewer confirmed the timing counterexample, and the clean branch passed its
+isolated full local gate. Neither closes the red probe. A durable repair test, PR/CI, remote main,
+and Issue acceptance remain pending.

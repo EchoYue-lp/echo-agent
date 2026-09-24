@@ -42,4 +42,5 @@ Docker/K8s 不可用且 auto-detect fallback 开启时，声明最低隔离的 c
 `3735f7e0` 使显式 `minimum_isolation` 不再被 fallback 降级；buffered、limited、
 stream 路径和不可用 Docker 反例均由当前主线的 manager 测试覆盖（12/12）。
 独立 reviewer 核对源码、原反例和验证收据后确认无剩余 blocker，本分支 Finding
-标记 resolved。完整合并门禁、PR/CI、远端 main 与 Issue #83 关闭均待单独交付。
+标记 resolved。`e8371e58` 的隔离 target 完整本地门禁已通过；PR/CI、远端 main 与
+Issue #83 关闭仍待单独交付。

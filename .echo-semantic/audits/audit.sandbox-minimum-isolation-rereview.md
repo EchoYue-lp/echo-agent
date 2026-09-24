@@ -40,9 +40,10 @@ Finding resolved，不代表 Issue 已按远端交付口径关闭。
 ## 残余风险
 
 未设显式 minimum 的 policy preference 仍可按 `allow_fallback` 降级；这是独立于
-caller floor 的可见配置行为。完整 workspace 门禁及远端交付仍待验收。
+caller floor 的可见配置行为。`e8371e58` 的独立 target 完整本地门禁已通过，
+PR/CI 与远端交付仍待验收。
 
 ## 未检查项
 
-独立 reviewer 未自行重跑 focused 测试；未连接真实 Docker/Kubernetes 环境，也未重跑
-完整 workspace 或远端 CI。
+独立 reviewer 未自行重跑 focused 或完整 workspace 测试；完整门禁由主任务执行。
+未连接真实 Docker/Kubernetes 环境或执行远端 CI。

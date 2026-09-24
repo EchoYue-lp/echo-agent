@@ -30,5 +30,5 @@ this does not weaken `minimum_isolation`.
 
 ## 已知缺口
 
-Current-branch focused tests and independent rereview have separate verification and audit
-receipts. Full gates and remote Issue closure remain pending.
+Current-branch focused tests, full local gate, and independent rereview have separate
+verification and audit receipts. PR/CI, remote main, and Issue closure remain pending.

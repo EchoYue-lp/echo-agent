@@ -40,4 +40,5 @@ their declared capabilities.
 
 The timed mode-switch counterexample is recorded separately in
 `evidence.plan-mode-write-surface-timing-verification`. This repair is partial; Finding #70
-remains open. Full gates, independent rereview, and remote Issue closure are pending.
+remains open. The clean branch's isolated full local gate passed, but a durable repair and its
+independent rereview, PR/CI, remote main, and Issue closure are pending.

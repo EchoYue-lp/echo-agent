@@ -20,7 +20,7 @@ challenges:
 
 检查 `origin/main@f7c1fef7` 的 Agent 自动工具调用：ToolRuntime 可见性、
 PlanModeStage、PreToolUse Hook、PermissionStage 和 ExecuteStage。此审计记录本轮作者的
-定向反例，尚未取得独立 reviewer 的最终结论。
+定向反例；独立 reviewer 已复核证据与当前源码，但本审计仍不构成修复复审。
 
 ## 已检查故障假设
 
@@ -45,4 +45,5 @@ effect 前重新判定。Finding #70 保持 open；本审计不构成修复复�
 
 ## 未检查项
 
-未执行完整 workspace 门禁、独立 reviewer、远端 CI 或第三方 Tool capability 真实性抽样。
+独立 reviewer 未自行运行测试；主任务的隔离 target 完整本地门禁已通过，但未包含临时红测。
+未执行远端 CI 或第三方 Tool capability 真实性抽样。

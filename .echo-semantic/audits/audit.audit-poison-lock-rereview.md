@@ -39,9 +39,10 @@ Finding resolved，不代表 Issue 已按远端交付口径关闭。
 
 ## 残余风险
 
-In-memory logger 不保证进程重启后的持久性；完整 workspace 门禁及远端交付仍待验收。
+In-memory logger 不保证进程重启后的持久性；`e8371e58` 的独立 target 完整本地门禁
+已通过，PR/CI 与远端交付仍待验收。
 
 ## 未检查项
 
-独立 reviewer 未自行重跑 focused 测试；未重跑完整 workspace、远端 CI 或 CLI/SDK
-消费者链路。
+独立 reviewer 未自行重跑 focused 或完整 workspace 测试；完整门禁由主任务执行。
+未执行远端 CI 或 CLI/SDK 消费者链路。

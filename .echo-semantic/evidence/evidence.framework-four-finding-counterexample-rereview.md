@@ -15,7 +15,7 @@ source_refs:
   - src/evolution/background_review.rs
 supports: [finding.in-memory-audit-successful-drop, finding.sandbox-minimum-isolation, finding.plan-mode-write-surface, finding.background-review-detached-persistence-settlement]
 limitations:
-  - Focused tests and source inspection only; no full workspace merge gate
+  - The e8371e58 branch passed the isolated full local gate; PR/CI and remote main remain pending
   - Independent rereview supports the #61/#83 original counterexamples only; #70/#38 remain open
   - No remote PR, CI, merge, or Issue closure evidence
   - Background Review still has no outcome receipt when its caller drops a future after a partial persistence write
@@ -47,11 +47,14 @@ suite passed 12/12, and the two existing #70 `permission_plan` tests passed 2/2.
 deterministic #70 late Plan-switch probe failed 0/1 with one mutating execution; its exact command
 and interleaving are in `evidence.plan-mode-write-surface-timing-verification`. The #38 source path
 is unchanged and still permits drop after a partial memory write without an outcome receipt; its
-15-test suite above was not rerun on this integrated snapshot. Strict semantic snapshot checking
-passed after removal of the temporary failing probe.
+15-test suite above was not separately rerun on this integrated snapshot. The clean `e8371e58`
+branch then passed `./scripts/verify.sh` using this worktree's isolated target, including its
+workspace all-target/all-feature tests. A prior shared-target attempt failed against a stale
+`echo_orchestration` API cache; the isolated rerun is the final local gate. Strict semantic
+snapshot checking passed after removal of the temporary failing probe.
 
 ## 已知缺口
 
 #61 and #83 now have separate independent rereview audit receipts and are resolved in this
-evidence branch. #70 and #38 remain open for the concrete gaps above; no full merge gate, PR/CI,
-or Issue closure is claimed here.
+evidence branch. #70 and #38 remain open for the concrete gaps above; the clean branch's full
+local gate does not resolve the temporary #70 red probe. PR/CI and Issue closure remain pending.
