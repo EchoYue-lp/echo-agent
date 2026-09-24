@@ -2,31 +2,38 @@
 schema_version: 1
 id: evidence.plan-mode-write-surface-timing-verification
 kind: evidence
-observed_at: f7c1fef779fd83d2f26a780edc5edf1babbc4c5d
+observed_at: source:fe131df2148d81ee04fef5804e38cf59a2e231e8e28d5e71b89323a5c2fa98b0
 source_refs:
   - src/agent/react/run/pipeline.rs
   - src/agent/snapshot.rs
+  - echo-tools/src/files/files.rs
   - echo-orchestration/src/human_loop/service.rs
   - echo-core/src/hooks/types.rs
 supports: [finding.plan-mode-write-surface, behavior.effect-permission-execution]
 limitations:
-  - The deterministic failing probe was a temporary uncommitted test and is not part of the docs-only deliverable
-  - Existing Plan tests cover mode active before invocation; they do not close the late-switch interleaving
-  - The e8371e58 branch passed a full local gate without this temporary red probe; no production repair or remote delivery is claimed
+  - The ToolManager regression proves admission runs after a held concurrency permit; the retry loop uses the same admission callback but has no separate delay-specific race fixture
+  - Third-party Tool capability declarations remain trusted input
+  - Full workspace gates, remote CI, independent rereview, and Issue closure remain pending
 command_results:
-  - { command: "cargo test -p echo_agent --features mcp,human-loop permission_plan --locked", exit_code: 0 }
-  - { command: "cargo test -p echo_agent --features mcp,human-loop plan_switch_during_pre_tool_hook_blocks_mutating_mcp_tool --locked", exit_code: 101 }
+  - { command: "cargo test -p echo_agent --features mcp,human-loop live_permission_plan_precedes_hook_allow_for_mutating_mcp_tool --locked", exit_code: 0 }
+  - { command: "cargo test -p echo_agent --features mcp,human-loop live_plan_mode_is_rechecked_after_call_scoped_allow --locked", exit_code: 0 }
+  - { command: "cargo test -p echo_agent --features mcp readonly_surface_is_rechecked_after_tool_replacement --locked", exit_code: 0 }
+  - { command: "cargo test -p echo_execution --lib checked_admission_runs_after_permit_and_can_reject_before_effect --locked", exit_code: 0 }
+  - { command: "cargo test -p echo_agent --features mcp,human-loop readonly_tools_hides_and_blocks_custom_mutation --locked", exit_code: 0 }
+  - { command: "cargo test -p echo_agent --features mcp,human-loop tool_visibility_combines_skill_plan_and_disabled_policies --locked", exit_code: 0 }
+  - { command: "cargo clippy -p echo_agent --lib --features mcp,human-loop --locked -- -D warnings", exit_code: 0 }
+  - { command: "cargo fmt --all -- --check", exit_code: 0 }
 ---
 
-# Issue 70 live Plan switch counterexample
+# Issue 70 live Plan switch repair verification
 
 ## 支持的结论
 
-At `origin/main@f7c1fef7`, the two existing `permission_plan` tests passed (2/2). A temporary
-deterministic test named `plan_switch_during_pre_tool_hook_blocks_mutating_mcp_tool`, inserted
-after `live_permission_plan_precedes_hook_allow_for_mutating_mcp_tool` in `src/agent/snapshot.rs`,
-failed twice; the final run exited 101 with 0 passed, 1 failed and the assertion at line 3847:
-`mutating tool executed after a live Plan switch`, actual execution count 1 versus expected 0.
+The pre-repair timing counterexample at `origin/main@f7c1fef7` showed one mutating execution
+after a live Plan switch. The durable regression
+`live_plan_mode_is_rechecked_after_call_scoped_allow` now drives the real caller through a
+programmatic `PreToolUse` Hook that pauses, switches `PermissionService` to Plan, then returns
+`Allow`; the full pipeline finishes with a typed `Unavailable` denial and execution count 0.
 
 The probe registered a mutating MCP Tool and a programmatic PreToolUse Hook. The Hook sent an
 entry signal, then waited on a `Notify`. After receiving the signal, the test awaited
@@ -35,7 +42,7 @@ The core interleaving was:
 
 ```rust
 // Inside the programmatic PreToolUse Hook:
-let _ = entered_tx.send(());
+entered.notify_one();
 release.notified().await;
 HookResult::allow()
 
@@ -44,20 +51,24 @@ service.set_mode(PermissionMode::Plan).await;
 release.notify_one();
 ```
 
-`PlanModeStage` had already observed Default mode. `PreToolUseHookStage` then returned Allow;
-`PermissionStage` consumed that Allow without rechecking Plan, and `ExecuteStage` invoked the
-mutating Tool. This is a remaining read-only surface violation, so Finding #70 stays open.
+The repair makes `ExecuteStage` recheck `ctx.plan_mode`, any call-scoped Plan override, and the
+live `PermissionService` mode before the first side effect. A stale Allow is recorded as a Plan
+denial, normalized to the existing blocked/Unavailable contract, and the mutating Tool is never
+invoked. `checked_admission_runs_after_permit_and_can_reject_before_effect` additionally holds
+the only ToolManager permit until the caller releases it, then proves the admission callback runs
+before the target Tool and can reject without an effect.
 
 ## 来源与范围
 
-The temporary test used the same shared target and build environment as the #61/#83 focused
-runs. The final document records its exact name, synchronization, command, failure count, and
-execution counter so a repair branch can add a durable red/green regression. The exploratory
-test is removed from this evidence-only branch to keep its test suite runnable.
+The durable test uses the same mutating MCP probe and shared PermissionService as the existing
+Plan test, then calls the real `execute_tool_with_policy` caller. It records the call-scoped Allow,
+switches the live service to Plan while the Hook is suspended, releases the Hook, and asserts the
+final execution gate blocks before mutation. The ToolManager test covers the post-permit boundary
+independently of the Agent policy pipeline. The readonly replacement regression runs
+`PlanModeStage`, replaces the current tool generation, and confirms the final admission still
+blocks a mutating implementation under `readonly_tools`.
 
 ## 已知缺口
 
-The effect-boundary repair and its regression test belong to a separate implementation lane.
-The independent reviewer confirmed the timing counterexample, and the clean branch passed its
-isolated full local gate. Neither closes the red probe. A durable repair test, PR/CI, remote main,
-and Issue acceptance remain pending.
+The repair is focused to the framework execution boundary. PR/CI, remote main, independent
+rereview, and Issue acceptance remain pending.

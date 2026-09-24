@@ -2731,6 +2731,12 @@ mod transcript_filter_tests {
     use super::{
         AgentRunSnapshot, ToolRuntime, TranscriptProjectionCursor, filter_user_visible_transcript,
     };
+    #[cfg(feature = "mcp")]
+    use crate::agent::react::run::context::HookMessageBatches;
+    #[cfg(feature = "mcp")]
+    use crate::agent::react::run::pipeline::{
+        ExecuteStage, PipelineStage, PlanModeStage, ToolExecutionContext,
+    };
     use crate::compression::{ContextManager, ContextProjection};
     use crate::error::{ReactError, Result};
     use echo_core::llm::types::Message;
@@ -3777,6 +3783,142 @@ mod transcript_filter_tests {
                 .error
                 .as_deref()
                 .is_some_and(|reason| reason.contains("Plan mode"))
+        );
+        assert_eq!(executions.load(std::sync::atomic::Ordering::SeqCst), 0);
+        Ok(())
+    }
+
+    #[cfg(all(feature = "mcp", feature = "human-loop"))]
+    #[tokio::test]
+    async fn live_plan_mode_is_rechecked_after_call_scoped_allow() -> Result<()> {
+        use crate::skills::hooks::HookEvent;
+        use echo_core::hooks::HookResult;
+
+        let tool_name = crate::mcp::McpToolAdapter::exposed_name_for("malicious", "write");
+        let executions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let service = Arc::new(
+            crate::human_loop::PermissionService::new()
+                .with_mode(echo_core::tools::permission::PermissionMode::Default),
+        );
+        let agent = crate::agent::ReactAgentBuilder::new()
+            .model("test-model")
+            .permission_service(Arc::clone(&service))
+            .tool(Box::new(McpPlanProbe {
+                name: tool_name.clone(),
+                executions: Arc::clone(&executions),
+            }))
+            .build()?;
+        let hook_entered = Arc::new(tokio::sync::Notify::new());
+        let hook_release = Arc::new(tokio::sync::Notify::new());
+        let entered = Arc::clone(&hook_entered);
+        let release = Arc::clone(&hook_release);
+        agent.hook_registry().write().await.set_programmatic_hook(
+            "live-plan-race",
+            &[HookEvent::PreToolUse],
+            Arc::new(move |_context| {
+                let entered = Arc::clone(&entered);
+                let release = Arc::clone(&release);
+                Box::pin(async move {
+                    entered.notify_one();
+                    release.notified().await;
+                    HookResult::allow()
+                })
+            }),
+        );
+        let snapshot = AgentRunSnapshot::from_agent(&agent);
+        let call_snapshot = snapshot.clone();
+        let call = tokio::spawn(async move {
+            call_snapshot
+                .execute_tool_with_policy(
+                    "call-live-plan-race".to_string(),
+                    &tool_name,
+                    &ToolParameters::new(),
+                    &serde_json::json!({}),
+                    None,
+                )
+                .await
+        });
+        hook_entered.notified().await;
+        service
+            .set_mode(echo_core::tools::permission::PermissionMode::Plan)
+            .await;
+        hook_release.notify_one();
+        let failure = call
+            .await
+            .map_err(|error| ReactError::Other(format!("live Plan call task failed: {error}")))?
+            .err()
+            .ok_or_else(|| ReactError::Other("stale Allow bypassed live Plan mode".to_string()))?;
+        assert!(
+            failure
+                .result
+                .error
+                .as_deref()
+                .is_some_and(|reason| reason.contains("Plan mode"))
+        );
+        assert_eq!(
+            failure
+                .result
+                .failure
+                .as_ref()
+                .map(|failure| failure.category),
+            Some(crate::tools::ToolFailureCategory::Unavailable)
+        );
+        assert_eq!(executions.load(std::sync::atomic::Ordering::SeqCst), 0);
+        Ok(())
+    }
+
+    #[cfg(feature = "mcp")]
+    #[tokio::test]
+    async fn readonly_surface_is_rechecked_after_tool_replacement() -> Result<()> {
+        let tool_name = "replaceable_readonly".to_string();
+        let executions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let agent = crate::agent::ReactAgentBuilder::new()
+            .model("test-model")
+            .readonly_tools()
+            .tool(Box::new(ReadOnlyNamedTool("replaceable_readonly")))
+            .build()?;
+        let snapshot = AgentRunSnapshot::from_agent(&agent);
+        let mut ctx = ToolExecutionContext {
+            call_id: "call-readonly-replacement".to_string(),
+            requested_tool_name: tool_name.clone(),
+            requested_input: serde_json::json!({}),
+            tool_name: tool_name.clone(),
+            params: ToolParameters::new(),
+            input: serde_json::json!({}),
+            hook_messages: HookMessageBatches::default(),
+            result: None,
+            output: None,
+            audit_error_output: None,
+            blocked: false,
+            block_reason: None,
+            block_failure: None,
+            duration_ms: 0,
+            plan_mode: false,
+            permission_decision: None,
+            permission_mode_override: None,
+            rewrites: Vec::new(),
+            invocation_emitted: false,
+            callback_started: false,
+            interrupted_execution_error: None,
+            stream_tx: None,
+        };
+
+        PlanModeStage.run(&mut ctx, &snapshot).await?;
+        assert!(!ctx.blocked);
+        snapshot.tools.tool_manager.replace(Box::new(McpPlanProbe {
+            name: tool_name,
+            executions: Arc::clone(&executions),
+        }));
+
+        ExecuteStage.run(&mut ctx, &snapshot).await?;
+        assert!(ctx.blocked);
+        assert_eq!(
+            ctx.block_reason.as_deref(),
+            Some("Tool 'replaceable_readonly' is blocked by the read-only Agent")
+        );
+        assert_eq!(
+            ctx.block_failure.as_ref().map(|failure| failure.category),
+            Some(crate::tools::ToolFailureCategory::Unavailable)
         );
         assert_eq!(executions.load(std::sync::atomic::Ordering::SeqCst), 0);
         Ok(())
