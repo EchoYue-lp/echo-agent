@@ -171,13 +171,13 @@ fn low_usage_factor(meta: &MemoryMeta) -> f32 {
 
 /// Map a staleness score to a recommended status.
 ///
-/// Already-archived/superseded entries keep their terminal status — the reviewer
-/// never re-activates something a prior review retired.
+/// Draft remains a proposal regardless of staleness. Only an explicit
+/// journal-bound approval can activate it; scoring never supplies that receipt.
+/// Archived and Superseded entries keep their prior status.
 fn recommended_status(staleness: f32, current: MemoryStatus) -> MemoryStatus {
     match current {
-        // Terminal statuses are sticky.
-        MemoryStatus::Archived | MemoryStatus::Superseded => current,
-        MemoryStatus::Draft | MemoryStatus::Active => {
+        MemoryStatus::Draft | MemoryStatus::Archived | MemoryStatus::Superseded => current,
+        MemoryStatus::Active => {
             if staleness >= STALENESS_ARCHIVE_MIN {
                 MemoryStatus::Archived
             } else if staleness >= STALENESS_SUPERSEDED_MIN {
@@ -708,6 +708,16 @@ mod tests {
         assert_eq!(archived, MemoryStatus::Archived);
         let superseded = recommended_status(0.10, MemoryStatus::Superseded);
         assert_eq!(superseded, MemoryStatus::Superseded);
+    }
+
+    #[test]
+    fn review_scoring_never_recommends_activating_a_draft() {
+        for staleness in [0.0, 0.4, 0.7, 1.0] {
+            assert_eq!(
+                recommended_status(staleness, MemoryStatus::Draft),
+                MemoryStatus::Draft
+            );
+        }
     }
 
     #[test]

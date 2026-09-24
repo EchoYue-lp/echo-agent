@@ -35,8 +35,8 @@ use crate::tools::builtin::cell_tools::{ListCellsTool, StopCellTool, WaitCellToo
 #[cfg(feature = "human-loop")]
 use crate::tools::builtin::human_in_loop::HumanInLoop;
 use crate::tools::builtin::memory::{
-    ForgetTool, LayeredForgetTool, LayeredRecallTool, LayeredRememberTool, LayeredSearchMemoryTool,
-    LegacyStoreRememberTool, RecallTool, SearchMemoryTool,
+    LayeredForgetTool, LayeredRecallTool, LayeredRememberTool, LayeredSearchMemoryTool, RecallTool,
+    SearchMemoryTool,
 };
 use crate::tools::{ToolManager, ToolSearchTool};
 use echo_core::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
@@ -718,19 +718,20 @@ impl ReactAgent {
     pub fn install_memory_layer_manager(
         &mut self,
         layer_manager: Arc<crate::evolution::MemoryLayerManager>,
-    ) {
+    ) -> Result<()> {
+        let mut context = self.memory.context.try_lock().map_err(|_| {
+            ReactError::Other(
+                "ContextManager is busy; install the memory layer manager before running the agent"
+                    .into(),
+            )
+        })?;
+        context.set_memory_promoter(Arc::new(crate::memory_promoter::StoreMemoryPromoter::new(
+            layer_manager.clone(),
+        )));
+        self.memory.store = Some(layer_manager.store().clone());
         self.replace_layered_memory_tools(&layer_manager);
-        self.memory_layer_manager = Some(layer_manager.clone());
-        if let Ok(mut context) = self.memory.context.try_lock() {
-            context.set_memory_promoter(Arc::new(
-                crate::memory_promoter::StoreMemoryPromoter::new(layer_manager),
-            ));
-        } else {
-            tracing::warn!(
-                "Could not acquire ContextManager lock to install layered memory promoter; \
-                 install the memory layer manager before running the agent"
-            );
-        }
+        self.memory_layer_manager = Some(layer_manager);
+        Ok(())
     }
 
     /// Whether this agent has the layered memory runtime installed.
@@ -894,16 +895,11 @@ impl ReactAgent {
                     .iter()
                     .map(|part| (*part).to_string())
                     .collect::<Vec<_>>();
-                tool_manager.register(Box::new(LegacyStoreRememberTool::new(
-                    store.clone(),
-                    namespace.clone(),
-                )));
                 tool_manager.register(Box::new(RecallTool::new(store.clone(), namespace.clone())));
                 tool_manager.register(Box::new(SearchMemoryTool::new(
                     store.clone(),
                     namespace.clone(),
                 )));
-                tool_manager.register(Box::new(ForgetTool::new(store.clone(), namespace)));
                 Some(store)
             }
             Err(e) => {
@@ -1221,7 +1217,8 @@ impl ReactAgent {
             .set_memory_promoter(promoter);
     }
 
-    /// Replace the long-term memory Store and re-register `remember` / `recall` / `forget` tools.
+    /// Replace the Store and register approved `recall` / `search_memory` tools.
+    /// An installed layer manager also provides journaled `remember` / `forget`.
     ///
     /// ```rust,no_run
     /// use echo_agent::memory::{EmbeddingStore, FileStore, HttpEmbedder};
@@ -1237,11 +1234,24 @@ impl ReactAgent {
     /// );
     ///
     /// let mut agent = ReactAgent::new(config);
-    /// agent.set_memory_store(store);
+    /// agent.set_memory_store(store)?;
     /// # Ok(())
     /// # }
     /// ```
-    pub fn set_memory_store(&mut self, store: Arc<dyn Store>) {
+    pub fn set_memory_store(&mut self, store: Arc<dyn Store>) -> Result<()> {
+        if let Some(layer_manager) = &self.memory_layer_manager
+            && !Arc::ptr_eq(&store, layer_manager.store())
+        {
+            return Err(ReactError::Other(
+                "MemoryLayerManager owns a different Store; replace the manager to change memory storage"
+                    .into(),
+            ));
+        }
+        let mut context = self.memory.context.try_lock().map_err(|_| {
+            ReactError::Other(
+                "ContextManager is busy; use install_memory_store from an async context".into(),
+            )
+        })?;
         let ns = crate::evolution::layer::WARM_NAMESPACE
             .iter()
             .map(|part| (*part).to_string())
@@ -1253,48 +1263,6 @@ impl ReactAgent {
         }
         self.memory.store = Some(store.clone());
 
-        // ── L3 Memory Promotion ──
-        // Wire a StoreMemoryPromoter into the ContextManager so that
-        // messages evicted during compression are promoted to long-term memory.
-        //
-        // `try_lock` is correct here — this synchronous setter is meant to be
-        // called during build / before any task holds the context lock. If an
-        // agent has already started running, callers should use
-        // [`Self::install_memory_store`] instead, which awaits the lock.
-        if let Ok(mut ctx) = self.memory.context.try_lock() {
-            if let Some(layer_manager) = &self.memory_layer_manager {
-                ctx.set_memory_promoter(Arc::new(
-                    crate::memory_promoter::StoreMemoryPromoter::new(layer_manager.clone()),
-                ));
-            } else {
-                ctx.remove_memory_promoter();
-            }
-        } else {
-            tracing::warn!(
-                "Could not acquire ContextManager lock to set memory promoter; \
-                 use install_memory_store() from an async context if the agent is already running"
-            );
-        }
-    }
-
-    /// Async variant of [`Self::set_memory_store`] safe to call after the
-    /// agent has started running (e.g. while another task is holding the
-    /// context lock). Awaits the `ContextManager` mutex instead of using
-    /// `try_lock`, so the `MemoryPromoter` and tool registrations always
-    /// take effect — no silent fallback.
-    pub async fn install_memory_store(&mut self, store: Arc<dyn Store>) {
-        let ns = crate::evolution::layer::WARM_NAMESPACE
-            .iter()
-            .map(|part| (*part).to_string())
-            .collect::<Vec<_>>();
-        if let Some(layer_manager) = &self.memory_layer_manager {
-            self.replace_layered_memory_tools(layer_manager);
-        } else {
-            self.replace_store_memory_tools(&store, ns);
-        }
-        self.memory.store = Some(store.clone());
-
-        let mut context = self.memory.context.lock().await;
         if let Some(layer_manager) = &self.memory_layer_manager {
             context.set_memory_promoter(Arc::new(
                 crate::memory_promoter::StoreMemoryPromoter::new(layer_manager.clone()),
@@ -1302,16 +1270,48 @@ impl ReactAgent {
         } else {
             context.remove_memory_promoter();
         }
+        Ok(())
+    }
+
+    /// Async variant of [`Self::set_memory_store`] safe to call after the
+    /// agent has started running (e.g. while another task is holding the
+    /// context lock). Awaits the `ContextManager` mutex instead of using
+    /// `try_lock`, so the `MemoryPromoter` and tool registrations always
+    /// take effect — no silent fallback.
+    pub async fn install_memory_store(&mut self, store: Arc<dyn Store>) -> Result<()> {
+        if let Some(layer_manager) = &self.memory_layer_manager
+            && !Arc::ptr_eq(&store, layer_manager.store())
+        {
+            return Err(ReactError::Other(
+                "MemoryLayerManager owns a different Store; replace the manager to change memory storage"
+                    .into(),
+            ));
+        }
+        let mut context = self.memory.context.lock().await;
+        let ns = crate::evolution::layer::WARM_NAMESPACE
+            .iter()
+            .map(|part| (*part).to_string())
+            .collect::<Vec<_>>();
+        if let Some(layer_manager) = &self.memory_layer_manager {
+            self.replace_layered_memory_tools(layer_manager);
+        } else {
+            self.replace_store_memory_tools(&store, ns);
+        }
+        self.memory.store = Some(store.clone());
+
+        if let Some(layer_manager) = &self.memory_layer_manager {
+            context.set_memory_promoter(Arc::new(
+                crate::memory_promoter::StoreMemoryPromoter::new(layer_manager.clone()),
+            ));
+        } else {
+            context.remove_memory_promoter();
+        }
+        Ok(())
     }
 
     fn replace_store_memory_tools(&self, store: &Arc<dyn Store>, namespace: Vec<String>) {
-        let _ = self
-            .tools
-            .tool_manager
-            .replace(Box::new(LegacyStoreRememberTool::new(
-                store.clone(),
-                namespace.clone(),
-            )));
+        let _ = self.tools.tool_manager.unregister("remember");
+        let _ = self.tools.tool_manager.unregister("forget");
         let _ = self
             .tools
             .tool_manager
@@ -1323,10 +1323,6 @@ impl ReactAgent {
                 store.clone(),
                 namespace.clone(),
             )));
-        let _ = self
-            .tools
-            .tool_manager
-            .replace(Box::new(ForgetTool::new(store.clone(), namespace)));
     }
 
     fn replace_layered_memory_tools(

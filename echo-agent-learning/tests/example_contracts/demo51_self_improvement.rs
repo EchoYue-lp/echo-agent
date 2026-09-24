@@ -24,7 +24,10 @@ use echo_agent::evolution::{
 use echo_agent::improve::*;
 use echo_agent::memory::store::FileStore;
 use echo_agent::memory::typed_store::TypedMemoryStore;
-use echo_agent::prelude::{MemoryMeta, MemorySource, MemoryType};
+use echo_agent::prelude::{
+    MemoryApproval, MemoryEvidence, MemoryEvidenceRole, MemoryMeta, MemoryProvenance, MemorySource,
+    MemoryStatus, MemoryTrust, MemoryType,
+};
 use echo_agent::trace::{Run, RunEvent, RunStatus, RunTimings, TokenUsage};
 use std::sync::Arc;
 
@@ -107,6 +110,7 @@ async fn contract_demo51_layered_memory_recovery_api() -> Result<(), Box<dyn std
     );
     manager.write_memory("cargo", "Use cargo", meta).await?;
     assert!(manager.read_hot_content()?.is_empty());
+    assert!(manager.recall_warm("cargo", 5).await?.is_empty());
     let exact_content = "  first line\nsecond line  \n";
     let promoted = MemoryMeta::new(
         MemoryType::UserPreference,
@@ -114,9 +118,24 @@ async fn contract_demo51_layered_memory_recovery_api() -> Result<(), Box<dyn std
         "format",
     )
     .with_confidence(0.95)
-    .with_stability(0.90);
+    .with_stability(0.90)
+    .with_provenance(MemoryProvenance::draft(
+        MemoryTrust::User,
+        vec![MemoryEvidence::new(MemoryEvidenceRole::User, exact_content)],
+    ));
     manager
         .write_memory("format", exact_content, promoted)
+        .await?;
+    let proposal = manager
+        .preview_activation("format")
+        .await?
+        .ok_or("missing exact Draft proposal")?;
+    assert_eq!(proposal.meta.status, MemoryStatus::Draft);
+    manager
+        .activate_draft(
+            &proposal,
+            MemoryApproval::new("demo51-format", "reviewer", 1_750_000_000),
+        )
         .await?;
     let (layer, live) = manager
         .locate("format")
@@ -143,8 +162,10 @@ async fn contract_demo51_layered_memory_recovery_api() -> Result<(), Box<dyn std
         .ok_or("missing recovered example memory")?;
     assert_eq!(layer, MemoryLayer::Hot);
     assert_eq!(recovered.content, exact_content);
+    assert_eq!(recovered.meta.provenance.trust, MemoryTrust::User);
+    assert!(recovered.meta.provenance.is_approved());
     let log = JsonlChangeLog::new(root.join("evolution/change-log.jsonl"))?;
-    assert_eq!(log.query(&ChangeFilter::new())?.len(), 3);
+    assert_eq!(log.query(&ChangeFilter::new())?.len(), 4);
     Ok(())
 }
 

@@ -9,9 +9,9 @@ primary_focus: data_durability
 focus: [state_authority, time_lifecycle, failure_concurrency, contract_evidence]
 boundary: boundary.context-memory
 observed_at: 44b2ed68772c7c016d09af6c2e1adac9fe4fea70
-code_refs: [echo-state/src/compression/mod.rs, src/context/mod.rs, src/agent/snapshot.rs, src/agent/react/run/phases/compact.rs, src/agent/react/run/phases/tools.rs, src/agent/react/run/phases/finalize.rs, src/state/mod.rs, src/state/file.rs, src/state/sqlite.rs, echo-core/src/memory/conversation.rs, echo-core/src/memory/store.rs]
+code_refs: [echo-state/src/compression/mod.rs, src/context/mod.rs, src/agent/snapshot.rs, src/agent/react/run/context.rs, src/agent/react/run/phases/compact.rs, src/agent/react/run/phases/tools.rs, src/agent/react/run/phases/finalize.rs, src/evolution/layer.rs, src/evolution/recall.rs, src/state/mod.rs, src/state/file.rs, src/state/sqlite.rs, echo-core/src/memory/conversation.rs, echo-core/src/memory/store.rs, echo-core/src/memory/types.rs]
 rule_refs: [rule.context-persistence-separation]
-evidence_refs: [evidence.agent-context-execution, evidence.persistence-observation, evidence.transcript-generation-runtime-identity-repair, evidence.transcript-generation-runtime-identity-verification, evidence.transcript-projection-settlement-repair, evidence.transcript-projection-settlement-verification, evidence.checkpoint-plan-authority-repair, evidence.checkpoint-plan-authority-verification]
+evidence_refs: [evidence.agent-context-execution, evidence.persistence-observation, evidence.transcript-generation-runtime-identity-repair, evidence.transcript-generation-runtime-identity-verification, evidence.transcript-projection-settlement-repair, evidence.transcript-projection-settlement-verification, evidence.checkpoint-plan-authority-repair, evidence.checkpoint-plan-authority-verification, evidence.memory-provenance-authority-repair, evidence.memory-provenance-authority-verification]
 finding_refs: [finding.transcript-projection-settlement, finding.transcript-generation-runtime-identity]
 ---
 
@@ -23,7 +23,7 @@ finding_refs: [finding.transcript-projection-settlement, finding.transcript-gene
 
 ## 当前行为
 
-默认 ReAct 使用 `ContextManager`；`ContextAssembler` 是自定义 loop building block。`RuntimeStateStore` 保存 `AgentCheckpoint`，`ConversationStore` 保存 transcript，`Store` 保存长期知识。
+默认 ReAct 使用 `ContextManager`；`ContextAssembler` 是自定义 loop building block。`RuntimeStateStore` 保存 `AgentCheckpoint`，`ConversationStore` 保存 transcript，`Store` 保存长期知识。Typed memory由MemoryLayerManager持久化Draft/approval并经统一Recall资格检查。
 
 ## 期望行为
 
@@ -35,7 +35,7 @@ LLM 调用前执行预算准备与压缩，turn safe point 保存 checkpoint/tra
 
 ## 失败、重试与恢复
 
-损坏 checkpoint、部分 transcript 写入、切换 runtime ID、重复 safe point 和取消中的 hydration 必须保守失败或重建。Transcript effect 先持久化 pending，再以稳定 operation identity apply/proof-ack；timeout 不推断未提交，admission/recovery 先结算 debt。
+损坏 checkpoint、部分 transcript 写入、切换 runtime ID、重复 safe point 和取消中的 hydration 必须保守失败或重建。Transcript effect 先持久化 pending，再以稳定 operation identity apply/proof-ack；timeout 不推断未提交，admission/recovery 先结算 debt。Memory approval绑定原Draft journal generation；取消/失败后由原manager恢复结算，旧无来源记忆不自动召回。
 
 ## 证据
 

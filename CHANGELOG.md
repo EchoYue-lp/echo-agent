@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Layered memory now records source-role evidence and trust separately from
+  extraction mechanism. Pre-compaction and other automatic writers save Draft
+  candidates; only a journal-generation-bound, caller-approved activation
+  makes one exact candidate Active. Automatic and both Store-backed and layered
+  Agent recall exclude Draft and historical records lacking provenance,
+  recheck stale search results,
+  and update recall telemetry with Store CAS. File/SQLite and hot-file
+  historical records remain readable for review. Hot promotion preserves
+  automatic context visibility; Store-only Agents expose read-only recall
+  until a layer manager owns writes. Memory manager installation and Store
+  setters now return errors when the context is busy or a replacement Store
+  conflicts with the installed manager. See ADR 0070.
+
 - Added the canonical Skill lifecycle mutation authority for exact SKILL.md
   bytes plus Curator state. Draft, Merge, Patch, and runtime usage now use
   durable prepare/projection/idempotent-audit/settle ordering, digest-bound

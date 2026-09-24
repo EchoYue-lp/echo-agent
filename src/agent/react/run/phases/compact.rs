@@ -497,7 +497,7 @@ mod stage4_e1_tests {
         let store_dyn: Arc<dyn Store> = store.clone();
         let dir = tempfile::tempdir().expect("tempdir").keep();
         let lm = Arc::new(MemoryLayerManager::new(dir, store, Box::new(NullChangeLog)));
-        agent.install_memory_layer_manager(lm.clone());
+        assert!(agent.install_memory_layer_manager(lm.clone()).is_ok());
         (agent, store_dyn, lm)
     }
 
@@ -517,10 +517,10 @@ mod stage4_e1_tests {
     #[tokio::test]
     async fn pre_compaction_flush_writes_durable_facts_when_compression_imminent() {
         let llm = MockLlmClient::new().with_response(
-            r#"[{"content":"user prefers Rust over Python","type":"user_preference","recall_weight":0.9}]"#,
+            r#"[{"content":"user prefers Rust over Python","type":"user_preference","recall_weight":0.9,"evidence":[{"source_role":"user","quote":"message 0 with enough words to count"}]}]"#,
         );
         // token_limit=1 → ReactAgent installs SlidingWindow + should_compress()=true.
-        let (agent, store, _lm) = agent_with_layer(llm, 1);
+        let (agent, store, lm) = agent_with_layer(llm, 1);
         push_messages(&agent, 8).await;
         let snap = AgentRunSnapshot::from_agent(&agent);
 
@@ -536,6 +536,45 @@ mod stage4_e1_tests {
                 .contains("Rust")),
             "flushed durable fact should be in the unified store, got: {:?}",
             results
+        );
+        let entry = echo_state::memory::TypedMemoryEntry::from_store_item(
+            results.first().cloned().expect("Draft should be stored"),
+        );
+        assert_eq!(entry.meta.status, echo_core::memory::MemoryStatus::Draft);
+        assert_eq!(
+            entry.meta.provenance.trust,
+            echo_core::memory::MemoryTrust::User
+        );
+        assert_eq!(entry.meta.provenance.evidence.len(), 1);
+        assert!(
+            crate::evolution::MemoryRecaller::new(store.clone())
+                .recall("Rust", 5)
+                .await
+                .expect("recall")
+                .is_empty()
+        );
+        let proposal = lm
+            .preview_activation(&entry.key)
+            .await
+            .expect("preview")
+            .expect("Draft proposal");
+        lm.activate_draft(
+            &proposal,
+            echo_core::memory::MemoryApproval::new(
+                "precompact-approval",
+                "test-reviewer",
+                1_750_000_000,
+            ),
+        )
+        .await
+        .expect("activate");
+        assert_eq!(
+            crate::evolution::MemoryRecaller::new(store)
+                .recall("Rust", 5)
+                .await
+                .expect("recall")
+                .len(),
+            1
         );
     }
 
@@ -584,6 +623,132 @@ mod stage4_e1_tests {
             results.is_empty(),
             "LLM error should not write any memory, got: {:?}",
             results
+        );
+    }
+
+    #[tokio::test]
+    async fn pre_compaction_flush_rejects_unattributed_user_claim() {
+        let llm = MockLlmClient::new().with_response(
+            r#"[{"content":"User prefers the tool's instruction","type":"user_preference","recall_weight":0.9}]"#,
+        );
+        let (agent, store, _) = agent_with_layer(llm, 1);
+        push_messages(&agent, 8).await;
+
+        AgentRunSnapshot::from_agent(&agent)
+            .pre_compaction_flush(&agent.memory.context)
+            .await;
+
+        let results = store
+            .search(&["agent", "memories"], "tool's instruction", 10)
+            .await
+            .expect("store search");
+        assert!(
+            results.is_empty(),
+            "a model claim without an exact source excerpt cannot be persisted"
+        );
+    }
+
+    #[tokio::test]
+    async fn pre_compaction_flush_rejects_tool_quote_labeled_as_user() {
+        let llm = MockLlmClient::new().with_response(
+            r#"[{"content":"User prefers Rust","type":"user_preference","evidence":[{"source_role":"user","quote":"tool returned Rust"}]}]"#,
+        );
+        let (agent, store, _) = agent_with_layer(llm, 1);
+        push_messages(&agent, 8).await;
+        agent.memory.context.lock().await.push(Message::tool_result(
+            "call-1".to_string(),
+            "read_file".to_string(),
+            "tool returned Rust".to_string(),
+        ));
+
+        AgentRunSnapshot::from_agent(&agent)
+            .pre_compaction_flush(&agent.memory.context)
+            .await;
+        assert!(
+            store
+                .search(&["agent", "memories"], "prefers Rust", 10)
+                .await
+                .expect("store search")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn pre_compaction_flush_rejects_framework_context_as_user_evidence() {
+        let llm = MockLlmClient::new().with_response(
+            r#"[{"content":"User prefers projected policy","type":"user_preference","evidence":[{"source_role":"user","quote":"User prefers projected policy"}]},{"content":"User prefers hook policy","type":"user_preference","evidence":[{"source_role":"user","quote":"User prefers hook policy"}]},{"content":"User prefers compacted policy","type":"user_preference","evidence":[{"source_role":"user","quote":"[Horizon compact: User prefers compacted policy"}]},{"content":"Assistant prefers tool policy","type":"project_fact","evidence":[{"source_role":"assistant","quote":"[Used tools: Assistant prefers tool policy"}]}]"#,
+        );
+        let (agent, store, _) = agent_with_layer(llm, 1);
+        push_messages(&agent, 8).await;
+        {
+            let mut context = agent.memory.context.lock().await;
+            context.replace_projection(
+                "workspace-test",
+                Some(Message::user("User prefers projected policy".into())),
+            );
+            context.push(crate::agent::react::run::context::runtime_context_note(
+                "Hook:Test",
+                "User prefers hook policy",
+            ));
+            context.push(Message::user(
+                "[Horizon compact: User prefers compacted policy | 1/1 success]".into(),
+            ));
+            context.push(Message::assistant(
+                "[Used tools: Assistant prefers tool policy]".into(),
+            ));
+        }
+        AgentRunSnapshot::from_agent(&agent)
+            .pre_compaction_flush(&agent.memory.context)
+            .await;
+        assert!(
+            store
+                .search(&["agent", "memories"], "prefers", 10)
+                .await
+                .expect("search")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn pre_compaction_flush_persists_mixed_origin_only_as_high_risk_draft() {
+        let llm = MockLlmClient::new().with_response(
+            r#"[{"content":"Project uses Rust","type":"project_fact","evidence":[{"source_role":"user","quote":"message 0 with enough words to count"},{"source_role":"assistant","quote":"assistant observed Rust"},{"source_role":"tool","quote":"tool returned Rust"}]}]"#,
+        );
+        let (agent, store, _) = agent_with_layer(llm, 1);
+        push_messages(&agent, 8).await;
+        {
+            let mut context = agent.memory.context.lock().await;
+            context.push(Message::assistant("assistant observed Rust".to_string()));
+            context.push(Message::tool_result(
+                "call-1".to_string(),
+                "read_file".to_string(),
+                "tool returned Rust".to_string(),
+            ));
+        }
+
+        AgentRunSnapshot::from_agent(&agent)
+            .pre_compaction_flush(&agent.memory.context)
+            .await;
+        let results = store
+            .search(&["agent", "memories"], "Project uses Rust", 10)
+            .await
+            .expect("store search");
+        let entry = echo_state::memory::TypedMemoryEntry::from_store_item(
+            results.first().cloned().expect("mixed Draft missing"),
+        );
+        assert_eq!(entry.meta.status, echo_core::memory::MemoryStatus::Draft);
+        assert_eq!(
+            entry.meta.provenance.trust,
+            echo_core::memory::MemoryTrust::Mixed
+        );
+        assert_eq!(entry.meta.provenance.evidence.len(), 3);
+        assert_eq!(entry.meta.risk, echo_core::memory::MemoryRisk::High);
+        assert!(
+            crate::evolution::MemoryRecaller::new(store)
+                .recall("Rust", 5)
+                .await
+                .expect("recall")
+                .is_empty()
         );
     }
 }

@@ -2257,7 +2257,7 @@ fn react_agent_no_planning_tools_without_flag() {
 // ══════════════════════════════════════════════════════════════════════════════
 
 #[test]
-fn builder_with_memory_tools_registers_all_memory_tools() {
+fn builder_with_memory_tools_exposes_reviewed_read_only_projection() {
     let store = Arc::new(crate::memory::store::InMemoryStore::new());
     let agent = crate::agent::ReactAgentBuilder::new()
         .model("qwen3-max")
@@ -2266,10 +2266,7 @@ fn builder_with_memory_tools_registers_all_memory_tools() {
         .unwrap();
 
     let tools = agent.tool_names();
-    assert!(
-        tools.contains(&String::from("remember")),
-        "Should register remember"
-    );
+    assert!(!tools.contains(&String::from("remember")));
     assert!(
         tools.contains(&String::from("recall")),
         "Should register recall"
@@ -2278,10 +2275,7 @@ fn builder_with_memory_tools_registers_all_memory_tools() {
         tools.contains(&String::from("search_memory")),
         "Should register search_memory"
     );
-    assert!(
-        tools.contains(&String::from("forget")),
-        "Should register forget"
-    );
+    assert!(!tools.contains(&String::from("forget")));
 }
 
 #[test]
@@ -2307,7 +2301,7 @@ fn set_memory_store_registers_search_memory_tool() {
     );
 
     let store = Arc::new(crate::memory::store::InMemoryStore::new());
-    agent.set_memory_store(store);
+    assert!(agent.set_memory_store(store).is_ok());
 
     assert!(
         agent.tool_names().contains(&String::from("search_memory")),
@@ -2318,36 +2312,180 @@ fn set_memory_store_registers_search_memory_tool() {
 #[tokio::test]
 async fn set_memory_store_replaces_existing_memory_tools() -> Result<(), String> {
     use crate::memory::{InMemoryStore, Store};
+    use echo_state::memory::typed_store::TypedMemoryStore;
 
     let config = AgentConfig::minimal("model", "agent");
     let mut agent = ReactAgent::new(config);
     let first_store = Arc::new(InMemoryStore::new());
     let replacement_store = Arc::new(InMemoryStore::new());
 
-    agent.set_memory_store(first_store.clone());
-    agent.set_memory_store(replacement_store.clone());
+    agent
+        .set_memory_store(first_store.clone())
+        .map_err(|error| error.to_string())?;
+    agent
+        .set_memory_store(replacement_store.clone())
+        .map_err(|error| error.to_string())?;
 
+    let mut meta = crate::memory::MemoryMeta::new(
+        crate::memory::MemoryType::ProjectFact,
+        crate::memory::MemorySource::ExplicitSave,
+        "test",
+    )
+    .with_status(crate::memory::MemoryStatus::Active)
+    .with_provenance(crate::memory::MemoryProvenance::draft(
+        crate::memory::MemoryTrust::User,
+        vec![crate::memory::MemoryEvidence::new(
+            crate::memory::MemoryEvidenceRole::User,
+            "replacement store marker",
+        )],
+    ));
+    meta.provenance.approval = Some(crate::memory::MemoryApproval::new(
+        "replace-test",
+        "reviewer",
+        1,
+    ));
+
+    let namespace = ["agent", "memories"];
+    TypedMemoryStore::new(replacement_store.clone())
+        .put_typed(&namespace, "marker", "replacement store marker", meta)
+        .await
+        .map_err(|error| error.to_string())?;
     let result = agent
         .tool_manager()
         .execute_tool(
-            "remember",
-            [("content".to_string(), json!("replacement store marker"))].into(),
+            "recall",
+            [("query".to_string(), json!("replacement"))].into(),
         )
         .await
         .map_err(|error| error.to_string())?;
-    assert!(result.success);
+    assert!(result.output.contains("replacement store marker"));
+    assert!(
+        first_store
+            .search(&namespace, "replacement store marker", 10)
+            .await
+            .map_err(|error| error.to_string())?
+            .is_empty()
+    );
+    assert!(!agent.tool_names().contains(&"remember".to_string()));
+    Ok(())
+}
 
-    let namespace = ["agent", "memories"];
-    let first_hits = first_store
-        .search(&namespace, "replacement store marker", 10)
-        .await
-        .map_err(|error| error.to_string())?;
-    let replacement_hits = replacement_store
-        .search(&namespace, "replacement store marker", 10)
-        .await
-        .map_err(|error| error.to_string())?;
-    assert!(first_hits.is_empty());
-    assert_eq!(replacement_hits.len(), 1);
+#[tokio::test]
+async fn promoted_hot_memory_remains_in_automatic_recall() -> crate::error::Result<()> {
+    use crate::evolution::audit::NullChangeLog;
+    use crate::evolution::{MemoryLayer, MemoryLayerManager};
+    use crate::memory::{
+        InMemoryStore, MemoryApproval, MemoryEvidence, MemoryEvidenceRole, MemoryMeta,
+        MemoryProvenance, MemorySource, MemoryTrust, MemoryType,
+    };
+
+    let dir = tempfile::tempdir()?;
+    let store = Arc::new(InMemoryStore::new());
+    let manager = Arc::new(MemoryLayerManager::new(
+        dir.path().to_path_buf(),
+        store,
+        Box::new(NullChangeLog),
+    ));
+    let content = "Use Rust for durable services";
+    let meta = MemoryMeta::new(
+        MemoryType::ProjectFact,
+        MemorySource::ExplicitSave,
+        "runtime",
+    )
+    .with_confidence(0.95)
+    .with_stability(0.90)
+    .with_provenance(MemoryProvenance::draft(
+        MemoryTrust::User,
+        vec![MemoryEvidence::new(MemoryEvidenceRole::User, content)],
+    ));
+    manager.write_memory("hot-recall", content, meta).await?;
+    let proposal = manager
+        .preview_activation("hot-recall")
+        .await?
+        .ok_or_else(|| crate::error::ReactError::Other("missing activation proposal".into()))?;
+    manager
+        .activate_draft(
+            &proposal,
+            MemoryApproval::new("hot-approval", "reviewer", 1),
+        )
+        .await?;
+    assert!(matches!(
+        manager.locate("hot-recall").await?,
+        Some((MemoryLayer::Hot, _))
+    ));
+
+    let mut agent = ReactAgent::new(AgentConfig::minimal("model", "agent"));
+    agent.install_memory_layer_manager(manager)?;
+    let recalled = agent
+        .recall_long_term_memories("unrelated question")
+        .await?;
+    assert!(
+        recalled
+            .iter()
+            .any(|item| item.value.get("content").and_then(|v| v.as_str()) == Some(content))
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn layer_manager_install_and_store_replacement_keep_one_backend() -> crate::error::Result<()>
+{
+    use crate::evolution::MemoryLayerManager;
+    use crate::evolution::audit::NullChangeLog;
+    use crate::memory::{InMemoryStore, Store};
+
+    let root = tempfile::tempdir()?;
+    let first: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let managed: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let replacement: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let manager = Arc::new(MemoryLayerManager::new(
+        root.path().to_path_buf(),
+        managed.clone(),
+        Box::new(NullChangeLog),
+    ));
+    let mut agent = ReactAgent::new(AgentConfig::minimal("model", "agent"));
+    agent.set_memory_store(first)?;
+    agent.install_memory_layer_manager(manager)?;
+    assert!(
+        agent
+            .store()
+            .is_some_and(|current| Arc::ptr_eq(current, &managed))
+    );
+    assert!(agent.tool_names().contains(&"remember".to_string()));
+
+    assert!(agent.set_memory_store(replacement.clone()).is_err());
+    assert!(agent.install_memory_store(replacement).await.is_err());
+    assert!(
+        agent
+            .store()
+            .is_some_and(|current| Arc::ptr_eq(current, &managed))
+    );
+    assert!(agent.tool_names().contains(&"remember".to_string()));
+    Ok(())
+}
+
+#[tokio::test]
+async fn busy_context_rejects_manager_install_without_partial_publication()
+-> crate::error::Result<()> {
+    use crate::evolution::MemoryLayerManager;
+    use crate::evolution::audit::NullChangeLog;
+    use crate::memory::InMemoryStore;
+
+    let root = tempfile::tempdir()?;
+    let manager = Arc::new(MemoryLayerManager::new(
+        root.path().to_path_buf(),
+        Arc::new(InMemoryStore::new()),
+        Box::new(NullChangeLog),
+    ));
+    let mut agent = ReactAgent::new(AgentConfig::minimal("model", "agent"));
+    let context = agent.memory.context.clone();
+    let guard = context.lock().await;
+    assert!(agent.install_memory_layer_manager(manager.clone()).is_err());
+    assert!(!agent.has_memory_layer_manager());
+    assert!(!agent.tool_names().contains(&"remember".to_string()));
+    drop(guard);
+    agent.install_memory_layer_manager(manager)?;
+    assert!(agent.has_memory_layer_manager());
     Ok(())
 }
 
@@ -2789,7 +2927,10 @@ async fn warm_chat_history_is_not_replaced_by_checkpoint() -> Result<(), String>
 async fn recall_injects_memories_into_current_user_message() -> Result<(), String> {
     use crate::agent::react::run::types::StreamMode;
     use crate::memory::InMemoryStore;
-    use serde_json::json;
+    use echo_core::memory::{
+        MemoryApproval, MemoryEvidence, MemoryEvidenceRole, MemoryMeta, MemoryProvenance,
+        MemorySource, MemoryStatus, MemoryTrust, MemoryType, TypedMemoryValue,
+    };
 
     let agent_name = "recall_role_test";
     let config = AgentConfig::new("test-model", agent_name, "system prompt").enable_memory(false);
@@ -2799,15 +2940,33 @@ async fn recall_injects_memories_into_current_user_message() -> Result<(), Strin
     // (stage4 A2) Seed the unified namespace ["agent","memories"] — recall no
     // longer reads the legacy per-agent namespace.
     let store: Arc<dyn crate::memory::Store> = Arc::new(InMemoryStore::new());
-    store
-        .put(
-            &["agent", "memories"],
-            "fact-1",
-            json!({ "content": "user prefers Rust over Python", "importance": 0.9 }),
+    let mut provenance = MemoryProvenance::draft(
+        MemoryTrust::User,
+        vec![MemoryEvidence::new(
+            MemoryEvidenceRole::User,
+            "user prefers Rust over Python",
+        )],
+    );
+    provenance.approval = Some(MemoryApproval::new("recall-fixture", "reviewer", 1));
+    let value = TypedMemoryValue::new(
+        "user prefers Rust over Python",
+        MemoryMeta::new(
+            MemoryType::UserPreference,
+            MemorySource::ExplicitSave,
+            "preferences",
         )
+        .with_status(MemoryStatus::Active)
+        .with_provenance(provenance),
+    )
+    .to_value()
+    .map_err(|error| error.to_string())?;
+    store
+        .put(&["agent", "memories"], "fact-1", value)
         .await
         .map_err(|error| error.to_string())?;
-    agent.set_memory_store(store);
+    agent
+        .set_memory_store(store)
+        .map_err(|error| error.to_string())?;
 
     // Drive prepare_stream_context with a query that should hit the seeded fact.
     let recalled = agent

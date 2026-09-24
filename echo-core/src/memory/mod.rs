@@ -35,4 +35,7 @@ pub use conversation::{
 };
 pub use embedder::Embedder;
 pub use store::{SearchMode, SearchQuery, Store, StoreItem};
-pub use types::{MemoryMeta, MemoryRisk, MemorySource, MemoryStatus, MemoryType, TypedMemoryValue};
+pub use types::{
+    MemoryApproval, MemoryEvidence, MemoryEvidenceRole, MemoryMeta, MemoryProvenance, MemoryRisk,
+    MemorySource, MemoryStatus, MemoryTrust, MemoryType, TypedMemoryValue,
+};

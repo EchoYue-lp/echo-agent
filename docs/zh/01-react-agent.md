@@ -72,7 +72,7 @@ Subagent 后即可承担编排职责；版本化的 `task_create`、`task_update
 AgentConfig::new("qwen3-max", "my_agent", "你是一个助手")
     .enable_tool(true)          // 启用工具调用（默认 true）
     .enable_subagent(true)      // 启用 Subagent 编排（Orchestrator 模式）
-    .enable_memory(true)        // 启用长期记忆（Store + remember/recall/forget 工具）
+    .enable_memory(true)        // 启用已批准记忆的 Store 召回；manager 增加写入工具
     .enable_human_in_loop(true) // 启用人工介入
     .enable_cot(true)           // 启用 Chain-of-Thought 引导语（Builder 默认 true）
     .session_id("thread-001")   // run-grouping 标签（进程内）

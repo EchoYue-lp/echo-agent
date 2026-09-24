@@ -258,6 +258,33 @@ let filter = ChangeFilter::new()
 
 含换行或首尾空白的热层内容在 `MEMORY.md` frontmatter 标记 `content_json: true`，正文 bullet 使用单行 JSON 字符串，无损恢复原文；旧的普通 bullet 仍可读取。晋升或降级若基于过期读取，另一 manager 已改同一 key，则在 prepare 前失败，不覆盖较新的值。
 
+### 带证据的 Draft 与激活
+
+`MemorySource` 表示抽取机制；`MemoryProvenance` 单独保存 user、assistant、tool
+的精确原文及据此得到的信任分类。自动写入和分层 `remember` 工具先持久化
+Draft。`write_memory` 不接受调用方传入的 `Active` 或 approval 作为激活依据。
+调用方沿用同一 manager 审阅：
+
+```rust,no_run
+use echo_agent::prelude::MemoryApproval;
+use echo_agent::evolution::MemoryLayerManager;
+
+# async fn review(mgr: &MemoryLayerManager) -> echo_agent::error::Result<()> {
+if let Some(proposal) = mgr.preview_activation("candidate-key").await? {
+    let approval = MemoryApproval::new("review-123", "reviewer", 1_750_000_000);
+    mgr.activate_draft(&proposal, approval).await?;
+}
+# Ok(())
+# }
+```
+
+proposal 绑定准确内容、metadata 和 journal generation；过期内容及 A→B→A
+改写会在 mutation 前失败，同一已结算批准的重试返回幂等结果。失败或取消后的
+journal debt 由 `reconcile_pending` 结算。只有已批准 Active/Archived 记忆可
+召回；缺少 provenance 的旧 typed/hot 记录仍可审阅，但不进入模型 context。
+Recall 计数使用 Store CAS，不能把并发修改过的状态或来源写回。见
+[ADR 0070](../adr/0070-memory-provenance-and-recall-authority.md)。
+
 已批准的 `MemoryMerger` 现在绑定同一 manager：
 
 ```rust

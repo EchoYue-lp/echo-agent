@@ -19,16 +19,17 @@
 //! ## 运行方式
 //!
 //! ```bash
-//! # 基础运行（需要 LLM API Key + sqlite + human-loop feature）
-//! QWEN_API_KEY=your_key cargo run -p echo-agent-learning --example demo45_customer_service --features sqlite,human-loop
+//! # 基础运行（需要 LLM API Key + sqlite + human-loop + content-guard feature）
+//! QWEN_API_KEY=your_key cargo run -p echo-agent-learning --example demo45_customer_service --features sqlite,human-loop,content-guard
 //!
 //! # 带流式输出和彩色日志
-//! RUST_LOG=info QWEN_API_KEY=your_key cargo run -p echo-agent-learning --example demo45_customer_service --features sqlite,human-loop
+//! RUST_LOG=info QWEN_API_KEY=your_key cargo run -p echo-agent-learning --example demo45_customer_service --features sqlite,human-loop,content-guard
 //!
 //! # 若要验证图片输入，请先在 application configuration 中把 model.name 设为视觉模型
-//! cargo run -p echo-agent-learning --example demo45_customer_service --features sqlite,human-loop
+//! cargo run -p echo-agent-learning --example demo45_customer_service --features sqlite,human-loop,content-guard
 //! ```
 
+use echo_agent::evolution::MemoryRuntimeIntegrationBuilder;
 use echo_agent::human_loop::{
     HumanLoopEvent, HumanLoopManager, InMemoryPermissionAuditSink, PermissionService,
 };
@@ -149,29 +150,44 @@ async fn main() -> Result<()> {
 
     // ── 1. 创建 SQLite 持久化存储（长期记忆）───────────────────────────────
     let store = Arc::new(SqliteStore::new(&db_path)?);
-    let ns = &["customer_service", "memories"];
+    let ns = &["agent", "memories"];
+    let memory_dir = tempfile::tempdir()?;
+    let memory_manager = Arc::new(
+        MemoryRuntimeIntegrationBuilder::new(memory_dir.path().join(".echo-agent"), store.clone())
+            .build_layer_manager_reconciled()
+            .await?,
+    );
 
-    // 预填充一些常见知识
-    store
-        .put(
-            ns,
+    // Application-authored policy facts are explicitly reviewed before Agent recall.
+    for (key, content) in [
+        (
             "policy_return",
-            json!({
-                "content": "退换货政策：7天无理由退货，15天内质量问题可换货。退货需保持商品原包装完好。",
-                "category": "政策"
-            }),
-        )
-        .await?;
-    store
-        .put(
-            ns,
+            "退换货政策：7天无理由退货，15天内质量问题可换货。退货需保持商品原包装完好。",
+        ),
+        (
             "policy_shipping",
-            json!({
-                "content": "配送政策：全国包邮，偏远地区除外。通常48小时内发货，3-5个工作日送达。",
-                "category": "政策"
-            }),
-        )
-        .await?;
+            "配送政策：全国包邮，偏远地区除外。通常48小时内发货，3-5个工作日送达。",
+        ),
+    ] {
+        let meta = MemoryMeta::new(MemoryType::ProjectFact, MemorySource::ExplicitSave, "政策")
+            .with_provenance(MemoryProvenance::draft(
+                MemoryTrust::Assistant,
+                vec![MemoryEvidence::new(MemoryEvidenceRole::Assistant, content)],
+            ));
+        memory_manager.write_memory(key, content, meta).await?;
+        let proposal = memory_manager
+            .preview_activation(key)
+            .await?
+            .ok_or_else(|| {
+                echo_agent::error::ReactError::Other(format!("missing policy Draft: {key}"))
+            })?;
+        memory_manager
+            .activate_draft(
+                &proposal,
+                MemoryApproval::new(format!("seed-{key}"), "example-policy-owner", 1),
+            )
+            .await?;
+    }
 
     // ── 2. 创建审计日志（操作追踪）──────────────────────────────────────────
     let audit_logger = Arc::new(InMemoryAuditLogger::new());
@@ -321,6 +337,7 @@ async fn main() -> Result<()> {
         .audit_logger(audit_logger.clone())
         .with_memory_tools(store.clone())
         .build()?;
+    agent.install_memory_layer_manager(memory_manager)?;
 
     // 添加业务工具
     agent.add_tool(Box::new(QueryOrderTool));

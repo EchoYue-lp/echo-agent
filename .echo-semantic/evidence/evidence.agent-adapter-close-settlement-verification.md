@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.agent-adapter-close-settlement-verification
 kind: evidence
-observed_at: source:4887582b3c8c982732d721189145bdf28cbd3a06ce0881a785706fc514d3c6e7
+observed_at: source:87b717676a7b51e213630677989947777b4bed441acd8c7d655fb6c96dca77ad
 source_refs:
   - src/headless.rs
   - src/lib.rs
@@ -132,7 +132,7 @@ compiles the retained Headless handle pattern.
 
 ## 集成收据
 
-At source digest `4887582b3c8c982732d721189145bdf28cbd3a06ce0881a785706fc514d3c6e7`:
+At source digest `87b717676a7b51e213630677989947777b4bed441acd8c7d655fb6c96dca77ad`:
 
 - `CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2 RUSTFLAGS='-C debuginfo=0
   -A linker_messages' ./scripts/verify.sh`: exit 0. The root suite passed

@@ -5,7 +5,8 @@
 //!
 //! - **Skill lifecycle**: [`SkillMutationAuthority`] durably applies approved
 //!   Curator + exact SKILL.md transitions (Candidate → Draft → Active → Stale → Deprecated → Archived)
-//! - **Typed memory**: Structured metadata (type, confidence, stability, risk) for every memory
+//! - **Typed memory**: Structured metadata, exact source evidence, and
+//!   explicit Draft-to-Active activation for reviewed long-term memory
 //! - **Change audit**: Append-only evidence for durable, generation-fenced
 //!   memory and Skill owner-applied rollback
 //! - **Security**: Secret scanning, untrusted input isolation, injection detection
@@ -55,10 +56,11 @@ pub use draft::{DraftResult, SkillDraftGenerator, SkillDraftPreview};
 pub use dreaming::{Dreaming, DreamingAction, DreamingConfig, DreamingDecision, DreamingReport};
 pub use health::{HealthBreakdown, HealthStatus, SkillHealthMonitor, SkillHealthReport};
 pub use layer::{
-    EvolutionObserver, HotEntryMeta, LayerChangeResult, MemoryFile, MemoryLayer,
-    MemoryLayerManager, MemoryRollbackConflict, MemoryRollbackHistoryUnavailable,
-    MemoryRollbackOutcome, MemoryRollbackPreview, MemoryRollbackPreviewOutcome,
-    MemoryRollbackReceipt, MemoryRollbackTarget, is_stale_memory_proposal_error,
+    EvolutionObserver, HotEntryMeta, LayerChangeResult, MemoryActivationOutcome,
+    MemoryActivationProposal, MemoryActivationReceipt, MemoryFile, MemoryLayer, MemoryLayerManager,
+    MemoryRollbackConflict, MemoryRollbackHistoryUnavailable, MemoryRollbackOutcome,
+    MemoryRollbackPreview, MemoryRollbackPreviewOutcome, MemoryRollbackReceipt,
+    MemoryRollbackTarget, is_stale_memory_proposal_error,
 };
 pub use merge::{
     SimilarityBreakdown, SkillMergePreview, SkillMergeProposal, SkillMerger,

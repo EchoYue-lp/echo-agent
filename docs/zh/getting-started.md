@@ -159,11 +159,11 @@ async fn main() -> Result<()> {
     let agent = ReactAgentBuilder::new()
         .model("deepseek-v4-flash")
         .system_prompt("你是一个助手，可以记住用户告诉你的信息。")
-        .with_memory_tools(store)  // 自动注册 remember / recall / forget 工具
+        .with_memory_tools(store)  // 自动注册已批准记忆的 recall / search_memory 工具
         .build()?;
 
-    // Agent 现在可以记住和回忆信息了
-    let answer = agent.execute("请记住我的名字叫小明").await?;
+    // 安装 MemoryLayerManager 后才启用经过 journal 的 remember / forget 写入。
+    let answer = agent.execute("有哪些已批准的项目事实？").await?;
     println!("{answer}");
     Ok(())
 }

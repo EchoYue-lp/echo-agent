@@ -10,7 +10,10 @@ use crate::evolution::MemoryLayerManager;
 use crate::llm::LlmClient;
 use crate::memory::store::Store;
 use crate::trace::{Run, RunEvent, RunStore};
-use echo_core::memory::types::{MemoryMeta, MemorySource, MemoryStatus, MemoryType};
+use echo_core::memory::types::{
+    MemoryEvidence, MemoryEvidenceRole, MemoryMeta, MemoryProvenance, MemorySource, MemoryStatus,
+    MemoryTrust, MemoryType,
+};
 use futures::FutureExt;
 use serde::{Deserialize, Serialize};
 use std::panic::AssertUnwindSafe;
@@ -430,7 +433,14 @@ impl BackgroundReviewer {
                     "user",
                 )
                 .with_confidence(confidence)
-                .with_status(MemoryStatus::Draft);
+                .with_status(MemoryStatus::Draft)
+                .with_provenance(MemoryProvenance::draft(
+                    MemoryTrust::User,
+                    vec![MemoryEvidence::new(
+                        MemoryEvidenceRole::User,
+                        evidence.clone(),
+                    )],
+                ));
                 let key = format!("review_{run_id}");
                 let write = async { layer_manager.write_memory(&key, &content, meta).await };
                 match AssertUnwindSafe(write).catch_unwind().await {

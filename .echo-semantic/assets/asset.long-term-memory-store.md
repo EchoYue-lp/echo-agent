@@ -8,12 +8,12 @@ status: active
 risk: high
 observed_at: f1e9027246760661144786e9e35615cd46d580c6
 boundary_refs: [boundary.context-memory, boundary.observation-persistence-delivery]
-code_refs: [echo-core/src/memory/store.rs, echo-state/src/memory/store.rs, echo-state/src/memory/sqlite_store.rs, echo-state/src/memory/embedding_store.rs, echo-state/src/memory/typed_store.rs]
-consumer_refs: [src/agent/react/subsystems/memory.rs, src/agent/react/mod.rs, src/evolution/layer.rs, docs/en/03-memory.md]
+code_refs: [echo-core/src/memory/store.rs, echo-core/src/memory/types.rs, echo-state/src/memory/store.rs, echo-state/src/memory/sqlite_store.rs, echo-state/src/memory/embedding_store.rs, echo-state/src/memory/typed_store.rs, src/evolution/layer.rs, src/evolution/recall.rs]
+consumer_refs: [src/agent/react/subsystems/memory.rs, src/agent/react/mod.rs, src/agent/react/run/context.rs, src/evolution/layer.rs, docs/en/03-memory.md]
 behavior_refs: [behavior.context-memory-lifecycle, behavior.observation-persistence]
 rule_refs: [rule.context-persistence-separation, rule.fact-projection-separation]
-evidence_refs: [evidence.agent-context-execution, evidence.persistence-observation]
-finding_refs: []
+evidence_refs: [evidence.agent-context-execution, evidence.persistence-observation, evidence.memory-provenance-authority-repair, evidence.memory-provenance-authority-verification]
+finding_refs: [finding.pre-compaction-memory-trust-provenance]
 candidate_refs: []
 ---
 
@@ -21,7 +21,7 @@ candidate_refs: []
 
 ## 资产身份
 
-`Store` 是 namespaced 长期知识权威；in-memory/file、可选 SQLite、Embedding wrapper 和 TypedMemoryStore 是 framework capability/backends。
+`Store` 是 namespaced 长期知识权威；in-memory/file、可选 SQLite、Embedding wrapper 和 TypedMemoryStore 是 framework capability/backends。Typed长期记忆在同一Store中保存Draft/Active与exact provenance；manager journal拥有mutation结算。
 
 ## 来源与消费者
 
@@ -29,7 +29,7 @@ ReactAgent memory tools、retrieval 与 Evolution consumers 使用，不由 tran
 
 ## 生命周期
 
-Put/get/search/delete/prune、embedding index rebuild/persist 与 typed memory mutation 分别由具体 backend 和上层策略结算。
+Put/get/search/delete/prune、embedding index rebuild/persist 与 typed memory mutation 分别由具体 backend 和上层策略结算。LegacyUnknown可读取但不进入自动/分层recall；显式批准按journal generation激活。
 
 ## 候选关系
 

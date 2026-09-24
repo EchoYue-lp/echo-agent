@@ -73,7 +73,7 @@ without changing the Agent's runtime role.
 AgentConfig::new("qwen3-max", "my_agent", "You are a helpful assistant")
     .enable_tool(true)          // enable tool calling (default: true)
     .enable_subagent(true)      // enable Subagent dispatch (Orchestrator mode)
-    .enable_memory(true)        // enable long-term memory (Store + remember/recall/forget tools)
+    .enable_memory(true)        // enable approved Store recall/search; manager adds writes
     .enable_human_in_loop(true) // enable human approval gate
     .enable_cot(true)           // enable Chain-of-Thought prompt injection (Builder default: true)
     .session_id("thread-001")   // logical run-grouping label

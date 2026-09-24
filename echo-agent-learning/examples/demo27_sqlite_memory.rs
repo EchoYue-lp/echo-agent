@@ -13,6 +13,7 @@
 //! ```
 mod support;
 
+use echo_agent::evolution::MemoryRuntimeIntegrationBuilder;
 use echo_agent::memory::store::Store;
 use echo_agent::prelude::*;
 use serde_json::{Value, json};
@@ -393,23 +394,46 @@ async fn demo_agent_integration(db_path: &Path) -> echo_agent::error::Result<()>
     println!("  使用模型: {model_name}\n");
 
     let store: Arc<dyn Store> = Arc::new(SqliteStore::new(db_path)?);
-    let ns = &["agent_demo", "memories"];
+    let memory_dir = tempfile::tempdir()?;
+    let memory_manager = Arc::new(
+        MemoryRuntimeIntegrationBuilder::new(memory_dir.path().join(".echo-agent"), store.clone())
+            .build_layer_manager_reconciled()
+            .await?,
+    );
 
-    // 预填充记忆
-    store
-        .put(
-            ns,
-            "m1",
-            json!({"content": "用户叫 Alice，是一名 Rust 开发者"}),
-        )
-        .await?;
-    store
-        .put(
-            ns,
-            "m2",
-            json!({"content": "用户偏好使用 SQLite 作为嵌入式数据库"}),
-        )
-        .await?;
+    // Example-owned facts become recallable only after journaled review.
+    for (key, content) in [
+        ("m1", "用户叫 Alice，是一名 Rust 开发者"),
+        ("m2", "用户偏好使用 SQLite 作为嵌入式数据库"),
+    ] {
+        memory_manager
+            .write_memory(
+                key,
+                content,
+                MemoryMeta::new(
+                    MemoryType::ProjectFact,
+                    MemorySource::ExplicitSave,
+                    "profile",
+                )
+                .with_provenance(MemoryProvenance::draft(
+                    MemoryTrust::Assistant,
+                    vec![MemoryEvidence::new(MemoryEvidenceRole::Assistant, content)],
+                )),
+            )
+            .await?;
+        let proposal = memory_manager
+            .preview_activation(key)
+            .await?
+            .ok_or_else(|| {
+                echo_agent::error::ReactError::Other(format!("missing demo27 Draft: {key}"))
+            })?;
+        memory_manager
+            .activate_draft(
+                &proposal,
+                MemoryApproval::new(format!("demo27-{key}"), "example-reviewer", 1),
+            )
+            .await?;
+    }
     println!("  📚 预填充 2 条长期记忆\n");
 
     let mut agent = ReactAgentBuilder::new()
@@ -420,7 +444,8 @@ async fn demo_agent_integration(db_path: &Path) -> echo_agent::error::Result<()>
         .max_iterations(5)
         .build()?;
 
-    agent.set_memory_store(store);
+    agent.set_memory_store(store)?;
+    agent.install_memory_layer_manager(memory_manager)?;
 
     println!("  👤 用户: 推荐一个适合我的数据库方案");
     let answer = agent.execute("推荐一个适合我的数据库方案").await?;

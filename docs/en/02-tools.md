@@ -32,7 +32,8 @@ Built-in tools (builtin):
     ├─ task_list                  ← read the committed graph revision
     ├─ agent_tool                 ← dispatch to a registered Subagent
     ├─ human_in_loop              ← request human text input
-    ├─ remember / recall / forget ← long-term memory operations
+    ├─ recall / search_memory    ← approved Store recall
+    ├─ remember / forget         ← journaled writes with MemoryLayerManager
     └─ think                      ← explicit CoT tool (superseded by CoT text approach)
 
 Extension tools (ready to use):

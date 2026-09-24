@@ -97,7 +97,7 @@ pub struct AgentConfig {
     pub(crate) _reasoning_effort: String,
     /// Tool execution config: timeout, retry strategy, parallel concurrency
     pub(crate) tool_execution: ToolExecutionConfig,
-    /// Whether to enable long-term memory Store (remember/recall/forget tools + automatic context injection)
+    /// Whether to enable long-term Store recall/search and automatic context injection.
     pub(crate) enable_memory: bool,
     /// Long-term memory Store file path (default `~/.echo-agent/store.json`)
     pub(crate) memory_path: String,
@@ -719,7 +719,7 @@ impl AgentConfig {
     /// * `enabled` - `true` to enable long-term memory, `false` to disable
     ///
     /// # Description
-    /// When enabled, the Agent can use remember/recall/forget tools, with automatic context injection support
+    /// Enables approved-memory recall/search. A layer manager adds journaled remember/forget.
     pub fn enable_memory(mut self, enabled: bool) -> Self {
         self.enable_memory = enabled;
         self

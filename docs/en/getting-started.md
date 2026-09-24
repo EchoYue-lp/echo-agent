@@ -159,11 +159,11 @@ async fn main() -> Result<()> {
     let agent = ReactAgentBuilder::new()
         .model("deepseek-v4-flash")
         .system_prompt("You are an assistant that can remember information the user tells you.")
-        .with_memory_tools(store)  // registers remember / recall / forget tools
+        .with_memory_tools(store)  // registers approved recall / search_memory tools
         .build()?;
 
-    // The agent can now remember and recall information
-    let answer = agent.execute("Please remember that my name is Alice").await?;
+    // Install MemoryLayerManager for journaled remember / forget writes.
+    let answer = agent.execute("What approved project facts are available?").await?;
     println!("{answer}");
     Ok(())
 }

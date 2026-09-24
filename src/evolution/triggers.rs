@@ -272,11 +272,11 @@ impl TriggerDetector {
             evidence: vec![
                 TriggerEvidence {
                     source_role: "user".to_string(),
-                    quote: truncate_content(user_msg, 200),
+                    quote: user_msg.chars().take(200).collect(),
                 },
                 TriggerEvidence {
                     source_role: "assistant".to_string(),
-                    quote: truncate_content(assistant_msg, 100),
+                    quote: assistant_msg.chars().take(100).collect(),
                 },
             ],
         })
@@ -319,19 +319,11 @@ impl TriggerDetector {
             evidence: vec![
                 TriggerEvidence {
                     source_role: "tool_error".to_string(),
-                    quote: format!(
-                        "{}: {}",
-                        failure.tool_name,
-                        truncate_content(&failure.error, 160)
-                    ),
+                    quote: failure.error.chars().take(160).collect(),
                 },
                 TriggerEvidence {
                     source_role: "tool_output".to_string(),
-                    quote: format!(
-                        "{}: {}",
-                        success.tool_name,
-                        truncate_content(&success.output_summary, 160)
-                    ),
+                    quote: success.output_summary.chars().take(160).collect(),
                 },
             ],
         })
@@ -382,10 +374,7 @@ impl TriggerDetector {
                 .take(3)
                 .map(|record| TriggerEvidence {
                     source_role: "tool_sequence".to_string(),
-                    quote: format!(
-                        "{} in session {} at {}",
-                        record.tool_name, record.session_id, record.timestamp
-                    ),
+                    quote: record.tool_name.chars().take(200).collect(),
                 })
                 .collect(),
         })
@@ -571,6 +560,44 @@ mod tests {
                 .iter()
                 .any(|m| m.source == MemorySource::UserCorrection)
         );
+    }
+
+    #[test]
+    fn trigger_evidence_is_an_exact_excerpt_even_when_long() {
+        let user = format!("Actually use Rust {}", "界".repeat(250));
+        let assistant = format!("Use Python {}", "界".repeat(150));
+        let failure = format!("error {}", "界".repeat(200));
+        let success = format!("passed {}", "界".repeat(200));
+        let ctx = TriggerContext {
+            user_message: Some(user.clone()),
+            assistant_message: Some(assistant.clone()),
+            last_tool_failure: Some(ToolFailureRecord {
+                tool_name: "first".into(),
+                input_summary: "first".into(),
+                error: failure.clone(),
+                timestamp: "now".into(),
+            }),
+            last_tool_success: Some(ToolSuccessRecord {
+                tool_name: "second".into(),
+                input_summary: "second".into(),
+                output_summary: success.clone(),
+                timestamp: "later".into(),
+            }),
+            ..Default::default()
+        };
+        for trigger in TriggerDetector::new().detect(&ctx) {
+            for evidence in trigger.evidence {
+                let original = match evidence.source_role.as_str() {
+                    "user" => &user,
+                    "assistant" => &assistant,
+                    "tool_error" => &failure,
+                    "tool_output" => &success,
+                    _ => continue,
+                };
+                assert!(original.contains(&evidence.quote));
+                assert!(evidence.quote.chars().count() <= 200);
+            }
+        }
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! demo18_semantic_memory.rs —— Store 语义搜索（向量检索）综合演示
 
 use echo_agent::agent::Agent;
+use echo_agent::evolution::MemoryRuntimeIntegrationBuilder;
 use echo_agent::memory::SearchQuery;
 use echo_agent::memory::store::{InMemoryStore, Store};
 use echo_agent::memory::{Embedder, EmbeddingStore, HttpEmbedder};
@@ -114,24 +115,45 @@ async fn demo_agent_with_semantic_memory() -> echo_agent::error::Result<()> {
     let inner = Arc::new(InMemoryStore::new());
     let store = Arc::new(EmbeddingStore::new(inner as Arc<dyn Store>, embedder));
 
-    // 预填充记忆
-    let ns = ["memory_agent".to_string(), "memories".to_string()];
-    let ns_ref: Vec<&str> = ns.iter().map(String::as_str).collect();
-
-    store
-        .put(
-            &ns_ref,
-            "m1",
-            json!({"content": "用户叫 Alice，是一名数据科学家"}),
-        )
-        .await?;
-    store
-        .put(
-            &ns_ref,
-            "m2",
-            json!({"content": "用户偏好 Python 和 PyTorch"}),
-        )
-        .await?;
+    // Example-owned facts enter Agent recall only after journaled review.
+    let memory_dir = tempfile::tempdir()?;
+    let memory_manager = Arc::new(
+        MemoryRuntimeIntegrationBuilder::new(memory_dir.path().join(".echo-agent"), store.clone())
+            .build_layer_manager_reconciled()
+            .await?,
+    );
+    for (key, content) in [
+        ("m1", "用户叫 Alice，是一名数据科学家"),
+        ("m2", "用户偏好 Python 和 PyTorch"),
+    ] {
+        memory_manager
+            .write_memory(
+                key,
+                content,
+                MemoryMeta::new(
+                    MemoryType::ProjectFact,
+                    MemorySource::ExplicitSave,
+                    "profile",
+                )
+                .with_provenance(MemoryProvenance::draft(
+                    MemoryTrust::Assistant,
+                    vec![MemoryEvidence::new(MemoryEvidenceRole::Assistant, content)],
+                )),
+            )
+            .await?;
+        let proposal = memory_manager
+            .preview_activation(key)
+            .await?
+            .ok_or_else(|| {
+                echo_agent::error::ReactError::Other(format!("missing demo18 Draft: {key}"))
+            })?;
+        memory_manager
+            .activate_draft(
+                &proposal,
+                MemoryApproval::new(format!("demo18-{key}"), "example-reviewer", 1),
+            )
+            .await?;
+    }
 
     println!("  📚 预填充 2 条长期记忆\n");
 
@@ -144,7 +166,8 @@ async fn demo_agent_with_semantic_memory() -> echo_agent::error::Result<()> {
         .max_iterations(5)
         .build()?;
 
-    agent.set_memory_store(store);
+    agent.set_memory_store(store)?;
+    agent.install_memory_layer_manager(memory_manager)?;
 
     // 执行任务
     println!("  👤 用户: 帮我推荐适合数据科学研究的 Rust 库");
@@ -180,19 +203,19 @@ async fn demo_set_memory_store() -> echo_agent::error::Result<()> {
     let inner = Arc::new(InMemoryStore::new());
     let store = Arc::new(EmbeddingStore::new(inner as Arc<dyn Store>, embedder));
 
-    agent.set_memory_store(store.clone());
+    agent.set_memory_store(store.clone())?;
     println!("  ✅ EmbeddingStore 已挂载");
     let names = agent.tool_names();
-    if !names.contains(&"remember".to_string())
-        || !names.contains(&"recall".to_string())
-        || !names.contains(&"forget".to_string())
+    if !names.contains(&"recall".to_string())
+        || !names.contains(&"search_memory".to_string())
+        || names.contains(&"remember".to_string())
     {
         return Err(echo_agent::error::ReactError::Other(
             "demo18 验收失败：热挂载 EmbeddingStore 后记忆工具未完整注册".to_string(),
         ));
     }
 
-    println!("\n  ℹ️  接下来 Agent 的 remember/recall 工具将使用向量检索");
+    println!("\n  接下来 Agent 的 recall/search_memory 工具将使用向量检索");
 
     Ok(())
 }

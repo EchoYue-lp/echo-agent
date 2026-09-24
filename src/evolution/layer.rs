@@ -8,7 +8,7 @@
 //!
 //! | Layer | Storage | Namespace | Purpose |
 //! |-------|---------|-----------|---------|
-//! | **Hot** | `.echo-agent/MEMORY.md` (YAML frontmatter + markdown body) | File | Always loaded into context, max ~2000 tokens |
+//! | **Hot** | `.echo-agent/MEMORY.md` (YAML frontmatter + markdown body) | File | Approved entries loaded into context, max ~2000 tokens |
 //! | **Warm** | Store KV | `["agent", "memories"]` | Available on-demand via search; Archived entries stay here (stage4: cold removed) |
 //!
 //! # Hot layer MEMORY.md format
@@ -37,9 +37,10 @@
 //! When the hot layer exceeds its token budget, the lowest-priority entries
 //! are demoted back to warm based on a demotion score.
 
-use echo_core::memory::store::Store;
+use echo_core::memory::store::{Store, StoreItem};
 use echo_core::memory::types::{
-    MemoryMeta, MemoryRisk, MemorySource, MemoryStatus, MemoryType, TypedMemoryValue,
+    MemoryApproval, MemoryMeta, MemoryProvenance, MemoryRisk, MemorySource, MemoryStatus,
+    MemoryTrust, MemoryType, TypedMemoryValue,
 };
 use echo_state::memory::typed_store::{MemoryFilter, TypedMemoryEntry, TypedMemoryStore};
 use futures::future::BoxFuture;
@@ -59,11 +60,30 @@ use super::review::{
     AppliedMemoryMerge, ConflictDetector, ConflictGroup, MemoryConflictProposal,
     MemoryMergeSnapshot, MemoryMerger, MergeResult, ordered_conflict_entries,
 };
-use super::security::{EvolutionSecurityGuard, InputTrustLevel};
+use super::security::{
+    EvolutionSecurityGuard, InputTrustLevel, PromptInjectionDetector, SecretScanner,
+};
 use echo_core::error::{ConfigError, ReactError};
 
 /// Alias for layer operation results.
 type Result<T> = std::result::Result<T, ReactError>;
+
+fn stricter_memory_risk(left: MemoryRisk, right: MemoryRisk) -> MemoryRisk {
+    match (left, right) {
+        (MemoryRisk::High, _) | (_, MemoryRisk::High) => MemoryRisk::High,
+        (MemoryRisk::Medium, _) | (_, MemoryRisk::Medium) => MemoryRisk::Medium,
+        _ => MemoryRisk::Low,
+    }
+}
+
+fn evidence_is_safe(provenance: &MemoryProvenance) -> bool {
+    let scanner = SecretScanner::new();
+    let injector = PromptInjectionDetector;
+    provenance
+        .evidence
+        .iter()
+        .all(|item| !scanner.scan(&item.quote).has_secrets && !injector.detect(&item.quote))
+}
 
 fn merge_plan_error(message: impl Into<String>) -> ReactError {
     ReactError::Config(Box::new(ConfigError::ConfigFileError(message.into())))
@@ -154,6 +174,9 @@ pub struct HotEntryMeta {
     pub recall_weight: f32,
     /// Source of this memory.
     pub source: MemorySource,
+    /// Exact origin evidence and approval retained across hot/warm moves.
+    #[serde(default)]
+    pub provenance: MemoryProvenance,
     /// Topic category.
     pub topic: String,
     /// Risk level.
@@ -188,7 +211,8 @@ impl HotEntryMeta {
             .with_confidence(self.confidence)
             .with_stability(self.stability)
             .with_recall_weight(self.recall_weight)
-            .with_risk(self.risk);
+            .with_risk(self.risk)
+            .with_provenance(self.provenance.clone());
         meta.revision_count = self.revision_count;
         meta.recall_count = self.recall_count;
         meta.last_recalled_at = self.last_recalled_at;
@@ -224,6 +248,39 @@ pub struct LayerChangeResult {
     pub to_layer: MemoryLayer,
     /// Reason for the change.
     pub reason: String,
+}
+
+/// Exact Draft snapshot presented to an external reviewer.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MemoryActivationProposal {
+    /// Memory key in the canonical layered-memory authority.
+    pub key: String,
+    /// Exact content reviewed by the caller.
+    pub content: String,
+    /// Exact Draft metadata reviewed by the caller.
+    pub meta: MemoryMeta,
+    /// Latest durable journal generation for this key when it was reviewed.
+    pub generation: u64,
+}
+
+/// Durable activation receipt returned after Draft-to-Active settlement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryActivationReceipt {
+    /// Activated memory key.
+    pub key: String,
+    /// Stable approval identity persisted in the memory provenance.
+    pub approval_id: String,
+    /// Journal generation of the Draft that was approved.
+    pub draft_generation: u64,
+}
+
+/// Result of applying a caller-owned approval to one exact Draft snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MemoryActivationOutcome {
+    /// The Draft-to-Active transition was committed.
+    Activated(MemoryActivationReceipt),
+    /// The same approval had already reached Active state.
+    AlreadyActivated(MemoryActivationReceipt),
 }
 
 /// A typed, stable target for a later memory rollback.
@@ -298,7 +355,7 @@ pub enum MemoryRollbackOutcome {
 /// Manages the two-tier memory layer system (stage4: cold removed).
 ///
 /// - **Hot layer**: `.echo-agent/MEMORY.md` (YAML frontmatter + markdown body).
-///   Always loaded into context. Max ~2000 tokens.
+///   Only approved entries are loaded into context. Max ~2000 tokens.
 /// - **Warm layer**: Store KV under [`WARM_NAMESPACE`] = `["agent", "memories"]`.
 ///   Available on-demand via search; Archived entries stay here (recallable
 ///   with decay). See module-level docs for why cold is gone.
@@ -514,6 +571,19 @@ impl MemoryLayerManager {
         desired: &serde_json::Value,
     ) -> serde_json::Value {
         let mut result = desired.clone();
+        // Recall counts belong to a reviewed fact, not just its storage key.
+        // Replacing the fact or its origin starts a fresh telemetry lifetime.
+        let same_fact = current
+            .and_then(|value| TypedMemoryValue::from_value(value).ok())
+            .zip(TypedMemoryValue::from_value(desired).ok())
+            .is_some_and(|(before, after)| {
+                before.content == after.content
+                    && before.meta.provenance.trust == after.meta.provenance.trust
+                    && before.meta.provenance.evidence == after.meta.provenance.evidence
+            });
+        if !same_fact {
+            return result;
+        }
         if let (Some(current_meta), Some(target_meta)) = (
             current
                 .and_then(|value| value.get("meta"))
@@ -981,8 +1051,28 @@ impl MemoryLayerManager {
         builder: ChangeEntryBuilder,
         expected: Option<(MemoryLayer, &TypedMemoryEntry)>,
     ) -> Result<()> {
+        self.transition_at_generation(key, warm_after, hot_after, builder, expected, None)
+            .await
+    }
+
+    async fn transition_at_generation(
+        &self,
+        key: &str,
+        warm_after: Option<serde_json::Value>,
+        hot_after: Option<HotValue>,
+        builder: ChangeEntryBuilder,
+        expected: Option<(MemoryLayer, &TypedMemoryEntry)>,
+        expected_generation: Option<u64>,
+    ) -> Result<()> {
         let _serial = self.operation_lock.lock().await;
         self.reconcile_pending_locked().await?;
+        if let Some(generation) = expected_generation
+            && self.latest_key_generation(key)? != Some(generation)
+        {
+            return Err(stale_merge_plan_error(
+                "memory journal generation changed; refresh the activation proposal",
+            ));
+        }
         let hot = self.lock_hot_file().await.map_err(ReactError::from)?;
         let hot_before = Self::hot_value(&hot.file, key);
         let warm_before = self
@@ -1025,6 +1115,24 @@ impl MemoryLayerManager {
         let id = uuid::Uuid::new_v4().to_string();
         let mut audit = builder.build_with(id.clone(), chrono::Utc::now());
         if audit.trigger == "write_memory" {
+            if let Some(candidate) = warm_after
+                .as_ref()
+                .and_then(|value| TypedMemoryValue::from_value(value).ok())
+            {
+                let same_approved_warm = warm_before
+                    .as_ref()
+                    .and_then(|value| TypedMemoryValue::from_value(value).ok())
+                    .is_some_and(|current| {
+                        current.content == candidate.content && current.meta.is_recallable()
+                    });
+                let same_approved_hot = hot_before.as_ref().is_some_and(|current| {
+                    current.content == candidate.content
+                        && current.meta.to_memory_meta().is_recallable()
+                });
+                if same_approved_warm || same_approved_hot {
+                    return Ok(());
+                }
+            }
             audit.change_type = if warm_before.is_some() || hot_before.is_some() {
                 ChangeType::Update
             } else {
@@ -1051,6 +1159,16 @@ impl MemoryLayerManager {
         .await
     }
 
+    fn latest_key_generation(&self, key: &str) -> Result<Option<u64>> {
+        Ok(self
+            .operation_journal()?
+            .history_with_generations()?
+            .into_iter()
+            .filter(|item| item.batch.operations.iter().any(|op| op.key == key))
+            .map(|item| item.generation)
+            .max())
+    }
+
     // ── Reading ─────────────────────────────────────────────────────
 
     /// Read the hot layer content (MEMORY.md body, frontmatter stripped).
@@ -1058,7 +1176,23 @@ impl MemoryLayerManager {
     /// Returns an error while an operation awaits reconciliation.
     pub fn read_hot_content(&self) -> Result<String> {
         let _serial = self.clean_read_guard()?;
-        Ok(self.parse_memory_file().body)
+        let file = self.parse_memory_file();
+        let mut body = String::new();
+        for meta in &file.entries {
+            if !meta.to_memory_meta().is_recallable() {
+                continue;
+            }
+            let content = extract_hot_value_content(&file.body, meta);
+            let rendered = if meta.content_json {
+                serde_json::to_string(&content).map_err(|error| {
+                    ReactError::Other(format!("failed to encode hot memory content: {error}"))
+                })?
+            } else {
+                content
+            };
+            body.push_str(&format!("- **[{}]** {}\n", meta.key, rendered));
+        }
+        Ok(body)
     }
 
     /// Read the hot layer metadata (MEMORY.md YAML frontmatter entries).
@@ -1122,6 +1256,204 @@ impl MemoryLayerManager {
         let _serial = self.operation_lock.lock().await;
         self.reconcile_pending_locked().await?;
         self.typed_store.list_typed(WARM_NAMESPACE, filter).await
+    }
+
+    /// Recall warm memory only after the canonical mutation journal settles.
+    pub async fn recall_warm(&self, query: &str, limit: usize) -> Result<Vec<StoreItem>> {
+        let _serial = self.operation_lock.lock().await;
+        self.reconcile_pending_locked().await?;
+        crate::evolution::recall::MemoryRecaller::new(self.typed_store.inner().clone())
+            .recall(query, limit)
+            .await
+    }
+
+    pub(crate) fn store(&self) -> &Arc<dyn Store> {
+        self.typed_store.inner()
+    }
+
+    /// Read one Draft as an exact activation proposal.
+    pub async fn preview_activation(&self, key: &str) -> Result<Option<MemoryActivationProposal>> {
+        let _serial = self.operation_lock.lock().await;
+        self.reconcile_pending_locked().await?;
+        if Self::hot_value(&self.parse_memory_file(), key).is_some() {
+            return Ok(None);
+        }
+        let Some(entry) = self.typed_store.get_typed(WARM_NAMESPACE, key).await? else {
+            return Ok(None);
+        };
+        if entry.meta.status != MemoryStatus::Draft
+            || !entry.meta.provenance.is_well_formed()
+            || !entry.meta.has_required_evidence()
+            || !evidence_is_safe(&entry.meta.provenance)
+            || entry.meta.provenance.approval.is_some()
+        {
+            return Ok(None);
+        }
+        let Some(generation) = self.latest_key_generation(key)? else {
+            return Ok(None);
+        };
+        Ok(Some(MemoryActivationProposal {
+            key: entry.key,
+            content: entry.content,
+            meta: entry.meta,
+            generation,
+        }))
+    }
+
+    fn activation_still_current(
+        &self,
+        proposal: &MemoryActivationProposal,
+        approval: &MemoryApproval,
+        current: &TypedMemoryEntry,
+        layer: MemoryLayer,
+    ) -> Result<bool> {
+        if current.meta.status != MemoryStatus::Active || current.content != proposal.content {
+            return Ok(false);
+        }
+        let mut expected_meta = proposal.meta.clone();
+        expected_meta.status = MemoryStatus::Active;
+        expected_meta.provenance.approval = Some(approval.clone());
+        expected_meta.recall_count = current.meta.recall_count;
+        expected_meta.last_recalled_at = current.meta.last_recalled_at;
+        if current.meta != expected_meta {
+            return Ok(false);
+        }
+
+        let history = self.operation_journal()?.history_with_generations()?;
+        let key_history = history
+            .iter()
+            .filter_map(|item| {
+                item.batch
+                    .operations
+                    .iter()
+                    .find(|operation| operation.key == proposal.key)
+                    .map(|operation| (item.generation, operation))
+            })
+            .collect::<Vec<_>>();
+        let Some(draft_position) = key_history
+            .iter()
+            .position(|(generation, _)| *generation == proposal.generation)
+        else {
+            return Ok(false);
+        };
+        let Some((_, activation)) = key_history.get(draft_position.saturating_add(1)) else {
+            return Ok(false);
+        };
+        let reviewed = Self::typed_value(&proposal.content, proposal.meta.clone())?;
+        let activated = Self::typed_value(&proposal.content, expected_meta)?;
+        if activation.audit.trigger != "activate_draft"
+            || !Self::warm_matches(activation.warm_before.as_ref(), Some(&reviewed))
+            || !Self::warm_matches(activation.warm_after.as_ref(), Some(&activated))
+        {
+            return Ok(false);
+        }
+        let remaining = key_history
+            .get(draft_position.saturating_add(2)..)
+            .unwrap_or(&[]);
+        match layer {
+            MemoryLayer::Warm => Ok(remaining.is_empty()),
+            MemoryLayer::Hot => Ok(remaining.len() == 1
+                && remaining.first().is_some_and(|(_, operation)| {
+                    operation.audit.trigger == "promote"
+                        && Self::warm_matches(
+                            operation.warm_before.as_ref(),
+                            activation.warm_after.as_ref(),
+                        )
+                        && operation.hot_after.as_ref().is_some_and(|hot| {
+                            hot.content == current.content
+                                && hot.meta.to_memory_meta().provenance == current.meta.provenance
+                        })
+                })),
+            MemoryLayer::Cold => Ok(false),
+        }
+    }
+
+    /// Activate the exact Draft snapshot approved by an external caller.
+    ///
+    /// The existing operation journal owns prepare, projection, audit,
+    /// settlement, restart reconciliation, and stale fencing. Retrying the
+    /// same approval after an uncertain response returns AlreadyActivated.
+    pub async fn activate_draft(
+        &self,
+        proposal: &MemoryActivationProposal,
+        approval: MemoryApproval,
+    ) -> Result<MemoryActivationOutcome> {
+        if !approval.is_valid() {
+            return Err(ReactError::Config(Box::new(ConfigError::ConfigFileError(
+                "memory approval requires non-empty approval and reviewer identities".into(),
+            ))));
+        }
+        let (layer, current, already_activated) = {
+            let _serial = self.operation_lock.lock().await;
+            self.reconcile_pending_locked().await?;
+            let hot = self.parse_memory_file();
+            let state = if let Some(entry) = self.find_in_hot(&hot, &proposal.key) {
+                Some((MemoryLayer::Hot, entry))
+            } else {
+                self.typed_store
+                    .get_typed(WARM_NAMESPACE, &proposal.key)
+                    .await?
+                    .map(|entry| (MemoryLayer::Warm, entry))
+            };
+            let Some((layer, current)) = state else {
+                return Err(stale_merge_plan_error(
+                    "memory Draft disappeared; refresh the activation proposal",
+                ));
+            };
+            let already_activated =
+                self.activation_still_current(proposal, &approval, &current, layer)?;
+            (layer, current, already_activated)
+        };
+        if already_activated {
+            return Ok(MemoryActivationOutcome::AlreadyActivated(
+                MemoryActivationReceipt {
+                    key: current.key,
+                    approval_id: approval.approval_id,
+                    draft_generation: proposal.generation,
+                },
+            ));
+        }
+        if layer != MemoryLayer::Warm
+            || current.meta.status != MemoryStatus::Draft
+            || current.content != proposal.content
+            || current.meta != proposal.meta
+            || !current.meta.provenance.is_well_formed()
+            || !current.meta.has_required_evidence()
+            || !evidence_is_safe(&current.meta.provenance)
+            || current.meta.provenance.approval.is_some()
+        {
+            return Err(stale_merge_plan_error(
+                "memory Draft changed; refresh the activation proposal",
+            ));
+        }
+
+        let mut active = current.meta.clone();
+        active.status = MemoryStatus::Active;
+        active.provenance.approval = Some(approval.clone());
+        self.transition_at_generation(
+            &current.key,
+            Some(Self::typed_value(&current.content, active)?),
+            None,
+            Self::change_builder(
+                &current.key,
+                ChangeType::Promote,
+                Some("draft"),
+                Some("active"),
+                "explicit memory approval",
+                "activate_draft",
+            ),
+            Some((MemoryLayer::Warm, &current)),
+            Some(proposal.generation),
+        )
+        .await?;
+        let _ = self.consider_promotion(&current.key).await?;
+        Ok(MemoryActivationOutcome::Activated(
+            MemoryActivationReceipt {
+                key: current.key,
+                approval_id: approval.approval_id,
+                draft_generation: proposal.generation,
+            },
+        ))
     }
 
     // ── Promotion / Demotion ────────────────────────────────────────
@@ -1217,6 +1549,7 @@ impl MemoryLayerManager {
     pub async fn revive_archived(&self, key: &str) -> Result<bool> {
         if let Some(entry) = self.typed_store.get_typed(WARM_NAMESPACE, key).await?
             && entry.meta.status == MemoryStatus::Archived
+            && entry.meta.provenance.is_approved()
         {
             let mut meta = entry.meta.clone();
             meta.status = MemoryStatus::Active;
@@ -1517,7 +1850,7 @@ impl MemoryLayerManager {
 
         // Check trust level — untrusted content cannot auto-promote to hot
         use super::security::InputTrustLevel;
-        if !InputTrustLevel::from_source(entry.meta.source).can_auto_promote() {
+        if !InputTrustLevel::from_provenance(&entry.meta.provenance).can_auto_promote() {
             return Ok(None);
         }
 
@@ -1575,17 +1908,36 @@ impl MemoryLayerManager {
 
     // ── Write to warm layer ─────────────────────────────────────────
 
-    /// Write a new typed memory to the warm layer and consider promotion.
+    /// Save a typed Draft to the warm layer. Activation is a separate,
+    /// generation-fenced operation.
     ///
     /// Returns `Ok(Some(result))` if the memory was promoted to hot.
     pub async fn write_memory(
         &self,
         key: &str,
         content: &str,
-        meta: MemoryMeta,
+        mut meta: MemoryMeta,
     ) -> Result<Option<LayerChangeResult>> {
+        if (meta.provenance.trust == MemoryTrust::LegacyUnknown
+            && !meta.provenance.evidence.is_empty())
+            || (meta.provenance.trust != MemoryTrust::LegacyUnknown
+                && !meta.provenance.is_well_formed())
+        {
+            return Err(ReactError::Config(Box::new(ConfigError::ConfigFileError(
+                "memory provenance does not match its exact evidence roles".into(),
+            ))));
+        }
+        if !evidence_is_safe(&meta.provenance) {
+            return Err(ReactError::Config(Box::new(ConfigError::ConfigFileError(
+                "memory evidence contains a secret or instruction-like content".into(),
+            ))));
+        }
+        // A write only proposes content. The caller cannot smuggle an Active
+        // status or approval receipt around activate_draft's journal fence.
+        meta.status = MemoryStatus::Draft;
+        meta.provenance.approval = None;
         // Security check: scan secrets, detect injection, rate limit, trust assignment.
-        let trust = InputTrustLevel::from_source(meta.source);
+        let trust = InputTrustLevel::from_provenance(&meta.provenance);
         let verdict = self.security_guard.check_memory_write(content, trust);
 
         if !verdict.allowed {
@@ -1603,6 +1955,7 @@ impl MemoryLayerManager {
         let safe_content = verdict
             .sanitized_content
             .unwrap_or_else(|| content.to_string());
+        meta.risk = stricter_memory_risk(meta.risk, verdict.risk_level);
 
         self.transition(
             key,
@@ -1637,6 +1990,24 @@ impl MemoryLayerManager {
         query: &str,
         limit: usize,
     ) -> Result<Vec<(MemoryLayer, TypedMemoryEntry)>> {
+        self.search_settled(query, limit, false).await
+    }
+
+    /// Return every approved Hot entry plus relevant Warm entries for a turn.
+    pub async fn recall_for_context(
+        &self,
+        query: &str,
+        warm_limit: usize,
+    ) -> Result<Vec<(MemoryLayer, TypedMemoryEntry)>> {
+        self.search_settled(query, warm_limit, true).await
+    }
+
+    async fn search_settled(
+        &self,
+        query: &str,
+        limit: usize,
+        include_all_hot: bool,
+    ) -> Result<Vec<(MemoryLayer, TypedMemoryEntry)>> {
         let _serial = self.operation_lock.lock().await;
         self.reconcile_pending_locked().await?;
         let mut results = Vec::new();
@@ -1645,12 +2016,17 @@ impl MemoryLayerManager {
         let file = self.parse_memory_file();
         let query_lower = query.to_lowercase();
         for meta in &file.entries {
-            if results.len() >= limit {
+            if !include_all_hot && results.len() >= limit {
                 break;
             }
-            // Simple keyword match: check if key or topic contains the query
-            if (meta.key.to_lowercase().contains(&query_lower)
-                || meta.topic.to_lowercase().contains(&query_lower))
+            // Hot context is resident; tool search filters it by key, topic, or body.
+            if meta.to_memory_meta().is_recallable()
+                && (include_all_hot
+                    || meta.key.to_lowercase().contains(&query_lower)
+                    || meta.topic.to_lowercase().contains(&query_lower)
+                    || extract_hot_value_content(&file.body, meta)
+                        .to_lowercase()
+                        .contains(&query_lower))
                 && let Some(entry) = self.hot_meta_to_entry(meta, &file.body)
             {
                 results.push((MemoryLayer::Hot, entry));
@@ -1659,15 +2035,17 @@ impl MemoryLayerManager {
 
         // (stage4 D1) Warm layer via the unified composite-score recall entry —
         // same ranking / Superseded filter / recall_count as the auto path.
-        let remaining = limit.saturating_sub(results.len());
+        let remaining = if include_all_hot {
+            limit
+        } else {
+            limit.saturating_sub(results.len())
+        };
         if remaining > 0 {
             let reca =
                 crate::evolution::recall::MemoryRecaller::new(self.typed_store.inner().clone());
-            if let Ok(warm_items) = reca.recall(query, remaining).await {
-                for item in warm_items {
-                    let entry = TypedMemoryEntry::from_store_item(item);
-                    results.push((MemoryLayer::Warm, entry));
-                }
+            for item in reca.recall(query, remaining).await? {
+                let entry = TypedMemoryEntry::from_store_item(item);
+                results.push((MemoryLayer::Warm, entry));
             }
         }
 
@@ -1919,6 +2297,7 @@ impl MemoryLayerManager {
             stability: entry.meta.stability,
             recall_weight: entry.meta.recall_weight,
             source: entry.meta.source,
+            provenance: entry.meta.provenance.clone(),
             topic: entry.meta.topic.clone(),
             risk: entry.meta.risk,
             revision_count: entry.meta.revision_count,
@@ -2105,20 +2484,16 @@ impl MemorySourceExt for MemorySource {
 /// Extension for InputTrustLevel to derive from MemorySource.
 mod security_ext {
     use super::super::security::InputTrustLevel;
-    use echo_core::memory::types::MemorySource;
+    use echo_core::memory::types::{MemoryProvenance, MemoryTrust};
 
     impl InputTrustLevel {
         /// Derive the trust level from the memory source.
-        pub fn from_source(source: MemorySource) -> Self {
-            match source {
-                MemorySource::ExplicitSave | MemorySource::UserCorrection => {
-                    InputTrustLevel::Trusted
-                }
-                MemorySource::AutoExtracted | MemorySource::L3Promotion => {
-                    InputTrustLevel::Assistant
-                }
-                MemorySource::ErrorResolution | MemorySource::RepeatedWorkflow => {
-                    InputTrustLevel::Assistant
+        pub fn from_provenance(provenance: &MemoryProvenance) -> Self {
+            match provenance.trust {
+                MemoryTrust::User => InputTrustLevel::Trusted,
+                MemoryTrust::Assistant => InputTrustLevel::Assistant,
+                MemoryTrust::Tool | MemoryTrust::Mixed | MemoryTrust::LegacyUnknown => {
+                    InputTrustLevel::Untrusted
                 }
             }
         }
@@ -2133,6 +2508,7 @@ mod tests {
     use echo_state::memory::store::{FileStore, InMemoryStore};
     use std::sync::Mutex as StdMutex;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use tokio::sync::Notify;
 
     /// A no-op ChangeLog for testing.
     struct NullChangeLog;
@@ -2204,6 +2580,106 @@ mod tests {
     struct FailSecondChangeLog {
         inner: JsonlChangeLog,
         calls: AtomicUsize,
+    }
+
+    struct BlockingStore {
+        inner: InMemoryStore,
+        block_next_put: AtomicBool,
+        put_started: Notify,
+        release_put: Notify,
+    }
+
+    impl BlockingStore {
+        fn new() -> Self {
+            Self {
+                inner: InMemoryStore::new(),
+                block_next_put: AtomicBool::new(false),
+                put_started: Notify::new(),
+                release_put: Notify::new(),
+            }
+        }
+
+        fn block_next_put(&self) {
+            self.block_next_put.store(true, Ordering::SeqCst);
+        }
+    }
+
+    impl Store for BlockingStore {
+        fn put<'a>(
+            &'a self,
+            namespace: &'a [&'a str],
+            key: &'a str,
+            value: serde_json::Value,
+        ) -> futures::future::BoxFuture<'a, echo_core::error::Result<()>> {
+            Box::pin(async move {
+                if self.block_next_put.swap(false, Ordering::SeqCst) {
+                    self.put_started.notify_one();
+                    self.release_put.notified().await;
+                }
+                self.inner.put(namespace, key, value).await
+            })
+        }
+
+        fn compare_and_put<'a>(
+            &'a self,
+            namespace: &'a [&'a str],
+            key: &'a str,
+            expected: Option<serde_json::Value>,
+            value: serde_json::Value,
+        ) -> futures::future::BoxFuture<
+            'a,
+            echo_core::error::Result<echo_core::memory::store::StoreCompareAndPutOutcome>,
+        > {
+            self.inner.compare_and_put(namespace, key, expected, value)
+        }
+
+        fn get<'a>(
+            &'a self,
+            namespace: &'a [&'a str],
+            key: &'a str,
+        ) -> futures::future::BoxFuture<
+            'a,
+            echo_core::error::Result<Option<echo_core::memory::store::StoreItem>>,
+        > {
+            self.inner.get(namespace, key)
+        }
+
+        fn search<'a>(
+            &'a self,
+            namespace: &'a [&'a str],
+            query: &'a str,
+            limit: usize,
+        ) -> futures::future::BoxFuture<
+            'a,
+            echo_core::error::Result<Vec<echo_core::memory::store::StoreItem>>,
+        > {
+            self.inner.search(namespace, query, limit)
+        }
+
+        fn delete<'a>(
+            &'a self,
+            namespace: &'a [&'a str],
+            key: &'a str,
+        ) -> futures::future::BoxFuture<'a, echo_core::error::Result<bool>> {
+            self.inner.delete(namespace, key)
+        }
+
+        fn list_namespaces<'a>(
+            &'a self,
+            prefix: Option<&'a [&'a str]>,
+        ) -> futures::future::BoxFuture<'a, echo_core::error::Result<Vec<Vec<String>>>> {
+            self.inner.list_namespaces(prefix)
+        }
+
+        fn list<'a>(
+            &'a self,
+            namespace: &'a [&'a str],
+        ) -> futures::future::BoxFuture<
+            'a,
+            echo_core::error::Result<Vec<echo_core::memory::store::StoreItem>>,
+        > {
+            self.inner.list(namespace)
+        }
     }
 
     impl ChangeLog for FailSecondChangeLog {
@@ -2295,6 +2771,563 @@ mod tests {
         let store = Arc::new(InMemoryStore::new());
         let change_log = Box::new(NullChangeLog);
         MemoryLayerManager::new(dir_path, store, change_log)
+    }
+
+    fn user_draft_meta(content: &str) -> MemoryMeta {
+        MemoryMeta::new(
+            MemoryType::ProjectFact,
+            MemorySource::AutoExtracted,
+            "project",
+        )
+        .with_confidence(0.9)
+        .with_status(MemoryStatus::Draft)
+        .with_provenance(MemoryProvenance::draft(
+            MemoryTrust::User,
+            vec![echo_core::memory::MemoryEvidence::new(
+                echo_core::memory::MemoryEvidenceRole::User,
+                content,
+            )],
+        ))
+    }
+
+    fn approved_test_meta(meta: MemoryMeta, content: &str) -> MemoryMeta {
+        let mut provenance = MemoryProvenance::draft(
+            MemoryTrust::User,
+            vec![echo_core::memory::MemoryEvidence::new(
+                echo_core::memory::MemoryEvidenceRole::User,
+                content,
+            )],
+        );
+        provenance.approval = Some(approval("approved-test-memory"));
+        meta.with_provenance(provenance)
+    }
+
+    async fn write_approved_memory(
+        manager: &MemoryLayerManager,
+        key: &str,
+        content: &str,
+        meta: MemoryMeta,
+    ) -> Result<()> {
+        let draft = meta.with_provenance(MemoryProvenance::draft(
+            MemoryTrust::User,
+            vec![echo_core::memory::MemoryEvidence::new(
+                echo_core::memory::MemoryEvidenceRole::User,
+                content,
+            )],
+        ));
+        manager.write_memory(key, content, draft).await?;
+        let proposal = manager
+            .preview_activation(key)
+            .await?
+            .ok_or_else(|| merge_plan_error(format!("missing Draft for {key}")))?;
+        manager
+            .activate_draft(&proposal, approval(&format!("approval-{key}")))
+            .await?;
+        Ok(())
+    }
+
+    fn approval(id: &str) -> MemoryApproval {
+        MemoryApproval::new(id, "framework-test-reviewer", 1_750_000_000)
+    }
+
+    #[tokio::test]
+    async fn assistant_claimed_user_preference_cannot_activate() -> Result<()> {
+        let manager = make_manager();
+        let content = "User prefers Rust";
+        let meta = MemoryMeta::new(
+            MemoryType::UserPreference,
+            MemorySource::AutoExtracted,
+            "style",
+        )
+        .with_provenance(MemoryProvenance::draft(
+            MemoryTrust::Assistant,
+            vec![echo_core::memory::MemoryEvidence::new(
+                echo_core::memory::MemoryEvidenceRole::Assistant,
+                content,
+            )],
+        ));
+        manager.write_memory("claimed-pref", content, meta).await?;
+        assert!(manager.preview_activation("claimed-pref").await?.is_none());
+        let (_, entry) = manager
+            .locate("claimed-pref")
+            .await?
+            .ok_or_else(|| merge_plan_error("Draft disappeared"))?;
+        let generation = manager
+            .latest_key_generation("claimed-pref")?
+            .ok_or_else(|| merge_plan_error("Draft generation missing"))?;
+        let proposal = MemoryActivationProposal {
+            key: entry.key,
+            content: entry.content,
+            meta: entry.meta,
+            generation,
+        };
+        assert!(
+            manager
+                .activate_draft(&proposal, approval("invalid-pref"))
+                .await
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn draft_activation_is_exact_recallable_and_idempotent() -> Result<()> {
+        let root = tempfile::tempdir().map_err(ReactError::from)?;
+        let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+        let manager = MemoryLayerManager::new(
+            root.path().to_path_buf(),
+            store.clone(),
+            Box::new(NullChangeLog),
+        );
+        let content = "The project uses Rust for durable services";
+        manager
+            .write_memory("activation", content, user_draft_meta(content))
+            .await?;
+        assert!(
+            crate::evolution::MemoryRecaller::new(store.clone())
+                .recall("durable services", 5)
+                .await?
+                .is_empty()
+        );
+
+        let proposal = manager
+            .preview_activation("activation")
+            .await?
+            .ok_or_else(|| merge_plan_error("activation proposal missing"))?;
+        let receipt = approval("approval-1");
+        assert!(matches!(
+            manager.activate_draft(&proposal, receipt.clone()).await?,
+            MemoryActivationOutcome::Activated(_)
+        ));
+        assert_eq!(
+            crate::evolution::MemoryRecaller::new(store)
+                .recall("durable services", 5)
+                .await?
+                .len(),
+            1
+        );
+        assert!(matches!(
+            manager.activate_draft(&proposal, receipt).await?,
+            MemoryActivationOutcome::AlreadyActivated(_)
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stale_activation_proposal_cannot_overwrite_newer_draft() -> Result<()> {
+        let manager = make_manager();
+        let old = "The project uses Rust";
+        manager
+            .write_memory("stale-activation", old, user_draft_meta(old))
+            .await?;
+        let proposal = manager
+            .preview_activation("stale-activation")
+            .await?
+            .ok_or_else(|| merge_plan_error("activation proposal missing"))?;
+
+        let newer = "The project uses Rust and Tokio";
+        manager
+            .write_memory("stale-activation", newer, user_draft_meta(newer))
+            .await?;
+        let error = manager
+            .activate_draft(&proposal, approval("stale-approval"))
+            .await
+            .err()
+            .ok_or_else(|| merge_plan_error("stale activation unexpectedly succeeded"))?;
+        assert!(is_stale_memory_proposal_error(&error));
+        let (_, current) = manager
+            .locate("stale-activation")
+            .await?
+            .ok_or_else(|| merge_plan_error("newer Draft missing"))?;
+        assert_eq!(current.content, newer);
+        assert_eq!(current.meta.status, MemoryStatus::Draft);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn activation_fences_aba_even_when_draft_bytes_match_again() -> Result<()> {
+        let manager = make_manager();
+        let old = "The project uses Rust";
+        let other = "The project uses Go";
+        manager
+            .write_memory("aba-activation", old, user_draft_meta(old))
+            .await?;
+        let proposal = manager
+            .preview_activation("aba-activation")
+            .await?
+            .ok_or_else(|| merge_plan_error("activation proposal missing"))?;
+        manager
+            .write_memory("aba-activation", other, user_draft_meta(other))
+            .await?;
+        manager
+            .write_memory("aba-activation", old, user_draft_meta(old))
+            .await?;
+        let error = manager
+            .activate_draft(&proposal, approval("aba-approval"))
+            .await
+            .err()
+            .ok_or_else(|| merge_plan_error("ABA activation unexpectedly succeeded"))?;
+        assert!(is_stale_memory_proposal_error(&error));
+        let refreshed = manager
+            .preview_activation("aba-activation")
+            .await?
+            .ok_or_else(|| merge_plan_error("refreshed proposal missing"))?;
+        assert!(refreshed.generation > proposal.generation);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn direct_write_cannot_activate_or_replace_identical_approved_memory() -> Result<()> {
+        let manager = make_manager();
+        let content = "Use Rust for durable services";
+        let mut forged = user_draft_meta(content);
+        forged.status = MemoryStatus::Active;
+        forged.provenance.approval = Some(approval("forged"));
+        manager.write_memory("writer", content, forged).await?;
+        let (_, draft) = manager
+            .locate("writer")
+            .await?
+            .ok_or_else(|| merge_plan_error("Draft missing"))?;
+        assert_eq!(draft.meta.status, MemoryStatus::Draft);
+        assert!(draft.meta.provenance.approval.is_none());
+
+        let proposal = manager
+            .preview_activation("writer")
+            .await?
+            .ok_or_else(|| merge_plan_error("activation proposal missing"))?;
+        manager
+            .activate_draft(&proposal, approval("approved"))
+            .await?;
+        manager
+            .write_memory("writer", content, user_draft_meta(content))
+            .await?;
+        let (_, active) = manager
+            .locate("writer")
+            .await?
+            .ok_or_else(|| merge_plan_error("approved memory missing"))?;
+        assert_eq!(active.meta.status, MemoryStatus::Active);
+        assert_eq!(
+            active
+                .meta
+                .provenance
+                .approval
+                .as_ref()
+                .map(|item| item.approval_id.as_str()),
+            Some("approved")
+        );
+        assert!(matches!(
+            manager
+                .activate_draft(&proposal, approval("approved"))
+                .await?,
+            MemoryActivationOutcome::AlreadyActivated(_)
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn provenance_evidence_with_a_secret_is_rejected_before_persistence() -> Result<()> {
+        let manager = make_manager();
+        let mut meta = user_draft_meta("ordinary fact");
+        meta.provenance.evidence = vec![echo_core::memory::MemoryEvidence::new(
+            echo_core::memory::MemoryEvidenceRole::User,
+            format!("ghp_{}", "A".repeat(36)),
+        )];
+        assert!(
+            manager
+                .write_memory("secret-evidence", "ordinary fact", meta)
+                .await
+                .is_err()
+        );
+        assert!(manager.locate("secret-evidence").await?.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn replacing_an_approved_fact_starts_a_new_recall_lifetime() -> Result<()> {
+        let manager = make_manager();
+        let old = "Use Rust for the old service";
+        let new = "Use Go for the new service";
+        write_approved_memory(&manager, "replaced", old, user_draft_meta(old)).await?;
+        let (_, current) = manager
+            .locate("replaced")
+            .await?
+            .ok_or_else(|| merge_plan_error("approved memory missing"))?;
+        let mut counted = current.meta;
+        counted.recall_count = 7;
+        counted.last_recalled_at = Some(1_750_000_000);
+        manager
+            .typed_store
+            .update_meta(WARM_NAMESPACE, "replaced", counted)
+            .await?;
+
+        manager
+            .write_memory("replaced", new, user_draft_meta(new))
+            .await?;
+        let (_, draft) = manager
+            .locate("replaced")
+            .await?
+            .ok_or_else(|| merge_plan_error("new Draft missing"))?;
+        assert_eq!(draft.meta.status, MemoryStatus::Draft);
+        assert_eq!(draft.meta.recall_count, 0);
+        assert_eq!(draft.meta.last_recalled_at, None);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn failed_activation_reconciles_after_file_store_restart() -> Result<()> {
+        let dir = tempfile::tempdir().map_err(ReactError::from)?;
+        let root = dir.path().join(".echo-agent");
+        let store_path = dir.path().join("store.json");
+        let audit_path = root.join("evolution/change-log.jsonl");
+        let content = "The durable service uses a single memory authority";
+        let proposal = {
+            let manager = MemoryLayerManager::new(
+                root.clone(),
+                Arc::new(FileStore::new(&store_path)?),
+                Box::new(JsonlChangeLog::new(audit_path.clone())?),
+            );
+            manager
+                .write_memory("restart-activation", content, user_draft_meta(content))
+                .await?;
+            manager
+                .preview_activation("restart-activation")
+                .await?
+                .ok_or_else(|| merge_plan_error("activation proposal missing"))?
+        };
+
+        {
+            let manager = MemoryLayerManager::new(
+                root.clone(),
+                Arc::new(FileStore::new(&store_path)?),
+                Box::new(FailOnceChangeLog {
+                    inner: JsonlChangeLog::new(audit_path.clone())?,
+                    fail_next: AtomicBool::new(true),
+                }),
+            );
+            assert!(
+                manager
+                    .activate_draft(&proposal, approval("restart-approval"))
+                    .await
+                    .is_err()
+            );
+        }
+
+        let reopened = MemoryLayerManager::new(
+            root,
+            Arc::new(FileStore::new(store_path)?),
+            Box::new(JsonlChangeLog::new(audit_path)?),
+        );
+        reopened.reconcile_pending().await?;
+        let (_, current) = reopened
+            .locate("restart-activation")
+            .await?
+            .ok_or_else(|| merge_plan_error("reconciled activation missing"))?;
+        assert_eq!(current.meta.status, MemoryStatus::Active);
+        assert_eq!(
+            current
+                .meta
+                .provenance
+                .approval
+                .as_ref()
+                .map(|receipt| receipt.approval_id.as_str()),
+            Some("restart-approval")
+        );
+        assert!(matches!(
+            reopened
+                .activate_draft(&proposal, approval("restart-approval"))
+                .await?,
+            MemoryActivationOutcome::AlreadyActivated(_)
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn approved_hot_file_retains_provenance_after_restart() -> Result<()> {
+        let dir = tempfile::tempdir().map_err(ReactError::from)?;
+        let root = dir.path().join(".echo-agent");
+        let store_path = dir.path().join("store.json");
+        let content = "User prefers Rust for durable services";
+        {
+            let manager = MemoryLayerManager::new(
+                root.clone(),
+                Arc::new(FileStore::new(&store_path)?),
+                Box::new(NullChangeLog),
+            );
+            let meta = MemoryMeta::new(
+                MemoryType::UserPreference,
+                MemorySource::AutoExtracted,
+                "preferences",
+            )
+            .with_confidence(0.95)
+            .with_stability(0.90);
+            write_approved_memory(&manager, "hot-provenance", content, meta).await?;
+            assert!(manager.read_hot_content()?.contains(content));
+        }
+
+        let reopened = MemoryLayerManager::new(
+            root,
+            Arc::new(FileStore::new(store_path)?),
+            Box::new(NullChangeLog),
+        );
+        reopened.reconcile_pending().await?;
+        let hot = reopened.list_hot()?;
+        let record = hot
+            .iter()
+            .find(|entry| entry.key == "hot-provenance")
+            .ok_or_else(|| merge_plan_error("approved hot record missing after restart"))?;
+        assert_eq!(record.content, content);
+        assert_eq!(record.meta.status, MemoryStatus::Active);
+        assert_eq!(record.meta.provenance.trust, MemoryTrust::User);
+        assert_eq!(
+            record
+                .meta
+                .provenance
+                .evidence
+                .first()
+                .map(|item| item.quote.as_str()),
+            Some(content)
+        );
+        assert!(record.meta.provenance.is_approved());
+        assert!(reopened.read_hot_content()?.contains(content));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn historical_hot_record_is_inspectable_but_not_prompt_visible() -> Result<()> {
+        let dir = tempfile::tempdir().map_err(ReactError::from)?;
+        let manager = MemoryLayerManager::new(
+            dir.path().to_path_buf(),
+            Arc::new(InMemoryStore::new()),
+            Box::new(NullChangeLog),
+        );
+        let legacy = TypedMemoryEntry {
+            key: "legacy-hot".to_string(),
+            content: "Old unverified memory".to_string(),
+            meta: MemoryMeta::new(
+                MemoryType::ProjectFact,
+                MemorySource::AutoExtracted,
+                "legacy",
+            ),
+            raw: echo_core::memory::store::StoreItem::new(
+                vec!["agent".to_string(), "memories".to_string()],
+                "legacy-hot".to_string(),
+                serde_json::Value::Null,
+            ),
+        };
+        manager
+            .add_to_hot(&legacy)
+            .await
+            .map_err(ReactError::from)?;
+        assert_eq!(manager.list_hot()?.len(), 1);
+        assert!(manager.read_hot_content()?.is_empty());
+        assert!(manager.search_layered("legacy", 5).await?.is_empty());
+        Ok(())
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn sqlite_draft_activation_survives_store_restart() -> Result<()> {
+        let dir = tempfile::tempdir().map_err(ReactError::from)?;
+        let root = dir.path().join(".echo-agent");
+        let sqlite_path = dir.path().join("memory.sqlite");
+        let content = "User prefers Rust for persistent services";
+        let proposal = {
+            let manager = MemoryLayerManager::new(
+                root.clone(),
+                Arc::new(echo_state::memory::SqliteStore::new(&sqlite_path)?),
+                Box::new(NullChangeLog),
+            );
+            manager
+                .write_memory("sqlite-draft", content, user_draft_meta(content))
+                .await?;
+            manager
+                .preview_activation("sqlite-draft")
+                .await?
+                .ok_or_else(|| merge_plan_error("SQLite Draft proposal missing"))?
+        };
+        {
+            let reopened = MemoryLayerManager::new(
+                root.clone(),
+                Arc::new(echo_state::memory::SqliteStore::new(&sqlite_path)?),
+                Box::new(NullChangeLog),
+            );
+            reopened.reconcile_pending().await?;
+            assert!(matches!(
+                reopened
+                    .activate_draft(&proposal, approval("sqlite-approval"))
+                    .await?,
+                MemoryActivationOutcome::Activated(_)
+            ));
+        }
+        let reopened = MemoryLayerManager::new(
+            root,
+            Arc::new(echo_state::memory::SqliteStore::new(sqlite_path)?),
+            Box::new(NullChangeLog),
+        );
+        reopened.reconcile_pending().await?;
+        let (_, current) = reopened
+            .locate("sqlite-draft")
+            .await?
+            .ok_or_else(|| merge_plan_error("activated SQLite memory missing"))?;
+        assert!(current.meta.is_recallable());
+        assert!(matches!(
+            reopened
+                .activate_draft(&proposal, approval("sqlite-approval"))
+                .await?,
+            MemoryActivationOutcome::AlreadyActivated(_)
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancelled_activation_reconciles_without_losing_approval() -> Result<()> {
+        let root = tempfile::tempdir().map_err(ReactError::from)?;
+        let store = Arc::new(BlockingStore::new());
+        let manager = Arc::new(MemoryLayerManager::new(
+            root.path().to_path_buf(),
+            store.clone(),
+            Box::new(NullChangeLog),
+        ));
+        let content = "The approved memory survives caller cancellation";
+        manager
+            .write_memory("cancel-activation", content, user_draft_meta(content))
+            .await?;
+        let proposal = manager
+            .preview_activation("cancel-activation")
+            .await?
+            .ok_or_else(|| merge_plan_error("activation proposal missing"))?;
+        store.block_next_put();
+
+        let task = tokio::spawn({
+            let manager = manager.clone();
+            let proposal = proposal.clone();
+            async move {
+                manager
+                    .activate_draft(&proposal, approval("cancel-approval"))
+                    .await
+            }
+        });
+        store.put_started.notified().await;
+        task.abort();
+        let _ = task.await;
+        store.release_put.notify_one();
+
+        manager.reconcile_pending().await?;
+        let (_, current) = manager
+            .locate("cancel-activation")
+            .await?
+            .ok_or_else(|| merge_plan_error("reconciled activation missing"))?;
+        assert_eq!(current.meta.status, MemoryStatus::Active);
+        assert_eq!(
+            current
+                .meta
+                .provenance
+                .approval
+                .as_ref()
+                .map(|receipt| receipt.approval_id.as_str()),
+            Some("cancel-approval")
+        );
+        Ok(())
     }
 
     fn latest_memory_audit(path: &std::path::Path, key: &str) -> Result<ChangeEntry> {
@@ -2401,6 +3434,7 @@ entries:
                 stability: 0.85,
                 recall_weight: 0.8,
                 source: MemorySource::ExplicitSave,
+                provenance: MemoryProvenance::default(),
                 topic: "style".to_string(),
                 risk: MemoryRisk::Low,
                 revision_count: 2,
@@ -2432,10 +3466,13 @@ entries:
         let entry = TypedMemoryEntry {
             key: "test_key".to_string(),
             content: "User prefers concise output.".to_string(),
-            meta: MemoryMeta::new(
-                MemoryType::UserPreference,
-                MemorySource::ExplicitSave,
-                "style",
+            meta: approved_test_meta(
+                MemoryMeta::new(
+                    MemoryType::UserPreference,
+                    MemorySource::ExplicitSave,
+                    "style",
+                ),
+                "User prefers concise output.",
             ),
             raw: echo_core::memory::store::StoreItem::new(
                 vec!["agent".to_string(), "typed_memories".to_string()],
@@ -3110,6 +4147,7 @@ entries:
             stability: 0.90,
             recall_weight: 0.8,
             source: MemorySource::ExplicitSave,
+            provenance: MemoryProvenance::default(),
             topic: "style".to_string(),
             risk: MemoryRisk::Low,
             revision_count: 0,
@@ -3126,6 +4164,7 @@ entries:
             stability: 0.30,
             recall_weight: 0.4,
             source: MemorySource::AutoExtracted,
+            provenance: MemoryProvenance::default(),
             topic: "build".to_string(),
             risk: MemoryRisk::Low,
             revision_count: 0,
@@ -3176,18 +4215,31 @@ entries:
             "style",
         )
         .with_confidence(0.95)
-        .with_stability(0.90);
+        .with_stability(0.90)
+        .with_provenance(MemoryProvenance::draft(
+            MemoryTrust::User,
+            vec![echo_core::memory::MemoryEvidence::new(
+                echo_core::memory::MemoryEvidenceRole::User,
+                "User prefers concise output",
+            )],
+        ));
 
         let result = manager
-            .write_memory("test_pref", "User prefers concise output", meta)
-            .await
-            .expect("write_memory");
-
-        // ExplicitSave with high confidence/stability → should auto-promote
-        assert!(result.is_some());
-        let change = result.unwrap();
-        assert_eq!(change.from_layer, MemoryLayer::Warm);
-        assert_eq!(change.to_layer, MemoryLayer::Hot);
+            .write_memory("test_pref", "User prefers concise output", meta.clone())
+            .await?;
+        assert!(result.is_none(), "new memory stays Draft until reviewed");
+        let proposal = manager
+            .preview_activation("test_pref")
+            .await?
+            .ok_or_else(|| merge_plan_error("Draft proposal missing"))?;
+        manager
+            .activate_draft(&proposal, approval("test-pref-approval"))
+            .await?;
+        let (layer, _) = manager
+            .locate("test_pref")
+            .await?
+            .ok_or_else(|| merge_plan_error("approved memory missing"))?;
+        assert_eq!(layer, MemoryLayer::Hot);
 
         // Verify it's in hot
         let content = manager.read_hot_content()?;
@@ -3317,14 +4369,12 @@ entries:
         )
         .with_confidence(0.95)
         .with_stability(0.90);
-        first
-            .write_memory("shared", "Old fact", eligible.clone())
-            .await?;
+        write_approved_memory(&first, "shared", "Old fact", eligible.clone()).await?;
         let (_, stale) = first
             .locate("shared")
             .await?
             .ok_or_else(|| merge_plan_error("missing initial hot memory"))?;
-        second.write_memory("shared", "New fact", eligible).await?;
+        write_approved_memory(&second, "shared", "New fact", eligible).await?;
 
         assert!(
             first
@@ -3390,7 +4440,7 @@ entries:
             .await?
             .ok_or_else(|| merge_plan_error("newer warm memory disappeared"))?;
         assert_eq!(current.content, "New fact");
-        assert_eq!(current.meta.status, MemoryStatus::Active);
+        assert_eq!(current.meta.status, MemoryStatus::Draft);
         Ok(())
     }
 
@@ -3846,9 +4896,7 @@ entries:
             .ok_or_else(|| merge_plan_error("matrix delete memory was not restored"))?;
         assert_eq!(restored_delete.content, "deleted");
 
-        manager
-            .write_memory("matrix-promote", "promoted", hot_meta.clone())
-            .await?;
+        write_approved_memory(&manager, "matrix-promote", "promoted", hot_meta.clone()).await?;
         let promote = latest_memory_audit(&audit_path, "matrix-promote")?;
         assert_eq!(promote.change_type, ChangeType::Promote);
         manager
@@ -3870,9 +4918,7 @@ entries:
             Some((MemoryLayer::Warm, _))
         ));
 
-        manager
-            .write_memory("matrix-demote", "demoted", hot_meta)
-            .await?;
+        write_approved_memory(&manager, "matrix-demote", "demoted", hot_meta).await?;
         manager.demote("matrix-demote", "matrix demotion").await?;
         let demote = latest_memory_audit(&audit_path, "matrix-demote")?;
         assert_eq!(demote.change_type, ChangeType::Demote);
@@ -3912,7 +4958,7 @@ entries:
             .locate("matrix-meta")
             .await?
             .ok_or_else(|| merge_plan_error("matrix metadata memory disappeared"))?;
-        assert_eq!(restored_meta.meta.status, MemoryStatus::Active);
+        assert_eq!(restored_meta.meta.status, MemoryStatus::Draft);
 
         let multiline = "  first line\nsecond line  \n";
         manager
@@ -4027,13 +5073,16 @@ entries:
         let entry = TypedMemoryEntry {
             key: "demote_test".to_string(),
             content: "Test memory to demote".to_string(),
-            meta: MemoryMeta::new(
-                MemoryType::UserPreference,
-                MemorySource::ExplicitSave,
-                "style",
-            )
-            .with_confidence(0.95)
-            .with_stability(0.90),
+            meta: approved_test_meta(
+                MemoryMeta::new(
+                    MemoryType::UserPreference,
+                    MemorySource::ExplicitSave,
+                    "style",
+                )
+                .with_confidence(0.95)
+                .with_stability(0.90),
+                "Test memory to demote",
+            ),
             raw: echo_core::memory::store::StoreItem::new(
                 vec!["agent".to_string()],
                 "demote_test".to_string(),
@@ -4070,13 +5119,16 @@ entries:
         let hot_entry = TypedMemoryEntry {
             key: "hot_build".to_string(),
             content: "Hot build memory".to_string(),
-            meta: MemoryMeta::new(
-                MemoryType::DebuggingLesson,
-                MemorySource::ExplicitSave,
-                "build",
-            )
-            .with_confidence(0.95)
-            .with_stability(0.90),
+            meta: approved_test_meta(
+                MemoryMeta::new(
+                    MemoryType::DebuggingLesson,
+                    MemorySource::ExplicitSave,
+                    "build",
+                )
+                .with_confidence(0.95)
+                .with_stability(0.90),
+                "Hot build memory",
+            ),
             raw: echo_core::memory::store::StoreItem::new(
                 vec!["agent".to_string()],
                 "hot_build".to_string(),
@@ -4086,10 +5138,13 @@ entries:
         manager.add_to_hot(&hot_entry).await.expect("add to hot");
 
         // Add to warm
-        let warm_meta = MemoryMeta::new(
-            MemoryType::ProjectFact,
-            MemorySource::AutoExtracted,
-            "build",
+        let warm_meta = approved_test_meta(
+            MemoryMeta::new(
+                MemoryType::ProjectFact,
+                MemorySource::AutoExtracted,
+                "build",
+            ),
+            "Warm build memory",
         );
         manager
             .typed_store
@@ -4134,10 +5189,13 @@ entries:
         let mk_entry = |key: &'static str| TypedMemoryEntry {
             key: key.to_string(),
             content: format!("memory {key}"),
-            meta: MemoryMeta::new(
-                MemoryType::UserPreference,
-                MemorySource::ExplicitSave,
-                "topic",
+            meta: approved_test_meta(
+                MemoryMeta::new(
+                    MemoryType::UserPreference,
+                    MemorySource::ExplicitSave,
+                    "topic",
+                ),
+                &format!("memory {key}"),
             ),
             raw: echo_core::memory::store::StoreItem::new(
                 vec!["agent".to_string()],

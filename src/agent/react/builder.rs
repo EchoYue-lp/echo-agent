@@ -639,9 +639,10 @@ impl ReactAgentBuilder {
         self
     }
 
-    /// Inject an external Store and automatically register the four built-in tools: remember / recall / search_memory / forget
+    /// Inject an external Store and register approved-memory `recall` and `search_memory`.
     ///
-    /// This is a shortcut from "having a memory store" to "the Agent can use memory autonomously",
+    /// Install a `MemoryLayerManager` to add journaled `remember` and `forget`.
+    /// This is a shortcut from "having a memory store" to "the Agent can recall approved memory",
     /// equivalent to `.store(store).enable_memory()`, but supports any `Store` implementation
     /// (such as `EmbeddingStore`) without depending on the default `FileStore`.
     ///
@@ -655,7 +656,7 @@ impl ReactAgentBuilder {
     /// let store = Arc::new(InMemoryStore::new());
     /// let agent = ReactAgentBuilder::new()
     ///     .model("qwen3-max")
-    ///     .with_memory_tools(store)
+    ///     .with_memory_tools(store) // approved recall/search; install a layer manager to write
     ///     .build()?;
     /// # Ok(())
     /// # }
@@ -954,9 +955,9 @@ impl ReactAgentBuilder {
             agent.add_tool(tool);
         }
 
-        // Set Store (also registers remember/recall/search_memory/forget tools)
+        // Set Store (registers approved recall/search tools without a layer manager).
         if let Some(store) = self.store {
-            agent.set_memory_store(store);
+            agent.set_memory_store(store)?;
         }
 
         #[cfg(feature = "human-loop")]

@@ -1,106 +1,110 @@
-//! demo31_memory_tools —— Memory Tool 自动注入 ReAct 循环
+//! demo31_memory_tools: reviewed memory tools in a ReAct Agent.
 //!
-//! 演示 `ReactAgentBuilder::with_memory_tools(store)` 如何一行代码
-//! 自动注册 remember / recall / search_memory / forget 四个内置工具，
-//! 将 Store 直接暴露给 LLM，实现 Agent 自主使用记忆。
+//! `with_memory_tools(store)` exposes approved recall. Installing a layer
+//! manager adds journaled remember/forget and explicit Draft activation.
 //!
 //! ```bash
-//! cargo test --all-features --locked contract_demo31_memory_tools -- --nocapture
+//! cargo test -p echo-agent-learning --features eval,improve --test example_contracts contract_demo31_memory_tools --locked
 //! ```
 
+use echo_agent::evolution::MemoryLayerManager;
+use echo_agent::evolution::audit::NullChangeLog;
 use echo_agent::prelude::*;
 use std::sync::Arc;
 
 #[tokio::test]
 async fn contract_demo31_memory_tools() -> echo_agent::error::Result<()> {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter("echo_agent=info")
-        .try_init();
-
-    println!("═══ Memory Tool Auto-Injection Demo ═══\n");
-
-    // ── 1. 使用 with_memory_tools 构建 Agent ──────────────────────────────
     let store = Arc::new(InMemoryStore::new());
-
-    let agent = ReactAgentBuilder::new()
+    let mut agent = ReactAgentBuilder::new()
         .model("qwen3-max")
         .name("memory_agent")
-        .system_prompt("你是一个具有长期记忆能力的助手")
         .with_memory_tools(store.clone())
         .build()?;
 
     let tools = agent.tool_names();
-    println!("[1] with_memory_tools() 自动注册的工具：");
-    for name in &tools {
-        let tag = match name.as_str() {
-            "remember" | "recall" | "search_memory" | "forget" => "memory",
-            "final_answer" => "builtin",
-            _ => "other",
-        };
-        println!("    [{tag:7}] {name}");
-    }
-
-    assert!(tools.contains(&"remember".to_string()));
     assert!(tools.contains(&"recall".to_string()));
     assert!(tools.contains(&"search_memory".to_string()));
-    assert!(tools.contains(&"forget".to_string()));
-    println!("    → 全部 4 个记忆工具 ✓\n");
+    assert!(!tools.contains(&"remember".to_string()));
+    assert!(!tools.contains(&"forget".to_string()));
 
-    // ── 2. 手动写入 Store 模拟已有记忆 ────────────────────────────────────
-    let ns = &["memory_agent", "memories"];
+    let ns = &["agent", "memories"];
     store
         .put(
             ns,
-            "pref_001",
-            serde_json::json!({
-                "content": "用户偏好暗色主题，代码使用 JetBrains Mono 字体",
-                "importance": 8,
-                "tags": ["偏好", "UI"]
-            }),
+            "legacy",
+            serde_json::json!({ "content": "Rust legacy note" }),
         )
         .await?;
-    store
-        .put(
-            ns,
-            "fact_002",
-            serde_json::json!({
-                "content": "用户的项目使用 Rust + Tokio 技术栈",
-                "importance": 9,
-                "tags": ["技术", "项目"]
-            }),
+    let before = agent
+        .tool_manager()
+        .execute_tool(
+            "recall",
+            [("query".into(), serde_json::json!("Rust"))].into(),
         )
         .await?;
+    assert!(!before.output.contains("Rust legacy note"));
 
-    println!("[2] 手动写入 2 条模拟记忆");
+    let dir = tempfile::tempdir()?;
+    let manager = Arc::new(MemoryLayerManager::new(
+        dir.path().to_path_buf(),
+        store,
+        Box::new(NullChangeLog),
+    ));
+    agent.install_memory_layer_manager(manager.clone())?;
+    assert!(agent.tool_names().contains(&"remember".to_string()));
+    assert!(agent.tool_names().contains(&"forget".to_string()));
 
-    // ── 3. 通过 recall 工具搜索记忆 ───────────────────────────────────────
-    let results = store.search(ns, "主题偏好", 5).await?;
-    println!("[3] store.search('主题偏好') 返回 {} 条结果", results.len());
-    for item in &results {
-        println!(
-            "    ID: {} → {}",
-            item.key.chars().take(8).collect::<String>(),
-            item.value
-        );
-    }
+    let content = "The project uses Rust";
+    manager
+        .write_memory(
+            "rust-fact",
+            content,
+            MemoryMeta::new(
+                MemoryType::ProjectFact,
+                MemorySource::ExplicitSave,
+                "project",
+            )
+            .with_provenance(MemoryProvenance::draft(
+                MemoryTrust::User,
+                vec![MemoryEvidence::new(MemoryEvidenceRole::User, content)],
+            )),
+        )
+        .await?;
+    let draft = agent
+        .tool_manager()
+        .execute_tool(
+            "recall",
+            [("query".into(), serde_json::json!("Rust"))].into(),
+        )
+        .await?;
+    assert!(!draft.output.contains(content));
 
-    // ── 4. set_memory_store 也同样注册所有记忆工具 ─────────────────────────
-    let config = AgentConfig::minimal("qwen3-max", "bare_agent");
-    let mut bare_agent = echo_agent::agent::ReactAgent::new(config);
-    assert!(
-        !bare_agent
-            .tool_names()
-            .contains(&"search_memory".to_string())
-    );
+    let proposal = manager
+        .preview_activation("rust-fact")
+        .await?
+        .ok_or_else(|| echo_agent::error::ReactError::Other("Draft proposal missing".into()))?;
+    manager
+        .activate_draft(
+            &proposal,
+            MemoryApproval::new("demo31-review", "example-reviewer", 1),
+        )
+        .await?;
+    let approved = agent
+        .tool_manager()
+        .execute_tool(
+            "recall",
+            [("query".into(), serde_json::json!("Rust"))].into(),
+        )
+        .await?;
+    assert!(approved.output.contains(content));
 
-    bare_agent.set_memory_store(Arc::new(InMemoryStore::new()));
+    let mut bare_agent = ReactAgent::new(AgentConfig::minimal("qwen3-max", "bare_agent"));
+    bare_agent.set_memory_store(Arc::new(InMemoryStore::new()))?;
     assert!(
         bare_agent
             .tool_names()
             .contains(&"search_memory".to_string())
     );
-    println!("\n[4] set_memory_store() 也能注入记忆工具 ✓");
-
-    println!("\n═══ Demo Complete ═══");
+    assert!(!bare_agent.tool_names().contains(&"remember".to_string()));
     Ok(())
 }

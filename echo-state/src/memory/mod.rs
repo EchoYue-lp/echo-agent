@@ -45,7 +45,8 @@ pub use echo_core::memory::conversation::{
 pub use echo_core::memory::embedder::Embedder;
 pub use echo_core::memory::store::{SearchMode, SearchQuery, Store, StoreItem};
 pub use echo_core::memory::types::{
-    MemoryMeta, MemoryRisk, MemorySource, MemoryStatus, MemoryType, TypedMemoryValue,
+    MemoryApproval, MemoryEvidence, MemoryEvidenceRole, MemoryMeta, MemoryProvenance, MemoryRisk,
+    MemorySource, MemoryStatus, MemoryTrust, MemoryType, TypedMemoryValue,
 };
 
 // Re-export concrete implementations from sub-modules
