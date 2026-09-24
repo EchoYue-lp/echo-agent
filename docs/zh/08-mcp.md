@@ -336,9 +336,13 @@ async fn main() -> echo_agent::error::Result<()> {
 `McpClient::close`、`McpManager::disconnect` 和 `McpManager::close_all`
 现在返回 `Result`。close 成功表示 transport 已停止接纳新请求、全部 pending caller
 已释放，并在有界 shutdown 策略内等待完 transport 持有的 I/O task 与 stdio child
-process。`close_all` 会尝试关闭全部 client，再聚合返回 cleanup error，单个失败不会阻止
-后续 client 的清理。旧版 SSE close 同时取消 receive/POST 生命周期并等待 receive task。
+process。`close_all` 也会取消并等待仍在构建或握手的 client，然后尝试关闭全部已连接
+client 并聚合 cleanup error。构建阶段关闭失败会留给下次 `close_all` 重试。旧版 SSE close
+同时取消 receive/POST 生命周期并等待 receive task。
 这些生命周期约束不会给用户选择的 MCP server 增加权限门控。
+直接调用 `McpClient::new` 或 `McpClient::from_transport` 且可能丢弃准备 Future 的调用方，
+应先保留 `preparation.cleanup_scope()`，取消后 await `scope.close()`；关闭失败时可用同一
+scope 重试。`McpManager` 会自动保留该 scope。
 若 MCP client 由 `ReactAgent` 持有，adapter 必须在仍持有 Agent 时 await
 `Agent::close`。同步的 `ReactAgent::drop` 无法等待 MCP 清理，因此不再启动
 detached cleanup task；丢弃尚有可见 server 名称的 Agent 只发出诊断。
