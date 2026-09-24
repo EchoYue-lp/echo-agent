@@ -166,6 +166,10 @@ for entry in recent {
 
 ### 审计条目字段
 
+受保护路径检查由 `PermissionService` 持有。Agent 在接受 `PreToolUse` 或
+`PermissionRequest` 的 Allow 前，对最终工具输入执行同一项检查；Hook 批准不能
+覆盖受保护路径的拒绝。
+
 | 字段 | 说明 |
 |------|------|
 | `tool_name` | 被检查的工具 |

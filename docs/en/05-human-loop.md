@@ -166,6 +166,11 @@ for entry in recent {
 
 ### Audit Entry Fields
 
+`PermissionService` owns the protected-path check. The Agent applies the same
+check to the effective tool input before honoring an Allow from either
+`PreToolUse` or `PermissionRequest`; Hook approval cannot override a protected
+path denial.
+
 | Field | Description |
 |-------|-------------|
 | `tool_name` | Tool that was checked |

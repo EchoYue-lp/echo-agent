@@ -3,19 +3,19 @@ schema_version: 1
 id: finding.readonly-tools-custom-registration-bypass
 kind: finding
 type: implementation_bug
-status: open
+status: resolved
 severity: high
 primary_focus: permission_external
 focus: [state_authority, result_side_effect, contract_evidence]
 boundary_ref: boundary.tool-permission-sandbox
 behavior_refs: [behavior.effect-permission-execution]
 rule_refs: [rule.permission-effect-order]
-evidence_refs: [evidence.effects-extensions]
-audit_refs: [audit.tool-permission-sandbox.permission-external]
+evidence_refs: [evidence.effects-extensions, evidence.readonly-tool-capability-repair, evidence.readonly-tool-capability-verification]
+audit_refs: [audit.tool-permission-sandbox.permission-external, audit.readonly-tool-capability-rereview]
 decision_refs: []
-repair_evidence_refs: []
-verification_evidence_refs: []
-rereview_audit_refs: []
+repair_evidence_refs: [evidence.readonly-tool-capability-repair]
+verification_evidence_refs: [evidence.readonly-tool-capability-verification]
+rereview_audit_refs: [audit.readonly-tool-capability-rereview]
 discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 ---
 
@@ -39,4 +39,8 @@ Embedding consumer 组合 readonly_tools 与 custom mutation tool 时，模型�
 
 ## 处理记录
 
-Permission Audit 确认；可与 plan-mode surface 共享 typed ToolPermission gate，但保持独立构造期测试。
+`cd37e5d3` 以本地 ToolCapabilities 同时约束构造期自定义工具注册、后续工具入口、
+LLM 可见性与执行期硬门禁。只读观察工具保持可用；会写入持久 recall telemetry 的
+memory 工具不被误判为只读。focused 反例与独立复审分别见上述 verification 与
+rereview 引用。当前任务分支完整门禁与 17 项独立 feature 编译已通过；PR/CI 与
+远端 main 交付仍待完成。

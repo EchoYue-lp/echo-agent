@@ -5,23 +5,23 @@ kind: audit
 boundary_ref: boundary.task-subagent-workflow
 lens: failure_concurrency
 freshness: examined
-revision: source:757f499d4d9a40a4c27791933cb3d5e9d3b2dda76a1a28e4561e317d4719be94
+revision: 733d352fc719f922b21bab1cd46206139564367f
 finding_refs: [finding.scheduler-control-fire-race, finding.scheduler-task-id-uniqueness, finding.scheduler-cache-delivery]
 challenges:
   control-admission-linearization:
-    revision: source:757f499d4d9a40a4c27791933cb3d5e9d3b2dda76a1a28e4561e317d4719be94
+    revision: 733d352fc719f922b21bab1cd46206139564367f
     source_refs: [echo-orchestration/src/scheduler/runner.rs]
     evidence_refs: [evidence.scheduler-occurrence-authority-repair, evidence.scheduler-occurrence-authority-verification]
   unique-definition-identity:
-    revision: source:757f499d4d9a40a4c27791933cb3d5e9d3b2dda76a1a28e4561e317d4719be94
+    revision: 733d352fc719f922b21bab1cd46206139564367f
     source_refs: [echo-orchestration/src/scheduler/cron_task.rs, echo-orchestration/src/scheduler/runner.rs]
     evidence_refs: [evidence.scheduler-occurrence-authority-repair, evidence.scheduler-occurrence-authority-verification]
   durable-occurrence-replay:
-    revision: source:757f499d4d9a40a4c27791933cb3d5e9d3b2dda76a1a28e4561e317d4719be94
+    revision: 733d352fc719f922b21bab1cd46206139564367f
     source_refs: [echo-orchestration/src/scheduler/runner.rs, docs/adr/0042-scheduler-occurrence-authority.md]
     evidence_refs: [evidence.scheduler-occurrence-authority-repair, evidence.scheduler-occurrence-authority-verification]
   public-store-cache-bypass:
-    revision: source:757f499d4d9a40a4c27791933cb3d5e9d3b2dda76a1a28e4561e317d4719be94
+    revision: 733d352fc719f922b21bab1cd46206139564367f
     source_refs: [echo-orchestration/src/scheduler/cron_task.rs, echo-orchestration/src/scheduler/runner.rs]
     evidence_refs: [evidence.scheduler-occurrence-authority-repair, evidence.scheduler-occurrence-authority-verification]
 ---
