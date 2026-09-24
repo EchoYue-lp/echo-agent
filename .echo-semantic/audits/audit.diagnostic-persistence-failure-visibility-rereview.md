@@ -5,19 +5,19 @@ kind: audit
 boundary_ref: boundary.observation-persistence-delivery
 lens: data_durability
 freshness: examined
-revision: source:87b717676a7b51e213630677989947777b4bed441acd8c7d655fb6c96dca77ad
+revision: source:d0d70f0819595200d148564ce11cb55de583ba943d7a5554b4c06a0f6dcb8af9
 finding_refs: [finding.diagnostic-persistence-failure-visibility]
 challenges:
   canonical-finalize-failure:
-    revision: source:87b717676a7b51e213630677989947777b4bed441acd8c7d655fb6c96dca77ad
+    revision: source:d0d70f0819595200d148564ce11cb55de583ba943d7a5554b4c06a0f6dcb8af9
     source_refs: [src/trace/mod.rs, src/agent/snapshot.rs, src/agent/react/run/stream_channel.rs]
     evidence_refs: [evidence.diagnostic-persistence-failure-visibility-repair, evidence.diagnostic-persistence-failure-visibility-verification]
   delivery-not-terminal-authority:
-    revision: source:87b717676a7b51e213630677989947777b4bed441acd8c7d655fb6c96dca77ad
+    revision: source:d0d70f0819595200d148564ce11cb55de583ba943d7a5554b4c06a0f6dcb8af9
     source_refs: [echo-state/src/audit/mod.rs, src/agent/react/run/pipeline.rs, src/agent/snapshot.rs]
     evidence_refs: [evidence.diagnostic-persistence-failure-visibility-verification]
   file-durability-and-sdk-boundary:
-    revision: source:87b717676a7b51e213630677989947777b4bed441acd8c7d655fb6c96dca77ad
+    revision: source:d0d70f0819595200d148564ce11cb55de583ba943d7a5554b4c06a0f6dcb8af9
     source_refs: [echo-state/src/audit/file.rs, docs/adr/0053-trace-audit-persistence-visibility.md]
     evidence_refs: [evidence.diagnostic-persistence-failure-visibility-verification, evidence.diagnostic-persistence-sdk-inventory]
 ---

@@ -3,7 +3,7 @@
 //! The [`SchedulerRunner`] accepts an application callback and remains
 //! decoupled from any specific Agent or task service.
 
-use super::cron_task::{CronTask, CronTaskStatus, CronTaskStore};
+use super::cron_task::{CronTask, CronTaskStatus, CronTaskStore, SchedulerMutationOwner};
 use chrono::{DateTime, Utc};
 use echo_core::utils::fs::FileDurability;
 use echo_state::delivery::{
@@ -715,6 +715,7 @@ impl SchedulerHandle {
 /// Uses `last_fired` tracking to prevent double-firing.
 pub struct SchedulerRunner {
     store: CronTaskStore,
+    mutation_owner: SchedulerMutationOwner,
     fire_fn: OccurrenceFireFn,
     occurrence_authority: Arc<OccurrenceAuthority>,
     tasks: Arc<RwLock<Vec<CronTask>>>,
@@ -749,15 +750,17 @@ impl SchedulerRunner {
     }
 
     /// Create a scheduler whose callback can make external effects idempotent.
+    /// Claims definition mutation ownership before loading the task cache.
     pub async fn new_with_occurrence_context(
         store: CronTaskStore,
         cancel: CancellationToken,
         fire_fn: OccurrenceFireFn,
     ) -> echo_core::error::Result<Self> {
-        let tasks = store.load_all().await?;
+        let (mutation_owner, tasks) = store.claim_runner().await?;
         let occurrence_authority = open_occurrence_authority(&store, &tasks)?;
         Ok(Self {
             store,
+            mutation_owner,
             fire_fn,
             occurrence_authority,
             tasks: Arc::new(RwLock::new(tasks)),
@@ -1105,6 +1108,7 @@ impl SchedulerRunner {
             };
             let projection_result = {
                 let store = self.store.clone();
+                let owner = self.mutation_owner.clone();
                 let control = Arc::clone(&self.control_lock);
                 let tasks = Arc::clone(&self.tasks);
                 let task = payload.task.clone();
@@ -1112,7 +1116,10 @@ impl SchedulerRunner {
                 run_owned_mutation("last-run projection owner", async move {
                     let _control = control.lock().await;
                     let mut tasks = tasks.write().await;
-                    let updated = match store.update_last_run_for_task(&task, &result).await {
+                    let updated = match store
+                        .update_last_run_for_task(&task, &result, Some(&owner))
+                        .await
+                    {
                         Ok(updated) => updated,
                         Err(error) => {
                             if store.is_authority_poisoned() {
@@ -1190,12 +1197,13 @@ impl SchedulerRunner {
     /// Add a new cron task and persist it.
     pub async fn add_task(&self, task: CronTask) -> echo_core::error::Result<()> {
         let store = self.store.clone();
+        let owner = self.mutation_owner.clone();
         let control = Arc::clone(&self.control_lock);
         let tasks = Arc::clone(&self.tasks);
         run_owned_mutation("add scheduler task owner", async move {
             let _control = control.lock().await;
             let mut tasks = tasks.write().await;
-            match store.add(task).await {
+            match store.add_owned(task, &owner).await {
                 Ok(stored) => {
                     tasks.push(stored);
                     Ok(())
@@ -1220,6 +1228,7 @@ impl SchedulerRunner {
     pub async fn remove_task_exact(&self, id: &str) -> echo_core::error::Result<bool> {
         let id = id.to_string();
         let store = self.store.clone();
+        let owner = self.mutation_owner.clone();
         let control = Arc::clone(&self.control_lock);
         let tasks = Arc::clone(&self.tasks);
         let last_fired = Arc::clone(&self.last_fired);
@@ -1227,7 +1236,7 @@ impl SchedulerRunner {
         run_owned_mutation("remove scheduler task owner", async move {
             let _control = control.lock().await;
             let mut tasks = tasks.write().await;
-            match store.remove_with_snapshot(&id).await {
+            match store.remove_with_snapshot(&id, Some(&owner)).await {
                 Ok(Some(committed)) => {
                     *tasks = committed;
                     last_fired.write().await.remove(&id);
@@ -1258,12 +1267,16 @@ impl SchedulerRunner {
     ) -> echo_core::error::Result<bool> {
         let id = id.to_string();
         let store = self.store.clone();
+        let owner = self.mutation_owner.clone();
         let control = Arc::clone(&self.control_lock);
         let tasks = Arc::clone(&self.tasks);
         run_owned_mutation("status scheduler task owner", async move {
             let _control = control.lock().await;
             let mut tasks = tasks.write().await;
-            match store.set_status_with_snapshot(&id, status).await {
+            match store
+                .set_status_with_snapshot(&id, status, Some(&owner))
+                .await
+            {
                 Ok(Some(committed)) => {
                     *tasks = committed;
                     Ok(true)
@@ -2980,7 +2993,7 @@ mod tests {
         assert!(
             runner
                 .store
-                .update_last_run_for_task(&old, "stale")
+                .update_last_run_for_task(&old, "stale", None)
                 .await
                 .is_err()
         );
@@ -2992,6 +3005,206 @@ mod tests {
             .ok_or_else(|| echo_core::error::ReactError::Other("recreated task missing".into()))?;
         assert_eq!(cached.last_result, None);
         let _ = std::fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn live_runner_is_the_only_definition_mutation_owner() -> echo_core::error::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("tasks.json");
+        let store = CronTaskStore::new().with_path(path.clone());
+        let same_path = CronTaskStore::new().with_path(path);
+        let fire_fn: FireFn = Arc::new(|_| Box::pin(async { Ok("done".into()) }));
+        let runner = SchedulerRunner::new(store.clone(), CancellationToken::new(), fire_fn).await?;
+        let task = CronTask::new("owned", "* * * * *", "run");
+        runner.add_task(task.clone()).await?;
+
+        assert!(
+            store
+                .set_status(&task.id, CronTaskStatus::Disabled)
+                .await
+                .is_err()
+        );
+        assert!(same_path.remove(&task.id).await.is_err());
+        assert!(store.update_last_run(&task.id, "bypassed").await.is_err());
+        assert!(
+            same_path
+                .add(CronTask::new("other", "* * * * *", "run"))
+                .await
+                .is_err()
+        );
+        assert_eq!(runner.list_tasks().await, store.load_all().await?);
+
+        assert!(
+            runner
+                .set_status(&task.id, CronTaskStatus::Disabled)
+                .await?
+        );
+        assert_eq!(runner.list_tasks().await, store.load_all().await?);
+        drop(runner);
+        assert!(store.remove(&task.id).await?);
+        assert!(same_path.load_all().await?.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runner_releases_definition_owner_before_reopen() -> echo_core::error::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let store = CronTaskStore::new().with_path(temp.path().join("tasks.json"));
+        let fire_fn: FireFn = Arc::new(|_| Box::pin(async { Ok("done".into()) }));
+        let first = SchedulerRunner::new(
+            store.clone(),
+            CancellationToken::new(),
+            Arc::clone(&fire_fn),
+        )
+        .await?;
+        assert!(
+            SchedulerRunner::new(
+                store.clone(),
+                CancellationToken::new(),
+                Arc::clone(&fire_fn),
+            )
+            .await
+            .is_err()
+        );
+        first.cancel.cancel();
+        assert!(
+            store
+                .add(CronTask::new("blocked", "* * * * *", "run"))
+                .await
+                .is_err()
+        );
+        drop(first);
+        let second = SchedulerRunner::new(store.clone(), CancellationToken::new(), fire_fn).await?;
+        let task = CronTask::new("reopened", "* * * * *", "run");
+        second.add_task(task.clone()).await?;
+        assert_eq!(second.list_tasks().await, store.load_all().await?);
+        drop(second);
+        assert!(store.remove(&task.id).await?);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runner_claim_loads_a_committed_store_write_after_caller_cancellation()
+    -> echo_core::error::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let backend = Arc::new(ReloadFailureStore {
+            inner: echo_state::memory::InMemoryStore::new(),
+            fault: AtomicUsize::new(6),
+            committed: Notify::new(),
+            release: Notify::new(),
+        });
+        let store = CronTaskStore::with_backend_path_for_test(
+            backend.clone(),
+            temp.path().join("tasks.json"),
+        );
+        let task = CronTask::new("committed", "* * * * *", "run");
+        let writer = tokio::spawn({
+            let store = store.clone();
+            let task = task.clone();
+            async move { store.add(task).await }
+        });
+        backend.committed.notified().await;
+        let fire_fn: FireFn = Arc::new(|_| Box::pin(async { Ok("done".into()) }));
+        let mut constructor = tokio::spawn({
+            let store = store.clone();
+            async move { SchedulerRunner::new(store, CancellationToken::new(), fire_fn).await }
+        });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut constructor)
+                .await
+                .is_err()
+        );
+        writer.abort();
+        assert!(writer.await.is_err());
+        let runner = constructor
+            .await
+            .map_err(|error| ledger_error("runner claim", error))??;
+        assert_eq!(runner.list_tasks().await, store.load_all().await?);
+        assert_eq!(runner.list_tasks().await.len(), 1);
+        assert!(
+            store
+                .set_status(&task.id, CronTaskStatus::Disabled)
+                .await
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unanchored_store_clone_cannot_bypass_runner_owner() -> echo_core::error::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let backend = Arc::new(echo_state::memory::InMemoryStore::new());
+        let seeded = CronTaskStore::with_backend_path_for_test(
+            backend.clone(),
+            temp.path().join("tasks.json"),
+        );
+        let task = CronTask::new("owned", "* * * * *", "run");
+        seeded.add(task.clone()).await?;
+        let unanchored = CronTaskStore::with_store(backend.clone()).await?;
+        let anchored = unanchored.clone().with_path(temp.path().join("tasks.json"));
+        let fire_fn: FireFn = Arc::new(|_| Box::pin(async { Ok("done".into()) }));
+        let runner = SchedulerRunner::new(anchored, CancellationToken::new(), fire_fn).await?;
+
+        assert!(
+            unanchored
+                .set_status(&task.id, CronTaskStatus::Disabled)
+                .await
+                .is_err()
+        );
+        assert!(CronTaskStore::with_store(backend).await.is_err());
+        assert_eq!(runner.list_tasks().await, unanchored.load_all().await?);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reanchored_store_clone_cannot_bypass_runner_owner() -> echo_core::error::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let backend = Arc::new(echo_state::memory::InMemoryStore::new());
+        let store = CronTaskStore::with_backend_path_for_test(
+            backend,
+            temp.path().join("first/tasks.json"),
+        );
+        let reanchored = store
+            .clone()
+            .with_path(temp.path().join("second/tasks.json"));
+        let fire_fn: FireFn = Arc::new(|_| Box::pin(async { Ok("done".into()) }));
+        let runner = SchedulerRunner::new(store, CancellationToken::new(), fire_fn).await?;
+        let task = CronTask::new("owned", "* * * * *", "run");
+        runner.add_task(task.clone()).await?;
+
+        assert!(reanchored.remove(&task.id).await.is_err());
+        assert_eq!(runner.list_tasks().await, reanchored.load_all().await?);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn migration_cannot_remove_a_live_runner_definition_file() -> echo_core::error::Result<()>
+    {
+        let temp = tempfile::tempdir()?;
+        let legacy_path = temp.path().join(".echo-agent/scheduler/tasks.json");
+        let legacy = CronTaskStore::new().with_path(legacy_path.clone());
+        let task = CronTask::new("owned", "* * * * *", "run");
+        legacy.add(task).await?;
+        let fire_fn: FireFn = Arc::new(|_| Box::pin(async { Ok("done".into()) }));
+        let runner = SchedulerRunner::new(legacy, CancellationToken::new(), fire_fn).await?;
+        let backend = Arc::new(echo_state::memory::InMemoryStore::new());
+        let destination = CronTaskStore::with_backend_path_for_test(
+            backend,
+            temp.path().join("destination/tasks.json"),
+        );
+
+        assert!(destination.migrate_from_path(&legacy_path).await.is_err());
+        assert!(legacy_path.exists());
+        assert_eq!(runner.list_tasks().await.len(), 1);
+        assert!(destination.load_all().await?.is_empty());
+
+        destination
+            .add(CronTask::new("existing target", "* * * * *", "run"))
+            .await?;
+        destination.migrate_from_path(&legacy_path).await?;
+        assert!(legacy_path.exists());
+        assert_eq!(destination.load_all().await?.len(), 1);
         Ok(())
     }
 

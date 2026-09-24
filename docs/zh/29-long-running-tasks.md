@@ -138,6 +138,10 @@ drop 或 abort 时，也会在下一次 drain 通过 `OutcomeUnknown` 进入相�
 `CronTaskStore` 每次 add 都分配不可变 `definition_id`，status control 则持久递增
 `control_revision`。因此 remove 后重新 add exact task clone 仍是新 definition；旧 incarnation
 的 queued callback 不能通过 admission，也不能写入 replacement 的 last-run projection。
+Runner 存活期间应通过其管理 API 修改 task definition。保留的 `CronTaskStore` clone、
+同一路径的其它 handle 或共享同一 Store backend 实例的 handle 若直接写入会返回错误；
+Store 读取仍可用。Runner 及其进行中的
+写入结束后，Store 可重新独立写入。
 
 Callback 会产生外部副作用时，使用
 `SchedulerRunner::new_with_occurrence_context` 与 `OccurrenceFireFn`。
