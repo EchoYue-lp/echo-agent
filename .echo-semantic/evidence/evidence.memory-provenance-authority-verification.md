@@ -27,7 +27,6 @@ source_refs:
   - docs/zh/25-self-improvement.md
 supports: [finding.pre-compaction-memory-trust-provenance, behavior.eval-evolution, behavior.context-memory-lifecycle, rule.quality-observation-boundary, rule.context-persistence-separation]
 limitations:
-  - PR CI and main delivery remain pending
   - Failure injection covers journal/audit/caller cancellation rather than physical power loss
 ---
 
@@ -75,8 +74,16 @@ Store→manager 与 manager→Store 两个安装顺序，以及 context 锁忙�
 第一次完整门禁在 `echo_state` 的 collapsible-if Clippy 告警处停止；修复后重新执行
 整个脚本至 exit 0，未以 focused 测试替代失败门禁。
 
+## 远端交付与合并后验证
+
+PR #152 的 Rust CI run `35961491513` 七项 job 全部 success：Linux quality，
+framework/foundations/tools/learning 分组测试，Windows compile/atomic replacement，
+dependency policy。squash commit `5a0f2af2da8de9db2bf98c3aa8dd2a54e1152d7c`
+进入 framework main，GitHub commit verification 为 valid；该 main 树与通过本地
+完整门禁的候选树无差异。独立 worktree 从已合并 main 检出后执行 strict semantic
+snapshot，exit 0，source digest 仍为本 Evidence 的 `observed_at`。
+
 ## 已知缺口
 
-独立 rereview PASS，见 `audit.memory-provenance-authority-rereview`。仍需远端 CI、
-framework main 交付及合并后 strict semantic 复验。外部
+独立 rereview PASS，见 `audit.memory-provenance-authority-rereview`。外部
 SDK/CLI/website/A2A 不在本 Finding 完成范围。
