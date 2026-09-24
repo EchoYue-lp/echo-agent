@@ -13,9 +13,9 @@ rule_refs: [rule.permission-effect-order]
 evidence_refs: [evidence.effects-extensions, evidence.plan-mode-write-surface-repair, evidence.plan-mode-write-surface-timing-verification]
 audit_refs: [audit.tool-permission-sandbox.permission-external, audit.plan-mode-write-surface-timing]
 decision_refs: []
-repair_evidence_refs: []
-verification_evidence_refs: []
-rereview_audit_refs: []
+repair_evidence_refs: [evidence.plan-mode-write-surface-repair]
+verification_evidence_refs: [evidence.plan-mode-write-surface-timing-verification]
+rereview_audit_refs: [audit.plan-mode-write-surface-timing]
 discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 ---
 
@@ -40,7 +40,8 @@ Agent 开启 plan mode 且拥有其它 mutation tool 时，仍可能改变 repos
 ## 处理记录
 
 `3735f7e0` 用 ToolCapabilities 取代工具名列表；`f7c1fef7` 的 readonly Agent 也复用
-该能力事实。当前主线的既有 Plan 测试 2/2 通过，但定向时序反例在 PreToolUse Hook
-等待期间切换 PermissionService 到 Plan，Hook Allow 后仍执行一次 mutation（exit 101）。
-执行前缺少对 live Plan 状态的最终检查，因此本 Finding 保持 open，详见新增
-timing verification 与 audit。修复与持久红绿回归留给独立实施分支。
+该能力事实。当前修复在 ExecuteStage 的 effect boundary 重新检查 live Plan，并在
+ToolManager 每次物理 attempt 通过 validation、permit、retry delay 后再次执行 admission；
+持久回归验证 PreToolUse/Permission 的旧 Allow 不会绕过新 Plan，晚到拒绝保持
+blocked/Unavailable 终态且不产生 mutation。Finding 仍保持 open，等待独立 rereview、
+PR/CI、remote main 和 post-merge closure。

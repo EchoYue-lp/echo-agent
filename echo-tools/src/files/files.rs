@@ -867,6 +867,10 @@ impl Tool for AppendFileTool {
                     tool: "append_file".to_string(),
                     message: format!("Failed to append write: {}", e),
                 })?;
+            file.flush().await.map_err(|e| ToolError::ExecutionFailed {
+                tool: "append_file".to_string(),
+                message: format!("Failed to flush append write: {}", e),
+            })?;
 
             let mut result = ToolResult::success(format!(
                 "Appended {} bytes to '{}'",

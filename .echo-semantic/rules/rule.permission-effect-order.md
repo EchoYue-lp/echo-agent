@@ -7,7 +7,7 @@ expectation: human_confirmed
 risk: high
 primary_focus: permission_external
 focus: [result_side_effect, state_authority, failure_concurrency, time_lifecycle]
-observed_at: source:052370cfd6d375b5ff7d00451d20d5427bb0e50603dfbbee38f1f4470b315801
+observed_at: source:fe131df2148d81ee04fef5804e38cf59a2e231e8e28d5e71b89323a5c2fa98b0
 behavior_refs: [behavior.effect-permission-execution]
 code_refs: [echo-core/src/tools/permission.rs, echo-orchestration/src/human_loop/service.rs, echo-execution/src/skills/hooks.rs, src/agent/react/run/pipeline.rs, echo-execution/src/tools.rs]
 evidence_refs: [evidence.effects-extensions, evidence.streaming-tool-validation-repair, evidence.streaming-tool-validation-verification, evidence.tool-read-cache-authority-repair, evidence.tool-read-cache-authority-verification, evidence.tool-registry-owned-handle-repair, evidence.tool-registry-owned-handle-verification, evidence.mcp-tool-local-classification-repair, evidence.mcp-tool-local-classification-verification, evidence.hook-protected-path-repair, evidence.hook-protected-path-verification, evidence.readonly-tool-capability-repair, evidence.readonly-tool-capability-verification, evidence.effect-cleanup-owner-repair, evidence.effect-cleanup-owner-verification]

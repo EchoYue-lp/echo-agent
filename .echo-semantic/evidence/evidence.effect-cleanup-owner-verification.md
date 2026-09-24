@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.effect-cleanup-owner-verification
 kind: evidence
-observed_at: source:052370cfd6d375b5ff7d00451d20d5427bb0e50603dfbbee38f1f4470b315801
+observed_at: source:fe131df2148d81ee04fef5804e38cf59a2e231e8e28d5e71b89323a5c2fa98b0
 source_refs:
   - echo-core/src/tools/artifact.rs
   - echo-execution/src/sandbox/docker.rs
@@ -42,7 +42,7 @@ Git target、`demo58_git_worktree` example、`cargo fmt --all -- --check` 与
 
 最终又在 `src/agent/react/run/pipeline.rs` 将 artifact 路径断言改为物理根与
 artifact 规范化后的包含关系；最终非语义源码摘要为
-`052370cfd6d375b5ff7d00451d20d5427bb0e50603dfbbee38f1f4470b315801`。
+`fe131df2148d81ee04fef5804e38cf59a2e231e8e28d5e71b89323a5c2fa98b0`。
 该 all-feature 定向回归 1/1 通过，独立 reviewer 对测试差异复核 PASS。
 最终源码的隔离 target `./scripts/verify.sh` exit 0，覆盖 workspace fmt、
 all-target/all-feature Clippy `-D warnings`、lib/bins panic/unwrap/expect/

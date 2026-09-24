@@ -4,7 +4,7 @@ id: map.tool-permission-sandbox
 kind: capability_map
 title: Tool、Permission、Sandbox 与外部 Effect
 risk: high
-observed_at: source:052370cfd6d375b5ff7d00451d20d5427bb0e50603dfbbee38f1f4470b315801
+observed_at: source:fe131df2148d81ee04fef5804e38cf59a2e231e8e28d5e71b89323a5c2fa98b0
 boundary_refs: [boundary.tool-permission-sandbox]
 behavior_refs: [behavior.effect-permission-execution]
 rule_refs: [rule.permission-effect-order]
@@ -40,8 +40,8 @@ scenarios:
     finding_refs: [finding.plan-mode-write-surface, finding.readonly-tools-custom-registration-bypass]
     evidence_refs: [evidence.readonly-tool-capability-repair, evidence.readonly-tool-capability-verification]
     audit_refs: [audit.readonly-tool-capability-rereview]
-    unknown: 构造期 readonly_tools 的 custom registration、晚注入可见性与执行反例已闭合；Plan mode 的独立 Finding 仍待专项复审
-    next_step: 按原 Plan mode 故障反例复审运行期边界，不影响 direct-user surface
+    unknown: 构造期 readonly_tools 的 custom registration、晚注入可见性与执行反例已闭合；Plan mode 的 effect-boundary 修复已有真实 Hook、permit 与动态替换回归，仍待独立复审与交付
+    next_step: 复核真实运行期拒绝的 blocked/Unavailable 与 observation 结算，不影响 direct-user surface
   permission-and-approval:
     status: mapped
     source_refs: [echo-core/src/tools/permission.rs, echo-orchestration/src/human_loop/service.rs, echo-tools/src/shell.rs]

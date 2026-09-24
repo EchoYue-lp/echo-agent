@@ -102,6 +102,9 @@ pub use echo_core::tools::{
     ToolStreamEvent,
 };
 
+/// Caller-owned policy evaluated immediately before each physical Tool attempt.
+pub type ToolAdmissionFn<'a> = dyn Fn(&dyn Tool) -> Result<()> + Send + Sync + 'a;
+
 fn retry_delay_ms(configured_ms: u64, retry_after_ms: Option<u64>, attempt: u32) -> u64 {
     use std::hash::{Hash, Hasher};
 
@@ -903,7 +906,7 @@ impl ToolManager {
         tool_name: &str,
         parameters: ToolParameters,
     ) -> Result<ToolResult> {
-        self.execute_tool_inner(tool_name, parameters, &ToolContext::default(), false)
+        self.execute_tool_inner(tool_name, parameters, &ToolContext::default(), false, None)
             .await
     }
 
@@ -919,7 +922,7 @@ impl ToolManager {
         parameters: ToolParameters,
         ctx: &ToolContext,
     ) -> Result<ToolResult> {
-        self.execute_tool_inner(tool_name, parameters, ctx, false)
+        self.execute_tool_inner(tool_name, parameters, ctx, false, None)
             .await
     }
 
@@ -936,7 +939,21 @@ impl ToolManager {
         parameters: ToolParameters,
         ctx: &ToolContext,
     ) -> Result<ToolResult> {
-        self.execute_tool_inner(tool_name, parameters, ctx, true)
+        self.execute_tool_inner(tool_name, parameters, ctx, true, None)
+            .await
+    }
+
+    /// Execute with a caller-owned admission check at every physical attempt.
+    /// The check runs after validation, permit acquisition, and retry delay,
+    /// immediately before the selected tool implementation is called.
+    pub async fn execute_tool_with_context_draining_started_checked(
+        &self,
+        tool_name: &str,
+        parameters: ToolParameters,
+        ctx: &ToolContext,
+        admission: &ToolAdmissionFn<'_>,
+    ) -> Result<ToolResult> {
+        self.execute_tool_inner(tool_name, parameters, ctx, true, Some(admission))
             .await
     }
 
@@ -949,6 +966,7 @@ impl ToolManager {
         parameters: ToolParameters,
         ctx: &ToolContext,
         drain_started: bool,
+        admission: Option<&ToolAdmissionFn<'_>>,
     ) -> Result<ToolResult> {
         // Observe before obtaining the tool guard so a future registry storage
         // change cannot let an old implementation publish into a new generation.
@@ -1016,6 +1034,9 @@ impl ToolManager {
             }
 
             let execution = async {
+                if let Some(check) = admission {
+                    check(tool.as_ref())?;
+                }
                 if self.config.timeout_ms > 0 && !tool.manages_own_timeout() {
                     match tokio::time::timeout(
                         Duration::from_millis(self.config.timeout_ms),
@@ -1105,8 +1126,10 @@ impl ToolManager {
         ctx: &ToolContext,
         event_tx: Option<tokio::sync::mpsc::Sender<ToolStreamEvent>>,
     ) -> Result<ToolResult> {
-        self.execute_tool_stream_with_context_inner(tool_name, parameters, ctx, event_tx, false)
-            .await
+        self.execute_tool_stream_with_context_inner(
+            tool_name, parameters, ctx, event_tx, false, None,
+        )
+        .await
     }
 
     /// Streaming counterpart of
@@ -1118,8 +1141,30 @@ impl ToolManager {
         ctx: &ToolContext,
         event_tx: Option<tokio::sync::mpsc::Sender<ToolStreamEvent>>,
     ) -> Result<ToolResult> {
-        self.execute_tool_stream_with_context_inner(tool_name, parameters, ctx, event_tx, true)
-            .await
+        self.execute_tool_stream_with_context_inner(
+            tool_name, parameters, ctx, event_tx, true, None,
+        )
+        .await
+    }
+
+    /// Streaming counterpart of the checked draining execution path.
+    pub async fn execute_tool_stream_with_context_draining_started_checked(
+        &self,
+        tool_name: &str,
+        parameters: ToolParameters,
+        ctx: &ToolContext,
+        event_tx: Option<tokio::sync::mpsc::Sender<ToolStreamEvent>>,
+        admission: &ToolAdmissionFn<'_>,
+    ) -> Result<ToolResult> {
+        self.execute_tool_stream_with_context_inner(
+            tool_name,
+            parameters,
+            ctx,
+            event_tx,
+            true,
+            Some(admission),
+        )
+        .await
     }
 
     async fn execute_tool_stream_with_context_inner(
@@ -1129,6 +1174,7 @@ impl ToolManager {
         ctx: &ToolContext,
         event_tx: Option<tokio::sync::mpsc::Sender<ToolStreamEvent>>,
         drain_started: bool,
+        admission: Option<&ToolAdmissionFn<'_>>,
     ) -> Result<ToolResult> {
         // Keep the registry generation and result-cache generation ordered:
         // an old tool implementation must never publish into a replacement's cache.
@@ -1194,6 +1240,10 @@ impl ToolManager {
             let mut output_forwarded = false;
             let consume_stream = async {
                 use futures::StreamExt;
+
+                if let Some(check) = admission {
+                    check(tool.as_ref())?;
+                }
 
                 let mut stream = tool
                     .execute_stream_with_context(parameters.clone(), ctx)
@@ -1360,6 +1410,10 @@ mod execute_with_context_tests {
         name: &'static str,
     }
 
+    struct AdmissionCountingTool {
+        calls: Arc<AtomicUsize>,
+    }
+
     struct ReadCountingTool {
         calls: Arc<AtomicUsize>,
         output: &'static str,
@@ -1403,6 +1457,12 @@ mod execute_with_context_tests {
     struct PendingTool {
         name: &'static str,
         started: Arc<tokio::sync::Notify>,
+    }
+
+    struct PermitHoldingTool {
+        started: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+        finished: Arc<AtomicBool>,
     }
 
     struct CompletingAfterCancellationTool {
@@ -1470,6 +1530,32 @@ mod execute_with_context_tests {
                 self.started.notify_one();
                 std::future::pending::<()>().await;
                 Ok(ToolResult::success("unreachable"))
+            })
+        }
+    }
+
+    impl Tool for PermitHoldingTool {
+        fn name(&self) -> &str {
+            "permit_holder"
+        }
+
+        fn description(&self) -> &str {
+            "holds the only execution permit until released"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        fn execute<'a>(
+            &'a self,
+            _params: ToolParameters,
+        ) -> futures::future::BoxFuture<'a, echo_core::error::Result<ToolResult>> {
+            Box::pin(async move {
+                self.started.notify_one();
+                self.release.notified().await;
+                self.finished.store(true, AtomicOrdering::SeqCst);
+                Ok(ToolResult::success("released"))
             })
         }
     }
@@ -1818,6 +1904,30 @@ mod execute_with_context_tests {
             _p: ToolParameters,
         ) -> futures::future::BoxFuture<'a, echo_core::error::Result<ToolResult>> {
             Box::pin(async { Ok(ToolResult::success("ok")) })
+        }
+    }
+
+    impl Tool for AdmissionCountingTool {
+        fn name(&self) -> &str {
+            "admission_target"
+        }
+
+        fn description(&self) -> &str {
+            "counts executions after admission"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        fn execute<'a>(
+            &'a self,
+            _params: ToolParameters,
+        ) -> futures::future::BoxFuture<'a, echo_core::error::Result<ToolResult>> {
+            Box::pin(async move {
+                self.calls.fetch_add(1, AtomicOrdering::SeqCst);
+                Ok(ToolResult::success("executed"))
+            })
         }
     }
 
@@ -2971,6 +3081,88 @@ mod execute_with_context_tests {
             ReactError::Other(format!("running tool task failed to join: {error}"))
         })?;
         assert!(first_result.is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn checked_admission_runs_after_permit_and_can_reject_before_effect()
+    -> echo_core::error::Result<()> {
+        let manager = Arc::new(ToolManager::new_with_config(ToolExecutionConfig {
+            timeout_ms: 0,
+            retry_on_fail: false,
+            max_retries: 0,
+            retry_delay_ms: 0,
+            max_concurrency: Some(1),
+            max_read_concurrency: None,
+        }));
+        let holder_started = Arc::new(tokio::sync::Notify::new());
+        let holder_release = Arc::new(tokio::sync::Notify::new());
+        let holder_finished = Arc::new(AtomicBool::new(false));
+        manager.try_register(Box::new(PermitHoldingTool {
+            started: Arc::clone(&holder_started),
+            release: Arc::clone(&holder_release),
+            finished: Arc::clone(&holder_finished),
+        }))?;
+        let target_calls = Arc::new(AtomicUsize::new(0));
+        manager.try_register(Box::new(AdmissionCountingTool {
+            calls: Arc::clone(&target_calls),
+        }))?;
+
+        let holder_manager = Arc::clone(&manager);
+        let holder = tokio::spawn(async move {
+            holder_manager
+                .execute_tool_with_context_draining_started(
+                    "permit_holder",
+                    ToolParameters::new(),
+                    &ToolContext::default(),
+                )
+                .await
+        });
+        holder_started.notified().await;
+
+        let admission_manager = Arc::clone(&manager);
+        let admission_finished = Arc::clone(&holder_finished);
+        let target = tokio::spawn(async move {
+            let admission = move |_tool: &dyn Tool| -> Result<()> {
+                if !admission_finished.load(AtomicOrdering::SeqCst) {
+                    return Err(ToolError::ExecutionFailed {
+                        tool: "admission_target".to_string(),
+                        message: "admission ran before the permit holder settled".to_string(),
+                    }
+                    .into());
+                }
+                Err(ToolError::ExecutionFailed {
+                    tool: "admission_target".to_string(),
+                    message: "admission revoked before effect".to_string(),
+                }
+                .into())
+            };
+            admission_manager
+                .execute_tool_with_context_draining_started_checked(
+                    "admission_target",
+                    ToolParameters::new(),
+                    &ToolContext::default(),
+                    &admission,
+                )
+                .await
+        });
+
+        tokio::task::yield_now().await;
+        holder_release.notify_one();
+        holder.await.map_err(|error| ToolError::ExecutionFailed {
+            tool: "permit_holder".to_string(),
+            message: format!("permit holder task failed: {error}"),
+        })??;
+        assert!(
+            target
+                .await
+                .map_err(|error| ToolError::ExecutionFailed {
+                    tool: "admission_target".to_string(),
+                    message: format!("admission target task failed: {error}"),
+                })?
+                .is_err()
+        );
+        assert_eq!(target_calls.load(AtomicOrdering::SeqCst), 0);
         Ok(())
     }
 

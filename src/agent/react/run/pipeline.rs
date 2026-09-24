@@ -676,6 +676,33 @@ impl PipelineStage for ExecuteStage {
             subagent_lineage: snapshot.subagent_lineage.clone(),
             uplink: snapshot.external_uplink.clone(),
         };
+
+        let call_plan_mode =
+            ctx.plan_mode || ctx.permission_mode_override == Some(PermissionMode::Plan);
+        let admission_denial = std::sync::atomic::AtomicU8::new(0);
+        let admission = |tool: &dyn echo_core::tools::Tool| -> Result<()> {
+            if !tool.capabilities().is_read_only() {
+                let denial_kind = if call_plan_mode || snapshot.tools.is_plan_mode() {
+                    1
+                } else if snapshot.tools.readonly_tools {
+                    2
+                } else {
+                    0
+                };
+                if denial_kind == 0 {
+                    return Ok(());
+                }
+                admission_denial.store(denial_kind, std::sync::atomic::Ordering::Release);
+                let (reason, _) = read_only_surface_denial(tool.name(), denial_kind == 1);
+                return Err(echo_core::error::ToolError::AccessDenied {
+                    path: tool.name().to_string(),
+                    reason,
+                }
+                .into());
+            }
+            Ok(())
+        };
+
         let execution_result = if snapshot
             .tools
             .tool_manager
@@ -687,11 +714,12 @@ impl PipelineStage for ExecuteStage {
                     snapshot
                         .tools
                         .tool_manager
-                        .execute_tool_stream_with_context_draining_started(
+                        .execute_tool_stream_with_context_draining_started_checked(
                             &ctx.tool_name,
                             ctx.params.clone(),
                             &tool_ctx,
                             Some(event_tx),
+                            &admission,
                         ),
                 );
                 let mut stream_open = true;
@@ -735,11 +763,12 @@ impl PipelineStage for ExecuteStage {
                 snapshot
                     .tools
                     .tool_manager
-                    .execute_tool_stream_with_context_draining_started(
+                    .execute_tool_stream_with_context_draining_started_checked(
                         &ctx.tool_name,
                         ctx.params.clone(),
                         &tool_ctx,
                         None,
+                        &admission,
                     )
                     .await
             }
@@ -747,13 +776,31 @@ impl PipelineStage for ExecuteStage {
             snapshot
                 .tools
                 .tool_manager
-                .execute_tool_with_context_draining_started(
+                .execute_tool_with_context_draining_started_checked(
                     &ctx.tool_name,
                     ctx.params.clone(),
                     &tool_ctx,
+                    &admission,
                 )
                 .await
         };
+
+        let denial_kind = admission_denial.load(std::sync::atomic::Ordering::Acquire);
+        let denial = match denial_kind {
+            1 | 2 => Some(read_only_surface_denial(&ctx.tool_name, denial_kind == 1)),
+            _ => None,
+        };
+        if let Some((reason, source)) = denial.as_ref() {
+            snapshot
+                .record_permission_decision(
+                    &ctx.tool_name,
+                    &PermissionDecision::Deny {
+                        reason: reason.clone(),
+                    },
+                    source,
+                )
+                .await;
+        }
 
         let may_have_side_effects = snapshot
             .tools
@@ -805,6 +852,21 @@ impl PipelineStage for ExecuteStage {
             );
         }
         ctx.result = Some(result.clone());
+
+        // A late policy denial remains blocked and unavailable while its
+        // failed result still flows through terminal observation stages.
+        if let Some((reason, _)) = denial {
+            ctx.block(
+                crate::tools::ToolFailureCategory::Unavailable,
+                reason.clone(),
+            );
+            let block_failure = ctx.block_failure.clone();
+            if let Some(result) = ctx.result.as_mut() {
+                result.success = false;
+                result.error = Some(reason);
+                result.failure = block_failure;
+            }
+        }
 
         // Confirmed effects belong to the tool, not post-use presentation.
         // Persist them before a hook can stall or reject the returned result.
@@ -1276,6 +1338,22 @@ impl ToolExecutionPipeline {
 
 // ── PlanModeStage ──────────────────────────────────────────────────
 
+fn read_only_surface_denial(tool_name: &str, plan_mode: bool) -> (String, &'static str) {
+    if plan_mode {
+        (
+            format!(
+                "Plan mode: '{tool_name}' is blocked. Read and analyze only. Use /plan off to enable writes."
+            ),
+            "plan_mode",
+        )
+    } else {
+        (
+            format!("Tool '{tool_name}' is blocked by the read-only Agent"),
+            "readonly_tools",
+        )
+    }
+}
+
 /// In plan mode or a read-only Agent, only locally classified read-only tools may execute.
 pub struct PlanModeStage;
 
@@ -1295,20 +1373,7 @@ impl PipelineStage for PlanModeStage {
             return Ok(());
         }
         if !snapshot.tools.is_tool_read_only(&ctx.tool_name) {
-            let (reason, source) = if plan_mode {
-                (
-                    format!(
-                        "Plan mode: '{}' is blocked. Read and analyze only. Use /plan off to enable writes.",
-                        ctx.tool_name
-                    ),
-                    "plan_mode",
-                )
-            } else {
-                (
-                    format!("Tool '{}' is blocked by the read-only Agent", ctx.tool_name),
-                    "readonly_tools",
-                )
-            };
+            let (reason, source) = read_only_surface_denial(&ctx.tool_name, plan_mode);
             snapshot
                 .record_permission_decision(
                     &ctx.tool_name,
