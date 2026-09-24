@@ -15,9 +15,9 @@ merge_base_revision: f12563c33de96b89baf9312807182f9500baa159
 predecessor_revisions:
   - 37313cd5303ca21b4a232335f342b2b59da554df
   - f12563c33de96b89baf9312807182f9500baa159
-result_snapshot: source:8b3972e1d2bc92f4ad59f511b6674eaaf243c1760f21973caf9e96558f71db90
+result_snapshot: source:46382a3fd5e3196b9c5c541945609af9ca0bed79299d0786e1fbb4f7e375024a
 resolutions:
-  "evidence.sdk-contracts#source:1239a1b718dbf0fbbacb6295516cc8a2532a5b3c3ab81957411462fe558b0d9d":
+  "evidence.sdk-contracts#source:46382a3fd5e3196b9c5c541945609af9ca0bed79299d0786e1fbb4f7e375024a":
     disposition: retired
     predecessor_fingerprints:
       37313cd5303ca21b4a232335f342b2b59da554df: absent
@@ -29,7 +29,7 @@ resolutions:
         content_digest: 40cb3f1917e3fb585d88d74e98ec21355903d9bf0e22b50c9f2ca3dc400eb2ad
     compatibility_impact: 仅退役旧 TypeScript index blob 指纹，不改变公共 API、wire 或运行时行为
     rollback_ref: 恢复目标 main 的旧 source ref，移除此 resolution 并重跑双前置连续性检查
-  "evidence.sdk-contracts#source:22d1578ba412e215fd4debfd0a28a4989e2248db7482688db26e021712935e9d":
+  "evidence.sdk-contracts#source:46382a3fd5e3196b9c5c541945609af9ca0bed79299d0786e1fbb4f7e375024a":
     disposition: retired
     predecessor_fingerprints:
       37313cd5303ca21b4a232335f342b2b59da554df: absent
@@ -38,7 +38,7 @@ resolutions:
     decision_authorities: *decision_authority
     compatibility_impact: 仅退役旧 Python README blob 指纹，不改变公共 API、wire 或运行时行为
     rollback_ref: 恢复目标 main 的旧 source ref，移除此 resolution 并重跑双前置连续性检查
-  "evidence.sdk-contracts#source:98fa802a0bee147cd5bb2ddc7560a6a7f50da6e11f429d196663ebb1d6d87c27":
+  "evidence.sdk-contracts#source:46382a3fd5e3196b9c5c541945609af9ca0bed79299d0786e1fbb4f7e375024a":
     disposition: retired
     predecessor_fingerprints:
       37313cd5303ca21b4a232335f342b2b59da554df: absent
@@ -47,7 +47,7 @@ resolutions:
     decision_authorities: *decision_authority
     compatibility_impact: 仅退役旧 Rust inventory blob 指纹，不改变公共 API、wire 或运行时行为
     rollback_ref: 恢复目标 main 的旧 source ref，移除此 resolution 并重跑双前置连续性检查
-  "evidence.sdk-contracts#source:c39feedc79e0030a353c011d217882a8e4d5ddfad0f830a5dcec7b26bb4cdf99":
+  "evidence.sdk-contracts#source:46382a3fd5e3196b9c5c541945609af9ca0bed79299d0786e1fbb4f7e375024a":
     disposition: retired
     predecessor_fingerprints:
       37313cd5303ca21b4a232335f342b2b59da554df: absent
@@ -56,7 +56,7 @@ resolutions:
     decision_authorities: *decision_authority
     compatibility_impact: 仅退役旧 parity manifest blob 指纹，不改变公共 API、wire 或运行时行为
     rollback_ref: 恢复目标 main 的旧 source ref，移除此 resolution 并重跑双前置连续性检查
-  "evidence.sdk-contracts#source:cb3f0313fe66a8635b44b30c120ad5af1501c5795582e9d036ce09d37bcd26d7":
+  "evidence.sdk-contracts#source:46382a3fd5e3196b9c5c541945609af9ca0bed79299d0786e1fbb4f7e375024a":
     disposition: retired
     predecessor_fingerprints:
       37313cd5303ca21b4a232335f342b2b59da554df: absent
@@ -65,7 +65,7 @@ resolutions:
     decision_authorities: *decision_authority
     compatibility_impact: 仅退役旧 TypeScript README blob 指纹，不改变公共 API、wire 或运行时行为
     rollback_ref: 恢复目标 main 的旧 source ref，移除此 resolution 并重跑双前置连续性检查
-  "evidence.sdk-contracts#source:ce8db8a82970ce189656158ad4ad70c651823774b00d7f98f9b5082e7505fa8f":
+  "evidence.sdk-contracts#source:46382a3fd5e3196b9c5c541945609af9ca0bed79299d0786e1fbb4f7e375024a":
     disposition: retired
     predecessor_fingerprints:
       37313cd5303ca21b4a232335f342b2b59da554df: absent
@@ -74,7 +74,7 @@ resolutions:
     decision_authorities: *decision_authority
     compatibility_impact: 仅退役旧 facade inventory test blob 指纹，不改变公共 API、wire 或运行时行为
     rollback_ref: 恢复目标 main 的旧 source ref，移除此 resolution 并重跑双前置连续性检查
-  "evidence.sdk-contracts#source:db076592749cf914d34bb3989dcd15d1441ce6149788041bbb086faee05df5f5":
+  "evidence.sdk-contracts#source:46382a3fd5e3196b9c5c541945609af9ca0bed79299d0786e1fbb4f7e375024a":
     disposition: retired
     predecessor_fingerprints:
       37313cd5303ca21b4a232335f342b2b59da554df: absent

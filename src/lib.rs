@@ -196,7 +196,7 @@ pub mod prelude {
     pub use crate::budget::TokenBudgetConfig;
     pub use echo_core::agent::{PromptTemplateManager, RunBudgetPolicy};
     // Config
-    pub use crate::config::{AgentSettings, FrameworkConfig, ModelConfig};
+    pub use crate::config::{AgentSettings, FrameworkConfig, ModelConfig, SourcedModelConfig};
 
     /// Convenience alias for [`ReactAgentBuilder`], the canonical builder type.
     pub type AgentBuilder = ReactAgentBuilder;
@@ -206,11 +206,13 @@ pub mod prelude {
         ContentPart, ImageUrl, LinkedResource, Message, MessageContent, Role, ToolCall,
     };
     pub use crate::llm::{
-        AnthropicClient, ChatChunk, ChatRequest, ChatResponse, JsonSchemaSpec, LlmApiProtocol,
-        LlmClient, LlmConfig, LlmTimeouts, ModelInputModality, ModelProfile, ModelProfileOverride,
-        ModelProfileResolver, OpenAiClient, ProviderCapabilities, ResponseFormat, ResponsesClient,
-        SimpleChatOptions, ThinkingProfile, ToolDefinition, infer_context_window,
-        resolve_protocol_endpoint, resolve_thinking_profile,
+        AnthropicClient, BUILT_IN_MODEL_FACTS_VERSION, ChatChunk, ChatRequest, ChatResponse,
+        JsonSchemaSpec, LlmApiProtocol, LlmClient, LlmConfig, LlmTimeouts, ModelFactConfidence,
+        ModelFactInputs, ModelFactMetadata, ModelFactSet, ModelFactSource, ModelInputModality,
+        ModelProfile, ModelProfileOverride, ModelProfileResolution, ModelProfileResolver,
+        OpenAiClient, ProviderCapabilities, ProviderCapabilityOverride, ResponseFormat,
+        ResponsesClient, SimpleChatOptions, SourcedLlmConfig, ThinkingProfile, ToolDefinition,
+        infer_context_window, resolve_protocol_endpoint, resolve_thinking_profile,
     };
 
     // Tools

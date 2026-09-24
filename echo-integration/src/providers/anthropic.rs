@@ -4,7 +4,9 @@
 //! System messages are sent as a top-level `system` field (not in the messages array).
 
 use echo_core::error::{LlmError, Result};
-use echo_core::llm::capabilities::resolve_thinking_profile;
+use echo_core::llm::capabilities::{
+    ModelProfileResolution, ModelProfileResolver, ProviderCapabilityOverride,
+};
 use echo_core::llm::types::{
     ChatCompletionResponse, ContentPart, DeltaFunctionCall, DeltaMessage, DeltaToolCall,
     FunctionCall, Message, MessageContent, ReasoningBlock, Role, ToolCall, Usage,
@@ -20,7 +22,7 @@ use super::anthropic_cache::AnthropicCachePlan;
 use super::client::{
     JsonSseEvent, ensure_request_not_cancelled, post_json_request, stream_json_sse,
 };
-use super::config::validate_model_input_modalities;
+use super::config::{protocol_fact_set, validate_model_input_modalities};
 use futures::stream::BoxStream;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -32,8 +34,9 @@ pub struct AnthropicClient {
     api_key: String,
     model: String,
     base_url: String,
+    provider_name: String,
+    model_profile_resolver: ModelProfileResolver,
     input_modalities: Vec<ModelInputModality>,
-    thinking_protocol: ThinkingProtocol,
     timeouts: LlmTimeouts,
 }
 
@@ -60,20 +63,19 @@ impl AnthropicClient {
     pub fn new(api_key: impl Into<String>, model: impl Into<String>) -> Self {
         let model = model.into();
         let base_url = "https://api.anthropic.com/v1/messages".to_string();
-        let thinking_protocol = resolve_thinking_profile(
-            "anthropic",
-            &model,
-            LlmApiProtocol::Anthropic,
-            Some(&base_url),
-        )
-        .protocol;
+        let provider_name = "anthropic".to_string();
+        let model_profile_resolver = ModelProfileResolver::new().register_protocol_facts(
+            &provider_name,
+            protocol_fact_set(LlmApiProtocol::Anthropic, std::time::SystemTime::now()),
+        );
         Self {
             client: Arc::new(Self::build_http_client()),
             api_key: api_key.into(),
             model,
             base_url,
+            provider_name,
+            model_profile_resolver,
             input_modalities: ModelInputModality::all_supported(),
-            thinking_protocol,
             timeouts: LlmTimeouts::default(),
         }
     }
@@ -85,22 +87,31 @@ impl AnthropicClient {
     ) -> Self {
         let base_url = base_url.into();
         let model = model.into();
-        let thinking_protocol = resolve_thinking_profile(
-            "anthropic",
-            &model,
-            LlmApiProtocol::Anthropic,
-            Some(&base_url),
-        )
-        .protocol;
+        let provider_name = "anthropic".to_string();
+        let model_profile_resolver = ModelProfileResolver::new().register_protocol_facts(
+            &provider_name,
+            protocol_fact_set(LlmApiProtocol::Anthropic, std::time::SystemTime::now()),
+        );
         Self {
             client: Arc::new(Self::build_http_client()),
             api_key: api_key.into(),
             model,
             base_url,
+            provider_name,
+            model_profile_resolver,
             input_modalities: ModelInputModality::all_supported(),
-            thinking_protocol,
             timeouts: LlmTimeouts::default(),
         }
+    }
+
+    pub(crate) fn with_model_profile_resolver(
+        mut self,
+        provider_name: impl Into<String>,
+        resolver: ModelProfileResolver,
+    ) -> Self {
+        self.provider_name = provider_name.into();
+        self.model_profile_resolver = resolver;
+        self
     }
 
     pub fn with_input_modalities(mut self, input_modalities: Vec<ModelInputModality>) -> Self {
@@ -356,7 +367,7 @@ impl AnthropicClient {
         let max_tokens = request.max_tokens.unwrap_or(4096);
         let (thinking, effort) = build_anthropic_thinking(
             &self.model,
-            self.thinking_protocol,
+            self.model_profile_resolution().profile.thinking_protocol,
             &request.thinking,
             max_tokens,
         );
@@ -761,6 +772,28 @@ impl LlmClient for AnthropicClient {
 
     fn model_name(&self) -> &str {
         &self.model
+    }
+
+    fn provider_name(&self) -> Option<&str> {
+        Some(&self.provider_name)
+    }
+
+    fn protocol_capabilities(&self) -> ProviderCapabilityOverride {
+        ProviderCapabilityOverride::anthropic_protocol()
+    }
+
+    fn model_profile_resolution(&self) -> ModelProfileResolution {
+        self.model_profile_resolver.resolve_for_protocol_at(
+            &self.provider_name,
+            &self.model,
+            LlmApiProtocol::Anthropic,
+            Some(&self.base_url),
+            std::time::SystemTime::now(),
+        )
+    }
+
+    fn capabilities(&self) -> echo_core::llm::capabilities::ProviderCapabilities {
+        self.model_profile_resolution().profile.capabilities
     }
 }
 

@@ -3,19 +3,19 @@ schema_version: 1
 id: finding.model-fact-freshness-authority
 kind: finding
 type: authority_conflict
-status: open
+status: resolved
 severity: medium
 primary_focus: state_authority
 focus: [contract_evidence, trigger_input]
 boundary_ref: boundary.llm-provider-runtime
 behavior_refs: [behavior.llm-provider-execution]
 rule_refs: [rule.provider-protocol-boundary]
-evidence_refs: [evidence.provider-protocol-quality]
+evidence_refs: [evidence.provider-protocol-quality, evidence.model-facts-authority-repair, evidence.model-facts-authority-verification]
 audit_refs: [audit.llm-provider-runtime.contract-evidence]
 decision_refs: []
-repair_evidence_refs: []
-verification_evidence_refs: []
-rereview_audit_refs: []
+repair_evidence_refs: [evidence.model-facts-authority-repair]
+verification_evidence_refs: [evidence.model-facts-authority-verification]
+rereview_audit_refs: [audit.model-facts-freshness-rereview]
 discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 ---
 
@@ -39,4 +39,4 @@ Provider 更新模型能力后，预算、工具和 thinking policy 可继续使
 
 ## 处理记录
 
-Contract Audit 确认；需 semantic-decide 确定允许内置的保守范围与刷新责任。
+ADR 0045 DU-68与ADR 0047完成裁决；本修复建立带source/version/time/confidence的唯一resolver、additive config sidecar、per-run freshness与预算safe point。独立 rereview Audit 已覆盖 fresh-wins、无 client snapshot refresh、caller complement 与 tokenizer boundary；完整 workspace delivery gate 仍是合并前置条件。

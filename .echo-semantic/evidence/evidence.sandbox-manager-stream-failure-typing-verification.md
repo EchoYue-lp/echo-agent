@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.sandbox-manager-stream-failure-typing-verification
 kind: evidence
-observed_at: source:56226f8a9b3999cbd88d702dc1dbb060470a20625824d22d56f562047beb4be3
+observed_at: source:46382a3fd5e3196b9c5c541945609af9ca0bed79299d0786e1fbb4f7e375024a
 source_refs:
   - echo-execution/src/sandbox/manager.rs
   - echo-execution/src/sandbox/local.rs
@@ -37,7 +37,7 @@ panic-policy Clippy、formatter 与 diff check 均 exit 0。
 ## 来源与范围
 
 所有命令针对候选 `3f63bf78`、`origin/main@2490fd7824eb7269d1984c893387b34e25a41ac5`
-基准和 `source:56226f8a9b3999cbd88d702dc1dbb060470a20625824d22d56f562047beb4be3`。
+基准和 `source:46382a3fd5e3196b9c5c541945609af9ca0bed79299d0786e1fbb4f7e375024a`。
 这组收据证明 backend 建流失败的 typed terminal 行为，不证明真实外部沙箱服务或远端
 平台信号。
 

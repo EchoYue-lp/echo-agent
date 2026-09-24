@@ -4,7 +4,7 @@ id: map.tool-permission-sandbox
 kind: capability_map
 title: Tool、Permission、Sandbox 与外部 Effect
 risk: high
-observed_at: source:56226f8a9b3999cbd88d702dc1dbb060470a20625824d22d56f562047beb4be3
+observed_at: source:46382a3fd5e3196b9c5c541945609af9ca0bed79299d0786e1fbb4f7e375024a
 boundary_refs: [boundary.tool-permission-sandbox]
 behavior_refs: [behavior.effect-permission-execution]
 rule_refs: [rule.permission-effect-order]

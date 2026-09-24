@@ -6,6 +6,9 @@
 //! `previous_response_id`, hosted conversations, or server-side storage.
 
 use echo_core::error::{LlmError, Result};
+use echo_core::llm::capabilities::{
+    ModelFactInputs, ModelProfileResolution, ModelProfileResolver, ProviderCapabilityOverride,
+};
 use echo_core::llm::types::{
     ChatCompletionResponse, Choice, ContentPart, DeltaFunctionCall, DeltaMessage, DeltaToolCall,
     FunctionCall, Message, MessageContent, ReasoningBlock, ResponseFormat, Role, TokenUsageDetails,
@@ -33,6 +36,7 @@ use super::thinking_translate::translate_thinking_openai_compat;
 pub struct ResponsesClient {
     client: Arc<Client>,
     config: LlmConfig,
+    model_profile_resolver: ModelProfileResolver,
     header_map: HeaderMap,
 }
 
@@ -40,19 +44,30 @@ impl ResponsesClient {
     /// Create a Responses client from an injected provider configuration.
     pub fn new(config: LlmConfig) -> Result<Self> {
         let header_map = assemble_req_header(&config)?;
+        let model_profile_resolver = config
+            .model_profile_resolver_at(std::time::SystemTime::now(), &ModelFactInputs::default());
         Ok(Self {
             client: Arc::new(Self::build_http_client()),
             config,
+            model_profile_resolver,
             header_map,
         })
+    }
+
+    pub(crate) fn with_model_profile_resolver(mut self, resolver: ModelProfileResolver) -> Self {
+        self.model_profile_resolver = resolver;
+        self
     }
 
     /// Create a Responses client with a shared HTTP client.
     pub fn with_client(client: Arc<Client>, config: LlmConfig) -> Result<Self> {
         let header_map = assemble_req_header(&config)?;
+        let model_profile_resolver = config
+            .model_profile_resolver_at(std::time::SystemTime::now(), &ModelFactInputs::default());
         Ok(Self {
             client,
             config,
+            model_profile_resolver,
             header_map,
         })
     }
@@ -112,7 +127,7 @@ impl ResponsesClient {
         let thinking = translate_thinking_openai_compat(
             &self.config.model,
             self.config.api_protocol,
-            self.config.thinking_protocol,
+            self.model_profile_resolution().profile.thinking_protocol,
             &request.thinking,
         );
         let mut body = json!({
@@ -204,6 +219,28 @@ impl LlmClient for ResponsesClient {
 
     fn model_name(&self) -> &str {
         &self.config.model
+    }
+
+    fn provider_name(&self) -> Option<&str> {
+        self.config.provider_name.as_deref()
+    }
+
+    fn protocol_capabilities(&self) -> ProviderCapabilityOverride {
+        ProviderCapabilityOverride::openai_responses_protocol()
+    }
+
+    fn model_profile_resolution(&self) -> ModelProfileResolution {
+        self.model_profile_resolver.resolve_for_protocol_at(
+            self.config.provider_name.as_deref().unwrap_or(""),
+            &self.config.model,
+            self.config.api_protocol,
+            Some(&self.config.base_url),
+            std::time::SystemTime::now(),
+        )
+    }
+
+    fn capabilities(&self) -> echo_core::llm::capabilities::ProviderCapabilities {
+        self.model_profile_resolution().profile.capabilities
     }
 }
 
@@ -1112,6 +1149,29 @@ mod tests {
             thinking_protocol: echo_core::llm::ThinkingProtocol::OpenaiReasoningEffort,
             timeouts: echo_core::llm::LlmTimeouts::default(),
         }
+    }
+
+    #[test]
+    fn responses_protocol_facts_do_not_follow_the_configured_provider_label()
+    -> std::result::Result<(), String> {
+        let custom = ResponsesClient::new(test_config()).map_err(|error| error.to_string())?;
+        assert_eq!(
+            custom.protocol_capabilities(),
+            ProviderCapabilityOverride::openai_responses_protocol()
+        );
+        assert!(!custom.capabilities().structured_output);
+        assert!(!custom.capabilities().tool_support);
+
+        let mut openai_config = test_config();
+        openai_config.provider_name = Some("openai".to_string());
+        let openai = ResponsesClient::new(openai_config).map_err(|error| error.to_string())?;
+        assert_eq!(
+            openai.protocol_capabilities(),
+            custom.protocol_capabilities()
+        );
+        assert!(openai.capabilities().structured_output);
+        assert!(openai.capabilities().tool_support);
+        Ok(())
     }
 
     fn is_invalid_response<T>(result: &Result<T>) -> bool {

@@ -76,8 +76,10 @@ pub mod cache {
 
 // Core traits from echo-core
 pub use echo_core::llm::capabilities::{
-    ModelProfile, ModelProfileOverride, ModelProfileResolver, ProviderCapabilities,
-    ThinkingProfile, infer_context_window, resolve_thinking_profile,
+    BUILT_IN_MODEL_FACTS_VERSION, ModelFactConfidence, ModelFactInputs, ModelFactMetadata,
+    ModelFactSet, ModelFactSource, ModelProfile, ModelProfileOverride, ModelProfileResolution,
+    ModelProfileResolver, ProviderCapabilities, ProviderCapabilityOverride, ThinkingProfile,
+    infer_context_window, resolve_thinking_profile,
 };
 pub use echo_core::llm::{
     ChatChunk, ChatRequest, ChatResponse, LlmApiProtocol, LlmClient, LlmTimeouts,
@@ -86,7 +88,8 @@ pub use echo_core::llm::{
 
 // Provider implementations and explicit runtime configuration.
 pub use echo_integration::providers::{
-    AnthropicClient, LlmConfig, OpenAiClient, ResponsesClient, resolve_protocol_endpoint,
+    AnthropicClient, LlmConfig, OpenAiClient, ResponsesClient, SourcedLlmConfig,
+    resolve_protocol_endpoint,
 };
 
 pub use types::{JsonSchemaSpec, Message as LlmMessage, ResponseFormat, ToolDefinition};
