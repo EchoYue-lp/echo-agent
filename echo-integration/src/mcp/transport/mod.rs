@@ -68,6 +68,7 @@ pub(super) struct CloseCoordinator {
 
 pub(super) struct CloseReceipt {
     status: Mutex<CloseStatus>,
+    producer: Mutex<Option<tokio::task::JoinHandle<()>>>,
     changed: Notify,
 }
 
@@ -76,6 +77,7 @@ impl CloseCoordinator {
         Arc::new(Self {
             current: Mutex::new(Arc::new(CloseReceipt {
                 status: Mutex::new(CloseStatus::Open),
+                producer: Mutex::new(None),
                 changed: Notify::new(),
             })),
         })
@@ -95,6 +97,15 @@ impl CloseCoordinator {
             CloseStatus::Failed(_) => {
                 *current = Arc::new(CloseReceipt {
                     status: Mutex::new(CloseStatus::Closing),
+                    producer: Mutex::new(None),
+                    changed: Notify::new(),
+                });
+                true
+            }
+            CloseStatus::Closing if current.producer_finished_without_receipt() => {
+                *current = Arc::new(CloseReceipt {
+                    status: Mutex::new(CloseStatus::Closing),
+                    producer: Mutex::new(None),
                     changed: Notify::new(),
                 });
                 true
@@ -106,6 +117,21 @@ impl CloseCoordinator {
 }
 
 impl CloseReceipt {
+    fn producer_finished_without_receipt(&self) -> bool {
+        self.producer
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+            .is_some_and(tokio::task::JoinHandle::is_finished)
+    }
+
+    pub(super) fn retain_producer(&self, producer: tokio::task::JoinHandle<()>) {
+        *self
+            .producer
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(producer);
+    }
+
     fn status(&self) -> MutexGuard<'_, CloseStatus> {
         self.status
             .lock()
