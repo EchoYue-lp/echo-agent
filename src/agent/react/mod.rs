@@ -20,7 +20,7 @@ use crate::error::{LlmError, ReactError, Result};
 use crate::guard::GuardManager;
 #[cfg(feature = "human-loop")]
 use crate::human_loop::{HumanLoopProvider, PermissionService};
-use crate::llm::LlmConfig;
+use crate::llm::{LlmConfig, SourcedLlmConfig};
 #[cfg(feature = "mcp")]
 use crate::mcp::{McpClient, McpManager};
 use crate::memory::snapshot::{SnapshotManager, StateSnapshot};
@@ -91,6 +91,34 @@ pub(crate) fn is_retryable_llm_error(err: &ReactError) -> bool {
             _ => false,
         },
         _ => false,
+    }
+}
+
+pub(crate) fn merge_model_profile_resolution(
+    current: Option<&echo_core::llm::capabilities::ModelProfileResolution>,
+    fresh: echo_core::llm::capabilities::ModelProfileResolution,
+) -> echo_core::llm::capabilities::ModelProfileResolution {
+    let same_identity = current.is_some_and(|current| {
+        let fresh_provider = fresh.profile.provider.trim();
+        current
+            .profile
+            .model_name
+            .trim()
+            .eq_ignore_ascii_case(fresh.profile.model_name.trim())
+            && (fresh_provider.is_empty()
+                || current
+                    .profile
+                    .provider
+                    .trim()
+                    .eq_ignore_ascii_case(fresh_provider))
+    });
+    if !same_identity {
+        return fresh;
+    }
+    let now = std::time::SystemTime::now();
+    match current {
+        Some(resolution) => fresh.with_missing_source_layers_from(&resolution.refresh_at(now), now),
+        None => fresh,
     }
 }
 
@@ -384,7 +412,7 @@ impl ReactAgent {
             && let Some(profile_window) = config
                 .model_profile
                 .as_ref()
-                .and_then(|profile| profile.context_window)
+                .and_then(|resolution| resolution.profile.context_window)
                 .and_then(|window| usize::try_from(window).ok())
         {
             config.token_limit = profile_window;
@@ -816,7 +844,7 @@ impl ReactAgent {
         if let Some(suffix) = config
             .model_profile
             .as_ref()
-            .and_then(|profile| profile.prompt_suffix.as_deref())
+            .and_then(|resolution| resolution.profile.prompt_suffix.as_deref())
             .filter(|suffix| !suffix.trim().is_empty())
         {
             prompt.push_str("\n\n");
@@ -986,9 +1014,19 @@ impl ReactAgent {
         self
     }
 
+    /// Inject LLM configuration together with sourced model facts.
+    pub fn with_sourced_llm_config(mut self, config: SourcedLlmConfig) -> Self {
+        self.set_sourced_llm_config(config);
+        self
+    }
+
     /// Inject a custom LLM client.
     pub fn with_llm_client(mut self, client: Arc<dyn crate::llm::LlmClient>) -> Self {
         self.config.model_name = client.model_name().to_string();
+        self.config.model_profile = Some(merge_model_profile_resolution(
+            self.config.model_profile.as_ref(),
+            client.model_profile_resolution(),
+        ));
         self.llm_client = Some(client);
         self
     }
@@ -998,25 +1036,34 @@ impl ReactAgent {
     /// Builds an LLM client from the config and sets it so that subsequent API
     /// calls use the provided credentials and explicit protocol.
     pub fn set_llm_config(&mut self, config: LlmConfig) {
-        self.config.model_name = config.model.clone();
+        self.set_sourced_llm_config(SourcedLlmConfig::new(config));
+    }
+
+    /// Set LLM configuration together with sourced model facts.
+    pub fn set_sourced_llm_config(&mut self, config: SourcedLlmConfig) {
+        self.config.model_name = config.config.model.clone();
+        self.config.model_profile = Some(merge_model_profile_resolution(
+            self.config.model_profile.as_ref(),
+            config.resolve_model_profile_at(std::time::SystemTime::now()),
+        ));
         match config.build_client() {
             Ok(client) => {
                 tracing::info!(
-                    model = %config.model,
+                    model = %config.config.model,
                     "LLM client built from LlmConfig, credential injection active"
                 );
-                self.install_llm_config(config, Arc::from(client));
+                self.install_llm_config(config.config, Arc::from(client));
                 return;
             }
             Err(e) => {
                 tracing::warn!(
-                    model = %config.model,
+                    model = %config.config.model,
                     error = %e,
                     "Failed to build LLM client from explicit LlmConfig"
                 );
             }
         }
-        self.llm_config = Some(config);
+        self.llm_config = Some(config.config);
     }
 
     pub(crate) fn install_llm_config(
@@ -1025,6 +1072,10 @@ impl ReactAgent {
         client: Arc<dyn crate::llm::LlmClient>,
     ) {
         self.config.model_name = config.model.clone();
+        self.config.model_profile = Some(merge_model_profile_resolution(
+            self.config.model_profile.as_ref(),
+            client.model_profile_resolution(),
+        ));
         self.llm_client = Some(client);
         self.llm_config = Some(config);
     }
@@ -1032,6 +1083,10 @@ impl ReactAgent {
     /// Set a custom LLM client.
     pub fn set_llm_client(&mut self, client: Arc<dyn crate::llm::LlmClient>) {
         self.config.model_name = client.model_name().to_string();
+        self.config.model_profile = Some(merge_model_profile_resolution(
+            self.config.model_profile.as_ref(),
+            client.model_profile_resolution(),
+        ));
         self.llm_client = Some(client);
     }
 
@@ -2322,7 +2377,7 @@ impl ReactAgent {
                 .config
                 .model_profile
                 .as_ref()
-                .map(|profile| profile.provider.clone()),
+                .map(|resolution| resolution.profile.provider.clone()),
             turn_id: turn_id.map(str::to_string),
             execution_id: execution_id.map(str::to_string),
             session_id: conversation_id

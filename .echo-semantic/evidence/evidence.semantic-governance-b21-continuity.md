@@ -22,7 +22,7 @@ evidence_type: semantic_continuity
 merge_base_revision: b21aba01b34e74c93d783a89db895282ba831c3c
 predecessor_revisions:
   - b21aba01b34e74c93d783a89db895282ba831c3c
-result_snapshot: source:1bcfbd1131476ae872a2dc89326675abd7c02dd26d56c8d29a058cd91fb308fc
+result_snapshot: source:72cb99ad1ed788f5702bdb82f8bc4757f90f5513ce1f0a7052a73dd2a7d616ea
 resolutions:
   "behavior.sdk-facade-routing":
     disposition: resolved_conflict
@@ -87,7 +87,7 @@ resolutions:
     decision_authorities: *continuity_authority
     compatibility_impact: 旧SDK子图未知项退役，全workspace baseline已闭合路径和行为模型且保留具体动态unknown
     rollback_ref: 按ADR 0041恢复b21aba01 discovery unknown并移除workspace baseline后，移除此resolution并重跑continuity
-  "evidence.sdk-contracts#source:32b420e6f7b28d734215ecb15db11f14e20086bbc7bbc59d8a8ce4454b9167ea":
+  "evidence.sdk-contracts#source:72cb99ad1ed788f5702bdb82f8bc4757f90f5513ce1f0a7052a73dd2a7d616ea":
     disposition: retired
     predecessor_fingerprints:
       b21aba01b34e74c93d783a89db895282ba831c3c: 53151b64ae65c5b1214b88a01fc12df37ccc091b58da2db01f451482a346df29
@@ -95,7 +95,7 @@ resolutions:
     decision_authorities: *continuity_authority
     compatibility_impact: 仅退役inventory.rs旧blob依赖，当前inventory和合同测试继续有效
     rollback_ref: 按ADR 0041恢复该旧blob和证据source ref后，移除此resolution并重跑continuity
-  "evidence.sdk-contracts#source:35635cc0a36bab6f610d6bf3600715478c8366008c5fa3487578cbc57a5991d8":
+  "evidence.sdk-contracts#source:72cb99ad1ed788f5702bdb82f8bc4757f90f5513ce1f0a7052a73dd2a7d616ea":
     disposition: retired
     predecessor_fingerprints:
       b21aba01b34e74c93d783a89db895282ba831c3c: 18ef8a0f6331c8230b0772bd9458a38626b47e6a3ca0826c89947144e3cb25d4
@@ -103,7 +103,7 @@ resolutions:
     decision_authorities: *continuity_authority
     compatibility_impact: 仅退役revisioned task旧blob依赖，当前CAS修复由独立Finding和Evidence拥有
     rollback_ref: 按ADR 0041恢复该旧blob和证据source ref后，移除此resolution并重跑continuity
-  "evidence.sdk-contracts#source:426fa3b6642b1fff7d6f9ab9f1da307282feeca815bf81f516742ee0b28b6e4b":
+  "evidence.sdk-contracts#source:72cb99ad1ed788f5702bdb82f8bc4757f90f5513ce1f0a7052a73dd2a7d616ea":
     disposition: retired
     predecessor_fingerprints:
       b21aba01b34e74c93d783a89db895282ba831c3c: 91fe17c88c077800e27b7ccfdc13e3625456275e8a6e19c5225b2dd2321978c9
@@ -111,7 +111,7 @@ resolutions:
     decision_authorities: *continuity_authority
     compatibility_impact: 仅退役TypeScript catalog旧blob依赖，当前external contract gate继续覆盖
     rollback_ref: 按ADR 0041恢复该旧blob和证据source ref后，移除此resolution并重跑continuity
-  "evidence.sdk-contracts#source:4a86b212b87eebc92f0fc432454fef61bbd7f86871f84eff4ccca9331eddb9c3":
+  "evidence.sdk-contracts#source:72cb99ad1ed788f5702bdb82f8bc4757f90f5513ce1f0a7052a73dd2a7d616ea":
     disposition: retired
     predecessor_fingerprints:
       b21aba01b34e74c93d783a89db895282ba831c3c: 48f742e82a39d91ae3d4ea0688db9fd84e465b1589a3fecc4c06be5edd49fa47
@@ -119,7 +119,7 @@ resolutions:
     decision_authorities: *continuity_authority
     compatibility_impact: 仅退役旧operation catalog blob依赖，当前catalog仍由生成合同校验
     rollback_ref: 按ADR 0041恢复该旧blob和证据source ref后，移除此resolution并重跑continuity
-  "evidence.sdk-contracts#source:4d6c04985154a23a9af488d00c81c5db942a4c8f465c3e5528dc1accf0595866":
+  "evidence.sdk-contracts#source:72cb99ad1ed788f5702bdb82f8bc4757f90f5513ce1f0a7052a73dd2a7d616ea":
     disposition: retired
     predecessor_fingerprints:
       b21aba01b34e74c93d783a89db895282ba831c3c: 75da46bd860194b12813f604c0d6982f608a77647665fbfa8de3105048bf53e0
@@ -127,7 +127,7 @@ resolutions:
     decision_authorities: *continuity_authority
     compatibility_impact: 仅退役Improve loop旧blob依赖，当前iteration修复由独立Finding和Evidence拥有
     rollback_ref: 按ADR 0041恢复该旧blob和证据source ref后，移除此resolution并重跑continuity
-  "evidence.sdk-contracts#source:4fdfdab6ad12b22f4c3564516428d9790e3e5beb6dfa80ce7329fea36fd5d6bc":
+  "evidence.sdk-contracts#source:72cb99ad1ed788f5702bdb82f8bc4757f90f5513ce1f0a7052a73dd2a7d616ea":
     disposition: retired
     predecessor_fingerprints:
       b21aba01b34e74c93d783a89db895282ba831c3c: 6fb826edabc49d2562b4dfefdf1b9865225d280dc99b2c2d9430022e3153d520
@@ -135,7 +135,7 @@ resolutions:
     decision_authorities: *continuity_authority
     compatibility_impact: 仅退役parity schema旧blob依赖，schema v2和生成物检查继续有效
     rollback_ref: 按ADR 0041恢复该旧blob和证据source ref后，移除此resolution并重跑continuity
-  "evidence.sdk-contracts#source:66ac870a436382ca2d401d55887b3f5bf4ad640832831b152d76ac6cb57a9d7c":
+  "evidence.sdk-contracts#source:72cb99ad1ed788f5702bdb82f8bc4757f90f5513ce1f0a7052a73dd2a7d616ea":
     disposition: retired
     predecessor_fingerprints:
       b21aba01b34e74c93d783a89db895282ba831c3c: 3e27d5e3496c4659619e99f7047246a8927cc316a9d666c4ce319ff180142b35
@@ -143,7 +143,7 @@ resolutions:
     decision_authorities: *continuity_authority
     compatibility_impact: 仅退役Java parity test旧blob依赖，当前external contract gate继续覆盖
     rollback_ref: 按ADR 0041恢复该旧blob和证据source ref后，移除此resolution并重跑continuity
-  "evidence.sdk-contracts#source:6f5348656cd4e60d29c836e52c3e24b76a75b040d2055cfac5d1bf0326fa4790":
+  "evidence.sdk-contracts#source:72cb99ad1ed788f5702bdb82f8bc4757f90f5513ce1f0a7052a73dd2a7d616ea":
     disposition: retired
     predecessor_fingerprints:
       b21aba01b34e74c93d783a89db895282ba831c3c: de78f6aa565b9d25f989cc14ac80942cc47451a1eadd349b8b36f4386923c198
@@ -151,7 +151,7 @@ resolutions:
     decision_authorities: *continuity_authority
     compatibility_impact: 仅退役public API inventory旧blob依赖，当前inventory继续作为Rust drift权威
     rollback_ref: 按ADR 0041恢复该旧blob和证据source ref后，移除此resolution并重跑continuity
-  "evidence.sdk-contracts#source:89124f4d3b44bd898aa06aac9ccd542314a56b5390047c5032e038525613f63d":
+  "evidence.sdk-contracts#source:72cb99ad1ed788f5702bdb82f8bc4757f90f5513ce1f0a7052a73dd2a7d616ea":
     disposition: retired
     predecessor_fingerprints:
       b21aba01b34e74c93d783a89db895282ba831c3c: 9a4ace001799d8abdba9b6fe59e589eecf854113e798a8a1921b1e46dc8ec8ba
@@ -159,7 +159,7 @@ resolutions:
     decision_authorities: *continuity_authority
     compatibility_impact: 仅退役Rust facade inventory test旧blob依赖，当前scope和alias断言继续覆盖
     rollback_ref: 按ADR 0041恢复该旧blob和证据source ref后，移除此resolution并重跑continuity
-  "evidence.sdk-contracts#source:9d0901fd1f4eb24cbf176b0ed780ff154fc0e52e4b94b256e50fdcd1018cabab":
+  "evidence.sdk-contracts#source:72cb99ad1ed788f5702bdb82f8bc4757f90f5513ce1f0a7052a73dd2a7d616ea":
     disposition: retired
     predecessor_fingerprints:
       b21aba01b34e74c93d783a89db895282ba831c3c: fc527e766a893371f7a475b9b758b24bf4360864ec20b29b3920b95777f8f209
@@ -167,7 +167,7 @@ resolutions:
     decision_authorities: *continuity_authority
     compatibility_impact: 仅退役Python catalog旧blob依赖，当前external contract gate继续覆盖
     rollback_ref: 按ADR 0041恢复该旧blob和证据source ref后，移除此resolution并重跑continuity
-  "evidence.sdk-contracts#source:a59e3b9eb419a7deb16c8211e9d3f13230e9cd8f9e096fd226c1a498c2eca866":
+  "evidence.sdk-contracts#source:72cb99ad1ed788f5702bdb82f8bc4757f90f5513ce1f0a7052a73dd2a7d616ea":
     disposition: retired
     predecessor_fingerprints:
       b21aba01b34e74c93d783a89db895282ba831c3c: 70222e79fb94edebe0ab21eab6af204e7648503ed4c3779bbe3e2daf6e382871
@@ -175,7 +175,7 @@ resolutions:
     decision_authorities: *continuity_authority
     compatibility_impact: 仅退役Eval runner旧blob依赖，当前workspace、settlement和trace修复由独立Finding和Evidence拥有
     rollback_ref: 按ADR 0041恢复该旧blob和证据source ref后，移除此resolution并重跑continuity
-  "evidence.sdk-contracts#source:cf8a478a48c3458009224cf19301c8c008604da2120b7faaf7f8d0a9dbfea612":
+  "evidence.sdk-contracts#source:72cb99ad1ed788f5702bdb82f8bc4757f90f5513ce1f0a7052a73dd2a7d616ea":
     disposition: retired
     predecessor_fingerprints:
       b21aba01b34e74c93d783a89db895282ba831c3c: 73da072b588e2499b70f8d36fcded4ffac38fc41b2d582baa8b86122d0b94d51
@@ -183,7 +183,7 @@ resolutions:
     decision_authorities: *continuity_authority
     compatibility_impact: 仅退役React capability旧blob依赖，当前stream validation修复由独立Finding和Evidence拥有
     rollback_ref: 按ADR 0041恢复该旧blob和证据source ref后，移除此resolution并重跑continuity
-  "evidence.sdk-contracts#source:fb9558861fd7c0804ffa045d8724c47a859215a176caa6c999f6468a39747ffe":
+  "evidence.sdk-contracts#source:72cb99ad1ed788f5702bdb82f8bc4757f90f5513ce1f0a7052a73dd2a7d616ea":
     disposition: retired
     predecessor_fingerprints:
       b21aba01b34e74c93d783a89db895282ba831c3c: 70c93a4afaf71e925b853fc86cbd6df3b9987981daa466268835ec43c4e9c8f1

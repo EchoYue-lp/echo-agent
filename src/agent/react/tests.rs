@@ -1,4 +1,4 @@
-use super::ReactAgent;
+use super::{ReactAgent, merge_model_profile_resolution};
 #[cfg(feature = "subagent")]
 use crate::agent::ReactAgentBuilder;
 use crate::agent::config::{AgentConfig, DEFAULT_TOKEN_LIMIT};
@@ -18,10 +18,223 @@ use crate::testing::{FailingMockAgent, MockAgent, MockTool};
 use serde_json::json;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::time::SystemTime;
 
 struct SharedSandboxCleanupProbe {
     active: AtomicBool,
     cleanup_calls: AtomicUsize,
+}
+
+#[test]
+fn model_profile_merge_retains_provider_and_exact_facts() {
+    use echo_core::llm::capabilities::{
+        ModelFactConfidence, ModelFactMetadata, ModelFactSet, ModelFactSource,
+        ModelProfileOverride, ModelProfileResolver,
+    };
+
+    let now = SystemTime::now();
+    let current = ModelProfileResolver::new()
+        .register_provider_facts(
+            "openai",
+            ModelFactSet::new(
+                ModelFactMetadata::new(
+                    ModelFactSource::ProviderAdapter,
+                    "test:provider",
+                    "provider-v1",
+                    now,
+                    None,
+                    ModelFactConfidence::VERIFIED,
+                ),
+                None,
+                ModelProfileOverride {
+                    max_output_tokens: Some(8_000),
+                    ..Default::default()
+                },
+            ),
+        )
+        .register_exact_model_facts(
+            "openai",
+            "gpt-5-test",
+            ModelFactSet::new(
+                ModelFactMetadata::new(
+                    ModelFactSource::ExactModel,
+                    "test:exact",
+                    "model-v1",
+                    now,
+                    None,
+                    ModelFactConfidence::VERIFIED,
+                ),
+                None,
+                ModelProfileOverride {
+                    context_window: Some(64_000),
+                    ..Default::default()
+                },
+            ),
+        )
+        .register_explicit_override(
+            "openai",
+            "gpt-5-test",
+            ModelFactSet::new(
+                ModelFactMetadata::new(
+                    ModelFactSource::CallerOverride,
+                    "test:legacy-caller",
+                    "caller-v1",
+                    now,
+                    None,
+                    ModelFactConfidence::VERIFIED,
+                ),
+                None,
+                ModelProfileOverride {
+                    context_window: Some(48_000),
+                    ..Default::default()
+                },
+            ),
+        )
+        .resolve_at("openai", "gpt-5-test", now);
+    let fresh = ModelProfileResolver::new()
+        .register_provider_facts(
+            "openai",
+            ModelFactSet::new(
+                ModelFactMetadata::new(
+                    ModelFactSource::ProviderAdapter,
+                    "test:provider",
+                    "provider-v2",
+                    now,
+                    None,
+                    ModelFactConfidence::VERIFIED,
+                ),
+                None,
+                ModelProfileOverride {
+                    max_output_tokens: Some(12_000),
+                    ..Default::default()
+                },
+            ),
+        )
+        .register_exact_model_facts(
+            "openai",
+            "gpt-5-test",
+            ModelFactSet::new(
+                ModelFactMetadata::new(
+                    ModelFactSource::ExactModel,
+                    "test:exact",
+                    "model-v2",
+                    now,
+                    None,
+                    ModelFactConfidence::VERIFIED,
+                ),
+                None,
+                ModelProfileOverride {
+                    context_window: Some(96_000),
+                    ..Default::default()
+                },
+            ),
+        )
+        .register_explicit_override(
+            "openai",
+            "gpt-5-test",
+            ModelFactSet::new(
+                ModelFactMetadata::new(
+                    ModelFactSource::CallerOverride,
+                    "test:fresh-caller",
+                    "caller-v2",
+                    now,
+                    None,
+                    ModelFactConfidence::VERIFIED,
+                ),
+                None,
+                ModelProfileOverride {
+                    max_output_tokens: Some(14_000),
+                    ..Default::default()
+                },
+            ),
+        )
+        .resolve_at("openai", "gpt-5-test", now);
+    let merged = merge_model_profile_resolution(Some(&current), fresh);
+
+    assert!(
+        merged
+            .registered_facts
+            .iter()
+            .any(|facts| facts.metadata.version == "provider-v2")
+    );
+    assert!(
+        !merged
+            .registered_facts
+            .iter()
+            .any(|facts| facts.metadata.version == "provider-v1")
+    );
+    assert!(
+        merged
+            .registered_facts
+            .iter()
+            .any(|facts| facts.metadata.version == "model-v2")
+    );
+    assert!(
+        merged
+            .registered_facts
+            .iter()
+            .any(|facts| facts.metadata.version == "caller-v1")
+    );
+    assert!(
+        merged
+            .registered_facts
+            .iter()
+            .any(|facts| facts.metadata.version == "caller-v2")
+    );
+    assert_eq!(merged.profile.context_window, Some(48_000));
+    assert_eq!(merged.profile.max_output_tokens, Some(14_000));
+}
+
+#[test]
+fn model_profile_merge_does_not_let_empty_fresh_fact_mask_lower_fact() {
+    use echo_core::llm::capabilities::{
+        ModelFactConfidence, ModelFactMetadata, ModelFactSet, ModelFactSource,
+        ModelProfileOverride, ModelProfileResolver,
+    };
+
+    let now = SystemTime::now();
+    let current = ModelProfileResolver::new()
+        .register_exact_model_facts(
+            "openai",
+            "future-model",
+            ModelFactSet::new(
+                ModelFactMetadata::new(
+                    ModelFactSource::ExactModel,
+                    "test:exact",
+                    "model-v1",
+                    now,
+                    None,
+                    ModelFactConfidence::VERIFIED,
+                ),
+                None,
+                ModelProfileOverride {
+                    context_window: Some(64_000),
+                    ..Default::default()
+                },
+            ),
+        )
+        .resolve_at("openai", "future-model", now);
+    let fresh = ModelProfileResolver::new()
+        .register_exact_model_facts(
+            "openai",
+            "future-model",
+            ModelFactSet::new(
+                ModelFactMetadata::new(
+                    ModelFactSource::ExactModel,
+                    "test:empty",
+                    "model-v2-empty",
+                    now,
+                    None,
+                    ModelFactConfidence::VERIFIED,
+                ),
+                None,
+                ModelProfileOverride::default(),
+            ),
+        )
+        .resolve_at("openai", "future-model", now);
+
+    let merged = merge_model_profile_resolution(Some(&current), fresh);
+    assert_eq!(merged.profile.context_window, Some(64_000));
 }
 
 impl crate::sandbox::SandboxExecutor for SharedSandboxCleanupProbe {

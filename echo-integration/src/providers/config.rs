@@ -5,10 +5,14 @@
 //! a concrete wire client and validates that requests respect model capabilities.
 
 use echo_core::error::{ConfigError, LlmError, Result};
-use echo_core::llm::capabilities::resolve_thinking_profile;
+use echo_core::llm::capabilities::{
+    ModelFactConfidence, ModelFactInputs, ModelFactMetadata, ModelFactSet, ModelFactSource,
+    ModelProfileOverride, ModelProfileResolution, ModelProfileResolver, ProviderCapabilityOverride,
+};
 use echo_core::llm::types::{ContentPart, Message, MessageContent};
 use echo_core::llm::{LlmApiProtocol, LlmTimeouts, ModelInputModality, ThinkingProtocol};
 use serde::{Deserialize, Serialize};
+use std::time::SystemTime;
 
 /// Resolve a provider API root or complete endpoint for one explicit protocol.
 ///
@@ -77,6 +81,8 @@ pub struct LlmConfig {
     #[serde(default = "ModelInputModality::text_only")]
     pub input_modalities: Vec<ModelInputModality>,
     /// Thinking wire dialect resolved centrally from the runtime contract.
+    /// This is a compatibility projection; request paths resolve the retained
+    /// sourced facts again at their invocation boundary.
     #[serde(default)]
     pub thinking_protocol: ThinkingProtocol,
     /// Request and streaming timeout policy shared by every provider transport.
@@ -119,19 +125,19 @@ impl LlmConfig {
             .into());
         }
         let base_url = resolve_protocol_endpoint(base_url.as_ref(), api_protocol)?;
-        let thinking_protocol =
-            resolve_thinking_profile(&provider_name, &model, api_protocol, Some(&base_url))
-                .protocol;
-        Ok(Self {
+        let observed_at = SystemTime::now();
+        let mut config = Self {
             provider_name: (!provider_name.trim().is_empty()).then_some(provider_name),
             api_protocol,
             base_url,
             api_key: api_key.into(),
             model,
             input_modalities: ModelInputModality::text_only(),
-            thinking_protocol,
+            thinking_protocol: ThinkingProtocol::None,
             timeouts: LlmTimeouts::default(),
-        })
+        };
+        config.refresh_thinking_protocol(observed_at);
+        Ok(config)
     }
 
     /// Set the concrete model's accepted input modalities.
@@ -146,20 +152,79 @@ impl LlmConfig {
         self
     }
 
+    /// Install fresh provider-wide facts.
+    pub fn with_provider_facts(self, facts: ModelFactSet) -> SourcedLlmConfig {
+        SourcedLlmConfig::new(self).with_provider_facts(facts)
+    }
+
+    /// Install fresh facts for this exact provider/model identity.
+    pub fn with_exact_model_facts(self, facts: ModelFactSet) -> SourcedLlmConfig {
+        SourcedLlmConfig::new(self).with_exact_model_facts(facts)
+    }
+
+    /// Install an exact caller override.
+    pub fn with_model_override(self, facts: ModelFactSet) -> SourcedLlmConfig {
+        SourcedLlmConfig::new(self).with_model_override(facts)
+    }
+
+    /// Resolve all configured facts at an explicit time.
+    pub fn resolve_model_profile_at(&self, now: SystemTime) -> ModelProfileResolution {
+        let provider = self.provider_name.as_deref().unwrap_or("");
+        self.model_profile_resolver_at(now, &ModelFactInputs::default())
+            .resolve_for_protocol_at(
+                provider,
+                &self.model,
+                self.api_protocol,
+                Some(&self.base_url),
+                now,
+            )
+    }
+
+    pub(crate) fn model_profile_resolver_at(
+        &self,
+        now: SystemTime,
+        facts: &ModelFactInputs,
+    ) -> ModelProfileResolver {
+        let provider = self.provider_name.as_deref().unwrap_or("");
+        facts.register_with(
+            ModelProfileResolver::new()
+                .register_protocol_facts(provider, protocol_fact_set(self.api_protocol, now)),
+            provider,
+            &self.model,
+        )
+    }
+
+    fn refresh_thinking_protocol(&mut self, now: SystemTime) {
+        self.thinking_protocol = self.resolve_model_profile_at(now).profile.thinking_protocol;
+    }
+
     /// Build the wire client selected by [`Self::api_protocol`].
     pub fn build_client(&self) -> Result<Box<dyn echo_core::llm::LlmClient>> {
+        SourcedLlmConfig::new(self.clone()).build_client()
+    }
+
+    pub(crate) fn build_client_with_resolver(
+        &self,
+        resolver: ModelProfileResolver,
+    ) -> Result<Box<dyn echo_core::llm::LlmClient>> {
         match self.api_protocol {
-            LlmApiProtocol::Responses => Ok(Box::new(super::responses::ResponsesClient::new(
-                self.clone(),
-            )?)),
-            LlmApiProtocol::ChatCompletions => {
-                Ok(Box::new(super::openai::OpenAiClient::new(self.clone())?))
-            }
+            LlmApiProtocol::Responses => Ok(Box::new(
+                super::responses::ResponsesClient::new(self.clone())?
+                    .with_model_profile_resolver(resolver),
+            )),
+            LlmApiProtocol::ChatCompletions => Ok(Box::new(
+                super::openai::OpenAiClient::new(self.clone())?
+                    .with_model_profile_resolver(resolver),
+            )),
             LlmApiProtocol::Anthropic => Ok(Box::new(
                 super::anthropic::AnthropicClient::with_base_url(
                     &self.base_url,
                     &self.api_key,
                     &self.model,
+                )
+                .with_model_profile_resolver(
+                    self.provider_name.clone().unwrap_or_default(),
+                    resolver,
                 )
                 .with_input_modalities(self.input_modalities.clone())
                 .with_timeouts(self.timeouts),
@@ -170,6 +235,79 @@ impl LlmConfig {
     pub(crate) fn validate_input_modalities(&self, messages: &[Message]) -> Result<()> {
         validate_model_input_modalities(&self.model, &self.input_modalities, messages)
     }
+}
+
+/// Serializable model-fact sidecar for an existing [`LlmConfig`].
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SourcedLlmConfig {
+    pub config: LlmConfig,
+    #[serde(default)]
+    pub facts: ModelFactInputs,
+}
+
+impl SourcedLlmConfig {
+    pub fn new(config: LlmConfig) -> Self {
+        Self {
+            config,
+            facts: ModelFactInputs::default(),
+        }
+    }
+
+    pub fn with_provider_facts(mut self, facts: ModelFactSet) -> Self {
+        self.facts.provider_facts = Some(facts);
+        self
+    }
+
+    pub fn with_exact_model_facts(mut self, facts: ModelFactSet) -> Self {
+        self.facts.exact_model_facts = Some(facts);
+        self
+    }
+
+    pub fn with_model_override(mut self, facts: ModelFactSet) -> Self {
+        self.facts.model_overrides.push(facts);
+        self
+    }
+
+    pub fn resolve_model_profile_at(&self, now: SystemTime) -> ModelProfileResolution {
+        let provider = self.config.provider_name.as_deref().unwrap_or("");
+        self.config
+            .model_profile_resolver_at(now, &self.facts)
+            .resolve_for_protocol_at(
+                provider,
+                &self.config.model,
+                self.config.api_protocol,
+                Some(&self.config.base_url),
+                now,
+            )
+    }
+
+    pub fn build_client(&self) -> Result<Box<dyn echo_core::llm::LlmClient>> {
+        self.config.build_client_with_resolver(
+            self.config
+                .model_profile_resolver_at(SystemTime::now(), &self.facts),
+        )
+    }
+}
+
+pub(crate) fn protocol_fact_set(
+    api_protocol: LlmApiProtocol,
+    observed_at: SystemTime,
+) -> ModelFactSet {
+    ModelFactSet::new_partial(
+        ModelFactMetadata::new(
+            ModelFactSource::ProviderAdapter,
+            format!("echo-integration::{api_protocol:?}"),
+            env!("CARGO_PKG_VERSION"),
+            observed_at,
+            None,
+            ModelFactConfidence::VERIFIED,
+        ),
+        ProviderCapabilityOverride::for_protocol(api_protocol),
+        ModelProfileOverride {
+            supports_streaming: Some(true),
+            ..Default::default()
+        },
+    )
 }
 
 fn normalize_input_modalities(
@@ -308,6 +446,165 @@ mod tests {
             config.thinking_protocol,
             ThinkingProtocol::OpenaiReasoningEffort
         );
+        Ok(())
+    }
+
+    #[test]
+    fn serialized_model_facts_drive_thinking_and_reject_stale_budget_facts()
+    -> std::result::Result<(), String> {
+        let now = SystemTime::now();
+        let fresh = ModelFactSet::new(
+            ModelFactMetadata::new(
+                ModelFactSource::ExactModel,
+                "provider:/models/future-model",
+                "etag-v2",
+                now,
+                now.checked_add(std::time::Duration::from_secs(60)),
+                ModelFactConfidence::from_percent_saturating(90),
+            ),
+            None,
+            ModelProfileOverride {
+                context_window: Some(64_000),
+                thinking_protocol: Some(ThinkingProtocol::ModelManaged),
+                ..Default::default()
+            },
+        );
+        let config = LlmConfig::for_provider(
+            "custom",
+            "https://gateway.example/v1",
+            "test-key",
+            "future-model",
+            LlmApiProtocol::ChatCompletions,
+        )
+        .map_err(|error| error.to_string())?
+        .with_exact_model_facts(fresh);
+        let encoded = serde_json::to_string(&config).map_err(|error| error.to_string())?;
+        let decoded = serde_json::from_str::<SourcedLlmConfig>(&encoded)
+            .map_err(|error| error.to_string())?;
+        let resolved = decoded.resolve_model_profile_at(now);
+        assert_eq!(resolved.profile.context_window, Some(64_000));
+        assert_eq!(
+            resolved.profile.thinking_protocol,
+            ThinkingProtocol::ModelManaged
+        );
+        assert!(resolved.applied_facts.iter().any(|metadata| {
+            metadata.source == ModelFactSource::ExactModel && metadata.version == "etag-v2"
+        }));
+
+        let stale = ModelFactSet::new(
+            ModelFactMetadata::new(
+                ModelFactSource::ExactModel,
+                "provider:/models/future-model",
+                "etag-v1",
+                SystemTime::UNIX_EPOCH,
+                Some(SystemTime::UNIX_EPOCH),
+                ModelFactConfidence::VERIFIED,
+            ),
+            None,
+            ModelProfileOverride {
+                context_window: Some(1_000_000),
+                thinking_protocol: Some(ThinkingProtocol::ModelManaged),
+                ..Default::default()
+            },
+        );
+        let stale_resolution = decoded
+            .with_exact_model_facts(stale)
+            .resolve_model_profile_at(now);
+        assert_eq!(stale_resolution.profile.context_window, None);
+        assert_eq!(
+            stale_resolution.profile.thinking_protocol,
+            ThinkingProtocol::None
+        );
+        assert!(
+            stale_resolution
+                .ignored_stale_facts
+                .iter()
+                .any(|metadata| metadata.version == "etag-v1")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_serialized_config_defaults_missing_fact_inputs() -> std::result::Result<(), String> {
+        let decoded = serde_json::from_value::<LlmConfig>(serde_json::json!({
+            "provider_name": "openai",
+            "api_protocol": "responses",
+            "base_url": "https://api.openai.com/v1/responses",
+            "api_key": "test-key",
+            "model": "gpt-5",
+            "input_modalities": ["text"],
+            "thinking_protocol": "openai_reasoning_effort",
+            "timeouts": {}
+        }))
+        .map_err(|error| error.to_string())?;
+        let resolution = decoded.resolve_model_profile_at(SystemTime::now());
+        assert!(resolution.profile.capabilities.structured_output);
+        assert!(resolution.applied_facts.iter().any(|metadata| {
+            metadata.source == ModelFactSource::ProviderAdapter
+                && metadata.provenance.contains("Responses")
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn partial_provider_facts_preserve_current_adapter_protocol() -> std::result::Result<(), String>
+    {
+        let now = SystemTime::now();
+        let sourced = LlmConfig::for_provider(
+            "custom",
+            "https://gateway.example/v1",
+            "test-key",
+            "future-model",
+            LlmApiProtocol::ChatCompletions,
+        )
+        .map_err(|error| error.to_string())?
+        .with_provider_facts(ModelFactSet::new(
+            ModelFactMetadata::new(
+                ModelFactSource::ProviderAdapter,
+                "provider:/models",
+                "provider-v2",
+                now,
+                None,
+                ModelFactConfidence::VERIFIED,
+            ),
+            None,
+            ModelProfileOverride {
+                max_output_tokens: Some(4_096),
+                ..Default::default()
+            },
+        ));
+        let resolution = sourced.resolve_model_profile_at(now);
+        assert_eq!(resolution.profile.max_output_tokens, Some(4_096));
+        assert!(resolution.profile.capabilities.streaming_tool_calls);
+        assert!(!resolution.profile.capabilities.named_sse_events);
+
+        let client = sourced.build_client().map_err(|error| error.to_string())?;
+        assert_eq!(
+            client.protocol_capabilities(),
+            ProviderCapabilityOverride::openai_chat_protocol()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn anthropic_adapter_capabilities_survive_custom_provider_label()
+    -> std::result::Result<(), String> {
+        let config = LlmConfig::for_provider(
+            "private-anthropic-gateway",
+            "https://gateway.example/v1/messages",
+            "test-key",
+            "claude-test",
+            LlmApiProtocol::Anthropic,
+        )
+        .map_err(|error| error.to_string())?;
+        let client = config.build_client().map_err(|error| error.to_string())?;
+        let capabilities = client.capabilities();
+
+        assert!(capabilities.image_input);
+        assert!(capabilities.tool_support);
+        assert!(capabilities.supports_parallel_tool_calls);
+        assert!(!capabilities.structured_output);
+        assert_eq!(capabilities.tokenizer_name, Some("claude"));
         Ok(())
     }
 

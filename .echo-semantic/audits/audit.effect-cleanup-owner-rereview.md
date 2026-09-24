@@ -5,19 +5,19 @@ kind: audit
 boundary_ref: boundary.tool-permission-sandbox
 lens: result_side_effect
 freshness: examined
-revision: source:c4ea5a4467fdfe6b2559835c2e6b02e20a5456fbe941b86fbeb7753c2eb16fa4
+revision: source:72cb99ad1ed788f5702bdb82f8bc4757f90f5513ce1f0a7052a73dd2a7d616ea
 finding_refs: [finding.effect-cleanup-owner]
 challenges:
   artifact-pending-and-path-identity:
-    revision: source:c4ea5a4467fdfe6b2559835c2e6b02e20a5456fbe941b86fbeb7753c2eb16fa4
+    revision: source:72cb99ad1ed788f5702bdb82f8bc4757f90f5513ce1f0a7052a73dd2a7d616ea
     source_refs: [echo-core/src/tools/artifact.rs, src/agent/react/run/pipeline.rs, docs/adr/0072-resource-cleanup-ownership.md]
     evidence_refs: [evidence.effect-cleanup-owner-repair, evidence.effect-cleanup-owner-verification]
   backend-exact-owner-and-agent-close:
-    revision: source:c4ea5a4467fdfe6b2559835c2e6b02e20a5456fbe941b86fbeb7753c2eb16fa4
+    revision: source:72cb99ad1ed788f5702bdb82f8bc4757f90f5513ce1f0a7052a73dd2a7d616ea
     source_refs: [echo-execution/src/sandbox/resource_owner.rs, echo-execution/src/sandbox/docker.rs, echo-execution/src/sandbox/k8s.rs, echo-execution/src/sandbox/manager.rs, src/agent/react/mod.rs]
     evidence_refs: [evidence.effect-cleanup-owner-repair, evidence.effect-cleanup-owner-verification]
   worktree-marker-and-receipt-compensation:
-    revision: source:c4ea5a4467fdfe6b2559835c2e6b02e20a5456fbe941b86fbeb7753c2eb16fa4
+    revision: source:72cb99ad1ed788f5702bdb82f8bc4757f90f5513ce1f0a7052a73dd2a7d616ea
     source_refs: [echo-tools/src/git_worktree.rs, docs/adr/0072-resource-cleanup-ownership.md]
     evidence_refs: [evidence.effect-cleanup-owner-repair, evidence.effect-cleanup-owner-verification]
 ---
