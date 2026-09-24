@@ -6,7 +6,7 @@ title: Cron Scheduler Runtime
 asset_type: state_authority
 status: active
 risk: high
-observed_at: source:757f499d4d9a40a4c27791933cb3d5e9d3b2dda76a1a28e4561e317d4719be94
+observed_at: 733d352fc719f922b21bab1cd46206139564367f
 boundary_refs: [boundary.task-subagent-workflow]
 code_refs: [echo-orchestration/src/scheduler/runner.rs, echo-orchestration/src/scheduler/cron_task.rs]
 consumer_refs: [echo-agent-learning/examples/demo70_scheduler.rs]

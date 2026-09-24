@@ -4,7 +4,7 @@ id: map.extension-lifecycle
 kind: capability_map
 title: MCP、Hook、Skill、Plugin 与 LSP 生命周期
 risk: high
-observed_at: source:757f499d4d9a40a4c27791933cb3d5e9d3b2dda76a1a28e4561e317d4719be94
+observed_at: source:13ff9de40ae621e1201c111201fda28402a397d7104e90595be0c5106482dbc0
 boundary_refs: [boundary.extension-lifecycle]
 behavior_refs: [behavior.extension-publication]
 rule_refs: [rule.extension-generation-authority, rule.permission-effect-order]
@@ -26,6 +26,8 @@ scenarios:
     source_refs: [echo-core/src/hooks/types.rs, echo-execution/src/skills/hooks.rs]
     finding_refs: [finding.hook-permission-precedence, finding.hook-protected-path]
     rule_refs: [rule.permission-effect-order]
+    evidence_refs: [evidence.hook-protected-path-repair, evidence.hook-protected-path-verification]
+    audit_refs: [audit.hook-protected-path-rereview]
   skill-discovery-activation-restore:
     status: mapped
     source_refs: [echo-execution/src/skills/external/loader.rs, echo-execution/src/skills/registry.rs, src/agent/react/capabilities.rs, src/agent/react/mod.rs]

@@ -5,23 +5,23 @@ kind: audit
 boundary_ref: boundary.eval-evolution
 lens: permission_external
 freshness: examined
-revision: source:757f499d4d9a40a4c27791933cb3d5e9d3b2dda76a1a28e4561e317d4719be94
+revision: 733d352fc719f922b21bab1cd46206139564367f
 finding_refs: [finding.pre-compaction-memory-trust-provenance]
 challenges:
   exact-origin-and-producer-admission:
-    revision: source:757f499d4d9a40a4c27791933cb3d5e9d3b2dda76a1a28e4561e317d4719be94
+    revision: 733d352fc719f922b21bab1cd46206139564367f
     source_refs: [src/agent/react/run/context.rs, src/agent/react/run/phases/compact.rs, src/memory_promoter.rs, src/evolution/triggers.rs, echo-state/src/compression/mod.rs]
     evidence_refs: [evidence.memory-provenance-authority-repair, evidence.memory-provenance-authority-verification]
   activation-and-recovery-authority:
-    revision: source:757f499d4d9a40a4c27791933cb3d5e9d3b2dda76a1a28e4561e317d4719be94
+    revision: 733d352fc719f922b21bab1cd46206139564367f
     source_refs: [echo-core/src/memory/types.rs, src/evolution/layer.rs, src/evolution/review.rs, src/evolution/dreaming.rs]
     evidence_refs: [evidence.memory-provenance-authority-repair, evidence.memory-provenance-authority-verification]
   agent-tool-and-hot-warm-recall:
-    revision: source:757f499d4d9a40a4c27791933cb3d5e9d3b2dda76a1a28e4561e317d4719be94
+    revision: 733d352fc719f922b21bab1cd46206139564367f
     source_refs: [src/agent/react/mod.rs, src/agent/react/builder.rs, src/evolution/recall.rs, src/evolution/layer.rs, src/tools/builtin/memory.rs, src/agent/react/tests.rs]
     evidence_refs: [evidence.memory-provenance-authority-repair, evidence.memory-provenance-authority-verification]
   public-contract-and-examples:
-    revision: source:757f499d4d9a40a4c27791933cb3d5e9d3b2dda76a1a28e4561e317d4719be94
+    revision: 733d352fc719f922b21bab1cd46206139564367f
     source_refs: [README.md, README.zh.md, docs/en/03-memory.md, docs/zh/03-memory.md, docs/adr/0070-memory-provenance-and-recall-authority.md, echo-agent-learning/tests/example_contracts/demo31_memory_tools.rs, echo-agent-learning/examples/demo18_semantic_memory.rs, echo-agent-learning/examples/demo27_sqlite_memory.rs, echo-agent-learning/examples/demo45_customer_service.rs]
     evidence_refs: [evidence.memory-provenance-authority-repair, evidence.memory-provenance-authority-verification]
 ---

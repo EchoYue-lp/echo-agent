@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.memory-provenance-authority-verification
 kind: evidence
-observed_at: source:757f499d4d9a40a4c27791933cb3d5e9d3b2dda76a1a28e4561e317d4719be94
+observed_at: 733d352fc719f922b21bab1cd46206139564367f
 source_refs:
   - echo-core/src/memory/types.rs
   - echo-state/src/compression/mod.rs
