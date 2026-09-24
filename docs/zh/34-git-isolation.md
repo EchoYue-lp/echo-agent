@@ -51,7 +51,7 @@ let config = WorktreeConfig {
     base: None,                // 默认为 HEAD
     path_suffix: None,         // 从分支名自动推导
 };
-let worktree = create_worktree(Path::new("."), &config)?;
+let worktree = create_worktree(Path::new("."), &config).await?;
 // worktree.path → /repo/.worktrees/feature-auth
 // worktree.branch → "feature-auth"
 // worktree.managed → true
@@ -64,17 +64,21 @@ let config = WorktreeConfig {
 };
 
 // 列出所有 worktree
-let all = list_worktrees(Path::new("."))?;
+let all = list_worktrees(Path::new(".")).await?;
 for wt in &all {
     println!("{} (branch: {})", wt.path.display(), wt.branch);
 }
 
 // 将 worktree 的变更合并回目标分支
-merge_worktree(Path::new("."), &worktree, "main")?;
+merge_worktree(Path::new("."), &worktree, "main").await?;
 
-// 移除 worktree 并删除其分支
-remove_worktree(Path::new("."), &worktree)?;
+// 只移除干净的托管 worktree；分支保留
+remove_worktree(Path::new("."), &worktree).await?;
 ```
+
+创建时目标路径必须尚不存在。`git worktree add` 开始后由独立 owner 完成 marker 写入；
+调用方取消不会留下未标记的成功 checkout。marker 失败仅在路径、分支和干净状态均得到
+确认时补偿移除；若结果不确定，错误中会保留路径和分支供人工核查。
 
 #### `WorktreeConfig`
 
@@ -125,7 +129,7 @@ Agent: 我来为 auth 重构创建隔离工作空间。
 | `merge_to` | 否 | 如设置，在移除前将 worktree 分支合并到此目标分支 |
 | `repo_path` | 否 | 仓库路径（默认当前工作目录） |
 
-风险等级：**Dangerous** — 可能删除分支并通过 merge 修改主工作树。
+风险等级：**Dangerous** — 可选 merge 可能修改目标工作树；移除 worktree 时保留分支。
 
 ```
 Agent: auth 工作完成，合并到 main 并清理。
@@ -367,7 +371,7 @@ let worktree = create_worktree(&repo_path, &WorktreeConfig {
     branch: "feature-auth".to_string(),
     base: Some("main".to_string()),
     path_suffix: None,
-})?;
+}).await?;
 
 // 2. 子代理在 worktree.path 中工作
 //    （write_file/delete_file 自动创建检查点）
@@ -376,8 +380,8 @@ let worktree = create_worktree(&repo_path, &WorktreeConfig {
 rollback_to_checkpoint(&worktree.path, "echo-checkpoint/1748864400");
 
 // 4. 合并并清理
-merge_worktree(&repo_path, &worktree, "main")?;
-remove_worktree(&repo_path, &worktree)?;
+merge_worktree(&repo_path, &worktree, "main").await?;
+remove_worktree(&repo_path, &worktree).await?;
 
 // 5. 清理旧的检查点标签
 cleanup_old_checkpoints(&repo_path, 10);

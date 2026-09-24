@@ -19,6 +19,83 @@ use serde_json::json;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+struct SharedSandboxCleanupProbe {
+    active: AtomicBool,
+    cleanup_calls: AtomicUsize,
+}
+
+impl crate::sandbox::SandboxExecutor for SharedSandboxCleanupProbe {
+    fn name(&self) -> &str {
+        "shared-cleanup-probe"
+    }
+
+    fn isolation_level(&self) -> crate::sandbox::IsolationLevel {
+        crate::sandbox::IsolationLevel::None
+    }
+
+    fn is_available(&self) -> futures::future::BoxFuture<'_, bool> {
+        Box::pin(async { false })
+    }
+
+    fn execute(
+        &self,
+        _command: crate::sandbox::SandboxCommand,
+    ) -> futures::future::BoxFuture<'_, crate::error::Result<crate::sandbox::ExecutionResult>> {
+        Box::pin(async {
+            Err(crate::error::ReactError::Other(
+                "cleanup probe does not execute commands".to_string(),
+            ))
+        })
+    }
+
+    fn cleanup(&self) -> futures::future::BoxFuture<'_, crate::error::Result<()>> {
+        Box::pin(async move {
+            self.cleanup_calls.fetch_add(1, Ordering::SeqCst);
+            if self.active.load(Ordering::SeqCst) {
+                Err(crate::error::ReactError::Sandbox(Box::new(
+                    crate::error::SandboxError::IoError(
+                        "shared sandbox owner remains active".to_string(),
+                    ),
+                )))
+            } else {
+                Ok(())
+            }
+        })
+    }
+}
+
+#[tokio::test]
+async fn agent_close_reports_shared_sandbox_owner_and_retries_after_settlement()
+-> crate::error::Result<()> {
+    let sandbox = Arc::new(SharedSandboxCleanupProbe {
+        active: AtomicBool::new(true),
+        cleanup_calls: AtomicUsize::new(0),
+    });
+    let mut first = ReactAgent::new(AgentConfig::new("test-model", "first", "system"));
+    let mut second = ReactAgent::new(AgentConfig::new("test-model", "second", "system"));
+    first.set_sandbox_executor(sandbox.clone());
+    second.set_sandbox_executor(sandbox.clone());
+
+    let first_error =
+        first.close().await.err().ok_or_else(|| {
+            crate::error::ReactError::Other("active sandbox was hidden".to_string())
+        })?;
+    assert!(
+        first_error
+            .to_string()
+            .contains("shared sandbox owner remains active")
+    );
+    assert!(sandbox.active.load(Ordering::SeqCst));
+    assert!(second.close().await.is_err());
+    assert_eq!(sandbox.cleanup_calls.load(Ordering::SeqCst), 2);
+
+    sandbox.active.store(false, Ordering::SeqCst);
+    first.close().await?;
+    second.close().await?;
+    assert_eq!(sandbox.cleanup_calls.load(Ordering::SeqCst), 4);
+    Ok(())
+}
+
 async fn assert_legacy_plan_is_not_republished(
     store: Arc<dyn crate::state::RuntimeStateStore>,
     reopen: impl FnOnce() -> crate::error::Result<Arc<dyn crate::state::RuntimeStateStore>>,

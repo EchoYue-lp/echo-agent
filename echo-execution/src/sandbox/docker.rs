@@ -11,7 +11,8 @@
 
 use super::{
     CommandKind, ExecutionResult, IsolationLevel, ResourceLimits, SENSITIVE_MOUNT_PATHS,
-    SandboxCommand, SandboxExecutor, select_image_for_command,
+    SandboxCommand, SandboxExecutor, resource_owner::ResourceOwnerRegistry,
+    select_image_for_command,
 };
 use echo_core::error::Result;
 use echo_core::error::SandboxError;
@@ -86,6 +87,7 @@ pub struct DockerSandbox {
     docker_program: PathBuf,
     control_timeout: Duration,
     availability_cache: Arc<Mutex<Option<(Instant, bool)>>>,
+    resources: Arc<ResourceOwnerRegistry>,
 }
 
 struct DockerOwnerRequest {
@@ -173,6 +175,7 @@ impl DockerSandbox {
             docker_program: PathBuf::from("docker"),
             control_timeout: DEFAULT_DOCKER_CONTROL_TIMEOUT,
             availability_cache: Arc::new(Mutex::new(None)),
+            resources: Arc::new(ResourceOwnerRegistry::default()),
         }
     }
 
@@ -270,6 +273,7 @@ impl DockerSandbox {
             docker_program,
             control_timeout: Duration::from_millis(100),
             availability_cache: Arc::new(Mutex::new(None)),
+            resources: Arc::new(ResourceOwnerRegistry::default()),
         }
     }
 
@@ -624,7 +628,14 @@ impl DockerSandbox {
         container_name: &str,
         outcome: Result<ExecutionResult>,
     ) -> Result<ExecutionResult> {
-        match (outcome, self.remove_container(container_name).await) {
+        let _cleanup_guard = self.resources.lock_cleanup().await;
+        let cleanup = self.remove_container(container_name).await;
+        if cleanup.is_ok() {
+            self.resources.settle(container_name);
+        } else {
+            self.resources.retain_debt(container_name);
+        }
+        match (outcome, cleanup) {
             (outcome, Ok(())) => outcome,
             (Ok(primary), Err(cleanup)) => Err(echo_core::error::ReactError::Sandbox(Box::new(
                 SandboxError::IoError(format!(
@@ -640,6 +651,31 @@ impl DockerSandbox {
                     bounded_docker_fact(&cleanup.to_string())
                 )),
             ))),
+        }
+    }
+
+    async fn cleanup_owned_resources(&self) -> Result<()> {
+        let _cleanup_guard = self.resources.lock_cleanup().await;
+        let (active, debt) = self.resources.snapshot();
+        let mut failures = Vec::new();
+        for name in debt {
+            match self.remove_container(&name).await {
+                Ok(()) => self.resources.settle(&name),
+                Err(error) => failures.push(format!("{name}: {error}")),
+            }
+        }
+        if !active.is_empty() {
+            failures.push(format!("active container owners: {}", active.join(", ")));
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(echo_core::error::ReactError::Sandbox(Box::new(
+                SandboxError::IoError(format!(
+                    "Docker owned resource cleanup is unsettled: {}",
+                    failures.join("; ")
+                )),
+            )))
         }
     }
 
@@ -686,6 +722,7 @@ impl DockerSandbox {
         let caller_abandoned = CancellationToken::new();
         let mut caller_guard = DockerCallerAbandonmentGuard::new(caller_abandoned.clone());
         let recovery_name = container_name.clone();
+        self.resources.reserve(container_name.clone());
         let owner = self.clone();
         let task = tokio::spawn(async move {
             owner
@@ -732,6 +769,7 @@ impl DockerSandbox {
         } = request;
         let start = Instant::now();
         if docker_cancelled(cancel.as_ref(), Some(&caller_abandoned)) {
+            self.resources.settle(&container_name);
             return Ok(empty_docker_interrupted_result(
                 DockerInterruption::Cancelled,
                 start.elapsed(),
@@ -1346,10 +1384,7 @@ impl SandboxExecutor for DockerSandbox {
     }
 
     fn cleanup(&self) -> BoxFuture<'_, Result<()>> {
-        Box::pin(Self::cleanup_sandbox_containers_with_program(
-            &self.docker_program,
-            self.control_timeout,
-        ))
+        Box::pin(self.cleanup_owned_resources())
     }
 
     fn execute(&self, command: SandboxCommand) -> BoxFuture<'_, Result<ExecutionResult>> {
@@ -1704,8 +1739,8 @@ exit 64
     async fn cleanup_nonzero_status_is_a_typed_terminal_error()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let fake = FakeDocker::new("cleanup-fail")?;
-        let result = fake
-            .sandbox()
+        let sandbox = fake.sandbox();
+        let result = sandbox
             .execute(SandboxCommand::shell("printf completed"))
             .await;
         assert!(matches!(
@@ -1719,6 +1754,10 @@ exit 64
             fake.operations()?,
             ["info", "create", "start", "rm", "rm", "rm"]
         );
+        assert_eq!(sandbox.resources.snapshot().1.len(), 1);
+        assert!(sandbox.cleanup().await.is_err());
+        assert_eq!(sandbox.resources.snapshot().1.len(), 1);
+        assert!(!fake.operations()?.iter().any(|operation| operation == "ps"));
         Ok(())
     }
 
@@ -1873,6 +1912,55 @@ exit 64
             "unexpected cleanup error: {message}"
         );
         assert_eq!(fake.operations()?, ["ps", "rm", "rm"]);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn instance_cleanup_never_sweeps_shared_label_or_active_owner()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let fake = FakeDocker::new("global-first-fail")?;
+        let sandbox = fake.sandbox();
+        sandbox.cleanup().await?;
+        assert!(fake.operations_or_empty()?.is_empty());
+
+        sandbox.resources.reserve("echo-sandbox-active".to_string());
+        let error = sandbox
+            .cleanup()
+            .await
+            .err()
+            .ok_or("active owner was hidden")?;
+        assert!(error.to_string().contains("active container owners"));
+        assert!(fake.operations_or_empty()?.is_empty());
+        sandbox.resources.settle("echo-sandbox-active");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn owner_cancelled_before_create_releases_exact_reservation()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let fake = FakeDocker::new("normal")?;
+        let sandbox = fake.sandbox();
+        let name = "echo-sandbox-precreate".to_string();
+        sandbox.resources.reserve(name.clone());
+        let abandoned = CancellationToken::new();
+        abandoned.cancel();
+        let terminal = sandbox
+            .run_container_owner(DockerOwnerRequest {
+                command: SandboxCommand::shell("echo never-started"),
+                limits: None,
+                cancel: None,
+                timeout: Duration::from_secs(1),
+                container_name: name,
+                create_args: Vec::new(),
+                caller_abandoned: abandoned,
+                max_output_bytes: 1024,
+            })
+            .await?;
+        assert!(terminal.cancelled);
+        assert_eq!(sandbox.resources.snapshot(), (Vec::new(), Vec::new()));
+        assert!(fake.operations_or_empty()?.is_empty());
         Ok(())
     }
 

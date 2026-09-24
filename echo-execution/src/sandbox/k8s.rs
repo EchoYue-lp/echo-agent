@@ -11,7 +11,7 @@
 
 use super::{
     CommandKind, ExecutionResult, IsolationLevel, ResourceLimits, SandboxCommand, SandboxExecutor,
-    select_image_for_command,
+    resource_owner::ResourceOwnerRegistry, select_image_for_command,
 };
 use echo_core::error::Result;
 use echo_core::error::SandboxError;
@@ -91,6 +91,7 @@ pub struct K8sSandbox {
     config: K8sConfig,
     kubectl_program: PathBuf,
     control_timeout: Duration,
+    resources: Arc<ResourceOwnerRegistry>,
 }
 
 struct K8sOwnerRequest {
@@ -159,6 +160,7 @@ impl K8sSandbox {
             config,
             kubectl_program: PathBuf::from("kubectl"),
             control_timeout: DEFAULT_K8S_CONTROL_TIMEOUT,
+            resources: Arc::new(ResourceOwnerRegistry::default()),
         }
     }
 
@@ -170,6 +172,7 @@ impl K8sSandbox {
             // The fake client starts several real child processes per cleanup.
             // Leave scheduler headroom when the all-feature suite runs in parallel.
             control_timeout: Duration::from_secs(1),
+            resources: Arc::new(ResourceOwnerRegistry::default()),
         }
     }
 
@@ -397,7 +400,13 @@ impl K8sSandbox {
     ) -> tokio::task::JoinHandle<Result<()>> {
         let owner = self.clone();
         tokio::spawn(async move {
+            let _cleanup_guard = owner.resources.lock_cleanup().await;
             let cleanup = owner.delete_pod(&pod_name).await;
+            if cleanup.is_ok() {
+                owner.resources.settle(&pod_name);
+            } else {
+                owner.resources.retain_debt(&pod_name);
+            }
             if let Err(error) = cleanup.as_ref() {
                 tracing::error!(
                     pod = %pod_name,
@@ -532,6 +541,7 @@ impl K8sSandbox {
 
         let caller_abandoned = CancellationToken::new();
         let mut caller_guard = K8sCallerAbandonmentGuard::new(caller_abandoned.clone());
+        self.resources.reserve(pod_name.clone());
         let owner = self.clone();
         let owned_command = command.clone();
         let owned_limits = limits.cloned();
@@ -561,7 +571,7 @@ impl K8sSandbox {
                         format!("K8s sandbox lifecycle owner failed to join: {join_error}"),
                     )));
                 let recovery = self
-                    .spawn_pod_cleanup(recovery_name, "lifecycle owner join failure")
+                    .spawn_pod_cleanup(recovery_name.clone(), "lifecycle owner join failure")
                     .await;
                 caller_guard.disarm();
                 match recovery {
@@ -570,10 +580,15 @@ impl K8sSandbox {
                         &primary.to_string(),
                         &cleanup.to_string(),
                     )),
-                    Err(recovery_join_error) => Err(combined_k8s_cleanup_failure(
-                        &primary.to_string(),
-                        &format!("detached recovery cleanup failed to join: {recovery_join_error}"),
-                    )),
+                    Err(recovery_join_error) => {
+                        self.resources.retain_debt(&recovery_name);
+                        Err(combined_k8s_cleanup_failure(
+                            &primary.to_string(),
+                            &format!(
+                                "detached recovery cleanup failed to join: {recovery_join_error}"
+                            ),
+                        ))
+                    }
                 }
             }
         }
@@ -591,6 +606,7 @@ impl K8sSandbox {
         } = request;
 
         if caller_abandoned.is_cancelled() {
+            self.resources.settle(&pod_name);
             return Ok(empty_k8s_interrupted_result(
                 K8sInterruption::Cancelled,
                 Duration::ZERO,
@@ -624,6 +640,7 @@ impl K8sSandbox {
                     tokio::time::sleep(K8S_CONTROL_START_RETRY_DELAY).await;
                 }
                 Err(error) => {
+                    self.resources.settle(&pod_name);
                     return Err(echo_core::error::ReactError::Sandbox(Box::new(
                         SandboxError::StartFailed(format!("Failed to run kubectl: {error}")),
                     )));
@@ -767,7 +784,14 @@ impl K8sSandbox {
         pod_name: &str,
         terminal: Result<ExecutionResult>,
     ) -> Result<ExecutionResult> {
-        match (terminal, self.delete_pod(pod_name).await) {
+        let _cleanup_guard = self.resources.lock_cleanup().await;
+        let cleanup = self.delete_pod(pod_name).await;
+        if cleanup.is_ok() {
+            self.resources.settle(pod_name);
+        } else {
+            self.resources.retain_debt(pod_name);
+        }
+        match (terminal, cleanup) {
             (terminal, Ok(())) => terminal,
             (Ok(primary), Err(cleanup)) => {
                 let primary_fact = format!("K8s terminal [{}]", k8s_result_facts(&primary));
@@ -788,6 +812,31 @@ impl K8sSandbox {
                     &cleanup.to_string(),
                 ))
             }
+        }
+    }
+
+    async fn cleanup_owned_resources(&self) -> Result<()> {
+        let _cleanup_guard = self.resources.lock_cleanup().await;
+        let (active, debt) = self.resources.snapshot();
+        let mut failures = Vec::new();
+        for name in debt {
+            match self.delete_pod(&name).await {
+                Ok(()) => self.resources.settle(&name),
+                Err(error) => failures.push(format!("{name}: {error}")),
+            }
+        }
+        if !active.is_empty() {
+            failures.push(format!("active Pod owners: {}", active.join(", ")));
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(echo_core::error::ReactError::Sandbox(Box::new(
+                SandboxError::IoError(format!(
+                    "K8s owned resource cleanup is unsettled: {}",
+                    failures.join("; ")
+                )),
+            )))
         }
     }
 
@@ -1122,7 +1171,7 @@ impl SandboxExecutor for K8sSandbox {
     }
 
     fn cleanup(&self) -> BoxFuture<'_, Result<()>> {
-        Box::pin(self.cleanup_sandbox_pods())
+        Box::pin(self.cleanup_owned_resources())
     }
 
     fn execute(&self, command: SandboxCommand) -> BoxFuture<'_, Result<ExecutionResult>> {
@@ -1632,6 +1681,76 @@ exit 64
         let join = waiter.await;
         assert!(matches!(join, Err(error) if error.is_cancelled()));
         wait_for_operation(&recovered.log, "delete-complete").await?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn instance_cleanup_retries_only_its_exact_pod_debt()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let fake = FakeKubectl::new("success")?;
+        let sandbox = fake.sandbox();
+        sandbox.cleanup().await?;
+        assert!(!fake.log.exists(), "empty owner swept shared Pod label");
+
+        sandbox.resources.reserve("echo-sandbox-active".to_string());
+        let error = sandbox
+            .cleanup()
+            .await
+            .err()
+            .ok_or("active owner was hidden")?;
+        assert!(error.to_string().contains("active Pod owners"));
+        assert!(!fake.log.exists(), "active owner was deleted prematurely");
+
+        sandbox.resources.retain_debt("echo-sandbox-active");
+        sandbox.cleanup().await?;
+        assert_eq!(fake.operations()?, ["delete", "get"]);
+        assert!(sandbox.resources.snapshot().1.is_empty());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn owner_before_kubectl_start_releases_exact_reservation()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let sandbox = K8sSandbox::with_program(
+            K8sConfig::default(),
+            PathBuf::from("/missing-kubectl-for-cleanup-owner-test"),
+        );
+        let name = "echo-sandbox-prestart".to_string();
+        sandbox.resources.reserve(name.clone());
+        let abandoned = CancellationToken::new();
+        abandoned.cancel();
+        let terminal = sandbox
+            .run_pod_owner(K8sOwnerRequest {
+                command: SandboxCommand::shell("echo never-started"),
+                limits: None,
+                cancel: None,
+                timeout: Duration::from_secs(1),
+                pod_name: name.clone(),
+                run_args: Vec::new(),
+                caller_abandoned: abandoned,
+            })
+            .await?;
+        assert!(terminal.cancelled);
+        assert_eq!(sandbox.resources.snapshot(), (Vec::new(), Vec::new()));
+
+        sandbox.resources.reserve(name.clone());
+        let error = sandbox
+            .run_pod_owner(K8sOwnerRequest {
+                command: SandboxCommand::shell("echo cannot-start"),
+                limits: None,
+                cancel: None,
+                timeout: Duration::from_secs(1),
+                pod_name: name,
+                run_args: Vec::new(),
+                caller_abandoned: CancellationToken::new(),
+            })
+            .await
+            .err()
+            .ok_or("missing kubectl unexpectedly started")?;
+        assert!(error.to_string().contains("Failed to run kubectl"));
+        assert_eq!(sandbox.resources.snapshot(), (Vec::new(), Vec::new()));
         Ok(())
     }
 

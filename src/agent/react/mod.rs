@@ -3627,11 +3627,26 @@ impl Agent for ReactAgent {
             self.close_authority.begin_close();
             self.close_authority.wait_until_idle().await?;
             #[cfg(feature = "mcp")]
-            {
+            let mcp_close = {
                 let previous = self.tools.mcp_manager.get_clients_by_id();
                 let result = self.tools.mcp_manager.close_all().await;
                 self.settle_mcp_close_projections(previous).await;
-                result?;
+                result
+            };
+            #[cfg(not(feature = "mcp"))]
+            let mcp_close: Result<()> = Ok(());
+            let sandbox_close = match &self.tools.sandbox_manager {
+                Some(manager) => manager.cleanup().await,
+                None => Ok(()),
+            };
+            match (mcp_close, sandbox_close) {
+                (Ok(()), Ok(())) => {}
+                (Err(error), Ok(())) | (Ok(()), Err(error)) => return Err(error),
+                (Err(mcp), Err(sandbox)) => {
+                    return Err(ReactError::Other(format!(
+                        "Agent close left MCP and sandbox cleanup unsettled: MCP: {mcp}; sandbox: {sandbox}"
+                    )));
+                }
             }
             info!(agent = %self.config.agent_name, "Agent shut down complete");
             Ok(())

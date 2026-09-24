@@ -140,6 +140,14 @@ Prompt、project rule 或 Plan 可以引导行为，但不能授予 Permission�
 Hook reduction、protected path、read-only classification和layered shell policy保留各自详细合同；本概览不声称它们已形成全局唯一decision owner。详见 [Tool](./02-tools.md)、[人工环路](./05-human-loop.md)、
 [安全](./security.md)和[Guard 系统](./18-guard-system.md)。
 
+资源清理由创建组件持有精确身份。Tool-output scope 中仍有活跃 writer 时，删除返回
+`WouldBlock`；延迟删除失败保留为可重试债务，并在删除前复核原根目录的物理文件身份。
+目录被替换时不删除新目录，删除时机仍由应用决定。Docker/K8s
+执行 owner 在终态前结算各自命名的资源；manager cleanup 只重试本实例债务并报告
+活跃 owner。Agent close 在 Turn drain 后调用保留的 manager；共享 manager 中仍有其他
+活跃 owner 时，close 报告未结算并允许重试。按共享标签扫描只供明确的人工恢复。Worktree 创建必须完成 marker
+发布，或证明目标 checkout 精确且干净后才补偿移除。详见 [ADR 0072](../adr/0072-resource-cleanup-ownership.md)。
+
 ## Observation 与 Delivery
 
 ```text

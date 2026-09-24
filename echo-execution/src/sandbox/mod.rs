@@ -45,6 +45,7 @@ pub mod k8s;
 pub mod local;
 pub mod manager;
 pub mod policy;
+mod resource_owner;
 
 use std::collections::HashMap;
 use std::sync::LazyLock;
