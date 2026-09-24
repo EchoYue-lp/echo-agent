@@ -1353,6 +1353,210 @@ mod tests {
     use crate::error::ReactError;
     use std::sync::Mutex as StdMutex;
 
+    #[test]
+    fn run_event_contract_matrix_covers_all_variants() -> Result<()> {
+        // Keep this exhaustive match next to the serialized contract matrix:
+        // adding a RunEvent variant without adding its documented discriminator
+        // and producer evidence must fail this test at compile time.
+        let variant_name = |event: &RunEvent| match event {
+            RunEvent::BudgetDecision { .. } => "budget_decision",
+            RunEvent::LlmCall { .. } => "llm_call",
+            RunEvent::ContextCompression { .. } => "context_compression",
+            RunEvent::ToolCall { .. } => "tool_call",
+            RunEvent::ToolExecutionSkipped { .. } => "tool_execution_skipped",
+            RunEvent::ToolResult { .. } => "tool_result",
+            RunEvent::ToolError { .. } => "tool_error",
+            RunEvent::Error { .. } => "error",
+            RunEvent::Checkpoint { .. } => "checkpoint",
+            RunEvent::CheckpointResumed { .. } => "checkpoint_resumed",
+            RunEvent::TranscriptProjectionSettlement { .. } => "transcript_projection_settlement",
+            RunEvent::PermissionDecision { .. } => "permission_decision",
+            RunEvent::FileRead { .. } => "file_read",
+            RunEvent::FileEdit { .. } => "file_edit",
+            RunEvent::TestRun { .. } => "test_run",
+            RunEvent::PhaseTransition { .. } => "phase_transition",
+            RunEvent::SubagentRun { .. } => "subagent_run",
+        };
+
+        let events = vec![
+            (
+                "budget_decision",
+                RunEvent::BudgetDecision {
+                    decision: "wind_down".to_string(),
+                    reason: "iteration_wind_down".to_string(),
+                    iteration: 1,
+                    reported_model_tokens: 1,
+                    usage_complete: true,
+                },
+            ),
+            (
+                "llm_call",
+                RunEvent::LlmCall {
+                    messages: 1,
+                    prompt_tokens: 1,
+                    completion_tokens: 1,
+                    cached_prompt_tokens: 0,
+                    cache_creation_prompt_tokens: 0,
+                    usage_reported: true,
+                    estimated_context_tokens: 1,
+                    protected_context_tokens: 0,
+                    protected_message_count: 0,
+                    context_limit_tokens: 1,
+                    context_breakdown: LlmContextBreakdown::default(),
+                    cache_fingerprint: echo_core::llm::cache::PromptCacheFingerprint::default(),
+                    duration_ms: 1,
+                },
+            ),
+            (
+                "context_compression",
+                RunEvent::ContextCompression {
+                    source: "test".to_string(),
+                    before_messages: 2,
+                    after_messages: 1,
+                    before_tokens: 2,
+                    after_tokens: 1,
+                    protected_context_tokens: 0,
+                    protected_message_count: 0,
+                },
+            ),
+            (
+                "tool_call",
+                RunEvent::ToolCall {
+                    call_id: "call-1".to_string(),
+                    name: "read_file".to_string(),
+                    args: None,
+                    risk: None,
+                    duration_ms: 1,
+                },
+            ),
+            (
+                "tool_execution_skipped",
+                RunEvent::ToolExecutionSkipped {
+                    call_id: "call-1".to_string(),
+                    name: "read_file".to_string(),
+                    reason: "cancelled".to_string(),
+                },
+            ),
+            (
+                "tool_result",
+                RunEvent::ToolResult {
+                    call_id: "call-1".to_string(),
+                    name: "read_file".to_string(),
+                    success: true,
+                    output_preview: Some("ok".to_string()),
+                    output_truncated: false,
+                    duration_ms: 1,
+                    original_bytes: 2,
+                    returned_bytes: 2,
+                    estimated_tokens: 1,
+                    output_handling: Some("inline".to_string()),
+                    artifact: None,
+                },
+            ),
+            (
+                "tool_error",
+                RunEvent::ToolError {
+                    call_id: "call-1".to_string(),
+                    name: "read_file".to_string(),
+                    message: "failed".to_string(),
+                    failure: None,
+                },
+            ),
+            (
+                "error",
+                RunEvent::Error {
+                    message: "failed".to_string(),
+                },
+            ),
+            (
+                "checkpoint",
+                RunEvent::Checkpoint {
+                    id: "checkpoint-1".to_string(),
+                },
+            ),
+            (
+                "checkpoint_resumed",
+                RunEvent::CheckpointResumed {
+                    conversation_id: "conversation-1".to_string(),
+                    completed_tool_call_ids: vec!["call-1".to_string()],
+                    checkpoint_timestamp: Utc::now(),
+                },
+            ),
+            (
+                "transcript_projection_settlement",
+                RunEvent::TranscriptProjectionSettlement {
+                    settlement: crate::memory::TranscriptProjectionSettlement {
+                        status: crate::memory::TranscriptProjectionSettlementStatus::Settled,
+                        operation_id: Some("operation-1".to_string()),
+                        conversation_id: Some("conversation-1".to_string()),
+                        generation_id: Some("generation-1".to_string()),
+                        attempt: 1,
+                        error_class: None,
+                        detail: None,
+                    },
+                },
+            ),
+            (
+                "permission_decision",
+                RunEvent::PermissionDecision {
+                    tool: "read_file".to_string(),
+                    decision: "allow".to_string(),
+                    reason: "policy".to_string(),
+                },
+            ),
+            (
+                "file_read",
+                RunEvent::FileRead {
+                    tool: "read_file".to_string(),
+                    path: "src/lib.rs".to_string(),
+                },
+            ),
+            (
+                "file_edit",
+                RunEvent::FileEdit {
+                    tool: "write_file".to_string(),
+                    path: "src/lib.rs".to_string(),
+                },
+            ),
+            (
+                "test_run",
+                RunEvent::TestRun {
+                    command: "cargo test".to_string(),
+                    passed: true,
+                    failure_count: Some(0),
+                },
+            ),
+            (
+                "phase_transition",
+                RunEvent::PhaseTransition {
+                    phase: "think".to_string(),
+                    iteration: 1,
+                },
+            ),
+            (
+                "subagent_run",
+                RunEvent::SubagentRun {
+                    call_id: Some("call-2".to_string()),
+                    agent_name: "reviewer".to_string(),
+                    task: "review".to_string(),
+                    outcome: "completed".to_string(),
+                },
+            ),
+        ];
+
+        assert_eq!(events.len(), 17);
+        for (expected, event) in events {
+            assert_eq!(variant_name(&event), expected);
+            let value = serde_json::to_value(&event)?;
+            let actual = value
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| ReactError::Other("RunEvent discriminator missing".to_string()))?;
+            assert_eq!(actual, expected);
+        }
+        Ok(())
+    }
+
     struct MissingRunStore;
 
     #[async_trait::async_trait]

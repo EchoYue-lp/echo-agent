@@ -97,6 +97,44 @@ with correlation to the invocation that caused them.
    ordinary `on_tool_error_with_id`; a failure category alone is not proof of
    interruption.
 
+## Authoritative Producer Matrix (Issue #104)
+
+The following is the framework producer contract for all 17 `RunEvent`
+variants. `src/trace/mod.rs` owns the serialized schema; the listed producer
+owns the fact and its terminal boundary. The complete trigger and settlement
+notes are maintained in [Tracing System](../en/27-tracing.md).
+
+| Variant | Producer |
+|---------|----------|
+| `BudgetDecision` | `src/agent/react/run/stream_channel.rs` |
+| `LlmCall` | `src/agent/react/run/phases/think.rs` |
+| `ContextCompression` | `src/agent/react/capabilities.rs`, `src/agent/react/run/phases/compact.rs` |
+| `ToolCall` | `src/agent/react/run/pipeline.rs` at `ExecuteStage` entry; synthetic unstarted calls in `src/agent/snapshot.rs` |
+| `ToolExecutionSkipped` | `src/agent/snapshot.rs` |
+| `ToolResult` | `src/agent/react/run/pipeline.rs`, `src/agent/snapshot.rs` |
+| `ToolError` | `src/agent/react/run/pipeline.rs`, `src/agent/snapshot.rs` |
+| `Error` | `src/trace/mod.rs::apply_run_finalization` |
+| `Checkpoint` | `src/agent/snapshot.rs` |
+| `CheckpointResumed` | `src/agent/react/mod.rs` (called by `src/agent/react/run/stream_channel.rs`) |
+| `TranscriptProjectionSettlement` | `src/agent/snapshot.rs` |
+| `PermissionDecision` | `src/agent/react/run/pipeline.rs` (`PermissionStage` and hook paths) |
+| `FileRead` | `src/agent/snapshot.rs::record_tool_effect` |
+| `FileEdit` | `src/agent/snapshot.rs::record_tool_effect` |
+| `TestRun` | `src/agent/snapshot.rs::record_tool_effect`, `src/eval/runner.rs::record_test_run` |
+| `PhaseTransition` | `src/agent/react/run/react_loop.rs` |
+| `SubagentRun` | `src/agent/snapshot.rs::record_tool_effect`, fed by `src/tools/builtin/agent_dispatch.rs` |
+
+Generic shell output, command names, paths, and exit codes are not producers
+for `FileEdit` or `TestRun`. Those variants require a confirmed typed effect or
+the evaluator's explicit completed-command boundary. A background launch
+acknowledgement is not a `SubagentRun`; the invocation-scoped sink waits for
+the actual terminal outcome and records it once.
+
+The framework deliberately does not claim process-abort recovery for detached
+background work. Admission, generation fencing, shutdown cancellation/drain,
+and evidence settlement remain the embedding application's owner boundary and
+are tracked as the residual framework/consumer work for Issues #38 and #61.
+
 ## Alternatives Rejected
 
 - Guessing file changes from `write_file` success or test counts from shell

@@ -13,7 +13,7 @@ rule_refs: [rule.permission-effect-order, rule.fact-projection-separation]
 evidence_refs: [evidence.effects-extensions, evidence.persistence-observation]
 audit_refs: [audit.observation-persistence-delivery.state-authority, audit.observation-persistence-delivery.contract-evidence, audit.tool-permission-sandbox.result-side-effect]
 decision_refs: []
-repair_evidence_refs: []
+repair_evidence_refs: [evidence.trace-effect-producers-current-repair]
 verification_evidence_refs: []
 rereview_audit_refs: []
 discovered_at: f1e9027246760661144786e9e35615cd46d580c6
