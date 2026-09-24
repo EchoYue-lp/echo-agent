@@ -64,8 +64,10 @@ exit 0）。独立 reviewer 未重跑完整门禁，也无可独立读取的完�
 ## 残余风险
 
 `MemoryApproval` 的 reviewer 身份仍由 embedding host 负责；直接使用 raw Store
-的外部代码不享有 manager 已结算读取保证，均为 ADR 0070 明确的边界。PR CI、
-远端 main 交付、合并后 strict 验证和 Issue 关闭仍待完成。
+的外部代码不享有 manager 已结算读取保证，均为 ADR 0070 明确的边界。复审后
+PR #152 的七项 CI 全绿，修复经签名 squash commit `5a0f2af2` 进入 framework
+main；合并后 strict semantic 在相同 source digest 上通过。外部 Issue 关闭应在
+本语义状态进入 main 后执行。
 
 ## 未检查项
 

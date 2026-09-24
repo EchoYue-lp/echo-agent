@@ -3,7 +3,7 @@ schema_version: 1
 id: finding.pre-compaction-memory-trust-provenance
 kind: finding
 type: authority_conflict
-status: open
+status: resolved
 severity: high
 primary_focus: permission_external
 focus: [data_durability, trigger_input, state_authority]
@@ -43,4 +43,7 @@ ADR 0070 将来源角色、精确引用、信任与显式批准分离。自动 w
 MemoryLayerManager 按 exact snapshot 和 journal generation 激活；自动、Store 工具与分层
 recall 只消费已批准 Active/Archived，Hot 晋升仍保留自动上下文可见性。
 合成 runtime/Horizon 消息不作为用户原文证据。focused File/SQLite、取消、失败重启、
-ABA 与旧数据回归已通过。完整门禁、独立 rereview、远端 main 交付前保持 open。
+ABA 与旧数据回归已通过。完整门禁、17-feature matrix 与独立 rereview PASS。
+PR #152 七项 CI 全绿并 squash merge 到已签名的 framework
+`main@5a0f2af2da8de9db2bf98c3aa8dd2a54e1152d7c`；合并后 strict semantic
+在相同 source digest 上通过。SDK、CLI、website 与 A2A 不参与本 Finding 判定。

@@ -31,7 +31,6 @@ source_refs:
   - docs/adr/0070-memory-provenance-and-recall-authority.md
 supports: [finding.pre-compaction-memory-trust-provenance, behavior.eval-evolution, behavior.context-memory-lifecycle, rule.quality-observation-boundary, rule.context-persistence-separation]
 limitations:
-  - Remote CI and main delivery remain pending
   - Caller identity in MemoryApproval is owned by the embedding host
   - Raw Store readers may observe ADR 0065 prepared projections before manager reconciliation
 ---
@@ -84,6 +83,7 @@ migration。ADR 0070 记录行业参考、候选方案、分层选择和兼容�
 
 Raw `Store` 是通用 KV API，不为任意 JSON 声明 typed memory 审批语义。外部
 代码可以直接写底层 Store；需要已结算的框架记忆读取时应使用
-`MemoryLayerManager`。完整门禁和逐 feature matrix 已通过；rereview、PR 与主线结果
-由后续验证证据补齐。独立复审结论见
-`audit.memory-provenance-authority-rereview`：本候选 Critical/Important/Minor 为 0。
+`MemoryLayerManager`。完整门禁和逐 feature matrix 已通过，PR #152 七项 CI 全绿，
+修复进入 framework `main@5a0f2af2da8de9db2bf98c3aa8dd2a54e1152d7c`。
+独立复审结论见 `audit.memory-provenance-authority-rereview`：本候选
+Critical/Important/Minor 为 0。
