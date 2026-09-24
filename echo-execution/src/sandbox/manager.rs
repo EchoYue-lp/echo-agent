@@ -8,10 +8,9 @@
 use super::{
     DockerSandbox, ExecutionResult, IsolationLevel, K8sSandbox, LocalSandbox, ResourceLimits,
     SandboxCommand, SandboxExecutor, SandboxStreamEvent, docker::DockerConfig, k8s::K8sConfig,
-    local::LocalConfig, policy::SandboxPolicy,
+    local::LocalConfig, policy::SandboxPolicy, stream_failure_from_error,
 };
-use echo_core::error::Result;
-use echo_core::error::SandboxError;
+use echo_core::error::{ReactError, Result, SandboxError};
 use futures::future::BoxFuture;
 use futures::{Stream, StreamExt};
 use std::pin::Pin;
@@ -100,7 +99,6 @@ impl SandboxExecutor for SandboxManager {
             }
             let (tx, rx) = mpsc::channel(32);
             tokio::spawn(async move {
-                let executor_name = executor.name().to_string();
                 let stream = tokio::select! {
                     _ = tx.closed() => return,
                     stream = executor.execute_stream(command) => stream,
@@ -108,22 +106,8 @@ impl SandboxExecutor for SandboxManager {
                 let mut stream = match stream {
                     Ok(stream) => stream,
                     Err(error) => {
-                        let message = format!("Sandbox execution failed: {error}");
-                        let stderr_bytes = u64::try_from(message.len()).unwrap_or(u64::MAX);
-                        let _ = tx
-                            .send(SandboxStreamEvent::Complete(ExecutionResult {
-                                exit_code: -1,
-                                stdout: String::new(),
-                                stderr: message,
-                                duration: std::time::Duration::ZERO,
-                                sandbox_type: executor_name,
-                                timed_out: false,
-                                cancelled: false,
-                                output_truncated: false,
-                                stdout_bytes: 0,
-                                stderr_bytes,
-                            }))
-                            .await;
+                        let failure = stream_failure_from_react_error(&error);
+                        let _ = tx.send(SandboxStreamEvent::Failed { failure }).await;
                         return;
                     }
                 };
@@ -481,11 +465,21 @@ impl SandboxManager {
     }
 }
 
+fn stream_failure_from_react_error(error: &ReactError) -> super::SandboxStreamFailure {
+    match error {
+        ReactError::Sandbox(sandbox_error) => stream_failure_from_error(sandbox_error),
+        _ => super::SandboxStreamFailure::IoError {
+            message: format!("Sandbox execution failed: {error}"),
+        },
+    }
+}
+
 // ── 单元测试 ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::StreamExt;
 
     #[test]
     fn test_local_only() {
@@ -517,6 +511,32 @@ mod tests {
         let result = manager.execute(cmd).await.unwrap();
         assert!(result.success());
         assert_eq!(result.stdout.trim(), "sandbox_test");
+    }
+
+    #[tokio::test]
+    async fn backend_stream_start_failure_is_typed_terminal() -> Result<()> {
+        let manager = SandboxManager::local_only();
+        let missing_working_dir = std::env::temp_dir().join(format!(
+            "echo-agent-missing-sandbox-dir-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let command =
+            SandboxCommand::shell("printf unreachable").with_working_dir(missing_working_dir);
+
+        let mut stream = manager.execute_stream(command).await?;
+        let event = stream.next().await.ok_or_else(|| {
+            echo_core::error::ReactError::Other(
+                "sandbox stream ended without a startup failure event".to_string(),
+            )
+        })?;
+        assert!(matches!(
+            event,
+            SandboxStreamEvent::Failed {
+                failure: super::super::SandboxStreamFailure::IoError { .. }
+            }
+        ));
+        assert!(stream.next().await.is_none());
+        Ok(())
     }
 
     #[tokio::test]

@@ -11,7 +11,7 @@
 
 use super::{
     CommandKind, ExecutionResult, IsolationLevel, ResourceLimits, SandboxCommand, SandboxExecutor,
-    SandboxOutputChannel, SandboxStreamEvent, SandboxStreamFailure,
+    SandboxOutputChannel, SandboxStreamEvent, stream_failure_from_error,
 };
 use echo_core::error::Result;
 use echo_core::error::SandboxError;
@@ -1076,17 +1076,6 @@ fn bounded_terminal_fact(value: &str) -> String {
     fact
 }
 
-fn local_stream_failure(error: &SandboxError) -> SandboxStreamFailure {
-    match error {
-        SandboxError::Cancelled(message) => SandboxStreamFailure::Cancelled {
-            message: message.clone(),
-        },
-        _ => SandboxStreamFailure::IoError {
-            message: error.to_string(),
-        },
-    }
-}
-
 async fn emit_local_terminal_failure(
     events: &mpsc::Sender<SandboxStreamEvent>,
     terminal: &LocalChildTerminal,
@@ -1094,7 +1083,7 @@ async fn emit_local_terminal_failure(
     if let LocalChildTerminal::Failed(error) = terminal {
         let _ = events
             .send(SandboxStreamEvent::Failed {
-                failure: local_stream_failure(error),
+                failure: stream_failure_from_error(error),
             })
             .await;
     }
@@ -1680,7 +1669,7 @@ mod tests {
         assert!(matches!(
             receiver.try_recv(),
             Ok(SandboxStreamEvent::Failed {
-                failure: SandboxStreamFailure::IoError { message }
+                failure: super::super::SandboxStreamFailure::IoError { message }
             }) if message.contains("timed out")
                 && message.contains("process group still exists")
         ));

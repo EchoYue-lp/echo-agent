@@ -64,6 +64,22 @@ pub use echo_core::sandbox::{
     SandboxOutputChannel, SandboxStreamEvent, SandboxStreamFailure,
 };
 
+/// Convert an execution-layer sandbox error into the terminal failure contract
+/// used by live streams. Keep this mapping in one place so manager-level
+/// startup failures and backend-owned stream failures expose the same meaning.
+pub(crate) fn stream_failure_from_error(
+    error: &echo_core::error::SandboxError,
+) -> SandboxStreamFailure {
+    match error {
+        echo_core::error::SandboxError::Cancelled(message) => SandboxStreamFailure::Cancelled {
+            message: message.clone(),
+        },
+        _ => SandboxStreamFailure::IoError {
+            message: error.to_string(),
+        },
+    }
+}
+
 // ── 共享工具 ────────────────────────────────────────────────────────────────
 
 /// 已知危险目录，禁止挂载到容器/Pod 中
