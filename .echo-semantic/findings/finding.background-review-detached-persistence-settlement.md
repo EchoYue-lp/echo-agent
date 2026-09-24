@@ -10,7 +10,7 @@ focus: [time_lifecycle, data_durability, result_side_effect]
 boundary_ref: boundary.eval-evolution
 behavior_refs: [behavior.eval-evolution]
 rule_refs: [rule.quality-observation-boundary]
-evidence_refs: [evidence.provider-protocol-quality]
+evidence_refs: [evidence.provider-protocol-quality, evidence.background-review-current-repair, evidence.framework-four-finding-counterexample-rereview]
 audit_refs: [audit.eval-evolution.failure-concurrency]
 decision_refs: []
 repair_evidence_refs: []
@@ -39,4 +39,8 @@ BackgroundReviewer返回JoinHandle且文档允许discard；任务可auto-persist
 
 ## 处理记录
 
-Failure Audit确认；后续repair提供owned task/receipt/cancel/deadline和持久mutation settlement。
+`3735f7e0` 删除了可丢弃的 detached JoinHandle，改为返回 awaited ReviewOutcome；
+未 poll 的 future 不产生 effect，持久化错误在 await 返回时可见。当前源码仍允许 caller 在
+memory 已写、observer 未完成时 drop review future：`shutdown_can_drain_or_drop_but_drop_does_not_rollback_partial_write`
+固定了这一行为，caller 此时拿不到 outcome/receipt。故旧 detached 路径已消失，但持久
+mutation 的取消结算缺口仍在，本 Finding 保持 open。
