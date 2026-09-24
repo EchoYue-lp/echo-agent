@@ -36,7 +36,7 @@ panic-policy Clippy、formatter 与 diff check 均 exit 0。
 
 ## 来源与范围
 
-所有命令针对候选 `3f63bf78`、`origin/main@2490fd7824eb7269d1984c893387b34e25a41ac5`
+所有命令针对整合提交 `bf95ef61`、`origin/main@dbe9e1112e38a8a835871242fcf8dbf5abd3db0b`
 基准和 `source:46382a3fd5e3196b9c5c541945609af9ca0bed79299d0786e1fbb4f7e375024a`。
 这组收据证明 backend 建流失败的 typed terminal 行为，不证明真实外部沙箱服务或远端
 平台信号。

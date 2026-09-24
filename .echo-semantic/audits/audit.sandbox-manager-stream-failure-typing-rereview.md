@@ -18,9 +18,9 @@ challenges:
 
 ## 审查范围
 
-独立 reviewer 复核 `SandboxManager::execute_stream` 的 backend 建流错误路径、
+独立 reviewer 基于整合提交 `bf95ef61` 复核 `SandboxManager::execute_stream` 的 backend 建流错误路径、
 `SandboxStreamEvent::Failed` 合同、Local backend 共用错误映射、真实 caller 回归测试、
-ADR 与 focused verification evidence；基准为 `origin/main@2490fd7824eb7269d1984c893387b34e25a41ac5`。
+ADR 与 focused verification evidence；基准为 `origin/main@dbe9e1112e38a8a835871242fcf8dbf5abd3db0b`。
 
 ## 已检查故障假设
 
