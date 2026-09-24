@@ -5,15 +5,15 @@ kind: audit
 boundary_ref: boundary.tool-permission-sandbox
 lens: permission_external
 freshness: examined
-revision: source:9c022b1c18ebac4e8b3e0322adcc36aa003f7712600bee8ba16691e8f469aa1998
+revision: source:9c022b1c18ebac8e3b0322adcc36aa003f7712600bee8ba16691e8f469aa1998
 finding_refs: [finding.approval-authority]
 challenges:
   permission-request-rewrite-order:
-    revision: source:9c022b1c18ebac4e8b3e0322adcc36aa003f7712600bee8ba16691e8f469aa1998
+    revision: source:9c022b1c18ebac8e3b0322adcc36aa003f7712600bee8ba16691e8f469aa1998
     source_refs: [src/agent/react/run/pipeline.rs, src/agent/snapshot.rs]
     evidence_refs: [evidence.approval-authority-repair, evidence.approval-authority-verification]
   exact-effect-receipt:
-    revision: source:9c022b1c18ebac4e8b3e0322adcc36aa003f7712600bee8ba16691e8f469aa1998
+    revision: source:9c022b1c18ebac8e3b0322adcc36aa003f7712600bee8ba16691e8f469aa1998
     source_refs: [echo-core/src/tools/permission.rs, echo-core/src/tools/mod.rs, echo-tools/src/shell.rs]
     evidence_refs: [evidence.approval-authority-repair, evidence.approval-authority-verification]
 ---
@@ -54,3 +54,18 @@ Focused tests、受影响 package Clippy（普通与 panic-policy）、formatter
 `ToolApprovalReceipt::issue` 是公开的 caller-owned transport constructor；框架不把它
 当作持久化授权或第二规则注册表。调用方仍需将 receipt 绑定到当前 invocation，跨进程
 恢复必须重新经过 PermissionService/宿主授权。
+
+## 实际实现路径与证据
+
+PermissionStage 应用最终 hook rewrite 后，PermissionService/Hook Allow 产生
+ToolApprovalReceipt；pipeline 将其注入 ToolContext，Shell 的三条 effect 路径执行
+精确匹配。focused real-caller tests 覆盖 PermissionRequest rewrite、background 无
+receipt 和 Dangerous/direct ToolManager 拒绝。
+
+## 问题记录
+
+复审未发现新的 framework blocker。
+
+## 未检查项
+
+未执行完整 workspace gate、17-feature matrix、远端 CI 或应用层 consumer 验证。

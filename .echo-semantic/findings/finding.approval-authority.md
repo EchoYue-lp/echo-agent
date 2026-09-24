@@ -3,7 +3,7 @@ schema_version: 1
 id: finding.approval-authority
 kind: finding
 type: authority_conflict
-status: open
+status: resolved
 severity: high
 primary_focus: permission_external
 focus: [state_authority, result_side_effect, contract_evidence]

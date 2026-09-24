@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.approval-authority-verification
 kind: evidence
-observed_at: source:9c022b1c18ebac4e8b3e0322adcc36aa003f7712600bee8ba16691e8f469aa1998
+observed_at: source:9c022b1c18ebac8e3b0322adcc36aa003f7712600bee8ba16691e8f469aa1998
 source_refs:
   - echo-core/src/tools/permission.rs
   - echo-orchestration/src/human_loop/service.rs

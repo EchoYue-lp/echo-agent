@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.plan-mode-write-surface-repair
 kind: evidence
-observed_at: source:46382a3fd5e3196b9c5c541945609af9ca0bed79299d0786e1fbb4f7e375024a
+observed_at: source:9c022b1c18ebac8e3b0322adcc36aa003f7712600bee8ba16691e8f469aa1998
 source_refs:
   - echo-core/src/tools/mod.rs
   - echo-tools/src/files/files.rs
