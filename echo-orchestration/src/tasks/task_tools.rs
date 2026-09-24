@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use echo_core::error::Result;
 use echo_core::tools::pagination::PageRequest;
-use echo_core::tools::{Tool, ToolContext, ToolParameters, ToolResult};
+use echo_core::tools::{Tool, ToolContext, ToolParameters, ToolResult, ToolRiskLevel};
 use futures::future::BoxFuture;
 
 use super::{
@@ -160,6 +160,10 @@ impl Tool for TaskListTool {
 
     fn description(&self) -> &str {
         "List the current TaskRun's tasks, dependency-aware graph revision, and runtime status. Results are bounded; use limit, cursor, and detail_level=full to page through the same committed graph without creating another task store."
+    }
+
+    fn risk_level(&self) -> ToolRiskLevel {
+        ToolRiskLevel::ReadOnly
     }
 
     fn parameters(&self) -> serde_json::Value {

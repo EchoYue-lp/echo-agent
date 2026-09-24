@@ -267,9 +267,8 @@ impl ReactAgentBuilder {
         self
     }
 
-    /// Restrict registered tools to read-only (no shell, no file writes).
-    /// Must be combined with `enable_tools()`. Used by read-only subagent
-    /// subagents so readonly is enforced at the tool level, not just prompt.
+    /// Restrict the Agent tool surface to read-only capabilities.
+    /// `enable_tools()` controls whether the standard tool pack is installed.
     pub fn readonly_tools(mut self) -> Self {
         self.readonly_tools = true;
         self
