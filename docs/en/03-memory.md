@@ -170,27 +170,31 @@ store.json:
 
 Same physical file, different namespaces — data is completely inaccessible across boundaries (unless the holder of the `Store` object explicitly queries a different namespace).
 
-When `enable_memory=true`, the Agent automatically uses `[agent_name, "memories"]` as its namespace.
+Agent memory uses the unified `["agent", "memories"]` namespace.
 
 ### How It Works
 
-The Agent operates the Store through three built-in tools (no manual API calls needed):
+Without a layer manager, the Agent exposes only `recall` and `search_memory`.
+Both filter the Store through the approved-memory rule; raw KV values and
+Drafts remain available to direct Store callers but never enter an Agent tool
+result. With a layer manager, `remember` creates a journaled Draft and
+`forget` uses the manager's mutation authority:
 
 ```
 LLM decides to remember something:
     └─► remember("Fibonacci first 10 terms: 1,1,2,3,5,8,13,21,34,55", importance=8)
-            └─► store.put(["agent_name", "memories"], uuid, {
-                    "content": "Fibonacci first 10 terms...",
-                    "importance": 8,
-                    "created_at": "2026-02-28T..."
-                })
+            └─► manager.write_memory(["agent", "memories"], uuid, Draft)
+                    → caller reviews and activates the exact proposal
 
 LLM needs to retrieve:
     └─► recall("fibonacci")
-            └─► store.search(["agent_name", "memories"], "fibonacci", limit=5)
-                    → keyword matching (exact match first, then relevance scoring)
-                    → returns top 5 most relevant memories
+            └─► MemoryRecaller searches ["agent", "memories"]
+                    → returns only approved Active or Archived memories
 ```
+
+`install_memory_layer_manager`, `set_memory_store`, and `install_memory_store`
+return `Result`. A busy synchronous install fails without publishing half the
+configuration; replacing a manager's Store requires replacing that manager.
 
 ### Usage
 
@@ -198,42 +202,68 @@ LLM needs to retrieve:
 use echo_agent::prelude::*;
 
 # async fn demo() -> echo_agent::error::Result<()> {
-// Option 1: Via AgentConfig — auto-registers remember/recall/forget tools
+// Option 1: AgentConfig registers approved-memory recall/search tools
 let config = AgentConfig::new("qwen3-max", "my_agent", "You are an assistant")
     .enable_memory(true)
     .memory_path("./store.json");
 
 let mut agent = ReactAgent::new(config);
-// LLM can autonomously call remember / recall / forget
+// Install MemoryLayerManager to enable journaled remember / forget.
 
 // Option 2: Direct Store API
 let store = FileStore::new("./store.json")?;
 
 // Write a memory
 store.put(
-    &["my_agent", "memories"],
+    &["my_agent", "raw_notes"],
     "fact-001",
     serde_json::json!({ "content": "User prefers dark theme", "importance": 7 })
 ).await?;
 
 // Keyword search
-let results = store.search(&["my_agent", "memories"], "theme", 5).await?;
+let results = store.search(&["my_agent", "raw_notes"], "theme", 5).await?;
 for item in results {
     let content = item.value["content"].as_str().unwrap_or("");
     println!("[score={:.2}] {}", item.score.unwrap_or(0.0), content);
 }
 
 // Exact fetch
-let item = store.get(&["my_agent", "memories"], "fact-001").await?;
+let item = store.get(&["my_agent", "raw_notes"], "fact-001").await?;
 
 // Delete
-store.delete(&["my_agent", "memories"], "fact-001").await?;
+store.delete(&["my_agent", "raw_notes"], "fact-001").await?;
 
 // List all namespaces
 let namespaces = store.list_namespaces(None).await?;
 # Ok(())
 # }
 ```
+
+### Reviewed Typed Memory
+
+`MemoryLayerManager` owns the framework's evidence-bearing long-term memory.
+Pre-compaction LLM extraction, evicted-message promotion, memory triggers,
+layered `remember`, and optional Background Review persistence create
+`Draft` candidates in the unified `["agent", "memories"]` namespace.
+`MemoryMeta.provenance` records verbatim source excerpts with their user,
+assistant, or tool roles. Source mechanism (`L3Promotion`, `AutoExtracted`,
+and so on) does not prove speaker trust or approval. A claimed user preference
+without exact user evidence cannot be activated or recalled; some automatic
+extractors reject it before writing a Draft. Secrets and instruction-like
+evidence are rejected before persistence.
+
+The embedding host reviews a Draft through
+`MemoryLayerManager::preview_activation(key)`, then supplies a
+`MemoryApproval` to `activate_draft(proposal, approval)`. The proposal binds
+content, metadata, and the operation-journal generation. A changed value,
+provenance, or generation fails as stale, even after an A-to-B-to-A edit.
+Cancelled or uncertain activation is reconciled by the same manager after
+restart. Only approved Active or Archived typed memories enter automatic
+context recall and Store-backed or layered `recall`/`search_memory`. Approved
+Hot entries remain in turn context after promotion. Draft, Superseded, and
+older records without provenance remain inspectable but are not injected.
+See the executable [layered-memory example](../../echo-agent-learning/tests/example_contracts/demo51_self_improvement.rs)
+and [ADR 0070](../adr/0070-memory-provenance-and-recall-authority.md).
 
 ---
 
@@ -242,7 +272,8 @@ let namespaces = store.list_namespaces(None).await?;
 ```
 Day 1:
   user:  "My name is Alice and I love jazz music"
-  agent → remember("Alice loves jazz music")  ← stored in Store (persists forever)
+  agent with layer manager → remember("Alice loves jazz music")  ← Draft in Store
+  caller → preview_activation + activate_draft  ← reviewed and approved
   turn finalization → RuntimeStateStore saves AgentCheckpoint
                     → ConversationStore saves message rows
 

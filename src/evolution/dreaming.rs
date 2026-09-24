@@ -124,8 +124,9 @@ impl Dreaming {
         };
 
         for e in &entries {
-            // Superseded memories are tombstones — never revive/promote/demote.
-            if e.meta.status == MemoryStatus::Superseded {
+            // Draft, legacy-unverified, and Superseded memories never gain
+            // authority from recall telemetry or scheduled maintenance.
+            if !e.meta.is_recallable() {
                 continue;
             }
             let inactive_days = age_days(e.meta.last_recalled_at.unwrap_or(e.raw.created_at), now);
@@ -226,7 +227,8 @@ mod tests {
     use crate::evolution::audit::NullChangeLog;
     use echo_core::memory::store::StoreItem;
     use echo_core::memory::types::{
-        MemoryMeta, MemorySource, MemoryStatus, MemoryType, TypedMemoryValue,
+        MemoryApproval, MemoryEvidence, MemoryEvidenceRole, MemoryMeta, MemoryProvenance,
+        MemorySource, MemoryStatus, MemoryTrust, MemoryType, TypedMemoryValue,
     };
     use echo_state::memory::store::InMemoryStore;
 
@@ -241,6 +243,15 @@ mod tests {
         (lm, store)
     }
 
+    fn approved_meta(meta: MemoryMeta, content: &str) -> MemoryMeta {
+        let mut provenance = MemoryProvenance::draft(
+            MemoryTrust::User,
+            vec![MemoryEvidence::new(MemoryEvidenceRole::User, content)],
+        );
+        provenance.approval = Some(MemoryApproval::new("dreaming-approval", "reviewer", 1));
+        meta.with_provenance(provenance)
+    }
+
     /// High-recall Archived memory is revived (G2) + promoted to hot.
     #[tokio::test]
     async fn dreaming_revives_and_promotes_high_recall_archived() {
@@ -248,13 +259,16 @@ mod tests {
         // High-confidence UserPreference, Archived, recall_count=10. Insert via
         // put_raw to bypass `write_memory`'s auto-promote-to-hot (which would
         // move the entry to hot before we can mark it Archived in warm).
-        let mut meta = MemoryMeta::new(
-            MemoryType::UserPreference,
-            MemorySource::ExplicitSave,
-            "user",
-        )
-        .with_confidence(0.9)
-        .with_recall_weight(0.9);
+        let mut meta = approved_meta(
+            MemoryMeta::new(
+                MemoryType::UserPreference,
+                MemorySource::ExplicitSave,
+                "user",
+            )
+            .with_confidence(0.9)
+            .with_recall_weight(0.9),
+            "user prefers Rust over Python",
+        );
         meta.status = MemoryStatus::Archived;
         meta.recall_count = 10;
         let value = TypedMemoryValue::new("user prefers Rust over Python", meta)
@@ -299,12 +313,15 @@ mod tests {
     async fn dreaming_demotes_stale_low_recall_active() {
         let (lm, store) = make_manager();
         // Low-confidence ProjectFact, recall_count=0, Active. Backdate created_at.
-        let meta = MemoryMeta::new(
-            MemoryType::ProjectFact,
-            MemorySource::AutoExtracted,
-            "project",
-        )
-        .with_confidence(0.4);
+        let meta = approved_meta(
+            MemoryMeta::new(
+                MemoryType::ProjectFact,
+                MemorySource::AutoExtracted,
+                "project",
+            )
+            .with_confidence(0.4),
+            "maybe uses yarn",
+        );
         let value = TypedMemoryValue::new("maybe uses yarn", meta)
             .to_value()
             .expect("to_value");
@@ -340,12 +357,22 @@ mod tests {
     /// Fresh low-recall Active memory (not stale) is left alone.
     #[tokio::test]
     async fn dreaming_leaves_fresh_low_recall_active_alone() {
-        let (lm, _store) = make_manager();
-        let meta = MemoryMeta::new(MemoryType::ProjectFact, MemorySource::AutoExtracted, "p")
-            .with_confidence(0.4);
-        lm.write_memory("k_fresh", "a fresh low-recall fact", meta)
-            .await
-            .expect("write");
+        let (lm, store) = make_manager();
+        let meta = approved_meta(
+            MemoryMeta::new(MemoryType::ProjectFact, MemorySource::AutoExtracted, "p")
+                .with_confidence(0.4),
+            "a fresh low-recall fact",
+        );
+        let value = TypedMemoryValue::new("a fresh low-recall fact", meta)
+            .to_value()
+            .expect("typed memory");
+        store
+            .put_raw(StoreItem::new(
+                vec!["agent".to_string(), "memories".to_string()],
+                "k_fresh".to_string(),
+                value,
+            ))
+            .await;
 
         let dreaming = Dreaming::new(lm.clone(), DreamingConfig::default());
         let report = dreaming.run().await.expect("dreaming run");
@@ -358,13 +385,16 @@ mod tests {
     #[tokio::test]
     async fn dreaming_does_not_promote_old_lifetime_recall_count() -> crate::error::Result<()> {
         let (lm, store) = make_manager();
-        let mut meta = MemoryMeta::new(
-            MemoryType::UserPreference,
-            MemorySource::ExplicitSave,
-            "user",
-        )
-        .with_confidence(0.9)
-        .with_recall_weight(0.9);
+        let mut meta = approved_meta(
+            MemoryMeta::new(
+                MemoryType::UserPreference,
+                MemorySource::ExplicitSave,
+                "user",
+            )
+            .with_confidence(0.9)
+            .with_recall_weight(0.9),
+            "old preference",
+        );
         meta.status = MemoryStatus::Archived;
         meta.recall_count = 10;
         let value = TypedMemoryValue::new("old preference", meta).to_value()?;
@@ -381,6 +411,49 @@ mod tests {
         assert_eq!(report.revived, 0);
         assert_eq!(report.promoted, 0);
         assert!(report.decisions.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn dreaming_never_activates_unreviewed_draft_with_high_recall_count()
+    -> crate::error::Result<()> {
+        let (lm, store) = make_manager();
+        let mut meta = MemoryMeta::new(
+            MemoryType::UserPreference,
+            MemorySource::AutoExtracted,
+            "user",
+        )
+        .with_confidence(0.99)
+        .with_stability(0.95)
+        .with_provenance(MemoryProvenance::draft(
+            MemoryTrust::User,
+            vec![MemoryEvidence::new(
+                MemoryEvidenceRole::User,
+                "Use Rust for durable services",
+            )],
+        ));
+        meta.status = MemoryStatus::Draft;
+        meta.recall_count = 100;
+        let value = TypedMemoryValue::new("Use Rust for durable services", meta).to_value()?;
+        store
+            .put_raw(StoreItem::new(
+                vec!["agent".to_string(), "memories".to_string()],
+                "unreviewed".to_string(),
+                value,
+            ))
+            .await;
+
+        let report = Dreaming::new(lm.clone(), DreamingConfig::default())
+            .run()
+            .await?;
+        assert_eq!(report.promoted, 0);
+        assert_eq!(report.revived, 0);
+        assert_eq!(report.demoted, 0);
+        let (_, entry) = lm
+            .locate("unreviewed")
+            .await?
+            .ok_or_else(|| crate::error::ReactError::Other("Draft missing".to_string()))?;
+        assert_eq!(entry.meta.status, MemoryStatus::Draft);
         Ok(())
     }
 }

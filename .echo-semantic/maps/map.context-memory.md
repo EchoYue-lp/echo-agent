@@ -4,13 +4,13 @@ id: map.context-memory
 kind: capability_map
 title: Context、Memory、Compression 与 Checkpoint
 risk: high
-observed_at: 44b2ed68772c7c016d09af6c2e1adac9fe4fea70
+observed_at: source:87b717676a7b51e213630677989947777b4bed441acd8c7d655fb6c96dca77ad
 boundary_refs: [boundary.context-memory]
 behavior_refs: [behavior.context-memory-lifecycle]
 rule_refs: [rule.context-persistence-separation]
-evidence_refs: [evidence.agent-context-execution, evidence.persistence-observation, evidence.high-risk-audit-frontier, evidence.framework-concept-navigation, evidence.transcript-projection-settlement-repair, evidence.transcript-projection-settlement-verification, evidence.checkpoint-plan-authority-repair, evidence.checkpoint-plan-authority-verification]
-finding_refs: [finding.transcript-projection-settlement, finding.transcript-generation-runtime-identity, finding.checkpoint-current-plan-orphan-authority]
-audit_refs: [audit.context-memory.data-durability, audit.transcript-generation-runtime-identity-rereview, audit.transcript-projection-settlement-rereview, audit.checkpoint-plan-authority-rereview]
+evidence_refs: [evidence.agent-context-execution, evidence.persistence-observation, evidence.high-risk-audit-frontier, evidence.framework-concept-navigation, evidence.transcript-projection-settlement-repair, evidence.transcript-projection-settlement-verification, evidence.checkpoint-plan-authority-repair, evidence.checkpoint-plan-authority-verification, evidence.memory-provenance-authority-repair, evidence.memory-provenance-authority-verification]
+finding_refs: [finding.transcript-projection-settlement, finding.transcript-generation-runtime-identity, finding.checkpoint-current-plan-orphan-authority, finding.pre-compaction-memory-trust-provenance]
+audit_refs: [audit.context-memory.data-durability, audit.transcript-generation-runtime-identity-rereview, audit.transcript-projection-settlement-rereview, audit.checkpoint-plan-authority-rereview, audit.memory-provenance-authority-rereview]
 related_map_refs: [map.agent-session-turn, map.observation-persistence-delivery, map.eval-evolution]
 scenarios:
   active-context-and-compression:
@@ -55,6 +55,14 @@ scenarios:
     rule_refs: [rule.context-persistence-separation, rule.task-subagent-authority]
     evidence_refs: [evidence.checkpoint-plan-authority-repair, evidence.checkpoint-plan-authority-verification]
     audit_refs: [audit.checkpoint-plan-authority-rereview]
+  reviewed-long-term-memory:
+    status: mapped
+    source_refs: [echo-core/src/memory/types.rs, echo-state/src/compression/mod.rs, src/agent/config.rs, src/agent/react/builder.rs, src/agent/react/mod.rs, src/agent/react/run/context.rs, src/evolution/layer.rs, src/evolution/recall.rs, src/evolution/triggers.rs, src/evolution/review.rs, src/tools/builtin/memory.rs, src/memory_promoter.rs, echo-agent-learning/tests/example_contracts/demo31_memory_tools.rs, echo-agent-learning/examples/demo18_semantic_memory.rs, echo-agent-learning/examples/demo27_sqlite_memory.rs, echo-agent-learning/examples/demo45_customer_service.rs, docs/adr/0070-memory-provenance-and-recall-authority.md]
+    finding_refs: [finding.pre-compaction-memory-trust-provenance]
+    behavior_refs: [behavior.context-memory-lifecycle, behavior.eval-evolution]
+    rule_refs: [rule.context-persistence-separation, rule.quality-observation-boundary]
+    evidence_refs: [evidence.memory-provenance-authority-repair, evidence.memory-provenance-authority-verification]
+    audit_refs: [audit.memory-provenance-authority-rereview]
 ---
 
 # Context、Memory、Compression 与 Checkpoint
@@ -94,8 +102,8 @@ ConversationStore 供 history UI；active context 与 checkpoint 默认不直接
 ## 场景处置清单
 
 四层 authority、transcript settlement、clear/delete 与旧 current_plan 退役路径已映射；
-assembler alignment 仍保持 needs_review。Finding #42 已完成 framework 候选复审，
-外部 Issue 等待远端交付。
+assembler alignment 仍保持 needs_review。#42 已合入framework main并关闭；
+长期 typed memory 的 Draft、approval 与 recall 由 #76 单独治理。
 
 ## 未展开项
 

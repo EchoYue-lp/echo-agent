@@ -268,8 +268,12 @@ pub mod prelude {
     // TaskRuntime memory bridge) can reach them through the echo_agent facade
     // without depending on echo_core directly — keeping the facade as the
     // single integration surface.
+    pub use crate::evolution::{
+        MemoryActivationOutcome, MemoryActivationProposal, MemoryActivationReceipt,
+    };
     pub use echo_core::memory::{
-        MemoryMeta, MemoryRisk, MemoryScope, MemorySource, MemoryStatus, MemoryType,
+        MemoryApproval, MemoryEvidence, MemoryEvidenceRole, MemoryMeta, MemoryProvenance,
+        MemoryRisk, MemoryScope, MemorySource, MemoryStatus, MemoryTrust, MemoryType,
     };
 
     // Skills

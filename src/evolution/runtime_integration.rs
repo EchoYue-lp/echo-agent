@@ -173,7 +173,10 @@ impl EvolutionObserver for HookEvolutionObserver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use echo_core::memory::types::{MemoryMeta, MemorySource, MemoryType};
+    use echo_core::memory::types::{
+        MemoryApproval, MemoryEvidence, MemoryEvidenceRole, MemoryMeta, MemoryProvenance,
+        MemorySource, MemoryTrust, MemoryType,
+    };
     use echo_state::memory::store::InMemoryStore;
     use std::sync::Mutex;
 
@@ -228,9 +231,26 @@ mod tests {
             "runtime",
         )
         .with_confidence(0.9)
-        .with_stability(0.8);
+        .with_stability(0.8)
+        .with_provenance(MemoryProvenance::draft(
+            MemoryTrust::User,
+            vec![MemoryEvidence::new(
+                MemoryEvidenceRole::User,
+                "Use layered memory",
+            )],
+        ));
         manager
             .write_memory("builder_test", "Use layered memory", meta)
+            .await?;
+        let proposal = manager
+            .preview_activation("builder_test")
+            .await?
+            .ok_or("Draft proposal missing")?;
+        manager
+            .activate_draft(
+                &proposal,
+                MemoryApproval::new("builder-approval", "reviewer", 1),
+            )
             .await?;
 
         assert_eq!(

@@ -275,6 +275,36 @@ exact text through promotion and demotion; legacy plain bullets remain valid.
 A promotion or demotion based on a stale read fails before prepare when another
 manager has already changed that key.
 
+### Evidence-Bound Draft and Activation
+
+`MemorySource` names the extraction mechanism; `MemoryProvenance` separately
+records the exact user, assistant, or tool excerpts and derived trust.
+Automatic producers and the layered `remember` tool persist Drafts.
+`write_memory` cannot activate a record by accepting a caller-supplied
+`Active` status or approval. A reviewer uses the same manager:
+
+```rust,no_run
+use echo_agent::prelude::MemoryApproval;
+use echo_agent::evolution::MemoryLayerManager;
+
+# async fn review(mgr: &MemoryLayerManager) -> echo_agent::error::Result<()> {
+if let Some(proposal) = mgr.preview_activation("candidate-key").await? {
+    let approval = MemoryApproval::new("review-123", "reviewer", 1_750_000_000);
+    mgr.activate_draft(&proposal, approval).await?;
+}
+# Ok(())
+# }
+```
+
+The proposal binds the exact content, metadata, and journal generation. A
+stale value or A-to-B-to-A edit fails before mutation; retrying the same
+settled approval returns the original activation result. A failed or
+cancelled write retains journal debt for `reconcile_pending`. Only approved
+Active/Archived memory can be recalled. Historical typed or hot records
+without provenance remain readable for review, not model context. Recall
+telemetry uses Store CAS and cannot restore an overwritten status or trust.
+See [ADR 0070](../adr/0070-memory-provenance-and-recall-authority.md).
+
 An approved `MemoryMerger` now binds to the same manager:
 
 ```rust

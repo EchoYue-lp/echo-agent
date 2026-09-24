@@ -97,13 +97,13 @@ let store = Arc::new(
 use echo_agent::prelude::*;
 
 let mut agent = ReactAgent::new(config);
-agent.set_memory_store(store); // ← also re-registers remember/recall/forget tools
+agent.set_memory_store(store)?; // ← registers approved recall/search tools
 ```
 
-Once attached, three behaviors all use semantic search:
+Once attached, approved-memory reads use semantic search:
 - **Auto-injection**: before each `execute()` / `chat()`, semantically recalled memories are injected into context
 - **`recall` tool**: when the Agent calls it, vector similarity search is used
-- **`remember` tool**: on write, the embedding is computed and stored automatically
+Journaled writes become available after installing a `MemoryLayerManager`.
 
 ---
 
@@ -163,9 +163,10 @@ Built-in implementations:
 | Method | Effect |
 |--------|--------|
 | `agent.set_store(store)` | Replaces auto-injection channel only (tools not updated) |
-| `agent.set_memory_store(store)` | Replaces auto-injection channel **and** re-registers `remember` / `recall` / `forget` tools |
+| `agent.set_memory_store(store)` | Replaces auto-injection channel and registers approved `recall` / `search_memory`; an installed layer manager also provides journaled `remember` / `forget` |
 
-**Always prefer `set_memory_store()` when switching stores.**
+Use `set_memory_store()` before installing a layer manager. Once installed,
+that manager owns the Store; passing a different Store returns an error.
 
 ---
 

@@ -4,7 +4,9 @@
 //!
 //! - **Store** — Long-term key-value storage with namespace isolation.
 //!   Backed by [`InMemoryStore`], [`FileStore`], or `SqliteStore` (requires feature `sqlite`).
-//!   Used for L3 memory promotion (compression evicts → write here → recall later).
+//!   Layered memory writes evidence-bearing Drafts here. An explicit
+//!   journal-bound activation makes a Draft eligible for later recall;
+//!   raw Store values are general-purpose KV data, not approved memory.
 //! - **ConversationStore** — User-visible transcript projection (one row per
 //!   message, `StoredMessage` shape). Drives the application UI history panes.
 //!   The framework persists this automatically at `run_core_loop` finalization.
@@ -24,7 +26,7 @@
 //! let store = Arc::new(InMemoryStore::new());
 //! let agent = ReactAgentBuilder::new()
 //!     .model("qwen3-max")
-//!     .with_memory_tools(store)  // registers remember, recall, search_memory, forget
+//!     .with_memory_tools(store)  // approved recall/search; manager enables remember/forget
 //!     .build()?;
 //! # Ok(())
 //! # }

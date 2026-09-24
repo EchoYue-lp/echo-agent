@@ -4,7 +4,7 @@ id: map.task-subagent-workflow
 kind: capability_map
 title: Task、Subagent、Workflow 与 Scheduler
 risk: high
-observed_at: source:4887582b3c8c982732d721189145bdf28cbd3a06ce0881a785706fc514d3c6e7
+observed_at: source:87b717676a7b51e213630677989947777b4bed441acd8c7d655fb6c96dca77ad
 boundary_refs: [boundary.task-subagent-workflow]
 behavior_refs: [behavior.task-subagent-execution]
 rule_refs: [rule.task-subagent-authority]

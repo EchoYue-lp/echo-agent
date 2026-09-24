@@ -5,140 +5,32 @@
 //! | Tool       | Store Operation                              |
 //! |------------|----------------------------------------------|
 //! | `remember` | `MemoryLayerManager::write_memory()` when layered memory is installed |
-//! | `recall`   | `store.search(namespace, query, limit)`      |
-//! | `forget`   | `store.delete(namespace, key)`              |
+//! | `recall`   | `MemoryRecaller` approved-memory projection  |
+//! | `forget`   | `MemoryLayerManager` journaled deletion     |
 
 use futures::future::BoxFuture;
 
 use crate::error::ToolError;
+use crate::evolution::recall::MemoryRecaller;
 use crate::evolution::{MemoryLayer, MemoryLayerManager};
-use crate::memory::{SearchQuery, Store, StoreItem};
+use crate::memory::{Store, StoreItem};
 use crate::tools::{Tool, ToolParameters, ToolResult};
-use echo_core::memory::types::{MemoryMeta, MemorySource, MemoryType};
+use echo_core::memory::types::{
+    MemoryEvidence, MemoryEvidenceRole, MemoryMeta, MemoryProvenance, MemorySource, MemoryStatus,
+    MemoryTrust, MemoryType,
+};
 use echo_core::tools::pagination::PageRequest;
 use serde_json::{Value, json};
 use std::sync::Arc;
 use tracing::debug;
 
-// ── LegacyStoreRememberTool ─────────────────────────────────────────────────
-
-/// Legacy store-backed remember tool.
-///
-/// New runtime paths should install [`LayeredRememberTool`] so explicit saves
-/// go through `MemoryLayerManager::write_memory`. This legacy variant remains
-/// only for agents that enable the old Store memory tools without a layer
-/// manager.
-pub struct LegacyStoreRememberTool {
-    pub store: Arc<dyn Store>,
-    /// Storage namespace, e.g. `["alice", "memories"]`
-    pub namespace: Vec<String>,
-}
-
-impl LegacyStoreRememberTool {
-    pub fn new(store: Arc<dyn Store>, namespace: Vec<String>) -> Self {
-        Self { store, namespace }
-    }
-
-    fn ns_refs(&self) -> Vec<&str> {
-        self.namespace.iter().map(String::as_str).collect()
-    }
-}
-
-impl Tool for LegacyStoreRememberTool {
-    fn name(&self) -> &str {
-        "remember"
-    }
-
-    fn description(&self) -> &str {
-        "Store information worth long-term retention into persistent memory (cross-session). \
-         Suitable for recording user preferences, important conclusions, to-do items, key facts, etc."
-    }
-
-    fn parameters(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "content": {
-                    "type": "string",
-                    "description": "The specific content to remember; please describe concisely and completely"
-                },
-                "tags": {
-                    "type": "array",
-                    "items": { "type": "string" },
-                    "description": "List of tags for categorization and retrieval (optional), e.g. [\"preferences\", \"programming\"]"
-                },
-                "importance": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 10,
-                    "description": "Importance level (1-10), default 5; higher values are prioritized in recall"
-                }
-            },
-            "required": ["content"]
-        })
-    }
-
-    fn execute(
-        &self,
-        parameters: ToolParameters,
-    ) -> BoxFuture<'_, crate::error::Result<ToolResult>> {
-        Box::pin(async move {
-            let content = parameters
-                .get("content")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| ToolError::MissingParameter("content".to_string()))?;
-
-            let tags: Vec<String> = parameters
-                .get("tags")
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|t| t.as_str().map(String::from))
-                        .collect()
-                })
-                .unwrap_or_default();
-
-            let importance = parameters
-                .get("importance")
-                .and_then(|v| v.as_u64())
-                .map(|n| n.clamp(1, 10))
-                .unwrap_or(5);
-
-            let key = uuid::Uuid::new_v4().to_string();
-            let value = json!({
-                "content": content,
-                "importance": importance,
-                "tags": tags,
-            });
-
-            debug!(key = %key, importance = importance, "💡 remember tool writing to Store");
-
-            let ns: Vec<&str> = self.ns_refs();
-            self.store.put(&ns, &key, value).await?;
-
-            let tag_str = if tags.is_empty() {
-                String::new()
-            } else {
-                format!("(tags: {})", tags.join(", "))
-            };
-
-            Ok(ToolResult::success(format!(
-                "✅ Remembered (ID: {}, importance: {}): \"{}\"{tag_str}",
-                key.get(..8).unwrap_or(&key),
-                importance,
-                content,
-            )))
-        })
-    }
-}
-
 // ── LayeredRememberTool ────────────────────────────────────────────────────
 
-/// Store memory through the evolution layer manager.
+/// Save a Draft memory through the evolution layer manager.
 ///
 /// This preserves the public `remember` tool contract while routing writes
-/// through typed memory, security checks, audit logging, promotion, and the
-/// shared review counter.
+/// through typed memory, security checks, and audit logging. A separate
+/// caller-owned activation is required before this Draft is recalled.
 pub struct LayeredRememberTool {
     pub layer_manager: Arc<MemoryLayerManager>,
 }
@@ -155,7 +47,7 @@ impl Tool for LayeredRememberTool {
     }
 
     fn description(&self) -> &str {
-        "Store information worth long-term retention into persistent typed memory. \
+        "Save a long-term memory Draft for review in persistent typed memory. \
          Suitable for user preferences, project facts, decisions, debugging lessons, and durable workflow patterns."
     }
 
@@ -216,7 +108,12 @@ impl Tool for LayeredRememberTool {
                 .unwrap_or_else(|| memory_type_topic(memory_type).to_string());
             let confidence = (0.55 + importance as f32 * 0.045).clamp(0.0, 1.0);
             let meta = MemoryMeta::new(memory_type, MemorySource::ExplicitSave, topic)
-                .with_confidence(confidence);
+                .with_confidence(confidence)
+                .with_status(MemoryStatus::Draft)
+                .with_provenance(MemoryProvenance::draft(
+                    MemoryTrust::Assistant,
+                    vec![MemoryEvidence::new(MemoryEvidenceRole::Assistant, content)],
+                ));
             let key = uuid::Uuid::new_v4().to_string();
 
             self.layer_manager.write_memory(&key, content, meta).await?;
@@ -227,7 +124,7 @@ impl Tool for LayeredRememberTool {
                 format!(" (tags: {})", tags.join(", "))
             };
             Ok(ToolResult::success(format!(
-                "✅ Remembered in typed memory (ID: {}, importance: {}): \"{}\"{}",
+                "Draft memory saved (ID: {}, importance: {}): \"{}\"{}",
                 key.get(..8).unwrap_or(&key),
                 importance,
                 content,
@@ -241,7 +138,7 @@ impl Tool for LayeredRememberTool {
 
 /// Retrieve relevant historical memories from the persistent Store
 ///
-/// Internally calls `store.search(namespace, query, limit)`
+/// Uses the canonical approved-memory projection over the configured namespace.
 pub struct RecallTool {
     pub store: Arc<dyn Store>,
     pub namespace: Vec<String>,
@@ -304,7 +201,9 @@ impl Tool for RecallTool {
             debug!(query = %query, limit = limit, "🔍 recall tool querying Store");
 
             let ns: Vec<&str> = self.ns_refs();
-            let items = self.store.search(&ns, query, limit).await?;
+            let items = MemoryRecaller::new(self.store.clone())
+                .recall_in(&ns, query, limit, false)
+                .await?;
 
             if items.is_empty() {
                 return Ok(ToolResult::success(format!(
@@ -324,86 +223,6 @@ impl Tool for RecallTool {
             }
 
             Ok(ToolResult::success(lines.join("\n")))
-        })
-    }
-}
-
-// ── ForgetTool ───────────────────────────────────────────────────────────────
-
-/// Delete a memory entry by its ID (key), or clear all memories under a namespace
-///
-/// Internally calls `store.delete(namespace, key)`
-pub struct ForgetTool {
-    pub store: Arc<dyn Store>,
-    pub namespace: Vec<String>,
-}
-
-impl ForgetTool {
-    pub fn new(store: Arc<dyn Store>, namespace: Vec<String>) -> Self {
-        Self { store, namespace }
-    }
-
-    fn ns_refs(&self) -> Vec<&str> {
-        self.namespace.iter().map(String::as_str).collect()
-    }
-}
-
-impl Tool for ForgetTool {
-    fn name(&self) -> &str {
-        "forget"
-    }
-
-    fn description(&self) -> &str {
-        "Delete a memory entry by its ID. The ID can be obtained from recall tool results (first 8 chars is sufficient)."
-    }
-
-    fn parameters(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "id": {
-                    "type": "string",
-                    "description": "Memory ID to delete (first 8 chars prefix from recall results)"
-                }
-            },
-            "required": ["id"]
-        })
-    }
-
-    fn execute(
-        &self,
-        parameters: ToolParameters,
-    ) -> BoxFuture<'_, crate::error::Result<ToolResult>> {
-        Box::pin(async move {
-            let id_prefix = parameters
-                .get("id")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| ToolError::MissingParameter("id".to_string()))?;
-
-            let ns: Vec<&str> = self.ns_refs();
-
-            // Try exact match first; if that fails, search by prefix across all keys
-            let full_key = self.store.get(&ns, id_prefix).await?.map(|item| item.key);
-
-            // Try direct delete (user may have passed the full key)
-            let deleted = if let Some(key) = &full_key {
-                self.store.delete(&ns, key).await?
-            } else {
-                // Assume the user passed the full key (UUID format)
-                self.store.delete(&ns, id_prefix).await?
-            };
-
-            if deleted {
-                Ok(ToolResult::success(format!(
-                    "🗑️ Deleted memory ID: {}",
-                    id_prefix
-                )))
-            } else {
-                Ok(ToolResult::success(format!(
-                    "No memory entry found with ID \"{}\", nothing to delete.\nTip: use the recall tool to find the correct ID.",
-                    id_prefix
-                )))
-            }
         })
     }
 }
@@ -482,17 +301,9 @@ impl Tool for SearchMemoryTool {
             debug!(query = %query, limit = page_request.limit, "🔎 search_memory hybrid search on Store");
 
             let ns: Vec<&str> = self.ns_refs();
-            let items = match self
-                .store
-                .search_with(&ns, SearchQuery::hybrid(query, 20))
-                .await
-            {
-                Ok(items) => items,
-                Err(err) if format!("{err}").contains("hybrid search") => {
-                    self.store.search(&ns, query, 20).await?
-                }
-                Err(err) => return Err(err),
-            };
+            let items = MemoryRecaller::new(self.store.clone())
+                .recall_in(&ns, query, 20, true)
+                .await?;
 
             let records = items
                 .iter()
@@ -933,6 +744,7 @@ mod tests {
     use super::*;
     use crate::evolution::EvolutionObserver;
     use echo_state::memory::store::InMemoryStore;
+    use echo_state::memory::typed_store::TypedMemoryStore;
     use futures::future::BoxFuture;
     use std::sync::Mutex;
 
@@ -961,6 +773,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn store_backed_agent_tools_hide_drafts_and_legacy_records()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+        let ns = &["agent", "memories"];
+        store
+            .put(ns, "legacy", json!({ "content": "Rust legacy fact" }))
+            .await?;
+        let typed = TypedMemoryStore::new(store.clone());
+        let draft = MemoryMeta::new(MemoryType::ProjectFact, MemorySource::ExplicitSave, "rust")
+            .with_provenance(MemoryProvenance::draft(
+                MemoryTrust::User,
+                vec![MemoryEvidence::new(
+                    MemoryEvidenceRole::User,
+                    "Rust draft fact",
+                )],
+            ));
+        typed
+            .put_typed(ns, "draft", "Rust draft fact", draft)
+            .await?;
+        let mut approved =
+            MemoryMeta::new(MemoryType::ProjectFact, MemorySource::ExplicitSave, "rust")
+                .with_status(MemoryStatus::Active)
+                .with_provenance(MemoryProvenance::draft(
+                    MemoryTrust::User,
+                    vec![MemoryEvidence::new(
+                        MemoryEvidenceRole::User,
+                        "Rust approved fact",
+                    )],
+                ));
+        approved.provenance.approval = Some(echo_core::memory::MemoryApproval::new(
+            "approved-tool-fact",
+            "reviewer",
+            1,
+        ));
+        typed
+            .put_typed(ns, "approved", "Rust approved fact", approved)
+            .await?;
+
+        for tool in [
+            Box::new(RecallTool::new(
+                store.clone(),
+                ns.iter().map(|s| s.to_string()).collect(),
+            )) as Box<dyn Tool>,
+            Box::new(SearchMemoryTool::new(
+                store.clone(),
+                ns.iter().map(|s| s.to_string()).collect(),
+            )) as Box<dyn Tool>,
+        ] {
+            let result = tool
+                .execute([("query".to_string(), json!("Rust"))].into())
+                .await?;
+            assert!(result.success);
+            assert!(result.output.contains("Rust approved fact"));
+            assert!(!result.output.contains("Rust draft fact"));
+            assert!(!result.output.contains("Rust legacy fact"));
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn layered_forget_tool_emits_hot_delete_notification()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let dir = tempfile::tempdir()?.keep();
@@ -974,14 +846,31 @@ mod tests {
             .with_evolution_observer(observer.clone()),
         );
         let meta = MemoryMeta::new(
-            MemoryType::UserPreference,
+            MemoryType::ProjectFact,
             MemorySource::ExplicitSave,
             "tool-test",
         )
         .with_confidence(0.95)
-        .with_stability(0.90);
+        .with_stability(0.90)
+        .with_provenance(MemoryProvenance::draft(
+            MemoryTrust::Assistant,
+            vec![MemoryEvidence::new(
+                MemoryEvidenceRole::Assistant,
+                "Forget through the tool",
+            )],
+        ));
         manager
             .write_memory("tool_forget", "Forget through the tool", meta)
+            .await?;
+        let proposal = manager
+            .preview_activation("tool_forget")
+            .await?
+            .ok_or("Draft proposal missing")?;
+        manager
+            .activate_draft(
+                &proposal,
+                echo_core::memory::MemoryApproval::new("forget-test", "reviewer", 1),
+            )
             .await?;
         observer
             .changes

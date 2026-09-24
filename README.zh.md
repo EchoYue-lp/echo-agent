@@ -332,13 +332,20 @@ async fn weather(city: String) -> Result<ToolResult> {
 - **RuntimeStateStore**：ReAct 运行时检查点（消息 + 激活技能 + 阻塞原因），用于跨进程崩溃恢复（`SqliteRuntimeStateStore`）。公开的 `current_plan` 字段只保留旧 Store 记录的原样读写；ReactAgent 忽略历史值，并在新 safe point 写入 `None`。
 - **ConversationStore**：用户可见的对话历史投影，与 `RuntimeStateStore` 配对并在压缩或终态发布前原子结算
 
-一行代码让 Agent 拥有持久记忆——无需手动工具接线：
+直接 Store API 提供通用 KV 读写；Agent 的 Store 工具只召回已批准记忆。分层 typed memory 会把自动抽取和 remember 工具输出
+保存为附有来源证据的 Draft；调用方通过
+`MemoryLayerManager::preview_activation` 和 `activate_draft` 显式批准后，
+记录才进入自动和分层召回。缺少来源的旧记录仍可检查，但不会被当作已批准记忆召回。
+参见[记忆概念](docs/zh/03-memory.md)和
+[ADR 0070](docs/adr/0070-memory-provenance-and-recall-authority.md)。
+
+一行代码注册已批准记忆的召回工具；安装 `MemoryLayerManager` 后才提供经过 journal 的 `remember` 与 `forget`：
 
 ```rust
 let store = Arc::new(InMemoryStore::new());
 let agent = ReactAgentBuilder::new()
     .model("qwen3.7-max")
-    .with_memory_tools(store)  // 注册 remember + recall + search_memory + forget
+    .with_memory_tools(store)  // 注册 recall + search_memory
     .build()?;
 ```
 

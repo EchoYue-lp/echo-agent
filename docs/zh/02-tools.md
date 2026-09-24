@@ -34,7 +34,8 @@ ToolManager                      ← 注册表 + 执行器
     ├─ task_list                 ← 读取已提交任务图版本
     ├─ agent_tool                ← 分派任务给已注册 Subagent
     ├─ human_in_loop             ← 向人类请求文本输入
-    ├─ remember / recall / forget ← 长期记忆操作
+    ├─ recall / search_memory    ← 已批准记忆的 Store 召回
+    ├─ remember / forget         ← 安装 MemoryLayerManager 后的 journal 写入
     └─ think                     ← CoT 显式思维工具（已被 CoT 文本方案替代）
 
 扩展工具（开箱即用）：

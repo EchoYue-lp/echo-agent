@@ -349,7 +349,17 @@ Built-in data tools (feature `data`): Polars-powered read/filter/aggregate/stats
 - **RuntimeStateStore**: ReAct runtime checkpoint (messages + active skills + blocked reason) for crash recovery (`SqliteRuntimeStateStore`). The public `current_plan` field is retained only for legacy Store round trips; ReactAgent ignores historical values and writes `None` at new safe points.
 - **ConversationStore**: User-visible transcript projection, atomically settled with a paired `RuntimeStateStore` before compaction or terminal publication
 
-One line to give your agent persistent memory — no manual tool wiring:
+The raw Store API provides direct KV access; Agent Store tools recall only
+approved memory. The layered typed-memory path saves
+automatic extracts and remember-tool output as evidence-bearing Drafts;
+`MemoryLayerManager::preview_activation` and `activate_draft` require an
+explicit caller approval before they enter automatic or layered recall.
+Historical records without provenance remain inspectable but are not recalled
+as approved memory. See [memory concepts](docs/en/03-memory.md) and
+[ADR 0070](docs/adr/0070-memory-provenance-and-recall-authority.md).
+
+One line to register approved-memory recall tools (install a
+`MemoryLayerManager` for journaled `remember` and `forget`):
 
 ```rust,no_run
 use echo_agent::prelude::*;
@@ -359,7 +369,7 @@ fn main() -> echo_agent::error::Result<()> {
     let store = Arc::new(InMemoryStore::new());
     let _agent = ReactAgentBuilder::new()
         .model("qwen3.7-max")
-        .with_memory_tools(store)  // registers remember + recall + search_memory + forget
+        .with_memory_tools(store)  // registers recall + search_memory
         .build()?;
     Ok(())
 }

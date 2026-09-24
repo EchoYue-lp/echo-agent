@@ -97,13 +97,13 @@ let store = Arc::new(
 use echo_agent::prelude::*;
 
 let mut agent = ReactAgent::new(config);
-agent.set_memory_store(store); // ← 同时更新 remember/recall/forget 工具
+agent.set_memory_store(store)?; // ← 更新已批准记忆的 recall/search 工具
 ```
 
-挂载后，Agent 的三个行为均使用语义搜索：
+挂载后，已批准记忆的读取使用语义搜索：
 - **自动注入**：每次 `execute()` / `chat()` 前，自动语义召回相关记忆注入上下文
 - **`recall` 工具**：Agent 主动调用时执行语义检索
-- **`remember` 工具**：写入时自动计算并存储嵌入向量
+- 安装 `MemoryLayerManager` 后才提供经过 journal 的写入工具。
 
 ---
 
@@ -163,9 +163,10 @@ pub trait Embedder: Send + Sync {
 | 方法 | 作用 |
 |------|------|
 | `agent.set_store(store)` | 仅替换自动注入通道（不更新工具）|
-| `agent.set_memory_store(store)` | 替换自动注入通道 + 重注册 `remember` / `recall` / `forget` 工具 |
+| `agent.set_memory_store(store)` | 替换自动注入通道并注册已批准记忆的 `recall` / `search_memory`；已安装 manager 时还提供经过 journal 的 `remember` / `forget` |
 
-**推荐始终使用 `set_memory_store()`。**
+安装 layer manager 前可用 `set_memory_store()` 更换 Store；安装后由 manager 持有
+Store，传入另一 Store 会返回错误。
 
 ---
 

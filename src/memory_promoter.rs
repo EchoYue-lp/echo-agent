@@ -1,7 +1,8 @@
 //! Store-backed memory promoter — L3 memory promotion from evicted messages.
 //!
 //! Implements [`MemoryPromoter`] to extract key facts from messages evicted
-//! during compression and write them to a [`crate::memory::Store`] for later recall.
+//! during compression and write evidence-bearing Drafts to a
+//! [`crate::memory::Store`]. A caller must approve an exact Draft before recall.
 //!
 //! # Fact extraction heuristic
 //!
@@ -17,21 +18,39 @@
 //! extracted multiple times will overwrite (upsert) rather than create duplicates.
 //!
 use echo_core::llm::types::{Message, Role};
-use echo_core::memory::types::{MemoryMeta, MemorySource, MemoryType};
+use echo_core::memory::types::{
+    MemoryEvidence, MemoryEvidenceRole, MemoryMeta, MemoryProvenance, MemorySource, MemoryStatus,
+    MemoryTrust, MemoryType,
+};
 use echo_state::compression::{MemoryPromoter, MemoryPromotionReceipt};
 use futures::future::BoxFuture;
 use std::sync::Arc;
+
+/// Framework-injected context is model-visible but is not a user utterance.
+pub(crate) fn is_framework_context_message(message: &Message) -> bool {
+    echo_state::compression::is_generated_context_message(message)
+        || message
+            .content
+            .as_text_ref()
+            .is_some_and(|text| text.starts_with("[runtime_context:"))
+}
 
 /// Store-backed memory promoter.
 ///
 /// Extracts key facts from messages evicted during compression and writes them
 /// as typed memories (`MemoryMeta`) to the unified namespace
 /// (`crate::evolution::layer::WARM_NAMESPACE` = `["agent","memories"]`) for
-/// later recall. (stage4 A2: previously raw JSON to `["l3_promoted"]` —
+/// later review. (stage4 A2: previously raw JSON to `["l3_promoted"]` —
 /// 割裂点1: promoter-written facts now flow through the same typed path as
 /// agent-written memories and are recallable by composite-score recall.)
 pub struct StoreMemoryPromoter {
     layer_manager: Arc<crate::evolution::MemoryLayerManager>,
+}
+
+struct ExtractedFact {
+    content: String,
+    fact_type: &'static str,
+    provenance: MemoryProvenance,
 }
 
 impl StoreMemoryPromoter {
@@ -68,25 +87,29 @@ impl MemoryPromoter for StoreMemoryPromoter {
         Box::pin(async move {
             let mut promoted = 0usize;
             let mut deduplicated = 0usize;
-            for (fact, fact_type) in facts.into_iter() {
-                let key = Self::content_key(&fact);
-                let memory_type = fact_type_to_memory_type(fact_type);
-                let recall_weight = if contains_signal_word(&fact) {
+            for fact in facts {
+                let key = Self::content_key(&fact.content);
+                let memory_type = fact_type_to_memory_type(fact.fact_type);
+                let recall_weight = if contains_signal_word(&fact.content) {
                     0.7
                 } else {
                     0.4
                 };
                 let meta = MemoryMeta::new(memory_type, MemorySource::L3Promotion, "l3_promotion")
-                    .with_recall_weight(recall_weight);
+                    .with_recall_weight(recall_weight)
+                    .with_status(MemoryStatus::Draft)
+                    .with_provenance(fact.provenance);
                 if layer_manager
                     .locate(&key)
                     .await?
-                    .is_some_and(|(_, existing)| existing.content.trim() == fact.trim())
+                    .is_some_and(|(_, existing)| existing.content.trim() == fact.content.trim())
                 {
                     deduplicated = deduplicated.saturating_add(1);
                     continue;
                 }
-                layer_manager.write_memory(&key, &fact, meta).await?;
+                layer_manager
+                    .write_memory(&key, &fact.content, meta)
+                    .await?;
                 promoted = promoted.saturating_add(1);
             }
             Ok(MemoryPromotionReceipt {
@@ -113,10 +136,13 @@ fn fact_type_to_memory_type(fact_type: &str) -> MemoryType {
 }
 
 /// Extract key facts from evicted messages using heuristics.
-fn extract_key_facts(messages: &[Message]) -> Vec<(String, &'static str)> {
+fn extract_key_facts(messages: &[Message]) -> Vec<ExtractedFact> {
     let mut facts = Vec::new();
 
     for msg in messages {
+        if is_framework_context_message(msg) {
+            continue;
+        }
         let text = match msg.content.as_text() {
             Some(t) if t.chars().count() >= 50 => t,
             _ => continue, // Skip short or empty messages
@@ -129,31 +155,68 @@ fn extract_key_facts(messages: &[Message]) -> Vec<(String, &'static str)> {
             }
             Role::Tool => {
                 // Extract a tool digest: key findings from tool outputs
-                if let Some(digest) = tool_digest(&text) {
-                    facts.push((truncate_fact(&digest), "tool_output"));
+                if let Some((digest, quotes)) = tool_digest(&text) {
+                    facts.push(ExtractedFact {
+                        content: truncate_fact(&digest),
+                        fact_type: "tool_output",
+                        provenance: MemoryProvenance::draft(
+                            MemoryTrust::Tool,
+                            quotes
+                                .into_iter()
+                                .map(|quote| MemoryEvidence::new(MemoryEvidenceRole::Tool, quote))
+                                .collect(),
+                        ),
+                    });
                 }
                 continue;
             }
             Role::Assistant => {
                 // Extract conclusion-like content from assistant messages
                 if contains_signal_word(&text) {
-                    facts.push((truncate_fact(&text), classify_fact_type(&text, &msg.role)));
+                    let excerpt = exact_excerpt(&text, 300);
+                    facts.push(ExtractedFact {
+                        content: excerpt.clone(),
+                        fact_type: classify_fact_type(&text, &msg.role),
+                        provenance: MemoryProvenance::draft(
+                            MemoryTrust::Assistant,
+                            vec![MemoryEvidence::new(
+                                MemoryEvidenceRole::Assistant,
+                                excerpt,
+                            )],
+                        ),
+                    });
                 } else {
                     // Take the last paragraph as a potential conclusion
                     if let Some(last_para) = last_paragraph(&text)
                         && last_para.chars().count() >= 50
                     {
-                            facts.push((
-                                truncate_fact(&last_para),
-                                classify_fact_type(&last_para, &msg.role),
-                            ));
+                        let excerpt = exact_excerpt(&last_para, 300);
+                        facts.push(ExtractedFact {
+                            content: excerpt.clone(),
+                            fact_type: classify_fact_type(&last_para, &msg.role),
+                            provenance: MemoryProvenance::draft(
+                                MemoryTrust::Assistant,
+                                vec![MemoryEvidence::new(
+                                    MemoryEvidenceRole::Assistant,
+                                    excerpt,
+                                )],
+                            ),
+                        });
                         }
                 }
             }
             Role::User
                 // User questions are useful context for recall
                 if text.chars().count() >= 50 && !text.starts_with('[') => {
-                    facts.push((truncate_fact(&text), classify_fact_type(&text, &msg.role)));
+                    let excerpt = exact_excerpt(&text, 300);
+                    facts.push(ExtractedFact {
+                        content: excerpt.clone(),
+                        fact_type: classify_fact_type(&text, &msg.role),
+                        provenance: MemoryProvenance::draft(
+                            MemoryTrust::User,
+                            vec![MemoryEvidence::new(MemoryEvidenceRole::User, excerpt)],
+                        ),
+                    });
                 }
             _ => {}
         }
@@ -205,7 +268,7 @@ fn classify_fact_type(text: &str, role: &Role) -> &'static str {
 
 /// Extract a concise digest from tool output — key findings, errors, file paths.
 /// Returns `None` if nothing meaningful can be extracted.
-fn tool_digest(text: &str) -> Option<String> {
+fn tool_digest(text: &str) -> Option<(String, Vec<String>)> {
     let mut highlights: Vec<&str> = Vec::new();
 
     for line in text.lines() {
@@ -234,14 +297,19 @@ fn tool_digest(text: &str) -> Option<String> {
     if highlights.is_empty() {
         None
     } else {
-        Some(
+        Some((
             highlights
                 .iter()
                 .take(3)
                 .cloned()
                 .collect::<Vec<_>>()
                 .join(" | "),
-        )
+            highlights
+                .into_iter()
+                .take(3)
+                .map(|line| line.chars().take(1_000).collect())
+                .collect(),
+        ))
     }
 }
 
@@ -282,6 +350,10 @@ fn truncate_fact(text: &str) -> String {
     }
 }
 
+fn exact_excerpt(text: &str, limit: usize) -> String {
+    text.trim().chars().take(limit).collect()
+}
+
 /// FNV-1a hash — deterministic across process restarts.
 #[cfg(test)]
 mod tests {
@@ -295,6 +367,36 @@ mod tests {
         ];
         let facts = extract_key_facts(&messages);
         assert!(facts.is_empty());
+    }
+
+    #[test]
+    fn promoter_does_not_attribute_framework_context_to_user() {
+        let mut context = echo_state::compression::ContextManager::builder(1_000).build();
+        context.replace_projection(
+            "workspace-test",
+            Some(Message::user(
+                "User prefers projected workspace instructions over real user input".into(),
+            )),
+        );
+        let projection = context.messages().first().cloned();
+        let hook = crate::agent::react::run::context::runtime_context_note(
+            "Hook:Test",
+            "User prefers hook-provided instructions over real user input",
+        );
+        let messages = projection
+            .into_iter()
+            .chain(std::iter::once(hook))
+            .chain([
+                Message::user(
+                    "[Horizon compact: User prefers a tool-generated summary that is not a user instruction]"
+                        .into(),
+                ),
+                Message::assistant(
+                    "[Used tools: assistant summary created after tool output was removed]".into(),
+                ),
+            ])
+            .collect::<Vec<_>>();
+        assert!(extract_key_facts(&messages).is_empty());
     }
 
     #[test]
@@ -320,8 +422,21 @@ mod tests {
         assert!(
             facts
                 .first()
-                .is_some_and(|(fact, _)| fact.contains("PostgreSQL"))
+                .is_some_and(|fact| fact.content.contains("PostgreSQL"))
         );
+    }
+
+    #[test]
+    fn long_tool_digest_keeps_bounded_verbatim_evidence() {
+        let source = format!("error {}", "界".repeat(1_200));
+        let message = Message::tool_result("call".into(), "test".into(), source.clone());
+        let facts = extract_key_facts(&[message]);
+        assert_eq!(facts.len(), 1);
+        let evidence = &facts[0].provenance.evidence;
+        assert_eq!(evidence.len(), 1);
+        assert!(source.contains(&evidence[0].quote));
+        assert!(evidence[0].quote.chars().count() <= 1_000);
+        assert!(facts[0].provenance.is_well_formed());
     }
 
     #[test]
@@ -336,7 +451,7 @@ mod tests {
         assert!(
             facts
                 .first()
-                .is_some_and(|(fact, _)| fact.contains("authentication"))
+                .is_some_and(|fact| fact.content.contains("authentication"))
         );
     }
 
@@ -384,7 +499,7 @@ mod tests {
             store.clone(),
             Box::new(NullChangeLog),
         ));
-        let promoter = StoreMemoryPromoter::new(layer_manager);
+        let promoter = StoreMemoryPromoter::new(layer_manager.clone());
 
         // Build a conversation with important facts that should be preserved
         let messages = vec![
@@ -430,7 +545,7 @@ mod tests {
         // Verify extracted facts contain key information
         let all_facts: String = facts
             .iter()
-            .map(|(s, _)| s.as_str())
+            .map(|fact| fact.content.as_str())
             .collect::<Vec<_>>()
             .join(" ");
         assert!(
@@ -445,13 +560,13 @@ mod tests {
         // Step 2: Promote to Store (writes via the promoter)
         promoter.promote(&messages).await?;
 
-        // Step 3: Verify facts are recallable via Store search
+        // Step 3: Draft is durable but excluded from canonical recall.
         let results = store.search(&["agent", "memories"], "PostgreSQL", 5).await;
         assert!(results.is_ok(), "Store search should succeed");
         let items = results.unwrap_or_default();
         assert!(
             !items.is_empty(),
-            "Should be able to recall the PostgreSQL decision fact from Store"
+            "Should persist the PostgreSQL decision Draft in Store"
         );
 
         // Step 4: Verify quality — the recalled item contains meaningful content
@@ -469,6 +584,39 @@ mod tests {
             content.len() >= 50,
             "Recalled content should be meaningful (≥50 chars), got {} chars",
             content.len()
+        );
+        assert!(
+            crate::evolution::MemoryRecaller::new(store.clone())
+                .recall("PostgreSQL", 5)
+                .await?
+                .is_empty()
+        );
+
+        // Step 4: an external review activates that exact Draft.
+        let key = items
+            .first()
+            .map(|item| item.key.clone())
+            .ok_or_else(|| echo_core::error::MemoryError::NotFound("Draft".into()))?;
+        let proposal = layer_manager
+            .preview_activation(&key)
+            .await?
+            .ok_or_else(|| echo_core::error::MemoryError::NotFound("activation proposal".into()))?;
+        layer_manager
+            .activate_draft(
+                &proposal,
+                echo_core::memory::MemoryApproval::new(
+                    "promoter-approval",
+                    "test-reviewer",
+                    1_750_000_000,
+                ),
+            )
+            .await?;
+        assert_eq!(
+            crate::evolution::MemoryRecaller::new(store)
+                .recall("PostgreSQL", 5)
+                .await?
+                .len(),
+            1
         );
         Ok(())
     }
