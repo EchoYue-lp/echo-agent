@@ -16,8 +16,11 @@ use echo_core::memory::types::{
 };
 use futures::FutureExt;
 use serde::{Deserialize, Serialize};
+use std::future::Future;
 use std::panic::AssertUnwindSafe;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 
 // ── Review prompts (adapted from Hermes Agent) ─────────────────────
 
@@ -118,6 +121,23 @@ impl Default for BackgroundReviewConfig {
 
 // ── ReviewOutcome ──────────────────────────────────────────────────
 
+/// Stable identity used to reconcile one run review with its memory write.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewIdentity {
+    pub run_id: String,
+    pub persistence_key: String,
+}
+
+impl ReviewIdentity {
+    pub fn for_run(run_id: impl Into<String>) -> Self {
+        let run_id = run_id.into();
+        Self {
+            persistence_key: format!("review_{run_id}"),
+            run_id,
+        }
+    }
+}
+
 /// Kind of durable-information candidate produced by a run review.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -152,6 +172,41 @@ pub struct ReviewOutcome {
     pub candidate: Option<ReviewCandidate>,
     /// Error message if the review failed.
     pub error: Option<String>,
+}
+
+/// Lazy, caller-owned review operation.
+///
+/// Polling directly drives the operation. The caller or application runtime
+/// retains admission, cancellation, generation lease, and result settlement.
+#[must_use]
+pub struct BackgroundReviewHandle {
+    identity: ReviewIdentity,
+    operation: Pin<Box<dyn Future<Output = ReviewOutcome> + Send + 'static>>,
+}
+
+impl BackgroundReviewHandle {
+    fn new(
+        identity: ReviewIdentity,
+        operation: impl Future<Output = ReviewOutcome> + Send + 'static,
+    ) -> Self {
+        Self {
+            identity,
+            operation: Box::pin(operation),
+        }
+    }
+
+    /// Bind application admission and recovery records before polling.
+    pub fn identity(&self) -> &ReviewIdentity {
+        &self.identity
+    }
+}
+
+impl Future for BackgroundReviewHandle {
+    type Output = ReviewOutcome;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        self.get_mut().operation.as_mut().poll(cx)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -260,64 +315,112 @@ impl BackgroundReviewer {
         lines.join("\n")
     }
 
-    pub async fn review(&self, run: &Run) -> ReviewOutcome {
-        if let Some(outcome) = self.skip_review(&run.run_id) {
-            return outcome;
-        }
-        let review = async {
-            Self::run_review(
-                self.llm_client.clone(),
-                self.layer_manager.clone(),
-                run.run_id.clone(),
-                Self::build_transcript(run),
-                run.input.clone(),
-                self.review_prompt().to_string(),
-                self.config.auto_persist_user_preferences,
-            )
-            .await
-        };
-        AssertUnwindSafe(review)
-            .catch_unwind()
-            .await
-            .unwrap_or_else(|_| {
-                Self::empty_outcome(
-                    &run.run_id,
-                    Some("Review panicked; side effects are unknown".into()),
-                )
-            })
-    }
-
-    pub async fn review_and_wait(&self, run: &Run) -> ReviewOutcome {
-        self.review(run).await
-    }
-
-    pub async fn review_by_run_id(&self, run_id: &str) -> ReviewOutcome {
-        if let Some(outcome) = self.skip_review(run_id) {
-            return outcome;
-        }
-        let Some(store) = &self.run_store else {
-            return Self::empty_outcome(run_id, Some("No run store configured".into()));
-        };
-        let load = async { store.load(run_id).await };
-        match AssertUnwindSafe(load).catch_unwind().await {
-            Ok(Ok(Some(run))) => self.review(&run).await,
-            Ok(Ok(None)) => Self::empty_outcome(run_id, Some(format!("Run {run_id} not found"))),
-            Ok(Err(error)) => {
-                Self::empty_outcome(run_id, Some(format!("Failed to load run: {error}")))
+    pub fn review(&self, run: &Run) -> BackgroundReviewHandle {
+        let identity = ReviewIdentity::for_run(&run.run_id);
+        let operation_identity = identity.clone();
+        let run = run.clone();
+        let config = self.config.clone();
+        let llm_client = self.llm_client.clone();
+        let layer_manager = self.layer_manager.clone();
+        let prompt = self.review_prompt().to_string();
+        BackgroundReviewHandle::new(identity, async move {
+            if let Some(outcome) = Self::skip_review(&config, &operation_identity) {
+                return outcome;
             }
-            Err(_) => Self::empty_outcome(
-                run_id,
-                Some("Run load panicked; side effects are unknown".into()),
-            ),
-        }
+            let review = Self::run_review(
+                llm_client,
+                layer_manager,
+                operation_identity.clone(),
+                Self::build_transcript(&run),
+                run.input,
+                prompt,
+                config.auto_persist_user_preferences,
+            );
+            AssertUnwindSafe(review)
+                .catch_unwind()
+                .await
+                .unwrap_or_else(|_| {
+                    Self::empty_outcome(
+                        &operation_identity,
+                        Some("Review panicked; side effects are unknown".into()),
+                    )
+                })
+        })
     }
 
-    fn skip_review(&self, run_id: &str) -> Option<ReviewOutcome> {
-        if !self.config.enabled {
-            Some(Self::empty_outcome(run_id, None))
-        } else if self.config.max_iterations == 0 {
+    pub fn review_and_wait(&self, run: &Run) -> BackgroundReviewHandle {
+        self.review(run)
+    }
+
+    pub fn review_by_run_id(&self, run_id: &str) -> BackgroundReviewHandle {
+        let identity = ReviewIdentity::for_run(run_id);
+        let operation_identity = identity.clone();
+        let config = self.config.clone();
+        let store = self.run_store.clone();
+        let llm_client = self.llm_client.clone();
+        let layer_manager = self.layer_manager.clone();
+        let prompt = self.review_prompt().to_string();
+        BackgroundReviewHandle::new(identity, async move {
+            if let Some(outcome) = Self::skip_review(&config, &operation_identity) {
+                return outcome;
+            }
+            let Some(store) = store else {
+                return Self::empty_outcome(
+                    &operation_identity,
+                    Some("No run store configured".into()),
+                );
+            };
+            let load = async { store.load(&operation_identity.run_id).await };
+            match AssertUnwindSafe(load).catch_unwind().await {
+                Ok(Ok(Some(run))) if run.run_id == operation_identity.run_id => {
+                    let review = Self::run_review(
+                        llm_client,
+                        layer_manager,
+                        operation_identity.clone(),
+                        Self::build_transcript(&run),
+                        run.input,
+                        prompt,
+                        config.auto_persist_user_preferences,
+                    );
+                    AssertUnwindSafe(review)
+                        .catch_unwind()
+                        .await
+                        .unwrap_or_else(|_| {
+                            Self::empty_outcome(
+                                &operation_identity,
+                                Some("Review panicked; side effects are unknown".into()),
+                            )
+                        })
+                }
+                Ok(Ok(Some(_))) => Self::empty_outcome(
+                    &operation_identity,
+                    Some("Run store returned a different run identity".into()),
+                ),
+                Ok(Ok(None)) => Self::empty_outcome(
+                    &operation_identity,
+                    Some(format!("Run {} not found", operation_identity.run_id)),
+                ),
+                Ok(Err(error)) => Self::empty_outcome(
+                    &operation_identity,
+                    Some(format!("Failed to load run: {error}")),
+                ),
+                Err(_) => Self::empty_outcome(
+                    &operation_identity,
+                    Some("Run load panicked; side effects are unknown".into()),
+                ),
+            }
+        })
+    }
+
+    fn skip_review(
+        config: &BackgroundReviewConfig,
+        identity: &ReviewIdentity,
+    ) -> Option<ReviewOutcome> {
+        if !config.enabled {
+            Some(Self::empty_outcome(identity, None))
+        } else if config.max_iterations == 0 {
             Some(Self::empty_outcome(
-                run_id,
+                identity,
                 Some("Review iteration budget exhausted (max_iterations=0)".into()),
             ))
         } else {
@@ -325,9 +428,9 @@ impl BackgroundReviewer {
         }
     }
 
-    fn empty_outcome(run_id: &str, error: Option<String>) -> ReviewOutcome {
+    fn empty_outcome(identity: &ReviewIdentity, error: Option<String>) -> ReviewOutcome {
         ReviewOutcome {
-            run_id: run_id.to_string(),
+            run_id: identity.run_id.clone(),
             actions: vec![],
             nothing_to_save: error.is_none(),
             candidate: None,
@@ -342,7 +445,7 @@ impl BackgroundReviewer {
     async fn run_review(
         llm_client: Arc<dyn LlmClient>,
         layer_manager: Option<Arc<MemoryLayerManager>>,
-        run_id: String,
+        identity: ReviewIdentity,
         transcript: String,
         user_input: String,
         prompt: String,
@@ -368,7 +471,7 @@ impl BackgroundReviewer {
         let response = match llm_client.chat(request).await {
             Ok(r) => r,
             Err(e) => {
-                return Self::empty_outcome(&run_id, Some(format!("LLM call failed: {e}")));
+                return Self::empty_outcome(&identity, Some(format!("LLM call failed: {e}")));
             }
         };
 
@@ -380,7 +483,7 @@ impl BackgroundReviewer {
             Ok(decision) => decision,
             Err(error) => {
                 return Self::empty_outcome(
-                    &run_id,
+                    &identity,
                     Some(format!("Review response rejected: invalid JSON ({error})")),
                 );
             }
@@ -394,7 +497,7 @@ impl BackgroundReviewer {
         } = decision
         else {
             return ReviewOutcome {
-                run_id,
+                run_id: identity.run_id.clone(),
                 actions: vec![],
                 nothing_to_save: true,
                 candidate: None,
@@ -413,7 +516,7 @@ impl BackgroundReviewer {
             Ok(candidate) => candidate,
             Err(error) => {
                 return Self::empty_outcome(
-                    &run_id,
+                    &identity,
                     Some(format!("Review response rejected: {error}")),
                 );
             }
@@ -441,8 +544,8 @@ impl BackgroundReviewer {
                         evidence.clone(),
                     )],
                 ));
-                let key = format!("review_{run_id}");
-                let write = async { layer_manager.write_memory(&key, &content, meta).await };
+                let key = identity.persistence_key.as_str();
+                let write = async { layer_manager.write_memory(key, &content, meta).await };
                 match AssertUnwindSafe(write).catch_unwind().await {
                     Ok(Ok(_)) => persisted = Some(true),
                     Ok(Err(write_error)) => {
@@ -466,7 +569,10 @@ impl BackgroundReviewer {
         let action = match persisted {
             Some(true) => format!("Draft memory saved: {content}"),
             Some(false) => format!("Candidate proposed (not saved): {content}"),
-            None => format!("Candidate persistence unknown (review_{run_id}): {content}"),
+            None => format!(
+                "Candidate persistence unknown ({}): {content}",
+                identity.persistence_key
+            ),
         };
         let candidate = ReviewCandidate {
             kind,
@@ -477,7 +583,7 @@ impl BackgroundReviewer {
         };
 
         ReviewOutcome {
-            run_id,
+            run_id: identity.run_id.clone(),
             actions: vec![action],
             nothing_to_save: false,
             candidate: Some(candidate),
@@ -641,10 +747,22 @@ mod tests {
         let client = Arc::new(MockLlmClient::new().with_response(PREFERENCE));
         let reviewer = BackgroundReviewer::new(auto_config(), client.clone(), None, None);
         let run = preference_run();
-        drop(reviewer.review(&run));
+        let handle = reviewer.review(&run);
+        assert_eq!(handle.identity().run_id, run.run_id);
+        assert_eq!(handle.identity().persistence_key, "review_test-review-1");
+        drop(handle);
         drop(reviewer.review_and_wait(&run));
         drop(reviewer.review_by_run_id(&run.run_id));
         assert_eq!(client.call_count(), 0);
+    }
+
+    #[test]
+    fn caller_executor_drives_review_without_framework_runtime_gate() {
+        let client = Arc::new(MockLlmClient::new().with_response(PREFERENCE));
+        let reviewer = BackgroundReviewer::new(Default::default(), client, None, None);
+        let outcome = futures::executor::block_on(reviewer.review(&preference_run()));
+        assert!(outcome.error.is_none(), "{outcome:?}");
+        assert_eq!(outcome.run_id, "test-review-1");
     }
 
     #[test]
@@ -825,12 +943,16 @@ mod tests {
         let reviewer = BackgroundReviewer::new(auto_config(), client.clone(), None, None)
             .with_layer_manager(manager);
         let run = preference_run();
-        let mut future = Box::pin(reviewer.review_and_wait(&run));
+        let future = reviewer.review_and_wait(&run);
+        let identity = future.identity().clone();
+        let mut future = Box::pin(future);
         assert!(futures::poll!(&mut future).is_pending());
         assert_eq!(client.calls.load(Ordering::SeqCst), 1);
         drop(future);
         assert!(client.dropped.load(Ordering::SeqCst));
         assert!(store.list(WARM_NAMESPACE).await?.is_empty());
+        assert_eq!(identity.run_id, run.run_id);
+        assert_eq!(identity.persistence_key, format!("review_{}", run.run_id));
         Ok(())
     }
 

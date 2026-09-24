@@ -353,7 +353,14 @@ the before snapshot for undo.
 strict JSON output with an exact quote. It returns a structured `ReviewCandidate`;
 the default is proposal-only. Only framework consumers that explicitly enable
 `auto_persist_user_preferences` may persist a high-confidence user preference,
-and that write is stored as Draft memory. The review response is capped at 512 tokens.
+and that write is stored as Draft memory. Review methods return a lazy
+`BackgroundReviewHandle`; its `ReviewIdentity` is available before polling and
+binds the run ID to the deterministic persistence key. The handle directly polls
+the caller-owned operation, so the framework adds no Tokio runtime prerequisite,
+detached task, receipt registry, or shutdown owner. Applications must retain the
+identity and perform admission, generation fencing, cancellation, evidence
+settlement, and retry reconciliation in their own lifecycle owner. The review
+response is capped at 512 tokens.
 
 ### Skill Lifecycle and Auto-Creation
 

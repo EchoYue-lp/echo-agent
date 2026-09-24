@@ -31,25 +31,33 @@ shutdown. EKO already has a review registry that owns those product concerns.
 
 ## Decision
 
-`review`, `review_and_wait`, and `review_by_run_id` are async operations that
-return `ReviewOutcome` directly. No framework task starts before the future is
-polled. `ReviewCandidate.persisted` is tri-state: `Some(true)` means the write
-settled, `Some(false)` means no write was attempted, and `None` means an
-attempted write has an unknown result and must be reconciled before retry.
+`review`, `review_and_wait`, and `review_by_run_id` return a lazy
+`BackgroundReviewHandle`. Polling it directly drives the caller-owned
+operation; the framework never calls `tokio::spawn`, creates a receipt registry,
+or owns cancellation. `ReviewIdentity` is available before the first poll and
+binds the source `run_id` to the deterministic memory `persistence_key`. The
+existing `ReviewOutcome.run_id` and persistence action continue to identify
+settled or unknown writes without adding required fields to public result
+structs; cancellation before settlement is reconciled from the handle identity.
 
-Applications that run reviews in the background must first admit a lazy future
-to their lifecycle owner and only then spawn it. Shutdown closes admission and
-drains accepted work. Dropping a result observer does not cancel registry-owned
-work. Application-specific workspace leases, evidence inbox persistence, and UI
-projection remain outside the framework.
+`ReviewCandidate.persisted` is tri-state: `Some(true)` means the write settled,
+`Some(false)` means no write was attempted, and `None` means an attempted write
+has an unknown result and must be reconciled using the identity-bound memory
+journal before retry. Applications that run reviews in the background must admit
+the handle into their own generation/lease owner, retain its identity, and
+perform shutdown cancellation and evidence settlement there. Application-
+specific workspace leases, evidence inbox persistence, and UI projection remain
+outside the framework.
 
 ## Consequences
 
 The old synchronous `review(...) -> JoinHandle<_>` source shape is removed.
-Callers that need foreground behavior simply await the future. Background
-callers need an explicit owner. Process abort and panic-abort remain outside an
+Callers that need foreground behavior simply await the handle. Background
+callers own the task and its receipt/lease. An unpolled handle has no receipt to
+wait on and no effect to settle. Process abort and panic-abort remain outside an
 in-process receipt; partial store mutations are reported as unknown rather than
-being described as rolled back.
+being described as rolled back, but the stable handle identity remains available
+for reconciliation before settlement.
 
 [ADR 0065](0065-evolution-memory-audit-reconciliation.md) gives the layered
 memory mutation behind an accepted review a durable operation identity. Its
