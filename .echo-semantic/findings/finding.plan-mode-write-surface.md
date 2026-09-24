@@ -3,19 +3,19 @@ schema_version: 1
 id: finding.plan-mode-write-surface
 kind: finding
 type: implementation_bug
-status: open
+status: resolved
 severity: high
 primary_focus: permission_external
 focus: [result_side_effect, state_authority, contract_evidence]
 boundary_ref: boundary.tool-permission-sandbox
 behavior_refs: [behavior.effect-permission-execution]
 rule_refs: [rule.permission-effect-order]
-evidence_refs: [evidence.effects-extensions, evidence.plan-mode-write-surface-repair, evidence.plan-mode-write-surface-timing-verification]
-audit_refs: [audit.tool-permission-sandbox.permission-external, audit.plan-mode-write-surface-timing]
+evidence_refs: [evidence.effects-extensions, evidence.plan-mode-write-surface-repair, evidence.plan-mode-write-surface-timing-verification, evidence.plan-mode-write-surface-closure]
+audit_refs: [audit.tool-permission-sandbox.permission-external, audit.plan-mode-write-surface-timing, audit.plan-mode-write-surface-closure]
 decision_refs: []
 repair_evidence_refs: [evidence.plan-mode-write-surface-repair]
-verification_evidence_refs: [evidence.plan-mode-write-surface-timing-verification]
-rereview_audit_refs: [audit.plan-mode-write-surface-timing]
+verification_evidence_refs: [evidence.plan-mode-write-surface-timing-verification, evidence.plan-mode-write-surface-closure]
+rereview_audit_refs: [audit.plan-mode-write-surface-timing, audit.plan-mode-write-surface-closure]
 discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 ---
 
@@ -43,5 +43,6 @@ Agent 开启 plan mode 且拥有其它 mutation tool 时，仍可能改变 repos
 该能力事实。当前修复在 ExecuteStage 的 effect boundary 重新检查 live Plan，并在
 ToolManager 每次物理 attempt 通过 validation、permit、retry delay 后再次执行 admission；
 持久回归验证 PreToolUse/Permission 的旧 Allow 不会绕过新 Plan，晚到拒绝保持
-blocked/Unavailable 终态且不产生 mutation。Finding 仍保持 open，等待独立 rereview、
-PR/CI、remote main 和 post-merge closure。
+blocked/Unavailable 终态且不产生 mutation。独立复审 PASS；PR #159 已合入
+`origin/main@a8a4d945`，远端 CI 与完整本地门禁通过，Issue #70 已关闭，交付分支和
+worktree 已删除。本 Finding 已满足 resolved 条件。
