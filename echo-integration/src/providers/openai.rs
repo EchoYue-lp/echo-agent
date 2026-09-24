@@ -1,4 +1,7 @@
 use echo_core::error::{LlmError, ReactError, Result};
+use echo_core::llm::capabilities::{
+    ModelFactInputs, ModelProfileResolution, ModelProfileResolver, ProviderCapabilityOverride,
+};
 use echo_core::llm::types::{ChatCompletionRequest, ContentPart, Message, MessageContent};
 use echo_core::llm::{ChatChunk, ChatRequest, ChatResponse, LlmClient};
 use futures::future::BoxFuture;
@@ -153,6 +156,7 @@ pub fn assemble_req_header(model: &LlmConfig) -> Result<HeaderMap> {
 pub struct OpenAiClient {
     client: Arc<Client>,
     config: LlmConfig,
+    model_profile_resolver: ModelProfileResolver,
     header_map: HeaderMap,
 }
 
@@ -160,9 +164,12 @@ impl OpenAiClient {
     /// Create a client with a custom configuration
     pub fn new(config: LlmConfig) -> Result<Self> {
         let header_map = assemble_req_header(&config)?;
+        let model_profile_resolver = config
+            .model_profile_resolver_at(std::time::SystemTime::now(), &ModelFactInputs::default());
         Ok(Self {
             client: Arc::new(Self::build_http_client()),
             config,
+            model_profile_resolver,
             header_map,
         })
     }
@@ -170,11 +177,19 @@ impl OpenAiClient {
     /// Create a client with a shared HTTP client
     pub fn with_client(client: Arc<Client>, config: LlmConfig) -> Result<Self> {
         let header_map = assemble_req_header(&config)?;
+        let model_profile_resolver = config
+            .model_profile_resolver_at(std::time::SystemTime::now(), &ModelFactInputs::default());
         Ok(Self {
             client,
             config,
+            model_profile_resolver,
             header_map,
         })
+    }
+
+    pub(crate) fn with_model_profile_resolver(mut self, resolver: ModelProfileResolver) -> Self {
+        self.model_profile_resolver = resolver;
+        self
     }
 
     fn build_http_client() -> Client {
@@ -192,7 +207,7 @@ impl LlmClient for OpenAiClient {
                 let t = translate_thinking_openai_compat(
                     &self.config.model,
                     self.config.api_protocol,
-                    self.config.thinking_protocol,
+                    self.model_profile_resolution().profile.thinking_protocol,
                     &request.thinking,
                 );
                 let (max_tokens, max_completion_tokens) =
@@ -258,7 +273,7 @@ impl LlmClient for OpenAiClient {
                 let t = translate_thinking_openai_compat(
                     &self.config.model,
                     self.config.api_protocol,
-                    self.config.thinking_protocol,
+                    self.model_profile_resolution().profile.thinking_protocol,
                     &request.thinking,
                 );
                 let (max_tokens, max_completion_tokens) =
@@ -314,6 +329,28 @@ impl LlmClient for OpenAiClient {
     fn model_name(&self) -> &str {
         &self.config.model
     }
+
+    fn provider_name(&self) -> Option<&str> {
+        self.config.provider_name.as_deref()
+    }
+
+    fn protocol_capabilities(&self) -> ProviderCapabilityOverride {
+        ProviderCapabilityOverride::openai_chat_protocol()
+    }
+
+    fn model_profile_resolution(&self) -> ModelProfileResolution {
+        self.model_profile_resolver.resolve_for_protocol_at(
+            self.config.provider_name.as_deref().unwrap_or(""),
+            &self.config.model,
+            self.config.api_protocol,
+            Some(&self.config.base_url),
+            std::time::SystemTime::now(),
+        )
+    }
+
+    fn capabilities(&self) -> echo_core::llm::capabilities::ProviderCapabilities {
+        self.model_profile_resolution().profile.capabilities
+    }
 }
 
 #[cfg(test)]
@@ -326,6 +363,47 @@ mod tests {
         let mut msg = Message::user(String::new());
         msg.content = MessageContent::Parts(parts);
         msg
+    }
+
+    #[test]
+    fn client_protocol_facts_do_not_follow_the_configured_provider_label()
+    -> std::result::Result<(), String> {
+        let openai = OpenAiClient::new(
+            LlmConfig::for_provider(
+                "openai",
+                "https://api.openai.com/v1",
+                "test-key",
+                "gpt-test",
+                echo_core::llm::LlmApiProtocol::ChatCompletions,
+            )
+            .map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        assert_eq!(
+            openai.protocol_capabilities(),
+            ProviderCapabilityOverride::openai_chat_protocol()
+        );
+        assert!(openai.capabilities().structured_output);
+        assert!(openai.capabilities().tool_support);
+
+        let custom = OpenAiClient::new(
+            LlmConfig::for_provider(
+                "custom",
+                "https://gateway.example/v1",
+                "test-key",
+                "future-model",
+                echo_core::llm::LlmApiProtocol::ChatCompletions,
+            )
+            .map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        assert_eq!(
+            custom.protocol_capabilities(),
+            openai.protocol_capabilities()
+        );
+        assert!(!custom.capabilities().structured_output);
+        assert!(!custom.capabilities().tool_support);
+        Ok(())
     }
 
     #[test]

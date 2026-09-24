@@ -212,10 +212,20 @@ pub struct RuntimeConfig {
     pub provider: Option<String>,
     pub max_iterations: usize,
     pub token_limit: usize,
+    /// Budget rebuilt from the same fresh model profile as `token_limit`.
+    pub token_budget: Option<echo_core::budget::TokenBudget>,
     /// Construction-time validation failure for the configured token budget.
     pub token_budget_error: Option<String>,
     pub run_budget: echo_core::agent::RunBudgetPolicy,
     pub supports_tool_choice_none: bool,
+    /// Model fact provenance applied to this immutable run snapshot.
+    pub model_fact_sources: Vec<echo_core::llm::capabilities::ModelFactMetadata>,
+    /// Expired or future-observed model facts rejected at resolution time.
+    pub ignored_model_facts: Vec<echo_core::llm::capabilities::ModelFactMetadata>,
+    /// Tokenizer fact recorded for diagnostics; runtime estimation remains the
+    /// framework's calibrated heuristic tokenizer until tokenizer dispatch is
+    /// implemented as a separate provider contract.
+    pub resolved_tokenizer_name: Option<String>,
     /// Input modalities accepted by the configured model. `None` preserves
     /// compatibility for custom agents that do not provide an
     /// [`crate::llm::LlmConfig`].
@@ -258,33 +268,70 @@ pub struct RuntimeConfig {
 impl RuntimeConfig {
     /// Create a snapshot from the agent's config.
     pub fn from_agent_config(config: &crate::agent::AgentConfig) -> Self {
+        Self::from_agent_config_with_model_profile(config, None)
+    }
+
+    /// Create a snapshot using the fresh profile resolved for this invocation.
+    ///
+    /// The profile receipt is the authority for both the context limit and the
+    /// token budget. Keeping those values together prevents a refreshed model
+    /// fact from changing one policy while leaving the other on a stale value.
+    pub fn from_agent_config_with_model_profile(
+        config: &crate::agent::AgentConfig,
+        model_profile: Option<&echo_core::llm::capabilities::ModelProfileResolution>,
+    ) -> Self {
+        let model_profile = model_profile.or(config.model_profile.as_ref());
+        let token_limit = if config.token_limit_explicit {
+            config.token_limit
+        } else {
+            model_profile
+                .and_then(|resolution| resolution.profile.context_window)
+                .and_then(|window| usize::try_from(window).ok())
+                .map(|window| window.clamp(1, 10_000_000))
+                .unwrap_or(crate::agent::config::DEFAULT_TOKEN_LIMIT)
+        };
+        let token_budget_result = if config.token_budget_config.enabled {
+            let mut token_budget_config = config.token_budget_config.clone();
+            token_budget_config.total_window = Some(token_limit);
+            Some(token_budget_config.build(token_limit))
+        } else {
+            None
+        };
+        let max_tokens = config.max_tokens.or_else(|| {
+            model_profile
+                .and_then(|resolution| resolution.profile.max_output_tokens)
+                .filter(|value| *value > 0)
+        });
         Self {
             agent_name: config.agent_name.clone(),
             model_name: config.model_name.clone(),
-            provider: config
-                .model_profile
-                .as_ref()
-                .map(|profile| profile.provider.clone()),
+            provider: model_profile.map(|resolution| resolution.profile.provider.clone()),
             max_iterations: config.max_iterations,
-            token_limit: config.token_limit,
-            token_budget_error: config
-                .token_budget_config
-                .enabled
-                .then(|| config.token_budget_config.build(config.token_limit).err())
-                .flatten()
+            token_limit,
+            token_budget: token_budget_result
+                .as_ref()
+                .and_then(|result| result.as_ref().ok().cloned()),
+            token_budget_error: token_budget_result
+                .and_then(|result| result.err())
                 .map(|error| error.to_string()),
             run_budget: config.run_budget.clone(),
-            supports_tool_choice_none: config
-                .model_profile
-                .as_ref()
-                .is_none_or(|profile| profile.supports_tool_choice_none),
+            supports_tool_choice_none: model_profile
+                .is_none_or(|resolution| resolution.profile.supports_tool_choice_none),
+            model_fact_sources: model_profile
+                .map(|resolution| resolution.applied_facts.clone())
+                .unwrap_or_default(),
+            ignored_model_facts: model_profile
+                .map(|resolution| resolution.ignored_stale_facts.clone())
+                .unwrap_or_default(),
+            resolved_tokenizer_name: model_profile
+                .and_then(|resolution| resolution.resolved_tokenizer_name.clone()),
             input_modalities: None,
             session_id: config.session_id.clone(),
             runtime_state_id: config.conversation_id.clone(),
             conversation_id: config.conversation_id.clone(),
             working_dir: config.working_dir.lock().ok().and_then(|g| g.clone()),
             temperature: config.temperature,
-            max_tokens: config.max_tokens,
+            max_tokens,
             tool_error_feedback: config.tool_error_feedback,
             force_read_before_edit: config.force_read_before_edit,
             enable_tool: config.enable_tool,
@@ -399,12 +446,13 @@ pub struct ToolRuntime {
 impl ToolRuntime {
     pub fn from_agent(
         agent: &super::ReactAgent,
+        model_profile: Option<&echo_core::llm::capabilities::ModelProfileResolution>,
         invocation_disabled_tools: Option<&std::collections::HashSet<String>>,
         invocation_visible_tools: Option<&std::collections::HashSet<String>>,
     ) -> Self {
         let mut disabled_tools = agent.tools.tool_visibility.disabled_names();
-        if let Some(profile) = agent.config.model_profile.as_ref() {
-            disabled_tools.extend(profile.excluded_tools.iter().cloned());
+        if let Some(resolution) = model_profile.or(agent.config.model_profile.as_ref()) {
+            disabled_tools.extend(resolution.profile.excluded_tools.iter().cloned());
         }
         if let Some(invocation_disabled_tools) = invocation_disabled_tools {
             disabled_tools.extend(invocation_disabled_tools.iter().cloned());
@@ -1430,7 +1478,25 @@ impl AgentRunSnapshot {
         invocation: Option<&echo_core::agent::AgentInvocationContext>,
         legacy: Option<&crate::agent::react::LegacyExternalContextSnapshot>,
     ) -> Self {
-        let mut config = RuntimeConfig::from_agent_config(&agent.config);
+        let now = std::time::SystemTime::now();
+        let retained_model_profile = agent
+            .config
+            .model_profile
+            .as_ref()
+            .map(|resolution| resolution.refresh_at(now));
+        let model_profile = agent
+            .llm_client()
+            .map(|client| {
+                crate::agent::react::merge_model_profile_resolution(
+                    retained_model_profile.as_ref(),
+                    client.model_profile_resolution(),
+                )
+            })
+            .or(retained_model_profile);
+        let mut config = RuntimeConfig::from_agent_config_with_model_profile(
+            &agent.config,
+            model_profile.as_ref(),
+        );
         let configured_runtime_state_id = config.runtime_state_id.clone();
         config.input_modalities = agent
             .llm_config()
@@ -1458,6 +1524,7 @@ impl AgentRunSnapshot {
             .or_else(|| config.runtime_state_id.clone());
         let tools = ToolRuntime::from_agent(
             agent,
+            model_profile.as_ref(),
             invocation.and_then(|context| context.disabled_tools.as_ref()),
             invocation.and_then(|context| context.visible_tools.as_ref()),
         );
@@ -2729,7 +2796,8 @@ impl AgentRunSnapshot {
 #[cfg(test)]
 mod transcript_filter_tests {
     use super::{
-        AgentRunSnapshot, ToolRuntime, TranscriptProjectionCursor, filter_user_visible_transcript,
+        AgentRunSnapshot, RuntimeConfig, ToolRuntime, TranscriptProjectionCursor,
+        filter_user_visible_transcript,
     };
     #[cfg(feature = "mcp")]
     use crate::agent::react::run::context::HookMessageBatches;
@@ -3443,6 +3511,128 @@ mod transcript_filter_tests {
                 text.contains("Base prompt") && text.contains("Use compact tool arguments.")
             })
         }));
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_snapshot_bounds_malformed_context_window_facts() -> Result<()> {
+        use echo_core::llm::capabilities::{
+            ModelFactConfidence, ModelFactMetadata, ModelFactSet, ModelFactSource,
+            ModelProfileOverride, ModelProfileResolver,
+        };
+
+        let resolution = ModelProfileResolver::new()
+            .register_explicit_override(
+                "custom",
+                "future-model",
+                ModelFactSet::new(
+                    ModelFactMetadata::new(
+                        ModelFactSource::CallerOverride,
+                        "test:malformed-window",
+                        "window-v1",
+                        std::time::SystemTime::UNIX_EPOCH,
+                        None,
+                        ModelFactConfidence::VERIFIED,
+                    ),
+                    None,
+                    ModelProfileOverride {
+                        context_window: Some(u32::MAX),
+                        ..Default::default()
+                    },
+                ),
+            )
+            .resolve_at("custom", "future-model", std::time::SystemTime::UNIX_EPOCH);
+        let config = crate::agent::AgentConfig::new("future-model", "test", "system")
+            .model_profile_resolution(resolution);
+
+        let runtime = RuntimeConfig::from_agent_config(&config);
+        assert_eq!(runtime.token_limit, 10_000_000);
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_snapshot_uses_fresh_output_cap_when_unconfigured() -> Result<()> {
+        use echo_core::llm::capabilities::{
+            ModelFactConfidence, ModelFactMetadata, ModelFactSet, ModelFactSource,
+            ModelProfileOverride, ModelProfileResolver,
+        };
+
+        let resolution = ModelProfileResolver::new()
+            .register_explicit_override(
+                "custom",
+                "future-model",
+                ModelFactSet::new(
+                    ModelFactMetadata::new(
+                        ModelFactSource::ExactModel,
+                        "test:model-output-cap",
+                        "output-v2",
+                        std::time::SystemTime::UNIX_EPOCH,
+                        None,
+                        ModelFactConfidence::VERIFIED,
+                    ),
+                    None,
+                    ModelProfileOverride {
+                        max_output_tokens: Some(4_096),
+                        ..Default::default()
+                    },
+                ),
+            )
+            .resolve_at("custom", "future-model", std::time::SystemTime::UNIX_EPOCH);
+        let config = crate::agent::AgentConfig::new("future-model", "test", "system")
+            .model_profile_resolution(resolution);
+
+        let runtime = RuntimeConfig::from_agent_config(&config);
+        assert_eq!(runtime.max_tokens, Some(4_096));
+        Ok(())
+    }
+
+    #[test]
+    fn snapshot_refreshes_retained_facts_without_an_llm_client() -> Result<()> {
+        use echo_core::llm::capabilities::{
+            ModelFactConfidence, ModelFactMetadata, ModelFactSet, ModelFactSource,
+            ModelProfileOverride, ModelProfileResolver,
+        };
+
+        let resolution = ModelProfileResolver::new()
+            .register_exact_model_facts(
+                "openai",
+                "future-model",
+                ModelFactSet::new(
+                    ModelFactMetadata::new(
+                        ModelFactSource::ExactModel,
+                        "test:expiring-model",
+                        "model-v1",
+                        std::time::SystemTime::UNIX_EPOCH,
+                        Some(std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1)),
+                        ModelFactConfidence::VERIFIED,
+                    ),
+                    None,
+                    ModelProfileOverride {
+                        context_window: Some(32_000),
+                        max_output_tokens: Some(4_096),
+                        ..Default::default()
+                    },
+                ),
+            )
+            .resolve_at("openai", "future-model", std::time::SystemTime::UNIX_EPOCH);
+        let agent = crate::agent::ReactAgent::new(
+            crate::agent::AgentConfig::new("future-model", "test", "system")
+                .model_profile_resolution(resolution),
+        );
+
+        let snapshot = AgentRunSnapshot::from_agent(&agent);
+        assert_eq!(
+            snapshot.config.token_limit,
+            crate::agent::config::DEFAULT_TOKEN_LIMIT
+        );
+        assert_eq!(snapshot.config.max_tokens, None);
+        assert!(
+            snapshot
+                .config
+                .ignored_model_facts
+                .iter()
+                .any(|metadata| metadata.version == "model-v1")
+        );
         Ok(())
     }
 

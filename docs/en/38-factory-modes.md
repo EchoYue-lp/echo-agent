@@ -51,34 +51,88 @@ Provider adapters remain responsible for wire-format translation.
 - a stable prompt suffix;
 - explicit `tool_choice=none` support.
 
-Applications can register a provider default and a more specific normalized
-`provider:model` override with `ModelProfileResolver`. The exact entry wins.
+`ModelProfileResolver` is the framework authority for combining changing model
+facts. Every registered `ModelFactSet` carries source, provenance, version,
+observation/expiration timestamps, and bounded confidence. Resolution is field-wise:
+
+1. conservative unknown;
+2. versioned built-in catalog;
+3. fresh provider facts;
+4. fresh exact-model facts;
+5. fresh exact caller override.
+
+Expired and future-observed records are returned in
+`ModelProfileResolution::ignored_stale_facts` and cannot enable structured output,
+tools, parallel calls, or larger token budgets. Unknown `LlmClient`
+implementations likewise default to conservative capabilities.
 
 ```rust
-use echo_agent::llm::{ModelProfileOverride, ModelProfileResolver, ProviderCapabilities};
-use std::collections::HashSet;
+use echo_agent::llm::{
+    ModelFactConfidence, ModelFactMetadata, ModelFactSet, ModelFactSource,
+    ModelProfileOverride, ModelProfileResolver, ProviderCapabilities,
+};
+use std::time::{Duration, SystemTime};
 
+let observed_at = SystemTime::now();
 let resolver = ModelProfileResolver::new()
-    .register_provider_default(
+    .register_provider_facts(
         "ollama",
-        ModelProfileOverride {
-            supports_parallel_tool_calls: Some(false),
-            supports_tool_choice_none: Some(false),
-            ..Default::default()
-        },
+        ModelFactSet::new(
+            ModelFactMetadata::new(
+                ModelFactSource::ProviderAdapter,
+                "ollama:/api/show",
+                "manifest-digest-v1",
+                observed_at,
+                observed_at.checked_add(Duration::from_secs(300)),
+                ModelFactConfidence::from_percent_saturating(90),
+            ),
+            Some(ProviderCapabilities::ollama()),
+            ModelProfileOverride::default(),
+        ),
     )
-    .register_exact(
+    .register_explicit_override(
         "ollama",
         "local-coder",
-        ModelProfileOverride {
-            excluded_tools: HashSet::from(["browser".to_string()]),
-            prompt_suffix: Some("Use compact tool arguments.".to_string()),
-            ..Default::default()
-        },
+        ModelFactSet::new(
+            ModelFactMetadata::new(
+                ModelFactSource::CallerOverride,
+                "application:model.local-coder",
+                "config-v3",
+                observed_at,
+                None,
+                ModelFactConfidence::VERIFIED,
+            ),
+            None,
+            ModelProfileOverride {
+                context_window: Some(32_768),
+                ..Default::default()
+            },
+        ),
     );
 
-let profile = resolver.resolve("ollama", "local-coder", ProviderCapabilities::ollama());
+let resolution = resolver.resolve_at("ollama", "local-coder", observed_at);
+let profile = resolution.profile;
 ```
+
+Provider adapters or applications that discover exact-model data use
+`register_exact_model_facts`. `register_provider_default`, `register_exact`, and the
+three-argument `resolve` remain compatibility entry points; they immediately
+translate their values into sourced records and use the same resolver.
+
+`ModelFactInputs` is the serializable sidecar for existing `LlmConfig` and
+`ModelConfig` values. `SourcedLlmConfig` and `SourcedModelConfig` preserve provider,
+exact-model, and ordered caller records without changing the existing public config
+struct shapes. A legacy `ModelConfig::context_window` is converted to a sourced
+caller override. Concrete clients publish an adapter-specific
+`protocol_capabilities` baseline; configurable provider labels cannot change that
+wire contract. Their existing `capabilities` method returns the fresh resolved
+profile instead of the protocol baseline.
+
+Use `ReactAgentBuilder::sourced_llm_config` for the LLM sidecar. Every run snapshot resolves
+the current client again and retains `model_fact_sources` and `ignored_model_facts`, so an
+expired record cannot remain hidden in budget, compression, thinking, or tool policy. The
+tokenizer fact is receipt metadata only; the current runtime still uses its calibrated
+heuristic estimator. Provider tokenizer dispatch remains a follow-up for #100.
 
 Install the resolved value with `ReactAgentBuilder::model_profile(profile)`. Tool
 exclusions join the immutable effective tool policy. The prompt suffix becomes part
@@ -87,7 +141,8 @@ mode, providers that support `tool_choice=none` receive it explicitly; other
 providers receive an empty tool surface plus the final-answer instruction.
 
 The resolver intentionally ships without a large model catalog. Fast-changing model
-facts should be supplied by the consuming application or provider integration.
+facts should be supplied by the consuming application or provider integration with
+a bounded expiration time. See [ADR 0047](../adr/0047-model-facts-freshness-authority.md).
 
 ## Prompt Templates
 

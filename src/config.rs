@@ -7,8 +7,12 @@
 use crate::agent::AgentConfig;
 use echo_core::budget::TokenBudgetConfig;
 use echo_core::llm::LlmApiProtocol;
-use echo_core::llm::capabilities::infer_context_window;
+use echo_core::llm::capabilities::{
+    ModelFactConfidence, ModelFactInputs, ModelFactMetadata, ModelFactSet, ModelFactSource,
+    ModelProfileOverride, ModelProfileResolution, ModelProfileResolver, ProviderCapabilityOverride,
+};
 use serde::{Deserialize, Serialize};
+use std::time::SystemTime;
 
 pub const DEFAULT_AGENT_SYSTEM_PROMPT: &str = "You are a helpful assistant.";
 
@@ -20,9 +24,10 @@ pub struct FrameworkConfig {
     pub agent: AgentSettings,
 }
 
-fn resolve_context_window(explicit: Option<u32>, provider: &str, model_name: &str) -> usize {
-    explicit
-        .or_else(|| infer_context_window(provider, model_name))
+fn resolve_context_window(resolution: &ModelProfileResolution) -> usize {
+    resolution
+        .profile
+        .context_window
         .unwrap_or(u32::try_from(crate::agent::config::DEFAULT_TOKEN_LIMIT).unwrap_or(128_000))
         .clamp(1, 10_000_000) as usize
 }
@@ -30,16 +35,10 @@ fn resolve_context_window(explicit: Option<u32>, provider: &str, model_name: &st
 impl From<FrameworkConfig> for AgentConfig {
     fn from(value: FrameworkConfig) -> Self {
         let FrameworkConfig { model, agent } = value;
-        let context_window =
-            resolve_context_window(model.context_window, &model.provider, &model.name);
-        let token_limit = if agent.token_limit > 0 {
-            agent.token_limit
-        } else if model.context_window.is_some() {
-            context_window
-        } else {
-            usize::MAX
-        };
-        let token_budget_config = if model.context_window.is_some() || agent.token_limit > 0 {
+        let resolution = model.resolve_model_profile_at(SystemTime::now());
+        let resolved_context_window = resolution.profile.context_window;
+        let context_window = resolve_context_window(&resolution);
+        let token_budget_config = if resolved_context_window.is_some() || agent.token_limit > 0 {
             TokenBudgetConfig {
                 total_window: Some(context_window),
                 ..Default::default()
@@ -59,12 +58,15 @@ impl From<FrameworkConfig> for AgentConfig {
             .memory_path(&agent.memory_path)
             .temperature(model.temperature)
             .max_tokens(model.max_tokens)
-            .token_limit(token_limit)
+            .model_profile_resolution(resolution)
             .token_budget(token_budget_config)
             .tool_execution(crate::tools::ToolExecutionConfig {
                 timeout_ms: agent.tool_timeout_ms,
                 ..Default::default()
             });
+        if agent.token_limit > 0 {
+            config = config.token_limit(agent.token_limit);
+        }
         if agent.max_tool_output_tokens > 0 {
             config = config.max_tool_output_tokens(agent.max_tool_output_tokens);
         }
@@ -75,7 +77,12 @@ impl From<FrameworkConfig> for AgentConfig {
 impl FrameworkConfig {
     pub fn has_compressor(&self) -> bool {
         self.agent.token_limit > 0
-            || self.model.context_window.is_some()
+            || self
+                .model
+                .resolve_model_profile_at(SystemTime::now())
+                .profile
+                .context_window
+                .is_some()
             || !self.agent.compress_strategy.is_empty()
     }
 
@@ -85,11 +92,8 @@ impl FrameworkConfig {
         if !self.has_compressor() {
             return;
         }
-        let context_window = resolve_context_window(
-            self.model.context_window,
-            &self.model.provider,
-            &self.model.name,
-        );
+        let resolution = self.model.resolve_model_profile_at(SystemTime::now());
+        let context_window = resolve_context_window(&resolution);
         let window = self.agent.compress_window.max(2);
         match self.agent.compress_strategy.as_str() {
             "summary" => {
@@ -180,6 +184,123 @@ impl ModelConfig {
     pub fn get_model_name(&self) -> String {
         self.name.clone()
     }
+
+    /// Resolve serialized model facts and legacy explicit fields at `now`.
+    pub fn resolve_model_profile_at(&self, now: SystemTime) -> ModelProfileResolution {
+        self.resolve_model_profile_with_facts_at(&ModelFactInputs::default(), now)
+    }
+
+    /// Attach serialized model facts without changing the existing config shape.
+    pub fn with_model_facts(self, facts: ModelFactInputs) -> SourcedModelConfig {
+        SourcedModelConfig {
+            config: self,
+            facts,
+        }
+    }
+
+    fn resolve_model_profile_with_facts_at(
+        &self,
+        facts: &ModelFactInputs,
+        now: SystemTime,
+    ) -> ModelProfileResolution {
+        let protocol = self.api_protocol.unwrap_or(LlmApiProtocol::ChatCompletions);
+        let mut resolver =
+            facts.register_with(ModelProfileResolver::new(), &self.provider, &self.name);
+        if self.api_protocol.is_some() {
+            resolver = resolver.register_protocol_facts(
+                &self.provider,
+                ModelFactSet::new_partial(
+                    ModelFactMetadata::new(
+                        ModelFactSource::ProviderAdapter,
+                        "FrameworkConfig::ModelConfig.api_protocol",
+                        "framework-model-config-v1",
+                        now,
+                        None,
+                        ModelFactConfidence::VERIFIED,
+                    ),
+                    ProviderCapabilityOverride::for_protocol(protocol),
+                    ModelProfileOverride {
+                        supports_streaming: Some(true),
+                        ..Default::default()
+                    },
+                ),
+            );
+        }
+        for facts in self.explicit_model_facts_at(now) {
+            resolver = resolver.register_explicit_override(&self.provider, &self.name, facts);
+        }
+        resolver.resolve_for_protocol_at(
+            &self.provider,
+            &self.name,
+            protocol,
+            self.base_url.as_deref(),
+            now,
+        )
+    }
+
+    /// Transfer serialized facts into the provider client configuration so
+    /// dynamic capability reads and run snapshots preserve application policy.
+    pub fn apply_to_llm_config(
+        &self,
+        config: crate::llm::LlmConfig,
+    ) -> crate::llm::SourcedLlmConfig {
+        let mut config = crate::llm::SourcedLlmConfig::new(config);
+        for facts in self.explicit_model_facts_at(SystemTime::now()) {
+            config = config.with_model_override(facts);
+        }
+        config
+    }
+
+    fn explicit_model_facts_at(&self, now: SystemTime) -> Vec<ModelFactSet> {
+        let mut explicit = Vec::new();
+        if let Some(context_window) = self.context_window {
+            explicit.push(ModelFactSet::new(
+                ModelFactMetadata::new(
+                    ModelFactSource::CallerOverride,
+                    "FrameworkConfig::ModelConfig.context_window",
+                    "legacy-model-config-v1",
+                    now,
+                    None,
+                    ModelFactConfidence::VERIFIED,
+                ),
+                None,
+                ModelProfileOverride {
+                    context_window: Some(context_window),
+                    ..Default::default()
+                },
+            ));
+        }
+        explicit
+    }
+}
+
+/// Serializable model-fact sidecar for an existing [`ModelConfig`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SourcedModelConfig {
+    pub config: ModelConfig,
+    #[serde(default)]
+    pub facts: ModelFactInputs,
+}
+
+impl SourcedModelConfig {
+    pub fn resolve_model_profile_at(&self, now: SystemTime) -> ModelProfileResolution {
+        self.config
+            .resolve_model_profile_with_facts_at(&self.facts, now)
+    }
+
+    pub fn apply_to_llm_config(
+        &self,
+        config: crate::llm::LlmConfig,
+    ) -> crate::llm::SourcedLlmConfig {
+        let mut sourced = crate::llm::SourcedLlmConfig {
+            config,
+            facts: self.facts.clone(),
+        };
+        for facts in self.config.explicit_model_facts_at(SystemTime::now()) {
+            sourced = sourced.with_model_override(facts);
+        }
+        sourced
+    }
 }
 
 /// Serializable provider-neutral Agent settings.
@@ -241,5 +362,114 @@ mod tests {
         assert!(!config.agent.enable_memory);
         assert!(config.agent.memory_path.is_empty());
         assert!(config.model.name.is_empty());
+    }
+
+    #[test]
+    fn legacy_context_window_becomes_a_retained_explicit_fact() -> std::result::Result<(), String> {
+        let model = ModelConfig {
+            provider: "custom".to_string(),
+            name: "future-model".to_string(),
+            api_protocol: Some(LlmApiProtocol::ChatCompletions),
+            context_window: Some(8_192),
+            ..ModelConfig::default()
+        };
+        let stale = ModelFactSet::new(
+            ModelFactMetadata::new(
+                ModelFactSource::CallerOverride,
+                "stale-config",
+                "stale-v1",
+                SystemTime::UNIX_EPOCH,
+                Some(SystemTime::UNIX_EPOCH),
+                ModelFactConfidence::VERIFIED,
+            ),
+            None,
+            ModelProfileOverride {
+                context_window: Some(1_000_000),
+                ..Default::default()
+            },
+        );
+        let now = SystemTime::now();
+        let resolution = model
+            .clone()
+            .with_model_facts(ModelFactInputs {
+                model_overrides: vec![stale],
+                ..Default::default()
+            })
+            .resolve_model_profile_at(now);
+        assert_eq!(resolution.profile.context_window, Some(8_192));
+        assert!(resolution.applied_facts.iter().any(|metadata| {
+            metadata.source == ModelFactSource::CallerOverride
+                && metadata.provenance == "FrameworkConfig::ModelConfig.context_window"
+        }));
+        assert!(
+            resolution
+                .ignored_stale_facts
+                .iter()
+                .any(|metadata| metadata.version == "stale-v1")
+        );
+
+        let config = FrameworkConfig {
+            model,
+            agent: AgentSettings::default(),
+        };
+        let agent_config = AgentConfig::from(config);
+        assert_eq!(
+            agent_config.token_limit,
+            crate::agent::config::DEFAULT_TOKEN_LIMIT
+        );
+        assert!(!agent_config.token_limit_explicit);
+        assert!(agent_config.token_budget_config.enabled);
+        assert!(agent_config.model_profile.as_ref().is_some_and(|receipt| {
+            receipt
+                .applied_facts
+                .iter()
+                .any(|metadata| metadata.source == ModelFactSource::CallerOverride)
+        }));
+        let agent = crate::agent::ReactAgent::new(agent_config);
+        let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+        assert_eq!(snapshot.config.token_limit, 8_192);
+        Ok(())
+    }
+
+    #[test]
+    fn model_config_fact_inputs_round_trip_without_legacy_fields() -> std::result::Result<(), String>
+    {
+        let now = SystemTime::now();
+        let config = ModelConfig {
+            provider: "custom".to_string(),
+            name: "future-model".to_string(),
+            api_protocol: Some(LlmApiProtocol::Responses),
+            ..ModelConfig::default()
+        }
+        .with_model_facts(ModelFactInputs {
+            exact_model_facts: Some(ModelFactSet::new(
+                ModelFactMetadata::new(
+                    ModelFactSource::ExactModel,
+                    "provider:/models/future-model",
+                    "model-v4",
+                    now,
+                    None,
+                    ModelFactConfidence::from_percent_saturating(85),
+                ),
+                None,
+                ModelProfileOverride {
+                    context_window: Some(32_000),
+                    ..Default::default()
+                },
+            )),
+            ..Default::default()
+        });
+        let encoded = serde_json::to_string(&config).map_err(|error| error.to_string())?;
+        let decoded = serde_json::from_str::<SourcedModelConfig>(&encoded)
+            .map_err(|error| error.to_string())?;
+        let resolution = decoded.resolve_model_profile_at(now);
+        assert_eq!(resolution.profile.context_window, Some(32_000));
+        assert!(
+            resolution
+                .applied_facts
+                .iter()
+                .any(|metadata| metadata.version == "model-v4")
+        );
+        Ok(())
     }
 }

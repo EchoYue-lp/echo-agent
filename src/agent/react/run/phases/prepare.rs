@@ -26,6 +26,10 @@ pub(crate) async fn prepare_turn(
     recalled: usize,
     user_prompt_hook_already_run: bool,
 ) -> Result<PrepareOutcome> {
+    context
+        .lock()
+        .await
+        .set_token_limit(snap.config.token_limit, snap.config.token_budget.clone());
     let agent = &snap.config.agent_name;
     match mode {
         StreamMode::Execute => info!(agent = %agent, "Agent streaming task execution{label}"),

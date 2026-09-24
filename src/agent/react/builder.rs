@@ -8,7 +8,7 @@ use crate::error::Result;
 use crate::guard::{Guard, GuardManager};
 #[cfg(feature = "human-loop")]
 use crate::human_loop::{HumanLoopProvider, PermissionService};
-use crate::llm::{LlmClient, LlmConfig, ResponseFormat};
+use crate::llm::{LlmClient, LlmConfig, ResponseFormat, SourcedLlmConfig};
 use crate::memory::snapshot::{SnapshotManager, SnapshotPolicy};
 use crate::memory::store::Store;
 use crate::prelude::ReactAgent;
@@ -27,7 +27,7 @@ pub struct ReactAgentBuilder {
     model: String,
     system_prompt: String,
     llm_client: Option<Arc<dyn LlmClient>>,
-    llm_config: Option<LlmConfig>,
+    llm_config: Option<SourcedLlmConfig>,
     tools: Vec<Box<dyn Tool>>,
     task_revision_service: Option<Arc<crate::tasks::TaskRevisionService>>,
     enable_builtin_tools: bool,
@@ -57,7 +57,7 @@ pub struct ReactAgentBuilder {
     max_iterations: usize,
     run_budget: echo_core::agent::RunBudgetPolicy,
     persistence_settlement_timeout: std::time::Duration,
-    model_profile: Option<echo_core::llm::capabilities::ModelProfile>,
+    model_profile: Option<echo_core::llm::capabilities::ModelProfileResolution>,
     token_limit: usize,
     token_limit_explicit: bool,
     max_tokens: Option<u32>,
@@ -249,6 +249,13 @@ impl ReactAgentBuilder {
     /// For dynamically configuring API endpoint, keys, etc., without using environment variables.
     pub fn llm_config(mut self, config: LlmConfig) -> Self {
         self.model = config.model.clone();
+        self.llm_config = Some(SourcedLlmConfig::new(config));
+        self
+    }
+
+    /// Set LLM configuration together with sourced model facts.
+    pub fn sourced_llm_config(mut self, config: SourcedLlmConfig) -> Self {
+        self.model = config.config.model.clone();
         self.llm_config = Some(config);
         self
     }
@@ -461,7 +468,21 @@ impl ReactAgentBuilder {
 
     /// Install a resolved provider/model profile that controls harness behavior.
     pub fn model_profile(mut self, profile: echo_core::llm::capabilities::ModelProfile) -> Self {
-        self.model_profile = Some(profile);
+        self.model_profile = Some(
+            echo_core::llm::capabilities::ModelProfileResolution::from_explicit_profile(
+                profile,
+                std::time::SystemTime::now(),
+            ),
+        );
+        self
+    }
+
+    /// Install a resolved profile together with its provenance/freshness receipt.
+    pub fn model_profile_resolution(
+        mut self,
+        resolution: echo_core::llm::capabilities::ModelProfileResolution,
+    ) -> Self {
+        self.model_profile = Some(resolution);
         self
     }
 
@@ -846,6 +867,19 @@ impl ReactAgentBuilder {
             llm_config.build_client()?;
         }
 
+        let model_profile_resolution = self
+            .model_profile
+            .clone()
+            .or_else(|| {
+                self.llm_config
+                    .as_ref()
+                    .map(|config| config.resolve_model_profile_at(std::time::SystemTime::now()))
+            })
+            .or_else(|| {
+                self.llm_client
+                    .as_ref()
+                    .map(|client| client.model_profile_resolution())
+            });
         let mut config = AgentConfig::new(&self.model, &self.name, &self.system_prompt)
             .enable_tool(self.enable_builtin_tools)
             .readonly_tools(self.readonly_tools)
@@ -871,8 +905,8 @@ impl ReactAgentBuilder {
         if self.token_limit_explicit {
             config = config.token_limit(self.token_limit);
         }
-        if let Some(profile) = self.model_profile {
-            config = config.model_profile(profile);
+        if let Some(resolution) = model_profile_resolution {
+            config = config.model_profile_resolution(resolution);
         }
         if let Some(project_root) = self.project_root {
             config = config.project_root(project_root);
@@ -946,7 +980,7 @@ impl ReactAgentBuilder {
 
         // Inject LLM config
         if let Some(llm_config) = self.llm_config {
-            agent.set_llm_config(llm_config);
+            agent.set_sourced_llm_config(llm_config);
         }
 
         // Register all custom tools

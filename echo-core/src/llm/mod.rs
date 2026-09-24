@@ -441,12 +441,131 @@ pub trait LlmClient: Send + Sync {
     /// Model identifier used by this client.
     fn model_name(&self) -> &str;
 
+    /// Stable provider identity used by the model-fact resolver, when known.
+    fn provider_name(&self) -> Option<&str> {
+        None
+    }
+
+    /// Immutable wire behavior implemented by this client adapter.
+    fn protocol_capabilities(&self) -> capabilities::ProviderCapabilityOverride {
+        capabilities::ProviderCapabilityOverride::default()
+    }
+
+    /// Resolve and retain provider/model policy with provenance.
+    fn model_profile_resolution(&self) -> capabilities::ModelProfileResolution {
+        let now = std::time::SystemTime::now();
+        let provider = self.provider_name().unwrap_or("");
+        let declared_capabilities = self.capabilities();
+        let protocol_facts = capabilities::ModelFactSet::new_partial(
+            capabilities::ModelFactMetadata::new(
+                capabilities::ModelFactSource::ProviderAdapter,
+                "LlmClient::protocol_capabilities",
+                "llm-client-protocol-v1",
+                now,
+                None,
+                capabilities::ModelFactConfidence::VERIFIED,
+            ),
+            self.protocol_capabilities(),
+            capabilities::ModelProfileOverride::default(),
+        );
+        let mut resolver = capabilities::ModelProfileResolver::new()
+            .register_protocol_facts(provider, protocol_facts);
+        if declared_capabilities != capabilities::ProviderCapabilities::conservative_unknown() {
+            resolver = resolver.register_provider_facts(
+                provider,
+                capabilities::ModelFactSet::new(
+                    capabilities::ModelFactMetadata::new(
+                        capabilities::ModelFactSource::ProviderAdapter,
+                        "LlmClient::capabilities compatibility override",
+                        "llm-client-capabilities-v1",
+                        now,
+                        None,
+                        capabilities::ModelFactConfidence::VERIFIED,
+                    ),
+                    Some(declared_capabilities),
+                    capabilities::ModelProfileOverride::default(),
+                ),
+            );
+        }
+        resolver.resolve_at(provider, self.model_name(), now)
+    }
+
     /// Provider capabilities for this client.
     ///
-    /// Default returns OpenAI-compatible capabilities. Override for
-    /// Anthropic, Ollama, or custom providers.
+    /// The default is conservative: custom clients must explicitly publish
+    /// protocol/model facts rather than inheriting OpenAI capabilities.
     fn capabilities(&self) -> capabilities::ProviderCapabilities {
-        capabilities::ProviderCapabilities::openai_compatible()
+        capabilities::ProviderCapabilities::conservative_unknown()
+    }
+}
+
+#[cfg(test)]
+mod client_capability_tests {
+    use super::*;
+    use crate::error::LlmError;
+
+    struct UnknownClient;
+    struct DeclaredClient;
+
+    impl LlmClient for UnknownClient {
+        fn chat(&self, _request: ChatRequest) -> BoxFuture<'_, Result<ChatResponse>> {
+            Box::pin(async {
+                Err(LlmError::InvalidResponse("not used by this test".to_string()).into())
+            })
+        }
+
+        fn chat_stream(
+            &self,
+            _request: ChatRequest,
+        ) -> BoxFuture<'_, Result<BoxStream<'static, Result<ChatChunk>>>> {
+            Box::pin(async {
+                Ok(Box::pin(futures::stream::empty()) as BoxStream<'static, Result<ChatChunk>>)
+            })
+        }
+
+        fn model_name(&self) -> &str {
+            "unknown-model"
+        }
+    }
+
+    impl LlmClient for DeclaredClient {
+        fn chat(&self, request: ChatRequest) -> BoxFuture<'_, Result<ChatResponse>> {
+            UnknownClient.chat(request)
+        }
+
+        fn chat_stream(
+            &self,
+            request: ChatRequest,
+        ) -> BoxFuture<'_, Result<BoxStream<'static, Result<ChatChunk>>>> {
+            UnknownClient.chat_stream(request)
+        }
+
+        fn model_name(&self) -> &str {
+            "declared-model"
+        }
+
+        fn capabilities(&self) -> capabilities::ProviderCapabilities {
+            capabilities::ProviderCapabilities::openai_compatible()
+        }
+    }
+
+    #[test]
+    fn unknown_clients_do_not_inherit_openai_capabilities() {
+        assert_eq!(
+            UnknownClient.capabilities(),
+            capabilities::ProviderCapabilities::conservative_unknown()
+        );
+    }
+
+    #[test]
+    fn legacy_custom_capability_override_enters_the_resolution_receipt() {
+        let resolution = DeclaredClient.model_profile_resolution();
+        assert!(resolution.profile.capabilities.structured_output);
+        assert!(
+            resolution.applied_facts.iter().any(|metadata| {
+                metadata.source == capabilities::ModelFactSource::ProviderAdapter
+            })
+        );
     }
 }
 

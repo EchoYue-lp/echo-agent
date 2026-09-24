@@ -23,7 +23,7 @@ pub struct AgentConfig {
     /// Optional soft run budgets. All fields default to disabled.
     pub(crate) run_budget: echo_core::agent::RunBudgetPolicy,
     /// Resolved provider/model capabilities that affect harness behavior.
-    pub(crate) model_profile: Option<echo_core::llm::capabilities::ModelProfile>,
+    pub(crate) model_profile: Option<echo_core::llm::capabilities::ModelProfileResolution>,
     /// Tool allowlist (empty = no restriction, all registered tools can be called)
     pub(crate) allowed_tools: Vec<String>,
     /// Whether to allow registering and calling business tools (e.g., math, weather, etc.)
@@ -461,7 +461,21 @@ impl AgentConfig {
 
     /// Install a resolved model profile for harness-level behavior.
     pub fn model_profile(mut self, profile: echo_core::llm::capabilities::ModelProfile) -> Self {
-        self.model_profile = Some(profile);
+        self.model_profile = Some(
+            echo_core::llm::capabilities::ModelProfileResolution::from_explicit_profile(
+                profile,
+                std::time::SystemTime::now(),
+            ),
+        );
+        self
+    }
+
+    /// Install the canonical model profile together with source/freshness facts.
+    pub fn model_profile_resolution(
+        mut self,
+        resolution: echo_core::llm::capabilities::ModelProfileResolution,
+    ) -> Self {
+        self.model_profile = Some(resolution);
         self
     }
 

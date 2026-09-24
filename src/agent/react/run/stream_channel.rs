@@ -4568,6 +4568,12 @@ mod tests {
         );
         let agent = ReactAgentBuilder::new()
             .llm_client(llm.clone())
+            .model_profile(
+                echo_core::llm::capabilities::ModelProfile::from_provider_name(
+                    "mock-model",
+                    "openai",
+                ),
+            )
             .tool(Box::new(
                 MockTool::new("mock_calc").with_response("must not run"),
             ))
