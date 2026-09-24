@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.audit-poison-current-verification
 kind: evidence
-observed_at: source:87b717676a7b51e213630677989947777b4bed441acd8c7d655fb6c96dca77ad
+observed_at: source:d0d70f0819595200d148564ce11cb55de583ba943d7a5554b4c06a0f6dcb8af9
 source_refs:
   - echo-state/src/audit/memory.rs
 supports: [finding.in-memory-audit-successful-drop]

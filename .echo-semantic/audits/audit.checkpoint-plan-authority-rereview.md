@@ -5,19 +5,19 @@ kind: audit
 boundary_ref: boundary.context-memory
 lens: state_authority
 freshness: examined
-revision: source:87b717676a7b51e213630677989947777b4bed441acd8c7d655fb6c96dca77ad
+revision: source:d0d70f0819595200d148564ce11cb55de583ba943d7a5554b4c06a0f6dcb8af9
 finding_refs: [finding.checkpoint-current-plan-orphan-authority]
 challenges:
   legacy-store-compatibility:
-    revision: source:87b717676a7b51e213630677989947777b4bed441acd8c7d655fb6c96dca77ad
+    revision: source:d0d70f0819595200d148564ce11cb55de583ba943d7a5554b4c06a0f6dcb8af9
     source_refs: [src/state/mod.rs, src/state/file.rs, src/state/sqlite.rs, src/agent/react/tests.rs]
     evidence_refs: [evidence.checkpoint-plan-authority-repair, evidence.checkpoint-plan-authority-verification]
   react-authority-retirement:
-    revision: source:87b717676a7b51e213630677989947777b4bed441acd8c7d655fb6c96dca77ad
+    revision: source:d0d70f0819595200d148564ce11cb55de583ba943d7a5554b4c06a0f6dcb8af9
     source_refs: [src/agent/react/mod.rs, src/agent/react/run/context.rs, src/agent/snapshot.rs, src/agent/react/run/stream_channel.rs]
     evidence_refs: [evidence.checkpoint-plan-authority-repair, evidence.checkpoint-plan-authority-verification]
   public-contract-alignment:
-    revision: source:87b717676a7b51e213630677989947777b4bed441acd8c7d655fb6c96dca77ad
+    revision: source:d0d70f0819595200d148564ce11cb55de583ba943d7a5554b4c06a0f6dcb8af9
     source_refs: [README.md, README.zh.md, CHANGELOG.md, src/memory.rs, docs/adr/0008-canonical-runtime-task-authority.md, echo-agent-learning/tests/documentation_contract.rs]
     evidence_refs: [evidence.checkpoint-plan-authority-repair, evidence.checkpoint-plan-authority-verification]
 ---
