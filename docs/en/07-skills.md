@@ -346,23 +346,32 @@ explicit API activation and the LLM tool path remain available.
 
 ## Hooks System
 
-Skills participate in the same 31-event Hook system as user and plugin Hook
+Skills participate in the same 31-event Hook catalog as user and plugin Hook
 files. This covers tool execution, sessions, Subagents, tasks, plugins, and
-self-evolution; it is not limited to successful tool calls.
+self-evolution; it is not limited to successful tool calls. The catalog is not
+an automatic-emission guarantee: each event is either framework-auto, host-owned,
+or currently has no producer. See the [authoritative producer matrix](./23-hooks.md#hook-event-producer-matrix)
+and [ADR 0073](../adr/0073-hook-event-producer-contract.md).
 
 ### Hook Events
 
 | Category | Events |
 |----------|--------|
 | Tool (5) | `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `PermissionRequest`, `PermissionDenied` |
-| Session/run (11) | `SessionStart`, `SessionEnd`, `Stop`, `StopFailure`, `Notification`, `UserPromptSubmit`, `PreCompact`, `PostCompact`, `ConfigChange`, `InstructionsLoaded`, `PostToolBatch` |
+| Session/run (10) | `SessionStart`, `SessionEnd`, `Stop`, `Notification`, `UserPromptSubmit`, `PreCompact`, `PostCompact`, `ConfigChange`, `InstructionsLoaded`, `PostToolBatch` |
+| Error (1) | `StopFailure` |
 | Subagent (2) | `SubagentStart`, `SubagentStop` |
 | Task (3) | `TaskCreated`, `TaskStarted`, `TaskCompleted` |
 | Plugin (2) | `PluginLoaded`, `PluginDisabled` |
 | Evolution (8) | `PostMemoryWrite`, `MemoryLayerChange`, `SkillCandidateDetected`, `SkillLifecycleTransition`, `SkillHealthCheck`, `SkillPatchApplied`, `SkillMergeApplied`, `RulePromoted` |
 
-The authoritative trigger and matcher semantics are documented in
-[Hooks System](./23-hooks.md).
+The authoritative trigger, matcher, and producer semantics are documented in
+[Hooks System](./23-hooks.md). In particular, `PermissionDenied`,
+`Notification`, `ConfigChange`, and four evolution events are currently
+catalog-only (`no-producer`); registering a hook for them does not make the
+framework emit an event. Task events and the four wired evolution callbacks
+require the embedding application's bridge or observer configuration. Subagent
+events are framework-auto when `ReactAgent` installs the unified executor.
 
 ### Hook Types
 

@@ -15,45 +15,61 @@ Hooks allow custom behavior to be injected at key points in the agent lifecycle.
 The primary hook system. Hooks are configured in YAML via host application or
 plugin configuration and executed by the `HookExecutor`.
 
-### Hook Events
+`HookEvent::ALL` is a 31-event catalog, not a promise that every event is
+automatically emitted by a bare `ReactAgent`. The producer contract is explicit:
+`framework-auto` means a framework-owned runtime path emits the event when that
+path is used; `host-owned` means the embedding application must invoke an
+event-specific bridge or opt-in observer; `no-producer` means the enum and context
+support the event, but the current framework has no producer. The complete
+matrix is also recorded in [ADR 0073](../adr/0073-hook-event-producer-contract.md)
+and locked by `tests/hook_event_producer_contract.rs`.
 
-| Event | When Fires | Can Modify |
-|-------|-----------|------------|
-| `PreToolUse` | Before tool execution | Input, permission (allow/block) |
-| `PostToolUse` | After tool succeeds | Output, continuation |
-| `PostToolUseFailure` | After tool fails | Error feedback |
-| `PermissionRequest` | Permission dialog appears | Auto-approve/deny |
-| `PermissionDenied` | Permission denied | Retry signal |
-| `SessionStart` | Session begins or resumes | Context injection |
-| `SessionEnd` | Session terminates | Cleanup |
-| `Stop` | Agent finishes responding | Continue reason |
-| `StopFailure` | Agent encounters unrecoverable error | Alert/recovery |
-| `Notification` | Agent needs user attention | Permission shortcut |
-| `UserPromptSubmit` | User submits prompt | Context injection, block |
-| `PreCompact` | Before context compression | Context injection |
-| `PostCompact` | After context compression | Context injection |
-| `ConfigChange` | Configuration file changes | Block/reload |
-| `InstructionsLoaded` | Skills/instructions loaded | Post-load validation |
-| `PostToolBatch` | After batch of parallel tool calls | Aggregation |
-| `SubagentStart` | Before subagent dispatch | Context injection |
-| `SubagentStop` | After subagent completes | Result injection |
-| `TaskCreated` | Task created/scheduled | Context injection |
-| `TaskStarted` | Scheduler claims a task attempt | Context injection |
-| `TaskCompleted` | Task completed | Result injection |
-| `PluginLoaded` | Plugin components become live | Notification/context |
-| `PluginDisabled` | Plugin is disabled or uninstalled | Notification/context |
-| `PostMemoryWrite` | Memory is persisted | Evolution feedback |
-| `MemoryLayerChange` | Memory changes layer | Evolution feedback |
-| `SkillCandidateDetected` | A skill candidate is detected | Evolution feedback |
-| `SkillLifecycleTransition` | A skill changes lifecycle state | Evolution feedback |
-| `SkillHealthCheck` | A skill health check finishes | Evolution feedback |
-| `SkillPatchApplied` | A skill patch is applied | Evolution feedback |
-| `SkillMergeApplied` | Skills are merged | Evolution feedback |
-| `RulePromoted` | Memory is promoted to an AGENTS.md rule | Evolution feedback |
+### Hook event producer matrix
 
-All eight Evolution events above are emitted by their owning write, transition,
-candidate-detection, health-check, patch, merge, and rule-promotion paths. They
-are runtime events rather than reserved enum values.
+| Event | Category | Producer status | Current producer / owner |
+|-------|----------|-----------------|-------------------------|
+| `PreToolUse` | Tool | `framework-auto` | ReAct tool pipeline before execution |
+| `PostToolUse` | Tool | `framework-auto` | ReAct tool pipeline after success |
+| `PostToolUseFailure` | Tool | `framework-auto` | ReAct tool pipeline after failure |
+| `PermissionRequest` | Tool | `framework-auto` | ReAct permission stage |
+| `PermissionDenied` | Tool | `no-producer` | Reserved for the approval-receipt work (#37); do not synthesize it through the generic lifecycle API |
+| `SessionStart` | Session/run | `framework-auto` | Runtime reset/restore path |
+| `SessionEnd` | Session/run | `framework-auto` | ReAct finalization and agent close paths |
+| `Stop` | Session/run | `framework-auto` | ReAct final answer/intervention path |
+| `Notification` | Session/run | `no-producer` | No dedicated framework or host adapter; the generic lifecycle API is only a manual escape hatch |
+| `UserPromptSubmit` | Session/run | `framework-auto` | ReAct context preparation |
+| `PreCompact` | Session/run | `framework-auto` | Framework compression entry points |
+| `PostCompact` | Session/run | `framework-auto` | Framework compression completion path |
+| `ConfigChange` | Session/run | `no-producer` | No dedicated framework or host adapter; the generic lifecycle API is only a manual escape hatch |
+| `InstructionsLoaded` | Session/run | `framework-auto` | `ReactAgent::discover_skills` after registration |
+| `PostToolBatch` | Session/run | `framework-auto` | ReAct parallel-tool batch settlement |
+| `SubagentStart` | Subagent | `framework-auto` | `SubagentExecutor::unified_hook_executor` on each concrete dispatch attempt |
+| `SubagentStop` | Subagent | `framework-auto` | `SubagentExecutor::unified_hook_executor` at each attempt terminal boundary |
+| `TaskCreated` | Task | `host-owned` | Application-owned task runtime through `TaskHookBridge` |
+| `TaskStarted` | Task | `host-owned` | Application-owned task runtime through `TaskHookBridge` |
+| `TaskCompleted` | Task | `host-owned` | Application-owned task runtime through `TaskHookBridge` |
+| `StopFailure` | Error | `framework-auto` | ReAct terminal failure paths |
+| `PluginLoaded` | Plugin | `framework-auto` | `PluginCoordinator` event-emission phase |
+| `PluginDisabled` | Plugin | `framework-auto` | `PluginCoordinator` event-emission phase |
+| `PostMemoryWrite` | Evolution | `host-owned` | Opt-in `HookEvolutionObserver` wired by the embedding application |
+| `MemoryLayerChange` | Evolution | `host-owned` | Opt-in `HookEvolutionObserver` wired by the embedding application |
+| `SkillCandidateDetected` | Evolution | `host-owned` | Opt-in `HookEvolutionObserver` wired by the embedding application |
+| `SkillLifecycleTransition` | Evolution | `no-producer` | Enum/context support only; no framework observer callback exists |
+| `SkillHealthCheck` | Evolution | `host-owned` | Opt-in `HookEvolutionObserver` wired by the embedding application |
+| `SkillPatchApplied` | Evolution | `no-producer` | Enum/context support only; no framework observer callback exists |
+| `SkillMergeApplied` | Evolution | `no-producer` | Enum/context support only; no framework observer callback exists |
+| `RulePromoted` | Evolution | `no-producer` | Enum/context support only; no framework observer callback exists |
+
+The `host-owned` evolution rows are real only after the host wires
+`HookEvolutionObserver` into the relevant runtime. The four `no-producer`
+evolution rows must not be described as automatic callbacks. Adding a producer
+for any `no-producer` event is a separate contract change that must update this
+matrix and the contract test.
+
+`SubagentExecutor::unified_hook_executor` is the canonical producer for the
+default `ReactAgent` path. `SubagentHookBridge` remains an explicit adapter for
+hosts that own a separate Subagent runtime; a host must choose one path per
+dispatch attempt rather than wiring both, or it will duplicate Start/Stop.
 
 `MemoryLayerChange` also reports a successful hot-memory deletion as
 `from_layer = "hot"` and `to_layer = "deleted"`. Missing or failed deletes do
