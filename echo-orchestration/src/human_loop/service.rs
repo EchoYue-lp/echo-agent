@@ -58,7 +58,7 @@
 use async_trait::async_trait;
 use echo_core::tools::permission::{
     PermissionDecision, PermissionMode, PermissionRule, RuleBehavior, RuleMatcher, RuleRegistry,
-    RuleSource, ToolPermission,
+    RuleSource, ToolApprovalReceipt, ToolPermission,
 };
 use serde_json::Value;
 use std::sync::Arc;
@@ -141,6 +141,8 @@ pub struct PermissionService {
 pub struct PermissionCheck {
     pub decision: PermissionDecision,
     pub updated_input: Option<Value>,
+    /// Receipt bound to the final effective input when the decision allows it.
+    pub approval_receipt: Option<ToolApprovalReceipt>,
 }
 
 /// Immutable identity and environment snapshot for one permission decision.
@@ -160,7 +162,27 @@ impl PermissionCheck {
         Self {
             decision,
             updated_input: None,
+            approval_receipt: None,
         }
+    }
+
+    fn for_input(decision: PermissionDecision, tool_name: &str, input: &Value) -> Result<Self> {
+        let approval_receipt = if matches!(decision, PermissionDecision::Allow) {
+            Some(
+                ToolApprovalReceipt::issue(tool_name, input).map_err(|error| {
+                    echo_core::error::ReactError::Other(format!(
+                        "failed to canonicalize approval input: {error}"
+                    ))
+                })?,
+            )
+        } else {
+            None
+        };
+        Ok(Self {
+            decision,
+            updated_input: None,
+            approval_receipt,
+        })
     }
 }
 
@@ -641,7 +663,7 @@ impl PermissionService {
                     pipeline_start,
                     pipeline_start.elapsed(),
                 );
-                return Ok(PermissionCheck::from_decision(d));
+                return PermissionCheck::for_input(d, tool_name, tool_input);
             }};
         }
 
@@ -769,7 +791,7 @@ impl PermissionService {
                     protected_path_audited = audited;
                     check
                 } else {
-                    PermissionCheck::from_decision(decision)
+                    PermissionCheck::for_input(decision, tool_name, tool_input)?
                 }
             }
             PermissionMode::Default => {
@@ -780,12 +802,12 @@ impl PermissionService {
                     protected_path_audited = audited;
                     check
                 } else {
-                    PermissionCheck::from_decision(PermissionDecision::Allow)
+                    PermissionCheck::for_input(PermissionDecision::Allow, tool_name, tool_input)?
                 }
             }
             PermissionMode::Plan => {
                 // Plan 已在步骤 2 处理，此处不应到达
-                PermissionCheck::from_decision(PermissionDecision::Allow)
+                PermissionCheck::for_input(PermissionDecision::Allow, tool_name, tool_input)?
             }
             PermissionMode::AcceptEdits => {
                 if Self::accept_edits_confirmation_required(permissions) {
@@ -795,7 +817,7 @@ impl PermissionService {
                     protected_path_audited = audited;
                     check
                 } else {
-                    PermissionCheck::from_decision(PermissionDecision::Allow)
+                    PermissionCheck::for_input(PermissionDecision::Allow, tool_name, tool_input)?
                 }
             }
             PermissionMode::StrictConfirm => {
@@ -806,7 +828,7 @@ impl PermissionService {
                     protected_path_audited = audited;
                     check
                 } else {
-                    PermissionCheck::from_decision(PermissionDecision::Allow)
+                    PermissionCheck::for_input(PermissionDecision::Allow, tool_name, tool_input)?
                 }
             }
             PermissionMode::DontAsk => PermissionCheck::from_decision(
@@ -832,7 +854,7 @@ impl PermissionService {
             }
             PermissionMode::BypassPermissions => {
                 // Bypass 已在步骤 1 处理，此处不应到达
-                PermissionCheck::from_decision(PermissionDecision::Allow)
+                PermissionCheck::for_input(PermissionDecision::Allow, tool_name, tool_input)?
             }
         };
         let decision = &check.decision;
@@ -961,13 +983,27 @@ impl PermissionService {
                 suggestions: vec![question],
             },
         };
-        Ok((
+        let final_check = if matches!(decision, PermissionDecision::Allow) {
+            let effective_input = updated_input.as_ref().unwrap_or(tool_input);
+            let approval_receipt =
+                ToolApprovalReceipt::issue(tool_name, effective_input).map_err(|error| {
+                    echo_core::error::ReactError::Other(format!(
+                        "failed to canonicalize approval input: {error}"
+                    ))
+                })?;
             PermissionCheck {
                 decision,
                 updated_input,
-            },
-            false,
-        ))
+                approval_receipt: Some(approval_receipt),
+            }
+        } else {
+            PermissionCheck {
+                decision,
+                updated_input,
+                approval_receipt: None,
+            }
+        };
+        Ok((final_check, false))
     }
 
     /// 解析规则
@@ -1393,6 +1429,11 @@ mod tests {
             check.updated_input,
             Some(serde_json::json!({"approved_for": "one"}))
         );
+        let receipt = check.approval_receipt.as_ref().ok_or_else(|| {
+            echo_core::error::ReactError::Other("approval receipt missing".into())
+        })?;
+        assert!(receipt.matches("Bash", &serde_json::json!({"approved_for": "one"})));
+        assert!(!receipt.matches("Bash", &serde_json::json!({"request_id": "one"})));
         Ok(())
     }
 

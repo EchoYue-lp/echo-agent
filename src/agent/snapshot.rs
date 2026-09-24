@@ -2116,16 +2116,19 @@ impl AgentRunSnapshot {
 
     // ── Tool execution helpers (delegated from Pipeline stages) ─────
 
-    /// Check tool approval via PermissionService.
-    /// Returns modified input if approval modified the tool call, None otherwise.
+    /// Check tool approval via PermissionService and retain the exact approval
+    /// receipt for the final effective invocation.
     #[cfg(feature = "human-loop")]
-    pub async fn check_tool_approval(
+    pub async fn check_tool_approval_with_receipt(
         &self,
         request_id: &str,
         tool_name: &str,
         input: &serde_json::Value,
         permission_mode_override: Option<echo_core::tools::permission::PermissionMode>,
-    ) -> std::result::Result<Option<serde_json::Value>, echo_core::error::ReactError> {
+    ) -> std::result::Result<
+        Option<echo_orchestration::human_loop::PermissionCheck>,
+        echo_core::error::ReactError,
+    > {
         if let Some(ref service) = self.permission_service {
             let pending = {
                 let mut rules = self.pending_permission_rules.lock().await;
@@ -2228,9 +2231,7 @@ impl AgentRunSnapshot {
             self.record_permission_decision(tool_name, &decision.decision, "permission_service")
                 .await;
             match decision.decision {
-                echo_core::tools::permission::PermissionDecision::Allow => {
-                    Ok(decision.updated_input)
-                }
+                echo_core::tools::permission::PermissionDecision::Allow => Ok(Some(decision)),
                 echo_core::tools::permission::PermissionDecision::Deny { reason } => {
                     Err(echo_core::error::ReactError::Other(format!(
                         "Permission denied for tool '{}': {}",
@@ -2257,14 +2258,38 @@ impl AgentRunSnapshot {
 
     /// Check tool approval via PermissionService (no-op when human-loop feature is disabled).
     #[cfg(not(feature = "human-loop"))]
-    pub async fn check_tool_approval(
+    pub async fn check_tool_approval_with_receipt(
         &self,
         _request_id: &str,
         _tool_name: &str,
         _input: &serde_json::Value,
         _permission_mode_override: Option<echo_core::tools::permission::PermissionMode>,
-    ) -> std::result::Result<Option<serde_json::Value>, echo_core::error::ReactError> {
+    ) -> std::result::Result<
+        Option<echo_orchestration::human_loop::PermissionCheck>,
+        echo_core::error::ReactError,
+    > {
         Ok(None)
+    }
+
+    /// Backward-compatible permission check that exposes only any rewritten
+    /// input.  New execution paths should use
+    /// [`Self::check_tool_approval_with_receipt`] so effectful tools retain the
+    /// exact invocation approval proof.
+    pub async fn check_tool_approval(
+        &self,
+        request_id: &str,
+        tool_name: &str,
+        input: &serde_json::Value,
+        permission_mode_override: Option<echo_core::tools::permission::PermissionMode>,
+    ) -> std::result::Result<Option<serde_json::Value>, echo_core::error::ReactError> {
+        self.check_tool_approval_with_receipt(
+            request_id,
+            tool_name,
+            input,
+            permission_mode_override,
+        )
+        .await
+        .map(|check| check.and_then(|value| value.updated_input))
     }
 
     /// Record a file read for read-before-edit enforcement.
@@ -2644,6 +2669,7 @@ impl AgentRunSnapshot {
                 duration_ms: 0,
                 plan_mode: self.config.plan_mode,
                 permission_decision: None,
+                approval_receipt: None,
                 permission_mode_override: None,
                 rewrites: Vec::new(),
                 invocation_emitted: false,

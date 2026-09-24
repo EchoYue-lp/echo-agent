@@ -10,12 +10,12 @@ focus: [state_authority, result_side_effect, contract_evidence]
 boundary_ref: boundary.tool-permission-sandbox
 behavior_refs: [behavior.effect-permission-execution]
 rule_refs: [rule.permission-effect-order]
-evidence_refs: [evidence.effects-extensions]
+evidence_refs: [evidence.effects-extensions, evidence.approval-authority-repair, evidence.approval-authority-verification]
 audit_refs: [audit.tool-permission-sandbox.permission-external]
 decision_refs: []
-repair_evidence_refs: []
-verification_evidence_refs: []
-rereview_audit_refs: []
+repair_evidence_refs: [evidence.approval-authority-repair]
+verification_evidence_refs: [evidence.approval-authority-verification]
+rereview_audit_refs: [audit.approval-authority-rereview]
 discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 ---
 
@@ -39,4 +39,8 @@ GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/37
 
 ## 处理记录
 
-Discovery 记录；下一阶段统一批准 receipt 或明确两层职责，避免双提示和无法执行。
+Discovery 记录；当前候选统一为 invocation-scoped approval receipt：
+PermissionService 或显式 Hook Allow 在最终 rewrite 后签发，React pipeline 通过
+`ToolContext` 传入 ShellTool，Shell 的 foreground/background/streaming effect boundary
+只消费与最终 tool name 和 canonical effective args 完全匹配的 receipt。完整门禁、独立复审、
+远端交付与 Issue 关闭仍待验收。

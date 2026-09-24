@@ -289,6 +289,7 @@ impl ShellTool {
         &self,
         command: &str,
         ctx: &ToolContext,
+        effective_input: &Value,
         timeout_secs: Option<u64>,
         has_sandbox: bool,
     ) -> ToolResult {
@@ -299,13 +300,15 @@ impl ShellTool {
         match self.check_command_safety(command) {
             CommandSafety::Safe => {}
             CommandSafety::RequiresApproval(reason) => {
-                return ToolResult::failure(
-                    ToolFailureCategory::Permanent,
-                    format!(
-                        "⚠️  Manual confirmation required: {}\nCommand: {}\n\nPlease use the human_loop module to confirm before executing.",
-                        reason, command
-                    ),
-                );
+                if !self.approval_receipt_matches(ctx, effective_input) {
+                    return ToolResult::failure(
+                        ToolFailureCategory::Permanent,
+                        format!(
+                            "⚠️  Manual confirmation required: {}\nCommand: {}\n\nPlease use the human_loop module to confirm before executing.",
+                            reason, command
+                        ),
+                    );
+                }
             }
             CommandSafety::Dangerous(reason) => {
                 return ToolResult::failure(
@@ -374,6 +377,12 @@ impl ShellTool {
                 )
             }
         }
+    }
+
+    fn approval_receipt_matches(&self, ctx: &ToolContext, effective_input: &Value) -> bool {
+        ctx.approval_receipt
+            .as_ref()
+            .is_some_and(|receipt| receipt.matches(self.name(), effective_input))
     }
 
     /// Check whether a command is safe
@@ -626,6 +635,12 @@ impl Tool for ShellTool {
                 .get("command")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| ToolError::MissingParameter("command".to_string()))?;
+            let effective_input = Value::Object(
+                parameters
+                    .iter()
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect(),
+            );
 
             // Extract timeout parameter (default 60s). The background path maps
             // an explicit timeout onto the cell lifetime WITHOUT the 300s
@@ -646,6 +661,7 @@ impl Tool for ShellTool {
                     .launch_background_cell(
                         command,
                         &ctx,
+                        &effective_input,
                         if has_timeout_param {
                             Some(timeout_secs_raw)
                         } else {
@@ -664,13 +680,15 @@ impl Tool for ShellTool {
             match self.check_command_safety(command) {
                 CommandSafety::Safe => {}
                 CommandSafety::RequiresApproval(reason) => {
-                    return Ok(single_complete_stream(ToolResult::failure(
-                        ToolFailureCategory::Permanent,
-                        format!(
-                            "⚠️  Manual confirmation required: {}\nCommand: {}\n\nPlease use the human_loop module to confirm before executing.",
-                            reason, command
-                        ),
-                    )));
+                    if !self.approval_receipt_matches(&ctx, &effective_input) {
+                        return Ok(single_complete_stream(ToolResult::failure(
+                            ToolFailureCategory::Permanent,
+                            format!(
+                                "⚠️  Manual confirmation required: {}\nCommand: {}\n\nPlease use the human_loop module to confirm before executing.",
+                                reason, command
+                            ),
+                        )));
+                    }
                 }
                 CommandSafety::Dangerous(reason) => {
                     return Ok(single_complete_stream(ToolResult::failure(
@@ -1313,6 +1331,7 @@ mod tests {
         CommandCellArtifactStatus, CommandCellDelta, CommandCellError, CommandCellLaunchReceipt,
         CommandCellObservationLease, CommandCellPhase, CommandCellSnapshot, CommandCellWaitReason,
     };
+    use echo_core::tools::permission::ToolApprovalReceipt;
     use echo_core::tools::{ToolContext, ToolOutputChannel, ToolStreamEvent};
     use futures::StreamExt;
     use std::collections::HashMap;
@@ -1698,6 +1717,133 @@ mod tests {
         let result = tool.execute(params).await.unwrap();
         assert!(!result.success);
         assert!(result.error.unwrap().contains("rejection"));
+    }
+
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn approval_receipt_is_required_and_bound_for_foreground_shell() -> Result<()> {
+        let tool = ShellTool::new();
+        let params = HashMap::from([(
+            "command".to_string(),
+            serde_json::json!("python3 --version"),
+        )]);
+        let denied = tool
+            .execute_with_context(params.clone(), &ToolContext::default())
+            .await?;
+        assert!(!denied.success);
+        assert!(
+            denied
+                .error
+                .as_deref()
+                .is_some_and(|message| message.contains("confirmation"))
+        );
+
+        let effective_input = Value::Object(
+            params
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+        );
+        let denied = tool
+            .execute_with_context(params.clone(), &ToolContext::default())
+            .await?;
+        assert!(!denied.success);
+        assert!(
+            denied
+                .error
+                .as_deref()
+                .is_some_and(|message| message.contains("confirmation"))
+        );
+        let receipt = ToolApprovalReceipt::issue("shell", &effective_input).map_err(|error| {
+            ToolError::ExecutionFailed {
+                tool: "shell".to_string(),
+                message: error.to_string(),
+            }
+        })?;
+        let approved = tool
+            .execute_with_context(
+                params,
+                &ToolContext {
+                    approval_receipt: Some(receipt),
+                    ..ToolContext::default()
+                },
+            )
+            .await?;
+        assert!(approved.success, "approved command failed: {approved:?}");
+        Ok(())
+    }
+
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn background_and_streaming_paths_consume_the_same_exact_receipt() -> Result<()> {
+        let registry = Arc::new(CapturingCellRegistry::default());
+        let tool = ShellTool::new().with_cell_launcher(registry.clone());
+        let params = HashMap::from([
+            (
+                "command".to_string(),
+                serde_json::json!("python3 --version"),
+            ),
+            ("background".to_string(), serde_json::json!(true)),
+        ]);
+        let effective_input = Value::Object(
+            params
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+        );
+        let receipt = ToolApprovalReceipt::issue("shell", &effective_input).map_err(|error| {
+            ToolError::ExecutionFailed {
+                tool: "shell".to_string(),
+                message: error.to_string(),
+            }
+        })?;
+        let result = tool
+            .execute_with_context(
+                params.clone(),
+                &ToolContext {
+                    approval_receipt: Some(receipt.clone()),
+                    ..ToolContext::default()
+                },
+            )
+            .await?;
+        assert!(result.success, "background launch failed: {result:?}");
+        assert!(
+            registry
+                .request
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_some()
+        );
+
+        let mut stream = tool
+            .execute_stream_with_context(
+                HashMap::from([(
+                    "command".to_string(),
+                    serde_json::json!("python3 --version"),
+                )]),
+                &ToolContext {
+                    approval_receipt: Some(
+                        ToolApprovalReceipt::issue(
+                            "shell",
+                            &serde_json::json!({"command": "python3 --version"}),
+                        )
+                        .map_err(|error| ToolError::ExecutionFailed {
+                            tool: "shell".to_string(),
+                            message: error.to_string(),
+                        })?,
+                    ),
+                    ..ToolContext::default()
+                },
+            )
+            .await?;
+        let mut saw_complete = false;
+        while let Some(event) = stream.next().await {
+            if let ToolStreamEvent::Complete(result) = event {
+                saw_complete = result.success;
+            }
+        }
+        assert!(saw_complete);
+        Ok(())
     }
 
     #[test]
