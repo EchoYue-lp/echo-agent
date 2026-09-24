@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.trace-effect-producers-current-repair
 kind: evidence
-observed_at: f4ba41cf3e0c52ceb45b4cf9f92530aec64fc84c
+observed_at: source:6ed43c02230186db2c60d15eeda68864a0c1dddb9719434c45439363536592e4
 source_refs:
   - echo-core/src/tools/mod.rs
   - echo-tools/src/files/files.rs
@@ -33,7 +33,7 @@ source_refs:
   - src/trace/mod.rs
 supports: [finding.trace-effect-event-producers, behavior.effect-permission-execution, behavior.observation-persistence]
 limitations:
-  - This evidence describes the candidate producer contract at the current main snapshot; final source digest, full validation, and independent review are pending
+  - Full gate and cross-repository SDK/CLI consumer gates remain separate delivery boundaries
   - Optional failure_count stays unknown when the test runner has no structured count
   - Background Subagent observation is in-process; process abort, admission, generation fencing, shutdown drain, and evidence settlement remain embedding-application responsibilities for Issues #38/#61
 ---

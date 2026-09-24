@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.plan-mode-write-surface-closure
 kind: evidence
-observed_at: source:46382a3fd5e3196b9c5c541945609af9ca0bed79299d0786e1fbb4f7e375024a
+observed_at: source:6ed43c02230186db2c60d15eeda68864a0c1dddb9719434c45439363536592e4
 source_refs:
   - src/agent/react/run/pipeline.rs
   - src/agent/snapshot.rs

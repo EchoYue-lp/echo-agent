@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.trace-audit-retention-current-verification
 kind: evidence
-observed_at: 733d352fc719f922b21bab1cd46206139564367f
+observed_at: source:6ed43c02230186db2c60d15eeda68864a0c1dddb9719434c45439363536592e4
 source_refs:
   - echo-core/src/utils/retention.rs
   - echo-state/src/audit/file.rs

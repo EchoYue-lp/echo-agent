@@ -5,11 +5,11 @@ kind: audit
 boundary_ref: boundary.tool-permission-sandbox
 lens: permission_external
 freshness: examined
-revision: source:46382a3fd5e3196b9c5c541945609af9ca0bed79299d0786e1fbb4f7e375024a
+revision: source:6ed43c02230186db2c60d15eeda68864a0c1dddb9719434c45439363536592e4
 finding_refs: [finding.plan-mode-write-surface]
 challenges:
   live-plan-switch-after-gate:
-    revision: source:46382a3fd5e3196b9c5c541945609af9ca0bed79299d0786e1fbb4f7e375024a
+    revision: source:6ed43c02230186db2c60d15eeda68864a0c1dddb9719434c45439363536592e4
     source_refs: [src/agent/react/run/pipeline.rs, src/agent/snapshot.rs, echo-orchestration/src/human_loop/service.rs]
     evidence_refs: [evidence.plan-mode-write-surface-repair, evidence.plan-mode-write-surface-timing-verification]
 ---
