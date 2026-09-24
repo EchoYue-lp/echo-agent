@@ -2255,7 +2255,14 @@ mod tests {
             .as_ref()
             .ok_or_else(|| ReactError::Other("spill result lacks typed artifact".to_string()))?;
         let artifact_path = &artifact.path;
-        assert!(artifact_path.starts_with(working_dir.path()));
+        let physical_root = working_dir
+            .path()
+            .canonicalize()
+            .map_err(|error| ReactError::Other(error.to_string()))?;
+        let physical_artifact = artifact_path
+            .canonicalize()
+            .map_err(|error| ReactError::Other(error.to_string()))?;
+        assert!(physical_artifact.starts_with(physical_root));
         let artifact_path_text = artifact_path.to_string_lossy();
         assert!(ctx.output.as_deref().is_some_and(|output| {
             output.contains("Tool output preview only")

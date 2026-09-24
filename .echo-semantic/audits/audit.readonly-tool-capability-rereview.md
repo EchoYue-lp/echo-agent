@@ -5,19 +5,19 @@ kind: audit
 boundary_ref: boundary.tool-permission-sandbox
 lens: permission_external
 freshness: examined
-revision: source:13ff9de40ae621e1201c111201fda28402a397d7104e90595be0c5106482dbc0
+revision: bd17c73075d6b3cf8e00877fa0fb10d36694ea54
 finding_refs: [finding.readonly-tools-custom-registration-bypass]
 challenges:
   custom-registration-bypass:
-    revision: source:13ff9de40ae621e1201c111201fda28402a397d7104e90595be0c5106482dbc0
+    revision: bd17c73075d6b3cf8e00877fa0fb10d36694ea54
     source_refs: [src/agent/react/builder.rs, src/agent/react/mod.rs, src/agent/react/capabilities.rs]
     evidence_refs: [evidence.readonly-tool-capability-repair, evidence.readonly-tool-capability-verification]
   late-injection-visibility-execution:
-    revision: source:13ff9de40ae621e1201c111201fda28402a397d7104e90595be0c5106482dbc0
+    revision: bd17c73075d6b3cf8e00877fa0fb10d36694ea54
     source_refs: [src/agent/snapshot.rs, src/agent/react/run/pipeline.rs]
     evidence_refs: [evidence.readonly-tool-capability-repair, evidence.readonly-tool-capability-verification]
   observation-side-effects:
-    revision: source:13ff9de40ae621e1201c111201fda28402a397d7104e90595be0c5106482dbc0
+    revision: bd17c73075d6b3cf8e00877fa0fb10d36694ea54
     source_refs: [echo-orchestration/src/tasks/task_tools.rs, src/tools/builtin/cell_tools.rs, src/tools/builtin/subagent_message.rs]
     evidence_refs: [evidence.readonly-tool-capability-repair, evidence.readonly-tool-capability-verification]
 ---
