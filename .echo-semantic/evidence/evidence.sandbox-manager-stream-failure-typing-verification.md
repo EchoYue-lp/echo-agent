@@ -43,5 +43,6 @@ panic-policy Clippy、formatter 与 diff check 均 exit 0。
 
 ## 已知缺口
 
-未运行完整 `./scripts/verify.sh`、17-feature 矩阵或远端 CI；这些是主任务创建 MR/合并
-前的交付门禁。独立 reviewer 已读取最终 diff、源码与本证据，结论 PASS、无阻塞发现。
+完整 `./scripts/verify.sh` 已在整合快照上通过；17-feature 矩阵不适用于本次无公共 API
+形状变化的修复，远端 CI 与 main 交付仍待验收。独立 reviewer 已读取最终 diff、源码与本证据，
+结论 PASS、无阻塞发现。

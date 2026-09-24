@@ -13,7 +13,7 @@ supports: [finding.sandbox-manager-stream-failure-typing, behavior.effect-permis
 limitations:
   - 选择 executor 或策略拒绝发生在 stream channel 建立前，仍通过 Result 返回；本 Finding 只覆盖已选择 backend 的建流失败
   - 未连接真实 Docker/Kubernetes backend；回归使用真实 LocalSandbox manager caller 路径触发 process spawn 失败
-  - 完整 workspace 门禁、远端 CI、main 交付与 Issue 关闭仍待后续验收
+  - 远端 CI、main 交付与 Issue 关闭仍待后续验收
 ---
 
 # Issue 82 SandboxManager typed stream failure 修复证据

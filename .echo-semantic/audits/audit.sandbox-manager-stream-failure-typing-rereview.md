@@ -42,8 +42,8 @@ ADR 与 focused verification evidence；基准为 `origin/main@dbe9e1112e38a8a83
 
 ## 残余风险
 
-完整 workspace 合并门禁、远端 CI、远端 main 与 Issue #82 关闭尚未发生；真实 Docker/
-Kubernetes backend 故障仍需部署环境验收。
+完整 workspace 合并门禁已在整合快照上通过；远端 CI、远端 main 与 Issue #82 关闭尚未发生。
+真实 Docker/Kubernetes backend 故障仍需部署环境验收。
 
 ## 未检查项
 
