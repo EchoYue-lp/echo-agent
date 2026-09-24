@@ -7,7 +7,7 @@ expectation: inferred
 risk: high
 primary_focus: failure_concurrency
 focus: [state_authority, time_lifecycle, data_durability, permission_external]
-observed_at: source:87b717676a7b51e213630677989947777b4bed441acd8c7d655fb6c96dca77ad
+observed_at: 733d352fc719f922b21bab1cd46206139564367f
 behavior_refs: [behavior.extension-publication]
 code_refs: [echo-integration/src/mcp/mod.rs, echo-execution/src/skills/hooks.rs, echo-execution/src/skills/registry.rs, echo-core/src/plugin/registry.rs, src/plugin/coordinator.rs, src/plugin/prepared.rs, src/agent/react/mod.rs, echo-core/src/plugin/lifecycle.rs, echo-integration/src/lsp/manager.rs]
 evidence_refs: [evidence.effects-extensions, evidence.skill-activation-authority-repair, evidence.skill-activation-authority-verification, evidence.mcp-client-capability-advertisement-repair, evidence.mcp-client-capability-advertisement-verification, evidence.lsp-derived-handle-lifecycle-repair, evidence.lsp-derived-handle-lifecycle-verification, evidence.plugin-component-preparation-repair, evidence.plugin-component-preparation-verification, evidence.plugin-generation-publication-authority-repair, evidence.plugin-generation-publication-authority-verification, evidence.plugin-mcp-owner-isolation-repair, evidence.plugin-mcp-owner-isolation-verification, evidence.plugin-lifecycle-coordinator-repair, evidence.plugin-lifecycle-coordinator-verification]
@@ -26,7 +26,7 @@ MCP、Hook、Skill、Plugin 和 LSP 各自使用明确 owner/registry；Plugin p
 
 ## 当前实现
 
-各manager/registry持有自身状态；SkillRegistry主视图、definition adapter、run snapshot与checkpoint共享唯一epoch/generation-fenced activation handle。MCP client只协商已实现capability，McpManager以typed owner identity统一索引active/prepared/debt状态；LspManager的generation/closed lifecycle覆盖所有派生client。PluginRegistry、PluginIntegrator与PluginLifecycleManager分别负责持久状态、immutable preparation和callbacks；prepare的进程级序号跨独立Integrator排序，ReactAgent持有唯一target-scoped active publication与cleanup receipt，cloned Integrator不拥有全局active generation。MCP每次成功连接在下一次await前登记typed receipt，原本缺席的identity在连接期间保留清理scope。
+各manager/registry持有自身状态；SkillRegistry主视图、definition adapter、run snapshot与checkpoint共享唯一epoch/generation-fenced activation handle。MCP client只协商已实现capability，McpManager以typed owner identity统一索引active/prepared/debt状态；LspManager的generation/closed lifecycle覆盖所有派生client。PluginRegistry、PluginIntegrator与PluginLifecycleManager分别负责持久状态、immutable preparation和callbacks；prepare的进程级序号跨独立Integrator排序，ReactAgent持有唯一target-scoped active publication与cleanup receipt，cloned Integrator不拥有全局active generation。MCP每次成功连接在下一次await前登记typed receipt，连接前先登记可等待、可重试的preparation scope；SSE construction在暂停前交付receive task owner。
 
 ## 期望行为
 

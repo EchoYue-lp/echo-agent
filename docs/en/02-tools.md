@@ -347,6 +347,17 @@ impl Tool for DeleteFileTool {
 }
 ```
 
+`ReactAgentBuilder::readonly_tools()` applies to custom tools as well as the
+standard pack. A custom tool must declare read-only `ToolCapabilities` to be
+registered during construction. The invocation surface also hides mutating
+tools registered later and the default execution pipeline rejects their calls.
+The tool capability declaration, rather than its name, controls this boundary.
+Framework observation tools `task_list`, `list_cells`, and `subagent_list`
+declare read-only access. `task_create`, `task_update`, `stop_cell`, and
+`subagent_message` remain mutating. Both Store-backed and layered memory
+search remain mutating: Store-backed recall updates persistent recall telemetry,
+while layered search may reconcile pending durable changes before returning.
+
 `ToolRiskClassifier` (in `echo-execution`) auto-classifies tools by name into 7 risk categories:
 
 | Category | Risk Level | Example Tools |

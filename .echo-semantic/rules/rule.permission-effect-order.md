@@ -7,10 +7,10 @@ expectation: human_confirmed
 risk: high
 primary_focus: permission_external
 focus: [result_side_effect, state_authority, failure_concurrency, time_lifecycle]
-observed_at: e59fe773d92bca409fe0606b608c4812f87f7ac2
+observed_at: source:13ff9de40ae621e1201c111201fda28402a397d7104e90595be0c5106482dbc0
 behavior_refs: [behavior.effect-permission-execution]
 code_refs: [echo-core/src/tools/permission.rs, echo-orchestration/src/human_loop/service.rs, echo-execution/src/skills/hooks.rs, src/agent/react/run/pipeline.rs, echo-execution/src/tools.rs]
-evidence_refs: [evidence.effects-extensions, evidence.streaming-tool-validation-repair, evidence.streaming-tool-validation-verification, evidence.tool-read-cache-authority-repair, evidence.tool-read-cache-authority-verification, evidence.tool-registry-owned-handle-repair, evidence.tool-registry-owned-handle-verification, evidence.mcp-tool-local-classification-repair, evidence.mcp-tool-local-classification-verification]
+evidence_refs: [evidence.effects-extensions, evidence.streaming-tool-validation-repair, evidence.streaming-tool-validation-verification, evidence.tool-read-cache-authority-repair, evidence.tool-read-cache-authority-verification, evidence.tool-registry-owned-handle-repair, evidence.tool-registry-owned-handle-verification, evidence.mcp-tool-local-classification-repair, evidence.mcp-tool-local-classification-verification, evidence.hook-protected-path-repair, evidence.hook-protected-path-verification, evidence.readonly-tool-capability-repair, evidence.readonly-tool-capability-verification]
 finding_refs: [finding.tool-registry-mutation-active-call-deadlock, finding.streaming-tool-validation, finding.plan-mode-write-surface, finding.approval-authority, finding.hook-protected-path, finding.sandbox-minimum-isolation, finding.trace-audit-secret-boundary, finding.effect-cleanup-owner, finding.tool-pipeline-example-drift]
 ---
 
@@ -26,7 +26,7 @@ ReactAgent 的 LLM 驱动自动 Tool effect 必须先完成该入口定义的可
 
 ## 当前实现
 
-PermissionPolicy/Service、Hook/Guard与ToolExecutionPipeline分层影响ReactAgent自动调用；ToolManager以owned Arc generation进入stream/non-stream，在effect前完成统一validation，并用context key与write-lifetime epoch限制read result复用，Sandbox/具体Tool持有资源。
+PermissionPolicy/Service、Hook/Guard与ToolExecutionPipeline分层影响ReactAgent自动调用；protected-path 由 PermissionService 在 Hook Allow 前按有效输入拒绝，readonly Agent 的构造、LLM surface 与执行门禁共用 ToolCapabilities。ToolManager以owned Arc generation进入stream/non-stream，在effect前完成统一validation，并用context key与write-lifetime epoch限制read result复用，Sandbox/具体Tool持有资源。
 
 ## 期望行为
 
@@ -38,4 +38,4 @@ Tool/permission contracts、PermissionService、Hook reducer、pipeline 和 sand
 
 ## 裁决记录
 
-Stream validation已闭合；Hook source order、deny-first、approval与cleanup冲突仍需审计，且本Rule不扩展为direct-user或trusted-extension权限门控。
+Stream validation、#60 protected-path 和 #81 readonly custom Tool 已在当前任务分支闭合；其它 Hook source order、deny-first、approval与cleanup冲突仍需审计，且本Rule不扩展为direct-user或trusted-extension权限门控。

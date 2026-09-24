@@ -34,6 +34,7 @@ References:
 - <https://github.com/modelcontextprotocol/specification/blob/main/docs/specification/2024-11-05/basic/lifecycle.mdx>
 - <https://github.com/modelcontextprotocol/rust-sdk/blob/main/crates/rmcp/src/transport/child_process.rs>
 - <https://github.com/modelcontextprotocol/typescript-sdk/blob/main/packages/client/src/client/sse.ts>
+- <https://tokio.rs/tokio/topics/shutdown>
 
 ## Options Considered
 
@@ -107,12 +108,38 @@ tests, formatting, and `echo_integration` Clippy run before branch handoff; the
 workspace-wide merge gate runs only on the integration branch before its MR to
 `main`.
 
-## Current Implementation Gap
+## Construction Cancellation Follow-Up (Issue #55)
 
-The transport close paths above are merged, but construction cancellation is
-not yet an awaited boundary. Dropping `McpPreparationOwner` or an in-progress
-SSE construction future currently spawns cleanup work without returning a
-join handle or receipt to a durable caller. Runtime shutdown can therefore
-terminate that work before settlement. Issue #55 remains open until the
-construction owner is retained, cancellation is awaitable and retryable, and
-runtime-shutdown fault injection proves the same ownership rule.
+The original transport decision did not cover cancellation before a client
+was published. A preparation waiter could be dropped during initialization,
+and its `Drop` handler launched an untracked retry loop. SSE construction also
+held a receive task across a warmup await and discarded its join waiter on
+drop. Runtime shutdown could stop either cleanup task before settlement.
+
+The considered options were another detached retry loop, a separate global
+process registry, and a retained preparation scope under the existing client
+and manager lifecycle. The retained scope was chosen: `McpClient::new` returns
+a concrete awaitable preparation with a cloneable cleanup scope, and
+`McpManager` registers that scope before the first resource-creating poll.
+`close_all` cancels and awaits every registered preparation, retaining failed
+close as retryable debt. A cancelled scope cannot publish a late initialized
+client. Direct consumers that cancel a preparation waiter retain its scope and
+await `close`, retrying the same scope after a cleanup error. SSE construction
+now transfers its receive task into the transport before suspension; endpoint
+discovery remains part of the subsequent MCP handshake.
+Manager topology methods retain their exclusive `&mut self` contract, so a
+remove cannot overtake an in-progress connection handshake. A caller that
+drops a blocked reconcile Future can then await `close_all` on the same manager
+to settle its retained preparation scope.
+
+Transport close receipts retain their producer task handle. If its runtime
+stops while a receipt still says `Closing`, a later close starts a new
+settlement attempt. Stdio keeps the child in its owner slot while awaiting
+exit, so an interrupted close cannot lose the child before a retry can reap
+it. These rules also cover a manager close interrupted after preparation has
+handed off to an installed client.
+
+This follows the same transport-owned, awaited shutdown guidance cited above
+from the MCP specification and Rust and TypeScript SDKs. Tokio's graceful
+shutdown guidance likewise requires tracking spawned tasks and waiting for
+them to finish. No product-specific registry or permission policy is added.

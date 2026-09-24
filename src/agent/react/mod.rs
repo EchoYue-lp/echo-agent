@@ -3651,6 +3651,9 @@ impl Agent for ReactAgent {
     }
 
     fn register_tool(&self, tool: Box<dyn crate::tools::Tool>) {
+        if self.config.readonly_tools && !tool.capabilities().is_read_only() {
+            return;
+        }
         self.tools.tool_manager.register(tool);
     }
 

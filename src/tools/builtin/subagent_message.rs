@@ -225,6 +225,10 @@ impl Tool for SubagentListTool {
          sibling targets."
     }
 
+    fn risk_level(&self) -> echo_core::tools::ToolRiskLevel {
+        echo_core::tools::ToolRiskLevel::ReadOnly
+    }
+
     fn parameters(&self) -> serde_json::Value {
         json!({
             "type": "object",

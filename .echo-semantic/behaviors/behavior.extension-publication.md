@@ -8,7 +8,7 @@ risk: high
 primary_focus: failure_concurrency
 focus: [state_authority, time_lifecycle, result_side_effect, permission_external, data_durability]
 boundary: boundary.extension-lifecycle
-observed_at: source:87b717676a7b51e213630677989947777b4bed441acd8c7d655fb6c96dca77ad
+observed_at: 733d352fc719f922b21bab1cd46206139564367f
 code_refs: [echo-integration/src/mcp/mod.rs, echo-execution/src/skills/hooks.rs, echo-execution/src/skills/registry.rs, echo-core/src/plugin/registry.rs, echo-core/src/plugin/lifecycle.rs, src/plugin/coordinator.rs, src/plugin/prepared.rs, src/agent/react/mod.rs, echo-integration/src/lsp/manager.rs]
 rule_refs: [rule.extension-generation-authority]
 evidence_refs: [evidence.effects-extensions, evidence.skill-activation-authority-repair, evidence.skill-activation-authority-verification, evidence.mcp-tool-local-classification-repair, evidence.mcp-tool-local-classification-verification, evidence.mcp-client-capability-advertisement-repair, evidence.mcp-client-capability-advertisement-verification, evidence.lsp-derived-handle-lifecycle-repair, evidence.lsp-derived-handle-lifecycle-verification, evidence.plugin-component-preparation-repair, evidence.plugin-component-preparation-verification, evidence.plugin-generation-publication-authority-repair, evidence.plugin-generation-publication-authority-verification, evidence.plugin-mcp-owner-isolation-repair, evidence.plugin-mcp-owner-isolation-verification, evidence.plugin-lifecycle-coordinator-repair, evidence.plugin-lifecycle-coordinator-verification]
@@ -23,7 +23,7 @@ finding_refs: [finding.skill-activation-authority, finding.hook-permission-prece
 
 ## 当前行为
 
-McpManager以typed owner/local-name identity管理连接、prepared target与cleanup/closing debt，client只广告已实现capability；旧字符串API严格映射Direct。HookRegistry管source/order/action reduction；Skill definition view可为异步tool适配而复制，但主registry、tool adapter、run snapshot与checkpoint共享epoch-fenced activation handle。PluginRegistry/Integrator/Lifecycle管持久状态、不可变generation与callback；独立Integrator的prepare序号由进程统一分配，每个ReactAgent另有唯一publication target，成功发布后拒绝旧prepared和旧receipt，失败清理保留本target的receipt。逐server MCP发布即时记录typed receipt，取消中的新identity提前预留清理范围。LspManager唯一拥有client child process，派生handle共享其generation/closed fence。
+McpManager以typed owner/local-name identity管理连接、prepared target与cleanup/closing debt，client只广告已实现capability；旧字符串API严格映射Direct。HookRegistry管source/order/action reduction；Skill definition view可为异步tool适配而复制，但主registry、tool adapter、run snapshot与checkpoint共享epoch-fenced activation handle。PluginRegistry/Integrator/Lifecycle管持久状态、不可变generation与callback；独立Integrator的prepare序号由进程统一分配，每个ReactAgent另有唯一publication target，成功发布后拒绝旧prepared和旧receipt，失败清理保留本target的receipt。逐server MCP发布即时记录typed receipt，取消中的新identity提前预留可等待、可重试的preparation scope；SSE receive task在construction暂停前转入transport owner。LspManager唯一拥有client child process，派生handle共享其generation/closed fence。
 
 ## 期望行为
 

@@ -338,6 +338,15 @@ impl Tool for DeleteFileTool {
 }
 ```
 
+`ReactAgentBuilder::readonly_tools()` 同时约束标准工具包和自定义工具。自定义工具
+必须声明只读 `ToolCapabilities` 才会在构造时注册。调用期间后续注册的变更工具
+也不会出现在模型工具面中，默认执行管线会拒绝其调用。此边界按能力声明判定，
+不依赖工具名称。
+框架观察工具 `task_list`、`list_cells` 和 `subagent_list` 声明只读能力。
+`task_create`、`task_update`、`stop_cell` 和 `subagent_message` 仍是变更工具。
+基于 Store 的记忆召回会更新持久化召回统计；分层记忆搜索可能先结算待处理
+的持久化变更，因此两类记忆搜索都按变更工具处理。
+
 风险分类器 `ToolRiskClassifier`（在 `echo-execution` 中）会自动根据工具名称细分为 7 类风险：
 
 | 类别 | 风险等级 | 示例工具 |

@@ -28,9 +28,8 @@ pub struct AgentConfig {
     pub(crate) allowed_tools: Vec<String>,
     /// Whether to allow registering and calling business tools (e.g., math, weather, etc.)
     pub(crate) enable_tool: bool,
-    /// When `enable_tool` is true, register only **read-only** tools (no shell,
-    /// no file writes, no git mutations). Used by read-only subagents so
-    /// that "readonly" is physically enforced at the tool level, not just prompt.
+    /// Restrict custom registration, invocation visibility, and execution to
+    /// read-only capabilities.
     pub(crate) readonly_tools: bool,
     /// Shared background-command cell registry. When set, `ShellTool` gains
     /// `background=true` support and the wait/stop_cell/list_cells tools are
@@ -289,12 +288,8 @@ impl AgentConfig {
         self
     }
 
-    /// Restrict registered tools to **read-only** (no shell, no file writes).
-    ///
-    /// Only takes effect when `enable_tool(true)` is also set. The agent will
-    /// get read_file/list_dir/grep/glob/diff/web_search etc. but NOT
-    /// shell/write_file/delete_file/git-commit. Used by read-only subagent
-    /// subagents so that "readonly" is enforced at the tool level.
+    /// Restrict the Agent to read-only tool capabilities, including custom
+    /// tools. `enable_tool(true)` separately installs the standard tool pack.
     pub fn readonly_tools(mut self, readonly: bool) -> Self {
         self.readonly_tools = readonly;
         self

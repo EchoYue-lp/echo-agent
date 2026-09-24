@@ -389,6 +389,8 @@ pub struct ToolRuntime {
     pub visibility: Option<std::sync::Arc<echo_core::tools::ToolVisibilityState>>,
     /// Whether the invocation uses plan mode's read-only tool surface.
     pub plan_mode: bool,
+    /// Construction-time read-only Agent policy, including custom tools.
+    pub readonly_tools: bool,
     /// Live permission-mode authority for mode changes made through SDK/host APIs.
     #[cfg(feature = "human-loop")]
     permission_service: Option<Arc<crate::human_loop::PermissionService>>,
@@ -434,7 +436,7 @@ impl ToolRuntime {
                 .into_iter()
                 .filter(|tool| !disabled_tools.contains(&tool.function.name))
                 .filter(|tool| {
-                    !plan_mode
+                    !(plan_mode || agent.config.readonly_tools)
                         || tool_manager
                             .get_tool(&tool.function.name)
                             .is_some_and(|tool| tool.capabilities().is_read_only())
@@ -467,6 +469,7 @@ impl ToolRuntime {
             disabled_tools,
             visibility,
             plan_mode,
+            readonly_tools: agent.config.readonly_tools,
             #[cfg(feature = "human-loop")]
             permission_service,
         }
@@ -486,7 +489,7 @@ impl ToolRuntime {
             })
             .filter(|tool| self.is_skill_tool_allowed(&tool.function.name))
             .filter(|tool| {
-                !self.is_plan_mode()
+                !(self.is_plan_mode() || self.readonly_tools)
                     || self
                         .tool_manager
                         .get_tool(&tool.function.name)
@@ -3464,6 +3467,7 @@ mod transcript_filter_tests {
             disabled_tools: HashSet::from(["final_answer".to_string()]),
             visibility: None,
             plan_mode: true,
+            readonly_tools: false,
             #[cfg(feature = "human-loop")]
             permission_service: None,
         };
@@ -3475,6 +3479,192 @@ mod transcript_filter_tests {
             .collect();
 
         assert_eq!(visible, vec!["read_file"]);
+    }
+
+    #[tokio::test]
+    async fn readonly_tools_hides_and_blocks_custom_mutation() -> Result<()> {
+        let mut agent = crate::agent::ReactAgentBuilder::new()
+            .model("test-model")
+            .readonly_tools()
+            .tool(Box::new(ReadOnlyNamedTool("custom_read")))
+            .tool(Box::new(NamedTool("custom_write")))
+            .build()?;
+        let snapshot = AgentRunSnapshot::from_agent(&agent);
+        assert!(tool_names(&snapshot).contains(&"custom_read".to_string()));
+        assert!(!tool_names(&snapshot).contains(&"custom_write".to_string()));
+        assert!(!agent.tool_names().contains(&"custom_write".to_string()));
+
+        agent.add_tools(vec![
+            Box::new(ReadOnlyNamedTool("batch_read")),
+            Box::new(NamedTool("batch_write")),
+        ]);
+        assert!(agent.tool_names().contains(&"batch_read".to_string()));
+        assert!(!agent.tool_names().contains(&"batch_write".to_string()));
+        agent.add_tool(Box::new(ReadOnlyNamedTool("replaceable")));
+        assert!(
+            agent
+                .replace_tool(Box::new(NamedTool("replaceable")))
+                .is_none()
+        );
+        assert!(
+            agent
+                .tool_manager()
+                .get_tool("replaceable")
+                .is_some_and(|tool| tool.capabilities().is_read_only())
+        );
+
+        agent.add_tool(Box::new(NamedTool("late_write")));
+        assert!(!agent.tool_names().contains(&"late_write".to_string()));
+        echo_core::agent::Agent::register_tool(&agent, Box::new(NamedTool("trait_write")));
+        assert!(!agent.tool_names().contains(&"trait_write".to_string()));
+        agent
+            .tool_manager()
+            .register(Box::new(NamedTool("injected_write")));
+        let snapshot = AgentRunSnapshot::from_agent(&agent);
+        assert!(!tool_names(&snapshot).contains(&"late_write".to_string()));
+        assert!(!tool_names(&snapshot).contains(&"injected_write".to_string()));
+        let result = snapshot
+            .execute_tool_with_policy(
+                "readonly-custom-write".to_string(),
+                "injected_write",
+                &ToolParameters::new(),
+                &serde_json::json!({}),
+                None,
+            )
+            .await;
+        let Err(failure) = result else {
+            return Err(ReactError::Other(
+                "readonly agent executed a late custom write tool".to_string(),
+            ));
+        };
+        assert!(
+            failure
+                .result
+                .error
+                .as_deref()
+                .is_some_and(|reason| reason.contains("read-only"))
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn readonly_agent_keeps_task_list_and_blocks_effectful_tools() -> Result<()> {
+        let store: Arc<dyn crate::memory::Store> = Arc::new(crate::memory::InMemoryStore::new());
+        let agent = crate::agent::ReactAgentBuilder::new()
+            .model("test-model")
+            .readonly_tools()
+            .store(store)
+            .build()?;
+        let snapshot = AgentRunSnapshot::from_agent(&agent);
+        let visible = tool_names(&snapshot);
+        assert!(visible.contains(&"task_list".to_string()));
+        let result = snapshot
+            .execute_tool_with_policy(
+                "readonly-task-list".to_string(),
+                "task_list",
+                &ToolParameters::new(),
+                &serde_json::json!({}),
+                None,
+            )
+            .await;
+        let Err(failure) = result else {
+            return Err(ReactError::Other(
+                "empty task graph unexpectedly returned tasks".to_string(),
+            ));
+        };
+        assert!(
+            failure
+                .result
+                .error
+                .as_deref()
+                .is_some_and(|reason| reason.contains("No tasks"))
+        );
+
+        for name in ["task_create", "task_update", "recall", "search_memory"] {
+            assert!(!visible.contains(&name.to_string()), "{name} was visible");
+            let input = if matches!(name, "recall" | "search_memory") {
+                serde_json::json!({"query": "missing"})
+            } else {
+                serde_json::json!({})
+            };
+            let params = input
+                .as_object()
+                .map(|map| {
+                    map.iter()
+                        .map(|(key, value)| (key.clone(), value.clone()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let result = snapshot
+                .execute_tool_with_policy(format!("readonly-{name}"), name, &params, &input, None)
+                .await;
+            let Err(failure) = result else {
+                return Err(ReactError::Other(format!("{name} executed")));
+            };
+            assert!(
+                failure
+                    .result
+                    .error
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("read-only"))
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn readonly_agent_keeps_cell_list_and_blocks_stop() -> Result<()> {
+        let registry = Arc::new(
+            echo_orchestration::tasks::BackgroundCommandManager::new(
+                echo_orchestration::tasks::BackgroundCommandManagerConfig::default(),
+            )
+            .map_err(ReactError::Other)?,
+        );
+        let agent = crate::agent::ReactAgentBuilder::new()
+            .model("test-model")
+            .readonly_tools()
+            .command_cells(registry)
+            .build()?;
+        let snapshot = AgentRunSnapshot::from_agent(&agent);
+        let visible = tool_names(&snapshot);
+        assert!(visible.contains(&"list_cells".to_string()));
+        assert!(!visible.contains(&"stop_cell".to_string()));
+        let result = snapshot
+            .execute_tool_with_policy(
+                "readonly-list-cells".to_string(),
+                "list_cells",
+                &ToolParameters::new(),
+                &serde_json::json!({}),
+                None,
+            )
+            .await;
+        assert!(result.is_ok());
+        Ok(())
+    }
+
+    #[cfg(feature = "subagent")]
+    #[tokio::test]
+    async fn readonly_agent_keeps_subagent_list_and_blocks_message() -> Result<()> {
+        let agent = crate::agent::ReactAgentBuilder::new()
+            .model("test-model")
+            .readonly_tools()
+            .register_subagent_message_tools()
+            .build()?;
+        let snapshot = AgentRunSnapshot::from_agent(&agent);
+        let visible = tool_names(&snapshot);
+        assert!(visible.contains(&"subagent_list".to_string()));
+        assert!(!visible.contains(&"subagent_message".to_string()));
+        let result = snapshot
+            .execute_tool_with_policy(
+                "readonly-subagent-list".to_string(),
+                "subagent_list",
+                &ToolParameters::new(),
+                &serde_json::json!({}),
+                None,
+            )
+            .await;
+        assert!(result.is_ok());
+        Ok(())
     }
 
     #[cfg(feature = "mcp")]

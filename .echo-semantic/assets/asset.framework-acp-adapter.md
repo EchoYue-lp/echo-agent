@@ -6,7 +6,7 @@ title: Framework 通用 ACP Agent adapter
 asset_type: protocol
 status: active
 risk: high
-observed_at: source:87b717676a7b51e213630677989947777b4bed441acd8c7d655fb6c96dca77ad
+observed_at: 733d352fc719f922b21bab1cd46206139564367f
 boundary_refs: [boundary.protocol-surfaces, boundary.workspace-architecture]
 code_refs: [src/acp/adapter.rs, src/acp/runtime.rs, src/acp/projection.rs, src/acp/mod.rs, tests/acp_agent_adapter.rs, tests/fixtures/acp/v1/prompt-resource-link-valid.json, tests/fixtures/acp/v1/session-relative-cwd-invalid.json]
 consumer_refs: [tests/acp_agent_adapter.rs, echo-agent-learning/examples/demo72_acp_agent_adapter.rs]

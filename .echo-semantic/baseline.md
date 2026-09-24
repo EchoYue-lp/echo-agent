@@ -3,8 +3,8 @@ schema_version: 1
 id: baseline.repository
 kind: baseline
 source_snapshot:
-  base_revision: ab3ed7d23f0a3fbe2bb859a7537df2546531239e
-  content_digest: 87b717676a7b51e213630677989947777b4bed441acd8c7d655fb6c96dca77ad
+  base_revision: 733d352fc719f922b21bab1cd46206139564367f
+  content_digest: 13ff9de40ae621e1201c111201fda28402a397d7104e90595be0c5106482dbc0
 inventory_closure: closed
 behavior_model_closure: closed
 map_refs:
@@ -143,7 +143,7 @@ coverage:
 
 ## 源码快照
 
-基线以PR #117的squash merge结果`d492c676`为可恢复主线祖先，并绑定当前非语义源码摘要；`.echo-semantic`自身不参与摘要，后续业务、合同、测试或正式文档变化必须通过semantic-diff刷新。
+基线以远端 `main@733d352f` 为可恢复祖先，绑定当前非语义源码摘要；任务分支的 merge commit 不作为目标主线祖先。`.echo-semantic` 自身不参与摘要。后续业务、合同、测试或正式文档变化必须通过 semantic-diff 刷新。
 
 ## 仓库区域
 

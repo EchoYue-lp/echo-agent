@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.foundation-36-72-51-integration-verification
 kind: evidence
-observed_at: source:87b717676a7b51e213630677989947777b4bed441acd8c7d655fb6c96dca77ad
+observed_at: 733d352fc719f922b21bab1cd46206139564367f
 source_refs:
   - src/acp/adapter.rs
   - src/headless.rs

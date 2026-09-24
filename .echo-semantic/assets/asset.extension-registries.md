@@ -6,7 +6,7 @@ title: MCP、Hook、Skill、Plugin 与 LSP Registries
 asset_type: state_authority
 status: needs_review
 risk: high
-observed_at: source:87b717676a7b51e213630677989947777b4bed441acd8c7d655fb6c96dca77ad
+observed_at: 733d352fc719f922b21bab1cd46206139564367f
 boundary_refs: [boundary.extension-lifecycle]
 code_refs: [echo-integration/src/mcp/mod.rs, echo-execution/src/skills/hooks.rs, echo-execution/src/skills/registry.rs, echo-core/src/plugin/registry.rs, src/plugin/coordinator.rs, src/plugin/prepared.rs, src/agent/react/mod.rs, echo-core/src/plugin/lifecycle.rs, echo-integration/src/lsp/manager.rs]
 consumer_refs: [src/agent/react/capabilities.rs, echo-sdk-host/src/core_profile/facade/integrations.rs]
@@ -37,6 +37,6 @@ Discover/connect/prepare/apply/activate/start，reload/replace，unwire/deactiva
 
 ## 未知与限制
 
-Plugin generation publication与MCP owner已在主线交付并独立复审；Host coordinator 候选已
-串联 registry、publication 与 callback authority，仍待 #73 独立复审和远端交付。其它开放
-Finding 各自保留验收边界。
+Plugin generation publication、MCP owner 与 Host coordinator 已在主线交付并独立复审。
+MCP construction cleanup owner 在当前 #55 工作树通过 focused 验证与独立复审，待完整
+门禁、PR/CI 和远端 main 交付；其它开放 Finding 各自保留验收边界。

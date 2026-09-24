@@ -356,6 +356,20 @@ impl PipelineStage for PermissionStage {
         ctx: &mut ToolExecutionContext,
         snapshot: &crate::agent::snapshot::AgentRunSnapshot,
     ) -> Result<()> {
+        #[cfg(feature = "human-loop")]
+        if let Some(decision) = snapshot
+            .permission_service
+            .as_ref()
+            .and_then(|service| service.protected_path_decision(&ctx.tool_name, &ctx.input))
+        {
+            snapshot
+                .record_permission_decision(&ctx.tool_name, &decision, "protected_paths")
+                .await;
+            if let PermissionDecision::Deny { reason } = decision {
+                ctx.block(crate::tools::ToolFailureCategory::Permanent, reason);
+                return Ok(());
+            }
+        }
         if let Some(decision) = ctx.permission_decision.take() {
             snapshot
                 .record_permission_decision(&ctx.tool_name, &decision, "pre_tool_use_hook")
@@ -1262,7 +1276,7 @@ impl ToolExecutionPipeline {
 
 // ── PlanModeStage ──────────────────────────────────────────────────
 
-/// In plan mode, only locally classified read-only tools may execute.
+/// In plan mode or a read-only Agent, only locally classified read-only tools may execute.
 pub struct PlanModeStage;
 
 #[async_trait]
@@ -1276,21 +1290,32 @@ impl PipelineStage for PlanModeStage {
         ctx: &mut ToolExecutionContext,
         snapshot: &crate::agent::snapshot::AgentRunSnapshot,
     ) -> Result<()> {
-        if !ctx.plan_mode && !snapshot.tools.is_plan_mode() {
+        let plan_mode = ctx.plan_mode || snapshot.tools.is_plan_mode();
+        if !plan_mode && !snapshot.tools.readonly_tools {
             return Ok(());
         }
         if !snapshot.tools.is_tool_read_only(&ctx.tool_name) {
-            let reason = format!(
-                "Plan mode: '{}' is blocked. Read and analyze only. Use /plan off to enable writes.",
-                ctx.tool_name
-            );
+            let (reason, source) = if plan_mode {
+                (
+                    format!(
+                        "Plan mode: '{}' is blocked. Read and analyze only. Use /plan off to enable writes.",
+                        ctx.tool_name
+                    ),
+                    "plan_mode",
+                )
+            } else {
+                (
+                    format!("Tool '{}' is blocked by the read-only Agent", ctx.tool_name),
+                    "readonly_tools",
+                )
+            };
             snapshot
                 .record_permission_decision(
                     &ctx.tool_name,
                     &PermissionDecision::Deny {
                         reason: reason.clone(),
                     },
-                    "plan_mode",
+                    source,
                 )
                 .await;
             ctx.block(crate::tools::ToolFailureCategory::Unavailable, reason);
@@ -1748,6 +1773,203 @@ mod tests {
                 }
             }
         }
+        Ok(())
+    }
+
+    #[cfg(feature = "human-loop")]
+    struct PermissionAuditProbe(
+        tokio::sync::mpsc::UnboundedSender<crate::human_loop::PermissionAuditEntry>,
+    );
+
+    #[cfg(all(feature = "human-loop", not(windows)))]
+    struct ProtectedPathExecutionProbe(Arc<std::sync::atomic::AtomicUsize>);
+
+    #[cfg(all(feature = "human-loop", not(windows)))]
+    impl Tool for ProtectedPathExecutionProbe {
+        fn name(&self) -> &str {
+            "shell"
+        }
+
+        fn description(&self) -> &str {
+            "count protected-path probe executions"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        fn execute<'a>(
+            &'a self,
+            _parameters: ToolParameters,
+        ) -> futures::future::BoxFuture<'a, crate::error::Result<ToolResult>> {
+            Box::pin(async move {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(ToolResult::success("executed"))
+            })
+        }
+    }
+
+    #[cfg(feature = "human-loop")]
+    #[async_trait::async_trait]
+    impl crate::human_loop::PermissionAuditSink for PermissionAuditProbe {
+        async fn record(&self, entry: crate::human_loop::PermissionAuditEntry) {
+            let _ = self.0.send(entry);
+        }
+    }
+
+    #[cfg(feature = "human-loop")]
+    #[tokio::test]
+    async fn hook_allow_cannot_override_protected_path() -> Result<()> {
+        use crate::skills::hooks::{HookAction, HookEvent, HookRule, HooksDefinition};
+
+        for event in [
+            None,
+            Some(HookEvent::PreToolUse),
+            Some(HookEvent::PermissionRequest),
+        ] {
+            let (audit_tx, mut audit_rx) = tokio::sync::mpsc::unbounded_channel();
+            let agent = crate::agent::ReactAgentBuilder::new()
+                .model("test-model")
+                .permission_service(Arc::new(
+                    crate::human_loop::PermissionService::new()
+                        .with_audit_sink(Arc::new(PermissionAuditProbe(audit_tx))),
+                ))
+                .tool(Box::new(EffectTool))
+                .build()?;
+            let mut definition = HooksDefinition::default();
+            if let Some(event) = event {
+                definition.add_rules(
+                    event,
+                    vec![HookRule {
+                        matcher: "shell".to_string(),
+                        hooks: vec![HookAction::Permission {
+                            decision: "allow".to_string(),
+                            reason: None,
+                            suggestions: Vec::new(),
+                        }],
+                    }],
+                );
+                agent
+                    .hook_registry()
+                    .write()
+                    .await
+                    .register_user_hooks(definition);
+            }
+
+            let input = serde_json::json!({"command": "cat .env"});
+            let params = ToolParameters::from([(
+                "command".to_string(),
+                Value::String("cat .env".to_string()),
+            )]);
+            let result = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent)
+                .execute_tool_with_policy(
+                    "protected-path".to_string(),
+                    "shell",
+                    &params,
+                    &input,
+                    None,
+                )
+                .await;
+            let Err(failure) = result else {
+                return Err(ReactError::Other(format!(
+                    "{event:?} allow executed a protected-path tool"
+                )));
+            };
+            assert!(
+                failure
+                    .result
+                    .error
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains(".env"))
+            );
+            let audit = tokio::time::timeout(std::time::Duration::from_secs(1), audit_rx.recv())
+                .await
+                .map_err(|_| ReactError::Other("protected-path audit missing".to_string()))?
+                .ok_or_else(|| {
+                    ReactError::Other("protected-path audit channel closed".to_string())
+                })?;
+            assert_eq!(audit.decision, "deny");
+            assert_eq!(audit.reason, "protected_path");
+            assert_eq!(audit.source, "protected_paths");
+            assert_eq!(audit.tool_name, "shell");
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(50), audit_rx.recv())
+                    .await
+                    .is_err(),
+                "protected path produced duplicate audit records"
+            );
+        }
+        Ok(())
+    }
+
+    #[cfg(all(feature = "human-loop", not(windows)))]
+    #[tokio::test]
+    async fn hook_allow_rewrite_to_protected_path_is_denied_and_audited_once() -> Result<()> {
+        use crate::skills::hooks::HookEvent;
+        use echo_core::hooks::HookResult;
+
+        let executions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (audit_tx, mut audit_rx) = tokio::sync::mpsc::unbounded_channel();
+        let agent = crate::agent::ReactAgentBuilder::new()
+            .model("test-model")
+            .permission_service(Arc::new(
+                crate::human_loop::PermissionService::new()
+                    .with_audit_sink(Arc::new(PermissionAuditProbe(audit_tx))),
+            ))
+            .tool(Box::new(ProtectedPathExecutionProbe(Arc::clone(
+                &executions,
+            ))))
+            .build()?;
+        agent.hook_registry().write().await.set_programmatic_hook(
+            "protected-rewrite",
+            &[HookEvent::PreToolUse],
+            Arc::new(|_| {
+                Box::pin(async {
+                    HookResult {
+                        updated_input: Some(serde_json::json!({"command": "cat .env"})),
+                        ..HookResult::allow()
+                    }
+                })
+            }),
+        );
+
+        let input = serde_json::json!({"command": "echo ordinary"});
+        let params = ToolParameters::from([(
+            "command".to_string(),
+            Value::String("echo ordinary".to_string()),
+        )]);
+        let result = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent)
+            .execute_tool_with_policy(
+                "protected-rewrite".to_string(),
+                "shell",
+                &params,
+                &input,
+                None,
+            )
+            .await;
+        let Err(failure) = result else {
+            return Err(ReactError::Other("protected rewrite executed".to_string()));
+        };
+        assert!(
+            failure
+                .result
+                .error
+                .as_deref()
+                .is_some_and(|reason| reason.contains(".env"))
+        );
+        assert_eq!(executions.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let audit = tokio::time::timeout(std::time::Duration::from_secs(1), audit_rx.recv())
+            .await
+            .map_err(|_| ReactError::Other("rewritten-path audit missing".to_string()))?
+            .ok_or_else(|| ReactError::Other("rewritten-path audit channel closed".to_string()))?;
+        assert_eq!(audit.decision, "deny");
+        assert_eq!(audit.reason, "protected_path");
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), audit_rx.recv())
+                .await
+                .is_err(),
+            "protected rewrite produced duplicate audit records"
+        );
         Ok(())
     }
 

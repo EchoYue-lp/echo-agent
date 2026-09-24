@@ -128,9 +128,13 @@ impl CronTask {
 /// [`super::SchedulerRunner`] derives its occurrence journal and checkpoint
 /// paths from this store's definition path. Store-backed definitions must set
 /// a stable path anchor with [`Self::with_path`] before constructing a runner.
+/// A live runner owns definition writes; direct writes through this store or
+/// another handle for the same path or Store backend return an error until the
+/// runner is gone.
 #[derive(Clone)]
 pub struct CronTaskStore {
     backend: Option<Arc<dyn echo_core::memory::Store>>,
+    backend_mutation_owner: Option<Arc<StdMutex<Weak<()>>>>,
     path: PathBuf,
     mutation_lock: Arc<Mutex<()>>,
     health: Arc<CronTaskStoreHealth>,
@@ -138,6 +142,7 @@ pub struct CronTaskStore {
 
 struct CronTaskStoreHealth {
     poison: StdMutex<Option<String>>,
+    mutation_owner: StdMutex<Weak<()>>,
     #[cfg(test)]
     file_after_replace_fault: Arc<std::sync::atomic::AtomicBool>,
     #[cfg(test)]
@@ -148,6 +153,7 @@ impl CronTaskStoreHealth {
     fn new() -> Self {
         Self {
             poison: StdMutex::new(None),
+            mutation_owner: StdMutex::new(Weak::new()),
             #[cfg(test)]
             file_after_replace_fault: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             #[cfg(test)]
@@ -155,6 +161,9 @@ impl CronTaskStoreHealth {
         }
     }
 }
+
+#[derive(Clone)]
+pub(super) struct SchedulerMutationOwner(Arc<()>);
 
 const STORE_NAMESPACE: &[&str] = &["scheduler", "cron_tasks"];
 const STORE_KEY: &str = "all_cron_tasks";
@@ -168,6 +177,28 @@ fn cron_store_health_registry() -> &'static StdMutex<HashMap<PathBuf, Weak<CronT
     static REGISTRY: OnceLock<StdMutex<HashMap<PathBuf, Weak<CronTaskStoreHealth>>>> =
         OnceLock::new();
     REGISTRY.get_or_init(|| StdMutex::new(HashMap::new()))
+}
+
+type BackendOwnerRegistry = Vec<(Weak<dyn echo_core::memory::Store>, Weak<StdMutex<Weak<()>>>)>;
+
+fn cron_backend_owner(backend: &Arc<dyn echo_core::memory::Store>) -> Arc<StdMutex<Weak<()>>> {
+    static REGISTRY: OnceLock<StdMutex<BackendOwnerRegistry>> = OnceLock::new();
+    let mut registry = REGISTRY
+        .get_or_init(|| StdMutex::new(Vec::new()))
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    registry.retain(|(store, owner)| store.strong_count() > 0 && owner.strong_count() > 0);
+    let key = Arc::downgrade(backend);
+    if let Some(owner) = registry
+        .iter()
+        .find(|(store, _)| Weak::ptr_eq(store, &key))
+        .and_then(|(_, owner)| owner.upgrade())
+    {
+        return owner;
+    }
+    let owner = Arc::new(StdMutex::new(Weak::new()));
+    registry.push((key, Arc::downgrade(&owner)));
+    owner
 }
 
 fn cron_store_health_key(path: &Path) -> PathBuf {
@@ -230,6 +261,7 @@ impl CronTaskStore {
         let path = default_task_path();
         Self {
             backend: None,
+            backend_mutation_owner: None,
             health: cron_store_health(&path),
             path,
             mutation_lock: cron_store_mutation_lock(),
@@ -240,8 +272,10 @@ impl CronTaskStore {
     pub async fn with_store(
         store: Arc<dyn echo_core::memory::Store>,
     ) -> echo_core::error::Result<Self> {
+        let backend_mutation_owner = cron_backend_owner(&store);
         let s = Self {
             backend: Some(store),
+            backend_mutation_owner: Some(backend_mutation_owner),
             path: PathBuf::new(),
             mutation_lock: cron_store_mutation_lock(),
             health: Arc::new(CronTaskStoreHealth::new()),
@@ -265,8 +299,10 @@ impl CronTaskStore {
         backend: Arc<dyn echo_core::memory::Store>,
         path: PathBuf,
     ) -> Self {
+        let backend_mutation_owner = cron_backend_owner(&backend);
         Self {
             backend: Some(backend),
+            backend_mutation_owner: Some(backend_mutation_owner),
             health: cron_store_health(&path),
             path,
             mutation_lock: cron_store_mutation_lock(),
@@ -312,6 +348,63 @@ impl CronTaskStore {
     pub async fn load_all(&self) -> echo_core::error::Result<Vec<CronTask>> {
         self.check_authority()?;
         self.load_all_unchecked().await
+    }
+
+    /// Claim the definition writer before the runner copies its initial view.
+    pub(super) async fn claim_runner(
+        &self,
+    ) -> echo_core::error::Result<(SchedulerMutationOwner, Vec<CronTask>)> {
+        let _guard = self.mutation_lock.lock().await;
+        self.check_mutation_owner(None)?;
+        let tasks = self.load_all().await?;
+        let owner = SchedulerMutationOwner(Arc::new(()));
+        *self
+            .health
+            .mutation_owner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Arc::downgrade(&owner.0);
+        if let Some(backend_owner) = &self.backend_mutation_owner {
+            *backend_owner
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = Arc::downgrade(&owner.0);
+        }
+        Ok((owner, tasks))
+    }
+
+    fn check_mutation_owner(
+        &self,
+        owner: Option<&SchedulerMutationOwner>,
+    ) -> echo_core::error::Result<()> {
+        let path_active = self
+            .health
+            .mutation_owner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .upgrade();
+        let backend_active = self
+            .backend_mutation_owner
+            .as_ref()
+            .and_then(|backend_owner| {
+                backend_owner
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .upgrade()
+            });
+        let matches = |active: Option<Arc<()>>| match (active, owner) {
+            (None, None) => true,
+            (Some(active), Some(owner)) => Arc::ptr_eq(&active, &owner.0),
+            _ => false,
+        };
+        if matches(path_active)
+            && (self.backend_mutation_owner.is_none() || matches(backend_active))
+        {
+            Ok(())
+        } else {
+            Err(echo_core::error::ReactError::Other(
+                "Cron task definitions have a live SchedulerRunner mutation owner; use its management API"
+                    .into(),
+            ))
+        }
     }
 
     async fn load_all_unchecked(&self) -> echo_core::error::Result<Vec<CronTask>> {
@@ -377,9 +470,26 @@ impl CronTaskStore {
     /// The store replaces caller-supplied `definition_id` and returns the exact
     /// committed definition so callers can update projections without a second
     /// fallible backend read.
-    pub async fn add(&self, mut task: CronTask) -> echo_core::error::Result<CronTask> {
+    pub async fn add(&self, task: CronTask) -> echo_core::error::Result<CronTask> {
+        self.add_inner(task, None).await
+    }
+
+    pub(super) async fn add_owned(
+        &self,
+        task: CronTask,
+        owner: &SchedulerMutationOwner,
+    ) -> echo_core::error::Result<CronTask> {
+        self.add_inner(task, Some(owner)).await
+    }
+
+    async fn add_inner(
+        &self,
+        mut task: CronTask,
+        owner: Option<&SchedulerMutationOwner>,
+    ) -> echo_core::error::Result<CronTask> {
         unique_id(&task.id)?;
         let _guard = self.mutation_lock.lock().await;
+        self.check_mutation_owner(owner)?;
         let mut tasks = self.load_all().await?;
         if tasks.iter().any(|existing| existing.id == task.id) {
             return Err(echo_core::error::ReactError::Other(format!(
@@ -395,16 +505,18 @@ impl CronTaskStore {
 
     /// Remove a task by ID and persist. Returns true if found.
     pub async fn remove(&self, id: &str) -> echo_core::error::Result<bool> {
-        Ok(self.remove_with_snapshot(id).await?.is_some())
+        Ok(self.remove_with_snapshot(id, None).await?.is_some())
     }
 
     /// Return the exact committed definition set to update an in-memory view.
-    pub(crate) async fn remove_with_snapshot(
+    pub(super) async fn remove_with_snapshot(
         &self,
         id: &str,
+        owner: Option<&SchedulerMutationOwner>,
     ) -> echo_core::error::Result<Option<Vec<CronTask>>> {
         let id = unique_id(id)?;
         let _guard = self.mutation_lock.lock().await;
+        self.check_mutation_owner(owner)?;
         let mut tasks = self.load_all().await?;
         let before = tasks.len();
         tasks.retain(|task| task.id != id);
@@ -426,16 +538,21 @@ impl CronTaskStore {
         id: &str,
         status: CronTaskStatus,
     ) -> echo_core::error::Result<bool> {
-        Ok(self.set_status_with_snapshot(id, status).await?.is_some())
+        Ok(self
+            .set_status_with_snapshot(id, status, None)
+            .await?
+            .is_some())
     }
 
-    pub(crate) async fn set_status_with_snapshot(
+    pub(super) async fn set_status_with_snapshot(
         &self,
         id: &str,
         status: CronTaskStatus,
+        owner: Option<&SchedulerMutationOwner>,
     ) -> echo_core::error::Result<Option<Vec<CronTask>>> {
         let id = unique_id(id)?;
         let _guard = self.mutation_lock.lock().await;
+        self.check_mutation_owner(owner)?;
         let mut tasks = self.load_all().await?;
         let mut found = false;
         for task in &mut tasks {
@@ -463,7 +580,7 @@ impl CronTaskStore {
         let task = self.get(id).await?.ok_or_else(|| {
             echo_core::error::ReactError::Other(format!("Cron task '{id}' not found"))
         })?;
-        self.update_last_run_for_task(&task, result)
+        self.update_last_run_for_task(&task, result, None)
             .await
             .map(|_| ())
     }
@@ -473,13 +590,15 @@ impl CronTaskStore {
     /// The store-owned `definition_id` prevents a callback from an older
     /// definition from updating a task that was removed and recreated with the
     /// same public ID. Legacy records use `created_at` as their identity.
-    pub(crate) async fn update_last_run_for_task(
+    pub(super) async fn update_last_run_for_task(
         &self,
         expected: &CronTask,
         result: &str,
+        owner: Option<&SchedulerMutationOwner>,
     ) -> echo_core::error::Result<CronTask> {
         let id = unique_id(&expected.id)?;
         let _guard = self.mutation_lock.lock().await;
+        self.check_mutation_owner(owner)?;
         let mut tasks = self.load_all().await?;
         let updated = tasks.iter_mut().find_map(|task| {
             if task.same_definition(expected) {
@@ -653,12 +772,18 @@ impl CronTaskStore {
     }
 
     async fn migrate_from_file(&self) -> echo_core::error::Result<()> {
+        self.migrate_from_path(&default_task_path()).await
+    }
+
+    pub(super) async fn migrate_from_path(
+        &self,
+        legacy_path: &Path,
+    ) -> echo_core::error::Result<()> {
         let _guard = self.mutation_lock.lock().await;
+        self.check_mutation_owner(None)?;
         let Some(backend) = self.backend.as_ref() else {
             return Ok(());
         };
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        let legacy_path = PathBuf::from(home).join(".echo-agent/scheduler/tasks.json");
         if !legacy_path.exists() {
             return Ok(());
         }
@@ -671,8 +796,20 @@ impl CronTaskStore {
             return Ok(());
         }
 
+        let source_health = cron_store_health(legacy_path);
+        if source_health
+            .mutation_owner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .upgrade()
+            .is_some()
+        {
+            return Err(echo_core::error::ReactError::Other(
+                "Cron task migration source has a live SchedulerRunner mutation owner".into(),
+            ));
+        }
         debug!("Migrating cron tasks from file to Store backend");
-        let content = std::fs::read_to_string(&legacy_path).map_err(|error| {
+        let content = std::fs::read_to_string(legacy_path).map_err(|error| {
             echo_core::error::ReactError::Other(format!(
                 "Failed to read legacy cron tasks: {error}"
             ))
@@ -688,7 +825,7 @@ impl CronTaskStore {
         validate_task_ids(&tasks)?;
         self.save_all_unlocked(&tasks).await?;
         // Remove legacy file after successful migration
-        let _ = std::fs::remove_file(&legacy_path);
+        let _ = std::fs::remove_file(legacy_path);
         debug!(
             "Migrated {} cron tasks and removed legacy file",
             tasks.len()

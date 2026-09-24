@@ -268,29 +268,27 @@ impl StdioTransport {
         graceful_deadline: Instant,
         close_deadline: Instant,
     ) -> Result<()> {
-        let child = tokio::time::timeout_at(close_deadline, child_slot.lock())
+        let mut child_slot = tokio::time::timeout_at(close_deadline, child_slot.lock())
             .await
-            .map_err(|_| close_error("MCP stdio child owner lock timed out during close"))?
-            .take();
-        let Some(mut child) = child else {
+            .map_err(|_| close_error("MCP stdio child owner lock timed out during close"))?;
+        let Some(child) = child_slot.as_mut() else {
             return Ok(());
         };
 
         match tokio::time::timeout_at(graceful_deadline, child.wait()).await {
             Ok(Ok(status)) => {
+                child_slot.take();
                 tracing::debug!(?status, "MCP stdio: 子进程已退出");
                 Ok(())
             }
-            Ok(Err(error)) => {
-                *child_slot.lock().await = Some(child);
-                Err(close_error(format!(
-                    "MCP stdio failed to wait for child: {error}"
-                )))
-            }
+            Ok(Err(error)) => Err(close_error(format!(
+                "MCP stdio failed to wait for child: {error}"
+            ))),
             Err(_) => {
                 let kill_error = child.start_kill().err();
                 match tokio::time::timeout_at(close_deadline, child.wait()).await {
                     Ok(Ok(status)) => {
+                        child_slot.take();
                         if let Some(error) = kill_error {
                             Err(close_error(format!(
                                 "MCP stdio child exited as {status}, but kill failed: {error}"
@@ -300,14 +298,10 @@ impl StdioTransport {
                             Ok(())
                         }
                     }
-                    Ok(Err(error)) => {
-                        *child_slot.lock().await = Some(child);
-                        Err(close_error(format!(
-                            "MCP stdio failed to reap killed child: {error}"
-                        )))
-                    }
+                    Ok(Err(error)) => Err(close_error(format!(
+                        "MCP stdio failed to reap killed child: {error}"
+                    ))),
                     Err(_) => {
-                        *child_slot.lock().await = Some(child);
                         let kill_detail = kill_error
                             .map(|error| format!("; kill failed: {error}"))
                             .unwrap_or_default();
@@ -331,6 +325,7 @@ impl StdioTransport {
         };
         match tokio::time::timeout_at(deadline, &mut task).await {
             Ok(Ok(result)) => result,
+            Ok(Err(error)) if error.is_cancelled() => Ok(()),
             Ok(Err(error)) => Err(close_error(format!(
                 "MCP stdio {task_name} task join failed: {error}"
             ))),
@@ -470,7 +465,7 @@ impl McpTransport for StdioTransport {
                 let stdout_task = Arc::clone(&self.stdout_task);
                 let stderr_task = Arc::clone(&self.stderr_task);
                 let timeouts = self.timeouts;
-                tokio::spawn(async move {
+                let producer = tokio::spawn(async move {
                     let result = Self::close_owned(
                         &stdin,
                         &pending,
@@ -483,6 +478,7 @@ impl McpTransport for StdioTransport {
                     .await;
                     coordinator.complete(&result);
                 });
+                receipt.retain_producer(producer);
             }
             receipt.wait(deadline, "MCP stdio transport").await
         })
@@ -743,6 +739,59 @@ mod tests {
         assert!(transport.child.lock().await.is_none());
         assert!(transport.stdout_task.lock().await.is_none());
         assert!(transport.stderr_task.lock().await.is_none());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn close_retries_child_after_owning_runtime_stops_mid_wait() -> Result<()> {
+        let first_runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        let (transport, child_id) = first_runtime.block_on(async {
+            let transport = Arc::new(
+                StdioTransport::new_with_timeouts(
+                    "/bin/sh",
+                    &["-c".to_string(), "exec sleep 30".to_string()],
+                    &[],
+                    None,
+                    short_timeouts(),
+                )
+                .await?,
+            );
+            let child_id = transport
+                .child
+                .lock()
+                .await
+                .as_ref()
+                .and_then(Child::id)
+                .ok_or_else(|| close_error("test child has no process id"))?;
+            let close = tokio::spawn({
+                let transport = Arc::clone(&transport);
+                async move { transport.close().await }
+            });
+            for _ in 0..100 {
+                if transport.child.try_lock().is_err() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            assert!(transport.child.try_lock().is_err());
+            assert!(!close.is_finished());
+            Ok::<_, ReactError>((transport, child_id))
+        })?;
+        drop(first_runtime);
+
+        let second_runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        second_runtime.block_on(async { transport.close().await })?;
+        assert!(transport.child.blocking_lock().is_none());
+        let status = std::process::Command::new("kill")
+            .arg("-0")
+            .arg(child_id.to_string())
+            .status()?;
+        assert!(!status.success());
         Ok(())
     }
 
