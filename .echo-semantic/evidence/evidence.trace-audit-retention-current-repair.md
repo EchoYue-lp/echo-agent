@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.trace-audit-retention-current-repair
 kind: evidence
-observed_at: source:87b717676a7b51e213630677989947777b4bed441acd8c7d655fb6c96dca77ad
+observed_at: source:d0d70f0819595200d148564ce11cb55de583ba943d7a5554b4c06a0f6dcb8af9
 source_refs:
   - echo-core/src/utils/retention.rs
   - src/security.rs

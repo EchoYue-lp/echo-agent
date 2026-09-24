@@ -4,15 +4,15 @@ id: asset.cron-scheduler
 kind: asset
 title: Cron Scheduler Runtime
 asset_type: state_authority
-status: needs_review
+status: active
 risk: high
-observed_at: f1e9027246760661144786e9e35615cd46d580c6
+observed_at: source:d0d70f0819595200d148564ce11cb55de583ba943d7a5554b4c06a0f6dcb8af9
 boundary_refs: [boundary.task-subagent-workflow]
 code_refs: [echo-orchestration/src/scheduler/runner.rs, echo-orchestration/src/scheduler/cron_task.rs]
 consumer_refs: [echo-agent-learning/examples/demo70_scheduler.rs]
 behavior_refs: [behavior.task-subagent-execution]
 rule_refs: []
-evidence_refs: [evidence.task-subagent-workflow]
+evidence_refs: [evidence.task-subagent-workflow, evidence.scheduler-occurrence-authority-repair, evidence.scheduler-occurrence-authority-verification]
 finding_refs: [finding.scheduler-cache-delivery]
 candidate_refs: []
 ---
@@ -29,7 +29,9 @@ Public scheduler API 与 learning example 消费，不与 Task DAG 或 Workflow 
 
 ## 生命周期
 
-Load/migrate/add/remove/tick/fire/update/shutdown；delivery guarantee 和 cache/store 一致性尚待审计。
+Load/migrate/add/remove/tick/fire/update/shutdown；runner 持有单进程定义写入许可，
+Store 是持久权威，cache 是派生快照。Occurrence 使用 DeliveryLedger 的持久
+claim/attempt/settlement，callback effect 仍按 occurrence ID 自行幂等。
 
 ## 候选关系
 
@@ -37,4 +39,5 @@ Callback 可调用其它 framework capability，但 Scheduler 不拥有被调用
 
 ## 未知与限制
 
-Crash 后 duplicate/loss、run_once/tick 并发与 migration collision 已由 Finding 跟踪。
+真实进程 kill、跨进程 Store writer、不同 backend 对象指向同一物理存储及离线
+misfire 不由当前测试和单进程 owner 合同证明。

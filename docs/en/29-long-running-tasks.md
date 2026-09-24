@@ -158,6 +158,11 @@ also reconciles through `OutcomeUnknown` on the next drain.
 a monotonic `control_revision` for status changes. An exact task clone re-added
 after removal is therefore a new definition; queued callbacks from the old
 incarnation cannot pass admission or write its last-run projection.
+While a runner is live, task definitions are changed through its management
+API. Direct writes through retained `CronTaskStore` clones, another handle
+for the same definition path, or a handle sharing the same Store backend
+instance return an error. Store reads remain available;
+direct writes resume when the runner and its in-flight writes are gone.
 
 Use `SchedulerRunner::new_with_occurrence_context` and `OccurrenceFireFn` when
 the callback performs external effects. `SchedulerInvocation::occurrence_id`
