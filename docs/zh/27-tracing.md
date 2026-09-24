@@ -168,6 +168,23 @@ pub trait RunStore: Send + Sync {
 下覆盖这两个方法。run 不存在时 `finalize_run` 返回 `false`；内置 store 会保留晚到
 event，并以第一个 terminal result 为准。
 
+### 自定义 backend 的 retention 合同
+
+React producer 在调用自定义 `save`、`append_event` 前会应用默认的
+`ContentRetentionPolicy`；默认 `finalize_run` 实现会清洗终态输出和错误字段。覆盖
+`save`、`append_event` 或 `finalize_run` 的 backend 必须在接纳持久写入前重复应用相同或
+更严格的策略。`Run::apply_retention` 与 `RunEvent::apply_retention` 是可复用的边界
+helper，独立的终态字符串使用 `ContentRetentionPolicy::sanitize_text`。
+
+Retention 处理 prompt、输出、错误、tool 参数和人类可读原因等用户/模型/tool 内容。
+`run_id`、session/turn/execution ID、call ID、tool 名称、路径、状态、计数器和时间戳等
+typed 寻址与 effect 事实保持不变，以便诊断查询和回放；它们不是 secret 内容存储，调用方
+不得把 credential 放入仍需要寻址的 identity 字段。
+
+自定义 store 和 audit sink 在部分写入或持久性未知时必须返回错误。producer 保留已接纳
+状态的可见性，并通过 diagnostic delivery 报告错误；backend 错误不得改写 Agent 执行终态。
+字段分类与自定义 backend 责任见 [ADR 0074](../adr/0074-trace-audit-retention-contract.md)。
+
 ### 内置实现
 
 | 实现 | 存储方式 | 使用场景 |

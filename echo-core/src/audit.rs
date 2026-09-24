@@ -38,6 +38,11 @@ impl AuditEvent {
         }
     }
 
+    /// Sanitize content-bearing fields before handing this event to an audit
+    /// backend. Typed addressing fields (`session_id`, `trace_id`, tool/call
+    /// names, permission values, and timing metadata) remain unchanged so a
+    /// consumer can correlate the diagnostic fact; they are not a secret
+    /// content channel and callers should not put credentials in them.
     pub fn apply_retention(&mut self, retention: &ContentRetentionPolicy) {
         match &mut self.event_type {
             AuditEventType::UserInput { content } | AuditEventType::FinalAnswer { content } => {
@@ -161,6 +166,14 @@ pub struct AuditFilter {
 }
 
 /// 审计日志记录器 trait
+///
+/// Framework producers apply the default [`ContentRetentionPolicy`] before
+/// invoking a custom logger. Implementations that are called directly, or
+/// override a producer adapter, must sanitize content with
+/// [`AuditEvent::apply_retention`] before accepting a durable write. A logger
+/// must return an error when a write is partial or durability is unknown;
+/// callers report that error separately from the Agent terminal. Typed IDs
+/// and other addressing metadata remain intact for diagnostics.
 pub trait AuditLogger: Send + Sync {
     /// Persist one audit event.
     fn log<'a>(&'a self, event: AuditEvent) -> BoxFuture<'a, Result<()>>;

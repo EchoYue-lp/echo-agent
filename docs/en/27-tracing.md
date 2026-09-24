@@ -169,6 +169,30 @@ methods under one authority. `finalize_run` returns `false` when the run does
 not exist; the built-in stores retain late events and preserve the first
 terminal result.
 
+### Retention contract for custom backends
+
+The React producer applies the default `ContentRetentionPolicy` before calling
+custom `save` and `append_event` methods; the default `finalize_run`
+implementation sanitizes terminal output and error fields. A backend that
+overrides `save`, `append_event`, or `finalize_run` must apply the same policy
+(or a stricter one) before accepting a durable write. `Run::apply_retention`
+and `RunEvent::apply_retention` are the reusable boundary helpers, while
+`ContentRetentionPolicy::sanitize_text` covers standalone finalization strings.
+
+Retention targets user/model/tool content such as prompts, outputs, errors,
+tool arguments, and human-readable reasons. Typed addressing and effect facts
+such as `run_id`, session/turn/execution IDs, call IDs, tool names, paths,
+status values, counters, and timestamps remain unchanged so a diagnostic can
+be queried and replayed. They are not secret-content storage; callers should
+never place credentials in an identity they expect to remain addressable.
+
+Custom stores and audit sinks must return an error for partial writes or
+unknown durability. The producer keeps the accepted state observable and
+reports the error through diagnostic delivery; a backend error must not rewrite
+the Agent execution terminal.
+See [ADR 0074](../adr/0074-trace-audit-retention-contract.md) for the field
+classification and custom-backend ownership decision.
+
 ### Built-in Implementations
 
 | Implementation | Storage | Use Case |
