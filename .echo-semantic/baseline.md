@@ -3,8 +3,8 @@ schema_version: 1
 id: baseline.repository
 kind: baseline
 source_snapshot:
-  base_revision: 733d352fc719f922b21bab1cd46206139564367f
-  content_digest: 13ff9de40ae621e1201c111201fda28402a397d7104e90595be0c5106482dbc0
+  base_revision: bd17c73075d6b3cf8e00877fa0fb10d36694ea54
+  content_digest: 052370cfd6d375b5ff7d00451d20d5427bb0e50603dfbbee38f1f4470b315801
 inventory_closure: closed
 behavior_model_closure: closed
 map_refs:
@@ -143,7 +143,7 @@ coverage:
 
 ## 源码快照
 
-基线以远端 `main@733d352f` 为可恢复祖先，绑定当前非语义源码摘要；任务分支的 merge commit 不作为目标主线祖先。`.echo-semantic` 自身不参与摘要。后续业务、合同、测试或正式文档变化必须通过 semantic-diff 刷新。
+基线以远端 `main@bd17c730` 为可恢复祖先，绑定当前非语义源码摘要；任务分支的 merge commit 不作为目标主线祖先。`.echo-semantic` 自身不参与摘要。后续业务、合同、测试或正式文档变化必须通过 semantic-diff 刷新。
 
 ## 仓库区域
 

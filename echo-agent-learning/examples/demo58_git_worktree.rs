@@ -4,7 +4,7 @@
 //! 1. 列出当前仓库的 worktree
 //! 2. 创建新 worktree 用于并行子 Agent 工作
 //! 3. 再次列出 worktree 确认创建成功
-//! 4. 移除 worktree 并清理分支
+//! 4. 移除干净的 worktree（分支保留）
 //! 5. 为单个文件创建精确 checkpoint
 //!
 //! 需要：
@@ -71,32 +71,11 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     println!("    path_suffix : {:?}", config.path_suffix);
     println!();
 
-    let worktree = match create_worktree(repo_path, &config).await {
-        Ok(wt) => {
-            println!("  ✓ worktree 创建成功");
-            println!("    path   : {}", wt.path.display());
-            println!("    branch : {}", wt.branch);
-            println!("    managed: {}", wt.managed);
-            wt
-        }
-        Err(e) => {
-            // May fail if branch already exists from a previous interrupted run.
-            println!("  ⚠ worktree 创建失败（可能上次运行未清理）: {e}");
-            println!("  尝试清理残留…");
-            let _ = std::process::Command::new("git")
-                .args(["worktree", "prune"])
-                .current_dir(repo_path)
-                .output();
-            let _ = std::process::Command::new("git")
-                .args(["branch", "-D", branch_name])
-                .current_dir(repo_path)
-                .output();
-            // Retry
-            let wt = create_worktree(repo_path, &config).await?;
-            println!("  ✓ 重试成功: {}", wt.path.display());
-            wt
-        }
-    };
+    let worktree = create_worktree(repo_path, &config).await?;
+    println!("  ✓ worktree 创建成功");
+    println!("    path   : {}", worktree.path.display());
+    println!("    branch : {}", worktree.branch);
+    println!("    managed: {}", worktree.managed);
     println!();
 
     // ── Part 3：再次列出确认 ───────────────────────────────────────────────
@@ -127,12 +106,12 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
     // ── Part 4：移除 worktree ──────────────────────────────────────────────
     println!("───────────────────────────────────────────────────────");
-    println!("Part 4：移除 worktree 并清理分支");
+    println!("Part 4：移除 worktree（保留分支）");
     println!("───────────────────────────────────────────────────────\n");
 
     remove_worktree(repo_path, &worktree).await?;
     println!("  ✓ worktree 已移除: {}", worktree.path.display());
-    println!("  ✓ 分支 '{}' 已删除", worktree.branch);
+    println!("  ✓ 分支 '{}' 已保留", worktree.branch);
     println!();
 
     // ── Part 5：Git Checkpoint ─────────────────────────────────────────────

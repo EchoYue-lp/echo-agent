@@ -4,13 +4,13 @@ id: map.tool-permission-sandbox
 kind: capability_map
 title: Tool、Permission、Sandbox 与外部 Effect
 risk: high
-observed_at: source:13ff9de40ae621e1201c111201fda28402a397d7104e90595be0c5106482dbc0
+observed_at: source:052370cfd6d375b5ff7d00451d20d5427bb0e50603dfbbee38f1f4470b315801
 boundary_refs: [boundary.tool-permission-sandbox]
 behavior_refs: [behavior.effect-permission-execution]
 rule_refs: [rule.permission-effect-order]
-evidence_refs: [evidence.effects-extensions, evidence.high-risk-audit-frontier, evidence.streaming-tool-validation-repair, evidence.streaming-tool-validation-verification, evidence.tool-read-cache-authority-repair, evidence.tool-read-cache-authority-verification, evidence.tool-registry-owned-handle-repair, evidence.tool-registry-owned-handle-verification, evidence.framework-concept-navigation, evidence.mcp-tool-local-classification-repair, evidence.mcp-tool-local-classification-verification, evidence.hook-protected-path-repair, evidence.hook-protected-path-verification, evidence.readonly-tool-capability-repair, evidence.readonly-tool-capability-verification, evidence.k8s-sandbox-cleanup-settlement-repair, evidence.k8s-sandbox-cleanup-settlement-verification]
+evidence_refs: [evidence.effects-extensions, evidence.high-risk-audit-frontier, evidence.streaming-tool-validation-repair, evidence.streaming-tool-validation-verification, evidence.tool-read-cache-authority-repair, evidence.tool-read-cache-authority-verification, evidence.tool-registry-owned-handle-repair, evidence.tool-registry-owned-handle-verification, evidence.framework-concept-navigation, evidence.mcp-tool-local-classification-repair, evidence.mcp-tool-local-classification-verification, evidence.hook-protected-path-repair, evidence.hook-protected-path-verification, evidence.readonly-tool-capability-repair, evidence.readonly-tool-capability-verification, evidence.k8s-sandbox-cleanup-settlement-repair, evidence.k8s-sandbox-cleanup-settlement-verification, evidence.effect-cleanup-owner-repair, evidence.effect-cleanup-owner-verification]
 finding_refs: [finding.tool-read-cache-scope, finding.tool-read-cache-inflight-invalidation-race, finding.tool-registry-mutation-active-call-deadlock, finding.streaming-tool-validation, finding.plan-mode-write-surface, finding.readonly-tools-custom-registration-bypass, finding.approval-authority, finding.hook-protected-path, finding.hook-permission-precedence, finding.sandbox-minimum-isolation, finding.sandbox-manager-stream-failure-typing, finding.guard-direction-contract, finding.trace-effect-event-producers, finding.trace-audit-secret-boundary, finding.effect-cleanup-owner, finding.k8s-sandbox-cleanup-settlement, finding.tool-terminal-observation-divergence, finding.command-cell-retention-lease-prune-race, finding.command-cell-cancel-artifact-settlement, finding.tool-pipeline-example-drift]
-audit_refs: [audit.tool-permission-sandbox.permission-external, audit.tool-permission-sandbox.failure-concurrency, audit.tool-permission-sandbox.result-side-effect, audit.streaming-tool-validation-rereview, audit.tool-read-cache-authority-rereview, audit.tool-registry-owned-handle-rereview, audit.mcp-tool-local-classification-rereview, audit.hook-protected-path-rereview, audit.readonly-tool-capability-rereview, audit.k8s-sandbox-cleanup-settlement-rereview]
+audit_refs: [audit.tool-permission-sandbox.permission-external, audit.tool-permission-sandbox.failure-concurrency, audit.tool-permission-sandbox.result-side-effect, audit.streaming-tool-validation-rereview, audit.tool-read-cache-authority-rereview, audit.tool-registry-owned-handle-rereview, audit.mcp-tool-local-classification-rereview, audit.hook-protected-path-rereview, audit.readonly-tool-capability-rereview, audit.k8s-sandbox-cleanup-settlement-rereview, audit.effect-cleanup-owner-rereview]
 related_map_refs: [map.agent-session-turn, map.task-subagent-workflow, map.observation-persistence-delivery, map.extension-lifecycle]
 scenarios:
   agent-automated-policy-pipeline:
@@ -51,10 +51,10 @@ scenarios:
     audit_refs: [audit.hook-protected-path-rereview]
   sandbox-and-resource-cleanup:
     status: mapped
-    source_refs: [echo-core/src/sandbox.rs, echo-execution/src/sandbox/manager.rs, echo-execution/src/sandbox/local.rs, echo-core/src/tools/artifact.rs, echo-tools/src/git_worktree.rs]
+    source_refs: [echo-core/src/sandbox.rs, echo-execution/src/sandbox/manager.rs, echo-execution/src/sandbox/resource_owner.rs, echo-execution/src/sandbox/docker.rs, echo-execution/src/sandbox/k8s.rs, echo-execution/src/sandbox/local.rs, echo-core/src/tools/artifact.rs, echo-tools/src/git_worktree.rs, src/agent/react/mod.rs]
     finding_refs: [finding.sandbox-minimum-isolation, finding.sandbox-manager-stream-failure-typing, finding.effect-cleanup-owner, finding.k8s-sandbox-cleanup-settlement]
-    evidence_refs: [evidence.effects-extensions, evidence.k8s-sandbox-cleanup-settlement-repair, evidence.k8s-sandbox-cleanup-settlement-verification]
-    audit_refs: [audit.k8s-sandbox-cleanup-settlement-rereview]
+    evidence_refs: [evidence.effects-extensions, evidence.k8s-sandbox-cleanup-settlement-repair, evidence.k8s-sandbox-cleanup-settlement-verification, evidence.effect-cleanup-owner-repair, evidence.effect-cleanup-owner-verification]
+    audit_refs: [audit.k8s-sandbox-cleanup-settlement-rereview, audit.effect-cleanup-owner-rereview]
   guard-and-trace-projection:
     status: needs_review
     source_refs: [echo-core/src/guard/mod.rs, src/agent/snapshot.rs, src/trace/mod.rs, echo-state/src/audit/memory.rs]
@@ -121,7 +121,7 @@ Permission prompt、Tool progress/result、CommandCell snapshot 与 artifact ref
 
 ## 场景处置清单
 
-Agent pipeline、programmatic primitive、trusted Hook effect 与 CommandCell 已拆分；#60 protected-path 和 #81 readonly custom Tool 反例在当前任务分支闭合，其他已知缺口继续保留 Finding；K8s caller-drop 已由detached owner、typed cleanup debt和故障注入映射，direct-user surface明确excluded。
+Agent pipeline、programmatic primitive、trusted Hook effect 与 CommandCell 已拆分；#60 protected-path、#81 readonly custom Tool 和本轮 #47 精确资源 cleanup owner 反例已闭合。#47 最终源码的本地完整门禁、17-feature 矩阵与独立复审已通过；远端 PR/CI 和 main 交付待验收。其他已知缺口继续保留 Finding；K8s caller-drop 已由detached owner、typed cleanup debt和故障注入映射，direct-user surface明确excluded。
 
 ## 未展开项
 

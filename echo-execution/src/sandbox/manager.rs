@@ -184,14 +184,30 @@ impl SandboxExecutor for SandboxManager {
 
     fn cleanup(&self) -> BoxFuture<'_, Result<()>> {
         Box::pin(async move {
-            self.local.cleanup().await?;
-            if let Some(docker) = &self.docker {
-                docker.cleanup().await?;
+            let mut failures = Vec::new();
+            if let Err(error) = self.local.cleanup().await {
+                failures.push(format!("local: {error}"));
             }
-            if let Some(k8s) = &self.k8s {
-                k8s.cleanup().await?;
+            if let Some(docker) = &self.docker
+                && let Err(error) = docker.cleanup().await
+            {
+                failures.push(format!("docker: {error}"));
             }
-            Ok(())
+            if let Some(k8s) = &self.k8s
+                && let Err(error) = k8s.cleanup().await
+            {
+                failures.push(format!("k8s: {error}"));
+            }
+            if failures.is_empty() {
+                Ok(())
+            } else {
+                Err(echo_core::error::ReactError::Sandbox(Box::new(
+                    SandboxError::IoError(format!(
+                        "Sandbox cleanup is unsettled: {}",
+                        failures.join("; ")
+                    )),
+                )))
+            }
         })
     }
 }

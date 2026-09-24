@@ -51,7 +51,7 @@ let config = WorktreeConfig {
     base: None,                // defaults to HEAD
     path_suffix: None,         // auto-derived from branch name
 };
-let worktree = create_worktree(Path::new("."), &config)?;
+let worktree = create_worktree(Path::new("."), &config).await?;
 // worktree.path → /repo/.worktrees/feature-auth
 // worktree.branch → "feature-auth"
 // worktree.managed → true
@@ -64,17 +64,22 @@ let config = WorktreeConfig {
 };
 
 // List all worktrees
-let all = list_worktrees(Path::new("."))?;
+let all = list_worktrees(Path::new(".")).await?;
 for wt in &all {
     println!("{} (branch: {})", wt.path.display(), wt.branch);
 }
 
 // Merge worktree changes back to a target branch
-merge_worktree(Path::new("."), &worktree, "main")?;
+merge_worktree(Path::new("."), &worktree, "main").await?;
 
-// Remove worktree and delete its branch
-remove_worktree(Path::new("."), &worktree)?;
+// Remove a clean managed worktree; the branch remains
+remove_worktree(Path::new("."), &worktree).await?;
 ```
+
+The target path must not already exist. After `git worktree add` begins, an
+independent owner finishes marker publication. A departed caller cannot leave
+a successful unmarked checkout. Marker failure removes only a proven exact,
+clean checkout; uncertain outcomes report the path and branch for recovery.
 
 #### `WorktreeConfig`
 
@@ -125,7 +130,8 @@ Removes a managed worktree, optionally merging its changes before cleanup.
 | `merge_to` | No | If set, merge the worktree branch into this target branch before removal |
 | `repo_path` | No | Repository path (defaults to current working directory) |
 
-Risk level: **Dangerous** — may delete branches and modify the main working tree via merge.
+Risk level: **Dangerous** — an optional merge may modify the target working tree;
+the branch is preserved when the worktree is removed.
 
 ```
 Agent: Done with the auth work. Merging into main and cleaning up.
@@ -367,7 +373,7 @@ let worktree = create_worktree(&repo_path, &WorktreeConfig {
     branch: "feature-auth".to_string(),
     base: Some("main".to_string()),
     path_suffix: None,
-})?;
+}).await?;
 
 // 2. Sub-agent works in worktree.path
 //    (write_file/delete_file auto-create checkpoints)
@@ -376,8 +382,8 @@ let worktree = create_worktree(&repo_path, &WorktreeConfig {
 rollback_to_checkpoint(&worktree.path, "echo-checkpoint/1748864400");
 
 // 4. Merge and clean up
-merge_worktree(&repo_path, &worktree, "main")?;
-remove_worktree(&repo_path, &worktree)?;
+merge_worktree(&repo_path, &worktree, "main").await?;
+remove_worktree(&repo_path, &worktree).await?;
 
 // 5. Clean up old checkpoint tags
 cleanup_old_checkpoints(&repo_path, 10);

@@ -141,7 +141,7 @@ impl Tool for ExitWorktreeTool {
     }
 
     fn description(&self) -> &str {
-        "Remove a git worktree and clean up its branch. \
+        "Remove a clean managed git worktree while preserving its branch. \
          Optionally merge the worktree branch into a target branch before removal."
     }
 

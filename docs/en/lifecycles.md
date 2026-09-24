@@ -163,6 +163,18 @@ claim they already form one universal decision owner. See [Tools](./02-tools.md)
 [Human Loop](./05-human-loop.md), [Security](./security.md), and
 [Guard System](./18-guard-system.md).
 
+Resource cleanup keeps the creating component's exact identity. Tool-output
+scope deletion returns `WouldBlock` while a writer is active and retains failed
+deletion for retry. Deferred deletion checks the bound root's physical file
+identity before removal; the application chooses when to request it. Docker
+and K8s execution owners settle their named resource before a terminal, while
+manager cleanup retries only that manager's debt and reports active owners.
+Agent close calls the retained manager after its Turn drain; a shared manager
+with another active owner makes close retryable. Label-wide sandbox sweeps are
+explicit manual recovery. Worktree creation
+finishes marker publication or proves a clean exact-checkout compensation before
+returning a settled error. See [ADR 0072](../adr/0072-resource-cleanup-ownership.md).
+
 ## Observation And Delivery
 
 ```text

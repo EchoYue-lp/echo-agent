@@ -117,7 +117,8 @@ pub trait SandboxExecutor: Send + Sync {
         })
     }
 
-    /// Clean up sandbox resources (containers, temp files, etc.)
+    /// Retry this executor's owned cleanup debt and report active owners.
+    /// A shared-label recovery sweep is a separate, explicit operation.
     fn cleanup(&self) -> BoxFuture<'_, Result<()>> {
         Box::pin(async { Ok(()) })
     }
