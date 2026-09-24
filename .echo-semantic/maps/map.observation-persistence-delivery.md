@@ -4,7 +4,7 @@ id: map.observation-persistence-delivery
 kind: capability_map
 title: Observation、Persistence、Projection 与 Delivery
 risk: high
-observed_at: source:d0d70f0819595200d148564ce11cb55de583ba943d7a5554b4c06a0f6dcb8af9
+observed_at: source:757f499d4d9a40a4c27791933cb3d5e9d3b2dda76a1a28e4561e317d4719be94
 boundary_refs: [boundary.observation-persistence-delivery]
 behavior_refs: [behavior.observation-persistence]
 rule_refs: [rule.fact-projection-separation]

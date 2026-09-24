@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.extension-cleanup-settlement-repair
 kind: evidence
-observed_at: source:d0d70f0819595200d148564ce11cb55de583ba943d7a5554b4c06a0f6dcb8af9
+observed_at: source:757f499d4d9a40a4c27791933cb3d5e9d3b2dda76a1a28e4561e317d4719be94
 source_refs:
   - echo-integration/src/mcp/transport/mod.rs
   - echo-integration/src/mcp/transport/sse.rs
@@ -12,10 +12,12 @@ source_refs:
   - src/agent/react/mod.rs
   - src/plugin/prepared.rs
   - docs/adr/0049-mcp-transport-close-settlement.md
+  - docs/en/08-mcp.md
+  - docs/zh/08-mcp.md
 supports: [behavior.extension-publication, rule.extension-generation-authority]
 limitations:
   - Consumer public inventory is independently owned and does not block the framework Finding
-  - Preparation and SSE construction cancellation still lack an externally awaitable cleanup owner
+  - 直接 consumer 若丢弃 preparation waiter，必须保留 scope 并显式 await close；进程强制退出不保证结算
   - LSP runtime state and derived-handle lifecycle remain owned by their separate Findings
 ---
 
@@ -29,12 +31,22 @@ SSE receive、request POST 与 notification POST 观察同一个 cancellation to
 
 Manager active client 与 cleanup debt 只在成功 close 后移除；失败保持在原 authority 中。Manager close gate 线性化并发 close，caller cancellation 后后续 close 可继续等待或重试。Replacement 在旧 transport close 失败时不发布新 target。
 
+本轮 `McpClient::prepare` 返回带 cloneable `McpPreparationScope` 的可等待 preparation；manager
+在首个资源创建 poll 前登记 scope。scope 取消 admission、等待 build 交接，并在 close 失败时
+保留同一 transport 供重试。`close_all` 等待 registered preparation，失败不删除 retry debt；
+已取消的 preparation 不再发布 late client。SSE receive task 在 construction 暂停前转入
+transport owner。transport close receipt 保留 task handle；runtime 中断后可重新发起 settlement。
+stdio child 在等待 exit 期间留在 owner slot，后续 close 可继续 kill/reap。拓扑方法保留独占
+`&mut self` 合同，避免 remove 超越尚未完成的连接握手。
+
 ## 来源与范围
 
 ADR 0049 绑定官方 MCP 2024-11-05 shutdown、官方 Rust SDK fallible graceful close 与官方 TypeScript SSE abort/close 做法。实现只修改 framework MCP transport/client/manager 及真实 close adapter，不新增 EKO 产品策略、MCP 连接权限门控或 LSP 状态。
 
 ## 已知缺口
 
-Transport close 的完整 workspace 门禁与远端 CI 已由后续 integration/main 交付。当前剩余缺口是
-preparation/SSE construction Drop 派生的不可等待 cleanup owner；Plugin、LSP 与 Agent adapter
+原 transport close 的完整 workspace 门禁与远端 CI 已由历史 integration/main 交付；本轮
+construction 修复已在当前任务分支完成 focused 验证、合入最新 main 后的完整本地门禁与
+17项独立feature检查；PR/CI与远端main交付尚未记录。
+直接 consumer 必须保留 preparation scope 并等待关闭；Plugin、LSP 与 Agent adapter
 lifecycle 仍由各自 Finding 持有。
