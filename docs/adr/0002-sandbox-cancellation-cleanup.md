@@ -171,7 +171,10 @@ Regression coverage starts a real local leader and descendant, waits until the
 leader exits, cancels execution, and verifies that the captured group and
 descendant are absent at terminal return. A blocked-stdin test aborts the caller
 and verifies that the detached owner still cleans the group. Typed failure tests
-prove cleanup debt cannot emit a fake completion.
+prove cleanup debt cannot emit a fake completion. The `SandboxManager` startup
+boundary is covered as well: when the selected backend cannot construct its
+stream, the caller receives a typed `SandboxStreamEvent::Failed` terminal rather
+than a synthetic `Complete` result with `exit_code = -1`.
 
 A fake Docker executable verifies pre-cancel performs no Docker operation;
 normal, non-zero, timeout, cancellation, blocked stdin, and caller-abort paths
