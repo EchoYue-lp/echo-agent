@@ -3,19 +3,19 @@ schema_version: 1
 id: finding.sandbox-manager-stream-failure-typing
 kind: finding
 type: implementation_bug
-status: open
+status: resolved
 severity: medium
 primary_focus: failure_concurrency
 focus: [contract_evidence, result_side_effect]
 boundary_ref: boundary.tool-permission-sandbox
 behavior_refs: [behavior.effect-permission-execution]
 rule_refs: [rule.permission-effect-order]
-evidence_refs: [evidence.effects-extensions]
-audit_refs: [audit.tool-permission-sandbox.failure-concurrency]
+evidence_refs: [evidence.effects-extensions, evidence.sandbox-manager-stream-failure-typing-repair, evidence.sandbox-manager-stream-failure-typing-verification]
+audit_refs: [audit.tool-permission-sandbox.failure-concurrency, audit.sandbox-manager-stream-failure-typing-rereview]
 decision_refs: []
-repair_evidence_refs: []
-verification_evidence_refs: []
-rereview_audit_refs: []
+repair_evidence_refs: [evidence.sandbox-manager-stream-failure-typing-repair]
+verification_evidence_refs: [evidence.sandbox-manager-stream-failure-typing-verification]
+rereview_audit_refs: [audit.sandbox-manager-stream-failure-typing-rereview]
 discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 ---
 
@@ -39,4 +39,8 @@ Backend 建流失败被 SandboxManager 包装成 `Complete(exit_code=-1)`，而�
 
 ## 处理记录
 
-Failure-concurrency Audit 确认；后续 repair 保留 Failed 分类并补 backend-start failure stream test。
+Failure-concurrency Audit 确认；`3f63bf78` 将 SandboxManager backend 建流失败改为
+typed `SandboxStreamEvent::Failed`，并集中复用 SandboxError 到 stream failure 的映射。
+真实 manager caller 入口的 backend-start failure regression 已通过；独立复审 PASS，
+本 Finding 在当前候选分支标记 resolved。完整门禁、PR/CI、远端 main 与 Issue #82
+关闭仍待交付验收。
