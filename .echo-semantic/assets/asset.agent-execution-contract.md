@@ -6,7 +6,7 @@ title: Raw Agent Execution Contract
 asset_type: protocol
 status: active
 risk: high
-observed_at: source:87b717676a7b51e213630677989947777b4bed441acd8c7d655fb6c96dca77ad
+observed_at: source:757f499d4d9a40a4c27791933cb3d5e9d3b2dda76a1a28e4561e317d4719be94
 boundary_refs: [boundary.agent-session-turn]
 code_refs: [echo-core/src/agent/mod.rs, echo-core/src/tools/mod.rs, src/lib.rs, src/agent/react/mod.rs, src/agent/react/lifecycle.rs, src/agent/handle.rs, src/headless.rs, src/eval/runner.rs, docs/adr/0038-eval-trace-correlation-identity.md, docs/adr/0066-agent-adapter-close-ownership.md]
 consumer_refs: [src/channels.rs, src/a2a/server.rs, echo-orchestration/src/runtime/turn_driver.rs]

@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.scheduler-occurrence-authority-repair
 kind: evidence
-observed_at: source:87b717676a7b51e213630677989947777b4bed441acd8c7d655fb6c96dca77ad
+observed_at: source:757f499d4d9a40a4c27791933cb3d5e9d3b2dda76a1a28e4561e317d4719be94
 source_refs:
   - echo-orchestration/src/scheduler/mod.rs
   - echo-orchestration/src/scheduler/cron_task.rs
@@ -25,8 +25,9 @@ limitations:
 
 `CronTaskStore` 在 load、add、save 和 legacy migration 入口校验非空且唯一的
 CronTask ID；重复定义 fail closed，Store backend 已存在的目标值不会被 legacy
-文件覆盖。SchedulerRunner 自身的成功 mutation 会重新加载完整快照，使 `tasks` 只作为
-derived cache；public Store clone 的直接 mutation 尚未接入同一同步边界。
+文件覆盖。SchedulerRunner 自身的成功 mutation 发布已提交快照，使 `tasks` 只作为
+derived cache。原 `main@e15cc17f` 版本的 public Store clone 直接 mutation 尚未接入
+同一同步边界；当前任务分支已闭合此反例。
 
 Tick 保存 `task.id + created_at + scheduled_at` occurrence identity，并将持久
 `control_revision` 写入 payload。每次 status control 都在 CronTaskStore 中递增 revision；
@@ -71,6 +72,23 @@ fail closed，不再共享 default-home journal。
 - 首轮修复后 `cargo test -p echo_orchestration scheduler::runner::tests --locked`：
   11 passed；最终 focused 矩阵由 verification Evidence 记录。
 
+## 当前任务分支的 Store 写入权威修复
+
+`SchedulerRunner::new_with_occurrence_context` 先调用 `CronTaskStore::claim_runner`。
+它在 Store mutation lock 下检查已有 owner、加载持久定义、再发布不可伪造的
+`SchedulerMutationOwner`，因此构造与公开写入不会在初始 cache 复制点交错。
+同路径 file handles 共享 path health/owner；同一 `Arc<Store>` 的 Store-backed handles
+共享 backend owner，`with_path()` 重新锚定也保留 backend owner。保留 clone、独立同路径
+handle 和同 backend handle 的公开 add/remove/status/last-run 写入在 runner 存活时
+fail closed；读操作仍可访问 Store。Runner 管理操作和 callback last-run settlement
+把私有 owner 传到已拥有的结算 future，并以已提交快照刷新 cache。Runner 与尚在进行的
+owned mutation 都释放 owner 后，standalone Store 写入重新开放。
+
+迁移在写入目标前检查 destination backend owner；仅在目标缺失且确实需要迁移时
+检查 legacy source path owner，拒绝移除 live runner 的源定义文件。
+取消中的 standalone 写入若已提交，runner claim 会等同一 mutation lock 并读取该提交；
+不依赖 caller future 完成通知来维持初始 cache 一致性。
+
 ## 来源与范围
 
 本 Evidence 覆盖 SchedulerRunner/CronTaskStore 的 definition authority、cache freshness、
@@ -94,6 +112,7 @@ disabled/removed recovery 以及三种管理操作的 post-commit reload failure
 
 迁移保护只覆盖同一 Store
 backend 的目标 key 已存在场景；跨进程 CronTaskStore writer 不在本次 closure 内。
-当前 Finding 保持 open 的原因是 public `CronTaskStore` clone 可在 runner 构造后直接 mutation，
-绕过 runner cache 同步。Consumer inventory、data-root adapter 与 website 不属于本 Finding 的
-关闭条件。
+旧版 Finding 保持 open 的原因是 public `CronTaskStore` clone 可在 runner 构造后直接
+mutation，绕过 runner cache 同步。当前任务分支以单一 live runner 写入许可闭合该缺口；
+Consumer inventory、data-root adapter 与 website 不属于本 Finding 的关闭条件。
+单进程 registry 不协调其他进程、直接 backend 编辑或不同 backend 对象指向同一物理存储。

@@ -33,6 +33,9 @@ instead of inventing a scheduler-specific claim reducer.
 Both systems separate scheduling/delivery facts from exactly-once external
 effects. This framework follows that mature boundary: a durably persisted occurrence is
 delivered at least once, while the callback owns effect idempotency.
+SQLite's isolation documentation also describes serializing writes through a
+single writer. The scheduler applies that ownership principle at the public
+definition Store boundary while a runner is live.
 
 ## Options
 
@@ -47,14 +50,35 @@ delivered at least once, while the callback owns effect idempotency.
    identity and choose at-least-once crash recovery. This preserves one generic
    claim/attempt/settlement reducer and exposes the idempotency identity to the
    callback.
+4. For definition writes, either publish every public Store mutation into the
+   runner cache or assign the live runner a single mutation permit. A permit
+   keeps the existing cancellation-safe runner write path and avoids a second
+   cache publication path for standalone Store callers.
 
 ## Decision
 
-Choose option 2 for the #85/#86 repair, then option 3 for #84:
+Choose option 2 for the #85/#86 repair, option 3 for durable #84 delivery,
+and option 4 for the remaining #84 definition writes:
 
 - The store remains the single durable authority for task definitions and
   `last_run` projection.  The runner list is a derived cache and is refreshed
   from successful store mutations; it is never updated ahead of the store.
+- A runner claims a Store mutation permit under the Store's existing mutation
+  lock before loading its initial cache. Public Store writes through retained
+  clones, same-path handles, or Store-backed handles sharing one backend instance
+  fail while that runner is live. Backend identity survives `with_path()` and
+  is shared by independently constructed handles using the same `Arc<Store>`;
+  legacy migration checks the destination backend owner first and the default
+  file definition path owner before reading or removing the source when a
+  migration is actually needed.
+  Runner management
+  and last-run writes carry the private permit through their owned settlement
+  task. Read-only Store calls remain available. Once the runner and any
+  in-flight owned mutations release the permit, standalone Store writes resume.
+  The shared path and backend owner registries make this an in-process
+  contract; direct backend edits, distinct backend objects for the same
+  physical store, and other processes still require explicit reload or
+  external coordination.
 - `CronTask.id` is unique within a store.  Add and load/migration paths reject
   duplicate IDs instead of merging, partially updating, or deleting an
   ambiguous set of definitions. Every add assigns a fresh store-owned
@@ -154,23 +178,12 @@ An embedding application that constructs a Store-backed scheduler supplies its
 own stable data-root anchor and validates its callback idempotency. Those
 consumer adaptations do not control the framework Finding's completion.
 
-## Current Implementation Gap
-
-`CronTaskStore` is public and clonable. A caller can currently retain a clone,
-mutate the durable definition directly after constructing `SchedulerRunner`,
-and leave the runner's in-memory cache stale until an explicit reload. That
-path can make `list_tasks`, `tick`, or `run_once` observe an old enabled
-definition, so the implementation does not yet satisfy the decision that the
-store is authoritative and successful mutations refresh or invalidate the
-derived cache. Issue #84 remains open until one mutation owner or an equivalent
-store-to-runner synchronization contract closes this bypass and its failure
-and cancellation races.
-
 ## References
 
 - GitHub Issues #84, #85, and #86.
 - [Kubernetes CronJob limitations](https://kubernetes.io/docs/concepts/workloads/controllers/cron-jobs/#job-creation).
 - [Temporal Activity idempotency and retry](https://docs.temporal.io/activity-definition#idempotency).
+- [SQLite Isolation](https://www.sqlite.org/isolation.html).
 - `echo-state/src/delivery.rs` and `echo-state/src/journal/file.rs`.
 - `echo-orchestration/src/scheduler/cron_task.rs`.
 - `echo-orchestration/src/scheduler/runner.rs`.

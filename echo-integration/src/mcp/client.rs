@@ -1,4 +1,6 @@
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::task::{Context, Poll};
 
 use serde_json::Value;
 
@@ -47,6 +49,7 @@ pub struct McpClient {
 /// client and cannot publish tools, resources, or prompts.
 pub struct McpClientCleanupOwner {
     client: Arc<McpClient>,
+    scope: Option<McpPreparationScope>,
 }
 
 impl McpClientCleanupOwner {
@@ -57,11 +60,10 @@ impl McpClientCleanupOwner {
 
     /// Retry settlement of the transport retained by this receipt.
     pub async fn retry_cleanup(&self) -> Result<()> {
-        self.client.close().await
-    }
-
-    pub(crate) fn into_client(self) -> Arc<McpClient> {
-        self.client
+        match &self.scope {
+            Some(scope) => scope.close().await,
+            None => self.client.close().await,
+        }
     }
 }
 
@@ -156,102 +158,190 @@ impl std::error::Error for McpClientPreparationError {
 /// Result of preparing one MCP client.
 pub type McpClientPreparationResult<T> = std::result::Result<T, McpClientPreparationError>;
 
-struct McpPreparationOwner {
-    server_name: String,
-    transport: Arc<dyn McpTransport>,
-    runtime: tokio::runtime::Handle,
-    armed: bool,
+#[derive(Clone)]
+pub struct McpPreparationScope {
+    state: Arc<Mutex<PreparationState>>,
+    changed: Arc<tokio::sync::Notify>,
+    close_gate: Arc<tokio::sync::Mutex<()>>,
 }
 
-impl McpPreparationOwner {
-    fn new(
-        server_name: String,
-        transport: Arc<dyn McpTransport>,
-        runtime: tokio::runtime::Handle,
-    ) -> Self {
+#[derive(Default)]
+struct PreparationState {
+    cancelled: bool,
+    closed: bool,
+    building: bool,
+    transport: Option<Arc<dyn McpTransport>>,
+}
+
+impl McpPreparationScope {
+    pub(crate) fn new() -> Self {
         Self {
-            server_name,
-            transport,
-            runtime,
-            armed: true,
+            state: Arc::new(Mutex::new(PreparationState::default())),
+            changed: Arc::new(tokio::sync::Notify::new()),
+            close_gate: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
-    fn disarm(&mut self) {
-        self.armed = false;
+    fn state(&self) -> std::sync::MutexGuard<'_, PreparationState> {
+        self.state.lock().unwrap_or_else(|error| error.into_inner())
     }
 
-    fn transfer_cleanup(&mut self) -> McpClientCleanupOwner {
-        self.disarm();
-        McpClientCleanupOwner {
-            client: McpClient::cleanup_only(self.server_name.clone(), Arc::clone(&self.transport)),
+    fn begin_build(&self) -> bool {
+        let mut state = self.state();
+        if state.cancelled {
+            return false;
+        }
+        state.building = true;
+        true
+    }
+
+    fn finish_build(&self, transport: Option<Arc<dyn McpTransport>>) {
+        let mut state = self.state();
+        state.transport = transport;
+        state.building = false;
+        self.changed.notify_waiters();
+    }
+
+    /// Cancel admission and await transport cleanup. A failed close remains
+    /// retryable through this same scope.
+    pub async fn close(&self) -> Result<()> {
+        loop {
+            let changed = self.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            let building = {
+                let mut state = self.state();
+                state.cancelled = true;
+                state.building
+            };
+            self.changed.notify_waiters();
+            if building {
+                changed.await;
+                continue;
+            }
+            let _close_guard = self.close_gate.lock().await;
+            let transport = {
+                let state = self.state();
+                if state.closed {
+                    return Ok(());
+                }
+                state.transport.clone()
+            };
+            if let Some(transport) = transport {
+                transport.close().await?;
+            }
+            self.state().closed = true;
+            return Ok(());
         }
     }
-}
 
-impl Drop for McpPreparationOwner {
-    fn drop(&mut self) {
-        if !self.armed {
-            return;
-        }
-        let server_name = self.server_name.clone();
-        let transport = Arc::clone(&self.transport);
-        let _cleanup_task = self
-            .runtime
-            .spawn(settle_cancelled_preparation(server_name, transport));
+    pub fn is_cancelled(&self) -> bool {
+        self.state().cancelled
     }
-}
 
-async fn settle_cancelled_preparation(server_name: String, transport: Arc<dyn McpTransport>) {
-    let mut retry_delay_ms = 50_u64;
-    loop {
-        match transport.close().await {
-            Ok(()) => {
-                tracing::debug!(
-                    server = %server_name,
-                    "Cancelled MCP preparation transport cleanup settled"
-                );
+    pub(crate) fn is_settled(&self) -> bool {
+        self.state().closed
+    }
+
+    pub(crate) fn same_owner(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.state, &other.state)
+    }
+
+    pub(crate) fn owns_client(&self, client: &Arc<McpClient>) -> bool {
+        self.state()
+            .transport
+            .as_ref()
+            .is_some_and(|transport| Arc::ptr_eq(transport, &client.transport))
+    }
+
+    async fn cancelled(&self) {
+        loop {
+            let changed = self.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if self.is_cancelled() {
                 return;
             }
-            Err(error) => {
-                tracing::warn!(
-                    server = %server_name,
-                    %error,
-                    retry_delay_ms,
-                    "Cancelled MCP preparation cleanup remains pending"
-                );
-                tokio::time::sleep(std::time::Duration::from_millis(retry_delay_ms)).await;
-                retry_delay_ms = retry_delay_ms.saturating_mul(2).min(5_000);
-            }
+            changed.await;
         }
+    }
+}
+
+/// Preparation with an independently retainable cleanup scope. Consumers
+/// that may cancel the waiter must retain the scope until `close` settles.
+pub struct McpClientPreparation {
+    scope: McpPreparationScope,
+    future: futures::future::BoxFuture<'static, McpClientPreparationResult<Arc<McpClient>>>,
+}
+
+impl McpClientPreparation {
+    pub fn cleanup_scope(&self) -> McpPreparationScope {
+        self.scope.clone()
+    }
+}
+
+impl std::future::Future for McpClientPreparation {
+    type Output = McpClientPreparationResult<Arc<McpClient>>;
+
+    fn poll(mut self: std::pin::Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        self.future.as_mut().poll(context)
     }
 }
 
 impl McpClient {
     /// 连接到 MCP 服务端，完成握手和能力发现后返回 `Arc<McpClient>`
-    pub async fn new(config: McpServerConfig) -> McpClientPreparationResult<Arc<Self>> {
-        let transport: Arc<dyn McpTransport> = match config.transport {
-            TransportConfig::Stdio {
-                command,
-                args,
-                env,
-                cwd,
-            } => Arc::new(
-                StdioTransport::new(&command, &args, &env, cwd.as_deref())
-                    .await
-                    .map_err(McpClientPreparationError::settled)?,
-            ),
-            TransportConfig::Http { base_url, headers } => {
-                Arc::new(HttpTransport::new(base_url, headers))
-            }
-            TransportConfig::Sse { base_url, headers } => Arc::new(
-                SseTransport::new(base_url, headers)
-                    .await
-                    .map_err(McpClientPreparationError::settled)?,
-            ),
-        };
+    // Keep `McpClient::new(config).await` source compatible while exposing the
+    // preparation scope before the first poll for cancellation ownership.
+    #[allow(clippy::new_ret_no_self)]
+    pub fn new(config: McpServerConfig) -> McpClientPreparation {
+        Self::prepare(config)
+    }
 
-        Self::from_transport(config.name, transport)?.await
+    /// Reserve cleanup ownership before the first resource-creating poll.
+    pub fn prepare(config: McpServerConfig) -> McpClientPreparation {
+        let scope = McpPreparationScope::new();
+        Self::prepare_in_scope(config, scope)
+    }
+
+    pub(crate) fn prepare_in_scope(
+        config: McpServerConfig,
+        scope: McpPreparationScope,
+    ) -> McpClientPreparation {
+        let server_name = config.name.clone();
+        let future_scope = scope.clone();
+        let future = Box::pin(async move {
+            if !future_scope.begin_build() {
+                return Err(McpClientPreparationError::settled(ReactError::Other(
+                    format!("MCP target '{server_name}' preparation was cancelled"),
+                )));
+            }
+            let transport: Result<Arc<dyn McpTransport>> = match config.transport {
+                TransportConfig::Stdio {
+                    command,
+                    args,
+                    env,
+                    cwd,
+                } => StdioTransport::new(&command, &args, &env, cwd.as_deref())
+                    .await
+                    .map(|transport| Arc::new(transport) as Arc<dyn McpTransport>),
+                TransportConfig::Http { base_url, headers } => {
+                    Ok(Arc::new(HttpTransport::new(base_url, headers)))
+                }
+                TransportConfig::Sse { base_url, headers } => SseTransport::new(base_url, headers)
+                    .await
+                    .map(|transport| Arc::new(transport) as Arc<dyn McpTransport>),
+            };
+            let transport = match transport {
+                Ok(transport) => transport,
+                Err(error) => {
+                    future_scope.finish_build(None);
+                    return Err(McpClientPreparationError::settled(error));
+                }
+            };
+            future_scope.finish_build(Some(Arc::clone(&transport)));
+            Self::prepare_transport(server_name, transport, future_scope).await
+        });
+        McpClientPreparation { scope, future }
     }
 
     /// Connect through an application-supplied transport while preserving the
@@ -261,11 +351,9 @@ impl McpClient {
     pub fn from_transport(
         server_name: impl Into<String>,
         transport: Arc<dyn McpTransport>,
-    ) -> McpClientPreparationResult<
-        impl std::future::Future<Output = McpClientPreparationResult<Arc<Self>>> + Send,
-    > {
+    ) -> McpClientPreparationResult<McpClientPreparation> {
         let server_name = server_name.into();
-        let runtime = tokio::runtime::Handle::try_current().map_err(|error| {
+        tokio::runtime::Handle::try_current().map_err(|error| {
             McpClientPreparationError::pending(
                 ReactError::Other(format!(
                     "MCP target '{server_name}' preparation requires an active Tokio runtime"
@@ -275,34 +363,85 @@ impl McpClient {
                 )),
                 McpClientCleanupOwner {
                     client: Self::cleanup_only(server_name.clone(), Arc::clone(&transport)),
+                    scope: None,
                 },
             )
         })?;
-        let mut owner = McpPreparationOwner::new(server_name.clone(), transport, runtime);
-        Ok(async move {
-            let result =
-                Self::initialize_from_transport(server_name, Arc::clone(&owner.transport)).await;
-            match result {
-                Ok(client) => {
-                    owner.disarm();
+        let scope = McpPreparationScope::new();
+        scope.finish_build(Some(Arc::clone(&transport)));
+        let future_scope = scope.clone();
+        let future =
+            Box::pin(
+                async move { Self::prepare_transport(server_name, transport, future_scope).await },
+            );
+        Ok(McpClientPreparation { scope, future })
+    }
+
+    async fn prepare_transport(
+        server_name: String,
+        transport: Arc<dyn McpTransport>,
+        scope: McpPreparationScope,
+    ) -> McpClientPreparationResult<Arc<Self>> {
+        if scope.is_cancelled() {
+            return Err(Self::settle_preparation_failure(
+                server_name.clone(),
+                transport,
+                scope,
+                ReactError::Other(format!(
+                    "MCP target '{server_name}' preparation was cancelled"
+                )),
+            )
+            .await);
+        }
+        let result = tokio::select! {
+            result = Self::initialize_from_transport(server_name.clone(), Arc::clone(&transport)) => result,
+            _ = scope.cancelled() => Err(ReactError::Other(format!(
+                "MCP target '{server_name}' preparation was cancelled"
+            ))),
+        };
+        match result {
+            Ok(client) => {
+                if scope.is_cancelled() {
+                    Err(Self::settle_preparation_failure(
+                        server_name.clone(),
+                        transport,
+                        scope,
+                        ReactError::Other(format!(
+                            "MCP target '{server_name}' preparation was cancelled"
+                        )),
+                    )
+                    .await)
+                } else {
                     Ok(client)
                 }
-                Err(initialization_error) => match owner.transport.close().await {
-                    Ok(()) => {
-                        owner.disarm();
-                        Err(McpClientPreparationError::settled(initialization_error))
-                    }
-                    Err(cleanup_error) => {
-                        let cleanup_owner = owner.transfer_cleanup();
-                        Err(McpClientPreparationError::pending(
-                            initialization_error,
-                            cleanup_error,
-                            cleanup_owner,
-                        ))
-                    }
-                },
             }
-        })
+            Err(initialization_error) => Err(Self::settle_preparation_failure(
+                server_name,
+                transport,
+                scope,
+                initialization_error,
+            )
+            .await),
+        }
+    }
+
+    async fn settle_preparation_failure(
+        server_name: String,
+        transport: Arc<dyn McpTransport>,
+        scope: McpPreparationScope,
+        initialization_error: ReactError,
+    ) -> McpClientPreparationError {
+        match scope.close().await {
+            Ok(()) => McpClientPreparationError::settled(initialization_error),
+            Err(cleanup_error) => McpClientPreparationError::pending(
+                initialization_error,
+                cleanup_error,
+                McpClientCleanupOwner {
+                    client: Self::cleanup_only(server_name, transport),
+                    scope: Some(scope),
+                },
+            ),
+        }
     }
 
     fn cleanup_only(server_name: String, transport: Arc<dyn McpTransport>) -> Arc<Self> {
@@ -885,6 +1024,50 @@ mod tests {
         failures_remaining: std::sync::atomic::AtomicUsize,
     }
 
+    struct SerialCloseTransport {
+        send_started: Arc<tokio::sync::Notify>,
+        close_started: Arc<tokio::sync::Notify>,
+        release_close: Arc<tokio::sync::Notify>,
+        close_count: Arc<std::sync::atomic::AtomicUsize>,
+        active_close: Arc<AtomicBool>,
+        overlapped: Arc<AtomicBool>,
+    }
+
+    impl McpTransport for SerialCloseTransport {
+        fn send(
+            &self,
+            _request: JsonRpcRequest,
+        ) -> BoxFuture<'_, Result<super::super::types::JsonRpcResponse>> {
+            Box::pin(async move {
+                self.send_started.notify_waiters();
+                std::future::pending().await
+            })
+        }
+
+        fn notify(&self, _notification: JsonRpcNotification) -> BoxFuture<'_, Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn close(&self) -> BoxFuture<'_, Result<()>> {
+            Box::pin(async move {
+                if self.active_close.swap(true, Ordering::AcqRel) {
+                    self.overlapped.store(true, Ordering::Release);
+                }
+                self.close_count.fetch_add(1, Ordering::AcqRel);
+                self.close_started.notify_waiters();
+                self.release_close.notified().await;
+                self.active_close.store(false, Ordering::Release);
+                Ok(())
+            })
+        }
+
+        fn notification_rx(
+            &self,
+        ) -> Option<Arc<dyn super::super::types::JsonRpcNotificationReceiver>> {
+            None
+        }
+    }
+
     async fn prepare_test_client(
         server_name: &str,
         transport: Arc<dyn McpTransport>,
@@ -1075,7 +1258,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancelled_preparation_transfers_cleanup_to_owned_retry_task()
+    async fn cancelled_preparation_scope_is_awaitable_and_retryable()
     -> std::result::Result<(), String> {
         let send_started = Arc::new(tokio::sync::Notify::new());
         let close_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -1087,6 +1270,7 @@ mod tests {
         let started = send_started.notified();
         let preparation_future =
             McpClient::from_transport("cancelled", transport).map_err(|error| error.to_string())?;
+        let cleanup_scope = preparation_future.cleanup_scope();
         let preparation = tokio::spawn(preparation_future);
         tokio::time::timeout(std::time::Duration::from_secs(1), started)
             .await
@@ -1098,13 +1282,126 @@ mod tests {
             .ok_or_else(|| "cancelled preparation unexpectedly completed".to_string())?;
         assert!(join_error.is_cancelled());
 
-        tokio::time::timeout(std::time::Duration::from_secs(2), async {
-            while close_count.load(Ordering::Acquire) < 2 {
-                tokio::task::yield_now().await;
+        assert_eq!(close_count.load(Ordering::Acquire), 0);
+        assert!(cleanup_scope.close().await.is_err());
+        assert_eq!(close_count.load(Ordering::Acquire), 1);
+        cleanup_scope
+            .close()
+            .await
+            .map_err(|error| error.to_string())?;
+        assert_eq!(close_count.load(Ordering::Acquire), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancellation_before_first_poll_retries_failed_cleanup_before_settled_error()
+    -> std::result::Result<(), String> {
+        let close_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let transport: Arc<dyn McpTransport> = Arc::new(BlockingInitializeTransport {
+            send_started: Arc::new(tokio::sync::Notify::new()),
+            close_count: Arc::clone(&close_count),
+            failures_remaining: std::sync::atomic::AtomicUsize::new(1),
+        });
+        let preparation = McpClient::from_transport("cancel-before-poll", transport)
+            .map_err(|error| error.to_string())?;
+        let scope = preparation.cleanup_scope();
+        assert!(scope.close().await.is_err());
+        assert_eq!(close_count.load(Ordering::Acquire), 1);
+        let error = preparation
+            .await
+            .err()
+            .ok_or_else(|| "cancelled preparation succeeded".to_string())?;
+        assert!(error.cleanup_error().is_none());
+        assert_eq!(close_count.load(Ordering::Acquire), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn scope_serializes_external_transport_close_with_cancelled_initialize()
+    -> std::result::Result<(), String> {
+        let send_started = Arc::new(tokio::sync::Notify::new());
+        let close_started = Arc::new(tokio::sync::Notify::new());
+        let release_close = Arc::new(tokio::sync::Notify::new());
+        let close_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let overlapped = Arc::new(AtomicBool::new(false));
+        let transport: Arc<dyn McpTransport> = Arc::new(SerialCloseTransport {
+            send_started: Arc::clone(&send_started),
+            close_started: Arc::clone(&close_started),
+            release_close: Arc::clone(&release_close),
+            close_count: Arc::clone(&close_count),
+            active_close: Arc::new(AtomicBool::new(false)),
+            overlapped: Arc::clone(&overlapped),
+        });
+        let started = send_started.notified();
+        let preparation =
+            McpClient::from_transport("serial", transport).map_err(|error| error.to_string())?;
+        let scope = preparation.cleanup_scope();
+        let prepare_task = tokio::spawn(preparation);
+        tokio::time::timeout(std::time::Duration::from_secs(1), started)
+            .await
+            .map_err(|_| "initialize did not start".to_string())?;
+        let started = close_started.notified();
+        let close_task = tokio::spawn(async move { scope.close().await });
+        tokio::time::timeout(std::time::Duration::from_secs(1), started)
+            .await
+            .map_err(|_| "close did not start".to_string())?;
+        tokio::task::yield_now().await;
+        assert_eq!(close_count.load(Ordering::Acquire), 1);
+        release_close.notify_waiters();
+        close_task
+            .await
+            .map_err(|error| error.to_string())?
+            .map_err(|error| error.to_string())?;
+        assert!(
+            prepare_task
+                .await
+                .map_err(|error| error.to_string())?
+                .is_err()
+        );
+        assert_eq!(close_count.load(Ordering::Acquire), 1);
+        assert!(!overlapped.load(Ordering::Acquire));
+        Ok(())
+    }
+
+    #[test]
+    fn cancelled_preparation_survives_runtime_shutdown_for_explicit_cleanup()
+    -> std::result::Result<(), String> {
+        let first_runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| error.to_string())?;
+        let close_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let transport: Arc<dyn McpTransport> = Arc::new(BlockingInitializeTransport {
+            send_started: Arc::new(tokio::sync::Notify::new()),
+            close_count: Arc::clone(&close_count),
+            failures_remaining: std::sync::atomic::AtomicUsize::new(1),
+        });
+        let scope = first_runtime.block_on(async {
+            let preparation = McpClient::from_transport("runtime-shutdown", transport)
+                .map_err(|error| error.to_string())?;
+            let scope = preparation.cleanup_scope();
+            let task = tokio::spawn(preparation);
+            tokio::task::yield_now().await;
+            task.abort();
+            let join_error = task
+                .await
+                .err()
+                .ok_or_else(|| "prepare completed".to_string())?;
+            if !join_error.is_cancelled() {
+                return Err(format!("unexpected preparation join error: {join_error}"));
             }
-        })
-        .await
-        .map_err(|_| "owned cleanup did not retry to settlement".to_string())?;
+            Ok::<_, String>(scope)
+        })?;
+        drop(first_runtime);
+        assert_eq!(close_count.load(Ordering::Acquire), 0);
+        let second_runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| error.to_string())?;
+        second_runtime.block_on(async {
+            assert!(scope.close().await.is_err());
+            scope.close().await.map_err(|error| error.to_string())
+        })?;
         assert_eq!(close_count.load(Ordering::Acquire), 2);
         Ok(())
     }

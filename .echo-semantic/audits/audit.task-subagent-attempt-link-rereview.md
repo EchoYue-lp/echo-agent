@@ -5,15 +5,15 @@ kind: audit
 boundary_ref: boundary.task-subagent-workflow
 lens: state_authority
 freshness: examined
-revision: source:87b717676a7b51e213630677989947777b4bed441acd8c7d655fb6c96dca77ad
+revision: source:757f499d4d9a40a4c27791933cb3d5e9d3b2dda76a1a28e4561e317d4719be94
 finding_refs: [finding.task-subagent-attempt-link]
 challenges:
   exact-attempt-authority:
-    revision: source:87b717676a7b51e213630677989947777b4bed441acd8c7d655fb6c96dca77ad
+    revision: source:757f499d4d9a40a4c27791933cb3d5e9d3b2dda76a1a28e4561e317d4719be94
     source_refs: [echo-orchestration/src/tasks/runtime.rs, echo-orchestration/src/tasks/runtime_executor.rs, src/agent/subagent/team/mod.rs]
     evidence_refs: [evidence.task-subagent-attempt-link-repair, evidence.task-subagent-attempt-link-verification]
   cancellation-and-recovery:
-    revision: source:87b717676a7b51e213630677989947777b4bed441acd8c7d655fb6c96dca77ad
+    revision: source:757f499d4d9a40a4c27791933cb3d5e9d3b2dda76a1a28e4561e317d4719be94
     source_refs: [echo-orchestration/src/tasks/runtime_service.rs, src/agent/subagent/control.rs, src/agent/subagent/executor.rs]
     evidence_refs: [evidence.task-subagent-attempt-link-repair, evidence.task-subagent-attempt-link-verification]
 ---

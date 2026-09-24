@@ -41,6 +41,7 @@ pub struct SseTransport {
     pending: Arc<PendingRequests>,
     notification_tx: broadcast::Sender<JsonRpcNotification>,
     message_endpoint: Arc<Mutex<Option<String>>>,
+    endpoint_ready: Arc<tokio::sync::Notify>,
     post_gate: Arc<RwLock<()>>,
     cancel_token: CancellationToken,
     sse_task: Arc<Mutex<Option<tokio::task::JoinHandle<Result<()>>>>>,
@@ -48,38 +49,8 @@ pub struct SseTransport {
     response_timeout: Duration,
 }
 
-struct SseConstructionTask {
-    cancel: CancellationToken,
-    pending: Arc<PendingRequests>,
-    task: Option<tokio::task::JoinHandle<Result<()>>>,
-}
-
-impl Drop for SseConstructionTask {
-    fn drop(&mut self) {
-        let Some(task) = self.task.take() else {
-            return;
-        };
-        self.cancel.cancel();
-        self.pending.close();
-        task.abort();
-        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-            runtime.spawn(async move {
-                let _ = task.await;
-            });
-        }
-    }
-}
-
 impl SseTransport {
     pub async fn new(base_url: String, headers: HashMap<String, String>) -> Result<Self> {
-        Self::new_with_warmup(base_url, headers, Duration::from_millis(300)).await
-    }
-
-    async fn new_with_warmup(
-        base_url: String,
-        headers: HashMap<String, String>,
-        warmup: Duration,
-    ) -> Result<Self> {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(60))
             .build()
@@ -94,6 +65,7 @@ impl SseTransport {
         let pending = PendingRequests::new();
         let (notification_tx, _) = broadcast::channel(64);
         let message_endpoint: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let endpoint_ready = Arc::new(tokio::sync::Notify::new());
         let cancel_token = CancellationToken::new();
 
         let sse_task = {
@@ -103,6 +75,7 @@ impl SseTransport {
             let pending_clone = pending.clone();
             let notification_tx_clone = notification_tx.clone();
             let message_endpoint_clone = message_endpoint.clone();
+            let endpoint_ready_clone = Arc::clone(&endpoint_ready);
             let cancel = cancel_token.clone();
 
             tokio::spawn(async move {
@@ -126,6 +99,7 @@ impl SseTransport {
                         &pending_clone,
                         &notification_tx_clone,
                         &message_endpoint_clone,
+                        &endpoint_ready_clone,
                         &mut last_event_id,
                         &mut retry_ms,
                         &cancel,
@@ -170,24 +144,10 @@ impl SseTransport {
                     }
                 };
                 pending_clone.close();
+                endpoint_ready_clone.notify_waiters();
                 result
             })
         };
-
-        let mut construction = SseConstructionTask {
-            cancel: cancel_token.clone(),
-            pending: Arc::clone(&pending),
-            task: Some(sse_task),
-        };
-
-        // Keep the original endpoint warm-up period while the task has an
-        // owner that can settle cancellation before Self is returned.
-        tokio::time::sleep(warmup).await;
-        let sse_task = construction.task.take().ok_or_else(|| {
-            ReactError::Mcp(Box::new(McpError::ConnectionFailed(
-                "SSE initialization lost its receive task".to_string(),
-            )))
-        })?;
 
         Ok(Self {
             client,
@@ -196,6 +156,7 @@ impl SseTransport {
             pending,
             notification_tx,
             message_endpoint,
+            endpoint_ready,
             post_gate: Arc::new(RwLock::new(())),
             cancel_token,
             sse_task: Arc::new(Mutex::new(Some(sse_task))),
@@ -212,6 +173,7 @@ impl SseTransport {
         pending: &Arc<PendingRequests>,
         notification_tx: &broadcast::Sender<JsonRpcNotification>,
         message_endpoint: &Arc<Mutex<Option<String>>>,
+        endpoint_ready: &Arc<tokio::sync::Notify>,
         last_event_id: &mut Option<String>,
         retry_ms: &mut u64,
         cancel: &CancellationToken,
@@ -317,6 +279,7 @@ impl SseTransport {
                     {
                         let mut endpoint_guard = message_endpoint.lock().await;
                         *endpoint_guard = Some(uri.to_string());
+                        endpoint_ready.notify_waiters();
                         tracing::info!("SSE: 获取到 POST 端点 URI: {}", redact_url(uri));
                         continue;
                     }
@@ -442,7 +405,7 @@ impl SseTransport {
             let message_endpoint = Arc::clone(&self.message_endpoint);
             let post_gate = Arc::clone(&self.post_gate);
             let sse_task = Arc::clone(&self.sse_task);
-            tokio::spawn(async move {
+            let producer = tokio::spawn(async move {
                 let result = Self::close_owned(
                     cancel_token,
                     pending,
@@ -454,6 +417,7 @@ impl SseTransport {
                 .await;
                 coordinator.complete(&result);
             });
+            receipt.retain_producer(producer);
         }
         receipt.wait(deadline, "SSE transport").await
     }
@@ -466,13 +430,23 @@ impl McpTransport for SseTransport {
             let id = self.next_id.fetch_add(1, Ordering::SeqCst);
             request.id = Some(Value::Number(id.into()));
 
-            let endpoint_uri = {
-                let guard = self.message_endpoint.lock().await;
-                guard.clone().ok_or_else(|| {
-                    ReactError::Mcp(Box::new(McpError::ProtocolError(
-                        "SSE: 尚未获取到 POST 端点 URI，请等待连接建立".to_string(),
-                    )))
-                })?
+            let deadline = Instant::now() + self.response_timeout;
+            let endpoint_uri = loop {
+                let ready = self.endpoint_ready.notified();
+                tokio::pin!(ready);
+                ready.as_mut().enable();
+                if let Some(uri) = self.message_endpoint.lock().await.clone() {
+                    break uri;
+                }
+                self.pending.ensure_open()?;
+                tokio::select! {
+                    biased;
+                    _ = self.cancel_token.cancelled() => return Err(transport_closed_error()),
+                    _ = tokio::time::sleep_until(deadline) => return Err(ReactError::Mcp(Box::new(
+                        McpError::ProtocolError("SSE POST endpoint discovery timed out".to_string())
+                    ))),
+                    _ = ready => {}
+                }
             };
             let (rx, _registration) = self.pending.register(id)?;
             self.pending.ensure_open()?;
@@ -646,6 +620,7 @@ mod tests {
                 pending,
                 notification_tx: broadcast::channel(4).0,
                 message_endpoint: Arc::new(Mutex::new(endpoint)),
+                endpoint_ready: Arc::new(tokio::sync::Notify::new()),
                 post_gate: Arc::new(RwLock::new(())),
                 cancel_token,
                 sse_task: Arc::new(Mutex::new(Some(task))),
@@ -657,12 +632,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancelled_construction_settles_its_started_receive_task() -> Result<()> {
+    async fn close_after_construction_settles_its_started_receive_task() -> Result<()> {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let base_url = format!("http://{}", listener.local_addr()?);
-        let construction = tokio::spawn(async move {
-            SseTransport::new_with_warmup(base_url, HashMap::new(), Duration::from_secs(5)).await
-        });
+        let transport = SseTransport::new(base_url, HashMap::new()).await?;
         let (mut socket, _) = tokio::time::timeout(Duration::from_secs(1), listener.accept())
             .await
             .map_err(|_| close_error("SSE construction did not start its receive request"))??;
@@ -671,13 +644,12 @@ mod tests {
         socket
             .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n")
             .await?;
-        construction.abort();
-        assert!(construction.await.is_err_and(|error| error.is_cancelled()));
+        transport.close().await?;
 
         let mut probe = [0u8; 1];
         let read = tokio::time::timeout(Duration::from_secs(1), socket.read(&mut probe))
             .await
-            .map_err(|_| close_error("cancelled SSE construction left its receive task alive"))?;
+            .map_err(|_| close_error("closed SSE transport left its receive task alive"))?;
         assert!(
             matches!(&read, Ok(0))
                 || matches!(&read, Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset)
@@ -711,6 +683,37 @@ mod tests {
         assert!(result.is_err());
         assert!(started_at.elapsed() < Duration::from_secs(1));
         assert!(transport.sse_task.lock().await.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn close_retries_after_owning_runtime_stops_mid_settlement() -> Result<()> {
+        let first_runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        let transport = first_runtime.block_on(async {
+            let (transport, _) = test_transport(None, Duration::from_secs(1), true)?;
+            let transport = Arc::new(transport);
+            let close = tokio::spawn({
+                let transport = Arc::clone(&transport);
+                async move { transport.close_with_timeout(Duration::from_secs(5)).await }
+            });
+            for _ in 0..20 {
+                tokio::task::yield_now().await;
+            }
+            assert!(!close.is_finished());
+            Ok::<_, ReactError>(transport)
+        })?;
+        drop(first_runtime);
+
+        let second_runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        second_runtime.block_on(async {
+            transport
+                .close_with_timeout(Duration::from_millis(50))
+                .await
+        })?;
         Ok(())
     }
 
@@ -869,6 +872,65 @@ mod tests {
         assert!(settled.load(AtomicOrdering::Acquire));
         assert!(transport.sse_task.lock().await.is_none());
         assert_eq!(transport.pending.len(), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn initial_send_waits_for_endpoint_until_close() -> Result<()> {
+        let (transport, _) = test_transport(None, Duration::from_secs(1), false)?;
+        let transport = Arc::new(transport);
+        let send = tokio::spawn({
+            let transport = Arc::clone(&transport);
+            async move {
+                transport
+                    .send(JsonRpcRequest::new("initialize", None))
+                    .await
+            }
+        });
+        tokio::task::yield_now().await;
+        assert!(!send.is_finished());
+        assert_eq!(transport.pending.len(), 0);
+        transport.close().await?;
+        assert!(
+            send.await
+                .map_err(|error| close_error(error.to_string()))?
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn initial_send_resumes_when_endpoint_arrives() -> Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let endpoint = format!("http://{}/message", listener.local_addr()?);
+        let (transport, _) = test_transport(None, Duration::from_secs(1), false)?;
+        let transport = Arc::new(transport);
+        let send = tokio::spawn({
+            let transport = Arc::clone(&transport);
+            async move {
+                transport
+                    .send(JsonRpcRequest::new("initialize", None))
+                    .await
+            }
+        });
+        tokio::task::yield_now().await;
+        assert!(!send.is_finished());
+        *transport.message_endpoint.lock().await = Some(endpoint);
+        transport.endpoint_ready.notify_waiters();
+        let (mut socket, _) = tokio::time::timeout(Duration::from_secs(1), listener.accept())
+            .await
+            .map_err(|_| close_error("SSE initial send did not resume after endpoint"))??;
+        let mut request = [0u8; 4096];
+        let _ = socket.read(&mut request).await?;
+        socket
+            .write_all(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n")
+            .await?;
+        assert!(
+            send.await
+                .map_err(|error| close_error(error.to_string()))?
+                .is_err()
+        );
+        transport.close().await?;
         Ok(())
     }
 

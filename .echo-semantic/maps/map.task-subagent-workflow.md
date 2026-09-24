@@ -4,7 +4,7 @@ id: map.task-subagent-workflow
 kind: capability_map
 title: Task、Subagent、Workflow 与 Scheduler
 risk: high
-observed_at: source:87b717676a7b51e213630677989947777b4bed441acd8c7d655fb6c96dca77ad
+observed_at: source:757f499d4d9a40a4c27791933cb3d5e9d3b2dda76a1a28e4561e317d4719be94
 boundary_refs: [boundary.task-subagent-workflow]
 behavior_refs: [behavior.task-subagent-execution]
 rule_refs: [rule.task-subagent-authority]
@@ -41,13 +41,13 @@ scenarios:
     unknown: checkpoint claim/lease、并行sibling settlement及四执行入口事件对等已关闭；Task/Graph/DagWorkflow长期边界已由ADR 0059裁决，仍待独立复审、严格语义门禁与远端交付
     next_step: 对Finding #111执行独立复审，不合并三套DAG或重建第二个Workflow入口循环
   cron-scheduler:
-    status: needs_review
+    status: mapped
     source_refs: [echo-orchestration/src/scheduler/runner.rs, echo-orchestration/src/scheduler/cron_task.rs]
     finding_refs: [finding.scheduler-cache-delivery, finding.scheduler-task-id-uniqueness, finding.scheduler-control-fire-race]
     evidence_refs: [evidence.task-subagent-workflow, evidence.scheduler-occurrence-authority-repair, evidence.scheduler-occurrence-authority-verification]
     audit_refs: [audit.scheduler-occurrence-authority-rereview]
-    unknown: durable occurrence、唯一ID、migration collision与runner自身control/admission已闭合；public CronTaskStore clone mutation仍可绕过runner cache同步
-    next_step: 在scheduler-store-cache-authority Outcome中统一mutation owner或建立可靠store-to-runner同步并覆盖直接mutation竞态
+    behavior_refs: [behavior.task-subagent-execution]
+    rule_refs: [rule.task-subagent-authority]
   process-local-background-task:
     status: mapped
     source_refs: [echo-orchestration/src/tasks/background_task.rs, docs/en/29-long-running-tasks.md, docs/zh/29-long-running-tasks.md, docs/adr/0039-background-task-terminal-authority.md]
@@ -101,7 +101,7 @@ TaskEvent/progress、Subagent envelopes、Workflow events 和 command snapshots 
 
 ## 场景处置清单
 
-所有主要入口已映射；Task relation patch、Subagent factory竞态与BackgroundTask terminal authority已关闭。其它当前缺口继续进入Finding/needs_review；Workflow、Scheduler、BackgroundTask与CommandCell不合成一个authority。
+所有主要入口已映射；Task relation patch、Subagent factory竞态与BackgroundTask terminal authority已关闭。Scheduler 的单进程定义写入由 live runner 许可约束，cache 从同一 Store 快照派生；跨进程 Store writer 和离线 misfire 不在该合同内。其它当前缺口继续进入Finding/needs_review；Workflow、Scheduler、BackgroundTask与CommandCell不合成一个authority。
 
 ## 未展开项
 

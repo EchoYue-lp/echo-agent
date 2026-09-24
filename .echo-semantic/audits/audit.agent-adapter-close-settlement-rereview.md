@@ -5,19 +5,19 @@ kind: audit
 boundary_ref: boundary.agent-session-turn
 lens: time_lifecycle
 freshness: examined
-revision: source:87b717676a7b51e213630677989947777b4bed441acd8c7d655fb6c96dca77ad
+revision: source:757f499d4d9a40a4c27791933cb3d5e9d3b2dda76a1a28e4561e317d4719be94
 finding_refs: [finding.agent-adapter-close-settlement]
 challenges:
   react-turn-close-debt:
-    revision: source:87b717676a7b51e213630677989947777b4bed441acd8c7d655fb6c96dca77ad
+    revision: source:757f499d4d9a40a4c27791933cb3d5e9d3b2dda76a1a28e4561e317d4719be94
     source_refs: [src/agent/react/lifecycle.rs, src/agent/react/run/react_loop.rs, src/agent/react/run/stream_channel.rs, src/agent/react/mod.rs]
     evidence_refs: [evidence.agent-adapter-close-settlement-repair, evidence.agent-adapter-close-settlement-verification]
   headless-and-driver-terminal:
-    revision: source:87b717676a7b51e213630677989947777b4bed441acd8c7d655fb6c96dca77ad
+    revision: source:757f499d4d9a40a4c27791933cb3d5e9d3b2dda76a1a28e4561e317d4719be94
     source_refs: [src/headless.rs, echo-orchestration/src/runtime/turn_driver.rs]
     evidence_refs: [evidence.agent-adapter-close-settlement-repair, evidence.agent-adapter-close-settlement-verification]
   protocol-adapter-close-owners:
-    revision: source:87b717676a7b51e213630677989947777b4bed441acd8c7d655fb6c96dca77ad
+    revision: source:757f499d4d9a40a4c27791933cb3d5e9d3b2dda76a1a28e4561e317d4719be94
     source_refs: [src/acp/adapter.rs, src/acp/session.rs, echo-integration/src/channels/manager.rs, echo-integration/src/channels/session.rs]
     evidence_refs: [evidence.agent-adapter-close-settlement-repair, evidence.agent-adapter-close-settlement-verification]
 ---

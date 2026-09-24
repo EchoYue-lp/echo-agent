@@ -1367,16 +1367,20 @@ exit 64
     async fn ambiguous_absence_exhaustion_is_typed_cleanup_debt()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let fake = FakeKubectl::new("never-visible")?;
-        let error = fake
-            .sandbox()
+        let mut sandbox = fake.sandbox();
+        sandbox.control_timeout = Duration::from_secs(5);
+        let error = sandbox
             .execute(SandboxCommand::shell("create outcome stays ambiguous"))
             .await
             .err()
             .ok_or("ambiguous Pod absence was reported as successful cleanup")?;
         let message = error.to_string();
-        assert!(message.contains("exit_code=0"));
-        assert!(message.contains("could not confirm"));
-        assert!(message.contains("create request may still commit"));
+        assert!(message.contains("exit_code=0"), "{message}");
+        assert!(message.contains("could not confirm"), "{message}");
+        assert!(
+            message.contains("create request may still commit"),
+            "{message}"
+        );
         Ok(())
     }
 

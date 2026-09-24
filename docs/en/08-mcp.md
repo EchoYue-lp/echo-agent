@@ -348,11 +348,16 @@ async fn main() -> echo_agent::error::Result<()> {
 `McpClient::close`, `McpManager::disconnect`, and `McpManager::close_all`
 return a `Result`. A successful close fences new transport requests, releases
 all pending callers, and waits for transport-owned I/O tasks and stdio child
-processes within the transport's bounded shutdown policy. `close_all` attempts
-every connected client before returning an aggregate cleanup error, so callers
-can observe debt without stranding later clients. Legacy SSE close also aborts
-the receive/POST lifecycle and awaits the receive task. These lifecycle checks
-do not add a permission gate for user-selected MCP servers.
+processes within the transport's bounded shutdown policy. `close_all` also
+cancels and awaits clients still in construction or negotiation, then attempts
+every connected client before returning an aggregate cleanup error. Failed
+construction cleanup remains registered for a later `close_all` retry. Legacy
+SSE close also aborts the receive/POST lifecycle and awaits the receive task.
+These lifecycle checks do not add a permission gate for user-selected MCP servers.
+Direct callers of `McpClient::new` or `McpClient::from_transport` that may drop
+the preparation waiter should retain `preparation.cleanup_scope()` first and
+await `scope.close()` after cancellation; a failed close can be retried through
+the same scope. `McpManager` retains this scope automatically.
 When a `ReactAgent` owns those clients, its adapter must await
 `Agent::close` while retaining the Agent. `ReactAgent::drop` cannot await MCP
 cleanup and no longer starts a detached cleanup task; dropping an unclosed

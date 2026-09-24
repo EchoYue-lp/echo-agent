@@ -27,7 +27,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 pub use client::{
-    McpClient, McpClientCleanupOwner, McpClientPreparationError, McpClientPreparationResult,
+    McpClient, McpClientCleanupOwner, McpClientPreparation, McpClientPreparationError,
+    McpClientPreparationResult, McpPreparationScope,
 };
 pub use config_loader::{
     AGENT_PLUGIN_MCP_SCHEMA_V1, AgentPluginMcpLoad, McpConfigFile, McpServerEntry,
@@ -76,8 +77,10 @@ struct McpManagerState {
     configs: HashMap<McpServerId, McpServerConfig>,
     cleanup_debt: Vec<(McpServerId, Arc<McpClient>)>,
     prepared: HashMap<u64, (McpServerId, Arc<McpClient>)>,
+    preparing: HashMap<u64, (McpServerId, McpPreparationScope)>,
     closing_debt: HashSet<McpServerId>,
     next_prepared_ticket: u64,
+    next_preparing_ticket: u64,
     close_callers: usize,
 }
 
@@ -106,6 +109,7 @@ struct PreparedClientOwner<'a> {
     manager: &'a McpManager,
     id: McpServerId,
     client: Arc<McpClient>,
+    scope: Option<&'a McpPreparationScope>,
     ticket: u64,
     armed: bool,
 }
@@ -121,7 +125,10 @@ impl PreparedClientOwner<'_> {
     }
 
     async fn close(&mut self) -> Result<()> {
-        self.client.close().await?;
+        match self.scope {
+            Some(scope) => scope.close().await?,
+            None => self.client.close().await?,
+        }
         self.disarm();
         Ok(())
     }
@@ -131,7 +138,7 @@ impl Drop for PreparedClientOwner<'_> {
     fn drop(&mut self) {
         if self.armed {
             let mut state = self.manager.state();
-            if state.prepared.remove(&self.ticket).is_some() {
+            if state.prepared.remove(&self.ticket).is_some() && self.scope.is_none() {
                 McpManager::retain_cleanup_debt(&mut state, &self.id, &self.client);
             }
         }
@@ -212,7 +219,7 @@ impl McpManager {
         let name = &id.local_name;
         let key = id.clone();
         let Some(config) = desired else {
-            let change = if self.disconnect_server(id).await? {
+            let change = if self.disconnect_id(id).await? {
                 McpTargetChange::Disconnected
             } else {
                 McpTargetChange::Absent
@@ -254,12 +261,49 @@ impl McpManager {
             });
         }
 
-        let client = match McpClient::new(config.clone()).await {
-            Ok(client) => client,
-            Err(error) => return Err(self.retain_preparation_failure(id, error)),
+        let scope = McpPreparationScope::new();
+        let ticket = {
+            let mut state = self.state();
+            if state.close_callers > 0 {
+                return Err(ReactError::Other(format!(
+                    "MCP target '{id}' preparation was superseded by manager close"
+                )));
+            }
+            let mut ticket = state.next_preparing_ticket;
+            while state.preparing.contains_key(&ticket) {
+                ticket = ticket.wrapping_add(1);
+            }
+            state.next_preparing_ticket = ticket.wrapping_add(1);
+            state.preparing.insert(ticket, (key.clone(), scope.clone()));
+            ticket
         };
-        self.install_prepared_server(id.clone(), config, client)
-            .await
+        let client = McpClient::prepare_in_scope(config.clone(), scope.clone()).await;
+        let client = match client {
+            Ok(client) => client,
+            Err(error) => {
+                let (initialization_error, cleanup_debt) = error.into_parts();
+                if let Some((cleanup_error, _owner)) = cleanup_debt {
+                    return Err(ReactError::Mcp(Box::new(McpError::ConnectionFailed(
+                        format!(
+                            "MCP target '{id}' preparation failed: {initialization_error}; transport cleanup remains retryable after: {cleanup_error}"
+                        ),
+                    ))));
+                }
+                self.state().preparing.remove(&ticket);
+                return Err(initialization_error);
+            }
+        };
+        let result = self
+            .install_prepared_server_in_scope(id.clone(), config, client, Some(&scope))
+            .await;
+        self.finish_preparation(ticket, &scope, result.is_ok());
+        result
+    }
+
+    fn finish_preparation(&self, ticket: u64, scope: &McpPreparationScope, published: bool) {
+        if published || scope.is_settled() {
+            self.state().preparing.remove(&ticket);
+        }
     }
 
     /// Publish an already-prepared client as the named target.
@@ -283,12 +327,26 @@ impl McpManager {
         config: McpServerConfig,
         client: Arc<McpClient>,
     ) -> impl std::future::Future<Output = Result<McpTargetReceipt>> + Send + 'a {
+        self.install_prepared_server_in_scope(id, config, client, None)
+    }
+
+    fn install_prepared_server_in_scope<'a>(
+        &'a self,
+        id: McpServerId,
+        config: McpServerConfig,
+        client: Arc<McpClient>,
+        scope: Option<&'a McpPreparationScope>,
+    ) -> impl std::future::Future<Output = Result<McpTargetReceipt>> + Send + 'a {
         let key = id.clone();
         // This owner must exist before the future's first poll. An embedding
         // adapter may cancel an already prepared target without polling us.
         let admission = {
             let mut state = self.state();
-            if let Some(authority) = Self::client_authority(&state, &client) {
+            if scope.is_some_and(McpPreparationScope::is_cancelled) {
+                Err(ReactError::Other(format!(
+                    "MCP prepared target '{id}' was cancelled before installation"
+                )))
+            } else if let Some(authority) = Self::client_authority(&state, &client) {
                 Err(ReactError::Other(format!(
                     "MCP prepared target '{id}' aliases a client already owned by {authority}"
                 )))
@@ -308,6 +366,7 @@ impl McpManager {
             manager: self,
             id: id.clone(),
             client: Arc::clone(&client),
+            scope,
             ticket,
             armed: true,
         });
@@ -339,7 +398,7 @@ impl McpManager {
             if let Err(error) = self.settle_active_close_debt(&key).await {
                 return Err(Self::reject_prepared(&mut prepared_owner, error).await);
             }
-            if let Err(error) = self.settle_same_name_cleanup_debt(&key).await {
+            if let Err(error) = self.settle_same_name_cleanup_debt_except(&key, scope).await {
                 return Err(Self::reject_prepared(&mut prepared_owner, error).await);
             }
             if self.same_name_prepared_conflict(&key, prepared_owner.ticket) {
@@ -421,6 +480,7 @@ impl McpManager {
             let published = {
                 let mut state = self.state();
                 if Self::has_same_name_prepared_conflict(&state, &key, prepared_owner.ticket)
+                    || scope.is_some_and(McpPreparationScope::is_cancelled)
                     || state
                         .cleanup_debt
                         .iter()
@@ -512,16 +572,46 @@ impl McpManager {
     /// Returns Ok only when no same-name debt remains (either none existed or
     /// every retry close succeeded). Errors aggregate but never publish.
     async fn settle_same_name_cleanup_debt(&self, id: &McpServerId) -> Result<()> {
-        let debt_clients = {
+        self.settle_same_name_cleanup_debt_except(id, None).await
+    }
+
+    async fn settle_same_name_cleanup_debt_except(
+        &self,
+        id: &McpServerId,
+        current: Option<&McpPreparationScope>,
+    ) -> Result<()> {
+        let (debt_clients, preparations) = {
             let state = self.state();
-            state
-                .cleanup_debt
-                .iter()
-                .filter(|(debt_name, _)| debt_name == id)
-                .map(|(_, client)| Arc::clone(client))
-                .collect::<Vec<_>>()
+            (
+                state
+                    .cleanup_debt
+                    .iter()
+                    .filter(|(debt_name, _)| debt_name == id)
+                    .map(|(_, client)| Arc::clone(client))
+                    .collect::<Vec<_>>(),
+                state
+                    .preparing
+                    .iter()
+                    .filter(|(_, (name, scope))| {
+                        name == id && !current.is_some_and(|current| scope.same_owner(current))
+                    })
+                    .map(|(ticket, (_, scope))| (*ticket, scope.clone()))
+                    .collect::<Vec<_>>(),
+            )
         };
         let mut failures = Vec::new();
+        for (ticket, scope) in preparations {
+            if !scope.is_cancelled() {
+                failures.push("another preparation is still active".to_string());
+                continue;
+            }
+            match scope.close().await {
+                Ok(()) => {
+                    self.state().preparing.remove(&ticket);
+                }
+                Err(error) => failures.push(error.to_string()),
+            }
+        }
         for client in debt_clients {
             match client.close().await {
                 Ok(()) => Self::remove_cleanup_debt(&mut self.state(), &client),
@@ -595,21 +685,6 @@ impl McpManager {
         {
             state.cleanup_debt.push((id.clone(), Arc::clone(client)));
         }
-    }
-
-    fn retain_preparation_failure(
-        &self,
-        id: &McpServerId,
-        error: McpClientPreparationError,
-    ) -> ReactError {
-        let (initialization_error, cleanup_debt) = error.into_parts();
-        let Some((cleanup_error, cleanup_owner)) = cleanup_debt else {
-            return initialization_error;
-        };
-        Self::retain_cleanup_debt(&mut self.state(), id, &cleanup_owner.into_client());
-        ReactError::Mcp(Box::new(McpError::ConnectionFailed(format!(
-            "MCP target '{id}' preparation failed: {initialization_error}; transport cleanup remains retryable after: {cleanup_error}"
-        ))))
     }
 
     fn remove_cleanup_debt(state: &mut McpManagerState, client: &Arc<McpClient>) {
@@ -756,11 +831,17 @@ impl McpManager {
         async move {
             let _close_guard = self.close_gate.lock().await;
             loop {
-                let clients = {
+                let (clients, preparations) = {
                     let mut state = self.state();
                     let prepared = std::mem::take(&mut state.prepared);
                     for (_, (name, client)) in prepared {
-                        Self::retain_cleanup_debt(&mut state, &name, &client);
+                        let covered_by_preparation = state
+                            .preparing
+                            .values()
+                            .any(|(_, scope)| scope.owns_client(&client));
+                        if !covered_by_preparation {
+                            Self::retain_cleanup_debt(&mut state, &name, &client);
+                        }
                     }
                     let mut clients = state
                         .clients
@@ -775,19 +856,32 @@ impl McpManager {
                             clients.push((name.clone(), Arc::clone(client)));
                         }
                     }
-                    if clients.is_empty() {
+                    let preparations = state
+                        .preparing
+                        .iter()
+                        .map(|(ticket, (id, scope))| (*ticket, id.clone(), scope.clone()))
+                        .collect::<Vec<_>>();
+                    if clients.is_empty() && preparations.is_empty() {
                         state.configs.clear();
                         state.closing_debt.clear();
                         close_owner.complete(&mut state);
-                        None
+                        (None, Vec::new())
                     } else {
-                        Some(clients)
+                        (Some(clients), preparations)
                     }
                 };
                 let Some(clients) = clients else {
                     return Ok(());
                 };
                 let mut failures = Vec::new();
+                for (ticket, id, scope) in preparations {
+                    match scope.close().await {
+                        Ok(()) => {
+                            self.state().preparing.remove(&ticket);
+                        }
+                        Err(error) => failures.push(format!("preparing {id}: {error}")),
+                    }
+                }
                 for (name, client) in clients {
                     tracing::info!("MCP: 关闭服务端 '{}'", name);
                     {
@@ -848,7 +942,7 @@ impl McpManager {
         self.disconnect_id(&McpServerId::direct(name)).await
     }
 
-    async fn disconnect_id(&mut self, id: &McpServerId) -> Result<bool> {
+    async fn disconnect_id(&self, id: &McpServerId) -> Result<bool> {
         let clients = {
             let mut state = self.state();
             state.configs.remove(id);
@@ -915,12 +1009,171 @@ mod tests {
     use futures::future::BoxFuture;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
 
     use super::transport::McpTransport;
     use super::types::{
         JsonRpcNotification, JsonRpcNotificationReceiver, JsonRpcRequest, JsonRpcResponse,
     };
     use super::*;
+
+    #[tokio::test]
+    async fn settled_initialize_failure_preserves_original_error_classification() -> Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let endpoint = format!("http://{}", listener.local_addr()?);
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await?;
+            let mut request = [0u8; 4096];
+            let _ = socket.read(&mut request).await?;
+            let body = r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"rejected"}}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await?;
+            Ok::<(), std::io::Error>(())
+        });
+        let mut manager = McpManager::new();
+        let error = tokio::time::timeout(
+            Duration::from_secs(2),
+            manager.reconcile_server(
+                &McpServerId::direct("rejected"),
+                Some(McpServerConfig::http("rejected", endpoint)),
+            ),
+        )
+        .await
+        .map_err(|_| ReactError::Other("initialize response timed out".to_string()))?
+        .err()
+        .ok_or_else(|| ReactError::Other("rejected initialization succeeded".to_string()))?;
+        server
+            .await
+            .map_err(|error| ReactError::Other(error.to_string()))??;
+        assert!(matches!(
+            error,
+            ReactError::Mcp(inner) if matches!(*inner, McpError::InitializationFailed(_))
+        ));
+        assert!(manager.state().preparing.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn close_all_settles_dropped_sse_preparation_before_returning() -> Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let config = McpServerConfig::sse("pending", format!("http://{}", listener.local_addr()?));
+        let manager = Arc::new(tokio::sync::Mutex::new(McpManager::new()));
+        let reconcile = tokio::spawn({
+            let manager = Arc::clone(&manager);
+            async move {
+                let mut manager = manager.lock().await;
+                manager
+                    .reconcile_server(&McpServerId::direct("pending"), Some(config))
+                    .await
+            }
+        });
+        let (_socket, _) = tokio::time::timeout(Duration::from_secs(2), listener.accept())
+            .await
+            .map_err(|_| ReactError::Other("SSE preparation did not start".to_string()))??;
+        reconcile.abort();
+        let error = reconcile.await.err().ok_or_else(|| {
+            ReactError::Other("dropped preparation unexpectedly completed".to_string())
+        })?;
+        assert!(error.is_cancelled());
+        let manager = manager.lock().await;
+        manager.close_all().await?;
+        assert!(manager.get_client("pending").is_none());
+        assert!(manager.state().preparing.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn close_all_retains_failed_preparation_scope_for_retry() -> Result<()> {
+        let manager = McpManager::new();
+        let close_count = Arc::new(AtomicUsize::new(0));
+        let preparation = McpClient::from_transport(
+            "pending",
+            Arc::new(RecordingCloseTransport {
+                close_count: Arc::clone(&close_count),
+                failures_remaining: Arc::new(AtomicUsize::new(1)),
+            }),
+        )
+        .map_err(|error| ReactError::Other(error.to_string()))?;
+        manager.state().preparing.insert(
+            1,
+            (McpServerId::direct("pending"), preparation.cleanup_scope()),
+        );
+        drop(preparation);
+
+        assert!(manager.close_all().await.is_err());
+        assert_eq!(manager.state().preparing.len(), 1);
+        manager.close_all().await?;
+        assert!(manager.state().preparing.is_empty());
+        assert_eq!(close_count.load(Ordering::Acquire), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn close_all_closes_transport_once_when_preparing_and_prepared_overlap() -> Result<()> {
+        let manager = McpManager::new();
+        let close_count = Arc::new(AtomicUsize::new(0));
+        let transport: Arc<dyn McpTransport> = Arc::new(RecordingCloseTransport {
+            close_count: Arc::clone(&close_count),
+            failures_remaining: Arc::new(AtomicUsize::new(0)),
+        });
+        let preparation = McpClient::from_transport("pending", Arc::clone(&transport))
+            .map_err(|error| ReactError::Other(error.to_string()))?;
+        let scope = preparation.cleanup_scope();
+        manager
+            .state()
+            .preparing
+            .insert(1, (McpServerId::direct("pending"), scope.clone()));
+        let config = McpServerConfig::http("pending", "http://127.0.0.1:1");
+        let client = McpClient::with_test_transport("pending", transport);
+        let installation = manager.install_prepared_server_in_scope(
+            McpServerId::direct("pending"),
+            config,
+            client,
+            Some(&scope),
+        );
+        manager.close_all().await?;
+        assert!(installation.await.is_err());
+        assert_eq!(close_count.load(Ordering::Acquire), 1);
+        assert!(manager.state().preparing.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn failed_close_during_install_keeps_one_preparation_retry_owner() -> Result<()> {
+        let manager = McpManager::new();
+        let close_count = Arc::new(AtomicUsize::new(0));
+        let transport: Arc<dyn McpTransport> = Arc::new(RecordingCloseTransport {
+            close_count: Arc::clone(&close_count),
+            failures_remaining: Arc::new(AtomicUsize::new(1)),
+        });
+        let preparation = McpClient::from_transport("pending", Arc::clone(&transport))
+            .map_err(|error| ReactError::Other(error.to_string()))?;
+        let scope = preparation.cleanup_scope();
+        manager
+            .state()
+            .preparing
+            .insert(1, (McpServerId::direct("pending"), scope.clone()));
+        let installation = manager.install_prepared_server_in_scope(
+            McpServerId::direct("pending"),
+            McpServerConfig::http("pending", "http://127.0.0.1:1"),
+            McpClient::with_test_transport("pending", transport),
+            Some(&scope),
+        );
+
+        assert!(manager.close_all().await.is_err());
+        assert!(installation.await.is_err());
+        manager.finish_preparation(1, &scope, false);
+        assert_eq!(manager.state().preparing.len(), 1);
+        assert_eq!(manager.cleanup_debt_count(), 0);
+        manager.close_all().await?;
+        assert!(manager.state().preparing.is_empty());
+        assert_eq!(close_count.load(Ordering::Acquire), 2);
+        Ok(())
+    }
 
     struct InertTransport;
 
@@ -1677,32 +1930,6 @@ mod tests {
                 .closing_debt
                 .contains(&McpServerId::direct("context"))
         );
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn manager_retains_failed_construction_cleanup_for_retry() -> Result<()> {
-        let manager = McpManager::new();
-        let close_count = Arc::new(AtomicUsize::new(0));
-        let transport: Arc<dyn McpTransport> = Arc::new(RecordingCloseTransport {
-            close_count: Arc::clone(&close_count),
-            failures_remaining: Arc::new(AtomicUsize::new(1)),
-        });
-        let preparation = McpClient::from_transport("context", transport)
-            .map_err(|error| ReactError::Other(error.to_string()))?;
-        let preparation_error = preparation
-            .await
-            .err()
-            .ok_or_else(|| ReactError::Other("failed construction was accepted".to_string()))?;
-        let error =
-            manager.retain_preparation_failure(&McpServerId::direct("context"), preparation_error);
-
-        assert!(error.to_string().contains("cleanup remains retryable"));
-        assert_eq!(manager.cleanup_debt_count(), 1);
-        assert_eq!(close_count.load(Ordering::Acquire), 1);
-        manager.close_all().await?;
-        assert_eq!(manager.cleanup_debt_count(), 0);
-        assert_eq!(close_count.load(Ordering::Acquire), 2);
         Ok(())
     }
 

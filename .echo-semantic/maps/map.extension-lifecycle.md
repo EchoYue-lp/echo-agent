@@ -4,7 +4,7 @@ id: map.extension-lifecycle
 kind: capability_map
 title: MCP、Hook、Skill、Plugin 与 LSP 生命周期
 risk: high
-observed_at: source:87b717676a7b51e213630677989947777b4bed441acd8c7d655fb6c96dca77ad
+observed_at: source:757f499d4d9a40a4c27791933cb3d5e9d3b2dda76a1a28e4561e317d4719be94
 boundary_refs: [boundary.extension-lifecycle]
 behavior_refs: [behavior.extension-publication]
 rule_refs: [rule.extension-generation-authority, rule.permission-effect-order]
@@ -17,10 +17,10 @@ scenarios:
     status: needs_review
     source_refs: [echo-integration/src/mcp/client.rs, echo-integration/src/mcp/mod.rs, echo-integration/src/mcp/transport/sse.rs]
     finding_refs: [finding.mcp-client-capability-advertisement, finding.mcp-tool-permission-classification, finding.extension-cleanup-settlement, finding.extension-credential-debug-redaction, finding.mcp-version-doc-drift]
-    evidence_refs: [evidence.effects-extensions, evidence.mcp-tool-local-classification-repair, evidence.mcp-tool-local-classification-verification, evidence.mcp-client-capability-advertisement-repair, evidence.mcp-client-capability-advertisement-verification, evidence.mcp-protocol-negotiation-repair, evidence.mcp-protocol-negotiation-verification]
+    evidence_refs: [evidence.effects-extensions, evidence.mcp-tool-local-classification-repair, evidence.mcp-tool-local-classification-verification, evidence.mcp-client-capability-advertisement-repair, evidence.mcp-client-capability-advertisement-verification, evidence.mcp-protocol-negotiation-repair, evidence.mcp-protocol-negotiation-verification, evidence.extension-cleanup-settlement-repair, evidence.extension-cleanup-settlement-verification]
     audit_refs: [audit.mcp-tool-local-classification-rereview, audit.mcp-client-capability-advertisement-rereview, audit.mcp-protocol-negotiation-rereview, audit.extension-cleanup-settlement-rereview]
-    unknown: transport close已闭合，但preparation/construction cancellation仍由Drop派生不可等待的后台cleanup
-    next_step: 在mcp-construction-close-owner Outcome中交付可保留、可等待和可重试的construction cleanup owner
+    unknown: MCP cleanup在当前任务分支由retained scope等待并可重试；本地完整门禁与17项独立feature已通过，PR/CI和远端main仍待交付，MCP版本文档与其它独立Finding另行验收
+    next_step: 完成#55的PR/CI与远端main交付，并单独处理MCP版本文档合同
   hook-source-and-reduction:
     status: mapped
     source_refs: [echo-core/src/hooks/types.rs, echo-execution/src/skills/hooks.rs]
@@ -98,7 +98,8 @@ Catalog/status/tool list 是 registry projection；仅可执行且当前 generat
 五类生命周期和十六个Finding已映射；Skill activation authority、Plugin prepare failure
 isolation、active generation 与 MCP owner isolation 已在主线修复并通过独立复审。跨 Host
 统一编排已覆盖 framework Host 主路径与失败重试矩阵，并以verified `dc61ef0e`进入远端main；
-#73已完成，#58继续覆盖跨进程 Hook producer acknowledgement。
+#73已完成，#58继续覆盖跨进程 Hook producer acknowledgement。MCP construction cleanup
+owner 在本任务分支通过完整本地门禁、17项独立feature检查与独立复审，待PR/CI和远端main交付。
 
 ## 未展开项
 
