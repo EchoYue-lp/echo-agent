@@ -101,7 +101,12 @@ use serde_json::json;
 let llm_config = LlmConfig::for_provider(
     "openai",
     "https://api.openai.com/v1",
-    std::env::var("OPENAI_API_KEY")?,
+    std::env::var("OPENAI_API_KEY").map_err(|_| {
+        echo_agent::error::ConfigError::MissingConfig(
+            "structured-output".to_string(),
+            "OPENAI_API_KEY".to_string(),
+        )
+    })?,
     "gpt-5.5",
     LlmApiProtocol::Responses,
 )?;
@@ -182,7 +187,12 @@ Stores the Agent-wide format in the run snapshot and sends JSON formats on every
 let llm_config = LlmConfig::for_provider(
     "openai",
     "https://api.openai.com/v1",
-    std::env::var("OPENAI_API_KEY")?,
+    std::env::var("OPENAI_API_KEY").map_err(|_| {
+        echo_agent::error::ConfigError::MissingConfig(
+            "structured-output".to_string(),
+            "OPENAI_API_KEY".to_string(),
+        )
+    })?,
     "gpt-5.5",
     LlmApiProtocol::Responses,
 )?;
