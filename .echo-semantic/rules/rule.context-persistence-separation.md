@@ -7,10 +7,10 @@ expectation: human_confirmed
 risk: high
 primary_focus: data_durability
 focus: [state_authority, time_lifecycle, failure_concurrency]
-observed_at: 44b2ed68772c7c016d09af6c2e1adac9fe4fea70
+observed_at: source:6fdcc1782b7aa2c97a148f7c377d60b4ed26b9d470f02c05a651de1e8e2eac74
 behavior_refs: [behavior.agent-turn-lifecycle, behavior.context-memory-lifecycle]
 code_refs: [echo-state/src/compression/mod.rs, src/agent/snapshot.rs, src/agent/react/run/phases/compact.rs, src/agent/react/run/phases/tools.rs, src/agent/react/run/phases/finalize.rs, src/state/mod.rs, echo-core/src/memory/conversation.rs, echo-core/src/memory/store.rs, docs/en/41-persistence-concepts.md]
-evidence_refs: [evidence.agent-context-execution, evidence.persistence-observation, evidence.transcript-generation-runtime-identity-repair, evidence.transcript-generation-runtime-identity-verification, evidence.transcript-projection-settlement-repair, evidence.transcript-projection-settlement-verification, evidence.memory-provenance-authority-repair, evidence.memory-provenance-authority-verification]
+evidence_refs: [evidence.agent-context-execution, evidence.persistence-observation, evidence.transcript-generation-runtime-identity-repair, evidence.transcript-generation-runtime-identity-verification, evidence.transcript-projection-settlement-repair, evidence.transcript-projection-settlement-verification, evidence.managed-import-generation-repair, evidence.memory-provenance-authority-repair, evidence.memory-provenance-authority-verification]
 finding_refs: [finding.transcript-projection-settlement, finding.transcript-generation-runtime-identity]
 ---
 
@@ -28,7 +28,7 @@ finding_refs: [finding.transcript-projection-settlement, finding.transcript-gene
 
 各 trait 使用独立数据模型与 key/scope；runtime lineage 区分稳定 conversation scope 和可轮换 runtime
 state ID。RuntimeStateStore 保存未提交 intent 与 retirement，ConversationStore receipt 才确认 transcript fact；
-单一 framework coordinator 编排两者，不建立第二 Outbox。
+单一 framework coordinator 编排两者，不建立第二 Outbox。Managed import 的 Store 回执只授权一次匹配的 runtime epoch CAS；Store 完整行摘要与 checkpoint 逻辑消息摘要分别服务各自权威，不可混用。
 
 ## 期望行为
 

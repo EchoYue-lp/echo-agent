@@ -6,13 +6,13 @@ title: Conversation Transcript Store
 asset_type: state_authority
 status: active
 risk: high
-observed_at: 733d352fc719f922b21bab1cd46206139564367f
+observed_at: source:6fdcc1782b7aa2c97a148f7c377d60b4ed26b9d470f02c05a651de1e8e2eac74
 boundary_refs: [boundary.context-memory, boundary.observation-persistence-delivery]
 code_refs: [echo-core/src/memory/conversation.rs, echo-state/src/memory/conversation.rs, echo-state/src/memory/file_conversation.rs, echo-state/src/memory/sqlite_conversation.rs, src/agent/snapshot.rs]
 consumer_refs: [src/agent/react/run/phases/compact.rs, src/agent/react/run/phases/finalize.rs, docs/en/03-memory.md]
 behavior_refs: [behavior.context-memory-lifecycle, behavior.observation-persistence]
 rule_refs: [rule.context-persistence-separation, rule.fact-projection-separation]
-evidence_refs: [evidence.agent-context-execution, evidence.persistence-observation, evidence.transcript-projection-settlement-repair, evidence.transcript-projection-settlement-verification, evidence.transcript-observer-current-repair, evidence.transcript-observer-current-verification, evidence.framework-only-finding-closure-verification]
+evidence_refs: [evidence.agent-context-execution, evidence.persistence-observation, evidence.transcript-projection-settlement-repair, evidence.transcript-projection-settlement-verification, evidence.managed-import-generation-repair, evidence.transcript-observer-current-repair, evidence.transcript-observer-current-verification, evidence.framework-only-finding-closure-verification]
 finding_refs: [finding.transcript-projection-settlement]
 candidate_refs: []
 ---
@@ -30,6 +30,7 @@ ReactAgent safe-point/finalization 写入，history consumers 查询；不与长
 ## 生命周期
 
 Ensure epoch、atomic apply/AlreadyApplied、managed import/metadata/delete、query 与 retention receipt。
+Generation-bound import 在替换消息和推进 epoch 的同一事务内写入新 frontier，并在提交前验证消息可恢复。
 每个 managed call 携带 absolute deadline；File/SQLite 在实际 authority lock/transaction 后复查。
 
 ## 候选关系

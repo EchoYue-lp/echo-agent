@@ -46,6 +46,32 @@ fn file_backends_are_constructible_from_public_facade_paths()
 }
 
 #[test]
+fn managed_import_generation_contract_is_available_from_the_public_facade()
+-> Result<(), Box<dyn std::error::Error>> {
+    let message = echo_agent::memory::project_message(
+        "branch",
+        &echo_agent::llm::types::Message::user("forked context".to_string()),
+    )?;
+    let request = echo_agent::memory::ManagedConversationImport::prepare_for_generation(
+        "branch",
+        1,
+        1,
+        "branch",
+        vec![message],
+    )?;
+    request.validate()?;
+    assert_eq!(request.generation_id.as_deref(), Some("branch"));
+    assert_eq!(
+        echo_agent::memory::managed_import_projection_digests("branch", &request.messages)?.len(),
+        1
+    );
+    fn public_type<T>() {}
+    public_type::<echo_agent::state::ManagedImportEpochTransition>();
+    public_type::<echo_agent::memory::ManagedConversationImportLocator>();
+    Ok(())
+}
+
+#[test]
 fn tracked_steering_types_are_available_from_the_public_facade() {
     fn public_type<T>() {}
 

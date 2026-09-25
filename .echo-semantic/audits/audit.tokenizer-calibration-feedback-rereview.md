@@ -5,19 +5,19 @@ kind: audit
 boundary_ref: boundary.llm-provider-runtime
 lens: contract_evidence
 freshness: examined
-revision: source:5e9a01f48cdf8338bbf8ccfdf225290e1c3f3db90fbea6c30cf1219b92cd1f48
+revision: 07e4270380c40df3f412f99c0aecb6145410cb2a
 finding_refs: [finding.tokenizer-calibration-feedback-convergence]
 challenges:
   full-request-denominator:
-    revision: source:5e9a01f48cdf8338bbf8ccfdf225290e1c3f3db90fbea6c30cf1219b92cd1f48
+    revision: 07e4270380c40df3f412f99c0aecb6145410cb2a
     source_refs: [echo-core/src/tokenizer.rs, src/agent/react/run/phases/think.rs]
     evidence_refs: [evidence.tokenizer-calibration-feedback-repair, evidence.tokenizer-calibration-feedback-verification]
   comparable-media-feedback:
-    revision: source:5e9a01f48cdf8338bbf8ccfdf225290e1c3f3db90fbea6c30cf1219b92cd1f48
+    revision: 07e4270380c40df3f412f99c0aecb6145410cb2a
     source_refs: [src/agent/react/run/phases/think.rs, echo-state/src/compression/mod.rs]
     evidence_refs: [evidence.tokenizer-calibration-feedback-verification]
   schema-compaction-draft-flush:
-    revision: source:5e9a01f48cdf8338bbf8ccfdf225290e1c3f3db90fbea6c30cf1219b92cd1f48
+    revision: 07e4270380c40df3f412f99c0aecb6145410cb2a
     source_refs: [src/agent/react/run/context.rs, src/agent/react/run/phases/compact.rs, echo-state/src/compression/mod.rs]
     evidence_refs: [evidence.tokenizer-calibration-feedback-verification]
 ---

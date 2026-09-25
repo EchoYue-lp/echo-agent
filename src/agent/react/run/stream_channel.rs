@@ -2027,6 +2027,7 @@ mod tests {
         )?;
         let prepared = runtime
             .compare_and_save_checkpoint(crate::state::RuntimeCheckpointCasRequest {
+                managed_import: None,
                 scope_id: "unbound-revision".to_string(),
                 runtime_state_id: "unbound-generation".to_string(),
                 conversation_epoch: None,

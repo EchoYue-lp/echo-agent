@@ -5,15 +5,15 @@ kind: audit
 boundary_ref: boundary.tool-permission-sandbox
 lens: contract_evidence
 freshness: examined
-revision: source:5e9a01f48cdf8338bbf8ccfdf225290e1c3f3db90fbea6c30cf1219b92cd1f48
+revision: 07e4270380c40df3f412f99c0aecb6145410cb2a
 finding_refs: [finding.tool-pipeline-example-drift]
 challenges:
   production-stage-source:
-    revision: source:5e9a01f48cdf8338bbf8ccfdf225290e1c3f3db90fbea6c30cf1219b92cd1f48
+    revision: 07e4270380c40df3f412f99c0aecb6145410cb2a
     source_refs: [src/agent/react/run/pipeline.rs, echo-agent-learning/tests/example_contracts/demo64_tool_pipeline.rs]
     evidence_refs: [evidence.tool-pipeline-example-repair, evidence.tool-pipeline-example-verification]
   pre-execution-order:
-    revision: source:5e9a01f48cdf8338bbf8ccfdf225290e1c3f3db90fbea6c30cf1219b92cd1f48
+    revision: 07e4270380c40df3f412f99c0aecb6145410cb2a
     source_refs: [src/agent/react/run/pipeline.rs, echo-agent-learning/tests/example_contracts/demo64_tool_pipeline.rs]
     evidence_refs: [evidence.tool-pipeline-example-verification]
 ---
