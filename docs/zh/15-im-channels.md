@@ -148,6 +148,16 @@ sink，默认 sink 仅表示进程内接纳，不是 QQ/飞书送达确认。fra
 `Agent::chat` API 保留。参见
 [ADR 0046](../adr/0046-turn-execution-delivery-settlement.md)。
 
+入站消息带附件时，同一个 Turn 传入 typed user message：非空文本在前，附件按原顺序
+排列。图像按字节签名识别 PNG、JPEG、GIF、WebP，并用正确 MIME 的 data URL 编码；
+无法识别的图像在模型接纳前拒绝。文件以 base64 `ContentPart::File` 保留原始字节，
+transport 未给文件名时使用稳定生成名。核心消息类型没有音频、视频对应的 typed part，
+因此这两类附件明确报错，不会悄悄退化为纯文本。无附件消息沿用原纯文本路径。
+这保证 framework typed 投影保留附件字节与部件顺序，不表示所有 transport 元数据
+都有对应字段，也不保证各 provider 都能读取任意二进制文件；
+provider adapter 可能把不支持的文件渲染成只有名称的占位内容。参见
+[ADR 0077](../adr/0077-channel-attachment-projection.md)。
+
 资源关闭是独立边界：`ChannelManager::stop_all` 先停止每个 transport，再 await
 它保留的 `MessageHandler::close`。`SessionHandler` 取消 sender generation、
 等待全部 accepted/polled active stream 与 delivery lease，然后 await 每个 sender
@@ -192,6 +202,7 @@ pub struct InboundMessage {
     pub text: String,
     pub message_id: String,   // 平台原始消息 ID（用于回复）
     pub timestamp: u64,
+    pub attachments: Vec<MessageAttachment>,
 }
 ```
 
