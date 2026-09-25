@@ -22,7 +22,7 @@ limitations:
 需在最终源码摘要上验证 OutputGuard artifact 清除、失败真实输出 preview、post-start
 stage Err、timeout/cancel 恰好一次调用终态、同名并发 AuditCallback 反序完成与 poison
 恢复、start 前后的 interruption 输入、skipped marker 与执行统计排除。历史 Issue 102 全门禁
-以及 `source:bd676c53ff6a431d3ef88581ad7a92a4db718dad7e88dd872b64e20170f61b93...` 之前的 package/root 日志不能替代本次差异复验；Finding 暂重新打开。
+以及 `source:e2f3b5f8a9af67e4a9534a49815f6da72fb3c17c5834b86ce5221c121838a99f...` 之前的 package/root 日志不能替代本次差异复验；Finding 暂重新打开。
 
 ## 来源与范围
 

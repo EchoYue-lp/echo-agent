@@ -5,15 +5,15 @@ kind: audit
 boundary_ref: boundary.llm-provider-runtime
 lens: result_side_effect
 freshness: examined
-revision: source:bd676c53ff6a431d3ef88581ad7a92a4db718dad7e88dd872b64e20170f61b93
+revision: source:e2f3b5f8a9af67e4a9534a49815f6da72fb3c17c5834b86ce5221c121838a99f
 finding_refs: [finding.structured-output-main-path, finding.structured-output-schema-validation-contract]
 challenges:
   request-format-authority:
-    revision: source:bd676c53ff6a431d3ef88581ad7a92a4db718dad7e88dd872b64e20170f61b93
+    revision: source:e2f3b5f8a9af67e4a9534a49815f6da72fb3c17c5834b86ce5221c121838a99f
     source_refs: [src/agent/snapshot.rs, src/agent/react/run/phases/think.rs, src/testing/mock_llm.rs]
     evidence_refs: [evidence.structured-output-main-path-repair, evidence.structured-output-main-path-verification]
   final-success-before-observers:
-    revision: source:bd676c53ff6a431d3ef88581ad7a92a4db718dad7e88dd872b64e20170f61b93
+    revision: source:e2f3b5f8a9af67e4a9534a49815f6da72fb3c17c5834b86ce5221c121838a99f
     source_refs: [src/agent/react/run/stream_channel.rs, src/agent/react/run/phases/tools.rs, src/agent/react/run/phases/finalize.rs]
     evidence_refs: [evidence.structured-output-schema-validation-repair, evidence.structured-output-schema-validation-verification]
 ---

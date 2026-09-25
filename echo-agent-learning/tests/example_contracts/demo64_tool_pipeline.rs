@@ -94,6 +94,31 @@ async fn contract_demo64_rejects_duplicate_production_stage() -> echo_agent::err
     Ok(())
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn contract_demo64_rejects_invalid_pre_execution_order() -> echo_agent::error::Result<()> {
+    let observed = observed_default_stages().await?;
+    verify_stage_contract(&observed)?;
+    for (before, after) in [
+        ("intervention", "tool_visibility"),
+        ("tool_visibility", "plan_mode"),
+        ("plan_mode", "pre_tool_use_hook"),
+        ("intervention", "plan_mode"),
+        ("intervention", "pre_tool_use_hook"),
+        ("pre_tool_use_hook", "permission"),
+        ("permission", "read_before_edit"),
+    ] {
+        let mut invalid = observed.clone();
+        let before_position = stage_position(&invalid, before)?;
+        let after_position = stage_position(&invalid, after)?;
+        invalid.swap(before_position, after_position);
+        assert!(
+            verify_stage_contract(&invalid).is_err(),
+            "{before} and {after} may not change places"
+        );
+    }
+    Ok(())
+}
+
 // Description catalog, alphabetically keyed; the runtime trace alone defines order.
 const STAGE_INFO: [(&str, &str, &str); 17] = [
     ("audit", "AuditStage", "审计结算后的工具终态"),
@@ -192,12 +217,14 @@ fn verify_stage_contract(stages: &[String]) -> echo_agent::error::Result<()> {
         }
     }
     for (before, after) in [
-        ("intervention", "permission"),
+        ("intervention", "tool_visibility"),
+        ("tool_visibility", "plan_mode"),
+        ("plan_mode", "pre_tool_use_hook"),
+        ("pre_tool_use_hook", "permission"),
+        ("permission", "read_before_edit"),
         ("tool_visibility", "invocation"),
         ("plan_mode", "invocation"),
-        ("pre_tool_use_hook", "invocation"),
         ("permission", "tool_input_guard"),
-        ("read_before_edit", "invocation"),
         ("skill_permission", "invocation"),
         ("tool_input_guard", "invocation"),
         ("invocation", "callback_start"),

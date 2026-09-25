@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.tool-pipeline-example-repair
 kind: evidence
-observed_at: source:c47c1a2f477aa8d78cd95f13b29119df92f2daf44d22457dcabaece4796c2474
+observed_at: source:e2f3b5f8a9af67e4a9534a49815f6da72fb3c17c5834b86ce5221c121838a99f
 source_refs:
   - src/agent/react/run/pipeline.rs
   - echo-agent-learning/tests/example_contracts/demo64_tool_pipeline.rs
@@ -12,7 +12,7 @@ supports: [finding.tool-pipeline-example-drift, behavior.effect-permission-execu
 limitations:
   - The learning contract covers the default pipeline on a successful tool call, not every custom pipeline or blocked branch
   - Structured tracing names are an internal observation surface, not a new public framework API
-  - Independent rereview and mainline delivery remain pending
+  - Full workspace gate, remote CI, and mainline delivery remain pending
 ---
 
 # demo64 Tool pipeline executable contract repair
@@ -21,7 +21,8 @@ limitations:
 
 demo64 从真实 Agent 工具调用中收集 `ToolExecutionPipeline::run` 发出的
 `stage.name()` 结构化 tracing 字段，以观测到的顺序打印阶段。测试要求每个预期阶段
-恰好出现一次、无未知阶段，并检查权限、输入守卫、canonical invocation、执行、后置 Hook、
+恰好出现一次、无未知阶段，并检查干预、可见性、计划模式、PreToolUse、权限、
+先读后改、输入守卫、canonical invocation、执行、后置 Hook、
 输出守卫、预算、Trace、Audit 和终态回调之间的关键顺序。它不再维护第二份
 生产阶段的有序数组或固定阶段编号；说明目录按名称排序，不参与执行顺序。
 
@@ -33,9 +34,10 @@ demo64 从真实 Agent 工具调用中收集 `ToolExecutionPipeline::run` 发出
 
 真实阶段注册和执行仍由 `src/agent/react/run/pipeline.rs` 唯一拥有。learning
 测试只消费已有运行时观察元数据，不增加框架公开 introspection API，不复制
-生产阶段顺序。此候选修复尚需独立复审及交付验证。
+生产阶段顺序。独立复审已通过；完整门禁和 main 交付仍待验证。
 
 ## 已知缺口
 
 此测试观测默认管线的一次成功工具调用，不覆盖自定义管线或所有执行前
-阻断分支。所有历史 `source:<digest>` 引用须在最终集成快照上统一刷新。
+阻断分支。语义摘要已按本候选的整合源码快照刷新；合并前如 main 再推进，
+须重新对账并刷新。
