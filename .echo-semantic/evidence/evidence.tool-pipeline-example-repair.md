@@ -12,7 +12,7 @@ supports: [finding.tool-pipeline-example-drift, behavior.effect-permission-execu
 limitations:
   - The learning contract covers the default pipeline on a successful tool call, not every custom pipeline or blocked branch
   - Structured tracing names are an internal observation surface, not a new public framework API
-  - Full workspace gate, remote CI, and mainline delivery remain pending
+  - Remote CI and mainline delivery remain pending
 ---
 
 # demo64 Tool pipeline executable contract repair
@@ -34,7 +34,7 @@ demo64 从真实 Agent 工具调用中收集 `ToolExecutionPipeline::run` 发出
 
 真实阶段注册和执行仍由 `src/agent/react/run/pipeline.rs` 唯一拥有。learning
 测试只消费已有运行时观察元数据，不增加框架公开 introspection API，不复制
-生产阶段顺序。独立复审已通过；完整门禁和 main 交付仍待验证。
+生产阶段顺序。独立复审及本地完整门禁已通过；远端 CI 和 main 交付仍待验证。
 
 ## 已知缺口
 

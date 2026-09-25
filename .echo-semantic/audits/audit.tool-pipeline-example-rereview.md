@@ -22,7 +22,8 @@ challenges:
 
 ## 审查范围
 
-独立 reviewer 对 `origin/main@9abdf9de` 集成后的 #101 候选复审。
+独立 reviewer 对 `origin/main@9abdf9de` 集成后的 #101 候选复审，
+并对随后合入 `origin/main@93ee33d9` 的快照增量复审。
 锚点为任务分支 HEAD `3a09a8bd13fa2a3a56bf8c8e5db9f5a879284247`，
 加审查时未提交 `git diff` 的 SHA-256
 `7a0ff047dfb32a500b4b0a88fe5484aa6058e7595280d2e15355bf1c8061d5de`。
@@ -54,15 +55,16 @@ demo64 的 `StageTraceLayer` 消费 `ToolExecutionPipeline::run` 实际发出的
 取得坏序回归 exit 101 红证据，随后补充关键依赖，4/4 转绿。最终独立
 复审返回 PASS，0 findings。此审计仅记录 reviewed 快照；随后新增本审计、
 Finding 引用及证据状态更正属于非源码增量。
+在 `f55856125b08e3c9fc2e06545bb66d707b8c6eba` 上的最终整合增量复审
+再次返回 PASS、0 findings，确认 #53 内容保留且 #101 合同未变。
 
 ## 残余风险
 
 回归覆盖默认管线的一次成功工具调用，不证明自定义管线或每个执行前
-阻断分支的行为。完整 workspace 门禁、远端 CI、PR 与 main 交付尚未完成；
-Finding 保持 open，不能仅凭复审 PASS 关闭 Issue #101。
+阻断分支的行为。整合 `origin/main@93ee33d9` 后的完整 workspace 门禁
+已通过；远端 CI、PR 与 main 交付尚未完成，不能仅凭复审 PASS 关闭 Issue #101。
 
 ## 未检查项
 
-独立 reviewer 未替代完整 workspace 门禁或远端 CI。文档合同在合入
-`9abdf9de` 后通过 14/14，但早于最后一条代码级坏序测试；最终合并前
-门禁应复验该合同。
+独立 reviewer 未替代完整 workspace 门禁或远端 CI。最终整合快照的
+文档合同通过 15/15，完整门禁日志确认 86 条测试汇总均为 0 failed。

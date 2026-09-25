@@ -3,14 +3,14 @@ schema_version: 1
 id: finding.tool-pipeline-example-drift
 kind: finding
 type: evidence_gap
-status: open
+status: resolved
 severity: medium
 primary_focus: contract_evidence
 focus: [time_lifecycle, result_side_effect]
 boundary_ref: boundary.tool-permission-sandbox
 behavior_refs: [behavior.effect-permission-execution, behavior.workspace-composition]
 rule_refs: [rule.permission-effect-order]
-evidence_refs: [evidence.effects-extensions, evidence.workspace-structure, evidence.tool-pipeline-example-repair]
+evidence_refs: [evidence.effects-extensions, evidence.workspace-structure, evidence.tool-pipeline-example-repair, evidence.tool-pipeline-example-verification]
 audit_refs: [audit.observation-persistence-delivery.contract-evidence, audit.tool-permission-sandbox.result-side-effect, audit.tool-pipeline-example-rereview]
 decision_refs: []
 repair_evidence_refs: [evidence.tool-pipeline-example-repair]
@@ -39,4 +39,4 @@ GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/101
 
 ## 处理记录
 
-候选修复从真实默认管线调用的结构化 tracing 读取阶段名称，动态展示顺序，并检查关键权限、守卫、执行和终态观察关系；不新增公开 runtime API。独立复审已通过，完整门禁、PR/CI 和 main 交付后再判定关闭。
+候选修复从真实默认管线调用的结构化 tracing 读取阶段名称，动态展示顺序，并检查关键权限、守卫、执行和终态观察关系；不新增公开 runtime API。整合 `origin/main@93ee33d9` 后独立复审与本地完整门禁通过，Finding 置为 resolved。GitHub Issue #101 仍待 PR、远端 CI 与 main 交付后关闭。
