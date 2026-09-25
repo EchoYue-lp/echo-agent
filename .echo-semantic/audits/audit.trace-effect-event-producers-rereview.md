@@ -5,11 +5,11 @@ kind: audit
 boundary_ref: boundary.observation-persistence-delivery
 lens: contract_evidence
 freshness: examined
-revision: source:33686a6a0273c6f8ea85608bff92fed9774f00bfefe1bbd34aa1a2316b236cbc
+revision: source:e09ea140ba27724c9d3fa92c16a8139087ddfd0256c1f0d614f153e6086b54cd
 finding_refs: [finding.trace-effect-event-producers]
 challenges:
   event-producer-coverage:
-    revision: source:33686a6a0273c6f8ea85608bff92fed9774f00bfefe1bbd34aa1a2316b236cbc
+    revision: source:e09ea140ba27724c9d3fa92c16a8139087ddfd0256c1f0d614f153e6086b54cd
     source_refs: [src/trace/mod.rs, docs/en/27-tracing.md, docs/zh/27-tracing.md, docs/adr/0059-observed-tool-effects-and-background-dispatch.md]
     evidence_refs: [evidence.trace-effect-producers-current-repair, evidence.trace-effect-producers-current-verification]
 ---
