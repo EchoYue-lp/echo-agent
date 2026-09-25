@@ -2,7 +2,43 @@
 
 ## What It Is
 
-The Guard system provides input/output content filtering to enforce safety, compliance, and policy rules. Guards can block or modify content before it reaches the LLM (input guards) or before it's returned to the user (output guards).
+The Guard system filters content at four production boundaries: user input,
+effective tool arguments, tool results, and final text answers. A guard can
+pass, warn, block, or transform content where transformation is permitted.
+
+| Direction | Production boundary | Transform |
+| --- | --- | --- |
+| `Input` | User text before the model context | Allowed |
+| `ToolInput` | Final effective JSON arguments after rewrites, before invocation | Rejected (block-only) |
+| `ToolOutput` | Tool result before output budgeting and terminal observation | Allowed |
+| `Output` | Model text final answer before callbacks and delivery | Allowed |
+
+`final_answer` tool results are checked as `ToolOutput` only. They are not
+checked again as `Output` after entering the transcript. Guard backend errors
+fail closed rather than becoming warnings. ToolInput transforms are rejected
+because an approval receipt is bound to the unchanged effective arguments.
+Text-answer `Token` and `FinalAnswer` events carry the same guarded content;
+partial content from a failed provider is also checked before `Token` delivery.
+When a GuardManager is configured, streaming tool chunks and progress are
+suppressed. The caller receives the guarded and budgeted terminal `ToolResult`;
+without a GuardManager, live stdout/stderr streaming is unchanged. For failed tools
+with no output, the guarded diagnostic is used consistently in the returned
+error, trace, audit, callback, and transcript.
+Structured data, non-empty metadata, content-bearing result kind, and MIME type
+are checked separately as canonical text. `Pass` retains a checked structure;
+if any field is blocked or transformed, parallel renderable fields that cannot
+be reconstructed from guarded text are retired. Image URLs/model rich content
+and pre-guard artifact references are suppressed whenever a Guard is configured,
+even on `Pass`, because text checks cannot prove their pixels or unseen bytes
+safe. Typed failure and confirmed effects remain. User-installed PostToolUse
+hooks run before this presentation guard and may see the raw result; they are
+not a sanitized consumer boundary.
+The free-text `ToolFailure.postcondition` and `idempotency_key` are also checked.
+A changed key is removed, never replaced with a fabricated retry identity.
+If a post-use hook blocks with a reason containing raw output, the guarded
+`ToolResult.error` is the reason returned to the caller and skill telemetry.
+Confirmed typed effect paths remain visible to caller and Trace under ADR 0074;
+Guard does not generically redact those recovery facts.
 
 ---
 
@@ -67,14 +103,17 @@ pub trait Guard: Send + Sync {
 }
 
 pub enum GuardDirection {
-    Input,   // User → Agent
-    Output,  // Agent → User
+    Input,      // User -> Agent
+    Output,     // Model text final answer -> User
+    ToolInput,  // Effective tool arguments -> Tool
+    ToolOutput, // Tool result -> Agent
 }
 
 pub enum GuardResult {
     Pass,
     Block { reason: String },
-    Modify { content: String },
+    Warn { reasons: Vec<String> },
+    Transform { content: String, reasons: Vec<String> },
 }
 ```
 
@@ -88,15 +127,10 @@ Rule-based guards use patterns for instant filtering:
 use echo_agent::guard::rule::{RuleGuard, RuleGuardBuilder};
 
 let guard = RuleGuardBuilder::new("no-pii")
-    // Block regex patterns
-    .block_regex(r"\b\d{3}-\d{2}-\d{4}\b")      // SSN
-    .block_regex(r"\b[A-Z]{2}\d{6}\b")          // Passport
-    .block_regex(r"\b[\w.-]+@[\w.-]+\.\w+\b")   // Email
-    // Allow patterns (whitelist)
-    .allow_regex(r"\b\d{4}\b")                  // Allow 4-digit numbers
-    // Custom rules
-    .block_if(|content| content.contains("password"))
-    .build()?;
+    .blocked_pattern(r"\b\d{3}-\d{2}-\d{4}\b")
+    .blocked_keyword("password")
+    .direction(GuardDirection::Output)
+    .build();
 
 // Test
 let result = guard.check("My SSN is 123-45-6789", GuardDirection::Output).await?;
@@ -112,14 +146,11 @@ LLM-based guards provide semantic understanding:
 ```rust
 use echo_agent::guard::llm::LlmGuard;
 
-let guard = LlmGuard::new("qwen3-max")
-    .with_prompt(|content, direction| format!(
-        "Analyze the following content for any issues:\n\n{}\n\n\
-         Check for: harmful content, PII, sensitive information.\
-         Return 'PASS' or 'BLOCK: reason'",
-        content
-    ))
-    .with_max_tokens(100);
+let guard = LlmGuard::with_prompt(
+    "review",
+    review_llm_client,
+    "Review the content and return JSON: {\"safe\": true} or {\"safe\": false, \"reason\": \"...\"}",
+).with_directions(vec![GuardDirection::Output]);
 
 // The LLM evaluates content semantically
 let result = guard.check("...", GuardDirection::Output).await?;
@@ -134,30 +165,30 @@ use echo_agent::guard::{GuardManager, GuardDirection};
 
 let mut manager = GuardManager::new();
 
-// Add input guards
-manager.add_input_guard(Box::new(injection_guard));
-manager.add_input_guard(Box::new(policy_guard));
-
-// Add output guards
-manager.add_output_guard(Box::new(pii_guard));
-manager.add_output_guard(Box::new(llm_guard));
+// Guards run in registration order and select their own directions.
+manager.add(Arc::new(injection_guard));
+manager.add(Arc::new(policy_guard));
+manager.add(Arc::new(pii_guard));
+manager.add(Arc::new(llm_guard));
 
 // Check input
-match manager.check_input("User's query").await? {
+match manager.check_all("User's query", GuardDirection::Input).await? {
     GuardResult::Pass => { /* proceed */ }
     GuardResult::Block { reason } => { 
         return Err(Error::Blocked(reason));
     }
-    GuardResult::Modify { content } => {
+    GuardResult::Transform { content, .. } => {
         // Use modified content
     }
+    GuardResult::Warn { .. } => { /* proceed with warning */ }
 }
 
 // Check output
-match manager.check_output("Agent's response").await? {
+match manager.check_all("Agent's response", GuardDirection::Output).await? {
     GuardResult::Pass => { /* return to user */ }
     GuardResult::Block { reason } => { /* redact or error */ }
-    GuardResult::Modify { content } => { /* return modified */ }
+    GuardResult::Transform { content, .. } => { /* return modified */ }
+    GuardResult::Warn { .. } => { /* return original */ }
 }
 ```
 
@@ -174,9 +205,9 @@ let mut agent = ReactAgentBuilder::new()
     .build()?;
 
 // Create and attach guard manager
-let guard_manager = GuardManager::new()
-    .add_input_guard(Box::new(injection_guard))
-    .add_output_guard(Box::new(pii_guard));
+let mut guard_manager = GuardManager::new();
+guard_manager.add(Arc::new(injection_guard));
+guard_manager.add(Arc::new(pii_guard));
 
 agent.set_guard_manager(guard_manager);
 
@@ -194,9 +225,9 @@ use echo_agent::{guard, prelude::*};
 
 #[guard(name = "length-limit")]
 async fn check_length(content: &str, direction: GuardDirection) -> Result<GuardResult> {
-    if content.len() > 10000 {
-        Ok(GuardResult::Block { 
-            reason: format!("Content too long: {} chars", content.len()) 
+    if content.chars().count() > 10000 {
+        Ok(GuardResult::Block {
+            reason: format!("Content too long: {} chars", content.chars().count())
         })
     } else {
         Ok(GuardResult::Pass)
@@ -204,7 +235,7 @@ async fn check_length(content: &str, direction: GuardDirection) -> Result<GuardR
 }
 
 // Use the generated LengthLimitGuard
-manager.add_output_guard(Box::new(LengthLimitGuard));
+manager.add(Arc::new(LengthLimitGuard));
 ```
 
 ---
@@ -214,9 +245,9 @@ manager.add_output_guard(Box::new(LengthLimitGuard));
 Multiple guards are evaluated in sequence:
 
 ```rust
-manager.add_input_guard(Box::new(guard1));  // First
-manager.add_input_guard(Box::new(guard2));  // Second
-manager.add_input_guard(Box::new(guard3));  // Third
+manager.add(Arc::new(guard1));  // First
+manager.add(Arc::new(guard2));  // Second
+manager.add(Arc::new(guard3));  // Third
 
 // Execution:
 // 1. guard1.check() → if Block, stop and return
@@ -225,7 +256,8 @@ manager.add_input_guard(Box::new(guard3));  // Third
 // 4. All passed → proceed
 ```
 
-First guard to return `Block` stops the chain.
+First guard to return `Block` stops the chain. A guard error propagates to the
+caller for fail-closed handling; it never becomes `Warn`.
 
 ---
 
@@ -235,8 +267,8 @@ First guard to return `Block` stops the chain.
 |-------|------|---------|
 | `RuleGuard` | Rule | Pattern-based blocking |
 | `LlmGuard` | LLM | Semantic content analysis |
-| `LengthGuard` | Rule | Block oversized content |
-| `SecretRedactor` | Rule | Redact secrets with *** |
+| `RuleGuard::max_length` | Rule | Block oversized content |
+| `ContentGuard` | Content | Detect, reject, or redact sensitive content |
 
 ---
 
@@ -246,7 +278,7 @@ First guard to return `Block` stops the chain.
 2. **Be specific with patterns**: Avoid overly broad regex
 3. **Log blocked content**: For auditing and tuning
 4. **Test thoroughly**: Ensure legitimate content isn't blocked
-5. **Consider Modify vs Block**: Sometimes redaction is better than blocking
+5. **Consider Transform vs Block**: Redact content only at boundaries that permit transformation
 
 ---
 

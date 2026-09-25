@@ -248,7 +248,7 @@ pub(crate) async fn run_think(
                     Some(&error.to_string()),
                 )
                 .await;
-                emit_partial_content_before_failure(tx, &content_buffer).await;
+                emit_partial_content_before_failure(snap, tx, &content_buffer).await;
                 let _ = tx
                     .send(Ok(AgentEvent::from_error("react_loop", &error)))
                     .await;
@@ -301,7 +301,7 @@ pub(crate) async fn run_think(
                 Some(&error.to_string()),
             )
             .await;
-            emit_partial_content_before_failure(tx, &content_buffer).await;
+            emit_partial_content_before_failure(snap, tx, &content_buffer).await;
             let _ = tx.send(Err(error)).await;
             return Ok(ThinkOutcome::TerminalSettled {
                 outcome: crate::agent::AgentSteerTurnOutcome::Failed,
@@ -321,7 +321,7 @@ pub(crate) async fn run_think(
                 Some(&error.to_string()),
             )
             .await;
-            emit_partial_content_before_failure(tx, &content_buffer).await;
+            emit_partial_content_before_failure(snap, tx, &content_buffer).await;
             let _ = tx.send(Err(error)).await;
             return Ok(ThinkOutcome::TerminalSettled {
                 outcome: crate::agent::AgentSteerTurnOutcome::Failed,
@@ -453,29 +453,21 @@ pub(crate) async fn run_think(
         );
     }
 
-    if !content_buffer.is_empty() {
-        if !tool_call_map.is_empty() {
-            yield_event_or!(tx, AgentEvent::ThinkStart, ThinkOutcome::Abandoned);
-            yield_event_or!(
-                tx,
-                AgentEvent::Token(content_buffer.clone()),
-                ThinkOutcome::Abandoned
-            );
-            yield_event_or!(
-                tx,
-                AgentEvent::ThinkEnd {
-                    prompt_tokens: pt,
-                    completion_tokens: ct,
-                },
-                ThinkOutcome::Abandoned
-            );
-        } else {
-            yield_event_or!(
-                tx,
-                AgentEvent::Token(content_buffer.clone()),
-                ThinkOutcome::Abandoned
-            );
-        }
+    if !content_buffer.is_empty() && !tool_call_map.is_empty() {
+        yield_event_or!(tx, AgentEvent::ThinkStart, ThinkOutcome::Abandoned);
+        yield_event_or!(
+            tx,
+            AgentEvent::Token(content_buffer.clone()),
+            ThinkOutcome::Abandoned
+        );
+        yield_event_or!(
+            tx,
+            AgentEvent::ThinkEnd {
+                prompt_tokens: pt,
+                completion_tokens: ct,
+            },
+            ThinkOutcome::Abandoned
+        );
     }
 
     Ok(ThinkOutcome::Continue(ThinkOutput {
@@ -489,9 +481,15 @@ pub(crate) async fn run_think(
     }))
 }
 
-async fn emit_partial_content_before_failure(tx: &mpsc::Sender<Result<AgentEvent>>, content: &str) {
-    if !content.is_empty() {
-        let _ = tx.send(Ok(AgentEvent::Token(content.to_string()))).await;
+async fn emit_partial_content_before_failure(
+    snap: &AgentRunSnapshot,
+    tx: &mpsc::Sender<Result<AgentEvent>>,
+    content: &str,
+) {
+    if !content.is_empty()
+        && let Ok(content) = snap.check_final_answer_guard(content).await
+    {
+        let _ = tx.send(Ok(AgentEvent::Token(content))).await;
     }
 }
 
@@ -718,6 +716,47 @@ fn log_prompt_cache_shape(messages: &[Message], tools: Option<&[ToolDefinition]>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct BlockPartialOutput;
+
+    impl crate::guard::Guard for BlockPartialOutput {
+        fn name(&self) -> &str {
+            "block_partial_output"
+        }
+
+        fn check<'a>(
+            &'a self,
+            _content: &'a str,
+            direction: crate::guard::GuardDirection,
+        ) -> futures::future::BoxFuture<'a, crate::error::Result<crate::guard::GuardResult>>
+        {
+            Box::pin(async move {
+                if direction == crate::guard::GuardDirection::Output {
+                    Ok(crate::guard::GuardResult::Block {
+                        reason: "partial content rejected".to_string(),
+                    })
+                } else {
+                    Ok(crate::guard::GuardResult::Pass)
+                }
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_provider_partial_output_cannot_bypass_output_guard() {
+        let mut agent = crate::agent::ReactAgent::new(crate::agent::AgentConfig::new(
+            "test-model",
+            "guarded",
+            "sys",
+        ));
+        agent.set_guard_manager(echo_core::guard::GuardManager::from_guards(vec![
+            std::sync::Arc::new(BlockPartialOutput),
+        ]));
+        let snapshot = AgentRunSnapshot::from_agent(&agent);
+        let (tx, mut rx) = mpsc::channel::<Result<AgentEvent>>(4);
+        emit_partial_content_before_failure(&snapshot, &tx, "unfiltered partial").await;
+        assert!(rx.try_recv().is_err());
+    }
 
     #[test]
     fn prompt_cache_fingerprint_isolates_stable_system_from_history() {
