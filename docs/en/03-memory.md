@@ -320,9 +320,13 @@ Subagent B    conversation_id = "sub-b-conv-001"    namespace = ["sub_b", "memor
 - The main Agent holds the `Store` / `RuntimeStateStore` objects and can explicitly read any conversation or namespace (for auditing).
 
 This example is not the `MemoryLayerManager` layout. Its warm tier always uses
-`WARM_NAMESPACE = ["agent", "memories"]` within the supplied Store; distinct
-Agents need separate Store instances or a consumer-owned isolation boundary
-when their layered memories must not be shared.
+`WARM_NAMESPACE = ["agent", "memories"]` within the supplied Store. To isolate
+layered memory, give each Agent a distinct Store backing path or partition and
+a distinct manager root for `MEMORY.md` and `evolution/memory-operations.jsonl`;
+keep its ChangeLog path separate too. A consumer-owned partitioning adapter
+must isolate both the Store data and root-derived files. Multiple
+`FileStore::new` handles opened on the same canonical path share one authority;
+different handles or `conversation_id` values alone do not isolate memory.
 
 ---
 

@@ -2,8 +2,9 @@
 schema_version: 1
 id: evidence.evolution-doc-namespace-verification
 kind: evidence
-observed_at: source:6190fcbfc03f3cea056d856080ae4b8aa6ba1d2ad9b433823d4aea784d7487ed
+observed_at: source:e4a6a58ffb69163c72d6334f33b62549ecc6f814665ba5a3786e2770bb282a8e
 source_refs:
+  - echo-state/src/memory/store.rs
   - src/evolution/layer.rs
   - docs/en/25-self-improvement.md
   - docs/zh/25-self-improvement.md
@@ -28,7 +29,9 @@ limitations:
 也写热/暖/冷管理。新 `evolution_memory_docs_match_runtime_namespaces`
 从公开 `WARM_NAMESPACE`/`COLD_NAMESPACE` 常量生成预期表项，并检查
 旧 namespace、默认三层描述、cold 可选性以及通用 Store 示例与
-manager 固定 namespace 的边界。修复后执行
+manager 固定 namespace 的边界。独立复审指出最初文档把不同 Store
+句柄误作独立 authority；追加的 contract 还检查同路径 FileStore、
+hot/journal root、ChangeLog 和 conversation ID 的隔离说明。修复后执行
 `cargo test -p echo-agent-learning --test documentation_contract --locked`：
 15 passed、0 failed；`cargo clippy -p echo-agent-learning --test documentation_contract --locked -- -D warnings` 退出码 0；
 `cargo fmt --all -- --check` 与 `git diff --check` 均退出码 0。

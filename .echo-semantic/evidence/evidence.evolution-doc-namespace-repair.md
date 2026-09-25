@@ -2,8 +2,9 @@
 schema_version: 1
 id: evidence.evolution-doc-namespace-repair
 kind: evidence
-observed_at: source:6190fcbfc03f3cea056d856080ae4b8aa6ba1d2ad9b433823d4aea784d7487ed
+observed_at: source:e4a6a58ffb69163c72d6334f33b62549ecc6f814665ba5a3786e2770bb282a8e
 source_refs:
+  - echo-state/src/memory/store.rs
   - src/evolution/layer.rs
   - src/evolution/recall.rs
   - src/evolution/runtime_integration.rs
@@ -41,7 +42,9 @@ warm/cold 描述为 `memory/topics` 与 `memory/archive` 目录。
 底层 `TypedMemoryStore` 示例明确不能代替 manager 的恢复、审计与激活路径。
 03 页交叉引用同步为热/暖两层，并将通用 Store 的调用方自定义
 namespace 示例与 manager 固定 `WARM_NAMESPACE` 区分；分层记忆隔离
-应由消费者提供各自 Store 或单独的隔离边界。
+必须同时覆盖 Store 底层路径/分区及 manager 的 hot/journal root 与
+ChangeLog 路径。多个 FileStore 句柄指向同一 canonical 路径时共享权威，
+仅换句柄或 conversation ID 不构成隔离。
 
 ## 来源与范围
 

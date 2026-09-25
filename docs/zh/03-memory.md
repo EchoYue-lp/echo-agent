@@ -308,8 +308,12 @@ Subagent B  conversation_id = "sub-b-conv-001"    namespace = ["sub_b", "memorie
 - 主 Agent 持有 `Store` / `RuntimeStateStore` 对象，可显式跨 conversation / namespace 读取（用于审计）
 
 这个例子不是 `MemoryLayerManager` 的布局。其暖层在注入的 Store 内固定使用
-`WARM_NAMESPACE = ["agent", "memories"]`；若不同 Agent 的分层记忆必须隔离，
-复用方需提供各自的 Store 实例或自行建立隔离边界。
+`WARM_NAMESPACE = ["agent", "memories"]`。若不同 Agent 的分层记忆必须隔离，
+需为各 Agent 提供独立的 Store 底层路径或分区，以及独立的 manager root
+（包含 `MEMORY.md` 和 `evolution/memory-operations.jsonl`）；ChangeLog 路径
+也应分开。调用方自建分区 adapter 时，必须同时隔离 Store 数据与 root 下的文件。
+多个 `FileStore::new` 句柄指向相同 canonical 路径时共享同一权威；仅换句柄或
+`conversation_id` 不会隔离记忆。
 
 ---
 

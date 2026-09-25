@@ -549,17 +549,39 @@ fn evolution_memory_docs_match_runtime_namespaces() -> Result<(), Box<dyn std::e
         }
     }
     let summaries = [
-        ("docs/en/03-memory.md", "hot/warm/cold tiered management"),
-        ("docs/zh/03-memory.md", "热/暖/冷三层自动管理"),
+        (
+            "docs/en/03-memory.md",
+            "## Context Isolation",
+            "hot/warm/cold tiered management",
+            "same canonical path",
+        ),
+        (
+            "docs/zh/03-memory.md",
+            "## 上下文隔离",
+            "热/暖/冷三层自动管理",
+            "相同 canonical 路径",
+        ),
     ];
-    for (path, stale) in summaries {
+    for (path, heading, stale, shared_path) in summaries {
         let content = std::fs::read_to_string(workspace_root.join(path))?;
         if content.contains(stale) {
             violations.push(format!("{path} still promises {stale}"));
         }
-        if !content.contains("WARM_NAMESPACE") {
+        let isolation = markdown_section(&content, heading)?;
+        if ![
+            "WARM_NAMESPACE",
+            "FileStore::new",
+            shared_path,
+            "MEMORY.md",
+            "memory-operations.jsonl",
+            "ChangeLog",
+            "conversation_id",
+        ]
+        .iter()
+        .all(|marker| isolation.contains(marker))
+        {
             violations.push(format!(
-                "{path} must distinguish generic Store namespaces from layered memory"
+                "{path} must distinguish Store backing paths and manager roots from handles and conversation IDs"
             ));
         }
     }
