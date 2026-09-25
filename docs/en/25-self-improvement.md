@@ -17,7 +17,7 @@ Run the Agent
    ├─ explicit/app-scheduled ─ BackgroundReviewer ─ ReviewCandidate (proposal)
    └─ accepted/explicit memory evidence ──────────────────────────┤
                                                                   ▼
-                                          MemoryLayerManager (hot/warm/cold tiers)
+                                          MemoryLayerManager (hot/warm tiers)
                                                                   │
                   ┌──────────────┬───────────────────┬────────────┴──────────┬──────────────┐
                   ▼              ▼                   ▼                       ▼              ▼
@@ -63,7 +63,7 @@ Layered memory mutations use a durable recovery operation before writing Store o
 | **PromptGenerator** | LLM-driven prompt improvement | `improve/` |
 | **TrajectorySaver** | Convert runs into ShareGPT fine-tune data | `improve/` |
 | **TypedMemoryStore** | Typed memory read/write with metadata | `echo-state` |
-| **MemoryLayerManager** | Hot/warm/cold tiered memory management | `evolution/` |
+| **MemoryLayerManager** | Hot/warm memory management; Archived remains in warm | `evolution/` |
 | **ChangeLog** | Append-only queryable business audit; `MemoryLayerManager` owns generation-fenced later memory rollback | `evolution/` |
 | **TriggerDetector** | Online conversation signals → new memory | `evolution/` |
 | **MemoryReviewer** | Staleness scoring, conflict detection, merge, archival (GC) | `evolution/` |
@@ -174,7 +174,13 @@ This is the core self-evolution capability added in `v0.2.x`, letting the Agent 
 
 Every memory carries structured metadata `MemoryMeta`: type, confidence, stability, risk, status, source, topic. Backward compatible — legacy untyped entries get default metadata on read.
 
+The example below uses the low-level typed Store API. Entries intended for
+runtime recall must instead be written through `MemoryLayerManager` and
+reviewed before activation; a direct Store write does not perform its durable
+operation, audit, or approval workflow.
+
 ```rust
+use echo_agent::evolution::layer::WARM_NAMESPACE;
 use echo_agent::memory::typed_store::{TypedMemoryStore, MemoryFilter};
 use echo_agent::prelude::{MemoryMeta, MemorySource, MemoryType, MemoryStatus};
 
@@ -185,14 +191,14 @@ let meta = MemoryMeta::new(MemoryType::ProjectFact, MemorySource::UserCorrection
     .with_confidence(0.9)
     .with_stability(0.8);
 store
-    .put_typed(&["agent", "typed_memories"], "build:java8", "Project uses Java 8", meta)
+    .put_typed(WARM_NAMESPACE, "build:java8", "Project uses Java 8", meta)
     .await?;
 
 // Filtered retrieval
 let filter = MemoryFilter::new()
     .with_type(MemoryType::ProjectFact)
     .with_min_confidence(0.7);
-let entries = store.list_typed(&["agent", "typed_memories"], &filter).await?;
+let entries = store.list_typed(WARM_NAMESPACE, &filter).await?;
 ```
 
 #### MemoryType categories
@@ -215,7 +221,7 @@ Memory is tiered by value; the hot tier is always in context, warm is retrieved 
 
 - **Hot** (`.echo-agent/MEMORY.md`): highest value, YAML frontmatter + markdown body, ~2000 token cap, editable by both humans and the Agent.
 - **Warm** (Store KV `["agent","memories"]`): unified typed-memory store; organized by topic, loaded on demand. Memories can be `Active` or `Archived` (staleness is a recall-decay weight, not a layer move — Archived stays recallable with decay).
-- **Cold** (optional; Store KV `["agent","cold_memories"]`): retained as pub API for consumers aligned with Letta/MemGPT archival memory (recall-on-demand, not proactively loaded). The default product path collapses cold into `Warm`+`Archived`; consumers who need a distinct cold tier can opt in via `COLD_NAMESPACE`.
+- **Separate cold storage** (optional API constant `COLD_NAMESPACE = ["agent", "cold_memories"]`): a consumer may implement its own archival tier. `MemoryLayerManager` does not read, write, or migrate that namespace; the constant and `MemoryLayer::Cold` do not enable a third tier in the manager.
 
 ```rust
 use echo_agent::evolution::{MemoryLayerManager, JsonlChangeLog, MemoryMeta, MemorySource, MemoryType};
@@ -504,33 +510,27 @@ There are three automatic memory paths with strictly divided responsibilities to
 
 ---
 
-## File Layout
+## Layered Memory Files
 
 ```
 .echo-agent/
-  MEMORY.md                        # hot tier (human-readable, editable by Agent and humans)
-  AGENTS.md                        # auto-promoted rules
-  project.md / local.md            # existing static prompt files
-  memory/
-    topics/*.md                    # warm-tier topic files
-    archive/                       # cold-tier archive
+  MEMORY.md                        # hot tier (human-readable)
   evolution/
-    change-log.jsonl               # change audit log
-    skill_candidates/              # candidate proposals
-    patches/                       # skill patches
-  skills/
-    _drafts/<name>/SKILL.md        # draft skills
-  curator_state.json               # Curator state
+    memory-operations.jsonl        # recovery journal owned by MemoryLayerManager
+    change-log.jsonl               # default business audit path for MemoryRuntimeIntegrationBuilder
 ```
 
-Framework consumers may choose another path. embedding application injects workspace-scoped files under `<application-data>/evolution/`, including `evidence-candidates.jsonl` and `curator-state.json`.
+The warm tier is Store KV under `WARM_NAMESPACE`, not a `memory/topics` or
+`memory/archive` directory. A consumer supplies the Store implementation and
+root path; the change-log path is configurable. Other product files and skill
+artifacts have separate ownership.
 
 ## Store Namespaces
 
 | Namespace | Purpose |
 |-----------|---------|
-| `["agent", "typed_memories"]` | typed memory (warm tier) |
-| `["agent", "cold_memories"]` | archived memory (cold tier) |
+| `["agent", "memories"]` | `WARM_NAMESPACE`: unified typed warm tier, including `MemoryStatus::Archived` |
+| `["agent", "cold_memories"]` | Optional `COLD_NAMESPACE` constant for a consumer-owned separate tier; not read or written by `MemoryLayerManager` |
 | `["agent", "skill_candidates"]` | skill candidate proposals |
 | `["agent", "skill_telemetry"]` | skill telemetry |
 | `["agent", "profile"]` | Agent profile |

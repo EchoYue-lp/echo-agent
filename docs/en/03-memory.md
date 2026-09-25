@@ -267,7 +267,7 @@ and [ADR 0070](../adr/0070-memory-provenance-and-recall-authority.md).
 
 ---
 
-## Three Layers in Practice
+## Memory Across Conversations
 
 ```
 Day 1:
@@ -306,7 +306,8 @@ let store = InMemoryStore::new(); // data lost on process exit
 
 ## Context Isolation
 
-Each Agent has an independent Store namespace and `conversation_id`:
+The base Store API lets a consumer assign distinct namespaces to Agents;
+`conversation_id` independently scopes runtime and transcript state:
 
 ```
 Main Agent    conversation_id = "main-conv-001"     namespace = ["main_agent", "memories"]
@@ -314,9 +315,14 @@ Subagent A    conversation_id = "sub-a-conv-001"    namespace = ["sub_a", "memor
 Subagent B    conversation_id = "sub-b-conv-001"    namespace = ["sub_b", "memories"]
 ```
 
-- Subagent A cannot read Subagent B's memories (different namespace).
+- Subagent A cannot read Subagent B's memories in this consumer-defined layout (different namespace).
 - Subagent A cannot see the main Agent's runtime state (different `conversation_id`).
 - The main Agent holds the `Store` / `RuntimeStateStore` objects and can explicitly read any conversation or namespace (for auditing).
+
+This example is not the `MemoryLayerManager` layout. Its warm tier always uses
+`WARM_NAMESPACE = ["agent", "memories"]` within the supplied Store; distinct
+Agents need separate Store instances or a consumer-owned isolation boundary
+when their layered memories must not be shared.
 
 ---
 
@@ -330,5 +336,5 @@ Subagent B    conversation_id = "sub-b-conv-001"    namespace = ["sub_b", "memor
 ## Typed and Layered Memory (Self-Evolution)
 
 This page covers the three underlying Stores (long-term `Store`, runtime `RuntimeStateStore`, conversation `ConversationStore`).
-For **structured memory with metadata** (type, confidence, source) and **hot/warm/cold tiered management, write triggers, review/GC, skill auto-creation** and other runtime evolution capabilities,
+For **structured memory with metadata** (type, confidence, source) and **hot/warm tiered management with Archived entries in warm, write triggers, review/GC, skill auto-creation** and other runtime evolution capabilities,
 see [25 - Self-Evolution](./25-self-improvement.md) (the `evolution` module).
