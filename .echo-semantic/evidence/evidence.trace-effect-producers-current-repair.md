@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.trace-effect-producers-current-repair
 kind: evidence
-observed_at: 733d352fc719f922b21bab1cd46206139564367f
+observed_at: source:8aeadcf34eb574d68a0fdd14a61337195d71c9a6b8cc6cc2d5bc387b168de3fe
 source_refs:
   - echo-core/src/tools/mod.rs
   - echo-tools/src/files/files.rs
@@ -19,18 +19,26 @@ source_refs:
   - src/agent/subagent/events.rs
   - src/tools/builtin/agent_dispatch.rs
   - src/agent/react/run/pipeline.rs
+  - src/agent/react/run/react_loop.rs
+  - src/agent/react/run/phases/compact.rs
+  - src/agent/react/run/phases/think.rs
+  - src/agent/react/capabilities.rs
+  - src/agent/react/mod.rs
   - src/agent/snapshot.rs
   - src/agent/react/run/phases/tools.rs
   - src/trace/mod.rs
   - docs/adr/0059-observed-tool-effects-and-background-dispatch.md
+  - docs/en/27-tracing.md
+  - docs/zh/27-tracing.md
+  - src/trace/mod.rs
 supports: [finding.trace-effect-event-producers, behavior.effect-permission-execution, behavior.observation-persistence]
 limitations:
-  - Proposed producer paths remain uncommitted and current full validation/review is pending
+  - Full gate and cross-repository SDK/CLI consumer gates remain separate delivery boundaries
   - Optional failure_count stays unknown when the test runner has no structured count
-  - Background Subagent observation is in-process; process abort still needs an external durable owner
+  - Background Subagent observation is in-process; process abort, admission, generation fencing, shutdown drain, and evidence settlement remain embedding-application responsibilities for Issues #38/#61
 ---
 
-# Issue 104 typed event producer repair candidate
+# Issue 104 typed event producer contract
 
 ## 支持的结论
 
@@ -44,6 +52,11 @@ sink 绑定父 trace 与 call_id，启动 ack 不冒充 Subagent 完成。
 
 `SubagentExecutor` 根据真实 outcome 区分 DispatchCompleted/DispatchFailed/DispatchCancelled，
 返回非终态 Running 被归一为失败，避免用 launch 或非终态回填成功。
+
+`RunEvent` 当前有 17 个变体。`src/trace/mod.rs` 中的 contract test 对 17 个 discriminator
+执行 exhaustive match 和 JSON 序列化检查，producer 矩阵同步记录在中英文 tracing 文档和 ADR
+0059。旧的 11-event 文档和泛化 producer 索引已删除。
+Generic shell 不从命令名、路径、输出或 exit code 推断 `FileEdit`/`TestRun`。
 
 外层 timeout/cancel 仅为未结算调用补 synthetic failed terminal，已完成调用保留真实结果；
 trace effect 仍是诊断投影，不替代实际文件、测试或 Subagent authority。ADR 0059
@@ -64,4 +77,5 @@ FileRead/FileEdit 事实，不再从 ToolCall 名称或参数推断 effect。
 
 ## 已知缺口
 
-最终源码验证、SDK 映射与后台进程 abort 后的外部恢复均不由本候选证明。
+最终源码摘要验证、SDK 映射与后台进程 abort 后的外部恢复均不由本候选证明；后者属于
+embedding application 的 #38/#61 residual。

@@ -123,6 +123,26 @@ impl Run {
         self.events.push(event);
     }
 
+    /// Apply the content-retention contract to a run before custom storage.
+    ///
+    /// This only sanitizes user/model/tool content: `run_id`, correlation
+    /// identities, tool names, paths, enum values, counters, and timestamps
+    /// remain typed diagnostic facts so a stored run can still be addressed
+    /// and replayed. Custom [`RunStore`] implementations that accept direct
+    /// caller writes should invoke this method before persisting a run.
+    pub fn apply_retention(&mut self, retention: &ContentRetentionPolicy) {
+        self.input = retention.sanitize_text(&self.input);
+        if let Some(output) = self.final_output.as_mut() {
+            *output = retention.sanitize_text(output);
+        }
+        if let Some(error) = self.error.as_mut() {
+            *error = retention.sanitize_text(error);
+        }
+        for event in &mut self.events {
+            event.apply_retention(retention);
+        }
+    }
+
     fn summary(&self) -> RunSummary {
         RunSummary {
             run_id: self.run_id.clone(),
@@ -456,6 +476,9 @@ impl RunEvent {
         event
     }
 
+    /// Sanitize content-bearing fields before handing this event to a custom
+    /// trace backend. Typed event identities and effect metadata are kept
+    /// unchanged for correlation and diagnosis.
     pub fn apply_retention(&mut self, retention: &ContentRetentionPolicy) {
         match self {
             Self::BudgetDecision { reason, .. } => {
@@ -516,16 +539,7 @@ pub(crate) fn skipped_tool_call_ids(events: &[RunEvent]) -> std::collections::Ha
 }
 
 pub(crate) fn apply_run_retention(run: &mut Run, retention: &ContentRetentionPolicy) {
-    run.input = retention.sanitize_text(&run.input);
-    if let Some(output) = run.final_output.as_mut() {
-        *output = retention.sanitize_text(output);
-    }
-    if let Some(error) = run.error.as_mut() {
-        *error = retention.sanitize_text(error);
-    }
-    for event in &mut run.events {
-        event.apply_retention(retention);
-    }
+    run.apply_retention(retention);
 }
 
 // ── TokenUsage ───────────────────────────────────────────────────────
@@ -640,6 +654,20 @@ pub struct RunSummary {
 
 /// Persistence backend for execution traces.
 ///
+/// React trace producers apply the default [`ContentRetentionPolicy`] before
+/// invoking custom `save`, `append_event`, and default finalization paths.
+/// Implementations that override a mutation method must preserve that
+/// boundary: sanitize content with [`Run::apply_retention`] and
+/// [`RunEvent::apply_retention`] before storing it, while preserving typed
+/// addressing fields (`run_id`, session/turn/execution IDs, call IDs, names,
+/// paths, counters, and timestamps). Those fields are diagnostic facts, not
+/// secret-content redaction targets; callers must avoid placing credentials in
+/// an identity they expect to remain queryable.
+///
+/// A backend must return an error when a write is only partially accepted or
+/// its durability is unknown. The producer reports that error as a separate
+/// diagnostic-delivery fact and must not infer a different Agent terminal.
+///
 /// Built-in implementations:
 /// - [`InMemoryRunStore`] — in-memory (testing, short-lived sessions)
 /// - [`JsonlRunStore`] — file-based JSONL persistence (production)
@@ -672,8 +700,9 @@ pub trait RunStore: Send + Sync {
     /// The default implementation loads, modifies, and saves. Implementations
     /// that support efficient append (e.g. JSONL) should override this. The
     /// compatibility path applies the default content-retention policy before
-    /// calling a custom backend; backends with a stricter policy must still
-    /// sanitize their own `save` implementation.
+    /// calling a custom backend. Implementations overriding this method must
+    /// retain the same sanitization and missing-run error contract; backends
+    /// with a stricter policy may apply it again.
     async fn append_event(&self, run_id: &str, event: RunEvent) -> Result<()> {
         let mut run = self
             .load(run_id)
@@ -1324,6 +1353,210 @@ mod tests {
     use crate::error::ReactError;
     use std::sync::Mutex as StdMutex;
 
+    #[test]
+    fn run_event_contract_matrix_covers_all_variants() -> Result<()> {
+        // Keep this exhaustive match next to the serialized contract matrix:
+        // adding a RunEvent variant without adding its documented discriminator
+        // and producer evidence must fail this test at compile time.
+        let variant_name = |event: &RunEvent| match event {
+            RunEvent::BudgetDecision { .. } => "budget_decision",
+            RunEvent::LlmCall { .. } => "llm_call",
+            RunEvent::ContextCompression { .. } => "context_compression",
+            RunEvent::ToolCall { .. } => "tool_call",
+            RunEvent::ToolExecutionSkipped { .. } => "tool_execution_skipped",
+            RunEvent::ToolResult { .. } => "tool_result",
+            RunEvent::ToolError { .. } => "tool_error",
+            RunEvent::Error { .. } => "error",
+            RunEvent::Checkpoint { .. } => "checkpoint",
+            RunEvent::CheckpointResumed { .. } => "checkpoint_resumed",
+            RunEvent::TranscriptProjectionSettlement { .. } => "transcript_projection_settlement",
+            RunEvent::PermissionDecision { .. } => "permission_decision",
+            RunEvent::FileRead { .. } => "file_read",
+            RunEvent::FileEdit { .. } => "file_edit",
+            RunEvent::TestRun { .. } => "test_run",
+            RunEvent::PhaseTransition { .. } => "phase_transition",
+            RunEvent::SubagentRun { .. } => "subagent_run",
+        };
+
+        let events = vec![
+            (
+                "budget_decision",
+                RunEvent::BudgetDecision {
+                    decision: "wind_down".to_string(),
+                    reason: "iteration_wind_down".to_string(),
+                    iteration: 1,
+                    reported_model_tokens: 1,
+                    usage_complete: true,
+                },
+            ),
+            (
+                "llm_call",
+                RunEvent::LlmCall {
+                    messages: 1,
+                    prompt_tokens: 1,
+                    completion_tokens: 1,
+                    cached_prompt_tokens: 0,
+                    cache_creation_prompt_tokens: 0,
+                    usage_reported: true,
+                    estimated_context_tokens: 1,
+                    protected_context_tokens: 0,
+                    protected_message_count: 0,
+                    context_limit_tokens: 1,
+                    context_breakdown: LlmContextBreakdown::default(),
+                    cache_fingerprint: echo_core::llm::cache::PromptCacheFingerprint::default(),
+                    duration_ms: 1,
+                },
+            ),
+            (
+                "context_compression",
+                RunEvent::ContextCompression {
+                    source: "test".to_string(),
+                    before_messages: 2,
+                    after_messages: 1,
+                    before_tokens: 2,
+                    after_tokens: 1,
+                    protected_context_tokens: 0,
+                    protected_message_count: 0,
+                },
+            ),
+            (
+                "tool_call",
+                RunEvent::ToolCall {
+                    call_id: "call-1".to_string(),
+                    name: "read_file".to_string(),
+                    args: None,
+                    risk: None,
+                    duration_ms: 1,
+                },
+            ),
+            (
+                "tool_execution_skipped",
+                RunEvent::ToolExecutionSkipped {
+                    call_id: "call-1".to_string(),
+                    name: "read_file".to_string(),
+                    reason: "cancelled".to_string(),
+                },
+            ),
+            (
+                "tool_result",
+                RunEvent::ToolResult {
+                    call_id: "call-1".to_string(),
+                    name: "read_file".to_string(),
+                    success: true,
+                    output_preview: Some("ok".to_string()),
+                    output_truncated: false,
+                    duration_ms: 1,
+                    original_bytes: 2,
+                    returned_bytes: 2,
+                    estimated_tokens: 1,
+                    output_handling: Some("inline".to_string()),
+                    artifact: None,
+                },
+            ),
+            (
+                "tool_error",
+                RunEvent::ToolError {
+                    call_id: "call-1".to_string(),
+                    name: "read_file".to_string(),
+                    message: "failed".to_string(),
+                    failure: None,
+                },
+            ),
+            (
+                "error",
+                RunEvent::Error {
+                    message: "failed".to_string(),
+                },
+            ),
+            (
+                "checkpoint",
+                RunEvent::Checkpoint {
+                    id: "checkpoint-1".to_string(),
+                },
+            ),
+            (
+                "checkpoint_resumed",
+                RunEvent::CheckpointResumed {
+                    conversation_id: "conversation-1".to_string(),
+                    completed_tool_call_ids: vec!["call-1".to_string()],
+                    checkpoint_timestamp: Utc::now(),
+                },
+            ),
+            (
+                "transcript_projection_settlement",
+                RunEvent::TranscriptProjectionSettlement {
+                    settlement: crate::memory::TranscriptProjectionSettlement {
+                        status: crate::memory::TranscriptProjectionSettlementStatus::Settled,
+                        operation_id: Some("operation-1".to_string()),
+                        conversation_id: Some("conversation-1".to_string()),
+                        generation_id: Some("generation-1".to_string()),
+                        attempt: 1,
+                        error_class: None,
+                        detail: None,
+                    },
+                },
+            ),
+            (
+                "permission_decision",
+                RunEvent::PermissionDecision {
+                    tool: "read_file".to_string(),
+                    decision: "allow".to_string(),
+                    reason: "policy".to_string(),
+                },
+            ),
+            (
+                "file_read",
+                RunEvent::FileRead {
+                    tool: "read_file".to_string(),
+                    path: "src/lib.rs".to_string(),
+                },
+            ),
+            (
+                "file_edit",
+                RunEvent::FileEdit {
+                    tool: "write_file".to_string(),
+                    path: "src/lib.rs".to_string(),
+                },
+            ),
+            (
+                "test_run",
+                RunEvent::TestRun {
+                    command: "cargo test".to_string(),
+                    passed: true,
+                    failure_count: Some(0),
+                },
+            ),
+            (
+                "phase_transition",
+                RunEvent::PhaseTransition {
+                    phase: "think".to_string(),
+                    iteration: 1,
+                },
+            ),
+            (
+                "subagent_run",
+                RunEvent::SubagentRun {
+                    call_id: Some("call-2".to_string()),
+                    agent_name: "reviewer".to_string(),
+                    task: "review".to_string(),
+                    outcome: "completed".to_string(),
+                },
+            ),
+        ];
+
+        assert_eq!(events.len(), 17);
+        for (expected, event) in events {
+            assert_eq!(variant_name(&event), expected);
+            let value = serde_json::to_value(&event)?;
+            let actual = value
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| ReactError::Other("RunEvent discriminator missing".to_string()))?;
+            assert_eq!(actual, expected);
+        }
+        Ok(())
+    }
+
     struct MissingRunStore;
 
     #[async_trait::async_trait]
@@ -1411,6 +1644,69 @@ mod tests {
 
         async fn load(&self, _run_id: &str) -> Result<Option<Run>> {
             Ok(None)
+        }
+
+        async fn list_by_session(&self, _session_id: &str) -> Result<Vec<RunSummary>> {
+            Ok(Vec::new())
+        }
+
+        async fn list_all(&self, _limit: usize) -> Result<Vec<RunSummary>> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[derive(Default)]
+    struct PartiallyFailingRunStore {
+        saved: StdMutex<Vec<Run>>,
+    }
+
+    #[async_trait::async_trait]
+    impl RunStore for PartiallyFailingRunStore {
+        async fn save(&self, run: Run) -> Result<()> {
+            self.saved
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .push(run);
+            Err(ReactError::Other(
+                "injected partial trace persistence failure".to_string(),
+            ))
+        }
+
+        async fn load(&self, _run_id: &str) -> Result<Option<Run>> {
+            Ok(None)
+        }
+
+        async fn list_by_session(&self, _session_id: &str) -> Result<Vec<RunSummary>> {
+            Ok(Vec::new())
+        }
+
+        async fn list_all(&self, _limit: usize) -> Result<Vec<RunSummary>> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingRunStore {
+        runs: StdMutex<HashMap<String, Run>>,
+    }
+
+    #[async_trait::async_trait]
+    impl RunStore for RecordingRunStore {
+        async fn save(&self, run: Run) -> Result<()> {
+            self.runs
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .insert(run.run_id.clone(), run);
+            Ok(())
+        }
+
+        async fn load(&self, run_id: &str) -> Result<Option<Run>> {
+            Ok(self
+                .runs
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .get(run_id)
+                .cloned())
         }
 
         async fn list_by_session(&self, _session_id: &str) -> Result<Vec<RunSummary>> {
@@ -1615,6 +1911,76 @@ mod tests {
                 .is_some_and(|id| id.starts_with("run_"))
         );
         assert!(failure.error.contains("injected trace start failure"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn custom_run_store_gets_retained_copy_before_partial_failure() -> Result<()> {
+        let observer = Arc::new(RecordingObserver::default());
+        let store = Arc::new(PartiallyFailingRunStore::default());
+        let mut agent = crate::agent::ReactAgent::new(crate::agent::AgentConfig::new(
+            "model", "agent", "system",
+        ));
+        agent.run_store = Some(store.clone());
+        agent.set_diagnostic_delivery_observer(observer.clone());
+
+        let legacy = agent.capture_legacy_external_context();
+        let run_id = agent
+            .start_legacy_trace_run("password: raw-partial-secret-value", &legacy)
+            .await;
+
+        assert!(run_id.is_none());
+        let saved = store
+            .saved
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .first()
+            .cloned()
+            .ok_or_else(|| ReactError::Other("partial backend did not receive run".into()))?;
+        assert!(!saved.input.contains("raw-partial-secret-value"));
+        assert!(saved.input.contains("[REDACTED]"));
+        assert!(saved.run_id.starts_with("run_"));
+
+        let failures = observer.wait_for_count(1)?;
+        let failure = failures
+            .first()
+            .ok_or_else(|| ReactError::Other("missing partial-write failure".into()))?;
+        assert_eq!(failure.operation, DiagnosticDeliveryOperation::Start);
+        assert!(failure.error.contains("partial trace persistence failure"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn default_custom_finalization_retains_output_and_error() -> Result<()> {
+        let store = RecordingRunStore::default();
+        let mut run = make_run("custom-finalize", "session");
+        run.status = RunStatus::Running;
+        run.finished_at = None;
+        run.final_output = None;
+        store.save(run).await?;
+
+        assert!(
+            store
+                .finalize_run(
+                    "custom-finalize",
+                    RunStatus::Failed,
+                    Some("Bearer abcdefghijklmnopqrstuvwxyz"),
+                    Some("password: raw-finalize-secret"),
+                )
+                .await?
+        );
+        let finalized = store
+            .load("custom-finalize")
+            .await?
+            .ok_or_else(|| ReactError::Other("custom finalized run missing".into()))?;
+        assert_eq!(finalized.status, RunStatus::Failed);
+        assert_eq!(finalized.final_output.as_deref(), Some("[REDACTED]"));
+        assert_eq!(finalized.error.as_deref(), Some("[REDACTED]"));
+        assert!(
+            finalized.events.iter().any(
+                |event| matches!(event, RunEvent::Error { message } if message == "[REDACTED]")
+            )
+        );
         Ok(())
     }
 

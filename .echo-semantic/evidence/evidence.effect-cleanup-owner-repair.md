@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.effect-cleanup-owner-repair
 kind: evidence
-observed_at: source:9c022b1c18ebac8e3b0322adcc36aa003f7712600bee8ba16691e8f469aa1998
+observed_at: source:8aeadcf34eb574d68a0fdd14a61337195d71c9a6b8cc6cc2d5bc387b168de3fe
 source_refs:
   - echo-core/src/tools/artifact.rs
   - echo-core/src/sandbox.rs
@@ -47,7 +47,7 @@ caller；未确认 receipt 只走正常的干净 managed-worktree 移除。marke
 
 源码修复提交 `1f53a12cd2c51290cd02c45acd06e2da5989fbb0`；任务分支已合入
 远端 `main@bd17c73075d6b3cf8e00877fa0fb10d36694ea54`，当前源码为
-`source:9c022b1c18ebac8e3b0322adcc36aa003f7712600bee8ba16691e8f469aa1998`。
+`source:8aeadcf34eb574d68a0fdd14a61337195d71c9a6b8cc6cc2d5bc387b168de3fe`。
 ADR 0072 记录 owner 选择、可重试债务与路径安全点边界。
 
 ## 已知缺口

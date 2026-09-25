@@ -97,42 +97,42 @@ pub struct RunSummary {
 
 ---
 
-## RunEvent — 11 种事件类型
+## RunEvent — 17 种事件类型
 
-`RunEvent` 是一个带标签的联合体，包含 11 个变体，每个捕获特定的执行时刻：
+`RunEvent` 是带有 snake-case `type` 鉴别器的联合体，目前包含 17 个变体。
+`src/trace/mod.rs` 中的枚举是序列化合同；下面的矩阵是权威 producer 映射。
+仅仅因为测试 fixture 可以构造某个变体，并不代表生产路径已经产生该事实。
 
-```rust
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum RunEvent {
-    LlmCall { messages, prompt_tokens, completion_tokens, duration_ms },
-    ToolCall { call_id, name, args, risk, duration_ms },
-    ToolResult { call_id, name, success, output_preview, output_truncated, artifact, duration_ms },
-    ToolError { call_id, name, message },
-    Error { message },
-    Checkpoint { id },
-    PermissionDecision { tool, decision, reason },
-    FileEdit { tool, path },
-    TestRun { command, passed, failure_count },
-    PhaseTransition { phase, iteration },
-    SubagentRun { agent_name, task, outcome },
-}
-```
+### 权威 Producer 矩阵
 
-### 各事件的触发时机
+| 变体 | 权威 producer | 结算规则 |
+|------|---------------|----------|
+| `BudgetDecision` | `src/agent/react/run/stream_channel.rs` | 只记录已发出的 wind-down 或 final-only 预算决策，并非每次运行都会产生。 |
+| `LlmCall` | `src/agent/react/run/phases/think.rs` | provider 返回后追加，记录该调用已知的 usage 与耗时事实。 |
+| `ContextCompression` | `src/agent/react/capabilities.rs`、`src/agent/react/run/phases/compact.rs` | 手动或自动压缩完成后追加。 |
+| `ToolCall` | `src/agent/react/run/pipeline.rs`；`src/agent/snapshot.rs` 中的 synthetic unstarted call | 正常调用在 `ExecuteStage` 入口记录；synthetic call 仅用于关闭未进入该阶段的 invocation。 |
+| `ToolExecutionSkipped` | `src/agent/snapshot.rs` | 与未进入 `ExecuteStage` 的 invocation 的 synthetic terminal 成对出现，不是从工具失败推断出来的。 |
+| `ToolResult` | `src/agent/react/run/pipeline.rs`、`src/agent/snapshot.rs` | 记录真实结果，或为未启动 invocation 记录一次 synthetic failed result。 |
+| `ToolError` | `src/agent/react/run/pipeline.rs`、`src/agent/snapshot.rs` | 记录失败结果或 interrupted synthetic terminal，并保留已知的 typed failure。 |
+| `Error` | `src/trace/mod.rs::apply_run_finalization` | 仅当失败 run 尚无 run-level error event 时，由 run-store finalizer 补写。 |
+| `Checkpoint` | `src/agent/snapshot.rs` | Runtime checkpoint compare-and-save 结算后追加。 |
+| `CheckpointResumed` | `src/agent/react/mod.rs`（由 `src/agent/react/run/stream_channel.rs` 调用） | 执行继续前记录持久化 runtime checkpoint 的 hydration。 |
+| `TranscriptProjectionSettlement` | `src/agent/snapshot.rs` | 记录 typed conversation projection 的结算或 reconciliation 结果。 |
+| `PermissionDecision` | `src/agent/react/run/pipeline.rs`（`PermissionStage` 与 hook 路径） | 记录每次观察到的 hook、protected-path 或 permission 决定；它不是最终授权收据。 |
+| `FileRead` | `src/agent/snapshot.rs::record_tool_effect` | 从确认的 `ToolEffect::FileRead` 投影实际解析路径；读取失败或猜测路径不产生。 |
+| `FileEdit` | `src/agent/snapshot.rs::record_tool_effect` | 变更确认后从 `ToolEffect::FileEdit` 投影；dry-run、提案和泛化成功不产生。 |
+| `TestRun` | `src/agent/snapshot.rs::record_tool_effect`；`src/eval/runner.rs::record_test_run` | 必须是已完成的测试命令 effect 或 evaluator 的显式 criterion；没有结构化计数时 `failure_count` 保持 `None`。 |
+| `PhaseTransition` | `src/agent/react/run/react_loop.rs` | 由 run loop 记录 ReAct 阶段转换。 |
+| `SubagentRun` | `src/agent/snapshot.rs::record_tool_effect`，由 `src/tools/builtin/agent_dispatch.rs` 提供 effect | 记录已结算的 Subagent 结果，包括失败和取消；launch acknowledgement 不是终态。 |
 
-| 事件 | 阶段 | 说明 |
-|------|------|------|
-| `LlmCall` | 思考 | 每次 LLM API 调用后——记录 Token 数和延迟 |
-| `ToolCall` | 执行 | 工具执行前——记录名称、参数（已脱敏）、风险等级 |
-| `ToolResult` | 执行 | 工具结束后——记录成功标志、有界输出预览，以及存在时的类型化完整输出 artifact |
-| `ToolError` | 执行 | 工具失败后——记录错误消息 |
-| `Error` | 任意 | 运行级别错误 |
-| `Checkpoint` | 任意 | 保存检查点时 |
-| `PermissionDecision` | 执行 | 权限策略评估后——"allow"、"deny" 或 "ask" |
-| `FileEdit` | 执行 | 写工具编辑文件后 |
-| `TestRun` | 执行 | 测试命令运行后 |
-| `PhaseTransition` | 循环 | 每个 ReAct 阶段："recall"、"think"、"act"、"finalize" |
-| `SubagentRun` | 调度 | 子 Agent 完成时——"completed"、"failed"、"cancelled" |
+通用 shell 工具不会根据命令名、路径、输出文本或 exit code 推断
+`FileEdit`/`TestRun`。只有工具自己确认的 `ToolEffect`，或 evaluator 明确完成的命令边界，
+才能产生这些事实，避免 trace projection 变成第二套副作用权威。
+
+后台 dispatch 也遵循同一边界：launch acknowledgement 不携带 `SubagentRun`；invocation-scoped
+effect sink 在之后记录且只记录一个终态。Detached background owner 的持久 admission、代次
+隔离、shutdown 取消以及 evidence settlement 仍由 embedding application 负责（对应 Issue
+#38 与 #61 的 framework/consumer residual），详见 [ADR 0059](../adr/0059-observed-tool-effects-and-background-dispatch.md)。
 
 ### 密钥脱敏
 
@@ -167,6 +167,23 @@ pub trait RunStore: Send + Sync {
 允许 event append 与 finalization 并发的 backend 必须在同一个 mutation authority
 下覆盖这两个方法。run 不存在时 `finalize_run` 返回 `false`；内置 store 会保留晚到
 event，并以第一个 terminal result 为准。
+
+### 自定义 backend 的 retention 合同
+
+React producer 在调用自定义 `save`、`append_event` 前会应用默认的
+`ContentRetentionPolicy`；默认 `finalize_run` 实现会清洗终态输出和错误字段。覆盖
+`save`、`append_event` 或 `finalize_run` 的 backend 必须在接纳持久写入前重复应用相同或
+更严格的策略。`Run::apply_retention` 与 `RunEvent::apply_retention` 是可复用的边界
+helper，独立的终态字符串使用 `ContentRetentionPolicy::sanitize_text`。
+
+Retention 处理 prompt、输出、错误、tool 参数和人类可读原因等用户/模型/tool 内容。
+`run_id`、session/turn/execution ID、call ID、tool 名称、路径、状态、计数器和时间戳等
+typed 寻址与 effect 事实保持不变，以便诊断查询和回放；它们不是 secret 内容存储，调用方
+不得把 credential 放入仍需要寻址的 identity 字段。
+
+自定义 store 和 audit sink 在部分写入或持久性未知时必须返回错误。producer 保留已接纳
+状态的可见性，并通过 diagnostic delivery 报告错误；backend 错误不得改写 Agent 执行终态。
+字段分类与自定义 backend 责任见 [ADR 0074](../adr/0074-trace-audit-retention-contract.md)。
 
 ### 内置实现
 
@@ -272,15 +289,14 @@ observer 没有控制型返回值，也不在 Agent producer 上运行。队列�
 best-effort telemetry，不会被提升为 Trace/Audit 投递权威。失败策略与业界依据见
 [ADR 0053](../adr/0053-trace-audit-persistence-visibility.md)。
 
-### 事件触发位置
+### Producer 源文件索引
 
-| 源文件 | 触发的事件 |
-|--------|-----------|
-| `react_loop.rs` | `LlmCall`、`PhaseTransition`、finalize |
-| `execution.rs` | `PermissionDecision`、`ToolCall`、`ToolError`、`ToolResult`、`FileEdit` |
-| `pipeline.rs` | `ToolCall`、`ToolResult`、`ToolError` |
-| `stream_channel.rs` | `ToolCall`、`ToolError`、`ToolResult` |
-| `approval.rs` | `PermissionDecision` |
+[权威 Producer 矩阵](#权威-producer-矩阵)是事件归属的唯一来源。主要 producer 模块为
+`src/agent/react/run/react_loop.rs`、`src/agent/react/run/phases/think.rs`、
+`src/agent/react/run/phases/compact.rs`、`src/agent/react/run/pipeline.rs`、
+`src/agent/react/run/stream_channel.rs`、`src/agent/snapshot.rs`、
+`src/eval/runner.rs` 和 `src/trace/mod.rs`。旧的泛化源文件索引已废弃；新增或复核
+producer 时应以变体级矩阵为准。
 
 ---
 

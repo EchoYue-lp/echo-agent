@@ -5,7 +5,7 @@ kind: audit
 boundary_ref: boundary.tool-permission-sandbox
 lens: contract_evidence
 freshness: examined
-revision: source:9c022b1c18ebac8e3b0322adcc36aa003f7712600bee8ba16691e8f469aa1998
+revision: source:8aeadcf34eb574d68a0fdd14a61337195d71c9a6b8cc6cc2d5bc387b168de3fe
 finding_refs: [finding.plan-mode-write-surface]
 challenges:
   post-merge-delivery-and-authority:
