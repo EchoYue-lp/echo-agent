@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.trace-audit-retention-current-repair
 kind: evidence
-observed_at: 733d352fc719f922b21bab1cd46206139564367f
+observed_at: source:623cac6a21b2ee853131bb0849f3228afdbfe78ec9c4eec731be622d4322d6b6
 source_refs:
   - echo-core/src/utils/retention.rs
   - src/security.rs
@@ -19,10 +19,10 @@ supports: [finding.trace-audit-secret-boundary, behavior.observation-persistence
 limitations:
   - Content redaction is not a claim that every possible secret format can be recognized
   - Typed identity, paths, hashes and numeric metadata are preserved and must be assessed separately for privacy
-  - Final marker fix has focused tests and independent targeted rereview, but final-digest full gates and cross-repository consumer tests remain pending
+  - Full gate and cross-repository consumer tests remain separate delivery boundaries
 ---
 
-# Issue 103 trace/audit retention repair candidate
+# Issue 103 trace/audit retention repair evidence
 
 ## 支持的结论
 

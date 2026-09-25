@@ -1,6 +1,9 @@
 //! 文件审计日志记录器
 //!
 //! 将审计事件以 JSON-lines 格式写入文件，支持按过滤条件查询。
+//! File ingestion and query re-apply content retention; typed diagnostic
+//! identities remain addressable. Custom backends must preserve the same
+//! content and partial-write error contract.
 
 use echo_core::audit::{AuditEvent, AuditFilter, AuditLogger};
 use echo_core::error::Result;

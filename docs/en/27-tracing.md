@@ -97,42 +97,47 @@ pub struct RunSummary {
 
 ---
 
-## RunEvent — 11 Event Types
+## RunEvent — 17 Event Types
 
-`RunEvent` is a tagged union with 11 variants, each capturing a specific execution moment:
+`RunEvent` is a tagged union with 17 variants and a snake-case `type`
+discriminator. The enum in `src/trace/mod.rs` is the serialization contract;
+the matrix below is the authoritative producer map. A variant is not evidence
+merely because a caller can construct it in a fixture.
 
-```rust
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum RunEvent {
-    LlmCall { messages, prompt_tokens, completion_tokens, duration_ms },
-    ToolCall { call_id, name, args, risk, duration_ms },
-    ToolResult { call_id, name, success, output_preview, output_truncated, artifact, duration_ms },
-    ToolError { call_id, name, message },
-    Error { message },
-    Checkpoint { id },
-    PermissionDecision { tool, decision, reason },
-    FileEdit { tool, path },
-    TestRun { command, passed, failure_count },
-    PhaseTransition { phase, iteration },
-    SubagentRun { agent_name, task, outcome },
-}
-```
+### Authoritative Producer Matrix
 
-### When Each Event Is Emitted
+| Variant | Authoritative producer | Settlement rule |
+|---------|------------------------|------------------|
+| `BudgetDecision` | `src/agent/react/run/stream_channel.rs` | Records an emitted wind-down or final-only budget decision; it is not emitted for every run. |
+| `LlmCall` | `src/agent/react/run/phases/think.rs` | Appended after the provider response, including the usage and timing facts known for that call. |
+| `ContextCompression` | `src/agent/react/capabilities.rs`, `src/agent/react/run/phases/compact.rs` | Appended after manual or automatic compression completes. |
+| `ToolCall` | `src/agent/react/run/pipeline.rs`; synthetic unstarted calls in `src/agent/snapshot.rs` | Normal calls are recorded at `ExecuteStage` entry. A synthetic call closes an invocation that never entered that stage. |
+| `ToolExecutionSkipped` | `src/agent/snapshot.rs` | Paired with a synthetic terminal for an invocation that never entered `ExecuteStage`; it is not a tool failure inference. |
+| `ToolResult` | `src/agent/react/run/pipeline.rs`, `src/agent/snapshot.rs` | Records the actual result, or the one synthetic failed result for an unstarted invocation. |
+| `ToolError` | `src/agent/react/run/pipeline.rs`, `src/agent/snapshot.rs` | Records a failed result or an interrupted synthetic terminal, preserving the typed failure when known. |
+| `Error` | `src/trace/mod.rs::apply_run_finalization` | The run-store finalizer adds it only when a failed run has no existing run-level error event. |
+| `Checkpoint` | `src/agent/snapshot.rs` | Appended after the runtime checkpoint compare-and-save settles. |
+| `CheckpointResumed` | `src/agent/react/mod.rs` (called by `src/agent/react/run/stream_channel.rs`) | Records hydration of a persisted runtime checkpoint before execution continues. |
+| `TranscriptProjectionSettlement` | `src/agent/snapshot.rs` | Records the typed conversation projection settlement or reconciliation result. |
+| `PermissionDecision` | `src/agent/react/run/pipeline.rs` (`PermissionStage` and hook paths) | Records each observed hook, protected-path, or permission decision; it is not a final authorization receipt. |
+| `FileRead` | `src/agent/snapshot.rs::record_tool_effect` | Projects a confirmed `ToolEffect::FileRead` with the resolved path. Failed or guessed reads emit nothing. |
+| `FileEdit` | `src/agent/snapshot.rs::record_tool_effect` | Projects a confirmed `ToolEffect::FileEdit` after mutation. Dry runs, proposals, and generic success emit nothing. |
+| `TestRun` | `src/agent/snapshot.rs::record_tool_effect`; `src/eval/runner.rs::record_test_run` | Requires a completed test-command effect or evaluator criterion. `failure_count` stays `None` when no structured count exists. |
+| `PhaseTransition` | `src/agent/react/run/react_loop.rs` | Records the ReAct phase transition emitted by the run loop. |
+| `SubagentRun` | `src/agent/snapshot.rs::record_tool_effect`, fed by `src/tools/builtin/agent_dispatch.rs` | Records the settled Subagent outcome, including failure and cancellation; a launch acknowledgement is not terminal. |
 
-| Event | Phase | Description |
-|-------|-------|-------------|
-| `LlmCall` | Think | After each LLM API call — records token counts and latency |
-| `ToolCall` | Act | Before tool execution — records name, args (secrets redacted), risk level |
-| `ToolResult` | Act | After tool completion — records success, bounded preview, and the typed complete-output artifact when present |
-| `ToolError` | Act | After tool fails — records error message |
-| `Error` | Any | Run-level errors |
-| `Checkpoint` | Any | When a checkpoint is saved |
-| `PermissionDecision` | Act | After permission policy evaluation — "allow", "deny", or "ask" |
-| `FileEdit` | Act | After a write tool edits a file |
-| `TestRun` | Act | After a test command runs |
-| `PhaseTransition` | Loop | At each ReAct phase: "recall", "think", "act", "finalize" |
-| `SubagentRun` | Dispatch | When a subagent completes — "completed", "failed", "cancelled" |
+The generic shell tool does not infer `FileEdit` or `TestRun` from a command
+name, path, output text, or exit code. Only a tool-owned, confirmed
+`ToolEffect` or the evaluator's explicit completed-command boundary can create
+those facts. This keeps trace projections from becoming a second side-effect
+authority.
+
+Background dispatch has the same boundary: the launch acknowledgement carries
+no `SubagentRun`; an invocation-scoped effect sink records exactly one terminal
+outcome later. Durable admission, generation fencing, shutdown cancellation and
+evidence settlement for a detached background owner remain the embedding
+application's responsibility (the residual framework/consumer boundary tracked
+by Issues #38 and #61), as described in [ADR 0059](../adr/0059-observed-tool-effects-and-background-dispatch.md).
 
 ### Secret Redaction
 
@@ -168,6 +173,30 @@ Backends that allow concurrent append and finalization override both mutation
 methods under one authority. `finalize_run` returns `false` when the run does
 not exist; the built-in stores retain late events and preserve the first
 terminal result.
+
+### Retention contract for custom backends
+
+The React producer applies the default `ContentRetentionPolicy` before calling
+custom `save` and `append_event` methods; the default `finalize_run`
+implementation sanitizes terminal output and error fields. A backend that
+overrides `save`, `append_event`, or `finalize_run` must apply the same policy
+(or a stricter one) before accepting a durable write. `Run::apply_retention`
+and `RunEvent::apply_retention` are the reusable boundary helpers, while
+`ContentRetentionPolicy::sanitize_text` covers standalone finalization strings.
+
+Retention targets user/model/tool content such as prompts, outputs, errors,
+tool arguments, and human-readable reasons. Typed addressing and effect facts
+such as `run_id`, session/turn/execution IDs, call IDs, tool names, paths,
+status values, counters, and timestamps remain unchanged so a diagnostic can
+be queried and replayed. They are not secret-content storage; callers should
+never place credentials in an identity they expect to remain addressable.
+
+Custom stores and audit sinks must return an error for partial writes or
+unknown durability. The producer keeps the accepted state observable and
+reports the error through diagnostic delivery; a backend error must not rewrite
+the Agent execution terminal.
+See [ADR 0074](../adr/0074-trace-audit-retention-contract.md) for the field
+classification and custom-backend ownership decision.
 
 ### Built-in Implementations
 
@@ -280,15 +309,18 @@ and are not promoted to diagnostic delivery authority.
 See [ADR 0053](../adr/0053-trace-audit-persistence-visibility.md) for the
 failure-policy decision and industry references.
 
-### Where Events Are Emitted
+### Producer Source Index
 
-| Source File | Events |
-|------------|--------|
-| `react_loop.rs` | `LlmCall`, `PhaseTransition`, finalize |
-| `execution.rs` | `PermissionDecision`, `ToolCall`, `ToolError`, `ToolResult`, `FileEdit` |
-| `pipeline.rs` | `ToolCall`, `ToolResult`, `ToolError` |
-| `stream_channel.rs` | `ToolCall`, `ToolError`, `ToolResult` |
-| `approval.rs` | `PermissionDecision` |
+The [authoritative producer matrix](#authoritative-producer-matrix) is the
+single source for event ownership. The main producer modules are
+`src/agent/react/run/react_loop.rs`,
+`src/agent/react/run/phases/think.rs`,
+`src/agent/react/run/phases/compact.rs`,
+`src/agent/react/run/pipeline.rs`,
+`src/agent/react/run/stream_channel.rs`,
+`src/agent/snapshot.rs`, `src/eval/runner.rs`, and
+`src/trace/mod.rs`. The previous generic source index has been retired; use the
+variant-level matrix above when adding or reviewing a producer.
 
 ---
 

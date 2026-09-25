@@ -1,6 +1,11 @@
 //! 内存审计日志记录器
 //!
 //! 将审计事件存储在内存中，适用于测试和实时查询。
+//!
+//! `InMemoryAuditLogger` sanitizes at its `log` boundary even when the
+//! producer already supplied a retained copy. This makes the built-in sink a
+//! regression oracle for custom logger implementations without rewriting
+//! typed IDs used for diagnostic lookup.
 
 use echo_core::audit::{AuditEvent, AuditFilter, AuditLogger};
 use echo_core::error::Result;

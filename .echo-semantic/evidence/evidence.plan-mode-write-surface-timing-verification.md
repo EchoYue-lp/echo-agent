@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.plan-mode-write-surface-timing-verification
 kind: evidence
-observed_at: source:28f42a6c8a446593492907c8e09effd43a986a5665776e38448b09fcba7fc585
+observed_at: source:623cac6a21b2ee853131bb0849f3228afdbfe78ec9c4eec731be622d4322d6b6
 source_refs:
   - src/agent/react/run/pipeline.rs
   - src/agent/snapshot.rs

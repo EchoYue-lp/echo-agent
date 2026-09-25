@@ -6,7 +6,7 @@ title: Tool、Permission 与 Sandbox Effect Pipeline
 asset_type: state_authority
 status: needs_review
 risk: high
-observed_at: source:28f42a6c8a446593492907c8e09effd43a986a5665776e38448b09fcba7fc585
+observed_at: source:623cac6a21b2ee853131bb0849f3228afdbfe78ec9c4eec731be622d4322d6b6
 boundary_refs: [boundary.tool-permission-sandbox]
 code_refs: [echo-core/src/tools/mod.rs, echo-core/src/tools/permission.rs, echo-core/src/tools/artifact.rs, echo-execution/src/tools.rs, echo-execution/src/sandbox/resource_owner.rs, echo-execution/src/sandbox/manager.rs, echo-execution/src/sandbox/docker.rs, echo-execution/src/sandbox/k8s.rs, echo-orchestration/src/human_loop/service.rs, src/agent/react/run/pipeline.rs, src/agent/react/mod.rs, echo-execution/src/skills/hooks.rs, echo-execution/src/sandbox/local.rs, echo-tools/src/git_worktree.rs]
 consumer_refs: [src/agent/react/subsystems/tool_exec.rs, echo-tools/src/lib.rs]

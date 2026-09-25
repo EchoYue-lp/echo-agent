@@ -274,6 +274,13 @@ struct ToolCallInfo {
 ///
 /// 实现 `AgentCallback`，将所有回调事件自动写入 `AuditLogger`。
 ///
+/// The callback applies its configured [`ContentRetentionPolicy`] to a
+/// producer-owned copy before invoking a custom logger. `session_id`, trace
+/// identity, tool/call names, and other typed addressing fields remain intact
+/// for correlation; they are not treated as secret content. A custom logger
+/// that is also used directly must repeat [`AuditEvent::apply_retention`] at
+/// its own durable-write boundary and return an error for partial writes.
+///
 /// # 示例
 ///
 /// ```rust
@@ -1073,6 +1080,35 @@ mod tests {
     }
 
     #[derive(Default)]
+    struct PartiallyFailingAuditLogger {
+        events: Mutex<Vec<AuditEvent>>,
+    }
+
+    impl AuditLogger for PartiallyFailingAuditLogger {
+        fn log<'a>(&'a self, event: AuditEvent) -> BoxFuture<'a, Result<()>> {
+            Box::pin(async move {
+                self.events
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .push(event);
+                Err(ReactError::Other(
+                    "injected partial audit persistence failure".to_string(),
+                ))
+            })
+        }
+
+        fn query<'a>(&'a self, _filter: AuditFilter) -> BoxFuture<'a, Result<Vec<AuditEvent>>> {
+            Box::pin(async move {
+                Ok(self
+                    .events
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .clone())
+            })
+        }
+    }
+
+    #[derive(Default)]
     struct RecordingObserver {
         failures: Mutex<Vec<DiagnosticDeliveryFailure>>,
         changed: std::sync::Condvar,
@@ -1165,6 +1201,75 @@ mod tests {
         assert_eq!(failure.operation, DiagnosticDeliveryOperation::Record);
         assert_eq!(failure.record_id.as_deref(), Some("session-46"));
         assert!(failure.error.contains("injected audit persistence failure"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn custom_audit_sink_retains_content_and_typed_identity_on_partial_failure() -> Result<()>
+    {
+        let observer = Arc::new(RecordingObserver::default());
+        let logger = Arc::new(PartiallyFailingAuditLogger::default());
+        let callback = AuditCallback::new(
+            logger.clone(),
+            "agent",
+            Some("sk-abcdefghijklmnopqrstuvwxyz123456".into()),
+        )
+        .with_diagnostic_delivery_observer(observer.clone());
+        let call_id = "ghp_abcdefghijklmnopqrstuvwxyz1234567890";
+
+        callback
+            .on_tool_start_with_id(
+                "agent",
+                call_id,
+                "shell",
+                &serde_json::json!({"password": "tiny-secret", "path": "/tmp/work"}),
+            )
+            .await;
+        callback
+            .on_tool_end_with_id(
+                "agent",
+                call_id,
+                "shell",
+                "Bearer abcdefghijklmnopqrstuvwxyz",
+            )
+            .await;
+
+        let failures = observer.wait_for_count(1)?;
+        let failure = failures
+            .first()
+            .ok_or_else(|| ReactError::Other("missing partial audit failure".into()))?;
+        assert_eq!(failure.operation, DiagnosticDeliveryOperation::Record);
+        assert!(failure.error.contains("partial audit persistence failure"));
+
+        let events = logger.query(AuditFilter::default()).await?;
+        let event = events
+            .first()
+            .ok_or_else(|| ReactError::Other("partial audit event missing".into()))?;
+        assert_eq!(
+            event.session_id.as_deref(),
+            Some("sk-abcdefghijklmnopqrstuvwxyz123456")
+        );
+        match &event.event_type {
+            AuditEventType::ToolCall {
+                call_id: Some(stored_call_id),
+                input,
+                output,
+                ..
+            } => {
+                assert_eq!(stored_call_id, call_id);
+                assert_eq!(
+                    input.get("password"),
+                    Some(&Value::String("[REDACTED]".into()))
+                );
+                assert_eq!(input.get("path"), Some(&Value::String("/tmp/work".into())));
+                assert_eq!(output, "[REDACTED]");
+            }
+            other => {
+                return Err(ReactError::Other(format!(
+                    "unexpected partial audit event: {other:?}"
+                )));
+            }
+        }
         Ok(())
     }
 
