@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.sandbox-manager-stream-failure-typing-repair
 kind: evidence
-observed_at: source:6ed43c02230186db2c60d15eeda68864a0c1dddb9719434c45439363536592e4
+observed_at: source:8aeadcf34eb574d68a0fdd14a61337195d71c9a6b8cc6cc2d5bc387b168de3fe
 source_refs:
   - echo-core/src/sandbox.rs
   - echo-execution/src/sandbox/mod.rs
@@ -38,5 +38,5 @@ limitations:
 ## 已知缺口
 
 本证据绑定整合提交 `bf95ef61`、基准 `origin/main@dbe9e1112e38a8a835871242fcf8dbf5abd3db0b`
-与源码摘要 `source:6ed43c02230186db2c60d15eeda68864a0c1dddb9719434c45439363536592e4`。
+与源码摘要 `source:8aeadcf34eb574d68a0fdd14a61337195d71c9a6b8cc6cc2d5bc387b168de3fe`。
 远端 PR/CI、完整合并门禁、远端 main 与 Issue #82 关闭不是本 repair evidence 的结论。
