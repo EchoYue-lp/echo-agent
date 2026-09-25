@@ -255,7 +255,7 @@ Draft、Superseded 和缺少 provenance 的旧记录仍可检查，但不会注�
 
 ---
 
-## 三层记忆联动
+## 跨对话记忆联动
 
 ```
 用户第 1 天：
@@ -294,7 +294,8 @@ let store = InMemoryStore::new(); // 进程退出后数据丢失
 
 ## 上下文隔离
 
-每个 Agent 都有独立的 Store namespace 和 `conversation_id`：
+底层 Store API 允许复用方给不同 Agent 指定独立 namespace；
+`conversation_id` 则分别隔离运行时与对话投影：
 
 ```
 主 Agent    conversation_id = "main-conv-001"     namespace = ["main_agent", "memories"]
@@ -302,9 +303,17 @@ Subagent A  conversation_id = "sub-a-conv-001"    namespace = ["sub_a", "memorie
 Subagent B  conversation_id = "sub-b-conv-001"    namespace = ["sub_b", "memories"]
 ```
 
-- Subagent A 无法读取 Subagent B 的记忆（不同 namespace）
+- 在此调用方自定布局中，Subagent A 无法读取 Subagent B 的记忆（不同 namespace）
 - Subagent A 无法看到主 Agent 的运行时状态（不同 `conversation_id`）
 - 主 Agent 持有 `Store` / `RuntimeStateStore` 对象，可显式跨 conversation / namespace 读取（用于审计）
+
+这个例子不是 `MemoryLayerManager` 的布局。其暖层在注入的 Store 内固定使用
+`WARM_NAMESPACE = ["agent", "memories"]`。若不同 Agent 的分层记忆必须隔离，
+需为各 Agent 提供独立的 Store 底层路径或分区，以及独立的 manager root
+（包含 `MEMORY.md` 和 `evolution/memory-operations.jsonl`）；ChangeLog 路径
+也应分开。调用方自建分区 adapter 时，必须同时隔离 Store 数据与 root 下的文件。
+多个 `FileStore::new` 句柄指向相同 canonical 路径时共享同一权威；仅换句柄或
+`conversation_id` 不会隔离记忆。
 
 ---
 
@@ -318,5 +327,5 @@ Subagent B  conversation_id = "sub-b-conv-001"    namespace = ["sub_b", "memorie
 ## 类型化与分层记忆（自进化）
 
 本文档介绍的是底层的三种 Store（长期 `Store`、运行时 `RuntimeStateStore`、对话 `ConversationStore`）。
-若你需要**带元数据的结构化记忆**（类型、置信度、来源）和**热/暖/冷三层自动管理、写入触发、审查/GC、技能自创建**等运行时演化能力，
+若你需要**带元数据的结构化记忆**（类型、置信度、来源）和**热/暖两层管理（Archived 留在暖层）、写入触发、审查/GC、技能自创建**等运行时演化能力，
 参见 [25 - 自进化系统](./25-self-improvement.md)（`evolution` 模块）。

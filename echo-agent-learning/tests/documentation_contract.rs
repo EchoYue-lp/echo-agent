@@ -498,6 +498,105 @@ fn public_checkpoint_docs_do_not_claim_plan_recovery() -> Result<(), Box<dyn std
 }
 
 #[test]
+fn evolution_memory_docs_match_runtime_namespaces() -> Result<(), Box<dyn std::error::Error>> {
+    use echo_agent::evolution::layer::{COLD_NAMESPACE, WARM_NAMESPACE};
+
+    let learning_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let workspace_root = learning_root.parent().ok_or_else(|| {
+        std::io::Error::other("learning package has no workspace parent directory")
+    })?;
+    let warm = format!("[\"{}\"]", WARM_NAMESPACE.join("\", \""));
+    let cold = format!("[\"{}\"]", COLD_NAMESPACE.join("\", \""));
+    let pages = [
+        (
+            "docs/en/25-self-improvement.md",
+            "## Store Namespaces",
+            "optional",
+            "hot/warm/cold tiers",
+        ),
+        (
+            "docs/zh/25-self-improvement.md",
+            "## Store 命名空间",
+            "可选",
+            "热/暖/冷三层",
+        ),
+    ];
+    let mut violations = Vec::new();
+    for (path, heading, optional, stale_tiers) in pages {
+        let content = std::fs::read_to_string(workspace_root.join(path))?;
+        let table = markdown_section(&content, heading)?;
+        let warm_row = table.lines().find(|line| line.contains(&warm));
+        if !warm_row.is_some_and(|line| {
+            line.contains("WARM_NAMESPACE") && line.contains("MemoryStatus::Archived")
+        }) {
+            violations.push(format!(
+                "{path} must describe {warm} as the unified warm and Archived namespace"
+            ));
+        }
+        if content.contains("typed_memories") {
+            violations.push(format!(
+                "{path} still advertises the old typed_memories namespace"
+            ));
+        }
+        if content.contains(stale_tiers) {
+            violations.push(format!("{path} still promises {stale_tiers}"));
+        }
+        let cold_row = table.lines().find(|line| line.contains(&cold));
+        if !cold_row.is_some_and(|line| line.to_lowercase().contains(optional)) {
+            violations.push(format!(
+                "{path} must mark the separate cold namespace {cold} as optional"
+            ));
+        }
+    }
+    let summaries = [
+        (
+            "docs/en/03-memory.md",
+            "## Context Isolation",
+            "hot/warm/cold tiered management",
+            "same canonical path",
+        ),
+        (
+            "docs/zh/03-memory.md",
+            "## 上下文隔离",
+            "热/暖/冷三层自动管理",
+            "相同 canonical 路径",
+        ),
+    ];
+    for (path, heading, stale, shared_path) in summaries {
+        let content = std::fs::read_to_string(workspace_root.join(path))?;
+        if content.contains(stale) {
+            violations.push(format!("{path} still promises {stale}"));
+        }
+        let isolation = markdown_section(&content, heading)?;
+        if ![
+            "WARM_NAMESPACE",
+            "FileStore::new",
+            shared_path,
+            "MEMORY.md",
+            "memory-operations.jsonl",
+            "ChangeLog",
+            "conversation_id",
+        ]
+        .iter()
+        .all(|marker| isolation.contains(marker))
+        {
+            violations.push(format!(
+                "{path} must distinguish Store backing paths and manager roots from handles and conversation IDs"
+            ));
+        }
+    }
+    if violations.is_empty() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(format!(
+            "evolution memory documentation drift:\n{}",
+            violations.join("\n")
+        ))
+        .into())
+    }
+}
+
+#[test]
 fn root_readme_learning_commands_reference_cargo_targets() -> Result<(), Box<dyn std::error::Error>>
 {
     let (workspace_root, packages) = workspace_packages()?;
