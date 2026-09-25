@@ -234,6 +234,14 @@ impl ReactAgent {
                             .finalize_run(crate::trace::RunStatus::Failed, None, Some(&msg))
                             .await;
                         turn_lease.settle();
+                        if self
+                            .config
+                            .response_format
+                            .as_ref()
+                            .is_some_and(crate::llm::ResponseFormat::is_json)
+                        {
+                            return Err(e);
+                        }
                         return Ok(msg);
                     }
                     turn_lease.settle();

@@ -3,19 +3,19 @@ schema_version: 1
 id: finding.structured-output-schema-validation-contract
 kind: finding
 type: intent_gap
-status: open
+status: resolved
 severity: high
 primary_focus: contract_evidence
 focus: [trigger_input, state_authority]
 boundary_ref: boundary.llm-provider-runtime
 behavior_refs: [behavior.llm-provider-execution]
 rule_refs: [rule.provider-protocol-boundary]
-evidence_refs: [evidence.provider-protocol-quality]
+evidence_refs: [evidence.provider-protocol-quality, evidence.structured-output-schema-validation-repair, evidence.structured-output-schema-validation-verification]
 audit_refs: [audit.llm-provider-runtime.contract-evidence]
 decision_refs: []
-repair_evidence_refs: []
-verification_evidence_refs: []
-rereview_audit_refs: []
+repair_evidence_refs: [evidence.structured-output-schema-validation-repair]
+verification_evidence_refs: [evidence.structured-output-schema-validation-verification]
+rereview_audit_refs: [audit.structured-output-terminal-rereview]
 discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 ---
 
@@ -39,4 +39,7 @@ Structured output types、`src/agent/react/extract.rs` 与正式文档展示 str
 
 ## 处理记录
 
-Contract Audit 确认 intent gap；需 semantic-decide 裁决 strict 是 provider hint 还是 framework 端到端保证。
+ADR 0045 DU-97 裁决 strict 为框架端到端保证。一次性提取和主 ReAct 文本、
+`final_answer` 工具结果、LlmCritic strict 成功路径均复用本地 validator；错误类型化，
+JSON/Schema 错误有界修复，成功终态前校验。ADR 0079 与修复、验证、独立复审证据
+已记录；外部 Issue 须等远端 main 交付后关闭。

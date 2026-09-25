@@ -5,8 +5,7 @@
 use super::super::TOOL_CANCELLATION_GRACE_PERIOD;
 use super::super::processor::build_tool_calls_from_map;
 use super::super::stream_macros::yield_event_or;
-use super::verify::verify_answer;
-use super::{IterOutcome, LoopState, ThinkOutput, with_reasoning_content};
+use super::{IterOutcome, ThinkOutput, with_reasoning_content};
 use crate::agent::react::run::pipeline::ToolPipelineEvent;
 use crate::agent::react::{StepType, TOOL_FINAL_ANSWER};
 use crate::agent::snapshot::AgentRunSnapshot;
@@ -338,19 +337,13 @@ async fn requires_sequential_execution(snap: &AgentRunSnapshot, tool_name: &str)
 
 /// Tool-call branch of one iteration. Emits the `ToolBatchStart` /
 /// `ToolCall` events, pushes the assistant-with-tools message, splits the
-/// batch by approval or tool concurrency policy, runs both sub-batches, and short-circuits
-/// with [`IterOutcome::Finish`] the moment a `final_answer` tool call is
-/// verifier-accepted.
-///
-/// On verifier rejection of a `final_answer`, increments
-/// `state.verifier_retry_count` and continues processing remaining results
-/// before returning [`IterOutcome::Continue`].
-#[allow(clippy::too_many_arguments)]
+/// batch by approval or tool concurrency policy, and settles every result
+/// before handing final-answer candidates to the run driver. The driver owns
+/// steer and cancellation fences before schema, Critic, or terminal decisions.
 pub(crate) async fn run_tools(
     snap: &AgentRunSnapshot,
     context: &Arc<Mutex<crate::compression::ContextManager>>,
     tx: &mpsc::Sender<Result<AgentEvent>>,
-    state: &mut LoopState,
     iteration: usize,
     think: ThinkOutput,
     _label: &str,
@@ -410,7 +403,7 @@ pub(crate) async fn run_tools(
     }
     let waves = build_execution_waves(steps, &sequential_call_ids);
 
-    let mut finish_output = None;
+    let mut final_outputs = Vec::new();
     let mut batch_success_count = 0usize;
     let mut batch_failure_count = 0usize;
     let batch_tool_names: Vec<String> = waves
@@ -654,13 +647,7 @@ pub(crate) async fn run_tools(
                         outcome: crate::agent::AgentSteerTurnOutcome::Cancelled,
                     });
                 }
-                for output in published.final_answers {
-                    if verify_answer(snap, context, &output, state.verifier_retry_count).await {
-                        finish_output = Some(output);
-                    } else {
-                        state.verifier_retry_count = state.verifier_retry_count.saturating_add(1);
-                    }
-                }
+                final_outputs.extend(published.final_answers);
                 remaining_calls.drain(..conc.len().min(remaining_calls.len()));
             }
             ToolExecutionWave::Sequential((id, fname, args)) => {
@@ -805,13 +792,7 @@ pub(crate) async fn run_tools(
                         outcome: crate::agent::AgentSteerTurnOutcome::Cancelled,
                     });
                 }
-                for output in published.final_answers {
-                    if verify_answer(snap, context, &output, state.verifier_retry_count).await {
-                        finish_output = Some(output);
-                    } else {
-                        state.verifier_retry_count = state.verifier_retry_count.saturating_add(1);
-                    }
-                }
+                final_outputs.extend(published.final_answers);
                 remaining_calls.drain(..1.min(remaining_calls.len()));
             }
         }
@@ -835,8 +816,10 @@ pub(crate) async fn run_tools(
     yield_event_or!(tx, AgentEvent::ToolBatchEnd, IterOutcome::Abandoned);
     snap.fire_post_tool_batch(&batch_tool_names, batch_success_count, batch_failure_count)
         .await;
-    if let Some(output) = finish_output {
-        return Ok(IterOutcome::Finish { output });
+    if !final_outputs.is_empty() {
+        return Ok(IterOutcome::FinishCandidates {
+            outputs: final_outputs,
+        });
     }
     snap.auto_snapshot(context, iteration).await;
 
