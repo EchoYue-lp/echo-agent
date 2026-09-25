@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.effect-cleanup-owner-verification
 kind: evidence
-observed_at: source:8aeadcf34eb574d68a0fdd14a61337195d71c9a6b8cc6cc2d5bc387b168de3fe
+observed_at: source:623cac6a21b2ee853131bb0849f3228afdbfe78ec9c4eec731be622d4322d6b6
 source_refs:
   - echo-core/src/tools/artifact.rs
   - echo-execution/src/sandbox/docker.rs

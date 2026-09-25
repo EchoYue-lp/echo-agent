@@ -14,36 +14,59 @@ Hooks 允许在 Agent 生命周期的关键节点注入自定义行为。框架�
 
 主 Hook 系统。通过宿主 application 或 Plugin 的 YAML 配置，由 `HookRegistry` 统一分发执行。
 
-### Hook 事件
+`HookEvent::ALL` 是包含 31 个事件的目录，不代表裸 `ReactAgent` 会自动发出每个事件。
+生产者合同明确区分三种状态：`framework-auto` 表示框架自有运行路径在该路径启用时自动发出；
+`host-owned` 表示嵌入应用必须调用事件专用 bridge 或 opt-in observer；`no-producer` 表示
+枚举和 context 支持该事件，但当前框架没有生产者。完整矩阵见
+[ADR 0073](../adr/0073-hook-event-producer-contract.md)，并由
+`tests/hook_event_producer_contract.rs` 锁定。
 
-事件按类别分组，matcher 语义因类别而异（见 `HookEventCategory`）。权威定义见 `echo-core/src/hooks/types.rs`。
+### Hook 事件与生产者矩阵
 
-#### 工具事件（matcher = 工具名）
+事件按类别分组，matcher 语义因类别而异（见 `HookEventCategory`）。下面是当前唯一的
+生产者合同；`framework-auto`、`host-owned` 和 `no-producer` 的含义见上文。
 
-| 事件 | 触发时机 | 可修改内容 |
-|------|---------|-----------|
-| `PreToolUse` | 工具执行前 | 输入、权限（允许/阻止） |
-| `PostToolUse` | 工具成功后 | 输出、继续行为 |
-| `PostToolUseFailure` | 工具失败后 | 错误反馈 |
-| `PermissionRequest` | 权限对话框出现时 | 自动批准/拒绝 |
-| `PermissionDenied` | 权限被拒绝时 | 重试信号 |
+| 事件 | 类别 | 生产者状态 | 当前生产者/所有者 |
+|------|------|-----------|------------------|
+| `PreToolUse` | 工具 | `framework-auto` | ReAct 工具 pipeline 执行前 |
+| `PostToolUse` | 工具 | `framework-auto` | ReAct 工具 pipeline 成功后 |
+| `PostToolUseFailure` | 工具 | `framework-auto` | ReAct 工具 pipeline 失败后 |
+| `PermissionRequest` | 工具 | `framework-auto` | ReAct 权限阶段 |
+| `PermissionDenied` | 工具 | `no-producer` | 保留给审批 receipt 工作（#37）；禁止通过通用生命周期 API 虚构 |
+| `SessionStart` | 会话/运行 | `framework-auto` | 运行时 reset/restore 路径 |
+| `SessionEnd` | 会话/运行 | `framework-auto` | ReAct finalize 与 Agent close 路径 |
+| `Stop` | 会话/运行 | `framework-auto` | ReAct 最终回答/干预路径 |
+| `Notification` | 会话/运行 | `no-producer` | 没有专用 framework 或 host adapter；通用生命周期 API 只是手动 escape hatch |
+| `UserPromptSubmit` | 会话/运行 | `framework-auto` | ReAct context 准备路径 |
+| `PreCompact` | 会话/运行 | `framework-auto` | 框架压缩入口 |
+| `PostCompact` | 会话/运行 | `framework-auto` | 框架压缩完成路径 |
+| `ConfigChange` | 会话/运行 | `no-producer` | 没有专用 framework 或 host adapter；通用生命周期 API 只是手动 escape hatch |
+| `InstructionsLoaded` | 会话/运行 | `framework-auto` | `ReactAgent::discover_skills` 注册后 |
+| `PostToolBatch` | 会话/运行 | `framework-auto` | ReAct 并行工具批次结算 |
+| `SubagentStart` | Subagent | `framework-auto` | 每次具体 dispatch attempt 由 `SubagentExecutor::unified_hook_executor` |
+| `SubagentStop` | Subagent | `framework-auto` | 每个 attempt 到达终态时由 `SubagentExecutor::unified_hook_executor` |
+| `TaskCreated` | Task | `host-owned` | 宿主拥有的任务运行时通过 `TaskHookBridge` |
+| `TaskStarted` | Task | `host-owned` | 宿主拥有的任务运行时通过 `TaskHookBridge` |
+| `TaskCompleted` | Task | `host-owned` | 宿主拥有的任务运行时通过 `TaskHookBridge` |
+| `StopFailure` | 错误 | `framework-auto` | ReAct 终态失败路径 |
+| `PluginLoaded` | Plugin | `framework-auto` | `PluginCoordinator` event-emission 阶段 |
+| `PluginDisabled` | Plugin | `framework-auto` | `PluginCoordinator` event-emission 阶段 |
+| `PostMemoryWrite` | Evolution | `host-owned` | 宿主 opt-in wiring 的 `HookEvolutionObserver` |
+| `MemoryLayerChange` | Evolution | `host-owned` | 宿主 opt-in wiring 的 `HookEvolutionObserver` |
+| `SkillCandidateDetected` | Evolution | `host-owned` | 宿主 opt-in wiring 的 `HookEvolutionObserver` |
+| `SkillLifecycleTransition` | Evolution | `no-producer` | 仅有枚举/context 支持；无框架 observer 回调 |
+| `SkillHealthCheck` | Evolution | `host-owned` | 宿主 opt-in wiring 的 `HookEvolutionObserver` |
+| `SkillPatchApplied` | Evolution | `no-producer` | 仅有枚举/context 支持；无框架 observer 回调 |
+| `SkillMergeApplied` | Evolution | `no-producer` | 仅有枚举/context 支持；无框架 observer 回调 |
+| `RulePromoted` | Evolution | `no-producer` | 仅有枚举/context 支持；无框架 observer 回调 |
 
-#### 会话生命周期事件（matcher = lifecycle hint）
+Evolution 中标为 `host-owned` 的事件只有在宿主将 `HookEvolutionObserver` 接入相关运行时后
+才会出现。四个 `no-producer` Evolution 事件不得描述成自动回调；新增任何生产者都必须
+同步更新本矩阵和契约测试。
 
-| 事件 | 触发时机 | 可修改内容 |
-|------|---------|-----------|
-| `SessionStart` | 会话开始或恢复时 | 上下文注入 |
-| `SessionEnd` | 会话终止时 | 清理 |
-| `Stop` | Agent 完成响应时 | 继续原因 |
-| `Notification` | Agent 需要用户注意时 | 权限快捷方式 |
-| `UserPromptSubmit` | 用户提交 prompt 时 | 上下文注入、阻止 |
-| `PreCompact` | 上下文压缩前 | 上下文注入 |
-| `PostCompact` | 上下文压缩后 | 上下文注入 |
-| `ConfigChange` | 配置文件变更时 | 阻止/重载 |
-| `InstructionsLoaded` | 技能/指令加载后 | 加载后验证 |
-| `PostToolBatch` | 并行工具调用批次完成后 | 聚合 |
-| `PluginLoaded` | 插件加载并注册组件后 | — |
-| `PluginDisabled` | 插件禁用/卸载后 | — |
+默认 `ReactAgent` 路径以 `SubagentExecutor::unified_hook_executor` 为 Subagent 事件的
+唯一权威 producer。`SubagentHookBridge` 仅是宿主拥有独立 Subagent runtime 时使用的显式
+适配器；每个 dispatch attempt 必须二选一，不能同时接入两条路径，否则会重复发出 Start/Stop。
 
 #### Subagent 事件（matcher = subagent 名称/类型）
 
@@ -63,7 +86,7 @@ Hooks 允许在 Agent 生命周期的关键节点注入自定义行为。框架�
 | `cancelled` | 被外部取消(用户 Esc / 父 run 取消) |
 | `timed_out` | 触发 deadline/timeout |
 
-> 注:旧的 `SubagentCancelled` 独立事件已删除 —— cancelled 现在是 `SubagentStop` 的一个 status 值。emission owner 是 `SubagentExecutor`(经 `unified_hook_executor`),每次实际 dispatch attempt 都有一对 Start/Stop；重试会开启新的 attempt。
+> 注:旧的 `SubagentCancelled` 独立事件已删除 —— cancelled 现在是 `SubagentStop` 的一个 status 值。`ReactAgent` 安装的 `SubagentExecutor::unified_hook_executor` 在每个实际 dispatch attempt 边界发出 Start/Stop；重试会开启新的 attempt。
 
 #### Task 事件（matcher = task subject/name）
 
@@ -83,7 +106,7 @@ Hooks 允许在 Agent 生命周期的关键节点注入自定义行为。框架�
 
 | 事件 | 触发时机 |
 |------|---------|
-| `PostMemoryWrite` | 任意记忆写入 Store 后 |
+| `PostMemoryWrite` | 已接入 observer 的分层记忆写入 Store 后 |
 | `MemoryLayerChange` | 记忆在层间升/降级后 |
 | `SkillCandidateDetected` | 从记忆模式检测到技能候选后 |
 | `SkillLifecycleTransition` | 技能在生命周期状态间转换后 |
@@ -92,8 +115,10 @@ Hooks 允许在 Agent 生命周期的关键节点注入自定义行为。框架�
 | `SkillMergeApplied` | 两个或更多技能合并后 |
 | `RulePromoted` | 记忆提升为 AGENTS.md 规则后 |
 
-上述 8 个 Evolution 事件均由对应的记忆写入/层级迁移、候选检测、生命周期转换、
-健康检查、补丁、合并和规则提升主路径真实发射，不是只保留在枚举中的占位事件。
+当前只有 `PostMemoryWrite`、`MemoryLayerChange`、`SkillCandidateDetected` 和
+`SkillHealthCheck` 有 opt-in observer 适配路径；`SkillLifecycleTransition`、
+`SkillPatchApplied`、`SkillMergeApplied` 和 `RulePromoted` 仍是 catalog-only，不能承诺
+由框架自动发射。
 Task/Subagent 的取消与超时由对应终态事件的结构化 status 表达，不再使用独立事件。
 
 成功删除 hot memory 时也会发出 `MemoryLayerChange`，其中

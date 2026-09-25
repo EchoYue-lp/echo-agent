@@ -317,21 +317,28 @@ LLM 工具路径仍然可用。
 
 ## Hooks 系统
 
-Skill 与用户和插件 Hook 文件使用同一套 31 事件系统，覆盖工具、会话、Subagent、Task、
-插件和自演化生命周期，并不局限于成功的工具调用。
+Skill 与用户和插件 Hook 文件使用同一套 31 事件目录，覆盖工具、会话、Subagent、Task、
+插件和自演化生命周期，并不局限于成功的工具调用。但目录不等于自动发射保证：每个事件
+都明确归为 `framework-auto`、`host-owned` 或当前 `no-producer`。请以[权威生产者矩阵](./23-hooks.md#hook-事件与生产者矩阵)
+和 [ADR 0073](../adr/0073-hook-event-producer-contract.md) 为准。
 
 ### Hook 事件
 
 | 类别 | 事件 |
 |------|------|
 | 工具（5） | `PreToolUse`、`PostToolUse`、`PostToolUseFailure`、`PermissionRequest`、`PermissionDenied` |
-| 会话/运行（11） | `SessionStart`、`SessionEnd`、`Stop`、`StopFailure`、`Notification`、`UserPromptSubmit`、`PreCompact`、`PostCompact`、`ConfigChange`、`InstructionsLoaded`、`PostToolBatch` |
+| 会话/运行（10） | `SessionStart`、`SessionEnd`、`Stop`、`Notification`、`UserPromptSubmit`、`PreCompact`、`PostCompact`、`ConfigChange`、`InstructionsLoaded`、`PostToolBatch` |
+| 错误（1） | `StopFailure` |
 | Subagent（2） | `SubagentStart`、`SubagentStop` |
 | Task（3） | `TaskCreated`、`TaskStarted`、`TaskCompleted` |
 | Plugin（2） | `PluginLoaded`、`PluginDisabled` |
 | Evolution（8） | `PostMemoryWrite`、`MemoryLayerChange`、`SkillCandidateDetected`、`SkillLifecycleTransition`、`SkillHealthCheck`、`SkillPatchApplied`、`SkillMergeApplied`、`RulePromoted` |
 
-各事件的触发点和 matcher 语义以 [Hooks 系统](./23-hooks.md) 为准。
+各事件的触发点、matcher 和生产者语义以 [Hooks 系统](./23-hooks.md) 为准。特别是
+`PermissionDenied`、`Notification`、`ConfigChange` 与四个 Evolution 事件当前仅是
+catalog-only（`no-producer`）；注册 Hook 不会让框架自动发出它们。Task 事件和四个已有
+Evolution observer 回调需要嵌入应用配置对应 bridge 或 observer；Subagent 事件在
+`ReactAgent` 安装 unified executor 时由 framework 自动发出。
 
 ### Hook 类型
 
