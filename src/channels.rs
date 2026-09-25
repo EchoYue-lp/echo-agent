@@ -78,6 +78,7 @@ pub use echo_integration::channels::prelude::*;
 use crate::agent::react::ReactAgent;
 use crate::agent::{Agent, CancellationToken, EventEnvelope, EventIdentity};
 use crate::error::{AgentError, Result};
+use crate::llm::types::{ContentPart, ImageUrl, Message};
 use crate::llm::{LlmClient, LlmConfig};
 use crate::prelude::AgentConfig;
 use crate::runtime::{
@@ -85,6 +86,7 @@ use crate::runtime::{
     TurnReceipt, TurnRequest,
 };
 use async_trait::async_trait;
+use base64::Engine as _;
 use futures::{StreamExt, stream::BoxStream};
 use std::sync::Arc;
 
@@ -173,12 +175,76 @@ impl AgentChannelHandler {
             msg.message_id.clone()
         };
         let identity = EventIdentity::for_chat(Some(conversation_id), turn_id, message_id, None)?;
-        let request = TurnRequest::new(identity, &msg.text)
-            .mode(TurnMode::Chat)
-            .cancel(cancel);
+        let request = if msg.attachments.is_empty() {
+            TurnRequest::new(identity, &msg.text)
+        } else {
+            TurnRequest::from_message(identity, channel_message(msg)?)
+        }
+        .mode(TurnMode::Chat)
+        .cancel(cancel);
         Ok(AgentTurnDriver
             .drive(self.agent.as_ref(), request, sink)
             .await)
+    }
+}
+
+fn channel_message(msg: &InboundMessage) -> Result<Message> {
+    let mut parts = Vec::with_capacity(msg.attachments.len().saturating_add(1));
+    if !msg.text.is_empty() {
+        parts.push(ContentPart::Text {
+            text: msg.text.clone(),
+        });
+    }
+    for (index, attachment) in msg.attachments.iter().enumerate() {
+        let part = match attachment.kind {
+            AttachmentKind::Image => {
+                let mime = image_mime(&attachment.data).ok_or_else(|| {
+                    ReactError::Other(format!(
+                        "channel image attachment {} has an unsupported or unrecognized format",
+                        index.saturating_add(1)
+                    ))
+                })?;
+                let encoded = base64::engine::general_purpose::STANDARD.encode(&attachment.data);
+                ContentPart::ImageUrl {
+                    image_url: ImageUrl {
+                        url: format!("data:{mime};base64,{encoded}"),
+                        detail: None,
+                    },
+                }
+            }
+            AttachmentKind::File => ContentPart::File {
+                name: attachment
+                    .filename
+                    .as_deref()
+                    .filter(|name| !name.is_empty())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| format!("attachment-{}.bin", index.saturating_add(1))),
+                content: base64::engine::general_purpose::STANDARD.encode(&attachment.data),
+            },
+            AttachmentKind::Audio | AttachmentKind::Video => {
+                return Err(ReactError::Other(format!(
+                    "channel {:?} attachment {} has no typed Agent message representation",
+                    attachment.kind,
+                    index.saturating_add(1)
+                )));
+            }
+        };
+        parts.push(part);
+    }
+    Ok(Message::user_multimodal(parts))
+}
+
+fn image_mime(data: &[u8]) -> Option<&'static str> {
+    if data.starts_with(&[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]) {
+        Some("image/png")
+    } else if data.starts_with(&[0xff, 0xd8, 0xff]) {
+        Some("image/jpeg")
+    } else if data.starts_with(b"GIF87a") || data.starts_with(b"GIF89a") {
+        Some("image/gif")
+    } else if data.starts_with(b"RIFF") && data.get(8..12).is_some_and(|tag| tag == b"WEBP") {
+        Some("image/webp")
+    } else {
+        None
     }
 }
 
@@ -257,6 +323,7 @@ mod tests {
     use crate::agent::{Agent, AgentEvent};
     use crate::llm::LlmApiProtocol;
     use crate::llm::types::Usage;
+    use crate::llm::types::{ContentPart, MessageContent};
     use crate::testing::MockLlmClient;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
@@ -379,6 +446,166 @@ mod tests {
         let outbound = handler.handle(test_message("incoming-2")).await?;
         assert_eq!(outbound.text, "reply");
         assert_eq!(outbound.to, "conversation");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn channel_handler_projects_file_bytes_into_the_model_message() -> Result<()> {
+        let client = Arc::new(MockLlmClient::new().with_response("received"));
+        let handler = AgentChannelHandler::from_config_with_client(
+            AgentConfig::minimal("mock-model", "channel-agent"),
+            client.clone(),
+        );
+        let bytes = vec![0, 1, 128, 255];
+        let inbound = test_message("with-file").with_attachments(vec![
+            MessageAttachment::new(AttachmentKind::File, bytes.clone())
+                .with_filename("payload.bin"),
+        ]);
+
+        let reply = handler.handle(inbound).await?;
+        assert_eq!(reply.text, "received");
+        let messages = client.last_messages().ok_or_else(|| {
+            ReactError::Other("channel model request was not recorded".to_string())
+        })?;
+        let user = messages
+            .iter()
+            .rev()
+            .find(|message| message.role == crate::llm::types::Role::User)
+            .ok_or_else(|| ReactError::Other("channel user message missing".to_string()))?;
+        let MessageContent::Parts(parts) = &user.content else {
+            return Err(ReactError::Other(
+                "channel attachment was not typed".to_string(),
+            ));
+        };
+        assert!(matches!(parts.first(), Some(ContentPart::Text { text }) if text == "hello"));
+        let Some(ContentPart::File { name, content }) = parts.get(1) else {
+            return Err(ReactError::Other("channel file part missing".to_string()));
+        };
+        assert_eq!(name, "payload.bin");
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(content)
+                .map_err(|error| ReactError::Other(error.to_string()))?,
+            bytes
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn channel_stream_projects_attachment_only_input_without_inventing_text() -> Result<()> {
+        let client = Arc::new(MockLlmClient::new().with_response("received"));
+        let handler = AgentChannelHandler::from_config_with_client(
+            AgentConfig::minimal("mock-model", "channel-agent"),
+            client.clone(),
+        );
+        let inbound = InboundMessage::new(
+            "qq",
+            "sender",
+            "conversation",
+            ChatType::Direct,
+            "",
+            "attachment-only",
+        )
+        .with_attachments(vec![MessageAttachment::new(
+            AttachmentKind::File,
+            b"notes".to_vec(),
+        )]);
+        let mut replies = handler.handle_stream(inbound).await?;
+        let reply = replies
+            .next()
+            .await
+            .ok_or_else(|| ReactError::Other("channel stream returned no reply".to_string()))??;
+        assert_eq!(reply.text, "received");
+        let messages = client.last_messages().ok_or_else(|| {
+            ReactError::Other("channel model request was not recorded".to_string())
+        })?;
+        let user = messages
+            .iter()
+            .rev()
+            .find(|message| message.role == crate::llm::types::Role::User)
+            .ok_or_else(|| ReactError::Other("channel user message missing".to_string()))?;
+        let MessageContent::Parts(parts) = &user.content else {
+            return Err(ReactError::Other(
+                "attachment-only input was not typed".to_string(),
+            ));
+        };
+        assert_eq!(parts.len(), 1);
+        assert!(matches!(
+            parts.first(),
+            Some(ContentPart::File { name, content })
+                if name == "attachment-1.bin"
+                    && base64::engine::general_purpose::STANDARD
+                        .decode(content)
+                        .ok()
+                        .as_deref() == Some(b"notes".as_slice())
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn channel_message_preserves_attachment_order_and_detects_image_mime() -> Result<()> {
+        let formats: &[(&[u8], &str)] = &[
+            (b"\x89PNG\r\n\x1a\nbody", "image/png"),
+            (b"\xff\xd8\xffbody", "image/jpeg"),
+            (b"GIF89abody", "image/gif"),
+            (b"RIFF\x00\x00\x00\x00WEBPbody", "image/webp"),
+        ];
+        for (bytes, mime) in formats {
+            let message = channel_message(&test_message("mixed").with_attachments(vec![
+                    MessageAttachment::new(AttachmentKind::File, b"first".to_vec())
+                        .with_filename("first.txt"),
+                    MessageAttachment::new(AttachmentKind::Image, bytes.to_vec())
+                        .with_filename("misleading.png"),
+                    MessageAttachment::new(AttachmentKind::File, b"last".to_vec())
+                        .with_filename("last.txt"),
+                ]))?;
+            let MessageContent::Parts(parts) = message.content else {
+                return Err(ReactError::Other(
+                    "channel message was not typed".to_string(),
+                ));
+            };
+            assert_eq!(parts.len(), 4);
+            assert!(matches!(parts.first(), Some(ContentPart::Text { text }) if text == "hello"));
+            assert!(
+                matches!(parts.get(1), Some(ContentPart::File { name, .. }) if name == "first.txt")
+            );
+            let Some(ContentPart::ImageUrl { image_url }) = parts.get(2) else {
+                return Err(ReactError::Other("channel image part missing".to_string()));
+            };
+            assert_eq!(
+                image_url.url,
+                format!(
+                    "data:{mime};base64,{}",
+                    base64::engine::general_purpose::STANDARD.encode(bytes)
+                )
+            );
+            assert!(
+                matches!(parts.get(3), Some(ContentPart::File { name, .. }) if name == "last.txt")
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn channel_rejects_unrepresented_media_before_model_call() -> Result<()> {
+        let client = Arc::new(MockLlmClient::new().with_response("must not run"));
+        let handler = AgentChannelHandler::from_config_with_client(
+            AgentConfig::minimal("mock-model", "channel-agent"),
+            client.clone(),
+        );
+        for kind in [AttachmentKind::Audio, AttachmentKind::Video] {
+            let inbound = test_message("unsupported")
+                .with_attachments(vec![MessageAttachment::new(kind, b"bytes".to_vec())]);
+            assert!(handler.handle(inbound.clone()).await.is_err());
+            assert!(handler.handle_stream(inbound).await.is_err());
+        }
+        let unknown_image = test_message("unknown-image").with_attachments(vec![
+            MessageAttachment::new(AttachmentKind::Image, b"not-an-image".to_vec())
+                .with_filename("looks-like-image.png"),
+        ]);
+        assert!(handler.handle(unknown_image.clone()).await.is_err());
+        assert!(handler.handle_stream(unknown_image).await.is_err());
+        assert_eq!(client.call_count(), 0);
         Ok(())
     }
 
