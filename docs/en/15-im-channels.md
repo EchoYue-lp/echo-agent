@@ -172,6 +172,19 @@ events must be retained. The default sink is only an in-process acceptance
 boundary and is not a QQ/Feishu delivery acknowledgement. Framework session
 reset passes cancellation to this driven handler and waits for that Turn to
 settle before publishing the replacement reply.
+When an inbound message has attachments, the same Turn carries a typed user
+message: non-empty text first, followed by attachments in their original order.
+Image bytes are identified as PNG, JPEG, GIF, or WebP before being encoded as
+MIME-correct data URLs; unknown image data is rejected before model admission.
+Files retain their bytes as base64 `ContentPart::File` values and use a stable
+generated name when the transport did not supply one. Audio and video have no
+matching core content part and are rejected rather than silently reduced to
+text. Text-only messages retain the existing plain-text path. This preserves
+attachment bytes and part order at the framework projection boundary, but is
+not a promise that every transport metadata field is represented or that every
+provider can read every file: provider adapters may render unsupported binary
+files as name-only placeholders. See
+[ADR 0077](../adr/0077-channel-attachment-projection.md).
 Resource close is a separate boundary: `ChannelManager::stop_all` stops each
 transport before awaiting its retained `MessageHandler::close`. A
 `SessionHandler` then cancels sender generations, waits for active streams and
@@ -199,6 +212,7 @@ pub struct InboundMessage {
     pub text: String,
     pub message_id: String,   // Platform message ID (for replies)
     pub timestamp: u64,
+    pub attachments: Vec<MessageAttachment>,
 }
 ```
 

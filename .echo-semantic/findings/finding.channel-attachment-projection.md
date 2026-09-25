@@ -3,19 +3,19 @@ schema_version: 1
 id: finding.channel-attachment-projection
 kind: finding
 type: intent_gap
-status: open
+status: resolved
 severity: medium
 primary_focus: result_side_effect
 focus: [contract_evidence, trigger_input]
 boundary_ref: boundary.protocol-surfaces
 behavior_refs: [behavior.protocol-projection]
 rule_refs: [rule.protocol-role-separation]
-evidence_refs: [evidence.provider-protocol-quality]
+evidence_refs: [evidence.provider-protocol-quality, evidence.channel-attachment-projection-repair, evidence.channel-attachment-projection-verification]
 audit_refs: [audit.protocol-surfaces.state-authority, audit.protocol-surfaces.contract-evidence]
 decision_refs: []
-repair_evidence_refs: []
-verification_evidence_refs: []
-rereview_audit_refs: []
+repair_evidence_refs: [evidence.channel-attachment-projection-repair]
+verification_evidence_refs: [evidence.channel-attachment-projection-verification]
+rereview_audit_refs: [audit.channel-attachment-projection-rereview]
 discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 ---
 
@@ -39,4 +39,7 @@ QQ/飞书等 channel 收到附件时，Agent 只看到文本，TUI/GUI/channel �
 
 ## 处理记录
 
-Discovery 记录；下一阶段确认 channel 是否明确 text-only，若非则复用 Message multimodal contract。
+复用 `Message::user_multimodal` 和 `TurnRequest::from_message`，有附件时按顺序投影
+为 typed user message；无附件仍走原文本入口。图像 MIME 按字节签名识别，文件字节
+以 base64 保留，不可表示的媒体在模型调用前拒绝。独立复审和本地完整合并门禁通过；
+Issue 仍须等远端主线交付及 CI 核对后关闭。
