@@ -2,7 +2,7 @@
 
 ## What It Is
 
-Structured output forces the LLM to return JSON that strictly conforms to a **pre-defined JSON Schema**, instead of free-form text. Developers no longer need regex or string parsing — the LLM's response can be deserialized directly into a Rust struct.
+Structured output sends a format hint to the LLM and, for a strict JSON Schema, validates the returned JSON locally before a structured extraction succeeds. Developers no longer need regex or string parsing to deserialize a valid result into a Rust struct.
 
 echo-agent supports structured output at three levels:
 
@@ -30,7 +30,7 @@ Fragile — breaks whenever the LLM rephrases the output
 ### Structured output approach
 
 ```
-Define JSON Schema → pass to LLM → LLM outputs strictly
+Define JSON Schema → send provider hint → validate a strict result locally
 ↓
 {"name":"John Smith","age":34,"occupation":"software engineer"}
 ↓
@@ -83,6 +83,8 @@ let fmt = ResponseFormat::json_schema(
     }),
 );
 ```
+
+`JsonSchema` with `strict: true` compiles and enforces the schema locally. An invalid schema is rejected before the one-shot LLM request. Invalid JSON and strict schema mismatches share the configured bounded correction retry budget and return typed errors when exhausted. `strict: false` sends only a provider hint; `JsonObject` checks JSON syntax, not schema shape. External schema references are currently rejected by the local validator; the integrated #96/#97 ADR will settle that policy.
 
 ---
 
@@ -164,7 +166,7 @@ println!("Keywords:    {:?}", result.keywords);
 
 ### Option 3: `AgentConfig::response_format()` — agent-wide config
 
-Forces every LLM call made by this Agent to use the specified format. Best for a dedicated "extraction agent":
+Stores the intended Agent-wide format. Main ReAct request forwarding is tracked by #96; this configuration alone does not yet guarantee that every model request carries the hint. `execute_typed()` validates the final value locally when a strict schema is configured:
 
 ```rust
 let config = AgentConfig::new("qwen3-max", "translator", "You are a translation assistant")
@@ -185,9 +187,7 @@ let config = AgentConfig::new("qwen3-max", "translator", "You are a translation 
 
 let mut agent = ReactAgent::new(config);
 
-// execute() returns a JSON string directly
-let raw = agent.execute("Artificial intelligence is transforming the world.").await?;
-let v: serde_json::Value = serde_json::from_str(&raw)?;
+let v: serde_json::Value = agent.execute_typed("Artificial intelligence is transforming the world.").await?;
 println!("translation: {}", v["translation"]);
 ```
 
@@ -246,7 +246,7 @@ for event in &result.events {
 |------|----------|-------------------|
 | `ResponseFormat::Text` | Default, free-form Q&A | None |
 | `ResponseFormat::JsonObject` | Any JSON output, fields not fixed | Valid JSON only |
-| `ResponseFormat::JsonSchema` | Fixed-field extraction / classification / conversion | Strict schema |
+| `ResponseFormat::JsonSchema` | Fixed-field extraction / classification / conversion | Local schema validation when `strict: true`; provider hint only when `strict: false` |
 
 ---
 
@@ -257,9 +257,9 @@ for event in &result.events {
 ```
 extract_json(prompt, schema)
     │
-    └─ single chat() call with response_format
+    └─ chat() call with response_format
          LLM outputs JSON text
-         parse and return immediately — no ReAct iterations
+         parse, validate strict schema, or retry invalid JSON/schema mismatch within the configured bound
 ```
 
 To combine tool-based data gathering with structured output, use a two-phase pattern:
@@ -276,7 +276,7 @@ let report: SalesReport = extractor_agent.extract(&raw_answer, schema).await?;
 
 ## Important Notes
 
-1. **Model compatibility**: `JsonSchema` strict mode requires the model to support Structured Outputs (e.g., GPT-4o, Qwen3). For unsupported models, fall back to `JsonObject`
+1. **Model compatibility**: Provider support helps produce valid output, but the local strict validator rejects a mismatch even if a provider ignores the hint. For unsupported models, `JsonObject` remains a syntax-only option.
 2. **`additionalProperties: false`**: Always set this in your JSON Schema to prevent the model from emitting extra fields
 3. **CoT**: Extraction tasks generally don't need chain-of-thought — use `.enable_cot(false)` to avoid interference
 4. **Temperature**: `extract_json()` internally uses `temperature=0.0` for stable outputs. The `AgentConfig::response_format()` path uses the Agent's configured temperature

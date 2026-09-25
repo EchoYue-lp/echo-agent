@@ -2,7 +2,7 @@
 
 ## 是什么
 
-结构化输出让 LLM 按照**预先定义的 JSON Schema** 严格返回 JSON，而不是自由文本。开发者无需再用正则表达式或字符串解析提取数据，LLM 的输出可以直接反序列化为 Rust 结构体。
+结构化输出向 LLM 发送格式提示；启用严格 JSON Schema 时，框架还会在结构化提取成功前本地校验返回值。开发者无需再用正则表达式或字符串解析提取数据，合格输出可以直接反序列化为 Rust 结构体。
 
 echo-agent 通过三层 API 支持结构化输出：
 
@@ -30,7 +30,7 @@ LLM 返回："人物：李明，年龄：34，职业：软件工程师"
 ### 结构化输出的方式
 
 ```
-定义 JSON Schema → 传给 LLM → LLM 严格按 Schema 输出
+定义 JSON Schema → 发送 Provider 提示 → 本地校验严格模式结果
 ↓
 {"name":"李明","age":34,"occupation":"软件工程师"}
 ↓
@@ -83,6 +83,8 @@ let fmt = ResponseFormat::json_schema(
     }),
 );
 ```
+
+`JsonSchema` 的 `strict: true` 会在本地编译并执行 Schema 校验。非法 Schema 在一次性 LLM 请求前被拒绝；JSON 语法错误与严格 Schema 不匹配共用配置的有界修复重试预算，耗尽后返回类型化错误。`strict: false` 仅向 Provider 发送提示；`JsonObject` 只检查 JSON 语法。当前本地校验器拒绝外部 Schema 引用，最终策略待 #96/#97 集成 ADR 裁决。
 
 ---
 
@@ -163,7 +165,7 @@ println!("置信: {:.0}%", result.confidence * 100.0); // "95%"
 
 ### 方式三：`AgentConfig::response_format()` — 全局配置
 
-让整个 Agent 在每次 LLM 调用时都强制使用该格式。适合"专职提取 Agent"：
+保存 Agent 级预期格式。主 ReAct 请求透传仍由 #96 接线，此配置目前不能单独保证每次模型请求都携带格式提示；配置严格 Schema 时，`execute_typed()` 会校验最终值：
 
 ```rust
 let config = AgentConfig::new("qwen3-235b-a22b", "translator", "你是一个翻译助手")
@@ -184,9 +186,7 @@ let config = AgentConfig::new("qwen3-235b-a22b", "translator", "你是一个翻�
 
 let mut agent = ReactAgent::new(config);
 
-// execute() 直接返回 JSON 字符串
-let raw = agent.execute("人工智能正在改变世界。").await?;
-let v: serde_json::Value = serde_json::from_str(&raw)?;
+let v: serde_json::Value = agent.execute_typed("人工智能正在改变世界。").await?;
 println!("translation: {}", v["translation"]);
 ```
 
@@ -245,7 +245,7 @@ for event in &result.events {
 |------|---------|---------|
 | `ResponseFormat::Text` | 默认，自由问答 | 无 |
 | `ResponseFormat::JsonObject` | 输出任意 JSON，不需要固定字段 | 仅验证合法 JSON |
-| `ResponseFormat::JsonSchema` | 固定字段提取/分类/转换 | 严格按 Schema |
+| `ResponseFormat::JsonSchema` | 固定字段提取/分类/转换 | `strict: true` 本地校验；`strict: false` 仅 Provider 提示 |
 
 ---
 
@@ -256,9 +256,9 @@ for event in &result.events {
 ```
 extract_json(prompt, schema)
     │
-    └─ 直接 chat()，携带 response_format
+    └─ chat()，携带 response_format
          LLM 输出 JSON 文本
-         直接解析返回，不进入 ReAct 迭代
+         解析并校验严格 Schema；语法错误或不匹配时在配置上限内修复重试
 ```
 
 若需要"先用工具查询数据，再以结构化格式输出结果"，推荐两阶段模式：
@@ -275,7 +275,7 @@ let report: SalesReport = extractor_agent.extract(&raw_answer, schema).await?;
 
 ## 注意事项
 
-1. **模型兼容性**：`JsonSchema` 严格模式需要模型支持 Structured Outputs（如 GPT-4o、Qwen3 等）；不支持的模型可降级使用 `JsonObject`
+1. **模型兼容性**：Provider 支持有助于生成合格输出；即使 Provider 忽略提示，本地严格校验也会拒绝不匹配值。不支持的模型可使用仅检查语法的 `JsonObject`。
 2. **`additionalProperties: false`**：JSON Schema 中建议始终设置此项，防止模型输出多余字段
 3. **与 CoT 的关系**：结构化提取场景通常不需要推理链，建议 `.enable_cot(false)` 以减少干扰
 4. **temperature**：`extract_json()` 内部固定使用 `temperature=0.0`，保证输出稳定；`AgentConfig::response_format()` 方式仍使用 Agent 默认温度
