@@ -1532,6 +1532,12 @@ pub struct ToolContext {
     pub execution_id: Option<String>,
     /// Stable identity for this logical tool call and all of its retry attempts.
     pub call_id: Option<String>,
+    /// Permission authority receipt for this exact final tool invocation.
+    ///
+    /// The receipt is invocation-local and must not be retained by a shared
+    /// tool implementation.  Effectful tools may require it after their own
+    /// command/resource policy has classified the effective operation.
+    pub approval_receipt: Option<permission::ToolApprovalReceipt>,
     /// Optional effect observer bound by the caller to this exact trace run
     /// and tool call. A shared tool must not retain it across invocations.
     pub effect_sink: Option<ToolEffectSinkFn>,
@@ -1577,6 +1583,13 @@ impl std::fmt::Debug for ToolContext {
             .field("message_id", &self.message_id)
             .field("execution_id", &self.execution_id)
             .field("call_id", &self.call_id)
+            .field(
+                "approval_receipt",
+                &self
+                    .approval_receipt
+                    .as_ref()
+                    .map(|receipt| receipt.tool_name()),
+            )
             .field("effect_sink", &self.effect_sink.as_ref().map(|_| "<sink>"))
             .field("has_active_message", &self.active_message.is_some())
             .field("output_artifacts", &self.output_artifacts)
@@ -1916,6 +1929,7 @@ mod tool_context_tests {
             message_id: None,
             execution_id: None,
             call_id: None,
+            approval_receipt: None,
             effect_sink: None,
             output_artifacts: None,
             tool_visibility: None,

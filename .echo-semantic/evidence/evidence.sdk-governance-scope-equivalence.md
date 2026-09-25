@@ -28,7 +28,7 @@ limitations:
   - 远程CI、PR/merge、发布和docs.rs渲染由独立交付证据负责
 evidence_type: behavior_equivalence
 before_revision: b21aba01b34e74c93d783a89db895282ba831c3c
-after_revision: source:983de91986bfb711ff3bf6586ef34bdcfad12189905d4a6a8551ddea697f82f9
+after_revision: source:28f42a6c8a446593492907c8e09effd43a986a5665776e38448b09fcba7fc585
 scenario_results:
   rust-runtime-authority:
     status: matched

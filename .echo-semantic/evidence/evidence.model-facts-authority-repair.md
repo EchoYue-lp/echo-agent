@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.model-facts-authority-repair
 kind: evidence
-observed_at: source:983de91986bfb711ff3bf6586ef34bdcfad12189905d4a6a8551ddea697f82f9
+observed_at: source:28f42a6c8a446593492907c8e09effd43a986a5665776e38448b09fcba7fc585
 source_refs:
   - echo-core/src/llm/capabilities.rs
   - echo-core/src/llm/mod.rs

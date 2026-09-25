@@ -10,7 +10,47 @@
 
 use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::HashSet;
+
+use crate::utils::canonical_json::canonical_json_bytes;
+
+/// Invocation-scoped proof that the permission authority allowed one exact
+/// tool call.  The receipt is intentionally bound to the final tool name and
+/// canonical effective arguments so a later rewrite, retry, or direct caller
+/// cannot reuse approval for a different effect.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolApprovalReceipt {
+    tool_name: String,
+    canonical_args: Vec<u8>,
+}
+
+impl ToolApprovalReceipt {
+    /// Issue a receipt for the final effective invocation.
+    ///
+    /// Permission services and trusted hook adapters are the intended issuers.
+    /// Consumers should only pass the receipt through [`ToolContext`] and must
+    /// validate it immediately before the effect they protect.
+    pub fn issue(tool_name: impl Into<String>, args: &Value) -> Result<Self, serde_json::Error> {
+        Ok(Self {
+            tool_name: tool_name.into(),
+            canonical_args: canonical_json_bytes(args)?,
+        })
+    }
+
+    /// Whether this receipt authorizes exactly the supplied invocation.
+    pub fn matches(&self, tool_name: &str, args: &Value) -> bool {
+        self.tool_name == tool_name
+            && canonical_json_bytes(args)
+                .map(|canonical| canonical == self.canonical_args)
+                .unwrap_or(false)
+    }
+
+    /// The tool name this receipt was issued for.
+    pub fn tool_name(&self) -> &str {
+        &self.tool_name
+    }
+}
 
 // ── Tool Permission Types ──────────────────────────────────────────────────────
 
@@ -1081,5 +1121,28 @@ mod tests {
         );
         assert_eq!("session".parse::<RuleSource>(), Ok(RuleSource::Session));
         assert!("tool:".parse::<RuleMatcher>().is_err());
+    }
+
+    #[test]
+    fn approval_receipt_matches_only_exact_canonical_effective_input()
+    -> Result<(), serde_json::Error> {
+        let receipt = ToolApprovalReceipt::issue(
+            "shell",
+            &serde_json::json!({"command": "git push", "background": false}),
+        )?;
+
+        assert!(receipt.matches(
+            "shell",
+            &serde_json::json!({"background": false, "command": "git push"})
+        ));
+        assert!(!receipt.matches(
+            "shell",
+            &serde_json::json!({"command": "git commit", "background": false})
+        ));
+        assert!(!receipt.matches(
+            "other_tool",
+            &serde_json::json!({"command": "git push", "background": false})
+        ));
+        Ok(())
     }
 }
