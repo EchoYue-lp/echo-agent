@@ -4111,6 +4111,7 @@ mod transcript_filter_tests {
             duration_ms: 0,
             plan_mode: false,
             permission_decision: None,
+            approval_receipt: None,
             permission_mode_override: None,
             rewrites: Vec::new(),
             invocation_emitted: false,
