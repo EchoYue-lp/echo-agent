@@ -5,11 +5,11 @@ kind: audit
 boundary_ref: boundary.tool-permission-sandbox
 lens: failure_concurrency
 freshness: examined
-revision: source:0427aee5ee15ea51f4623b1ae3db84522ef774c616f10390c3d7da16064d2ec0
+revision: source:b9df4130cf07d2561e8e61ec24d127607ce21112eca995952c64c1290ede3b74
 finding_refs: [finding.sandbox-manager-stream-failure-typing]
 challenges:
   backend-start-failure-terminal:
-    revision: source:0427aee5ee15ea51f4623b1ae3db84522ef774c616f10390c3d7da16064d2ec0
+    revision: source:b9df4130cf07d2561e8e61ec24d127607ce21112eca995952c64c1290ede3b74
     source_refs: [echo-execution/src/sandbox/manager.rs, echo-execution/src/sandbox/mod.rs, echo-execution/src/sandbox/local.rs, echo-core/src/sandbox.rs]
     evidence_refs: [evidence.sandbox-manager-stream-failure-typing-repair, evidence.sandbox-manager-stream-failure-typing-verification]
 ---

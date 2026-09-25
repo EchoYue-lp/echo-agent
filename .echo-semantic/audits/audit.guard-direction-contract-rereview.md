@@ -5,15 +5,15 @@ kind: audit
 boundary_ref: boundary.tool-permission-sandbox
 lens: result_side_effect
 freshness: examined
-revision: source:0427aee5ee15ea51f4623b1ae3db84522ef774c616f10390c3d7da16064d2ec0
+revision: source:b9df4130cf07d2561e8e61ec24d127607ce21112eca995952c64c1290ede3b74
 finding_refs: [finding.guard-direction-contract]
 challenges:
   tool-result-observation:
-    revision: source:0427aee5ee15ea51f4623b1ae3db84522ef774c616f10390c3d7da16064d2ec0
+    revision: source:b9df4130cf07d2561e8e61ec24d127607ce21112eca995952c64c1290ede3b74
     source_refs: [src/agent/react/run/pipeline.rs, src/agent/react/run/phases/tools.rs, src/agent/snapshot.rs]
     evidence_refs: [evidence.guard-direction-contract-repair, evidence.guard-direction-contract-verification]
   final-text-guard:
-    revision: source:0427aee5ee15ea51f4623b1ae3db84522ef774c616f10390c3d7da16064d2ec0
+    revision: source:b9df4130cf07d2561e8e61ec24d127607ce21112eca995952c64c1290ede3b74
     source_refs: [src/agent/react/run/phases/think.rs, src/agent/react/run/phases/finalize.rs]
     evidence_refs: [evidence.guard-direction-contract-repair, evidence.guard-direction-contract-verification]
 ---

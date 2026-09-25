@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.evolution-doc-namespace-verification
 kind: evidence
-observed_at: source:0427aee5ee15ea51f4623b1ae3db84522ef774c616f10390c3d7da16064d2ec0
+observed_at: source:b9df4130cf07d2561e8e61ec24d127607ce21112eca995952c64c1290ede3b74
 source_refs:
   - echo-state/src/memory/store.rs
   - src/evolution/layer.rs
@@ -45,7 +45,7 @@ hot/journal root、ChangeLog 和 conversation ID 的隔离说明。修复后执�
 此候选只验证文档与真实公开 namespace 常量保持一致，未验证运行时
 读写实现的新行为；后者本轮没有变更。合入 `origin/main@9abdf9de`
 后，documentation contract 再次通过 15/15；所有当前快照字段与
-baseline 刷新到整合源码摘要 `source:0427aee5ee15ea51f4623b1ae3db84522ef774c616f10390c3d7da16064d2ec0`，
+baseline 刷新到整合源码摘要 `source:b9df4130cf07d2561e8e61ec24d127607ce21112eca995952c64c1290ede3b74`，
 strict-snapshot/change-evidence 校验退出码 0。
 
 在同一 `a81e1752e5262e6109c3afab1ae3a411de0ed0f1` 代码及 #53
