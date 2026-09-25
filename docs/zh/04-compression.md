@@ -377,13 +377,14 @@ use echo_agent::tokenizer::{CalibratedTokenizer, HeuristicTokenizer, Tokenizer};
 use std::sync::Arc;
 
 let base = Arc::new(HeuristicTokenizer);
+let raw_prompt_tokens = base.count_tokens("some text");
 let calibrated = CalibratedTokenizer::new(base);
 
 // 像其他 Tokenizer 一样使用
 let tokens = calibrated.count_tokens("some text");
 
 // LLM API 返回实际 token 数后，反馈校准：
-calibrated.calibrate(tokens, api_usage.prompt_tokens);
+calibrated.calibrate(raw_prompt_tokens, api_usage.prompt_tokens);
 
 // 校准因子通过指数移动平均（EMA）逐步收敛
 println!("校准因子: {:.3}", calibrated.calibration_factor());
@@ -394,6 +395,14 @@ let ctx = ContextManager::builder(4096)
     .tokenizer(Arc::new(calibrated))
     .build();
 ```
+
+`calibrate` 接收与 provider usage 对应的**未校准**整次请求估算值，不能传入
+`calibrated.count_tokens(...)`。真实聊天请求须一并估算消息、暴露的工具 schema 和
+response-format schema；只有 provider 返回 prompt usage 才回灌。ReAct runtime 从实际
+交给 client 的不可变请求中取估算；provider 专属文件回退、图像输入与 reasoning replay
+无法把 usage 拆成可比的文本和非文本成本，因此不用于校准。文本因子变化不会放大图像的
+固定估算。ReAct 在压缩前预留当前工具与 response-format schema 的开销，Draft 记忆
+提取预判与准备阶段共用该预留值；干预或工具可见性变化后，最终请求还会再次检查预算。
 
 ---
 

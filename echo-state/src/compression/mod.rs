@@ -380,6 +380,13 @@ pub struct ContextManager {
     canonical_context: Option<CanonicalContext>,
 }
 
+struct InputBudgetEstimate {
+    system_tokens: usize,
+    conversation_tokens: usize,
+    effective_limit: usize,
+    needs_compression: bool,
+}
+
 impl ContextManager {
     pub fn builder(token_limit: usize) -> ContextManagerBuilder {
         ContextManagerBuilder {
@@ -493,19 +500,58 @@ impl ContextManager {
     ///
     /// (stage4 E1) Used by `pre_compaction_flush` to gate the flush LLM call so
     /// it only fires when compaction is actually about to happen, not on every
-    /// ReAct iteration. Mirrors `prepare()`'s `needs_compression` decision
-    /// (mod.rs:1017-1025) as a non-mutating pre-check. Slight over/under-fire
-    /// vs. the budget path is acceptable — the flush is best-effort.
+    /// ReAct iteration. Callers without request overhead use the same decision
+    /// as `prepare(None)`; pre-model callers can supply current schema overhead.
     pub fn should_compress(&self) -> bool {
+        self.should_compress_with_overhead(0)
+    }
+
+    /// Non-mutating preflight for prompt definitions outside the message
+    /// buffer. `prepare_with_cancel` recalculates after its visibility-horizon
+    /// pass, but uses the same budget rule.
+    pub fn should_compress_with_overhead(&self, request_overhead_tokens: usize) -> bool {
         if self.compressor.is_none() {
             return false;
         }
-        let estimated_tokens = Self::estimate_tokens(&self.messages, &*self.tokenizer);
-        if let Some(ref budget) = self.budget {
-            let allocation = budget.allocate(0, 0, estimated_tokens);
-            allocation.needs_compression()
+        self.input_budget(request_overhead_tokens).needs_compression
+    }
+
+    fn input_budget(&self, request_overhead_tokens: usize) -> InputBudgetEstimate {
+        let system_tokens = self
+            .messages
+            .iter()
+            .filter(|message| message.role == Role::System)
+            .fold(0usize, |total, message| {
+                total.saturating_add(message.content.estimated_tokens(&*self.tokenizer))
+            });
+        let conversation_tokens = self
+            .messages
+            .iter()
+            .filter(|message| message.role != Role::System)
+            .fold(0usize, |total, message| {
+                total.saturating_add(message.content.estimated_tokens(&*self.tokenizer))
+            });
+        let effective_limit = if let Some(ref budget) = self.budget {
+            budget
+                .total_window()
+                .saturating_sub(budget.output_budget())
+                .saturating_sub(budget.safety_budget())
+                .saturating_sub(request_overhead_tokens)
         } else {
-            estimated_tokens > self.token_limit
+            self.token_limit.saturating_sub(request_overhead_tokens)
+        };
+        let needs_compression = if let Some(ref budget) = self.budget {
+            budget
+                .allocate(system_tokens, request_overhead_tokens, conversation_tokens)
+                .needs_compression()
+        } else {
+            system_tokens.saturating_add(conversation_tokens) > effective_limit
+        };
+        InputBudgetEstimate {
+            system_tokens,
+            conversation_tokens,
+            effective_limit,
+            needs_compression,
         }
     }
 
@@ -1323,10 +1369,13 @@ impl ContextManager {
 
     /// Prepare model input while propagating one invocation cancellation token
     /// through every nested compression provider call.
+    /// `request_overhead_tokens` reserves caller-estimated prompt definitions
+    /// outside the message buffer (for example tool and response-format schemas).
+    /// `prepare()` passes zero for callers without such definitions.
     pub async fn prepare_with_cancel(
         &mut self,
         current_query: Option<&str>,
-        tool_tokens: usize,
+        request_overhead_tokens: usize,
         cancel_token: Option<echo_core::compression::CancellationToken>,
     ) -> Result<PrepareResult> {
         // ── Snapshot original messages for verification ──
@@ -1386,40 +1435,14 @@ impl ContextManager {
             }
         }
 
-        let system_tokens = self
-            .messages
-            .iter()
-            .filter(|message| message.role == Role::System)
-            .fold(0usize, |total, message| {
-                total.saturating_add(message.content.estimated_tokens(&*self.tokenizer))
-            });
-        let conversation_tokens = self
-            .messages
-            .iter()
-            .filter(|message| message.role != Role::System)
-            .fold(0usize, |total, message| {
-                total.saturating_add(message.content.estimated_tokens(&*self.tokenizer))
-            });
-        let estimated_tokens = system_tokens.saturating_add(conversation_tokens);
-
-        // Compute effective token limit once so primary compression and any
-        // verifier fallback obey the same budget-aware allowance.
-        let effective_limit = if let Some(ref budget) = self.budget {
-            budget
-                .total_window()
-                .saturating_sub(budget.output_budget())
-                .saturating_sub(budget.safety_budget())
-                .saturating_sub(tool_tokens)
-        } else {
-            self.token_limit
-        };
-
-        let needs_compression = if let Some(ref budget) = self.budget {
-            let allocation = budget.allocate(system_tokens, tool_tokens, conversation_tokens);
-            allocation.needs_compression()
-        } else {
-            estimated_tokens > self.token_limit
-        };
+        // Primary compression and verifier fallback use the same input budget
+        // rule as the pre-compaction memory-flush preflight.
+        let InputBudgetEstimate {
+            system_tokens,
+            conversation_tokens,
+            effective_limit,
+            needs_compression,
+        } = self.input_budget(request_overhead_tokens);
 
         let (compressed, mut combined_checkpoint) = if let Some(compressor) = &self.compressor
             && needs_compression
@@ -1659,7 +1682,7 @@ impl ContextManager {
         if self.token_estimate() > effective_limit {
             self.messages = original_messages;
             return Err(echo_core::error::AgentError::ContextLimitExceeded(format!(
-                "prepared context exceeds its effective input budget: system={system_tokens}, tools={tool_tokens}, conversation={conversation_tokens}, effective_limit={effective_limit}, window={}",
+                "prepared context exceeds its effective input budget: system={system_tokens}, request_overhead={request_overhead_tokens}, conversation={conversation_tokens}, effective_limit={effective_limit}, window={}",
                 self.token_limit
             ))
             .into());
@@ -2026,6 +2049,28 @@ mod tests {
         // is deducted before compression; the system prompt remains inside the
         // compressor input and shares the remaining 60-token input capacity.
         assert_eq!(recorded_limit.load(Ordering::SeqCst), 60);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn prepare_without_budget_reserves_request_overhead() -> Result<()> {
+        let mut ctx = ContextManager::builder(100)
+            .tokenizer(Arc::new(CharacterTokenizer))
+            .compressor(SlidingWindowCompressor::new(1))
+            .with_system("sys".to_string())
+            .build();
+        ctx.push(Message::user("a".repeat(30)));
+        ctx.push(Message::user("b".repeat(30)));
+        assert!(ctx.token_estimate() < 100);
+        assert!(!ctx.should_compress());
+        assert!(ctx.should_compress_with_overhead(45));
+
+        let result = ctx.prepare_with_cancel(None, 45, None).await?;
+        assert!(result.compressed.is_some());
+        assert!(ctx.token_estimate() <= 55);
+        assert!(result.messages.iter().any(|message| {
+            message.content.as_text_ref() == Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+        }));
         Ok(())
     }
 

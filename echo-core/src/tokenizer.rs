@@ -80,7 +80,8 @@ impl Tokenizer for SimpleTokenizer {
 /// # How it works
 ///
 /// 1. `count_tokens()` returns `inner.estimate × calibration_factor`
-/// 2. After each LLM call, feed back the actual token count via `calibrate()`
+/// 2. After each LLM call, feed back the *uncalibrated* estimate of the same
+///    request and its actual prompt-token count via `calibrate()`
 /// 3. The factor is an exponential moving average (EMA) that converges over time
 ///
 /// # Example
@@ -90,13 +91,15 @@ impl Tokenizer for SimpleTokenizer {
 /// use std::sync::Arc;
 ///
 /// let base = Arc::new(HeuristicTokenizer);
+/// let raw_estimate = base.count_tokens("hello world");
 /// let calibrated = CalibratedTokenizer::new(base);
 ///
 /// // Initial estimate (factor = 1.0)
 /// let est = calibrated.count_tokens("hello world");
+/// assert_eq!(est, raw_estimate);
 ///
 /// // After API returns actual count:
-/// calibrated.calibrate(est, 15); // actual was 15 tokens
+/// calibrated.calibrate(raw_estimate, 15); // actual was 15 tokens
 ///
 /// // Subsequent estimates are now adjusted
 /// let adjusted = calibrated.count_tokens("another text");
@@ -104,7 +107,7 @@ impl Tokenizer for SimpleTokenizer {
 pub struct CalibratedTokenizer {
     inner: std::sync::Arc<dyn Tokenizer>,
     /// Calibration factor stored as f64 bits in AtomicU64 for lock-free access.
-    /// Factor = actual_tokens / estimated_tokens (EMA smoothed).
+    /// Factor = actual_tokens / uncalibrated_estimated_tokens (EMA smoothed).
     factor_bits: std::sync::atomic::AtomicU64,
     /// Number of calibration samples received.
     sample_count: std::sync::atomic::AtomicU64,
@@ -142,8 +145,10 @@ impl CalibratedTokenizer {
 
     /// Feed back actual token count from an API response to improve future estimates.
     ///
-    /// - `estimated`: the value returned by `count_tokens()` before the API call
-    /// - `actual`: the actual token count from the API response (`usage.prompt_tokens`)
+    /// - `estimated`: the base tokenizer's uncalibrated estimate of the entire
+    ///   request whose usage is being reported, including estimable tool and
+    ///   format schemas. Never pass this wrapper's `count_tokens()` result.
+    /// - `actual`: the provider-normalized prompt-token count for that request
     pub fn calibrate(&self, estimated: usize, actual: u32) {
         if estimated == 0 || actual == 0 {
             return;
@@ -171,6 +176,12 @@ impl CalibratedTokenizer {
         f64::from_bits(bits)
     }
 
+    /// Access the underlying tokenizer for a raw estimate before applying
+    /// this wrapper's calibration factor.
+    pub fn base_tokenizer(&self) -> &dyn Tokenizer {
+        self.inner.as_ref()
+    }
+
     /// Get the number of calibration samples received.
     pub fn sample_count(&self) -> u64 {
         self.sample_count.load(std::sync::atomic::Ordering::Relaxed)
@@ -188,8 +199,7 @@ impl CalibratedTokenizer {
 impl Tokenizer for CalibratedTokenizer {
     fn count_tokens(&self, text: &str) -> usize {
         let base = self.inner.count_tokens(text);
-        let factor = self.calibration_factor();
-        (base as f64 * factor).round() as usize
+        (base as f64 * self.calibration_factor()).round() as usize
     }
 }
 
@@ -420,6 +430,7 @@ mod tests {
         // Now count_tokens should return ~2x the base estimate
         let adjusted = calibrated.count_tokens(text);
         assert_eq!(adjusted, estimated * 2);
+        assert_eq!(calibrated.base_tokenizer().count_tokens(text), estimated);
     }
 
     #[test]

@@ -5757,6 +5757,73 @@ mod tests {
         }));
     }
 
+    #[tokio::test]
+    async fn schema_overhead_compacts_history_before_model_admission() -> Result<()> {
+        use echo_core::tokenizer::{HeuristicTokenizer, Tokenizer};
+
+        let base = HeuristicTokenizer;
+        let history: Vec<Message> = (0..6)
+            .map(|index| Message::user(format!("history-{index} {}", "old ".repeat(80))))
+            .collect();
+        let history_tokens = history.iter().fold(0usize, |total, message| {
+            total.saturating_add(message.content.estimated_tokens(&base))
+        });
+        let format = crate::llm::ResponseFormat::json_schema(
+            "large_string",
+            serde_json::json!({
+                "type": "string",
+                "description": "schema guidance ".repeat(60)
+            }),
+        );
+        let format_json = serde_json::to_string(&format)?;
+        let format_tokens = base.count_tokens(&format_json);
+        let window = history_tokens.saturating_add(150);
+        assert!(format_tokens > 150);
+        assert!(format_tokens < window / 2);
+
+        for budget in [
+            echo_core::budget::TokenBudgetConfig::default(),
+            echo_core::budget::TokenBudgetConfig::disabled(),
+        ] {
+            let llm = Arc::new(MockLlmClient::new().with_response("\"done\""));
+            let config = AgentConfig::new("mock-model", "schema-compaction", "sys")
+                .auto_project_rules(false)
+                .enable_tool(false)
+                .model_profile(
+                    echo_core::llm::capabilities::ModelProfile::from_provider_name(
+                        "mock-model",
+                        "openai",
+                    ),
+                )
+                .response_format(format.clone())
+                .token_limit(window)
+                .token_budget(budget);
+            let mut agent = ReactAgent::new(config);
+            agent.set_llm_client(llm.clone());
+            agent
+                .set_compressor(crate::compression::compressor::SlidingWindowCompressor::new(1))
+                .await;
+            {
+                let mut context = agent.memory.context.lock().await;
+                for message in &history {
+                    context.push(message.clone());
+                }
+            }
+
+            let events = collect_events_result(&agent, "current request").await?;
+            assert!(
+                events
+                    .iter()
+                    .any(|event| matches!(event, AgentEvent::ContextCompressed { .. }))
+            );
+            assert!(events.iter().any(|event| {
+                matches!(event, AgentEvent::FinalAnswer(answer) if answer == "\"done\"")
+            }));
+            assert_eq!(llm.call_count(), 1);
+        }
+        Ok(())
+    }
+
     /// When the mock LLM exhausts its response queue (returns EmptyResponse
     /// error), the loop must terminate gracefully with an Error event rather
     /// than hanging or panicking. Guards the empty-response / error branch.
