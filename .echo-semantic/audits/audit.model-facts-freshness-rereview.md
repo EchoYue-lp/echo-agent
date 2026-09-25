@@ -5,23 +5,23 @@ kind: audit
 boundary_ref: boundary.llm-provider-runtime
 lens: state_authority
 freshness: examined
-revision: source:bd676c53ff6a431d3ef88581ad7a92a4db718dad7e88dd872b64e20170f61b93
+revision: source:b9df4130cf07d2561e8e61ec24d127607ce21112eca995952c64c1290ede3b74
 finding_refs: [finding.model-fact-freshness-authority, finding.provider-capability-authority]
 challenges:
   fresh-fact-precedence:
-    revision: source:bd676c53ff6a431d3ef88581ad7a92a4db718dad7e88dd872b64e20170f61b93
+    revision: source:b9df4130cf07d2561e8e61ec24d127607ce21112eca995952c64c1290ede3b74
     source_refs: [echo-core/src/llm/capabilities.rs, src/agent/react/mod.rs, src/agent/react/tests.rs]
     evidence_refs: [evidence.model-facts-authority-repair, evidence.model-facts-authority-verification]
   provider-protocol-cross-product:
-    revision: source:bd676c53ff6a431d3ef88581ad7a92a4db718dad7e88dd872b64e20170f61b93
+    revision: source:b9df4130cf07d2561e8e61ec24d127607ce21112eca995952c64c1290ede3b74
     source_refs: [echo-core/src/llm/capabilities.rs, echo-integration/src/providers/config.rs, echo-integration/src/providers/anthropic.rs]
     evidence_refs: [evidence.model-facts-authority-verification]
   unknown-provider-isolation:
-    revision: source:bd676c53ff6a431d3ef88581ad7a92a4db718dad7e88dd872b64e20170f61b93
+    revision: source:b9df4130cf07d2561e8e61ec24d127607ce21112eca995952c64c1290ede3b74
     source_refs: [echo-core/src/llm/capabilities.rs, echo-core/src/llm/mod.rs]
     evidence_refs: [evidence.model-facts-authority-verification]
   tokenizer-boundary:
-    revision: source:bd676c53ff6a431d3ef88581ad7a92a4db718dad7e88dd872b64e20170f61b93
+    revision: source:b9df4130cf07d2561e8e61ec24d127607ce21112eca995952c64c1290ede3b74
     source_refs: [src/agent/snapshot.rs, docs/en/38-factory-modes.md, docs/adr/0047-model-facts-freshness-authority.md]
     evidence_refs: [evidence.model-facts-authority-repair]
 ---

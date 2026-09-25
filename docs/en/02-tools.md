@@ -601,28 +601,17 @@ Tool calls no longer execute directly — they flow through a pluggable pipeline
 
 ### Pipeline Stages
 
-```
-Tool Call → InterventionStage → ParseValidate → PlanMode → PreToolUseHook
-           → Permission → ReadBeforeEdit → Callback(Start) → Execution
-           → TraceRecording → PostToolUseHook → OutputGuard → Truncation
-           → Callback(End)
-```
+The default pipeline checks visibility, plan mode, hooks, permissions, and the
+effective tool input before publishing an invocation or executing the tool.
+After execution, the post-use hook and output guard run before output budgeting,
+trace, audit, and the terminal callback. A post-use block does not erase an
+effect that already occurred or skip its terminal observation. ToolManager
+validates tool parameters at execution; there is no separate ParseValidate
+stage.
 
-| Stage | Purpose |
-|-------|---------|
-| **InterventionStage** | Intervention callbacks: block / cancel / redirect / modify_args |
-| **ParseValidate** | Parameter parsing and type validation |
-| **PlanMode** | Intercept write operations in planning mode |
-| **PreToolUseHook** | PreToolUse hooks: can modify input or block execution |
-| **Permission** | Permission check (PermissionService unified pipeline) |
-| **ReadBeforeEdit** | Force file read before edit (prevents blind writes) |
-| **Callback(Start)** | on_tool_start callbacks |
-| **Execution** | Actual tool execution |
-| **TraceRecording** | Record trace events |
-| **PostToolUseHook** | PostToolUse hooks |
-| **OutputGuard** | Output content guard check |
-| **Truncation** | Output truncation (token budget) |
-| **Callback(End)** | on_tool_end callbacks |
+The [executable demo64 contract](../../echo-agent-learning/tests/example_contracts/demo64_tool_pipeline.rs)
+prints the full stage sequence from structured events emitted by a real default
+pipeline invocation and checks these order constraints against production.
 
 ### Configuring the Pipeline
 
@@ -633,8 +622,9 @@ use echo_agent::prelude::*;
 let pipeline = ToolExecutionPipeline::default();
 
 let agent = ReactAgentBuilder::new()
+    .model("your-model")
     .tool_execution_pipeline(pipeline)
-    .build(config);
+    .build()?;
 ```
 
 See [demo64_tool_pipeline.rs](../../echo-agent-learning/tests/example_contracts/demo64_tool_pipeline.rs).

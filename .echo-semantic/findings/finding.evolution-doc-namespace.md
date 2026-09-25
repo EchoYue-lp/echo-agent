@@ -3,19 +3,19 @@ schema_version: 1
 id: finding.evolution-doc-namespace
 kind: finding
 type: evidence_gap
-status: open
+status: resolved
 severity: medium
 primary_focus: contract_evidence
 focus: [data_durability]
 boundary_ref: boundary.eval-evolution
 behavior_refs: [behavior.eval-evolution]
 rule_refs: [rule.quality-observation-boundary]
-evidence_refs: [evidence.provider-protocol-quality]
-audit_refs: [audit.eval-evolution.data-durability]
+evidence_refs: [evidence.provider-protocol-quality, evidence.evolution-doc-namespace-repair, evidence.evolution-doc-namespace-verification]
+audit_refs: [audit.eval-evolution.data-durability, audit.evolution-doc-namespace-rereview]
 decision_refs: []
-repair_evidence_refs: []
-verification_evidence_refs: []
-rereview_audit_refs: []
+repair_evidence_refs: [evidence.evolution-doc-namespace-repair]
+verification_evidence_refs: [evidence.evolution-doc-namespace-verification]
+rereview_audit_refs: [audit.evolution-doc-namespace-rereview]
 discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 ---
 
@@ -39,4 +39,8 @@ Framework consumer 按文档查询或设计持久布局时，会使用代码不�
 
 ## 处理记录
 
-Discovery 记录；下一阶段先确认当前持久 contract，再同步双语文档和 examples。
+已按 `MemoryLayerManager` 当前读写路径修正双语文档、交叉引用及
+documentation contract；整合快照的独立增量复审通过。
+`a81e1752` 整合快照上的 `./scripts/verify.sh` 已退出 0；repair、
+verification、rereview 与本地完整门禁支持将本 Finding 置为 resolved。
+GitHub Issue #53 仍待 PR、远端 CI 与 main 交付后关闭。

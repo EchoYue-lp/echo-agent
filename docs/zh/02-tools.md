@@ -590,28 +590,13 @@ let choice = ToolChoice::None;
 
 ### 管线阶段
 
-```
-Tool Call → InterventionStage → ParseValidate → PlanMode → PreToolUseHook
-           → Permission → ReadBeforeEdit → Callback(Start) → Execution
-           → TraceRecording → PostToolUseHook → OutputGuard → Truncation
-           → Callback(End)
-```
+默认管线在发布调用或执行工具前检查可见性、计划模式、Hook、权限和最终有效输入。
+执行后，PostToolUse Hook 与输出守卫先于输出预算、Trace、Audit 和终态回调。
+执行后拦截不会抹去已经发生的副作用，也不会跳过其终态观察。工具参数由
+ToolManager 在执行边界校验；不存在独立的 ParseValidate 阶段。
 
-| 阶段 | 作用 |
-|------|------|
-| **InterventionStage** | 干预回调：block / cancel / redirect / modify_args |
-| **ParseValidate** | 参数解析与类型校验 |
-| **PlanMode** | 在计划模式下拦截写操作工具 |
-| **PreToolUseHook** | PreToolUse 钩子：可修改输入或阻止执行 |
-| **Permission** | 权限检查（PermissionService 统一管线） |
-| **ReadBeforeEdit** | 编辑前强制先读取文件（防止盲写） |
-| **Callback(Start)** | on_tool_start 回调 |
-| **Execution** | 实际执行工具 |
-| **TraceRecording** | 记录 Trace 事件 |
-| **PostToolUseHook** | PostToolUse 钩子 |
-| **OutputGuard** | 输出内容守卫检查 |
-| **Truncation** | 输出截断（token 预算） |
-| **Callback(End)** | on_tool_end 回调 |
+[demo64 可执行合同](../../echo-agent-learning/tests/example_contracts/demo64_tool_pipeline.rs)
+从真实默认管线调用发出的结构化事件打印完整阶段顺序，并对生产顺序检查上述约束。
 
 ### 配置管线
 
@@ -622,8 +607,9 @@ use echo_agent::prelude::*;
 let pipeline = ToolExecutionPipeline::default();
 
 let agent = ReactAgentBuilder::new()
+    .model("your-model")
     .tool_execution_pipeline(pipeline)
-    .build(config);
+    .build()?;
 ```
 
 详见 [demo64_tool_pipeline.rs](../../echo-agent-learning/tests/example_contracts/demo64_tool_pipeline.rs)。

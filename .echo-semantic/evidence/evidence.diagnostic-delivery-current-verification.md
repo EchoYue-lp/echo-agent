@@ -21,7 +21,7 @@ limitations:
 最终验证须覆盖 FileAuditLogger child-process 独占/reacquire、custom backend diagnostic error
 retention、InMemory/JSONL append 与 finalize 并发下保留 late event、重复 finalize 不覆盖
 第一个 terminal 与缺失 run receipt。Consumer public inventory/Host mapping 由其所属仓库验证。所有
-`source:bd676c53ff6a431d3ef88581ad7a92a4db718dad7e88dd872b64e20170f61b93...` 前的 package/root 日志早于 atomic finalization，不能证明当前源码。
+`source:b9df4130cf07d2561e8e61ec24d127607ce21112eca995952c64c1290ede3b74...` 前的 package/root 日志早于 atomic finalization，不能证明当前源码。
 
 ## 来源与范围
 
