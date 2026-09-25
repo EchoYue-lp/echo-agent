@@ -10,11 +10,11 @@ focus: [time_lifecycle, result_side_effect]
 boundary_ref: boundary.tool-permission-sandbox
 behavior_refs: [behavior.effect-permission-execution, behavior.workspace-composition]
 rule_refs: [rule.permission-effect-order]
-evidence_refs: [evidence.effects-extensions, evidence.workspace-structure]
+evidence_refs: [evidence.effects-extensions, evidence.workspace-structure, evidence.tool-pipeline-example-repair]
 audit_refs: [audit.observation-persistence-delivery.contract-evidence, audit.tool-permission-sandbox.result-side-effect]
 decision_refs: []
-repair_evidence_refs: []
-verification_evidence_refs: []
+repair_evidence_refs: [evidence.tool-pipeline-example-repair]
+verification_evidence_refs: [evidence.tool-pipeline-example-verification]
 rereview_audit_refs: []
 discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 ---
@@ -27,7 +27,7 @@ GitHub Issue: https://github.com/EchoYue-lp/echo-agent/issues/101
 
 ## 问题
 
-Executable contract 仍声明 13 stages、包含已不存在的 ParseValidateStage，并把 Trace 放在 PostHook 前；生产 pipeline 当前是 16 stages 且顺序不同。
+最初的 executable contract 声明 13 stages，包含已不存在的 ParseValidateStage，并把 Trace 放在 PostHook 前。一次手工同步改成了 16-stage 静态列表；Guard 方向修复加入 ToolInputGuardStage 后，生产默认管线已是 17 stages，示例再次漂移。中英文工具文档仍保留最初的旧顺序。
 
 ## 触发条件与影响
 
@@ -35,8 +35,8 @@ Executable contract 仍声明 13 stages、包含已不存在的 ParseValidateSta
 
 ## 证据
 
-`echo-agent-learning/tests/example_contracts/demo64_tool_pipeline.rs` 与 `src/agent/react/run/pipeline.rs` 构成反例。
+在 `69a3b864` 上，`echo-agent-learning/tests/example_contracts/demo64_tool_pipeline.rs` 的静态总览与 `src/agent/react/run/pipeline.rs` 的真实顺序分别为 16 和 17 阶段；真实执行 tracing 给出同样的 17 阶段。
 
 ## 处理记录
 
-Discovery 记录；后续 repair 应让 contract 直接消费 production metadata 或用结构测试绑定真实顺序。
+候选修复从真实默认管线调用的结构化 tracing 读取阶段名称，动态展示顺序，并检查关键权限、守卫、执行和终态观察关系；不新增公开 runtime API。独立复审和 main 交付后再判定关闭。

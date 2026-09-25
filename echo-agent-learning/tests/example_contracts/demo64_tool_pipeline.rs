@@ -2,24 +2,7 @@
 //!
 //! 展示工具执行管线的完整架构：
 //!
-//! **ToolExecutionPipeline 的 16 个阶段**（按执行顺序）：
-//!
-//!  1. `InterventionStage`    — 干预回调（block / cancel / redirect / modify）
-//!  2. `ToolVisibilityStage`  — 工具可见性检查
-//!  3. `PlanModeStage`        — 计划模式：阻止写操作
-//!  4. `PreToolUseHookStage`  — PreToolUse 钩子
-//!  5. `PermissionStage`      — 权限检查（PermissionService）
-//!  6. `ReadBeforeEditStage`  — 编辑前必须读取文件
-//!  7. `SkillPermissionStage` — 激活技能的工具权限
-//!  8. `InvocationStage`      — 发布 canonical invocation
-//!  9. `CallbackStage(Start)` — on_tool_start 回调
-//! 10. `ExecuteStage`         — ToolManager 校验并执行工具
-//! 11. `PostToolUseHookStage` — 成功/失败后置钩子
-//! 12. `OutputGuardStage`    — 输出与审计错误投影的守卫
-//! 13. `TruncationStage`     — 输出预算与 artifact 处理
-//! 14. `TraceRecordingStage` — ToolResult / ToolError
-//! 15. `AuditStage`          — 结算后工具终态审计
-//! 16. `CallbackStage(End)`  — on_tool_end / on_tool_error 分流
+//! 阶段总览由真实工具调用的生产 tracing 事件生成，不维护第二份静态顺序。
 //!
 //! Contract test: `contract_demo64_tool_pipeline`.
 
@@ -28,8 +11,212 @@ use echo_agent::testing::MockLlmClient;
 use echo_agent::tool;
 use futures::future::BoxFuture;
 use serde_json::{Value, json};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use tracing::field::{Field, Visit};
+use tracing::{Event, Subscriber};
+use tracing_subscriber::Layer;
+use tracing_subscriber::layer::{Context, SubscriberExt};
+
+#[derive(Default)]
+struct StageVisitor {
+    stage: Option<String>,
+}
+
+impl Visit for StageVisitor {
+    fn record_debug(&mut self, _field: &Field, _value: &dyn std::fmt::Debug) {}
+
+    fn record_str(&mut self, field: &Field, value: &str) {
+        if field.name() == "stage" {
+            self.stage = Some(value.to_string());
+        }
+    }
+}
+
+struct StageTraceLayer {
+    stages: Arc<Mutex<Vec<String>>>,
+}
+
+impl<S: Subscriber> Layer<S> for StageTraceLayer {
+    fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+        if event.metadata().target() != "echo_agent::agent::react::run::pipeline" {
+            return;
+        }
+        let mut visitor = StageVisitor::default();
+        event.record(&mut visitor);
+        if let Some(stage) = visitor.stage
+            && let Ok(mut stages) = self.stages.lock()
+        {
+            stages.push(stage);
+        }
+    }
+}
+
+async fn observed_default_stages() -> echo_agent::error::Result<Vec<String>> {
+    let stages = Arc::new(Mutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::registry().with(StageTraceLayer {
+        stages: stages.clone(),
+    });
+    let llm = Arc::new(
+        MockLlmClient::new()
+            .then_tool_call("call_add", "add", r#"{"a":15.0,"b":27.0}"#)
+            .with_response("42"),
+    );
+    let mut agent = ReactAgent::new(AgentConfig::new(
+        "qwen3-max",
+        "stage_observer",
+        "Calculate.",
+    ))
+    .with_llm_client(llm);
+    agent.add_tool(Box::new(AddTool));
+    let guard = tracing::subscriber::set_default(subscriber);
+    let answer = agent.execute("15 + 27").await?;
+    drop(guard);
+    assert_eq!(answer.trim(), "42");
+    let observed = stages.lock().map_err(|_| {
+        echo_agent::error::ReactError::Other("stage trace lock poisoned".to_string())
+    })?;
+    Ok(observed.clone())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn contract_demo64_stage_inventory_matches_overview() -> echo_agent::error::Result<()> {
+    let observed = observed_default_stages().await?;
+    verify_stage_contract(&observed)?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn contract_demo64_rejects_duplicate_production_stage() -> echo_agent::error::Result<()> {
+    let mut observed = observed_default_stages().await?;
+    observed.push("execute".to_string());
+    assert!(verify_stage_contract(&observed).is_err());
+    Ok(())
+}
+
+// Description catalog, alphabetically keyed; the runtime trace alone defines order.
+const STAGE_INFO: [(&str, &str, &str); 17] = [
+    ("audit", "AuditStage", "审计结算后的工具终态"),
+    (
+        "callback_end",
+        "CallbackStage(End)",
+        "按真实终态分流 on_tool_end / on_tool_error",
+    ),
+    (
+        "callback_start",
+        "CallbackStage(Start)",
+        "通知观察者工具即将执行",
+    ),
+    ("execute", "ExecuteStage", "ToolManager 校验并执行工具"),
+    (
+        "intervention",
+        "InterventionStage",
+        "干预回调：block / cancel / redirect / modify_args",
+    ),
+    (
+        "invocation",
+        "InvocationStage",
+        "发布 requested/effective canonical invocation",
+    ),
+    ("output_guard", "OutputGuardStage", "守卫工具结果及错误投影"),
+    ("permission", "PermissionStage", "检查本次工具调用的权限"),
+    ("plan_mode", "PlanModeStage", "计划模式下阻止写操作"),
+    (
+        "post_tool_use_hook",
+        "PostToolUseHookStage",
+        "执行后 Hook 检查结果",
+    ),
+    (
+        "pre_tool_use_hook",
+        "PreToolUseHookStage",
+        "执行前 Hook 可修改输入或阻止调用",
+    ),
+    (
+        "read_before_edit",
+        "ReadBeforeEditStage",
+        "按配置要求先读后改",
+    ),
+    (
+        "skill_permission",
+        "SkillPermissionStage",
+        "检查激活技能的工具许可",
+    ),
+    (
+        "tool_input_guard",
+        "ToolInputGuardStage",
+        "在有效调用被发布前检查最终输入",
+    ),
+    (
+        "tool_visibility",
+        "ToolVisibilityStage",
+        "检查工具是否在本次调用中可见",
+    ),
+    (
+        "trace_recording",
+        "TraceRecordingStage",
+        "记录结算后的 ToolResult / ToolError",
+    ),
+    ("truncation", "TruncationStage", "输出预算及 artifact 处理"),
+];
+
+fn stage_info(name: &str) -> Option<(&'static str, &'static str)> {
+    STAGE_INFO
+        .iter()
+        .find(|(key, _, _)| *key == name)
+        .map(|(_, display, description)| (*display, *description))
+}
+
+fn stage_position(stages: &[String], name: &str) -> echo_agent::error::Result<usize> {
+    stages
+        .iter()
+        .position(|stage| stage == name)
+        .ok_or_else(|| {
+            echo_agent::error::ReactError::Other(format!("production pipeline omitted {name}"))
+        })
+}
+
+fn verify_stage_contract(stages: &[String]) -> echo_agent::error::Result<()> {
+    for (name, _, _) in STAGE_INFO {
+        let count = stages.iter().filter(|stage| stage.as_str() == name).count();
+        if count != 1 {
+            return Err(echo_agent::error::ReactError::Other(format!(
+                "production pipeline stage {name} occurred {count} times"
+            )));
+        }
+    }
+    for stage in stages {
+        if stage_info(stage).is_none() {
+            return Err(echo_agent::error::ReactError::Other(format!(
+                "document the new production pipeline stage: {stage}"
+            )));
+        }
+    }
+    for (before, after) in [
+        ("intervention", "permission"),
+        ("tool_visibility", "invocation"),
+        ("plan_mode", "invocation"),
+        ("pre_tool_use_hook", "invocation"),
+        ("permission", "tool_input_guard"),
+        ("read_before_edit", "invocation"),
+        ("skill_permission", "invocation"),
+        ("tool_input_guard", "invocation"),
+        ("invocation", "callback_start"),
+        ("callback_start", "execute"),
+        ("execute", "post_tool_use_hook"),
+        ("post_tool_use_hook", "output_guard"),
+        ("output_guard", "truncation"),
+        ("truncation", "trace_recording"),
+        ("trace_recording", "audit"),
+        ("audit", "callback_end"),
+    ] {
+        if stage_position(stages, before)? >= stage_position(stages, after)? {
+            return Err(echo_agent::error::ReactError::Other(format!(
+                "production pipeline order violated: {before} must precede {after}"
+            )));
+        }
+    }
+    Ok(())
+}
 
 // ── 工具定义 ──────────────────────────────────────────────────────────────────
 
@@ -45,7 +232,7 @@ async fn add(
 
 // ── 入口 ──────────────────────────────────────────────────────────────────────
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn contract_demo64_tool_pipeline() -> echo_agent::error::Result<()> {
     dotenvy::dotenv().ok();
     let _ = tracing_subscriber::fmt()
@@ -58,8 +245,13 @@ async fn contract_demo64_tool_pipeline() -> echo_agent::error::Result<()> {
     print_banner();
 
     // ── Part 1: Pipeline 阶段总览 ────────────────────────────────────────────
-    separator("Part 1: ToolExecutionPipeline 16 阶段总览");
-    demo_pipeline_stages();
+    let stages = observed_default_stages().await?;
+    verify_stage_contract(&stages)?;
+    separator(&format!(
+        "Part 1: ToolExecutionPipeline {} 阶段总览",
+        stages.len()
+    ));
+    demo_pipeline_stages(&stages)?;
 
     // ── Part 2: InterventionCallback — 第一阶段拦截 ──────────────────────────
     separator("Part 2: InterventionCallback — 干预回调");
@@ -81,77 +273,13 @@ async fn contract_demo64_tool_pipeline() -> echo_agent::error::Result<()> {
 
 // ── Part 1: Pipeline 阶段总览 ─────────────────────────────────────────────────
 
-fn demo_pipeline_stages() {
-    let stages = [
-        (
-            " 1",
-            "InterventionStage",
-            "干预回调：block / cancel / redirect / modify_args",
-        ),
-        (
-            " 2",
-            "ToolVisibilityStage",
-            "工具可见性检查：阻止不可见的工具",
-        ),
-        (
-            " 3",
-            "PlanModeStage",
-            "计划模式：阻止 write_file / shell / delete_file",
-        ),
-        (
-            " 4",
-            "PreToolUseHookStage",
-            "PreToolUse 钩子：可修改输入或阻止执行",
-        ),
-        (" 5", "PermissionStage", "权限检查（PermissionService）"),
-        (
-            " 6",
-            "ReadBeforeEditStage",
-            "Read-before-edit：编辑文件前必须先 read_file",
-        ),
-        (
-            " 7",
-            "SkillPermissionStage",
-            "激活技能的 allowed_tools 检查",
-        ),
-        (
-            " 8",
-            "InvocationStage",
-            "发布 requested/effective canonical invocation",
-        ),
-        (
-            " 9",
-            "CallbackStage(Start)",
-            "on_tool_start 回调：通知观察者工具即将执行",
-        ),
-        ("10", "ExecuteStage", "核心执行：ToolManager 校验并执行工具"),
-        (
-            "11",
-            "PostToolUseHookStage",
-            "PostToolUse 钩子：检查输出或注入额外信息",
-        ),
-        ("12", "OutputGuardStage", "输出与审计错误投影的内容守卫"),
-        (
-            "13",
-            "TruncationStage",
-            "输出截断：根据 token 预算截断过长输出",
-        ),
-        (
-            "14",
-            "TraceRecordingStage",
-            "Trace 记录：结算后的 ToolResult / ToolError",
-        ),
-        ("15", "AuditStage", "记录结算后的工具终态与处理后输出"),
-        (
-            "16",
-            "CallbackStage(End)",
-            "成功走 on_tool_end，失败走 on_tool_error",
-        ),
-    ];
-
-    println!("  ToolExecutionPipeline::default_pipeline() 阶段:\n");
-    for (num, name, desc) in &stages {
-        println!("  [{num}] {name:<24} — {desc}");
+fn demo_pipeline_stages(stages: &[String]) -> echo_agent::error::Result<()> {
+    println!("  从真实 ToolExecutionPipeline::default_pipeline() 调用观测到的阶段:\n");
+    for (index, stage) in stages.iter().enumerate() {
+        let (name, desc) = stage_info(stage).ok_or_else(|| {
+            echo_agent::error::ReactError::Other(format!("unknown pipeline stage: {stage}"))
+        })?;
+        println!("  [{:>2}] {name:<24} — {desc}", index + 1);
     }
 
     println!("\n  关键设计:");
@@ -163,6 +291,7 @@ fn demo_pipeline_stages() {
     println!("    • ReadBeforeEditStage 仅在 force_read_before_edit = true 时生效");
 
     println!("  → Pipeline 阶段总览 ✓");
+    Ok(())
 }
 
 // ── Part 2: InterventionCallback ──────────────────────────────────────────────
@@ -393,8 +522,8 @@ async fn demo_agent_callback() -> echo_agent::error::Result<()> {
     assert_eq!(add_ends, 1, "add should trigger one end callback");
 
     println!("\n  回调触发的管线阶段:");
-    println!("    on_tool_start → 阶段 9: CallbackStage(Start)");
-    println!("    on_tool_end / on_tool_error → 阶段 16: CallbackStage(End)");
+    println!("    on_tool_start → CallbackStage(Start)");
+    println!("    on_tool_end / on_tool_error → CallbackStage(End)");
     println!("    on_final_answer → 最终答案输出时触发");
     println!("    on_iteration → 每轮 ReAct 循环结束时触发");
 
