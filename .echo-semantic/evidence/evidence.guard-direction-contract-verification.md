@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.guard-direction-contract-verification
 kind: evidence
-observed_at: source:041e17dc4bd59659d6bf15646a7a71bd89a9ba7bb118d35df06fa3e5f3866b6b
+observed_at: source:e09ea140ba27724c9d3fa92c16a8139087ddfd0256c1f0d614f153e6086b54cd
 source_refs:
   - echo-core/src/guard/mod.rs
   - src/agent/react/run/pipeline.rs
@@ -14,8 +14,7 @@ source_refs:
   - docs/zh/18-guard-system.md
 supports: [finding.guard-direction-contract]
 limitations:
-  - 仅是候选分支 focused 证据；完整 workspace/feature 门禁与独立复审待 main 交付阶段执行
-  - 当前候选的 semantic change-evidence 校验仍有 47 项共享 source digest/既有 SDK continuity 错误；本 Finding 新证据无格式或引用错误，整合 strict 尚未通过
+  - 本记录的 focused 证据不替代完整 workspace/feature 门禁、远端 CI 与 main 交付
 command_results:
   - { command: "CARGO_TARGET_DIR=/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/echo-agent/.worktrees/channel-attachment-projection/target cargo test -p echo_agent --features content-guard agent::react::run::pipeline::tests --locked --lib", exit_code: 0 }
   - { command: "CARGO_TARGET_DIR=/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/echo-agent/.worktrees/channel-attachment-projection/target cargo test -p echo_agent --features content-guard agent::react::run::phases::tools::tests --locked --lib", exit_code: 0 }
@@ -60,7 +59,5 @@ category/recovery/side_effect 保留，caller 与 Trace 均无该自由文本。
 
 ## 已知缺口
 
-这组收据不替代合并前完整门禁、feature 矩阵、基线摘要刷新、独立复审及远端验收。
-`verify_semantic.py --base d5ad3584 --require-change-evidence` exit 1，剩余 47 项为
-全局旧 source digest 引用与两项既有 SDK continuity；本候选新 evidence 的六项
-必需标题错误已修复，未将失败宣称为通过。
+这组收据不替代合并前完整门禁、feature 矩阵与远端验收。独立复审已
+确认当前候选无阻断；共享 source digest 在整合快照统一刷新后仍须验证。

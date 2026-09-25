@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.guard-direction-contract-repair
 kind: evidence
-observed_at: source:041e17dc4bd59659d6bf15646a7a71bd89a9ba7bb118d35df06fa3e5f3866b6b
+observed_at: source:e09ea140ba27724c9d3fa92c16a8139087ddfd0256c1f0d614f153e6086b54cd
 source_refs:
   - echo-core/src/guard/mod.rs
   - src/agent/react/run/pipeline.rs
@@ -15,7 +15,7 @@ supports: [finding.guard-direction-contract, behavior.effect-permission-executio
 limitations:
   - 本证据只覆盖 framework Guard 四方向的生产可达性，不改变 EKO 应用策略、Hook 或 PermissionService 的权威
   - final_answer 工具结果已作为 ToolOutput 进入 transcript，不再二次用 Output 检查；Output 专属模型文本终态
-  - 独立复审、完整 workspace 合并门禁、远端 CI、main 交付与 Issue #57 关闭尚未完成
+  - 完整 workspace 合并门禁、远端 CI、main 交付与 Issue #57 关闭尚未完成
 ---
 
 # Issue 57 Guard direction 修复证据
@@ -65,5 +65,5 @@ ADR 0076 记录候选方案、边界权威、双检取舍和影响；中英文 G
 
 ## 已知缺口
 
-独立复审、完整 workspace/feature 门禁、共享 semantic 摘要刷新、远端 CI、
-main 交付与 Issue #57 关闭仍待整合阶段；不声明已完成 framework Finding 闭合。
+独立复审已通过；完整 workspace/feature 门禁、远端 CI、main 交付与
+Issue #57 关闭仍待整合阶段，不声明已完成远端交付。

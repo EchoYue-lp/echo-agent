@@ -5,15 +5,15 @@ kind: audit
 boundary_ref: boundary.observation-persistence-delivery
 lens: data_durability
 freshness: examined
-revision: source:33686a6a0273c6f8ea85608bff92fed9774f00bfefe1bbd34aa1a2316b236cbc
+revision: source:e09ea140ba27724c9d3fa92c16a8139087ddfd0256c1f0d614f153e6086b54cd
 finding_refs: [finding.trace-audit-secret-boundary]
 challenges:
   custom-audit-backend:
-    revision: source:33686a6a0273c6f8ea85608bff92fed9774f00bfefe1bbd34aa1a2316b236cbc
+    revision: source:e09ea140ba27724c9d3fa92c16a8139087ddfd0256c1f0d614f153e6086b54cd
     source_refs: [echo-core/src/audit.rs, echo-state/src/audit/mod.rs, echo-state/src/audit/memory.rs, echo-state/src/audit/file.rs]
     evidence_refs: [evidence.trace-audit-retention-current-repair, evidence.trace-audit-retention-current-verification]
   identity-vs-content:
-    revision: source:33686a6a0273c6f8ea85608bff92fed9774f00bfefe1bbd34aa1a2316b236cbc
+    revision: source:e09ea140ba27724c9d3fa92c16a8139087ddfd0256c1f0d614f153e6086b54cd
     source_refs: [src/trace/mod.rs, docs/adr/0074-trace-audit-retention-contract.md]
     evidence_refs: [evidence.trace-audit-retention-current-repair]
 ---

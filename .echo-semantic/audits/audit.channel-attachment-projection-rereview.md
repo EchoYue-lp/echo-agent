@@ -5,15 +5,15 @@ kind: audit
 boundary_ref: boundary.protocol-surfaces
 lens: result_side_effect
 freshness: examined
-revision: source:33686a6a0273c6f8ea85608bff92fed9774f00bfefe1bbd34aa1a2316b236cbc
+revision: source:e09ea140ba27724c9d3fa92c16a8139087ddfd0256c1f0d614f153e6086b54cd
 finding_refs: [finding.channel-attachment-projection]
 challenges:
   typed-attachment-arrival:
-    revision: source:33686a6a0273c6f8ea85608bff92fed9774f00bfefe1bbd34aa1a2316b236cbc
+    revision: source:e09ea140ba27724c9d3fa92c16a8139087ddfd0256c1f0d614f153e6086b54cd
     source_refs: [src/channels.rs, echo-core/src/llm/types.rs, echo-orchestration/src/runtime/turn_driver.rs]
     evidence_refs: [evidence.channel-attachment-projection-repair, evidence.channel-attachment-projection-verification]
   unsupported-media-failure:
-    revision: source:33686a6a0273c6f8ea85608bff92fed9774f00bfefe1bbd34aa1a2316b236cbc
+    revision: source:e09ea140ba27724c9d3fa92c16a8139087ddfd0256c1f0d614f153e6086b54cd
     source_refs: [src/channels.rs]
     evidence_refs: [evidence.channel-attachment-projection-verification]
 ---

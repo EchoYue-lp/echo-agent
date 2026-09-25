@@ -3,7 +3,7 @@ schema_version: 1
 id: finding.guard-direction-contract
 kind: finding
 type: intent_gap
-status: open
+status: resolved
 severity: medium
 primary_focus: contract_evidence
 focus: [failure_concurrency, result_side_effect]
@@ -15,7 +15,7 @@ audit_refs: [audit.tool-permission-sandbox.failure-concurrency]
 decision_refs: []
 repair_evidence_refs: [evidence.guard-direction-contract-repair]
 verification_evidence_refs: [evidence.guard-direction-contract-verification]
-rereview_audit_refs: []
+rereview_audit_refs: [audit.guard-direction-contract-rereview]
 discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 ---
 
@@ -56,4 +56,4 @@ ToolOutput guard 前看到原始结果，这是既有 #102 顺序，ADR 0076 明
 ToolFailure 自由文本 retry key/postcondition 到 caller/Trace；本候选已将 blocked
 reason 归一到受检错误，分别守护并撤销或替换自由文本，保留 typed 恢复字段与
 ADR 0074 的 effect/path 事实合同。
-独立复审、完整门禁、语义摘要刷新、PR/CI 和 main 交付前保持 open。
+独立复审已通过；完整门禁、PR/CI 和 main 交付前 Issue 仍保持 open。
