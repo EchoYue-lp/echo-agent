@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.evolution-doc-namespace-repair
 kind: evidence
-observed_at: source:e4a6a58ffb69163c72d6334f33b62549ecc6f814665ba5a3786e2770bb282a8e
+observed_at: source:0427aee5ee15ea51f4623b1ae3db84522ef774c616f10390c3d7da16064d2ec0
 source_refs:
   - echo-state/src/memory/store.rs
   - src/evolution/layer.rs
@@ -54,5 +54,5 @@ ChangeLog 路径。多个 FileStore 句柄指向同一 canonical 路径时共享
 
 ## 已知缺口
 
-独立复审、最新 main 的全局 source digest 刷新、完整合并门禁与远端 CI
-由最终交付阶段处理。
+整合 `origin/main@9abdf9de` 后的 source digest 与 baseline 已刷新，
+独立增量复审及本地完整合并门禁已通过；远端 CI 与 main 交付仍待完成。

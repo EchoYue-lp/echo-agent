@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.evolution-doc-namespace-verification
 kind: evidence
-observed_at: source:e4a6a58ffb69163c72d6334f33b62549ecc6f814665ba5a3786e2770bb282a8e
+observed_at: source:0427aee5ee15ea51f4623b1ae3db84522ef774c616f10390c3d7da16064d2ec0
 source_refs:
   - echo-state/src/memory/store.rs
   - src/evolution/layer.rs
@@ -13,9 +13,8 @@ source_refs:
   - echo-agent-learning/tests/documentation_contract.rs
 supports: [finding.evolution-doc-namespace, behavior.eval-evolution, rule.quality-observation-boundary]
 limitations:
-  - 尚未执行完整 workspace 合并门禁和远端 CI
   - 未对任意第三方 Store 执行旧 namespace 数据迁移测试
-  - 独立复审和 main 交付尚未完成
+  - 远端 CI、main 交付及 GitHub Issue 关闭尚未完成
 ---
 
 # Evolution namespace 文档验证
@@ -44,11 +43,22 @@ hot/journal root、ChangeLog 和 conversation ID 的隔离说明。修复后执�
 ## 来源与范围
 
 此候选只验证文档与真实公开 namespace 常量保持一致，未验证运行时
-读写实现的新行为；后者本轮没有变更。完整合并门禁留在发 PR 或合 main 前。
+读写实现的新行为；后者本轮没有变更。合入 `origin/main@9abdf9de`
+后，documentation contract 再次通过 15/15；所有当前快照字段与
+baseline 刷新到整合源码摘要 `source:0427aee5ee15ea51f4623b1ae3db84522ef774c616f10390c3d7da16064d2ec0`，
+strict-snapshot/change-evidence 校验退出码 0。
+
+在同一 `a81e1752e5262e6109c3afab1ae3a411de0ed0f1` 代码及 #53
+当前差异上执行 `./scripts/verify.sh`，2026-09-25 08:23:10–08:34:56 UTC
+退出码 0。日志位于
+`.git/worktrees/evolution-doc-namespace/supreme/logs/issue53-full-gate-1790324590165.log`，
+375260 bytes、未截断；
+格式检查、两组 Clippy、workspace all-target/all-feature 测试及
+no-default-features lib check 均完成。86 条 `test result` 汇总全部
+0 failed，包含既有 3 条 ignored，并非声称所有测试均实际执行。
 
 ## 已知缺口
 
-独立复审、最新 main 的全局 source digest 刷新、完整合并门禁与远端 CI
-由最终交付阶段处理。目前 strict semantic verifier 退出码 1：
-49 条既有跨边界 `source:` 引用和 1 条共享 baseline 摘要失配；
-本分支自己的 evidence schema 错误已修复。
+修复 Store 句柄隔离说明后的独立增量复审与本地完整合并门禁已通过；
+远端 CI、main 交付和 Issue 关闭仍待完成。历史叙述中的旧 source 摘要保留为历史证据，
+不能将过去的日志视为当前整合快照的全量验证。
