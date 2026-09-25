@@ -222,7 +222,8 @@ pub mod prelude {
     };
     pub use crate::tools::permission::{
         DefaultPermissionPolicy, PermissionDecision, PermissionMode, PermissionPolicy,
-        PermissionRule, RuleBehavior, RuleMatcher, RuleRegistry, RuleSource, ToolPermission,
+        PermissionRule, RuleBehavior, RuleMatcher, RuleRegistry, RuleSource, ToolApprovalReceipt,
+        ToolPermission,
     };
     pub use crate::tools::{
         CommandPolicy, CommandPolicyDecision, StandardToolPack, Tool, ToolAccess, ToolCapabilities,

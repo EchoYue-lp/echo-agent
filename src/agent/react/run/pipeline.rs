@@ -8,7 +8,7 @@ use crate::agent::{ToolInvocation, ToolInvocationRewrite};
 use crate::error::{ReactError, Result};
 use crate::tools::{ToolParameters, ToolResult, ToolStreamEvent, is_write_tool};
 use async_trait::async_trait;
-use echo_core::tools::permission::{PermissionDecision, PermissionMode};
+use echo_core::tools::permission::{PermissionDecision, PermissionMode, ToolApprovalReceipt};
 use serde_json::Value;
 use tokio::sync::mpsc;
 use tracing::debug;
@@ -64,6 +64,8 @@ pub(crate) struct ToolExecutionContext {
     pub plan_mode: bool,
     /// Permission decision returned by PreToolUse hooks for this call only.
     pub permission_decision: Option<PermissionDecision>,
+    /// Approval proof bound to the final effective invocation.
+    pub approval_receipt: Option<ToolApprovalReceipt>,
     /// Permission mode override returned by hooks for this call only.
     pub permission_mode_override: Option<PermissionMode>,
     /// Ordered provenance for policy rewrites applied before execution.
@@ -101,6 +103,15 @@ impl ToolExecutionContext {
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect();
         self.input = input;
+        Ok(())
+    }
+
+    fn issue_approval_receipt(&mut self) -> Result<()> {
+        self.approval_receipt = Some(
+            ToolApprovalReceipt::issue(&self.tool_name, &self.input).map_err(|error| {
+                ReactError::Other(format!("failed to canonicalize approval input: {error}"))
+            })?,
+        );
         Ok(())
     }
 
@@ -375,7 +386,10 @@ impl PipelineStage for PermissionStage {
                 .record_permission_decision(&ctx.tool_name, &decision, "pre_tool_use_hook")
                 .await;
             match decision {
-                PermissionDecision::Allow => return Ok(()),
+                PermissionDecision::Allow => {
+                    ctx.issue_approval_receipt()?;
+                    return Ok(());
+                }
                 PermissionDecision::Deny { reason } => {
                     ctx.block(crate::tools::ToolFailureCategory::Permanent, reason);
                     return Ok(());
@@ -414,12 +428,32 @@ impl PipelineStage for PermissionStage {
         if let Some(mode) = permission_hook.permission_mode_override {
             ctx.permission_mode_override = Some(mode);
         }
+        if let Some(updated) = permission_hook.updated_input {
+            ctx.replace_input(updated, ToolInvocationRewrite::Approval)?;
+            #[cfg(feature = "human-loop")]
+            if let Some(decision) = snapshot
+                .permission_service
+                .as_ref()
+                .and_then(|service| service.protected_path_decision(&ctx.tool_name, &ctx.input))
+            {
+                snapshot
+                    .record_permission_decision(&ctx.tool_name, &decision, "protected_paths")
+                    .await;
+                if let PermissionDecision::Deny { reason } = decision {
+                    ctx.block(crate::tools::ToolFailureCategory::Permanent, reason);
+                    return Ok(());
+                }
+            }
+        }
         if let Some(decision) = permission_hook.permission_decision {
             snapshot
                 .record_permission_decision(&ctx.tool_name, &decision, "permission_request_hook")
                 .await;
             match decision {
-                PermissionDecision::Allow => return Ok(()),
+                PermissionDecision::Allow => {
+                    ctx.issue_approval_receipt()?;
+                    return Ok(());
+                }
                 PermissionDecision::Deny { reason } => {
                     ctx.block(crate::tools::ToolFailureCategory::Permanent, reason);
                     return Ok(());
@@ -429,8 +463,8 @@ impl PipelineStage for PermissionStage {
         }
 
         #[cfg(feature = "human-loop")]
-        let approval_modified = snapshot
-            .check_tool_approval(
+        let approval_check = snapshot
+            .check_tool_approval_with_receipt(
                 &ctx.call_id,
                 &ctx.tool_name,
                 &ctx.input,
@@ -440,8 +474,8 @@ impl PipelineStage for PermissionStage {
             .map_err(|error| ReactError::Other(error.to_string()))?;
 
         #[cfg(not(feature = "human-loop"))]
-        let approval_modified = snapshot
-            .check_tool_approval(
+        let approval_check = snapshot
+            .check_tool_approval_with_receipt(
                 &ctx.call_id,
                 &ctx.tool_name,
                 &ctx.input,
@@ -450,8 +484,38 @@ impl PipelineStage for PermissionStage {
             .await
             .map_err(|_| ReactError::Other("Permission check failed".into()))?;
 
-        if let Some(modified) = approval_modified {
-            ctx.replace_input(modified, ToolInvocationRewrite::Approval)?;
+        if let Some(check) = approval_check {
+            let echo_orchestration::human_loop::PermissionCheck {
+                decision,
+                updated_input,
+                approval_receipt,
+            } = check;
+            if let Some(modified) = updated_input {
+                ctx.replace_input(modified, ToolInvocationRewrite::Approval)?;
+            }
+            match decision {
+                PermissionDecision::Allow => {
+                    if let Some(receipt) = approval_receipt {
+                        if receipt.matches(&ctx.tool_name, &ctx.input) {
+                            ctx.approval_receipt = Some(receipt);
+                        } else {
+                            return Err(ReactError::Other(
+                                "permission approval receipt does not match effective tool input"
+                                    .to_string(),
+                            ));
+                        }
+                    }
+                }
+                PermissionDecision::Deny { reason } => {
+                    ctx.block(crate::tools::ToolFailureCategory::Permanent, reason);
+                }
+                PermissionDecision::RequireApproval | PermissionDecision::Ask { .. } => {
+                    ctx.block(
+                        crate::tools::ToolFailureCategory::Permanent,
+                        format!("Tool '{}' requires user approval", ctx.tool_name),
+                    );
+                }
+            }
         }
         Ok(())
     }
@@ -664,6 +728,7 @@ impl PipelineStage for ExecuteStage {
             message_id: snapshot.current_message_id.clone(),
             execution_id: snapshot.current_execution_id.clone(),
             call_id: Some(ctx.call_id.clone()),
+            approval_receipt: ctx.approval_receipt.clone(),
             effect_sink,
             active_message: snapshot.current_message.clone(),
             output_artifacts: snapshot.config.tool_output_artifacts.clone(),
@@ -1728,6 +1793,7 @@ mod tests {
             duration_ms: 0,
             plan_mode: false,
             permission_decision: None,
+            approval_receipt: None,
             permission_mode_override: None,
             rewrites: Vec::new(),
             invocation_emitted: false,
@@ -1755,6 +1821,7 @@ mod tests {
             duration_ms: 0,
             plan_mode: false,
             permission_decision: None,
+            approval_receipt: None,
             permission_mode_override: None,
             rewrites: Vec::new(),
             invocation_emitted: false,
@@ -1838,6 +1905,98 @@ mod tests {
                 }
             }
         }
+        Ok(())
+    }
+
+    #[cfg(all(feature = "human-loop", feature = "shell", not(windows)))]
+    #[tokio::test]
+    async fn permission_service_receipt_reaches_real_shell_effect_boundary() -> Result<()> {
+        struct AllowProvider;
+
+        impl crate::human_loop::HumanLoopProvider for AllowProvider {
+            fn request(
+                &self,
+                _request: crate::human_loop::HumanLoopRequest,
+            ) -> futures::future::BoxFuture<
+                '_,
+                crate::error::Result<crate::human_loop::HumanLoopResponse>,
+            > {
+                Box::pin(async { Ok(crate::human_loop::HumanLoopResponse::Approved) })
+            }
+        }
+
+        let permission_service = Arc::new(crate::human_loop::PermissionService::from_provider(
+            Arc::new(AllowProvider),
+        ));
+        let agent = crate::agent::ReactAgentBuilder::new()
+            .model("test-model")
+            .permission_service(permission_service)
+            .tool(Box::new(crate::tools::shell::ShellTool::new()))
+            .build()?;
+        let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+        let input = serde_json::json!({"command": "python3 --version"});
+        let params = ToolParameters::from([(
+            "command".to_string(),
+            Value::String("python3 --version".to_string()),
+        )]);
+
+        let result = snapshot
+            .execute_tool_with_policy("approved-shell".to_string(), "shell", &params, &input, None)
+            .await
+            .map_err(|failure| ReactError::Other(failure.error.to_string()))?;
+        assert!(
+            result.result.success,
+            "approved shell failed: {:?}",
+            result.result
+        );
+        assert!(result.result.output.contains("Python"));
+        Ok(())
+    }
+
+    #[cfg(all(feature = "human-loop", feature = "shell", not(windows)))]
+    #[tokio::test]
+    async fn permission_request_hook_allow_rewrite_binds_receipt_to_final_shell_args() -> Result<()>
+    {
+        use crate::skills::hooks::HookEvent;
+        use echo_core::hooks::HookResult;
+
+        let agent = crate::agent::ReactAgentBuilder::new()
+            .model("test-model")
+            .permission_service(Arc::new(crate::human_loop::PermissionService::new()))
+            .tool(Box::new(crate::tools::shell::ShellTool::new()))
+            .build()?;
+        agent.hook_registry().write().await.set_programmatic_hook(
+            "permission-rewrite",
+            &[HookEvent::PermissionRequest],
+            Arc::new(|_| {
+                Box::pin(async {
+                    HookResult {
+                        updated_input: Some(serde_json::json!({"command": "python3 --version"})),
+                        permission_decision: Some(PermissionDecision::Allow),
+                        ..HookResult::default()
+                    }
+                })
+            }),
+        );
+        let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+        let input = serde_json::json!({"command": "echo original"});
+        let params = ToolParameters::from([(
+            "command".to_string(),
+            Value::String("echo original".to_string()),
+        )]);
+
+        let result = snapshot
+            .execute_tool_with_policy(
+                "hook-rewrite-shell".to_string(),
+                "shell",
+                &params,
+                &input,
+                None,
+            )
+            .await
+            .map_err(|failure| ReactError::Other(failure.error.to_string()))?;
+        assert!(result.result.output.contains("Python"));
+        assert!(!result.result.output.contains("original"));
         Ok(())
     }
 
