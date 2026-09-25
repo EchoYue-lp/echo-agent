@@ -829,11 +829,12 @@ impl crate::agent::snapshot::AgentRunSnapshot {
     /// This is the user-chosen variant (overrides D14-G1's "真 subagent" — a
     /// subagent fork was judged higher-cost for equivalent durable-extraction
     /// value on a local single-user assistant). Best-effort — errors/timeouts
-    /// never block compaction. Gated by `ContextManager::should_compress()` so it
-    /// only fires when compaction is imminent, not every ReAct iteration.
+    /// never block compaction. Gated by the same request-overhead budget rule
+    /// as preparation so it only fires when compaction is imminent.
     pub(crate) async fn pre_compaction_flush(
         &self,
         context: &std::sync::Arc<tokio::sync::Mutex<crate::compression::ContextManager>>,
+        request_overhead_tokens: usize,
     ) {
         let (Some(llm_client), Some(layer_manager)) =
             (self.llm_client.as_ref(), self.memory_layer_manager.as_ref())
@@ -847,7 +848,7 @@ impl crate::agent::snapshot::AgentRunSnapshot {
             // (stage4 E1) Only flush when compression is imminent — mirrors
             // `ContextManager::prepare`'s `needs_compression` decision. Avoids
             // firing an LLM call every ReAct iteration when no compaction is due.
-            if !ctx.should_compress() {
+            if !ctx.should_compress_with_overhead(request_overhead_tokens) {
                 return;
             }
             let msgs = ctx.messages();

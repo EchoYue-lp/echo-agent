@@ -387,13 +387,14 @@ use echo_agent::tokenizer::{CalibratedTokenizer, HeuristicTokenizer, Tokenizer};
 use std::sync::Arc;
 
 let base = Arc::new(HeuristicTokenizer);
+let raw_prompt_tokens = base.count_tokens("some text");
 let calibrated = CalibratedTokenizer::new(base);
 
 // Use like any other tokenizer
 let tokens = calibrated.count_tokens("some text");
 
 // After the LLM API returns actual token counts, feed them back:
-calibrated.calibrate(tokens, api_usage.prompt_tokens);
+calibrated.calibrate(raw_prompt_tokens, api_usage.prompt_tokens);
 
 // The calibration factor converges via exponential moving average (EMA)
 println!("Factor: {:.3}", calibrated.calibration_factor());
@@ -404,6 +405,18 @@ let ctx = ContextManager::builder(4096)
     .tokenizer(Arc::new(calibrated))
     .build();
 ```
+
+`calibrate` takes the **uncalibrated** estimate of the same request reported by
+the provider, not `calibrated.count_tokens(...)`. For a real chat request,
+estimate all messages, exposed tool schemas, and response-format schema together;
+feed back only when the provider reports prompt usage. The ReAct runtime does
+this from the immutable request passed to the client. Provider-specific file
+fallback, image input, and reasoning replay are excluded from calibration
+because provider usage cannot be separated into comparable text and non-text
+costs. Image estimates remain fixed when the text factor changes. Before
+compression, ReAct reserves the current tool and response-format schemas;
+the Draft-memory flush preflight and preparation share that reservation. The
+final request is checked again after interventions and tool visibility changes.
 
 ---
 

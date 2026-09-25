@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.structured-output-main-path-verification
 kind: evidence
-observed_at: source:b9df4130cf07d2561e8e61ec24d127607ce21112eca995952c64c1290ede3b74
+observed_at: source:5e9a01f48cdf8338bbf8ccfdf225290e1c3f3db90fbea6c30cf1219b92cd1f48
 source_refs:
   - src/agent/react/run/stream_channel.rs
   - src/testing/mock_llm.rs

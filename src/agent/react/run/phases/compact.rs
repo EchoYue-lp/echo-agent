@@ -6,7 +6,6 @@ use super::CompactOutcome;
 use crate::agent::AgentEvent;
 use crate::agent::snapshot::AgentRunSnapshot;
 use crate::error::Result;
-use echo_core::tokenizer::Tokenizer;
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
 
@@ -27,11 +26,14 @@ pub(crate) async fn run_compact(
 ) -> Result<CompactOutcome> {
     snap.fire_hook(crate::skills::hooks::HookEvent::PreCompact, Some("auto"))
         .await;
+    let request_overhead_tokens = super::think::estimate_pre_compaction_overhead(snap)?;
     // (stage4 E1) Flush durable facts to memory BEFORE compression runs.
     // Best-effort: errors/timeouts never block compaction. Internally gated by
-    // `ContextManager::should_compress()` so it only fires when compaction is
-    // actually imminent (not every ReAct iteration).
-    let _ = snap.pre_compaction_flush(context).await;
+    // The same current request overhead is reserved for this preflight and
+    // for preparation; the final LLM request is checked again after hooks.
+    let _ = snap
+        .pre_compaction_flush(context, request_overhead_tokens)
+        .await;
     // A complete transcript batch must be acknowledged before active context
     // can cross the compaction horizon or realign its generation cursor.
     let settlement = snap.save_transcript_projection(context, None).await?;
@@ -68,17 +70,14 @@ pub(crate) async fn run_compact(
     let prepare_result = try_send_or!(
         tx,
         {
-            let tool_tokens = if snap.config.enable_tool {
-                serde_json::to_string(&snap.tools.tools_for_llm())
-                    .map(|schema| snap.calibrated_tokenizer.count_tokens(&schema))
-                    .map_err(|error| crate::error::ReactError::Other(error.to_string()))?
-            } else {
-                0
-            };
             let mut context = context.lock().await;
             context.apply_projection_scope("pre-model", &projections);
             context
-                .prepare_with_cancel(None, tool_tokens, snap.external_cancel.as_deref().cloned())
+                .prepare_with_cancel(
+                    None,
+                    request_overhead_tokens,
+                    snap.external_cancel.as_deref().cloned(),
+                )
                 .await
         },
         CompactOutcome::Failed
@@ -468,9 +467,13 @@ mod tests {
 
 #[cfg(test)]
 mod stage4_e1_tests {
+    use super::{CompactOutcome, run_compact};
+    use crate::agent::AgentEvent;
     use crate::agent::ReactAgent;
     use crate::agent::ReactAgentBuilder;
     use crate::agent::snapshot::AgentRunSnapshot;
+    use crate::compression::compressor::SlidingWindowCompressor;
+    use crate::error::Result;
     use crate::evolution::MemoryLayerManager;
     use crate::evolution::audit::NullChangeLog;
     use crate::llm::types::Message;
@@ -478,6 +481,7 @@ mod stage4_e1_tests {
     use echo_core::memory::store::Store;
     use echo_state::memory::store::InMemoryStore;
     use std::sync::Arc;
+    use tokio::sync::mpsc;
 
     /// Build an agent with a mock LLM + a shared `MemoryLayerManager` backed by
     /// an `InMemoryStore`. Returns `(agent, store_handle, layer_manager)` so
@@ -524,7 +528,7 @@ mod stage4_e1_tests {
         push_messages(&agent, 8).await;
         let snap = AgentRunSnapshot::from_agent(&agent);
 
-        snap.pre_compaction_flush(&agent.memory.context).await;
+        snap.pre_compaction_flush(&agent.memory.context, 0).await;
 
         let results = store
             .search(&["agent", "memories"], "Rust", 10)
@@ -578,6 +582,71 @@ mod stage4_e1_tests {
         );
     }
 
+    #[tokio::test]
+    async fn format_only_compression_flushes_draft_before_eviction() -> Result<()> {
+        use echo_core::tokenizer::{HeuristicTokenizer, Tokenizer};
+
+        let format = crate::llm::ResponseFormat::json_schema(
+            "large_string",
+            serde_json::json!({
+                "type": "string",
+                "description": "schema guidance ".repeat(50)
+            }),
+        );
+        let format_tokens = HeuristicTokenizer.count_tokens(&serde_json::to_string(&format)?);
+        let window = format_tokens.saturating_add(50);
+        let llm = Arc::new(MockLlmClient::new().with_response(
+            r#"[{"content":"user prefers Rust over Python","type":"user_preference","recall_weight":0.9,"evidence":[{"source_role":"user","quote":"message 0 with enough words to count"}]}]"#,
+        ));
+        let config = crate::agent::AgentConfig::new("mock-model", "format-flush", "sys")
+            .auto_project_rules(false)
+            .enable_tool(false)
+            .response_format(format)
+            .token_limit(window)
+            .token_budget(echo_core::budget::TokenBudgetConfig::disabled());
+        let mut agent = ReactAgent::new(config);
+        agent.set_llm_client(llm.clone());
+        agent.set_compressor(SlidingWindowCompressor::new(1)).await;
+        let store = Arc::new(InMemoryStore::new());
+        let store_dyn: Arc<dyn Store> = store.clone();
+        let directory = tempfile::tempdir()?;
+        let layer = Arc::new(MemoryLayerManager::new(
+            directory.path().to_path_buf(),
+            store,
+            Box::new(NullChangeLog),
+        ));
+        agent.install_memory_layer_manager(layer)?;
+        {
+            let mut context = agent.memory.context.lock().await;
+            for index in 0..8 {
+                context.push(Message::user(format!(
+                    "message {index} with enough words to count"
+                )));
+            }
+            let context_tokens = context.token_estimate();
+            assert!(context_tokens < window);
+            assert!(context_tokens > window.saturating_sub(format_tokens));
+        }
+
+        let snapshot = AgentRunSnapshot::from_agent(&agent);
+        let (tx, mut rx) = mpsc::channel::<Result<AgentEvent>>(16);
+        let outcome = run_compact(&snapshot, &agent.memory.context, &tx, 0).await?;
+        assert!(matches!(outcome, CompactOutcome::Continue(_)));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Ok(AgentEvent::ContextCompressed { .. }))
+        ));
+        assert_eq!(llm.call_count(), 1, "pre-compaction extraction was skipped");
+        let stored = store_dyn
+            .search(&["agent", "memories"], "user prefers Rust over Python", 10)
+            .await?;
+        assert!(stored.iter().any(|item| {
+            let entry = echo_state::memory::TypedMemoryEntry::from_store_item(item.clone());
+            entry.meta.status == echo_core::memory::MemoryStatus::Draft
+        }));
+        Ok(())
+    }
+
     /// When compression is NOT imminent (no compressor / tokens under limit),
     /// the flush is skipped — no LLM call, no memory written. Guards the
     /// `should_compress()` gate so flush doesn't fire every ReAct iteration.
@@ -590,7 +659,7 @@ mod stage4_e1_tests {
         push_messages(&agent, 8).await;
         let snap = AgentRunSnapshot::from_agent(&agent);
 
-        snap.pre_compaction_flush(&agent.memory.context).await;
+        snap.pre_compaction_flush(&agent.memory.context, 0).await;
 
         let results = store
             .search(&["agent", "memories"], "x", 10)
@@ -613,7 +682,7 @@ mod stage4_e1_tests {
         let snap = AgentRunSnapshot::from_agent(&agent);
 
         // Must not panic / block:
-        snap.pre_compaction_flush(&agent.memory.context).await;
+        snap.pre_compaction_flush(&agent.memory.context, 0).await;
 
         let results = store
             .search(&["agent", "memories"], "message", 10)
@@ -635,7 +704,7 @@ mod stage4_e1_tests {
         push_messages(&agent, 8).await;
 
         AgentRunSnapshot::from_agent(&agent)
-            .pre_compaction_flush(&agent.memory.context)
+            .pre_compaction_flush(&agent.memory.context, 0)
             .await;
 
         let results = store
@@ -662,7 +731,7 @@ mod stage4_e1_tests {
         ));
 
         AgentRunSnapshot::from_agent(&agent)
-            .pre_compaction_flush(&agent.memory.context)
+            .pre_compaction_flush(&agent.memory.context, 0)
             .await;
         assert!(
             store
@@ -698,7 +767,7 @@ mod stage4_e1_tests {
             ));
         }
         AgentRunSnapshot::from_agent(&agent)
-            .pre_compaction_flush(&agent.memory.context)
+            .pre_compaction_flush(&agent.memory.context, 0)
             .await;
         assert!(
             store
@@ -727,7 +796,7 @@ mod stage4_e1_tests {
         }
 
         AgentRunSnapshot::from_agent(&agent)
-            .pre_compaction_flush(&agent.memory.context)
+            .pre_compaction_flush(&agent.memory.context, 0)
             .await;
         let results = store
             .search(&["agent", "memories"], "Project uses Rust", 10)
