@@ -505,6 +505,20 @@ pub(crate) async fn create_llm_stream(
         Box<dyn futures::Stream<Item = Result<crate::llm::types::ChatCompletionChunk>> + Send>,
     >,
 > {
+    if snap
+        .config
+        .response_format
+        .as_ref()
+        .is_some_and(crate::llm::ResponseFormat::is_json)
+        && !snap.config.supports_structured_output
+    {
+        return Err(crate::error::ConfigError::UnMatchConfigError(
+            snap.config.model_name.clone(),
+            "configured response_format requires a fresh structured-output model capability"
+                .to_string(),
+        )
+        .into());
+    }
     let tools = tools_for_request(snap, final_only);
     log_prompt_cache_shape(&messages, tools.as_deref());
 
@@ -532,6 +546,10 @@ pub(crate) async fn create_llm_stream(
                 let llm_client = llm_client.clone();
                 let ms = messages.clone();
                 let t = tools.clone();
+                let response_format = match snap.config.response_format.as_ref() {
+                    Some(crate::llm::ResponseFormat::Text) | None => None,
+                    format => format.cloned(),
+                };
                 let temp = snap.config.temperature;
                 let max_tokens = snap.config.max_tokens;
                 async move {
@@ -553,7 +571,7 @@ pub(crate) async fn create_llm_stream(
                         tools: t,
                         tool_choice: (final_only && snap.config.supports_tool_choice_none)
                             .then(|| "none".to_string()),
-                        response_format: None,
+                        response_format,
                         thinking: snap.thinking.clone(),
                         cancel_token: snap.cancel_token.clone(),
                         timeouts: None,

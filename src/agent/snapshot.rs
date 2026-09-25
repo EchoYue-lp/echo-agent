@@ -16,7 +16,7 @@ use crate::skills::hooks::HookRegistry;
 use crate::tools::{ToolExecutionConfig, ToolFailure, ToolManager, ToolResult};
 use crate::trace::{RunEvent, RunStatus, RunStore};
 use echo_core::circuit_breaker::CircuitBreaker;
-use echo_core::llm::types::{Message, Role};
+use echo_core::llm::types::{Message, ResponseFormat, Role};
 use echo_core::tokenizer::Tokenizer;
 use std::sync::Arc;
 
@@ -218,6 +218,10 @@ pub struct RuntimeConfig {
     pub token_budget_error: Option<String>,
     pub run_budget: echo_core::agent::RunBudgetPolicy,
     pub supports_tool_choice_none: bool,
+    /// Caller-declared final response format, fixed for this run.
+    pub response_format: Option<ResponseFormat>,
+    /// Resolved provider/model capability, never inferred from the format request.
+    pub supports_structured_output: bool,
     /// Model fact provenance applied to this immutable run snapshot.
     pub model_fact_sources: Vec<echo_core::llm::capabilities::ModelFactMetadata>,
     /// Expired or future-observed model facts rejected at resolution time.
@@ -317,6 +321,9 @@ impl RuntimeConfig {
             run_budget: config.run_budget.clone(),
             supports_tool_choice_none: model_profile
                 .is_none_or(|resolution| resolution.profile.supports_tool_choice_none),
+            response_format: config.response_format.clone(),
+            supports_structured_output: model_profile
+                .is_some_and(|resolution| resolution.profile.capabilities.structured_output),
             model_fact_sources: model_profile
                 .map(|resolution| resolution.applied_facts.clone())
                 .unwrap_or_default(),

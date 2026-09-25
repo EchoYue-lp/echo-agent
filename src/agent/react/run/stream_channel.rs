@@ -4609,6 +4609,85 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn configured_response_format_reaches_every_react_request() -> Result<()> {
+        let llm = Arc::new(
+            MockLlmClient::new()
+                .then_tool_call("call", "mock_calc", r#"{"x":1}"#)
+                .with_response(r#"{"ok":true}"#),
+        );
+        let agent = ReactAgentBuilder::new()
+            .llm_client(llm.clone())
+            .model_profile(
+                echo_core::llm::capabilities::ModelProfile::from_provider_name(
+                    "mock-model",
+                    "openai",
+                ),
+            )
+            .response_format(crate::llm::ResponseFormat::JsonObject)
+            .tool(Box::new(MockTool::new("mock_calc").with_response("done")))
+            .build()?;
+
+        let events = collect_events(&agent, "run").await;
+        assert!(
+            matches!(events.last(), Some(AgentEvent::FinalAnswer(text)) if text == r#"{"ok":true}"#)
+        );
+        let formats = llm.all_response_formats();
+        assert_eq!(formats.len(), 2);
+        assert!(
+            formats
+                .iter()
+                .all(|format| matches!(format, Some(crate::llm::ResponseFormat::JsonObject)))
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unknown_model_does_not_silently_enable_structured_output() -> Result<()> {
+        let llm = Arc::new(MockLlmClient::new().with_response(r#"{"ok":true}"#));
+        let agent = ReactAgentBuilder::new()
+            .llm_client(llm.clone())
+            .response_format(crate::llm::ResponseFormat::JsonObject)
+            .build()?;
+
+        let events = collect_events(&agent, "run").await;
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AgentEvent::Error { message, .. }
+                if message.contains("structured-output model capability")
+        )));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::FinalAnswer(_)))
+        );
+        assert_eq!(llm.call_count(), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn explicit_text_format_keeps_anthropic_request_unconstrained() -> Result<()> {
+        let llm = Arc::new(MockLlmClient::new().with_response("plain answer"));
+        let agent = ReactAgentBuilder::new()
+            .llm_client(llm.clone())
+            .model_profile(
+                echo_core::llm::capabilities::ModelProfile::from_provider_name(
+                    "mock-model",
+                    "anthropic",
+                ),
+            )
+            .response_format(crate::llm::ResponseFormat::Text)
+            .build()?;
+
+        let events = collect_events(&agent, "run").await;
+        assert!(
+            matches!(events.last(), Some(AgentEvent::FinalAnswer(text)) if text == "plain answer")
+        );
+        assert_eq!(llm.all_response_formats().len(), 1);
+        assert!(llm.all_response_formats().iter().all(Option::is_none));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn final_only_falls_back_to_empty_tool_surface_when_none_is_unsupported() {
         let usage = crate::llm::types::Usage {
             prompt_tokens: Some(6),

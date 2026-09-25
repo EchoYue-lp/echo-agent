@@ -82,6 +82,7 @@ pub struct MockLlmClient {
     calls: Arc<Mutex<Vec<Vec<Message>>>>,
     user_ids: Arc<Mutex<Vec<Option<String>>>>,
     tool_choices: Arc<Mutex<Vec<Option<String>>>>,
+    response_formats: Arc<Mutex<Vec<Option<crate::llm::ResponseFormat>>>>,
     tool_counts: Arc<Mutex<Vec<usize>>>,
     /// Optional delay before returning each response. When set, `chat` and
     /// `chat_stream` sleep for this duration, but will return early with a
@@ -105,6 +106,7 @@ impl MockLlmClient {
             calls: Arc::new(Mutex::new(Vec::new())),
             user_ids: Arc::new(Mutex::new(Vec::new())),
             tool_choices: Arc::new(Mutex::new(Vec::new())),
+            response_formats: Arc::new(Mutex::new(Vec::new())),
             tool_counts: Arc::new(Mutex::new(Vec::new())),
             delay: None,
         }
@@ -357,6 +359,14 @@ impl MockLlmClient {
             .clone()
     }
 
+    /// Response formats received by each request.
+    pub fn all_response_formats(&self) -> Vec<Option<crate::llm::ResponseFormat>> {
+        self.response_formats
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
     /// Number of exposed tool definitions received by each request.
     pub fn all_tool_counts(&self) -> Vec<usize> {
         self.tool_counts
@@ -381,6 +391,10 @@ impl MockLlmClient {
             .unwrap_or_else(|e| e.into_inner())
             .clear();
         self.tool_choices
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        self.response_formats
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clear();
@@ -435,6 +449,10 @@ impl LlmClient for MockLlmClient {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .push(request.tool_choice);
+            self.response_formats
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(request.response_format);
 
             // Optional delay with cancel-awareness (Phase 3: lets tests verify
             // mid-flight cancellation).
@@ -550,6 +568,10 @@ impl LlmClient for MockLlmClient {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .push(request.tool_choice);
+            self.response_formats
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(request.response_format);
 
             // Optional delay with cancel-awareness (Phase 3).
             if let Some(d) = self.delay {
