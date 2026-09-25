@@ -59,6 +59,25 @@ pub fn project_messages(conversation_id: &str, messages: &[Message]) -> Result<V
         .collect()
 }
 
+/// Digest frontier shared by a generation-bound import and its runtime cursor.
+/// Canonical round-tripping removes backend IDs and application-only metadata.
+pub fn managed_import_projection_digests(
+    conversation_id: &str,
+    messages: &[StoredMessage],
+) -> Result<Vec<String>> {
+    let restored = restore_messages(messages)?;
+    if restored.iter().any(|message| message.role == Role::System) {
+        return Err(MemoryError::SerializationError(
+            "managed import contains a system message outside the visible transcript".to_string(),
+        )
+        .into());
+    }
+    project_messages(conversation_id, &restored)?
+        .iter()
+        .map(transcript_projection_message_digest)
+        .collect()
+}
+
 /// Project a single runtime Message to a transcript record.
 pub fn project_message(conversation_id: &str, message: &Message) -> Result<StoredMessage> {
     let tool_calls_json = message

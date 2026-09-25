@@ -982,6 +982,7 @@ impl<'a> AgentPersistenceCoordinator<'a> {
             runtime_store.compare_and_save_checkpoint_with_context(
                 self.call_context,
                 crate::state::RuntimeCheckpointCasRequest {
+                    managed_import: None,
                     scope_id: scope_id.to_string(),
                     runtime_state_id: runtime_state_id.to_string(),
                     conversation_epoch: Some(epoch.authority.epoch),
@@ -1188,6 +1189,7 @@ impl<'a> AgentPersistenceCoordinator<'a> {
                 runtime_store.compare_and_save_checkpoint_with_context(
                     self.call_context,
                     crate::state::RuntimeCheckpointCasRequest {
+                        managed_import: None,
                         scope_id: scope_id.to_string(),
                         runtime_state_id: runtime_state_id.to_string(),
                         conversation_epoch: Some(epoch.authority.epoch),

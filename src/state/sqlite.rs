@@ -315,6 +315,9 @@ impl SqliteRuntimeStateStore {
             )
             .into());
         }
+        if let Some(import) = request.managed_import.as_ref() {
+            import.validate_for(request)?;
+        }
         let payload = request.checkpoint.restore_managed_runtime_payload()?;
         if let Some(pending) = payload.pending_transcript_projection.as_ref()
             && (pending.batch.conversation_id != request.scope_id
@@ -1587,11 +1590,17 @@ impl RuntimeStateStore for SqliteRuntimeStateStore {
             }
             let epoch_matches = scope.conversation_epoch == request.conversation_epoch;
             let can_bind_epoch = scope.revision == 0 && scope.conversation_epoch.is_none();
+            let can_bind_import = request.managed_import.as_ref().is_some_and(|import| {
+                scope.lifecycle == RuntimeScopeLifecycle::Active
+                    && scope.conversation_epoch == Some(import.request.expected_epoch)
+            });
             let can_reopen = scope.lifecycle == RuntimeScopeLifecycle::Tombstoned
                 && request.conversation_epoch.is_some()
                 && request.conversation_epoch > scope.conversation_epoch;
             let fenced = match scope.lifecycle {
-                RuntimeScopeLifecycle::Active => !epoch_matches && !can_bind_epoch,
+                RuntimeScopeLifecycle::Active => {
+                    !epoch_matches && !can_bind_epoch && !can_bind_import
+                }
                 RuntimeScopeLifecycle::Retiring => true,
                 RuntimeScopeLifecycle::Tombstoned => !can_reopen,
             };
@@ -2858,6 +2867,7 @@ mod tests {
             assert!(
                 store
                     .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                        managed_import: None,
                         scope_id: "scope-a".to_string(),
                         runtime_state_id: "runtime-a".to_string(),
                         conversation_epoch: Some(epoch),
@@ -2876,6 +2886,102 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn managed_import_receipt_rebinds_runtime_epoch() -> Result<()> {
+        use crate::memory::{ConversationStore, SqliteConversationStore};
+
+        let root = std::env::temp_dir().join(format!("echo-import-cas-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root)?;
+        let transcript = SqliteConversationStore::new(root.join("transcript.sqlite"))?;
+        let runtime = SqliteRuntimeStateStore::new(root.join("runtime.sqlite"))?;
+        let id = "import-rebind";
+        let acquired = transcript
+            .ensure_projection_epoch(crate::memory::EnsureConversationProjectionRequest {
+                conversation: crate::memory::NewConversation {
+                    conversation_id: id.to_string(),
+                    user_id: "test".to_string(),
+                    agent_type: None,
+                    title: None,
+                },
+                expected_tombstone_epoch: None,
+            })
+            .await?;
+        let initial = runtime
+            .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                managed_import: None,
+                scope_id: id.to_string(),
+                runtime_state_id: id.to_string(),
+                conversation_epoch: Some(acquired.authority.epoch),
+                expected_scope_revision: 0,
+                expected_state_version: RuntimeStateExpectedVersion::Absent,
+                checkpoint: managed_checkpoint(id, "before")?,
+            })
+            .await?;
+        let message = crate::llm::types::Message::user("imported".to_string());
+        let row = crate::memory::project_message(id, &message)?;
+        let import = crate::memory::ManagedConversationImport::prepare_for_generation(
+            id,
+            acquired.authority.epoch,
+            acquired.authority.revision,
+            id,
+            vec![row],
+        )?;
+        let receipt = transcript.import_managed_messages(import.clone()).await?;
+        let digest = crate::memory::managed_import_projection_digests(id, &import.messages)?
+            .into_iter()
+            .next()
+            .ok_or_else(|| {
+                RuntimeStateError::SerializationError("import digest missing".to_string())
+            })?;
+        let mut checkpoint = managed_checkpoint(id, "imported")?;
+        checkpoint.messages_json = AgentCheckpoint::serialize_payload(
+            vec![message],
+            Some(super::super::TranscriptProjectionCheckpoint {
+                generation_id: id.to_string(),
+                next_ordinal: 1,
+                projected: vec![super::super::TranscriptProjectionMessage { ordinal: 0, digest }],
+            }),
+        )?;
+        let mut request = RuntimeCheckpointCasRequest {
+            managed_import: None,
+            scope_id: id.to_string(),
+            runtime_state_id: id.to_string(),
+            conversation_epoch: Some(receipt.authority.epoch),
+            expected_scope_revision: initial.scope.revision,
+            expected_state_version: RuntimeStateExpectedVersion::Managed { revision: 1 },
+            checkpoint,
+        };
+        assert_eq!(
+            runtime
+                .compare_and_save_checkpoint(request.clone())
+                .await?
+                .status,
+            RuntimeCheckpointCasStatus::ScopeFenced
+        );
+        request.managed_import = Some(super::super::ManagedImportEpochTransition {
+            request: import,
+            receipt,
+        });
+        let mut mismatched = request.clone();
+        mismatched.checkpoint.messages_json = AgentCheckpoint::serialize_payload(
+            vec![crate::llm::types::Message::user("wrong".to_string())],
+            mismatched.checkpoint.restore_transcript_projection()?,
+        )?;
+        assert!(
+            runtime
+                .compare_and_save_checkpoint(mismatched)
+                .await
+                .is_err()
+        );
+        let rebound = runtime.compare_and_save_checkpoint(request).await?;
+        assert_eq!(rebound.status, RuntimeCheckpointCasStatus::Applied);
+        assert_eq!(rebound.scope.conversation_epoch, Some(2));
+        drop(transcript);
+        drop(runtime);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn revisioned_cas_replays_and_fences_legacy_mutators() -> Result<()> {
         let path = std::env::temp_dir().join(format!(
             "echo-state-cas-{}-{}.sqlite",
@@ -2885,6 +2991,7 @@ mod tests {
         let store = SqliteRuntimeStateStore::new(&path)?;
         let initial = checkpoint("runtime-a", "initial")?;
         let create = RuntimeCheckpointCasRequest {
+            managed_import: None,
             scope_id: "scope-a".to_string(),
             runtime_state_id: "runtime-a".to_string(),
             conversation_epoch: Some(1),
@@ -2904,6 +3011,7 @@ mod tests {
         );
         let false_replay = store
             .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                managed_import: None,
                 scope_id: "scope-a".to_string(),
                 runtime_state_id: "runtime-a".to_string(),
                 conversation_epoch: Some(1),
@@ -2918,6 +3026,7 @@ mod tests {
         );
         let stale = store
             .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                managed_import: None,
                 scope_id: "scope-a".to_string(),
                 runtime_state_id: "runtime-a".to_string(),
                 conversation_epoch: Some(1),
@@ -2938,6 +3047,7 @@ mod tests {
 
         let updated = store
             .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                managed_import: None,
                 scope_id: "scope-a".to_string(),
                 runtime_state_id: "runtime-a".to_string(),
                 conversation_epoch: Some(1),
@@ -3017,6 +3127,7 @@ mod tests {
         };
         let adopted = restarted
             .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                managed_import: None,
                 scope_id: "scope-b".to_string(),
                 runtime_state_id: "runtime-b".to_string(),
                 conversation_epoch: Some(1),
@@ -3045,6 +3156,7 @@ mod tests {
         let pending = pending_checkpoint("runtime-pending", "scope-pending")?;
         let created = store
             .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                managed_import: None,
                 scope_id: "scope-pending".to_string(),
                 runtime_state_id: "runtime-pending".to_string(),
                 conversation_epoch: Some(1),
@@ -3064,6 +3176,7 @@ mod tests {
         assert!(
             store
                 .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                    managed_import: None,
                     scope_id: "scope-pending".to_string(),
                     runtime_state_id: "runtime-pending".to_string(),
                     conversation_epoch: Some(1),
@@ -3077,6 +3190,7 @@ mod tests {
         assert!(
             store
                 .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                    managed_import: None,
                     scope_id: "scope-pending".to_string(),
                     runtime_state_id: "runtime-pending".to_string(),
                     conversation_epoch: Some(1),
@@ -3102,6 +3216,7 @@ mod tests {
         assert!(
             store
                 .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                    managed_import: None,
                     scope_id: "scope-pending".to_string(),
                     runtime_state_id: "runtime-pending".to_string(),
                     conversation_epoch: Some(1),
@@ -3133,6 +3248,7 @@ mod tests {
         assert!(
             store
                 .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                    managed_import: None,
                     scope_id: "scope-pending".to_string(),
                     runtime_state_id: "runtime-pending".to_string(),
                     conversation_epoch: Some(1),
@@ -3160,6 +3276,7 @@ mod tests {
             assert!(
                 store
                     .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                        managed_import: None,
                         scope_id: "scope-pending".to_string(),
                         runtime_state_id: "runtime-pending".to_string(),
                         conversation_epoch: Some(1),
@@ -3175,6 +3292,7 @@ mod tests {
         }
         let failure = store
             .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                managed_import: None,
                 scope_id: "scope-pending".to_string(),
                 runtime_state_id: "runtime-pending".to_string(),
                 conversation_epoch: Some(1),
@@ -3199,6 +3317,7 @@ mod tests {
         assert!(
             store
                 .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                    managed_import: None,
                     scope_id: "scope-pending".to_string(),
                     runtime_state_id: "runtime-pending".to_string(),
                     conversation_epoch: Some(1),
@@ -3220,6 +3339,7 @@ mod tests {
         retried.timestamp = Utc::now();
         let retry = store
             .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                managed_import: None,
                 scope_id: "scope-pending".to_string(),
                 runtime_state_id: "runtime-pending".to_string(),
                 conversation_epoch: Some(1),
@@ -3289,6 +3409,7 @@ mod tests {
         let generic_checkpoint = checkpoint("runtime-generic", "generic")?;
         let generic = store
             .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                managed_import: None,
                 scope_id: "scope-pending".to_string(),
                 runtime_state_id: "runtime-generic".to_string(),
                 conversation_epoch: Some(1),
@@ -3314,6 +3435,7 @@ mod tests {
         );
         let prepared = store
             .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                managed_import: None,
                 scope_id: "scope-pending".to_string(),
                 runtime_state_id: "runtime-pending-2".to_string(),
                 conversation_epoch: Some(1),
@@ -3452,6 +3574,7 @@ mod tests {
         let pending = pending_checkpoint("runtime-base-corrupt", "scope-base-corrupt")?;
         store
             .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                managed_import: None,
                 scope_id: "scope-base-corrupt".to_string(),
                 runtime_state_id: "runtime-base-corrupt".to_string(),
                 conversation_epoch: Some(1),
@@ -3507,6 +3630,7 @@ mod tests {
         let initial = pending_checkpoint("runtime-terminal", "scope-terminal")?;
         let created = store
             .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                managed_import: None,
                 scope_id: "scope-terminal".to_string(),
                 runtime_state_id: "runtime-terminal".to_string(),
                 conversation_epoch: Some(1),
@@ -3523,6 +3647,7 @@ mod tests {
         })?;
         let failed = store
             .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                managed_import: None,
                 scope_id: "scope-terminal".to_string(),
                 runtime_state_id: "runtime-terminal".to_string(),
                 conversation_epoch: Some(1),
@@ -3539,6 +3664,7 @@ mod tests {
         })?;
         let dispatched = store
             .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                managed_import: None,
                 scope_id: "scope-terminal".to_string(),
                 runtime_state_id: "runtime-terminal".to_string(),
                 conversation_epoch: Some(1),
@@ -3555,6 +3681,7 @@ mod tests {
         })?;
         let terminal_receipt = store
             .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                managed_import: None,
                 scope_id: "scope-terminal".to_string(),
                 runtime_state_id: "runtime-terminal".to_string(),
                 conversation_epoch: Some(1),
@@ -3587,6 +3714,7 @@ mod tests {
         assert!(
             store
                 .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                    managed_import: None,
                     scope_id: "scope-terminal".to_string(),
                     runtime_state_id: "runtime-terminal".to_string(),
                     conversation_epoch: Some(1),
@@ -3642,6 +3770,7 @@ mod tests {
                 .compare_and_save_checkpoint_with_context(
                     context,
                     RuntimeCheckpointCasRequest {
+                        managed_import: None,
                         scope_id: "deadline-scope".to_string(),
                         runtime_state_id: "deadline-runtime".to_string(),
                         conversation_epoch: Some(1),
@@ -3704,6 +3833,7 @@ mod tests {
                 .compare_and_save_checkpoint_with_context(
                     context,
                     RuntimeCheckpointCasRequest {
+                        managed_import: None,
                         scope_id: "deadline-writer-scope".to_string(),
                         runtime_state_id: "deadline-writer-runtime".to_string(),
                         conversation_epoch: Some(1),
@@ -3753,6 +3883,7 @@ mod tests {
         let store = SqliteRuntimeStateStore::new(&path)?;
         let applied = store
             .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                managed_import: None,
                 scope_id: "scope-validation".to_string(),
                 runtime_state_id: "runtime-validation".to_string(),
                 conversation_epoch: Some(1),
@@ -3796,6 +3927,7 @@ mod tests {
         assert!(
             store
                 .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                    managed_import: None,
                     scope_id: "scope-validation".to_string(),
                     runtime_state_id: "runtime-validation".to_string(),
                     conversation_epoch: Some(1),
@@ -3810,6 +3942,7 @@ mod tests {
         assert!(
             store
                 .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                    managed_import: None,
                     scope_id: String::new(),
                     runtime_state_id: "runtime-validation".to_string(),
                     conversation_epoch: Some(1),
@@ -3823,6 +3956,7 @@ mod tests {
         assert!(
             store
                 .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                    managed_import: None,
                     scope_id: "scope-validation".to_string(),
                     runtime_state_id: String::new(),
                     conversation_epoch: Some(1),
@@ -3875,6 +4009,7 @@ mod tests {
         assert!(
             store
                 .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                    managed_import: None,
                     scope_id: "scope-corrupt".to_string(),
                     runtime_state_id: "runtime-corrupt".to_string(),
                     conversation_epoch: Some(1),
@@ -3908,6 +4043,7 @@ mod tests {
         let checkpoint = checkpoint("runtime-false-drop", "still-active")?;
         let created = store
             .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                managed_import: None,
                 scope_id: "scope-false-drop".to_string(),
                 runtime_state_id: "runtime-false-drop".to_string(),
                 conversation_epoch: Some(1),
@@ -4047,6 +4183,7 @@ mod tests {
         ));
         let store = SqliteRuntimeStateStore::new(&path)?;
         let first_request = RuntimeCheckpointCasRequest {
+            managed_import: None,
             scope_id: "scope-a".to_string(),
             runtime_state_id: "runtime-a1".to_string(),
             conversation_epoch: Some(10),
@@ -4059,6 +4196,7 @@ mod tests {
             .await?;
         let second = store
             .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                managed_import: None,
                 scope_id: "scope-a".to_string(),
                 runtime_state_id: "runtime-a2".to_string(),
                 conversation_epoch: Some(10),
@@ -4195,6 +4333,7 @@ mod tests {
 
         let old_epoch_reopen = store
             .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                managed_import: None,
                 scope_id: "scope-a".to_string(),
                 runtime_state_id: "runtime-old-epoch".to_string(),
                 conversation_epoch: Some(10),
@@ -4210,6 +4349,7 @@ mod tests {
 
         let next = store
             .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                managed_import: None,
                 scope_id: "scope-a".to_string(),
                 runtime_state_id: "runtime-a3".to_string(),
                 conversation_epoch: Some(11),
@@ -4408,6 +4548,7 @@ mod tests {
         };
         let adopted = store
             .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                managed_import: None,
                 scope_id: "legacy".to_string(),
                 runtime_state_id: "legacy".to_string(),
                 conversation_epoch: Some(1),
@@ -4431,6 +4572,7 @@ mod tests {
         let store = SqliteRuntimeStateStore::new(&path)?;
         let initial = store
             .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                managed_import: None,
                 scope_id: "scope-p".to_string(),
                 runtime_state_id: "runtime-p".to_string(),
                 conversation_epoch: Some(1),
@@ -4441,6 +4583,7 @@ mod tests {
             .await?;
         let pending = store
             .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                managed_import: None,
                 scope_id: "scope-p".to_string(),
                 runtime_state_id: "runtime-p".to_string(),
                 conversation_epoch: Some(1),
@@ -4481,6 +4624,7 @@ mod tests {
             first_barrier.wait().await;
             first_store
                 .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                    managed_import: None,
                     scope_id: "scope-c".to_string(),
                     runtime_state_id: "runtime-c".to_string(),
                     conversation_epoch: Some(1),
@@ -4495,6 +4639,7 @@ mod tests {
             second_barrier.wait().await;
             second_store
                 .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                    managed_import: None,
                     scope_id: "scope-c".to_string(),
                     runtime_state_id: "runtime-c".to_string(),
                     conversation_epoch: Some(1),

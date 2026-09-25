@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.structured-output-schema-validation-repair
 kind: evidence
-observed_at: source:5e9a01f48cdf8338bbf8ccfdf225290e1c3f3db90fbea6c30cf1219b92cd1f48
+observed_at: 1465a37101a6cc30f7e884ab3c138353aa8f1cda
 source_refs:
   - echo-core/src/error.rs
   - src/agent/react/extract.rs

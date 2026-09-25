@@ -576,6 +576,102 @@ pub struct RuntimeCheckpointCasRequest {
     pub expected_scope_revision: u64,
     pub expected_state_version: RuntimeStateExpectedVersion,
     pub checkpoint: AgentCheckpoint,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_import: Option<ManagedImportEpochTransition>,
+}
+
+/// Proof that one managed transcript import advanced the epoch being bound.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManagedImportEpochTransition {
+    pub request: crate::memory::ManagedConversationImport,
+    pub receipt: crate::memory::TranscriptProjectionApplyReceipt,
+}
+
+impl ManagedImportEpochTransition {
+    pub fn validate_for(&self, cas: &RuntimeCheckpointCasRequest) -> crate::error::Result<()> {
+        self.request.validate()?;
+        let next_epoch = self.request.expected_epoch.checked_add(1).ok_or_else(|| {
+            invalid_checkpoint("managed import epoch capacity exhausted".to_string())
+        })?;
+        let next_revision = self
+            .request
+            .expected_revision
+            .checked_add(1)
+            .ok_or_else(|| {
+                invalid_checkpoint("managed import revision capacity exhausted".to_string())
+            })?;
+        if self.request.conversation_id != cas.scope_id
+            || self.request.generation_id.as_deref() != Some(cas.runtime_state_id.as_str())
+            || self.receipt.operation_id != self.request.operation_id
+            || self.receipt.payload_digest != self.request.payload_digest
+            || self.receipt.authority.conversation_id != cas.scope_id
+            || self.receipt.authority.epoch != next_epoch
+            || self.receipt.authority.revision != next_revision
+            || self.receipt.authority.lifecycle
+                != crate::memory::ConversationProjectionLifecycle::Live
+            || cas.conversation_epoch != Some(next_epoch)
+            || !matches!(
+                self.receipt.status,
+                crate::memory::TranscriptProjectionApplyStatus::Applied
+                    | crate::memory::TranscriptProjectionApplyStatus::AlreadyApplied
+            )
+        {
+            return Err(invalid_checkpoint(
+                "managed import epoch transition identity does not match CAS".to_string(),
+            ));
+        }
+        let payload = cas.checkpoint.restore_managed_runtime_payload()?;
+        if payload.pending_transcript_projection.is_some() {
+            return Err(invalid_checkpoint(
+                "managed import checkpoint cannot contain a pending projection".to_string(),
+            ));
+        }
+        let expected_digests = crate::memory::managed_import_projection_digests(
+            &cas.scope_id,
+            &self.request.messages,
+        )?;
+        let cursor = payload.transcript_projection.ok_or_else(|| {
+            invalid_checkpoint("managed import checkpoint has no projection cursor".to_string())
+        })?;
+        let expected_next = u64::try_from(expected_digests.len()).map_err(|_| {
+            invalid_checkpoint("managed import cursor capacity exhausted".to_string())
+        })?;
+        if cursor.generation_id != cas.runtime_state_id
+            || cursor.next_ordinal != expected_next
+            || cursor.projected.len() != expected_digests.len()
+            || cursor
+                .projected
+                .iter()
+                .zip(expected_digests.iter())
+                .enumerate()
+                .any(|(ordinal, (message, digest))| {
+                    u64::try_from(ordinal) != Ok(message.ordinal) || &message.digest != digest
+                })
+        {
+            return Err(invalid_checkpoint(
+                "managed import checkpoint cursor differs from imported transcript".to_string(),
+            ));
+        }
+        let visible = payload
+            .messages
+            .iter()
+            .filter(|message| message.role != crate::llm::types::Role::System)
+            .cloned()
+            .collect::<Vec<_>>();
+        let restored = crate::memory::restore_messages(&self.request.messages)?;
+        let visible_json = serde_json::to_vec(&visible).map_err(|error| {
+            invalid_checkpoint(format!("serialize imported runtime history: {error}"))
+        })?;
+        let restored_json = serde_json::to_vec(&restored).map_err(|error| {
+            invalid_checkpoint(format!("serialize restored import history: {error}"))
+        })?;
+        if visible_json != restored_json {
+            return Err(invalid_checkpoint(
+                "managed import checkpoint history differs from imported transcript".to_string(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Domain result of compare-and-save.
@@ -1622,6 +1718,7 @@ async fn prepare_transcript_projection_retry(
         runtime_state_store.compare_and_save_checkpoint_with_context(
             budget.context,
             RuntimeCheckpointCasRequest {
+                managed_import: None,
                 scope_id: state.scope.scope_id.clone(),
                 runtime_state_id: state.runtime_state_id.clone(),
                 conversation_epoch: state.scope.conversation_epoch,
@@ -2024,6 +2121,7 @@ async fn persist_transcript_attempt_failure(
         runtime_state_store.compare_and_save_checkpoint_with_context(
             budget.context,
             RuntimeCheckpointCasRequest {
+                managed_import: None,
                 scope_id: state.scope.scope_id.clone(),
                 runtime_state_id: state.runtime_state_id.clone(),
                 conversation_epoch: state.scope.conversation_epoch,
@@ -3650,6 +3748,7 @@ mod checkpoint_tests {
             pending_projection_checkpoint("delete-retry", "delete-generation", 1)?;
         let prepared = runtime
             .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                managed_import: None,
                 scope_id: "delete-retry".to_string(),
                 runtime_state_id: "delete-generation".to_string(),
                 conversation_epoch: Some(acquired.authority.epoch),
@@ -3749,6 +3848,7 @@ mod checkpoint_tests {
             pending_projection_checkpoint("expired-managed", "expired-generation", 1)?;
         let prepared = runtime
             .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                managed_import: None,
                 scope_id: "expired-managed".to_string(),
                 runtime_state_id: "expired-generation".to_string(),
                 conversation_epoch: Some(acquired.authority.epoch),
@@ -3884,6 +3984,7 @@ mod checkpoint_tests {
         let (checkpoint, _) = pending_projection_checkpoint("failure-cas", "failure-runtime", 1)?;
         let prepared = runtime
             .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                managed_import: None,
                 scope_id: "failure-cas".to_string(),
                 runtime_state_id: "failure-runtime".to_string(),
                 conversation_epoch: Some(acquired.authority.epoch),
@@ -4016,6 +4117,7 @@ mod checkpoint_tests {
         let operation_id = pending.batch.operation_id.clone();
         let prepared = runtime
             .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                managed_import: None,
                 scope_id: "clear-pending".to_string(),
                 runtime_state_id: "clear-pending".to_string(),
                 conversation_epoch: Some(acquired.authority.epoch),
@@ -4075,6 +4177,7 @@ mod checkpoint_tests {
         )?;
         let prepared = runtime
             .compare_and_save_checkpoint(RuntimeCheckpointCasRequest {
+                managed_import: None,
                 scope_id: "clear-scope".to_string(),
                 runtime_state_id: "clear-generation".to_string(),
                 conversation_epoch: Some(scope.authority.epoch),

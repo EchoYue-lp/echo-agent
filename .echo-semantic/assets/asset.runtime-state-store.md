@@ -6,13 +6,13 @@ title: RuntimeStateStore 与 AgentCheckpoint
 asset_type: state_authority
 status: active
 risk: high
-observed_at: 44b2ed68772c7c016d09af6c2e1adac9fe4fea70
+observed_at: source:6fdcc1782b7aa2c97a148f7c377d60b4ed26b9d470f02c05a651de1e8e2eac74
 boundary_refs: [boundary.context-memory, boundary.observation-persistence-delivery]
 code_refs: [src/state/mod.rs, src/state/file.rs, src/state/sqlite.rs, src/agent/snapshot.rs]
 consumer_refs: [src/agent/react/run/context.rs, src/agent/react/run/phases/compact.rs, src/agent/react/run/phases/tools.rs, src/agent/react/run/phases/finalize.rs, docs/en/03-memory.md]
 behavior_refs: [behavior.context-memory-lifecycle, behavior.observation-persistence]
 rule_refs: [rule.context-persistence-separation, rule.fact-projection-separation]
-evidence_refs: [evidence.agent-context-execution, evidence.persistence-observation, evidence.transcript-projection-settlement-repair, evidence.transcript-projection-settlement-verification, evidence.checkpoint-plan-authority-repair, evidence.checkpoint-plan-authority-verification]
+evidence_refs: [evidence.agent-context-execution, evidence.persistence-observation, evidence.transcript-projection-settlement-repair, evidence.transcript-projection-settlement-verification, evidence.managed-import-generation-repair, evidence.checkpoint-plan-authority-repair, evidence.checkpoint-plan-authority-verification]
 finding_refs: [finding.transcript-projection-settlement]
 candidate_refs: []
 ---
@@ -32,6 +32,7 @@ ReactAgent hydration/finalization 消费，file 与 optional SQLite 提供 backe
 
 Load/hydrate、pending prepare/retry/proof-ack、rotate/clear incarnation、scope retirement 与 stable
 conversation delete saga。Attempt result 与 dispatch 归属由 CAS revision 约束。
+跨 managed import epoch 的 checkpoint CAS 还要求完整导入请求、Store 回执、消息和游标一致。
 
 ## 候选关系
 

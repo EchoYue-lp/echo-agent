@@ -42,10 +42,11 @@ use echo_core::memory::conversation::{
     ConversationProjectionEpochStatus, ConversationProjectionLifecycle, ConversationStore,
     EnsureConversationProjectionRequest, ManagedConversationDelete,
     ManagedConversationDeleteReceipt, ManagedConversationDeleteStatus, ManagedConversationImport,
-    ManagedConversationMetadataUpdate, ManagedConversationMetadataUpdateReceipt,
-    ManagedConversationMetadataUpdateStatus, NewConversation, PersistenceCallCapability,
-    PersistenceCallContext, StoredMessage, TranscriptProjectionApplyReceipt,
-    TranscriptProjectionApplyStatus, TranscriptProjectionBatch, TranscriptProjectionConflictKind,
+    ManagedConversationImportLocator, ManagedConversationMetadataUpdate,
+    ManagedConversationMetadataUpdateReceipt, ManagedConversationMetadataUpdateStatus,
+    NewConversation, PersistenceCallCapability, PersistenceCallContext, StoredMessage,
+    TranscriptProjectionApplyReceipt, TranscriptProjectionApplyStatus, TranscriptProjectionBatch,
+    TranscriptProjectionConflictKind,
 };
 use echo_core::utils::blocking::{
     BlockingFileOperationKey, BlockingFileOperationScope, run_keyed_file_operation,
@@ -90,6 +91,8 @@ struct FileProjectionState {
     applied_operations: HashMap<String, String>,
     #[serde(default)]
     ordinals: BTreeMap<String, BTreeMap<u64, String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    latest_import: Option<ManagedConversationImportLocator>,
     #[serde(default)]
     delete_receipts: HashMap<String, FileDeleteReceipt>,
 }
@@ -103,6 +106,7 @@ impl FileProjectionState {
             retention_floor_epoch: 0,
             applied_operations: HashMap::new(),
             ordinals: BTreeMap::new(),
+            latest_import: None,
             delete_receipts: HashMap::new(),
         }
     }
@@ -1184,6 +1188,18 @@ impl ConversationStore for FileConversationStore {
         })
     }
 
+    fn get_latest_managed_import_with_context<'a>(
+        &'a self,
+        context: PersistenceCallContext,
+        conversation_id: &'a str,
+    ) -> BoxFut<'a, Option<ManagedConversationImportLocator>> {
+        let store = self.with_persistence_call_context(context);
+        Box::pin(async move {
+            context.ensure_not_expired()?;
+            store.get_latest_managed_import(conversation_id).await
+        })
+    }
+
     fn update_managed_conversation_with_context<'a>(
         &'a self,
         context: PersistenceCallContext,
@@ -1729,6 +1745,31 @@ impl ConversationStore for FileConversationStore {
         )
     }
 
+    fn get_latest_managed_import<'a>(
+        &'a self,
+        conversation_id: &'a str,
+    ) -> BoxFut<'a, Option<ManagedConversationImportLocator>> {
+        let conversation_id = conversation_id.to_string();
+        self.run_blocking(
+            Self::conversation_scope(conversation_id.clone()),
+            move |store| {
+                let _conversation = store.authority.scan_barrier.read().map_err(poison)?;
+                store.ensure_persistence_call_not_expired()?;
+                let record = store.read_manifest(&conversation_id)?;
+                Ok(record
+                    .and_then(|record| record.projection)
+                    .filter(|state| state.lifecycle == ConversationProjectionLifecycle::Live)
+                    .and_then(|state| {
+                        state.latest_import.filter(|locator| {
+                            locator.applied_epoch == state.epoch
+                                && state.applied_operations.get(&locator.operation_id)
+                                    == Some(&locator.payload_digest)
+                        })
+                    }))
+            },
+        )
+    }
+
     fn apply_transcript_projection<'a>(
         &'a self,
         batch: TranscriptProjectionBatch,
@@ -1902,7 +1943,17 @@ impl ConversationStore for FileConversationStore {
                             kind: TranscriptProjectionConflictKind::OperationIdentity,
                         }
                     };
-                    return Ok(Self::import_receipt(&request, current_authority, status));
+                    let mut receipt_authority = current_authority;
+                    if status == TranscriptProjectionApplyStatus::AlreadyApplied
+                        && let Some(locator) = state
+                            .latest_import
+                            .as_ref()
+                            .filter(|locator| locator.matches(&request))
+                    {
+                        receipt_authority.epoch = locator.applied_epoch;
+                        receipt_authority.revision = locator.applied_revision;
+                    }
+                    return Ok(Self::import_receipt(&request, receipt_authority, status));
                 }
                 if state.epoch != request.expected_epoch
                     || state.lifecycle != ConversationProjectionLifecycle::Live
@@ -1936,6 +1987,17 @@ impl ConversationStore for FileConversationStore {
                         MemoryError::ProjectionEpochExhausted(conversation_id.clone())
                     })?;
                 let next_revision = state.next_revision(&conversation_id)?;
+                let import_digests = request
+                    .generation_id
+                    .as_deref()
+                    .map(|_| {
+                        crate::memory::conversation::managed_import_projection_digests(
+                            &conversation_id,
+                            &request.messages,
+                        )?;
+                        request.ordinal_digests()
+                    })
+                    .transpose()?;
                 let state = record
                     .projection
                     .as_mut()
@@ -1943,6 +2005,27 @@ impl ConversationStore for FileConversationStore {
                 state.epoch = next_epoch;
                 state.applied_operations.clear();
                 state.ordinals.clear();
+                if let (Some(generation_id), Some(digests)) =
+                    (&request.generation_id, import_digests)
+                {
+                    state.ordinals.insert(
+                        generation_id.clone(),
+                        digests
+                            .into_iter()
+                            .enumerate()
+                            .map(|(ordinal, digest)| {
+                                u64::try_from(ordinal)
+                                    .map(|ordinal| (ordinal, digest))
+                                    .map_err(|_| {
+                                        MemoryError::SerializationError(
+                                            "managed import ordinal capacity exhausted".to_string(),
+                                        )
+                                        .into()
+                                    })
+                            })
+                            .collect::<Result<BTreeMap<_, _>>>()?,
+                    );
+                }
                 state
                     .applied_operations
                     .insert(request.operation_id.clone(), request.payload_digest.clone());
@@ -1951,6 +2034,8 @@ impl ConversationStore for FileConversationStore {
                 record.conversation.summary = None;
                 record.conversation.compressed_before_id = None;
                 let authority = state.authority(&conversation_id);
+                state.latest_import =
+                    ManagedConversationImportLocator::from_applied(&request, &authority)?;
                 store.replace_record_messages(&mut record, &request.messages)?;
                 Ok(Self::import_receipt(
                     &request,
@@ -2963,6 +3048,84 @@ mod tests {
                 .and_then(|message| message.content.as_deref()),
             Some("restored")
         );
+        std::fs::remove_dir_all(base)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn generation_bound_import_seeds_projection_frontier() -> TestResult {
+        let base = tmp_base();
+        let store = FileConversationStore::new(&base)?;
+        let acquired = store
+            .ensure_projection_epoch(ensure_projection_request("import-frontier", None))
+            .await?;
+        let imported_message = projection_message("import-frontier", "restored");
+        let import = ManagedConversationImport::prepare_for_generation(
+            "import-frontier",
+            acquired.authority.epoch,
+            acquired.authority.revision,
+            "import-frontier",
+            vec![imported_message.clone()],
+        )?;
+        let imported = store.import_managed_messages(import.clone()).await?;
+        assert_eq!(imported.status, TranscriptProjectionApplyStatus::Applied);
+        let locator = store
+            .get_latest_managed_import("import-frontier")
+            .await?
+            .ok_or_else(|| std::io::Error::other("managed import locator missing"))?;
+        assert!(locator.matches(&import));
+        let renamed = store
+            .update_managed_conversation(ManagedConversationMetadataUpdate::prepare(
+                "import-frontier",
+                imported.authority.epoch,
+                imported.authority.revision,
+                Some("Renamed".to_string()),
+                None,
+                None,
+            )?)
+            .await?;
+        assert_eq!(
+            renamed.status,
+            ManagedConversationMetadataUpdateStatus::Updated
+        );
+        let repeated = store.import_managed_messages(import).await?;
+        assert_eq!(
+            repeated.status,
+            TranscriptProjectionApplyStatus::AlreadyApplied
+        );
+        assert_eq!(repeated.authority.revision, imported.authority.revision);
+        assert_eq!(
+            store
+                .get_latest_managed_import("import-frontier")
+                .await?
+                .map(|locator| locator.applied_revision),
+            Some(imported.authority.revision)
+        );
+        let replay = TranscriptProjectionBatch::prepare(
+            "import-frontier",
+            imported.authority.epoch,
+            "import-frontier",
+            0,
+            vec![imported_message],
+        )?;
+        assert!(matches!(
+            store.apply_transcript_projection(replay).await?.status,
+            TranscriptProjectionApplyStatus::Conflict {
+                kind: TranscriptProjectionConflictKind::OrdinalDigest,
+                ..
+            }
+        ));
+        let appended = store
+            .apply_transcript_projection(projection_batch(
+                "import-frontier",
+                imported.authority.epoch,
+                "import-frontier",
+                1,
+                &["next"],
+            )?)
+            .await?;
+        assert_eq!(appended.status, TranscriptProjectionApplyStatus::Applied);
+        assert_eq!(store.get_messages("import-frontier").await?.len(), 2);
         std::fs::remove_dir_all(base)?;
         Ok(())
     }

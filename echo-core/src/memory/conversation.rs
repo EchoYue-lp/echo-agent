@@ -440,6 +440,8 @@ pub struct ManagedConversationImport {
     pub conversation_id: String,
     pub expected_epoch: u64,
     pub expected_revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation_id: Option<String>,
     pub messages: Vec<StoredMessage>,
 }
 
@@ -458,6 +460,7 @@ impl ManagedConversationImport {
             conversation_id: &conversation_id,
             expected_epoch,
             expected_revision,
+            generation_id: None,
             messages: &messages,
         })?;
         Ok(Self {
@@ -467,25 +470,67 @@ impl ManagedConversationImport {
             conversation_id,
             expected_epoch,
             expected_revision,
+            generation_id: None,
             messages,
         })
+    }
+
+    /// Bind a managed replacement to the runtime generation that will resume it.
+    pub fn prepare_for_generation(
+        conversation_id: impl Into<String>,
+        expected_epoch: u64,
+        expected_revision: u64,
+        generation_id: impl Into<String>,
+        messages: Vec<StoredMessage>,
+    ) -> Result<Self> {
+        let generation_id = generation_id.into();
+        if generation_id.trim().is_empty() {
+            return Err(projection_error(
+                "managed import generation must not be empty",
+            ));
+        }
+        let mut request =
+            Self::prepare(conversation_id, expected_epoch, expected_revision, messages)?;
+        request.generation_id = Some(generation_id);
+        request.payload_digest = request.identity_digest()?;
+        request.operation_id = format!("managed-conversation-import-v1:{}", request.payload_digest);
+        Ok(request)
+    }
+
+    fn identity_digest(&self) -> Result<String> {
+        digest_serialized(&ManagedImportIdentity {
+            schema_version: self.schema_version,
+            conversation_id: &self.conversation_id,
+            expected_epoch: self.expected_epoch,
+            expected_revision: self.expected_revision,
+            generation_id: self.generation_id.as_deref(),
+            messages: &self.messages,
+        })
+    }
+
+    /// Exact row digests used by Store ordinal replay after this import.
+    pub fn ordinal_digests(&self) -> Result<Vec<String>> {
+        self.messages.iter().map(digest_serialized).collect()
     }
 
     pub fn validate(&self) -> Result<()> {
         validate_managed_messages(&self.conversation_id, &self.messages)?;
         validate_managed_epoch(self.expected_epoch)?;
+        if self
+            .generation_id
+            .as_deref()
+            .is_some_and(|generation_id| generation_id.trim().is_empty())
+        {
+            return Err(projection_error(
+                "managed import generation must not be empty",
+            ));
+        }
         if self.schema_version != TRANSCRIPT_PROJECTION_SCHEMA_VERSION {
             return Err(projection_error(
                 "unsupported managed conversation import schema",
             ));
         }
-        let digest = digest_serialized(&ManagedImportIdentity {
-            schema_version: self.schema_version,
-            conversation_id: &self.conversation_id,
-            expected_epoch: self.expected_epoch,
-            expected_revision: self.expected_revision,
-            messages: &self.messages,
-        })?;
+        let digest = self.identity_digest()?;
         if digest != self.payload_digest
             || self.operation_id != format!("managed-conversation-import-v1:{digest}")
         {
@@ -494,6 +539,65 @@ impl ManagedConversationImport {
             ));
         }
         Ok(())
+    }
+}
+
+/// Durable coordinates for replaying the latest generation-bound import.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManagedConversationImportLocator {
+    pub conversation_id: String,
+    pub generation_id: String,
+    pub expected_epoch: u64,
+    pub expected_revision: u64,
+    pub applied_epoch: u64,
+    pub applied_revision: u64,
+    pub operation_id: String,
+    pub payload_digest: String,
+}
+
+impl ManagedConversationImportLocator {
+    pub fn from_applied(
+        request: &ManagedConversationImport,
+        authority: &ConversationProjectionAuthority,
+    ) -> Result<Option<Self>> {
+        let Some(generation_id) = request.generation_id.clone() else {
+            return Ok(None);
+        };
+        request.validate()?;
+        if authority.conversation_id != request.conversation_id
+            || authority.epoch
+                != request.expected_epoch.checked_add(1).ok_or_else(|| {
+                    projection_error("managed import applied epoch capacity exhausted")
+                })?
+            || authority.revision
+                != request.expected_revision.checked_add(1).ok_or_else(|| {
+                    projection_error("managed import applied revision capacity exhausted")
+                })?
+            || authority.lifecycle != ConversationProjectionLifecycle::Live
+        {
+            return Err(projection_error(
+                "managed import locator does not match applied authority",
+            ));
+        }
+        Ok(Some(Self {
+            conversation_id: request.conversation_id.clone(),
+            generation_id,
+            expected_epoch: request.expected_epoch,
+            expected_revision: request.expected_revision,
+            applied_epoch: authority.epoch,
+            applied_revision: authority.revision,
+            operation_id: request.operation_id.clone(),
+            payload_digest: request.payload_digest.clone(),
+        }))
+    }
+
+    pub fn matches(&self, request: &ManagedConversationImport) -> bool {
+        request.conversation_id == self.conversation_id
+            && request.generation_id.as_deref() == Some(self.generation_id.as_str())
+            && request.expected_epoch == self.expected_epoch
+            && request.expected_revision == self.expected_revision
+            && request.operation_id == self.operation_id
+            && request.payload_digest == self.payload_digest
     }
 }
 
@@ -691,6 +795,8 @@ struct ManagedImportIdentity<'a> {
     conversation_id: &'a str,
     expected_epoch: u64,
     expected_revision: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    generation_id: Option<&'a str>,
     messages: &'a [StoredMessage],
 }
 
@@ -947,6 +1053,24 @@ pub trait ConversationStore: Send + Sync {
         request: ManagedConversationImport,
     ) -> BoxFuture<'a, Result<TranscriptProjectionApplyReceipt>> {
         self.import_managed_messages(request)
+    }
+
+    /// Read the latest generation-bound import identity without modifying state.
+    fn get_latest_managed_import<'a>(
+        &'a self,
+        _conversation_id: &'a str,
+    ) -> BoxFuture<'a, Result<Option<ManagedConversationImportLocator>>> {
+        Box::pin(async {
+            Err(MemoryError::Unsupported("managed import locator query".to_string()).into())
+        })
+    }
+
+    fn get_latest_managed_import_with_context<'a>(
+        &'a self,
+        _context: PersistenceCallContext,
+        conversation_id: &'a str,
+    ) -> BoxFuture<'a, Result<Option<ManagedConversationImportLocator>>> {
+        self.get_latest_managed_import(conversation_id)
     }
 
     /// Update managed metadata only when epoch and revision still match.
