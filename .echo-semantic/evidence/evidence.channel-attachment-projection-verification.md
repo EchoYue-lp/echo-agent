@@ -8,7 +8,7 @@ source_refs:
   - docs/adr/0077-channel-attachment-projection.md
 supports: [finding.channel-attachment-projection]
 limitations:
-  - Focused tests and Clippy do not replace the pre-merge workspace gate or remote CI
+  - Remote CI and mainline delivery remain pending
   - Provider-specific binary file rendering and actual QQ or Feishu media retrieval were not exercised
 command_results:
   - { command: "cargo test -p echo_agent --features channels --lib channels::tests --locked", exit_code: 0 }
@@ -16,6 +16,7 @@ command_results:
   - { command: "cargo clippy -p echo_agent --features channels --lib --locked -- -D warnings -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic -D clippy::unreachable", exit_code: 0 }
   - { command: "cargo fmt --all -- --check", exit_code: 0 }
   - { command: "git diff --check", exit_code: 0 }
+  - { command: "./scripts/verify.sh", exit_code: 0 }
 ---
 
 # Channel attachment projection verification
@@ -32,10 +33,11 @@ four image signatures, and pre-model rejection of unrepresented media.
 
 The test call records the exact `Message` reaching `MockLlmClient`. Targeted
 Clippy, format checking, and all 14 documentation contract tests passed on the
-candidate source. This scope is narrower than the required full workspace gate.
+candidate source. The unchanged reviewed source then passed the full workspace
+gate with exit code 0, recorded in `issue40-full-gate-1790305798535.log`.
 
 ## 已知缺口
 
-The independent rereview and final mainline source digest have not been
-recorded. Provider wire translation and transport-specific media acquisition
-are separate boundaries.
+Independent rereview found no blocker. Provider wire translation and
+transport-specific media acquisition are separate boundaries; remote CI and
+mainline delivery are still pending.

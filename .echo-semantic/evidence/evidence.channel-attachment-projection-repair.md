@@ -16,7 +16,7 @@ limitations:
   - ImageUrl does not retain the original image filename and File cannot retain an absent filename without a generated name
   - Typed File bytes do not guarantee every provider can read arbitrary binary files
   - QQ and Feishu transport media acquisition is outside this adapter
-  - Independent rereview, full gates, and mainline delivery remain pending
+  - Mainline delivery and remote CI remain pending
 ---
 
 # Channel attachment projection repair

@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.hook-event-producer-contract-verification
 kind: evidence
-observed_at: source:623cac6a21b2ee853131bb0849f3228afdbfe78ec9c4eec731be622d4322d6b6
+observed_at: source:33686a6a0273c6f8ea85608bff92fed9774f00bfefe1bbd34aa1a2316b236cbc
 source_refs:
   - tests/hook_event_producer_contract.rs
   - docs/en/23-hooks.md
