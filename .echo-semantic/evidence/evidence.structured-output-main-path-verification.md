@@ -9,11 +9,13 @@ source_refs:
   - src/agent/react/run/phases/think.rs
 supports: [finding.structured-output-main-path]
 limitations:
-  - Focused request tests and Clippy do not replace the full merge gate or remote CI
+  - Remote CI and mainline delivery remain pending
 command_results:
   - { command: "cargo test -p echo_agent configured_response_format_reaches_every_react_request --lib --locked", exit_code: 0 }
   - { command: "cargo test -p echo_agent unknown_model_does_not_silently_enable_structured_output --lib --locked", exit_code: 0 }
   - { command: "cargo test -p echo_agent explicit_text_format_keeps_anthropic_request_unconstrained --lib --locked", exit_code: 0 }
+  - { command: "./scripts/verify.sh", exit_code: 0 }
+  - { command: "17 independent-feature cargo checks", exit_code: 0 }
 ---
 
 # Structured output main request verification
@@ -34,5 +36,6 @@ passed 82/82 after Guard and schema terminal reconciliation.
 
 ## 已知缺口
 
-Complete workspace/all-feature, feature matrix, remote Linux/Windows, and
-mainline checks remain to be executed on the final integration snapshot.
+The final integrated source passed the complete workspace/all-feature gate
+and 17 independent-feature checks. Remote Linux/Windows and mainline checks
+remain to be executed on the PR and final merge commit.

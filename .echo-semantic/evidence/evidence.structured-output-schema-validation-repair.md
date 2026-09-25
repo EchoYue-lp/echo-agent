@@ -47,6 +47,6 @@ retry authority, full tool-batch settlement, and final callback safe points.
 
 ## 已知缺口
 
-These are framework boundaries, not EKO product policy. Complete gate,
-feature-matrix compilation, remote CI, and post-merge semantic verification
-remain separate acceptance steps.
+These are framework boundaries, not EKO product policy. The complete gate
+and feature matrix passed on the final integrated source; remote CI and
+post-merge semantic verification remain separate acceptance steps.

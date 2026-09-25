@@ -12,7 +12,7 @@ source_refs:
   - echo-agent-learning/examples/demo15_structured_output.rs
 supports: [finding.structured-output-schema-validation-contract]
 limitations:
-  - Focused suites and example compilation do not replace the full workspace gate or remote CI
+  - Remote CI and mainline delivery remain pending
 command_results:
   - { command: "cargo test -p echo_agent agent::react::run::stream_channel::tests --lib --locked", exit_code: 0 }
   - { command: "cargo test -p echo_agent agent::react::run::phases::finalize::tests --lib --locked", exit_code: 0 }
@@ -20,6 +20,8 @@ command_results:
   - { command: "cargo test -p echo_agent strict_critique_rejects_ --lib --locked", exit_code: 0 }
   - { command: "cargo check -p echo-agent-learning --example demo15_structured_output --locked", exit_code: 0 }
   - { command: "cargo test -p echo-agent-learning --test documentation_contract --locked", exit_code: 0 }
+  - { command: "./scripts/verify.sh", exit_code: 0 }
+  - { command: "17 independent-feature cargo checks", exit_code: 0 }
 ---
 
 # Strict structured output verification
@@ -46,5 +48,5 @@ documentation contract compile/test chain passed after injecting LlmConfig.
 ## 已知缺口
 
 No real provider wire was exercised by these Mock-based regressions. The
-required full workspace gate, independent feature matrix, PR CI, and mainline
-strict snapshot remain to be proven on the final integrated commit.
+full workspace gate and independent feature matrix passed on the final
+integrated source. PR CI and mainline strict snapshot remain to be proven.

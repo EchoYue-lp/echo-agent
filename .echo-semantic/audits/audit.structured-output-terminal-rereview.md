@@ -47,7 +47,8 @@ and repaired on the actual caller path. The run snapshot is the format/fact
 authority; the driver validates Guard-processed final candidates before
 success observations. Tool batches settle before candidate selection; the
 driver owns steer/cancel safe points and typed exhaustion. The final candidate
-diff was reviewed before the complete merge gate.
+diff was reviewed before the complete merge gate, which then exited zero on
+the same execution source.
 
 ## 问题记录
 
@@ -63,10 +64,11 @@ transcript counterexamples. The final round reported no new blocker.
 Provider tokens and tool-result events remain provisional before final
 schema validation. External `$ref` resolution is intentionally rejected.
 The optional Critic retains its own fail-open error policy, but cannot make
-a strict-invalid main Agent answer successful. Full local gate, remote CI,
-and mainline delivery remain separate obligations.
+a strict-invalid main Agent answer successful. Remote CI and mainline
+delivery remain separate obligations.
 
 ## 未检查项
 
-The independent review did not run the complete all-feature workspace gate,
-per-feature matrix, real remote providers, PR CI, or EKO application surface.
+The independent review did not itself run the complete all-feature workspace
+gate or per-feature matrix; the delivery owner ran both after review. Real
+remote providers, PR CI, and EKO application surface were not checked.

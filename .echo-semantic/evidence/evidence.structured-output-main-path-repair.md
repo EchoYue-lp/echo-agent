@@ -12,7 +12,7 @@ source_refs:
 supports: [finding.structured-output-main-path, behavior.llm-provider-execution, rule.provider-protocol-boundary]
 limitations:
   - Provider hint and capability admission do not replace framework-local strict schema validation; that result is owned by Issue 97 evidence
-  - Full workspace gate, remote CI, and mainline delivery remain pending
+  - Remote CI and mainline delivery remain pending
 ---
 
 # Structured output main request repair
@@ -36,5 +36,5 @@ ADR 0078 records the framework/provider division of responsibility.
 ## 已知缺口
 
 This evidence alone does not close strict schema validation or prove real
-provider acceptance. The local integration, complete gate, remote CI, and
-mainline Issue closure are separate evidence steps.
+provider acceptance. The local integration and complete gate passed; remote
+CI and mainline Issue closure are separate evidence steps.
