@@ -2,7 +2,36 @@
 
 ## 是什么
 
-Guard 系统提供输入/输出内容过滤，强制执行安全、合规和策略规则。护栏可以在内容到达 LLM 之前（输入护栏）或返回给用户之前（输出护栏）阻止或修改内容。
+Guard 系统在用户输入、有效工具参数、工具结果和最终文本答案四个生产边界过滤内容。
+护栏可放行、警告、阻断，或在允许的边界转换内容。
+
+| 方向 | 生产边界 | 转换 |
+| --- | --- | --- |
+| `Input` | 用户文本进入模型上下文前 | 允许 |
+| `ToolInput` | 全部重写后的最终 JSON 参数、工具调用前 | 拒绝（仅阻断） |
+| `ToolOutput` | 工具结果进入预算与终态观察前 | 允许 |
+| `Output` | 模型文本最终答案进入回调和交付前 | 允许 |
+
+`final_answer` 工具结果只按 `ToolOutput` 检查，不在写入 transcript 后再次按
+`Output` 检查。护栏后端错误 fail-closed，不降级为警告。ToolInput 转换会被拒绝，
+因为审批收据绑定的是未经再次修改的有效参数。
+文本答案的 `Token` 与 `FinalAnswer` 事件携带相同的受检内容；provider 失败时
+的部分内容也要经过检查才会以 `Token` 交付。
+配置 GuardManager 后，工具流的 chunk 和进度被抑制，caller 只收到经过护栏和
+输出预算的权威终态 `ToolResult`；未配置时保留原有
+stdout/stderr 实时流。工具失败且无输出时，受检诊断统一进入返回错误、Trace、
+Audit、callback 和 transcript。
+结构化 data、非空 metadata、携带内容的结果 kind 和 MIME 类型会分别规范序列化为
+文本检查；`Pass` 保留已检查的结构，任一字段被阻断或转换时，无法从受检文本无损
+重建的平行展示字段会撤销。配置 Guard 时，即使文本 `Pass`，图片 URL/模型富内容
+和护栏前 artifact 引用也会抑制，因为文本检查无法证明像素或未见字节安全。
+typed failure 与已确认 effect 事实保留。用户安装的 PostToolUse hook 仍按既有顺序
+在展示护栏前运行，可看到原始结果；它不是受检消费者边界。
+`ToolFailure.postcondition` 和 `idempotency_key` 的自由文本也会分别检查。
+idempotency key 被修改时直接撤销，不伪造新的重试身份。post-use hook 若将原始
+工具输出写入阻断原因，caller 错误与 skill telemetry 改用受检的 `ToolResult.error`。
+已确认的 typed effect path 仍依 ADR 0074 在 caller 与 Trace 可见；Guard 不承诺
+通用脱敏这些恢复事实。
 
 ---
 
@@ -67,14 +96,17 @@ pub trait Guard: Send + Sync {
 }
 
 pub enum GuardDirection {
-    Input,   // 用户 → Agent
-    Output,  // Agent → 用户
+    Input,      // 用户 -> Agent
+    Output,     // 模型文本最终答案 -> 用户
+    ToolInput,  // 有效工具参数 -> Tool
+    ToolOutput, // 工具结果 -> Agent
 }
 
 pub enum GuardResult {
     Pass,
     Block { reason: String },
-    Modify { content: String },
+    Warn { reasons: Vec<String> },
+    Transform { content: String, reasons: Vec<String> },
 }
 ```
 
@@ -88,15 +120,10 @@ pub enum GuardResult {
 use echo_agent::guard::rule::{RuleGuard, RuleGuardBuilder};
 
 let guard = RuleGuardBuilder::new("no-pii")
-    // 阻止正则模式
-    .block_regex(r"\b\d{3}-\d{2}-\d{4}\b")      // SSN
-    .block_regex(r"\b[A-Z]{2}\d{6}\b")          // 护照号
-    .block_regex(r"\b[\w.-]+@[\w.-]+\.\w+\b")   // 邮箱
-    // 允许模式（白名单）
-    .allow_regex(r"\b\d{4}\b")                  // 允许 4 位数字
-    // 自定义规则
-    .block_if(|content| content.contains("password"))
-    .build()?;
+    .blocked_pattern(r"\b\d{3}-\d{2}-\d{4}\b")
+    .blocked_keyword("password")
+    .direction(GuardDirection::Output)
+    .build();
 
 // 测试
 let result = guard.check("我的 SSN 是 123-45-6789", GuardDirection::Output).await?;
@@ -112,14 +139,11 @@ assert!(matches!(result, GuardResult::Block { .. }));
 ```rust
 use echo_agent::guard::llm::LlmGuard;
 
-let guard = LlmGuard::new("qwen3-max")
-    .with_prompt(|content, direction| format!(
-        "分析以下内容是否存在问题：\n\n{}\n\n\
-         检查：有害内容、PII、敏感信息。\
-         返回 'PASS' 或 'BLOCK: 原因'",
-        content
-    ))
-    .with_max_tokens(100);
+let guard = LlmGuard::with_prompt(
+    "review",
+    review_llm_client,
+    "检查内容并返回 JSON：{\"safe\": true} 或 {\"safe\": false, \"reason\": \"...\"}",
+).with_directions(vec![GuardDirection::Output]);
 
 // LLM 语义评估内容
 let result = guard.check("...", GuardDirection::Output).await?;
@@ -134,30 +158,30 @@ use echo_agent::guard::{GuardManager, GuardDirection};
 
 let mut manager = GuardManager::new();
 
-// 添加输入护栏
-manager.add_input_guard(Box::new(injection_guard));
-manager.add_input_guard(Box::new(policy_guard));
-
-// 添加输出护栏
-manager.add_output_guard(Box::new(pii_guard));
-manager.add_output_guard(Box::new(llm_guard));
+// 按注册顺序运行，各护栏自行选择方向。
+manager.add(Arc::new(injection_guard));
+manager.add(Arc::new(policy_guard));
+manager.add(Arc::new(pii_guard));
+manager.add(Arc::new(llm_guard));
 
 // 检查输入
-match manager.check_input("用户的查询").await? {
+match manager.check_all("用户的查询", GuardDirection::Input).await? {
     GuardResult::Pass => { /* 继续 */ }
     GuardResult::Block { reason } => { 
         return Err(Error::Blocked(reason));
     }
-    GuardResult::Modify { content } => {
+    GuardResult::Transform { content, .. } => {
         // 使用修改后的内容
     }
+    GuardResult::Warn { .. } => { /* 带警告继续 */ }
 }
 
 // 检查输出
-match manager.check_output("Agent 的响应").await? {
+match manager.check_all("Agent 的响应", GuardDirection::Output).await? {
     GuardResult::Pass => { /* 返回给用户 */ }
     GuardResult::Block { reason } => { /* 脱敏或错误 */ }
-    GuardResult::Modify { content } => { /* 返回修改后的 */ }
+    GuardResult::Transform { content, .. } => { /* 返回修改后的 */ }
+    GuardResult::Warn { .. } => { /* 返回原始内容 */ }
 }
 ```
 
@@ -174,9 +198,9 @@ let mut agent = ReactAgentBuilder::new()
     .build()?;
 
 // 创建并附加护栏管理器
-let guard_manager = GuardManager::new()
-    .add_input_guard(Box::new(injection_guard))
-    .add_output_guard(Box::new(pii_guard));
+let mut guard_manager = GuardManager::new();
+guard_manager.add(Arc::new(injection_guard));
+guard_manager.add(Arc::new(pii_guard));
 
 agent.set_guard_manager(guard_manager);
 
@@ -194,9 +218,9 @@ use echo_agent::{guard, prelude::*};
 
 #[guard(name = "length-limit")]
 async fn check_length(content: &str, direction: GuardDirection) -> Result<GuardResult> {
-    if content.len() > 10000 {
-        Ok(GuardResult::Block { 
-            reason: format!("内容过长: {} 字符", content.len()) 
+    if content.chars().count() > 10000 {
+        Ok(GuardResult::Block {
+            reason: format!("内容过长: {} 字符", content.chars().count())
         })
     } else {
         Ok(GuardResult::Pass)
@@ -204,7 +228,7 @@ async fn check_length(content: &str, direction: GuardDirection) -> Result<GuardR
 }
 
 // 使用生成的 LengthLimitGuard
-manager.add_output_guard(Box::new(LengthLimitGuard));
+manager.add(Arc::new(LengthLimitGuard));
 ```
 
 ---
@@ -214,9 +238,9 @@ manager.add_output_guard(Box::new(LengthLimitGuard));
 多个护栏按顺序评估：
 
 ```rust
-manager.add_input_guard(Box::new(guard1));  // 第一个
-manager.add_input_guard(Box::new(guard2));  // 第二个
-manager.add_input_guard(Box::new(guard3));  // 第三个
+manager.add(Arc::new(guard1));  // 第一个
+manager.add(Arc::new(guard2));  // 第二个
+manager.add(Arc::new(guard3));  // 第三个
 
 // 执行顺序：
 // 1. guard1.check() → 若 Block，停止并返回
@@ -225,7 +249,8 @@ manager.add_input_guard(Box::new(guard3));  // 第三个
 // 4. 全部通过 → 继续
 ```
 
-第一个返回 `Block` 的护栏停止链条。
+第一个返回 `Block` 的护栏停止链条。护栏错误传播给调用方执行 fail-closed，
+不会变成 `Warn`。
 
 ---
 
@@ -235,8 +260,8 @@ manager.add_input_guard(Box::new(guard3));  // 第三个
 |------|------|------|
 | `RuleGuard` | 规则 | 基于模式的阻止 |
 | `LlmGuard` | LLM | 语义内容分析 |
-| `LengthGuard` | 规则 | 阻止过长内容 |
-| `SecretRedactor` | 规则 | 用 *** 脱敏敏感词 |
+| `RuleGuard::max_length` | 规则 | 阻止过长内容 |
+| `ContentGuard` | 内容 | 检测、拒绝或脱敏敏感内容 |
 
 ---
 
@@ -246,7 +271,7 @@ manager.add_input_guard(Box::new(guard3));  // 第三个
 2. **模式要具体**：避免过于宽泛的正则
 3. **记录被阻止的内容**：用于审计和调优
 4. **充分测试**：确保合法内容不被阻止
-5. **考虑 Modify vs Block**：有时脱敏比阻止更好
+5. **考虑 Transform 与 Block**：仅在允许转换的边界执行脱敏
 
 ---
 
