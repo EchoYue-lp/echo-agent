@@ -83,7 +83,11 @@ pub(crate) async fn prepare_turn(
             .await;
             yield_final_event_or!(
                 tx,
-                AgentEvent::FinalAnswer(format!("Blocked by UserPromptSubmit hook: {}", reason)),
+                super::pre_model_block_terminal(
+                    snap.config.response_format.as_ref(),
+                    "user_prompt_hook",
+                    format!("Blocked by UserPromptSubmit hook: {}", reason),
+                ),
                 PrepareOutcome::BlockedAndDone
             );
             snap.fire_hook(crate::skills::hooks::HookEvent::SessionEnd, Some("blocked"))
@@ -319,6 +323,49 @@ mod tests {
             }
             other => panic!("expected FinalAnswer, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn structured_prepare_hook_block_emits_error_terminal() -> Result<()> {
+        let mut definition = HooksDefinition::default();
+        definition.add_rules(
+            HookEvent::UserPromptSubmit,
+            vec![HookRule {
+                matcher: String::new(),
+                hooks: vec![HookAction::Permission {
+                    decision: "deny".to_string(),
+                    reason: Some("test-deny".to_string()),
+                    suggestions: Vec::new(),
+                }],
+            }],
+        );
+        let mut registry = HookRegistry::new();
+        registry.register("test-blocker", "/tmp", definition);
+        let mut agent = ReactAgent::new(
+            AgentConfig::new("test-model", "agent", "sys")
+                .response_format(crate::llm::ResponseFormat::JsonObject),
+        );
+        agent.set_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)));
+
+        let snap = AgentRunSnapshot::from_agent(&agent);
+        let (tx, mut rx) = mpsc::channel::<Result<AgentEvent>>(8);
+        let outcome = prepare_turn(
+            &snap,
+            &agent.memory.context,
+            &tx,
+            "any user message",
+            "",
+            StreamMode::Execute,
+            0,
+            false,
+        )
+        .await?;
+        assert!(matches!(outcome, PrepareOutcome::BlockedAndDone));
+        assert!(matches!(
+            rx.recv().await,
+            Some(Ok(AgentEvent::Error { .. }))
+        ));
+        Ok(())
     }
 
     fn phase_outcome_label(o: &PrepareOutcome) -> &'static str {

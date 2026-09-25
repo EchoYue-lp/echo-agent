@@ -16,7 +16,7 @@ use crate::skills::hooks::HookRegistry;
 use crate::tools::{ToolExecutionConfig, ToolFailure, ToolManager, ToolResult};
 use crate::trace::{RunEvent, RunStatus, RunStore};
 use echo_core::circuit_breaker::CircuitBreaker;
-use echo_core::llm::types::{Message, Role};
+use echo_core::llm::types::{Message, ResponseFormat, Role};
 use echo_core::tokenizer::Tokenizer;
 use std::sync::Arc;
 
@@ -218,6 +218,10 @@ pub struct RuntimeConfig {
     pub token_budget_error: Option<String>,
     pub run_budget: echo_core::agent::RunBudgetPolicy,
     pub supports_tool_choice_none: bool,
+    /// Caller-declared final response format, fixed for this run.
+    pub response_format: Option<ResponseFormat>,
+    /// Resolved provider/model capability, never inferred from the format request.
+    pub supports_structured_output: bool,
     /// Model fact provenance applied to this immutable run snapshot.
     pub model_fact_sources: Vec<echo_core::llm::capabilities::ModelFactMetadata>,
     /// Expired or future-observed model facts rejected at resolution time.
@@ -317,6 +321,9 @@ impl RuntimeConfig {
             run_budget: config.run_budget.clone(),
             supports_tool_choice_none: model_profile
                 .is_none_or(|resolution| resolution.profile.supports_tool_choice_none),
+            response_format: config.response_format.clone(),
+            supports_structured_output: model_profile
+                .is_some_and(|resolution| resolution.profile.capabilities.structured_output),
             model_fact_sources: model_profile
                 .map(|resolution| resolution.applied_facts.clone())
                 .unwrap_or_default(),
@@ -703,7 +710,7 @@ pub struct AgentRunSnapshot {
     pub(crate) memory_store: Option<Arc<dyn crate::memory::Store>>,
     /// Optional Critic for final_answer verification.
     pub critic: Option<Arc<dyn echo_core::agent::Critic>>,
-    /// Optional tool execution pipeline (16-stage middleware).
+    /// Optional tool execution pipeline (17-stage middleware).
     pub tool_execution_pipeline:
         Option<Arc<crate::agent::react::run::pipeline::ToolExecutionPipeline>>,
     /// (stage4 E1) Layered memory manager — used by `pre_compaction_flush` to
@@ -2325,12 +2332,24 @@ impl AgentRunSnapshot {
         };
         use crate::guard::GuardDirection;
         let result = match gm
-            .check_all(&effective_output, GuardDirection::Output)
+            .check_all(&effective_output, GuardDirection::ToolOutput)
             .await
         {
             Ok(r) => r,
             Err(e) => {
                 tracing::error!(agent = %self.config.agent_name, error = %e, "Guard check failed, blocking output (fail-closed)");
+                if self.guard.audit_logger.is_some() {
+                    let event = crate::audit::AuditEvent::now(
+                        self.config.session_id.clone(),
+                        self.config.agent_name.clone(),
+                        crate::audit::AuditEventType::GuardBlock {
+                            guard: "guard_manager".to_string(),
+                            direction: GuardDirection::ToolOutput,
+                            reason: format!("guard check error: {e}"),
+                        },
+                    );
+                    self.record_audit_event(event).await;
+                }
                 return Some(format!("Output content blocked: guard check error ({e})"));
             }
         };
@@ -2343,7 +2362,7 @@ impl AgentRunSnapshot {
                         self.config.agent_name.clone(),
                         crate::audit::AuditEventType::GuardBlock {
                             guard: "guard_manager".to_string(),
-                            direction: GuardDirection::Output,
+                            direction: GuardDirection::ToolOutput,
                             reason: reason.clone(),
                         },
                     );
@@ -2354,6 +2373,71 @@ impl AgentRunSnapshot {
             crate::guard::GuardResult::Transform { content, .. } => Some(content),
             crate::guard::GuardResult::Pass | crate::guard::GuardResult::Warn { .. } => {
                 (effective_output != output).then_some(effective_output)
+            }
+        }
+    }
+
+    /// Check the final answer at the LLM-to-user boundary.
+    ///
+    /// Tool results use [`GuardDirection::ToolOutput`]; this separate
+    /// direction remains authoritative for the final answer emitted by the
+    /// run.  A block or backend error is returned to the terminal owner so
+    /// the original answer can never escape the guard boundary.
+    pub(crate) async fn check_final_answer_guard(
+        &self,
+        output: &str,
+    ) -> crate::error::Result<String> {
+        let Some(guard_manager) = self.guard.guard_manager.as_ref() else {
+            return Ok(output.to_string());
+        };
+        use crate::guard::GuardDirection;
+        let result = match guard_manager
+            .check_all(output, GuardDirection::Output)
+            .await
+        {
+            Ok(result) => result,
+            Err(error) => {
+                tracing::error!(
+                    agent = %self.config.agent_name,
+                    error = %error,
+                    "Final answer guard failed closed"
+                );
+                if self.guard.audit_logger.is_some() {
+                    let event = crate::audit::AuditEvent::now(
+                        self.config.session_id.clone(),
+                        self.config.agent_name.clone(),
+                        crate::audit::AuditEventType::GuardBlock {
+                            guard: "guard_manager".to_string(),
+                            direction: GuardDirection::Output,
+                            reason: format!("guard check error: {error}"),
+                        },
+                    );
+                    self.record_audit_event(event).await;
+                }
+                return Err(error);
+            }
+        };
+        match result {
+            crate::guard::GuardResult::Pass | crate::guard::GuardResult::Warn { .. } => {
+                Ok(output.to_string())
+            }
+            crate::guard::GuardResult::Transform { content, .. } => Ok(content),
+            crate::guard::GuardResult::Block { reason } => {
+                if self.guard.audit_logger.is_some() {
+                    let event = crate::audit::AuditEvent::now(
+                        self.config.session_id.clone(),
+                        self.config.agent_name.clone(),
+                        crate::audit::AuditEventType::GuardBlock {
+                            guard: "guard_manager".to_string(),
+                            direction: GuardDirection::Output,
+                            reason: reason.clone(),
+                        },
+                    );
+                    self.record_audit_event(event).await;
+                }
+                Err(crate::error::ReactError::Other(format!(
+                    "Final answer blocked by safety guard: {reason}"
+                )))
             }
         }
     }
@@ -2627,7 +2711,7 @@ impl AgentRunSnapshot {
     /// Execute a single tool call with the full policy pipeline:
     /// PreToolUse hooks → read-before-edit guard → execute → PostToolUse hooks → audit.
     ///
-    /// Uses the unified ToolExecutionPipeline (16 stages) for consistent behavior
+    /// Uses the unified ToolExecutionPipeline (17 stages) for consistent behavior
     /// between streaming and non-streaming paths.
     pub(crate) fn execute_tool_with_policy<'a>(
         &'a self,

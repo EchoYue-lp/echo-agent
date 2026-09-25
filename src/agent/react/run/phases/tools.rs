@@ -5,8 +5,7 @@
 use super::super::TOOL_CANCELLATION_GRACE_PERIOD;
 use super::super::processor::build_tool_calls_from_map;
 use super::super::stream_macros::yield_event_or;
-use super::verify::verify_answer;
-use super::{IterOutcome, LoopState, ThinkOutput, with_reasoning_content};
+use super::{IterOutcome, ThinkOutput, with_reasoning_content};
 use crate::agent::react::run::pipeline::ToolPipelineEvent;
 use crate::agent::react::{StepType, TOOL_FINAL_ANSWER};
 use crate::agent::snapshot::AgentRunSnapshot;
@@ -338,19 +337,13 @@ async fn requires_sequential_execution(snap: &AgentRunSnapshot, tool_name: &str)
 
 /// Tool-call branch of one iteration. Emits the `ToolBatchStart` /
 /// `ToolCall` events, pushes the assistant-with-tools message, splits the
-/// batch by approval or tool concurrency policy, runs both sub-batches, and short-circuits
-/// with [`IterOutcome::Finish`] the moment a `final_answer` tool call is
-/// verifier-accepted.
-///
-/// On verifier rejection of a `final_answer`, increments
-/// `state.verifier_retry_count` and continues processing remaining results
-/// before returning [`IterOutcome::Continue`].
-#[allow(clippy::too_many_arguments)]
+/// batch by approval or tool concurrency policy, and settles every result
+/// before handing final-answer candidates to the run driver. The driver owns
+/// steer and cancellation fences before schema, Critic, or terminal decisions.
 pub(crate) async fn run_tools(
     snap: &AgentRunSnapshot,
     context: &Arc<Mutex<crate::compression::ContextManager>>,
     tx: &mpsc::Sender<Result<AgentEvent>>,
-    state: &mut LoopState,
     iteration: usize,
     think: ThinkOutput,
     _label: &str,
@@ -410,7 +403,7 @@ pub(crate) async fn run_tools(
     }
     let waves = build_execution_waves(steps, &sequential_call_ids);
 
-    let mut finish_output = None;
+    let mut final_outputs = Vec::new();
     let mut batch_success_count = 0usize;
     let mut batch_failure_count = 0usize;
     let batch_tool_names: Vec<String> = waves
@@ -654,13 +647,7 @@ pub(crate) async fn run_tools(
                         outcome: crate::agent::AgentSteerTurnOutcome::Cancelled,
                     });
                 }
-                for output in published.final_answers {
-                    if verify_answer(snap, context, &output, state.verifier_retry_count).await {
-                        finish_output = Some(output);
-                    } else {
-                        state.verifier_retry_count = state.verifier_retry_count.saturating_add(1);
-                    }
-                }
+                final_outputs.extend(published.final_answers);
                 remaining_calls.drain(..conc.len().min(remaining_calls.len()));
             }
             ToolExecutionWave::Sequential((id, fname, args)) => {
@@ -805,13 +792,7 @@ pub(crate) async fn run_tools(
                         outcome: crate::agent::AgentSteerTurnOutcome::Cancelled,
                     });
                 }
-                for output in published.final_answers {
-                    if verify_answer(snap, context, &output, state.verifier_retry_count).await {
-                        finish_output = Some(output);
-                    } else {
-                        state.verifier_retry_count = state.verifier_retry_count.saturating_add(1);
-                    }
-                }
+                final_outputs.extend(published.final_answers);
                 remaining_calls.drain(..1.min(remaining_calls.len()));
             }
         }
@@ -835,8 +816,10 @@ pub(crate) async fn run_tools(
     yield_event_or!(tx, AgentEvent::ToolBatchEnd, IterOutcome::Abandoned);
     snap.fire_post_tool_batch(&batch_tool_names, batch_success_count, batch_failure_count)
         .await;
-    if let Some(output) = finish_output {
-        return Ok(IterOutcome::Finish { output });
+    if !final_outputs.is_empty() {
+        return Ok(IterOutcome::FinishCandidates {
+            outputs: final_outputs,
+        });
     }
     snap.auto_snapshot(context, iteration).await;
 
@@ -864,10 +847,10 @@ pub(crate) async fn run_tools(
 mod tests {
     use super::{
         InterruptedSettlement, ToolExecutionWave, build_execution_waves, project_typed_tool_result,
-        settle_interrupted_calls,
+        publish_completed_call, settle_interrupted_calls,
     };
     use crate::llm::types::{ContentPart, MessageContent};
-    use echo_core::tools::{ToolResult, ToolResultContent, ToolResultKind};
+    use echo_core::tools::{Tool, ToolParameters, ToolResult, ToolResultContent, ToolResultKind};
     use serde_json::Value;
     use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
@@ -876,6 +859,186 @@ mod tests {
 
     fn call(id: &str) -> (String, String, Value) {
         (id.to_string(), "tool".to_string(), Value::Null)
+    }
+
+    struct BlockRichOutput;
+
+    struct PassRichOutput;
+
+    impl crate::guard::Guard for PassRichOutput {
+        fn name(&self) -> &str {
+            "pass_rich_output"
+        }
+
+        fn check<'a>(
+            &'a self,
+            _content: &'a str,
+            _direction: crate::guard::GuardDirection,
+        ) -> futures::future::BoxFuture<'a, crate::error::Result<crate::guard::GuardResult>>
+        {
+            Box::pin(async { Ok(crate::guard::GuardResult::Pass) })
+        }
+    }
+
+    impl crate::guard::Guard for BlockRichOutput {
+        fn name(&self) -> &str {
+            "block_rich_output"
+        }
+
+        fn check<'a>(
+            &'a self,
+            _content: &'a str,
+            direction: crate::guard::GuardDirection,
+        ) -> futures::future::BoxFuture<'a, crate::error::Result<crate::guard::GuardResult>>
+        {
+            Box::pin(async move {
+                if direction == crate::guard::GuardDirection::ToolOutput {
+                    Ok(crate::guard::GuardResult::Block {
+                        reason: "rich output blocked".to_string(),
+                    })
+                } else {
+                    Ok(crate::guard::GuardResult::Pass)
+                }
+            })
+        }
+    }
+
+    struct RichOutputTool;
+
+    impl Tool for RichOutputTool {
+        fn name(&self) -> &str {
+            "rich_output"
+        }
+
+        fn description(&self) -> &str {
+            "returns text and model-visible image data"
+        }
+
+        fn parameters(&self) -> Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        fn execute<'a>(
+            &'a self,
+            _parameters: ToolParameters,
+        ) -> futures::future::BoxFuture<'a, crate::error::Result<ToolResult>> {
+            Box::pin(async {
+                Ok(ToolResult::success_with_kind(
+                    ToolResultKind::Image {
+                        mime_type: "image/png".to_string(),
+                    },
+                    "raw image result",
+                )
+                .with_data(serde_json::json!({"raw": "secret"}))
+                .with_model_content(ToolResultContent::ImageUrl {
+                    url: "data:image/png;base64,SECRET".to_string(),
+                    detail: Some("high".to_string()),
+                }))
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn guarded_tool_result_cannot_reinject_rich_content_into_context()
+    -> crate::error::Result<()> {
+        for guard in [
+            Arc::new(BlockRichOutput) as Arc<dyn crate::guard::Guard>,
+            Arc::new(PassRichOutput) as Arc<dyn crate::guard::Guard>,
+        ] {
+            let agent = crate::agent::ReactAgentBuilder::new()
+                .model("test-model")
+                .guard(guard)
+                .tool(Box::new(RichOutputTool))
+                .build()?;
+            let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+            let outcome = snapshot
+                .execute_tool_with_policy(
+                    "rich-output".to_string(),
+                    "rich_output",
+                    &ToolParameters::new(),
+                    &serde_json::json!({}),
+                    None,
+                )
+                .await
+                .map_err(|failure| failure.error)?;
+            assert!(outcome.result.model_content.is_empty());
+            assert!(matches!(outcome.result.kind, ToolResultKind::Text));
+
+            let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+            publish_completed_call(
+                &snapshot,
+                &agent.memory.context,
+                &tx,
+                "rich-output",
+                Ok(outcome),
+            )
+            .await;
+            let event = rx
+                .try_recv()
+                .map_err(|error| crate::error::ReactError::Other(error.to_string()))?;
+            assert!(matches!(
+                event,
+                Ok(crate::agent::AgentEvent::ToolResult { result, .. })
+                    if result.model_content.is_empty()
+            ));
+            let messages = agent.memory.context.lock().await.messages().to_vec();
+            assert!(
+                messages
+                    .iter()
+                    .all(|message| !matches!(message.content, MessageContent::Parts(_)))
+            );
+            assert!(messages.iter().all(|message| {
+                message
+                    .content
+                    .as_text()
+                    .is_none_or(|text| !text.contains("SECRET"))
+            }));
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn failed_tool_transcript_uses_guarded_result_error() -> crate::error::Result<()> {
+        let agent = crate::agent::ReactAgent::new(crate::agent::AgentConfig::new(
+            "test-model",
+            "guarded",
+            "sys",
+        ));
+        let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let failure = crate::agent::snapshot::ToolCallFailure {
+            name: "error_only".to_string(),
+            error: crate::error::ReactError::Other("raw secret diagnostic".to_string()),
+            result: ToolResult::error("guarded diagnostic"),
+        };
+        let answer = publish_completed_call(
+            &snapshot,
+            &agent.memory.context,
+            &tx,
+            "error-only",
+            Err(failure),
+        )
+        .await;
+        assert!(answer.is_none());
+        let event = rx
+            .try_recv()
+            .map_err(|error| crate::error::ReactError::Other(error.to_string()))?;
+        assert!(matches!(
+            event,
+            Ok(crate::agent::AgentEvent::ToolResult { result, .. })
+                if result.error.as_deref() == Some("guarded diagnostic")
+        ));
+        let messages = agent.memory.context.lock().await.messages().to_vec();
+        assert!(messages.iter().any(|message| {
+            message.content.as_text().as_deref() == Some("[Error] guarded diagnostic")
+        }));
+        assert!(!messages.iter().any(|message| {
+            message
+                .content
+                .as_text()
+                .is_some_and(|text| text.contains("raw secret"))
+        }));
+        Ok(())
     }
 
     #[derive(Default)]

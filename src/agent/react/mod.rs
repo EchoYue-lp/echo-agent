@@ -72,6 +72,7 @@ pub use capabilities::{
     PreparedTokenLimit,
 };
 mod extract;
+pub(crate) use extract::PreparedResponseFormat;
 mod lifecycle;
 pub mod run;
 pub mod structured;

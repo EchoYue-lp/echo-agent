@@ -3,19 +3,19 @@ schema_version: 1
 id: finding.structured-output-main-path
 kind: finding
 type: implementation_bug
-status: open
+status: resolved
 severity: high
 primary_focus: contract_evidence
 focus: [trigger_input, result_side_effect]
 boundary_ref: boundary.llm-provider-runtime
 behavior_refs: [behavior.llm-provider-execution]
 rule_refs: [rule.provider-protocol-boundary]
-evidence_refs: [evidence.provider-protocol-quality]
+evidence_refs: [evidence.provider-protocol-quality, evidence.structured-output-main-path-repair, evidence.structured-output-main-path-verification]
 audit_refs: [audit.llm-provider-runtime.contract-evidence]
 decision_refs: []
-repair_evidence_refs: []
-verification_evidence_refs: []
-rereview_audit_refs: []
+repair_evidence_refs: [evidence.structured-output-main-path-repair]
+verification_evidence_refs: [evidence.structured-output-main-path-verification]
+rereview_audit_refs: [audit.structured-output-terminal-rereview]
 discovered_at: f1e9027246760661144786e9e35615cd46d580c6
 ---
 
@@ -39,4 +39,7 @@ Builder/AgentConfig 保存 response_format，主 think request 固定为 None；
 
 ## 处理记录
 
-Discovery 记录；下一阶段统一 invocation response format 与 extract fallback。
+ReAct run snapshot 现在同时持有 caller 声明的 `response_format` 和新鲜 model
+capability；每次主模型请求携带 JSON 格式，显式 Text 映射为无约束请求。未知或不支持
+结构化输出的模型在请求前失败，最终输出由框架本地校验。ADR 0078/0079、repair、
+verification 和独立复审均已记录；外部 Issue 须等远端 main 交付后关闭。

@@ -157,7 +157,10 @@ impl GuardManager {
                 Ok(GuardResult::Pass) => {}
                 Err(e) => {
                     tracing::error!(guard = guard_name, error = %e, "Guard check error");
-                    warnings.push(format!("{} error: {}", guard_name, e));
+                    // A guard error means the policy decision is unknown.  Do
+                    // not turn an unavailable safety decision into a warning;
+                    // callers must be able to fail closed at the boundary.
+                    return Err(e);
                 }
             }
         }
@@ -244,5 +247,39 @@ mod tests {
             }
         }
         Ok(())
+    }
+
+    struct ErrorGuard;
+
+    impl Guard for ErrorGuard {
+        fn name(&self) -> &str {
+            "error"
+        }
+
+        fn check<'a>(
+            &'a self,
+            _content: &'a str,
+            _direction: GuardDirection,
+        ) -> BoxFuture<'a, Result<GuardResult>> {
+            Box::pin(async {
+                Err(crate::error::ReactError::Other(
+                    "guard backend unavailable".to_string(),
+                ))
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn guard_errors_are_propagated_for_fail_closed_callers() {
+        let manager = GuardManager::from_guards(vec![Arc::new(ErrorGuard)]);
+        let result = manager
+            .check_all("content", GuardDirection::ToolInput)
+            .await;
+        assert!(result.is_err());
+        assert!(
+            result
+                .err()
+                .is_some_and(|error| error.to_string().contains("guard backend unavailable"))
+        );
     }
 }

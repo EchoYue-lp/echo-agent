@@ -248,7 +248,7 @@ pub(crate) async fn run_think(
                     Some(&error.to_string()),
                 )
                 .await;
-                emit_partial_content_before_failure(tx, &content_buffer).await;
+                emit_partial_content_before_failure(snap, tx, &content_buffer).await;
                 let _ = tx
                     .send(Ok(AgentEvent::from_error("react_loop", &error)))
                     .await;
@@ -301,7 +301,7 @@ pub(crate) async fn run_think(
                 Some(&error.to_string()),
             )
             .await;
-            emit_partial_content_before_failure(tx, &content_buffer).await;
+            emit_partial_content_before_failure(snap, tx, &content_buffer).await;
             let _ = tx.send(Err(error)).await;
             return Ok(ThinkOutcome::TerminalSettled {
                 outcome: crate::agent::AgentSteerTurnOutcome::Failed,
@@ -321,7 +321,7 @@ pub(crate) async fn run_think(
                 Some(&error.to_string()),
             )
             .await;
-            emit_partial_content_before_failure(tx, &content_buffer).await;
+            emit_partial_content_before_failure(snap, tx, &content_buffer).await;
             let _ = tx.send(Err(error)).await;
             return Ok(ThinkOutcome::TerminalSettled {
                 outcome: crate::agent::AgentSteerTurnOutcome::Failed,
@@ -453,29 +453,21 @@ pub(crate) async fn run_think(
         );
     }
 
-    if !content_buffer.is_empty() {
-        if !tool_call_map.is_empty() {
-            yield_event_or!(tx, AgentEvent::ThinkStart, ThinkOutcome::Abandoned);
-            yield_event_or!(
-                tx,
-                AgentEvent::Token(content_buffer.clone()),
-                ThinkOutcome::Abandoned
-            );
-            yield_event_or!(
-                tx,
-                AgentEvent::ThinkEnd {
-                    prompt_tokens: pt,
-                    completion_tokens: ct,
-                },
-                ThinkOutcome::Abandoned
-            );
-        } else {
-            yield_event_or!(
-                tx,
-                AgentEvent::Token(content_buffer.clone()),
-                ThinkOutcome::Abandoned
-            );
-        }
+    if !content_buffer.is_empty() && !tool_call_map.is_empty() {
+        yield_event_or!(tx, AgentEvent::ThinkStart, ThinkOutcome::Abandoned);
+        yield_event_or!(
+            tx,
+            AgentEvent::Token(content_buffer.clone()),
+            ThinkOutcome::Abandoned
+        );
+        yield_event_or!(
+            tx,
+            AgentEvent::ThinkEnd {
+                prompt_tokens: pt,
+                completion_tokens: ct,
+            },
+            ThinkOutcome::Abandoned
+        );
     }
 
     Ok(ThinkOutcome::Continue(ThinkOutput {
@@ -489,9 +481,15 @@ pub(crate) async fn run_think(
     }))
 }
 
-async fn emit_partial_content_before_failure(tx: &mpsc::Sender<Result<AgentEvent>>, content: &str) {
-    if !content.is_empty() {
-        let _ = tx.send(Ok(AgentEvent::Token(content.to_string()))).await;
+async fn emit_partial_content_before_failure(
+    snap: &AgentRunSnapshot,
+    tx: &mpsc::Sender<Result<AgentEvent>>,
+    content: &str,
+) {
+    if !content.is_empty()
+        && let Ok(content) = snap.check_final_answer_guard(content).await
+    {
+        let _ = tx.send(Ok(AgentEvent::Token(content))).await;
     }
 }
 
@@ -505,6 +503,20 @@ pub(crate) async fn create_llm_stream(
         Box<dyn futures::Stream<Item = Result<crate::llm::types::ChatCompletionChunk>> + Send>,
     >,
 > {
+    if snap
+        .config
+        .response_format
+        .as_ref()
+        .is_some_and(crate::llm::ResponseFormat::is_json)
+        && !snap.config.supports_structured_output
+    {
+        return Err(crate::error::ConfigError::UnMatchConfigError(
+            snap.config.model_name.clone(),
+            "configured response_format requires a fresh structured-output model capability"
+                .to_string(),
+        )
+        .into());
+    }
     let tools = tools_for_request(snap, final_only);
     log_prompt_cache_shape(&messages, tools.as_deref());
 
@@ -532,6 +544,10 @@ pub(crate) async fn create_llm_stream(
                 let llm_client = llm_client.clone();
                 let ms = messages.clone();
                 let t = tools.clone();
+                let response_format = match snap.config.response_format.as_ref() {
+                    Some(crate::llm::ResponseFormat::Text) | None => None,
+                    format => format.cloned(),
+                };
                 let temp = snap.config.temperature;
                 let max_tokens = snap.config.max_tokens;
                 async move {
@@ -553,7 +569,7 @@ pub(crate) async fn create_llm_stream(
                         tools: t,
                         tool_choice: (final_only && snap.config.supports_tool_choice_none)
                             .then(|| "none".to_string()),
-                        response_format: None,
+                        response_format,
                         thinking: snap.thinking.clone(),
                         cancel_token: snap.cancel_token.clone(),
                         timeouts: None,
@@ -718,6 +734,47 @@ fn log_prompt_cache_shape(messages: &[Message], tools: Option<&[ToolDefinition]>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct BlockPartialOutput;
+
+    impl crate::guard::Guard for BlockPartialOutput {
+        fn name(&self) -> &str {
+            "block_partial_output"
+        }
+
+        fn check<'a>(
+            &'a self,
+            _content: &'a str,
+            direction: crate::guard::GuardDirection,
+        ) -> futures::future::BoxFuture<'a, crate::error::Result<crate::guard::GuardResult>>
+        {
+            Box::pin(async move {
+                if direction == crate::guard::GuardDirection::Output {
+                    Ok(crate::guard::GuardResult::Block {
+                        reason: "partial content rejected".to_string(),
+                    })
+                } else {
+                    Ok(crate::guard::GuardResult::Pass)
+                }
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_provider_partial_output_cannot_bypass_output_guard() {
+        let mut agent = crate::agent::ReactAgent::new(crate::agent::AgentConfig::new(
+            "test-model",
+            "guarded",
+            "sys",
+        ));
+        agent.set_guard_manager(echo_core::guard::GuardManager::from_guards(vec![
+            std::sync::Arc::new(BlockPartialOutput),
+        ]));
+        let snapshot = AgentRunSnapshot::from_agent(&agent);
+        let (tx, mut rx) = mpsc::channel::<Result<AgentEvent>>(4);
+        emit_partial_content_before_failure(&snapshot, &tx, "unfiltered partial").await;
+        assert!(rx.try_recv().is_err());
+    }
 
     #[test]
     fn prompt_cache_fingerprint_isolates_stable_system_from_history() {

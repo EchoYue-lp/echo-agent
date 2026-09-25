@@ -63,6 +63,42 @@ async fn settle_final_intervention(
     Ok(None)
 }
 
+pub(crate) async fn settle_final_guard_failure(
+    snap: &AgentRunSnapshot,
+    context: &Arc<Mutex<crate::compression::ContextManager>>,
+    tx: &mpsc::Sender<Result<AgentEvent>>,
+    error: ReactError,
+) -> Result<crate::agent::AgentSteerTurnOutcome> {
+    let detail = error.to_string();
+    settle_terminal_projection(snap, context, Some(detail.clone()), tx).await?;
+    snap.finalize_run(crate::trace::RunStatus::Failed, None, Some(&detail))
+        .await;
+    let _ = tx
+        .send(Ok(AgentEvent::from_error("output_guard", &error)))
+        .await;
+    snap.fire_hook(crate::skills::hooks::HookEvent::SessionEnd, Some("blocked"))
+        .await;
+    Ok(crate::agent::AgentSteerTurnOutcome::Failed)
+}
+
+pub(crate) async fn settle_cancelled_final_candidate(
+    snap: &AgentRunSnapshot,
+    context: &Arc<Mutex<crate::compression::ContextManager>>,
+    tx: &mpsc::Sender<Result<AgentEvent>>,
+) -> Result<crate::agent::AgentSteerTurnOutcome> {
+    let reason = "Agent execution cancelled before final answer";
+    settle_terminal_projection(snap, context, Some(reason.to_string()), tx).await?;
+    snap.finalize_run(crate::trace::RunStatus::Cancelled, None, Some(reason))
+        .await;
+    let _ = tx.send(Ok(AgentEvent::Cancelled)).await;
+    snap.fire_hook(
+        crate::skills::hooks::HookEvent::SessionEnd,
+        Some("cancelled"),
+    )
+    .await;
+    Ok(crate::agent::AgentSteerTurnOutcome::Cancelled)
+}
+
 pub(crate) async fn settle_terminal_projection(
     snap: &AgentRunSnapshot,
     context: &Arc<Mutex<crate::compression::ContextManager>>,
@@ -127,6 +163,11 @@ pub(crate) async fn finalize_completed_run(
     );
     let reg = snap.tools.hook_registry.read().await.clone();
     let sr = reg.run_lifecycle_hooks(&hc).await;
+    if super::cancellation_requested(snap) {
+        return Ok(ControlFlow::Break(
+            settle_cancelled_final_candidate(snap, context, tx).await?,
+        ));
+    }
     if let Some(reason) = &sr.continue_reason
         && !state.stop_hook_continued
     {
@@ -137,6 +178,12 @@ pub(crate) async fn finalize_completed_run(
         )
         .await;
         return Ok(ControlFlow::Continue(()));
+    }
+
+    if super::cancellation_requested(snap) {
+        return Ok(ControlFlow::Break(
+            settle_cancelled_final_candidate(snap, context, tx).await?,
+        ));
     }
 
     for cb in snap.config.callbacks.iter() {
@@ -203,18 +250,33 @@ pub(crate) async fn emit_final_text(
     answer: String,
     reasoning_content: String,
     reasoning_blocks: Vec<crate::llm::types::ReasoningBlock>,
+    // True only when the ReAct driver already applied Output Guard before
+    // schema validation and the optional Critic.
+    guard_already_checked: bool,
 ) -> Result<ControlFlow<crate::agent::AgentSteerTurnOutcome, ()>> {
+    let answer = if guard_already_checked {
+        answer
+    } else {
+        match snap.check_final_answer_guard(&answer).await {
+            Ok(answer) => answer,
+            Err(error) => {
+                return Ok(ControlFlow::Break(
+                    settle_final_guard_failure(snap, context, tx, error).await?,
+                ));
+            }
+        }
+    };
+    if super::cancellation_requested(snap) {
+        return Ok(ControlFlow::Break(
+            settle_cancelled_final_candidate(snap, context, tx).await?,
+        ));
+    }
     let agent = &snap.config.agent_name;
 
     let ts = vec![crate::agent::react::StepType::Thought(answer.clone())];
     for cb in snap.config.callbacks.iter() {
         cb.on_think_end(agent, &ts, pt, ct).await;
     }
-    context.lock().await.push(with_reasoning_content(
-        Message::assistant(answer.clone()),
-        reasoning_content,
-        reasoning_blocks,
-    ));
     let hc = crate::skills::hooks::HookContext::for_stop(
         None,
         snap.config.session_id.as_deref().unwrap_or(""),
@@ -223,9 +285,19 @@ pub(crate) async fn emit_final_text(
     );
     let reg = snap.tools.hook_registry.read().await.clone();
     let sr = reg.run_lifecycle_hooks(&hc).await;
+    if super::cancellation_requested(snap) {
+        return Ok(ControlFlow::Break(
+            settle_cancelled_final_candidate(snap, context, tx).await?,
+        ));
+    }
     if let Some(reason) = &sr.continue_reason
         && !state.stop_hook_continued
     {
+        context.lock().await.push(with_reasoning_content(
+            Message::assistant(answer.clone()),
+            reasoning_content.clone(),
+            reasoning_blocks.clone(),
+        ));
         super::super::context::push_runtime_context_note(
             context,
             "Hook:Stop",
@@ -241,6 +313,11 @@ pub(crate) async fn emit_final_text(
     if let Some(outcome) = settle_final_intervention(snap, context, &answer, tx).await? {
         return Ok(ControlFlow::Break(outcome));
     }
+    context.lock().await.push(with_reasoning_content(
+        Message::assistant(answer.clone()),
+        reasoning_content,
+        reasoning_blocks,
+    ));
     snap.auto_snapshot(context, iteration).await;
     if snap.guard.audit_logger.is_some() {
         let ev = crate::audit::AuditEvent::now(
@@ -256,6 +333,18 @@ pub(crate) async fn emit_final_text(
     // Finalize trace before moving the answer into the event
     snap.finalize_run(crate::trace::RunStatus::Completed, Some(&answer), None)
         .await;
+    // Text answers are emitted only after Output guard approval and terminal
+    // settlement. Publishing the raw model text from think would leak a
+    // blocked or transformed answer through the stream before this boundary.
+    if tx
+        .send(Ok(AgentEvent::Token(answer.clone())))
+        .await
+        .is_err()
+    {
+        return Ok(ControlFlow::Break(
+            crate::agent::AgentSteerTurnOutcome::Completed,
+        ));
+    }
     // Sending FinalAnswer is mandatory; on a closed receiver the macro
     // returns Ok(()) from this fn — but we model that as ControlFlow::Break.
     if tx.send(Ok(AgentEvent::FinalAnswer(answer))).await.is_err() {
@@ -342,6 +431,57 @@ mod tests {
     use crate::agent::config::AgentConfig;
     use crate::agent::snapshot::AgentRunSnapshot;
     use crate::trace::{InMemoryRunStore, RunStatus, RunStore};
+
+    struct BlockFinalAnswerGuard;
+
+    struct TransformFinalAnswerGuard;
+
+    impl crate::guard::Guard for TransformFinalAnswerGuard {
+        fn name(&self) -> &str {
+            "transform_final_answer"
+        }
+
+        fn check<'a>(
+            &'a self,
+            _content: &'a str,
+            direction: crate::guard::GuardDirection,
+        ) -> futures::future::BoxFuture<'a, crate::error::Result<crate::guard::GuardResult>>
+        {
+            Box::pin(async move {
+                if direction == crate::guard::GuardDirection::Output {
+                    Ok(crate::guard::GuardResult::Transform {
+                        content: "filtered answer".to_string(),
+                        reasons: vec!["final answer redacted".to_string()],
+                    })
+                } else {
+                    Ok(crate::guard::GuardResult::Pass)
+                }
+            })
+        }
+    }
+
+    impl crate::guard::Guard for BlockFinalAnswerGuard {
+        fn name(&self) -> &str {
+            "block_final_answer"
+        }
+
+        fn check<'a>(
+            &'a self,
+            _content: &'a str,
+            direction: crate::guard::GuardDirection,
+        ) -> futures::future::BoxFuture<'a, crate::error::Result<crate::guard::GuardResult>>
+        {
+            Box::pin(async move {
+                if direction == crate::guard::GuardDirection::Output {
+                    Ok(crate::guard::GuardResult::Block {
+                        reason: "final answer policy rejected the response".to_string(),
+                    })
+                } else {
+                    Ok(crate::guard::GuardResult::Pass)
+                }
+            })
+        }
+    }
 
     #[tokio::test]
     async fn closed_settlement_observer_preserves_persisted_projection_fact() -> Result<()> {
@@ -581,6 +721,134 @@ mod tests {
             .ok_or_else(|| ReactError::Other("blocked settlement unexpectedly completed".into()))?;
         assert!(matches!(error, ReactError::RuntimeState(_)));
         assert_eq!(hook_calls.load(Ordering::SeqCst), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn final_answer_guard_failure_settles_failed_terminal() -> Result<()> {
+        let store = Arc::new(InMemoryRunStore::new());
+        let mut agent = ReactAgent::new(AgentConfig::new("test-model", "guarded", "sys"));
+        agent.set_run_store(store.clone());
+        let legacy = agent.capture_legacy_external_context();
+        let run_id = agent
+            .start_legacy_trace_run("blocked answer", &legacy)
+            .await
+            .ok_or_else(|| ReactError::Other("trace did not start".into()))?;
+        agent.set_guard_manager(echo_core::guard::GuardManager::from_guards(vec![Arc::new(
+            BlockFinalAnswerGuard,
+        )]));
+        let snapshot = AgentRunSnapshot::from_agent(&agent);
+        let (tx, mut rx) = mpsc::channel::<Result<AgentEvent>>(8);
+        let mut state = LoopState::new();
+        let outcome = emit_final_text(
+            &snapshot,
+            &agent.memory.context,
+            &tx,
+            &mut state,
+            0,
+            0,
+            0,
+            "blocked answer".to_string(),
+            String::new(),
+            Vec::new(),
+            false,
+        )
+        .await?;
+        assert!(matches!(
+            outcome,
+            ControlFlow::Break(crate::agent::AgentSteerTurnOutcome::Failed)
+        ));
+        let mut saw_error = false;
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                Ok(AgentEvent::Error { source, .. }) if source == "output_guard" => {
+                    saw_error = true;
+                }
+                Ok(AgentEvent::FinalAnswer(_)) => {
+                    return Err(ReactError::Other(
+                        "blocked final answer was emitted".to_string(),
+                    ));
+                }
+                Ok(AgentEvent::Token(_)) => {
+                    return Err(ReactError::Other(
+                        "blocked final answer leaked through Token".to_string(),
+                    ));
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_error);
+        let run = store
+            .load(&run_id)
+            .await?
+            .ok_or_else(|| ReactError::Other("trace run disappeared".into()))?;
+        assert_eq!(run.status, RunStatus::Failed);
+        assert!(
+            run.error
+                .as_deref()
+                .is_some_and(|error| error.contains("final answer policy rejected"))
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn final_answer_transform_is_identical_in_token_and_terminal() -> Result<()> {
+        let mut agent = ReactAgent::new(AgentConfig::new("test-model", "guarded", "sys"));
+        agent.set_guard_manager(echo_core::guard::GuardManager::from_guards(vec![Arc::new(
+            TransformFinalAnswerGuard,
+        )]));
+        let snapshot = AgentRunSnapshot::from_agent(&agent);
+        let (tx, mut rx) = mpsc::channel::<Result<AgentEvent>>(8);
+        let mut state = LoopState::new();
+        let outcome = emit_final_text(
+            &snapshot,
+            &agent.memory.context,
+            &tx,
+            &mut state,
+            0,
+            0,
+            0,
+            "raw answer".to_string(),
+            String::new(),
+            Vec::new(),
+            false,
+        )
+        .await?;
+        assert!(matches!(
+            outcome,
+            ControlFlow::Break(crate::agent::AgentSteerTurnOutcome::Completed)
+        ));
+        let mut delivered = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                Ok(AgentEvent::Token(text)) | Ok(AgentEvent::FinalAnswer(text)) => {
+                    delivered.push(text);
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(delivered, vec!["filtered answer", "filtered answer"]);
+        let messages = agent.memory.context.lock().await.messages().to_vec();
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.content.as_text().as_deref() == Some("filtered answer"))
+        );
+        assert!(
+            !messages
+                .iter()
+                .any(|message| message.content.as_text().as_deref() == Some("raw answer"))
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unconfigured_output_guard_keeps_final_answer_verbatim() -> Result<()> {
+        let agent = ReactAgent::new(AgentConfig::new("test-model", "unguarded", "sys"));
+        let snapshot = AgentRunSnapshot::from_agent(&agent);
+        let answer = "token: sk-ant-api03-abc123def456ghi789";
+        assert!(crate::security::contains_secrets(answer));
+        assert_eq!(snapshot.check_final_answer_guard(answer).await?, answer);
         Ok(())
     }
 }

@@ -603,6 +603,91 @@ impl PipelineStage for SkillPermissionStage {
     }
 }
 
+/// Checks the final effective tool arguments immediately before invocation.
+///
+/// Tool input guards are intentionally block-only.  Permission approval and
+/// its receipt are already bound to `ctx.input` at this point; accepting a
+/// transformed payload here would authorize one value and execute another.
+pub struct ToolInputGuardStage;
+
+#[async_trait]
+impl PipelineStage for ToolInputGuardStage {
+    fn name(&self) -> &str {
+        "tool_input_guard"
+    }
+
+    async fn run(
+        &self,
+        ctx: &mut ToolExecutionContext,
+        snapshot: &crate::agent::snapshot::AgentRunSnapshot,
+    ) -> Result<()> {
+        let Some(guard_manager) = snapshot.guard.guard_manager.as_ref() else {
+            return Ok(());
+        };
+
+        let content = match serde_json::to_string(&ctx.input) {
+            Ok(content) => content,
+            Err(error) => {
+                let reason =
+                    format!("Tool input guard could not serialize effective input: {error}");
+                record_tool_input_guard_block(snapshot, &reason).await;
+                ctx.block(crate::tools::ToolFailureCategory::Permanent, reason);
+                return Ok(());
+            }
+        };
+        let result = match guard_manager
+            .check_all(&content, crate::guard::GuardDirection::ToolInput)
+            .await
+        {
+            Ok(result) => result,
+            Err(error) => {
+                let reason = format!("Tool input guard failed closed: {error}");
+                record_tool_input_guard_block(snapshot, &reason).await;
+                ctx.block(crate::tools::ToolFailureCategory::Permanent, reason);
+                return Ok(());
+            }
+        };
+
+        match result {
+            crate::guard::GuardResult::Pass | crate::guard::GuardResult::Warn { .. } => {}
+            crate::guard::GuardResult::Block { reason } => {
+                let reason = format!("Tool input blocked by guard: {reason}");
+                record_tool_input_guard_block(snapshot, &reason).await;
+                ctx.block(crate::tools::ToolFailureCategory::Permanent, reason);
+            }
+            crate::guard::GuardResult::Transform { reasons, .. } => {
+                let detail = if reasons.is_empty() {
+                    "guard returned a transform".to_string()
+                } else {
+                    reasons.join("; ")
+                };
+                let reason = format!("Tool input guard returned unsupported transform: {detail}");
+                record_tool_input_guard_block(snapshot, &reason).await;
+                ctx.block(crate::tools::ToolFailureCategory::Permanent, reason);
+            }
+        }
+        Ok(())
+    }
+}
+
+async fn record_tool_input_guard_block(
+    snapshot: &crate::agent::snapshot::AgentRunSnapshot,
+    reason: &str,
+) {
+    if snapshot.guard.audit_logger.is_some() {
+        let event = crate::audit::AuditEvent::now(
+            snapshot.config.session_id.clone(),
+            snapshot.config.agent_name.clone(),
+            crate::audit::AuditEventType::GuardBlock {
+                guard: "guard_manager".to_string(),
+                direction: crate::guard::GuardDirection::ToolInput,
+                reason: reason.to_string(),
+            },
+        );
+        snapshot.record_audit_event(event).await;
+    }
+}
+
 /// Records the settled tool outcome in the configured audit logger.
 pub struct AuditStage;
 
@@ -774,6 +859,10 @@ impl PipelineStage for ExecuteStage {
             .supports_streaming(&ctx.tool_name)
         {
             if let Some(stream_tx) = ctx.stream_tx.as_ref() {
+                // A guard cannot approve a chunk before seeing the complete
+                // result: policy matches may span chunk boundaries. The
+                // terminal ToolResult remains the guarded output authority.
+                let guarded_stream = snapshot.guard.guard_manager.is_some();
                 let (event_tx, mut event_rx) = mpsc::channel(64);
                 let mut execution = Box::pin(
                     snapshot
@@ -794,7 +883,7 @@ impl PipelineStage for ExecuteStage {
                         event = event_rx.recv(), if stream_open => {
                             match event {
                                 Some(event) => {
-                                    if !matches!(event, ToolStreamEvent::Complete(_)) {
+                                    if !guarded_stream && !matches!(event, ToolStreamEvent::Complete(_)) {
                                         stream_tx
                                             .send(ToolPipelineEvent::Stream {
                                                 call_id: ctx.call_id.clone(),
@@ -812,7 +901,7 @@ impl PipelineStage for ExecuteStage {
                     }
                 };
                 while let Some(event) = event_rx.recv().await {
-                    if !matches!(event, ToolStreamEvent::Complete(_)) {
+                    if !guarded_stream && !matches!(event, ToolStreamEvent::Complete(_)) {
                         stream_tx
                             .send(ToolPipelineEvent::Stream {
                                 call_id: ctx.call_id.clone(),
@@ -1049,25 +1138,188 @@ impl PipelineStage for OutputGuardStage {
         ctx: &mut ToolExecutionContext,
         snapshot: &crate::agent::snapshot::AgentRunSnapshot,
     ) -> Result<()> {
-        let mut guard_replaced_output = false;
-        if let Some(ref result) = ctx.result {
-            if !result.success && result.output.is_empty() {
-                if let Some(error) = result.error.as_deref() {
-                    let guarded = snapshot.check_tool_output_guard(error).await;
-                    guard_replaced_output = guarded.is_some();
-                    ctx.audit_error_output = Some(guarded.unwrap_or_else(|| error.to_string()));
-                }
-            } else if let Some(guarded) = snapshot.check_tool_output_guard(&result.output).await {
-                ctx.output = Some(guarded);
-                guard_replaced_output = true;
+        let Some(result) = ctx.result.as_ref() else {
+            return Ok(());
+        };
+        let raw_output = result.output.clone();
+        let raw_error = result.error.clone();
+        let raw_idempotency_key = result
+            .failure
+            .as_ref()
+            .and_then(|failure| failure.idempotency_key.clone());
+        let raw_postcondition = result
+            .failure
+            .as_ref()
+            .and_then(|failure| failure.postcondition.clone());
+        let error_only = !result.success && raw_output.is_empty();
+        let guard_configured = snapshot.guard.guard_manager.is_some();
+        let metadata_has_content = !result.metadata.is_empty();
+        let kind_has_content = matches!(
+            result.kind,
+            echo_core::tools::ToolResultKind::Image { .. }
+                | echo_core::tools::ToolResultKind::Table { .. }
+                | echo_core::tools::ToolResultKind::Diff { .. }
+                | echo_core::tools::ToolResultKind::FileReference { .. }
+                | echo_core::tools::ToolResultKind::SkillActivation { .. }
+                | echo_core::tools::ToolResultKind::StructuredError { .. }
+        );
+        let raw_data = guard_configured
+            .then(|| {
+                result
+                    .data
+                    .as_ref()
+                    .and_then(|data| serde_json::to_string(data).ok())
+            })
+            .flatten();
+        let data_unserializable = guard_configured && result.data.is_some() && raw_data.is_none();
+        let raw_metadata = (guard_configured && metadata_has_content)
+            .then(|| serde_json::to_string(&result.metadata).ok())
+            .flatten();
+        let raw_kind = (guard_configured && kind_has_content)
+            .then(|| serde_json::to_string(&result.kind).ok())
+            .flatten();
+        let raw_mime_type = guard_configured.then(|| result.mime_type.clone()).flatten();
+
+        let guarded_output = if error_only {
+            None
+        } else {
+            snapshot.check_tool_output_guard(&raw_output).await
+        };
+        let guarded_error = match raw_error.as_deref() {
+            Some(error) if error == raw_output => guarded_output.clone(),
+            Some(error) => snapshot.check_tool_output_guard(error).await,
+            None => None,
+        };
+        let guarded_data = match raw_data.as_deref() {
+            Some(data) => snapshot.check_tool_output_guard(data).await,
+            None => None,
+        };
+        let guarded_metadata = match raw_metadata.as_deref() {
+            Some(metadata) => snapshot.check_tool_output_guard(metadata).await,
+            None => None,
+        };
+        let guarded_kind = match raw_kind.as_deref() {
+            Some(kind) => snapshot.check_tool_output_guard(kind).await,
+            None => None,
+        };
+        let guarded_mime_type = match raw_mime_type.as_deref() {
+            Some(mime_type) => snapshot.check_tool_output_guard(mime_type).await,
+            None => None,
+        };
+        let guarded_idempotency_key = if guard_configured {
+            match raw_idempotency_key.as_deref() {
+                Some(key) => snapshot.check_tool_output_guard(key).await,
+                None => None,
+            }
+        } else {
+            None
+        };
+        let guarded_postcondition = if guard_configured {
+            match raw_postcondition.as_deref() {
+                Some(postcondition) => snapshot.check_tool_output_guard(postcondition).await,
+                None => None,
+            }
+        } else {
+            None
+        };
+        let content_replaced = guarded_output.is_some()
+            || guarded_error.is_some()
+            || guarded_data.is_some()
+            || guarded_metadata.is_some()
+            || guarded_kind.is_some()
+            || guarded_mime_type.is_some()
+            || data_unserializable
+            || (guard_configured && metadata_has_content && raw_metadata.is_none())
+            || (guard_configured && kind_has_content && raw_kind.is_none());
+
+        if let Some(output) = guarded_output {
+            ctx.output = Some(output);
+        }
+        if let Some(error) = raw_error {
+            let diagnostic = guarded_error.unwrap_or(error);
+            if error_only {
+                ctx.audit_error_output = Some(diagnostic.clone());
+            }
+            // Both output and error are caller-visible; filtering only one
+            // leaves ToolError, callbacks, and transcript with raw content.
+            if let Some(result) = ctx.result.as_mut() {
+                result.error = Some(diagnostic);
             }
         }
-        if guard_replaced_output && let Some(result) = ctx.result.as_mut() {
+        if ctx.output.is_none()
+            && let Some(data_projection) = guarded_data
+        {
+            ctx.output = Some(data_projection);
+        }
+        if guard_configured && let Some(result) = ctx.result.as_mut() {
+            // Image URLs/data URLs may describe opaque pixels; a text guard
+            // cannot approve the image payload. A pre-guard artifact can
+            // likewise refer to bytes beyond the checked inline text.
+            let had_rich_content = !result.model_content.is_empty();
+            result.model_content.clear();
             result.artifact = None;
-            result.metadata.remove("output_handling");
-            result.metadata.remove("original_bytes");
-            result.metadata.remove("returned_bytes");
-            result.metadata.remove("estimated_tokens");
+            if had_rich_content {
+                result.mime_type = None;
+            }
+            if matches!(
+                result.kind,
+                echo_core::tools::ToolResultKind::Image { .. }
+                    | echo_core::tools::ToolResultKind::FileReference { .. }
+            ) {
+                result.kind = echo_core::tools::ToolResultKind::Text;
+            }
+        }
+        if content_replaced && let Some(result) = ctx.result.as_mut() {
+            // A textual guard decision cannot attest to parallel structured
+            // or rich payloads. Keep typed execution facts, retire alternate
+            // renderable projections and their stale artifact capability.
+            if !matches!(
+                result.kind,
+                echo_core::tools::ToolResultKind::CommandOutput { .. }
+            ) {
+                result.kind = echo_core::tools::ToolResultKind::Text;
+            }
+            result.data = None;
+            result.model_content.clear();
+            result.mime_type = None;
+            result.artifact = None;
+            result.metadata.clear();
+        }
+        if let Some(failure) = ctx
+            .result
+            .as_mut()
+            .and_then(|result| result.failure.as_mut())
+        {
+            // A changed key is no longer the tool's true retry identity.
+            // Removing it also prevents accidental automatic replay.
+            if guarded_idempotency_key.is_some() {
+                failure.idempotency_key = None;
+            }
+            if let Some(postcondition) = guarded_postcondition {
+                failure.postcondition = Some(postcondition);
+            }
+        }
+        if ctx.blocked {
+            // A post-use hook reason may quote raw tool output. Once its
+            // error has been guarded, that error owns caller and telemetry
+            // failure text; the pre-guard reason must not escape separately.
+            if let Some(error) = ctx.result.as_ref().and_then(|result| result.error.clone()) {
+                ctx.block_reason = Some(error);
+            } else if let Some(raw_reason) = ctx.block_reason.as_deref() {
+                ctx.block_reason = Some(
+                    snapshot
+                        .check_tool_output_guard(raw_reason)
+                        .await
+                        .unwrap_or_else(|| raw_reason.to_string()),
+                );
+            }
+            if let Some(failure) = ctx
+                .result
+                .as_ref()
+                .and_then(|result| result.failure.clone())
+            {
+                ctx.block_failure = Some(failure);
+            }
         }
         Ok(())
     }
@@ -1320,6 +1572,7 @@ impl ToolExecutionPipeline {
                 Box::new(PermissionStage),
                 Box::new(ReadBeforeEditStage),
                 Box::new(SkillPermissionStage),
+                Box::new(ToolInputGuardStage),
                 Box::new(InvocationStage),
                 Box::new(CallbackStage::START),
                 Box::new(ExecuteStage),
@@ -1548,6 +1801,114 @@ mod tests {
 
     struct ErrorOnlyTool;
 
+    struct StructuredRichTool;
+
+    impl Tool for StructuredRichTool {
+        fn name(&self) -> &str {
+            "structured_rich"
+        }
+
+        fn description(&self) -> &str {
+            "returns several projections of one guarded tool result"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        fn execute<'a>(
+            &'a self,
+            _parameters: ToolParameters,
+        ) -> futures::future::BoxFuture<'a, crate::error::Result<ToolResult>> {
+            Box::pin(async {
+                Ok(ToolResult::success_with_kind(
+                    echo_core::tools::ToolResultKind::Table {
+                        columns: vec!["payload".to_string()],
+                        rows: vec![vec!["raw-secret".to_string()]],
+                    },
+                    "safe summary",
+                )
+                .with_data(serde_json::json!({"payload": "raw-secret"}))
+                .with_model_content(echo_core::tools::ToolResultContent::ImageUrl {
+                    url: "data:image/png;base64,raw-secret".to_string(),
+                    detail: None,
+                })
+                .with_meta("payload", "raw-secret")
+                .with_mime_type("image/raw-secret")
+                .with_effect(echo_core::tools::ToolEffect::FileEdit {
+                    path: "src/structured-rich.rs".to_string(),
+                }))
+            })
+        }
+    }
+
+    struct OutputAndErrorTool;
+
+    struct PartialFailureTool;
+
+    impl Tool for PartialFailureTool {
+        fn name(&self) -> &str {
+            "partial_failure"
+        }
+
+        fn description(&self) -> &str {
+            "returns typed recovery facts and free-text verification hints"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        fn execute<'a>(
+            &'a self,
+            _parameters: ToolParameters,
+        ) -> futures::future::BoxFuture<'a, crate::error::Result<ToolResult>> {
+            Box::pin(async {
+                let failure = crate::tools::ToolFailure::new(
+                    crate::tools::ToolFailureCategory::PartialSideEffect,
+                )
+                .with_idempotency_key("raw-secret-idempotency")
+                .with_postcondition("verify /private/raw-secret-path before retry");
+                Ok(ToolResult::failure(
+                    crate::tools::ToolFailureCategory::PartialSideEffect,
+                    "safe failure summary",
+                )
+                .with_output("safe output summary")
+                .with_failure(failure)
+                .with_effect(echo_core::tools::ToolEffect::FileEdit {
+                    path: "src/partial-failure.rs".to_string(),
+                }))
+            })
+        }
+    }
+
+    impl Tool for OutputAndErrorTool {
+        fn name(&self) -> &str {
+            "output_and_error"
+        }
+
+        fn description(&self) -> &str {
+            "returns independent output and error diagnostics"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        fn execute<'a>(
+            &'a self,
+            _parameters: ToolParameters,
+        ) -> futures::future::BoxFuture<'a, crate::error::Result<ToolResult>> {
+            Box::pin(async {
+                Ok(ToolResult::error("raw-secret-error")
+                    .with_output("raw-secret-output")
+                    .with_effect(echo_core::tools::ToolEffect::FileEdit {
+                        path: "src/output-error.rs".to_string(),
+                    }))
+            })
+        }
+    }
+
     impl Tool for ErrorOnlyTool {
         fn name(&self) -> &str {
             "error_only"
@@ -1565,7 +1926,13 @@ mod tests {
             &'a self,
             _parameters: ToolParameters,
         ) -> futures::future::BoxFuture<'a, crate::error::Result<ToolResult>> {
-            Box::pin(async { Ok(ToolResult::error("Bearer sensitive-token")) })
+            Box::pin(async {
+                Ok(ToolResult::error("Bearer sensitive-token").with_effect(
+                    echo_core::tools::ToolEffect::FileEdit {
+                        path: "src/error-only.rs".to_string(),
+                    },
+                ))
+            })
         }
     }
 
@@ -2894,6 +3261,7 @@ mod tests {
         tool_end_calls: std::sync::atomic::AtomicUsize,
         tool_error_calls: std::sync::atomic::AtomicUsize,
         tool_interrupted_calls: std::sync::atomic::AtomicUsize,
+        tool_error_messages: std::sync::Mutex<Vec<String>>,
         interrupted_inputs: std::sync::Mutex<Vec<Value>>,
         interrupted_errors: std::sync::Mutex<Vec<String>>,
     }
@@ -2915,11 +3283,15 @@ mod tests {
             &'a self,
             _agent: &'a str,
             _tool: &'a str,
-            _err: &'a ReactError,
+            err: &'a ReactError,
         ) -> futures::future::BoxFuture<'a, ()> {
-            Box::pin(async {
+            Box::pin(async move {
                 self.tool_error_calls
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                self.tool_error_messages
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .push(err.to_string());
             })
         }
 
@@ -3220,6 +3592,254 @@ mod tests {
 
     struct EmptyOutputGuard;
 
+    struct BlockOutputGuard;
+
+    struct ReplaceOutputGuard;
+
+    impl crate::guard::Guard for ReplaceOutputGuard {
+        fn name(&self) -> &str {
+            "replace_tool_output"
+        }
+
+        fn check<'a>(
+            &'a self,
+            _content: &'a str,
+            direction: crate::guard::GuardDirection,
+        ) -> futures::future::BoxFuture<'a, crate::error::Result<crate::guard::GuardResult>>
+        {
+            Box::pin(async move {
+                if direction == crate::guard::GuardDirection::ToolOutput {
+                    Ok(crate::guard::GuardResult::Transform {
+                        content: "filtered output".to_string(),
+                        reasons: vec!["redacted tool output".to_string()],
+                    })
+                } else {
+                    Ok(crate::guard::GuardResult::Pass)
+                }
+            })
+        }
+    }
+
+    struct FailOutputGuard;
+
+    struct BlockSensitiveProjection;
+
+    impl crate::guard::Guard for BlockSensitiveProjection {
+        fn name(&self) -> &str {
+            "block_sensitive_projection"
+        }
+
+        fn check<'a>(
+            &'a self,
+            content: &'a str,
+            direction: crate::guard::GuardDirection,
+        ) -> futures::future::BoxFuture<'a, crate::error::Result<crate::guard::GuardResult>>
+        {
+            Box::pin(async move {
+                if direction == crate::guard::GuardDirection::ToolOutput
+                    && content.contains("raw-secret")
+                {
+                    Ok(crate::guard::GuardResult::Block {
+                        reason: "sensitive projection rejected".to_string(),
+                    })
+                } else {
+                    Ok(crate::guard::GuardResult::Pass)
+                }
+            })
+        }
+    }
+
+    impl crate::guard::Guard for FailOutputGuard {
+        fn name(&self) -> &str {
+            "fail_tool_output"
+        }
+
+        fn check<'a>(
+            &'a self,
+            _content: &'a str,
+            direction: crate::guard::GuardDirection,
+        ) -> futures::future::BoxFuture<'a, crate::error::Result<crate::guard::GuardResult>>
+        {
+            Box::pin(async move {
+                if direction == crate::guard::GuardDirection::ToolOutput {
+                    Err(ReactError::Other("guard backend unavailable".to_string()))
+                } else {
+                    Ok(crate::guard::GuardResult::Pass)
+                }
+            })
+        }
+    }
+
+    impl crate::guard::Guard for BlockOutputGuard {
+        fn name(&self) -> &str {
+            "block_tool_output"
+        }
+
+        fn check<'a>(
+            &'a self,
+            _content: &'a str,
+            direction: crate::guard::GuardDirection,
+        ) -> futures::future::BoxFuture<'a, crate::error::Result<crate::guard::GuardResult>>
+        {
+            Box::pin(async move {
+                if direction == crate::guard::GuardDirection::ToolOutput {
+                    Ok(crate::guard::GuardResult::Block {
+                        reason: "tool result policy rejected output".to_string(),
+                    })
+                } else {
+                    Ok(crate::guard::GuardResult::Pass)
+                }
+            })
+        }
+    }
+
+    struct ToolInputBlockGuard;
+
+    impl crate::guard::Guard for ToolInputBlockGuard {
+        fn name(&self) -> &str {
+            "tool_input_block"
+        }
+
+        fn check<'a>(
+            &'a self,
+            _content: &'a str,
+            direction: crate::guard::GuardDirection,
+        ) -> futures::future::BoxFuture<'a, crate::error::Result<crate::guard::GuardResult>>
+        {
+            Box::pin(async move {
+                if direction == crate::guard::GuardDirection::ToolInput {
+                    Ok(crate::guard::GuardResult::Block {
+                        reason: "tool input policy rejected the effective arguments".to_string(),
+                    })
+                } else {
+                    Ok(crate::guard::GuardResult::Pass)
+                }
+            })
+        }
+    }
+
+    struct ErrorGuard;
+
+    impl crate::guard::Guard for ErrorGuard {
+        fn name(&self) -> &str {
+            "tool_input_error"
+        }
+
+        fn check<'a>(
+            &'a self,
+            _content: &'a str,
+            _direction: crate::guard::GuardDirection,
+        ) -> futures::future::BoxFuture<'a, crate::error::Result<crate::guard::GuardResult>>
+        {
+            Box::pin(async {
+                Err(crate::error::ReactError::Other(
+                    "tool guard backend unavailable".to_string(),
+                ))
+            })
+        }
+    }
+
+    struct DirectionRecordingGuard {
+        directions: Arc<std::sync::Mutex<Vec<crate::guard::GuardDirection>>>,
+    }
+
+    impl crate::guard::Guard for DirectionRecordingGuard {
+        fn name(&self) -> &str {
+            "direction_recording"
+        }
+
+        fn check<'a>(
+            &'a self,
+            _content: &'a str,
+            direction: crate::guard::GuardDirection,
+        ) -> futures::future::BoxFuture<'a, crate::error::Result<crate::guard::GuardResult>>
+        {
+            let directions = Arc::clone(&self.directions);
+            Box::pin(async move {
+                directions
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .push(direction);
+                Ok(crate::guard::GuardResult::Pass)
+            })
+        }
+    }
+
+    struct ToolInputTransformGuard;
+
+    impl crate::guard::Guard for ToolInputTransformGuard {
+        fn name(&self) -> &str {
+            "tool_input_transform"
+        }
+
+        fn check<'a>(
+            &'a self,
+            _content: &'a str,
+            direction: crate::guard::GuardDirection,
+        ) -> futures::future::BoxFuture<'a, crate::error::Result<crate::guard::GuardResult>>
+        {
+            Box::pin(async move {
+                if direction == crate::guard::GuardDirection::ToolInput {
+                    Ok(crate::guard::GuardResult::Transform {
+                        content: "{}".to_string(),
+                        reasons: vec!["rewrite is not allowed after approval".to_string()],
+                    })
+                } else {
+                    Ok(crate::guard::GuardResult::Pass)
+                }
+            })
+        }
+    }
+
+    struct GuardProbeTool {
+        executions: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Tool for GuardProbeTool {
+        fn name(&self) -> &str {
+            "guard_probe"
+        }
+
+        fn description(&self) -> &str {
+            "records whether tool input guard allowed execution"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        fn execute<'a>(
+            &'a self,
+            _parameters: ToolParameters,
+        ) -> futures::future::BoxFuture<'a, crate::error::Result<ToolResult>> {
+            self.executions
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async { Ok(ToolResult::success("executed")) })
+        }
+
+        fn supports_streaming(&self) -> bool {
+            true
+        }
+
+        fn execute_stream_with_context<'a>(
+            &'a self,
+            _parameters: ToolParameters,
+            _context: &ToolContext,
+        ) -> futures::future::BoxFuture<
+            'a,
+            crate::error::Result<Pin<Box<dyn Stream<Item = ToolStreamEvent> + Send + 'a>>>,
+        > {
+            self.executions
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async {
+                Ok(Box::pin(futures::stream::iter([ToolStreamEvent::Complete(
+                    ToolResult::success("executed"),
+                )]))
+                    as Pin<Box<dyn Stream<Item = ToolStreamEvent> + Send>>)
+            })
+        }
+    }
+
     impl crate::guard::Guard for EmptyOutputGuard {
         fn name(&self) -> &str {
             "empty_output"
@@ -3232,7 +3852,7 @@ mod tests {
         ) -> futures::future::BoxFuture<'a, crate::error::Result<crate::guard::GuardResult>>
         {
             Box::pin(async move {
-                if direction == crate::guard::GuardDirection::Output {
+                if direction == crate::guard::GuardDirection::ToolOutput {
                     Ok(crate::guard::GuardResult::Transform {
                         content: String::new(),
                         reasons: vec!["redacted".to_string()],
@@ -3302,6 +3922,572 @@ mod tests {
             })
             .collect();
         assert_eq!(terminal_outputs, vec![(String::new(), true)]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn tool_input_guard_blocks_streaming_and_non_streaming_before_execution() -> Result<()> {
+        for streaming in [false, true] {
+            let executions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let audit = Arc::new(crate::audit::InMemoryAuditLogger::new());
+            let agent = crate::agent::ReactAgentBuilder::new()
+                .model("test-model")
+                .audit_logger(audit.clone())
+                .guard(Arc::new(ToolInputBlockGuard))
+                .tool(Box::new(GuardProbeTool {
+                    executions: Arc::clone(&executions),
+                }))
+                .build()?;
+            let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+            let (stream_tx, _stream_rx) = if streaming {
+                let (stream_tx, stream_rx) = mpsc::channel(4);
+                (Some(stream_tx), Some(stream_rx))
+            } else {
+                (None, None)
+            };
+            let failure = snapshot
+                .execute_tool_with_policy(
+                    format!("guard-block-{streaming}"),
+                    "guard_probe",
+                    &ToolParameters::new(),
+                    &serde_json::json!({"blocked": true}),
+                    stream_tx,
+                )
+                .await
+                .err()
+                .ok_or_else(|| ReactError::Other("tool input guard allowed execution".into()))?;
+            assert!(
+                failure.result.output.contains("tool input policy rejected")
+                    || failure
+                        .error
+                        .to_string()
+                        .contains("tool input policy rejected"),
+                "unexpected guard failure output={:?} error={}",
+                failure.result.output,
+                failure.error
+            );
+            assert_eq!(executions.load(std::sync::atomic::Ordering::SeqCst), 0);
+            let guard_blocks = audit
+                .snapshot()
+                .into_iter()
+                .filter(|event| {
+                    matches!(
+                        event.event_type,
+                        crate::audit::AuditEventType::GuardBlock {
+                            direction: crate::guard::GuardDirection::ToolInput,
+                            ..
+                        }
+                    )
+                })
+                .count();
+            assert_eq!(guard_blocks, 1);
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn tool_input_guard_fails_closed_on_error_and_transform() -> Result<()> {
+        for guard in [
+            Arc::new(ErrorGuard) as Arc<dyn crate::guard::Guard>,
+            Arc::new(ToolInputTransformGuard) as Arc<dyn crate::guard::Guard>,
+        ] {
+            let executions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let agent = crate::agent::ReactAgentBuilder::new()
+                .model("test-model")
+                .guard(guard)
+                .tool(Box::new(GuardProbeTool {
+                    executions: Arc::clone(&executions),
+                }))
+                .build()?;
+            let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+            let failure = snapshot
+                .execute_tool_with_policy(
+                    "guard-fail-closed".to_string(),
+                    "guard_probe",
+                    &ToolParameters::new(),
+                    &serde_json::json!({"value": "effective"}),
+                    None,
+                )
+                .await
+                .err()
+                .ok_or_else(|| ReactError::Other("guard failure was not terminal".into()))?;
+            assert!(!failure.result.success);
+            assert_eq!(executions.load(std::sync::atomic::Ordering::SeqCst), 0);
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn tool_output_and_final_answer_use_distinct_directions() -> Result<()> {
+        let directions = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let agent = crate::agent::ReactAgentBuilder::new()
+            .model("test-model")
+            .guard(Arc::new(DirectionRecordingGuard {
+                directions: Arc::clone(&directions),
+            }))
+            .build()?;
+        let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+        let _ = snapshot.check_tool_output_guard("tool result").await;
+        let final_answer = snapshot.check_final_answer_guard("final answer").await?;
+        assert_eq!(final_answer, "final answer");
+        assert_eq!(
+            directions
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .as_slice(),
+            &[
+                crate::guard::GuardDirection::ToolOutput,
+                crate::guard::GuardDirection::Output
+            ]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn tool_output_block_replaces_caller_projection_and_audits_direction() -> Result<()> {
+        let audit = Arc::new(crate::audit::InMemoryAuditLogger::new());
+        let agent = crate::agent::ReactAgentBuilder::new()
+            .model("test-model")
+            .audit_logger(audit.clone())
+            .guard(Arc::new(BlockOutputGuard))
+            .tool(Box::new(EffectTool))
+            .build()?;
+        let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+        let outcome = snapshot
+            .execute_tool_with_policy(
+                "tool-output-block".to_string(),
+                "shell",
+                &ToolParameters::new(),
+                &serde_json::json!({}),
+                None,
+            )
+            .await
+            .map_err(|failure| ReactError::Other(failure.error.to_string()))?;
+        assert!(!outcome.result.output.contains("real effect"));
+        assert!(
+            outcome
+                .result
+                .output
+                .contains("tool result policy rejected")
+        );
+        let guard_blocks = audit
+            .snapshot()
+            .into_iter()
+            .filter(|event| {
+                matches!(
+                    event.event_type,
+                    crate::audit::AuditEventType::GuardBlock {
+                        direction: crate::guard::GuardDirection::ToolOutput,
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(guard_blocks, 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn guarded_text_replacement_retires_structured_and_rich_projections() -> Result<()> {
+        for (guard, expected) in [
+            (
+                Arc::new(BlockOutputGuard) as Arc<dyn crate::guard::Guard>,
+                "Output content filtered by safety guard: tool result policy rejected output",
+            ),
+            (
+                Arc::new(ReplaceOutputGuard) as Arc<dyn crate::guard::Guard>,
+                "filtered output",
+            ),
+        ] {
+            let agent = crate::agent::ReactAgentBuilder::new()
+                .model("test-model")
+                .guard(guard)
+                .tool(Box::new(StructuredRichTool))
+                .build()?;
+            let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+            let outcome = snapshot
+                .execute_tool_with_policy(
+                    "structured-rich".to_string(),
+                    "structured_rich",
+                    &ToolParameters::new(),
+                    &serde_json::json!({}),
+                    None,
+                )
+                .await
+                .map_err(|failure| ReactError::Other(failure.error.to_string()))?;
+            assert_eq!(outcome.result.output, expected);
+            assert!(outcome.result.data.is_none());
+            assert!(outcome.result.model_content.is_empty());
+            assert!(matches!(
+                outcome.result.kind,
+                echo_core::tools::ToolResultKind::Text
+            ));
+            assert!(outcome.result.mime_type.is_none());
+            assert!(!outcome.result.metadata.contains_key("payload"));
+            assert!(outcome.result.effects.iter().any(|effect| matches!(
+                effect,
+                echo_core::tools::ToolEffect::FileEdit { path }
+                    if path == "src/structured-rich.rs"
+            )));
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn output_pass_does_not_approve_independent_structured_content() -> Result<()> {
+        let agent = crate::agent::ReactAgentBuilder::new()
+            .model("test-model")
+            .guard(Arc::new(BlockSensitiveProjection))
+            .tool(Box::new(StructuredRichTool))
+            .build()?;
+        let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+        let outcome = snapshot
+            .execute_tool_with_policy(
+                "structured-disjoint".to_string(),
+                "structured_rich",
+                &ToolParameters::new(),
+                &serde_json::json!({}),
+                None,
+            )
+            .await
+            .map_err(|failure| ReactError::Other(failure.error.to_string()))?;
+        assert!(!outcome.result.output.contains("raw-secret"));
+        assert!(
+            outcome
+                .result
+                .output
+                .contains("sensitive projection rejected"),
+            "unexpected guarded output: {:?}",
+            outcome.result.output
+        );
+        assert!(outcome.result.data.is_none());
+        assert!(outcome.result.model_content.is_empty());
+        assert!(!outcome.result.metadata.contains_key("payload"));
+        assert!(matches!(
+            outcome.result.kind,
+            echo_core::tools::ToolResultKind::Text
+        ));
+        assert!(outcome.result.effects.iter().any(|effect| matches!(
+            effect,
+            echo_core::tools::ToolEffect::FileEdit { path }
+                if path == "src/structured-rich.rs"
+        )));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rich_projection_without_guard_stays_live_and_guard_pass_keeps_safe_structures()
+    -> Result<()> {
+        for with_guard in [false, true] {
+            let directions = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let mut builder = crate::agent::ReactAgentBuilder::new()
+                .model("test-model")
+                .tool(Box::new(StructuredRichTool));
+            if with_guard {
+                builder = builder.guard(Arc::new(DirectionRecordingGuard {
+                    directions: Arc::clone(&directions),
+                }));
+            }
+            let agent = builder.build()?;
+            let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+            let outcome = snapshot
+                .execute_tool_with_policy(
+                    format!("rich-{with_guard}"),
+                    "structured_rich",
+                    &ToolParameters::new(),
+                    &serde_json::json!({}),
+                    None,
+                )
+                .await
+                .map_err(|failure| ReactError::Other(failure.error.to_string()))?;
+            assert_eq!(outcome.result.output, "safe summary");
+            assert!(outcome.result.data.is_some());
+            assert!(outcome.result.metadata.contains_key("payload"));
+            assert!(matches!(
+                outcome.result.kind,
+                echo_core::tools::ToolResultKind::Table { .. }
+            ));
+            assert_eq!(outcome.result.model_content.is_empty(), with_guard);
+            if with_guard {
+                assert!(outcome.result.mime_type.is_none());
+                assert!(
+                    directions
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .len()
+                        >= 4
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn metadata_kind_and_mime_are_checked_when_output_passes() -> Result<()> {
+        let agent = crate::agent::ReactAgentBuilder::new()
+            .model("test-model")
+            .guard(Arc::new(BlockSensitiveProjection))
+            .build()?;
+        let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+
+        for field in ["metadata", "kind", "mime"] {
+            let mut ctx = completed_context("safe summary".to_string());
+            let result = ctx
+                .result
+                .as_mut()
+                .ok_or_else(|| ReactError::Other("missing test tool result".to_string()))?;
+            match field {
+                "metadata" => {
+                    result
+                        .metadata
+                        .insert("payload".to_string(), "raw-secret".to_string());
+                }
+                "kind" => {
+                    result.kind = echo_core::tools::ToolResultKind::Diff {
+                        unified_diff: "raw-secret".to_string(),
+                    };
+                }
+                "mime" => {
+                    result.mime_type = Some("image/raw-secret".to_string());
+                }
+                _ => {}
+            }
+            OutputGuardStage.run(&mut ctx, &snapshot).await?;
+            TruncationStage.run(&mut ctx, &snapshot).await?;
+            let result = ctx
+                .result
+                .as_ref()
+                .ok_or_else(|| ReactError::Other("guard lost tool result".to_string()))?;
+            assert_eq!(ctx.output.as_deref(), Some("safe summary"));
+            assert!(
+                !result
+                    .metadata
+                    .values()
+                    .any(|value| value.contains("raw-secret"))
+            );
+            assert!(matches!(
+                result.kind,
+                echo_core::tools::ToolResultKind::Text
+            ));
+            assert!(result.mime_type.is_none());
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn failed_tool_with_output_guards_independent_error_diagnostic() -> Result<()> {
+        use crate::trace::{InMemoryRunStore, RunEvent, RunStore};
+
+        for guard in [
+            Arc::new(BlockOutputGuard) as Arc<dyn crate::guard::Guard>,
+            Arc::new(ReplaceOutputGuard) as Arc<dyn crate::guard::Guard>,
+            Arc::new(FailOutputGuard) as Arc<dyn crate::guard::Guard>,
+        ] {
+            let callback = Arc::new(RecordingCallback::default());
+            let store = Arc::new(InMemoryRunStore::new());
+            let agent = crate::agent::ReactAgentBuilder::new()
+                .model("test-model")
+                .with_run_store(store.clone())
+                .callback(callback.clone())
+                .guard(guard)
+                .tool(Box::new(OutputAndErrorTool))
+                .build()?;
+            let legacy = agent.capture_legacy_external_context();
+            let run_id = agent
+                .start_legacy_trace_run("output and error", &legacy)
+                .await
+                .ok_or_else(|| ReactError::Other("trace did not start".to_string()))?;
+            let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+            let failure = snapshot
+                .execute_tool_with_policy(
+                    "output-and-error".to_string(),
+                    "output_and_error",
+                    &ToolParameters::new(),
+                    &serde_json::json!({}),
+                    None,
+                )
+                .await
+                .err()
+                .ok_or_else(|| {
+                    ReactError::Other("failed tool unexpectedly succeeded".to_string())
+                })?;
+            assert!(!failure.result.output.contains("raw-secret"));
+            assert!(
+                failure
+                    .result
+                    .error
+                    .as_deref()
+                    .is_some_and(|error| !error.contains("raw-secret"))
+            );
+            assert!(!failure.error.to_string().contains("raw-secret"));
+            let run = store
+                .load(&run_id)
+                .await?
+                .ok_or_else(|| ReactError::Other("trace run disappeared".to_string()))?;
+            assert!(run.events.iter().any(|event| matches!(
+                event,
+                RunEvent::ToolError { message, .. } if !message.contains("raw-secret")
+            )));
+            assert!(
+                callback
+                    .tool_error_messages
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .iter()
+                    .all(|error| !error.contains("raw-secret"))
+            );
+            assert!(failure.result.effects.iter().any(|effect| matches!(
+                effect,
+                echo_core::tools::ToolEffect::FileEdit { path } if path == "src/output-error.rs"
+            )));
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn partial_failure_free_text_is_guarded_without_losing_typed_recovery() -> Result<()> {
+        use crate::trace::{InMemoryRunStore, RunEvent, RunStore};
+
+        let store = Arc::new(InMemoryRunStore::new());
+        let agent = crate::agent::ReactAgentBuilder::new()
+            .model("test-model")
+            .with_run_store(store.clone())
+            .guard(Arc::new(BlockSensitiveProjection))
+            .tool(Box::new(PartialFailureTool))
+            .build()?;
+        let legacy = agent.capture_legacy_external_context();
+        let run_id = agent
+            .start_legacy_trace_run("partial failure", &legacy)
+            .await
+            .ok_or_else(|| ReactError::Other("trace did not start".to_string()))?;
+        let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+        let result = snapshot
+            .execute_tool_with_policy(
+                "partial-failure".to_string(),
+                "partial_failure",
+                &ToolParameters::new(),
+                &serde_json::json!({}),
+                None,
+            )
+            .await
+            .err()
+            .ok_or_else(|| {
+                ReactError::Other("partial failure unexpectedly succeeded".to_string())
+            })?;
+        let failure = result
+            .result
+            .failure
+            .as_ref()
+            .ok_or_else(|| ReactError::Other("typed failure missing".to_string()))?;
+        assert_eq!(
+            failure.category,
+            crate::tools::ToolFailureCategory::PartialSideEffect
+        );
+        assert_eq!(
+            failure.recovery,
+            echo_core::tools::ToolRecoveryAction::VerifyThenRetry
+        );
+        assert_eq!(
+            failure.side_effect,
+            echo_core::tools::ToolSideEffect::Possible
+        );
+        assert!(
+            !failure
+                .idempotency_key
+                .as_deref()
+                .unwrap_or("")
+                .contains("raw-secret")
+        );
+        assert!(
+            !failure
+                .postcondition
+                .as_deref()
+                .unwrap_or("")
+                .contains("raw-secret")
+        );
+        assert!(result.result.effects.iter().any(|effect| matches!(
+            effect,
+            echo_core::tools::ToolEffect::FileEdit { path } if path == "src/partial-failure.rs"
+        )));
+        let run = store
+            .load(&run_id)
+            .await?
+            .ok_or_else(|| ReactError::Other("trace run disappeared".to_string()))?;
+        assert!(run.events.iter().any(|event| matches!(
+            event,
+            RunEvent::ToolError { failure: Some(failure), .. }
+                if failure.category == crate::tools::ToolFailureCategory::PartialSideEffect
+                    && failure.idempotency_key.as_deref().is_none_or(|text| !text.contains("raw-secret"))
+                    && failure.postcondition.as_deref().is_none_or(|text| !text.contains("raw-secret"))
+        )));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn guarded_stream_never_emits_raw_chunks_before_terminal_projection() -> Result<()> {
+        for (guard, expected_chunks, expected_terminal) in [
+            (
+                None,
+                vec!["raw-1".to_string(), "raw-2".to_string()],
+                "raw".to_string(),
+            ),
+            (
+                Some(Arc::new(BlockOutputGuard) as Arc<dyn crate::guard::Guard>),
+                Vec::new(),
+                "Output content filtered by safety guard: tool result policy rejected output"
+                    .to_string(),
+            ),
+            (
+                Some(Arc::new(ReplaceOutputGuard) as Arc<dyn crate::guard::Guard>),
+                Vec::new(),
+                "filtered output".to_string(),
+            ),
+        ] {
+            let mut builder = crate::agent::ReactAgentBuilder::new()
+                .model("test-model")
+                .tool(Box::new(InterleavingTool));
+            if let Some(guard) = guard {
+                builder = builder.guard(guard);
+            }
+            let agent = builder.build()?;
+            let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+            let input = serde_json::json!({
+                "label": "raw",
+                "initial_delay": 0,
+                "finish_delay": 0,
+            });
+            let params = ToolParameters::from([
+                ("label".to_string(), Value::String("raw".to_string())),
+                ("initial_delay".to_string(), Value::from(0)),
+                ("finish_delay".to_string(), Value::from(0)),
+            ]);
+            let (stream_tx, mut stream_rx) = mpsc::channel(16);
+            let outcome = snapshot
+                .execute_tool_with_policy(
+                    "guarded-stream".to_string(),
+                    "interleaving",
+                    &params,
+                    &input,
+                    Some(stream_tx),
+                )
+                .await
+                .map_err(|failure| ReactError::Other(failure.error.to_string()))?;
+            let mut chunks = Vec::new();
+            let mut stream_events = 0;
+            while let Ok(event) = stream_rx.try_recv() {
+                if let ToolPipelineEvent::Stream { event, .. } = event {
+                    stream_events += 1;
+                    if let ToolStreamEvent::Output { chunk, .. } = event {
+                        chunks.push(chunk);
+                    }
+                }
+            }
+            assert_eq!(chunks, expected_chunks);
+            if expected_chunks.is_empty() {
+                assert_eq!(stream_events, 0);
+            }
+            assert_eq!(outcome.result.output, expected_terminal);
+        }
         Ok(())
     }
 
@@ -3451,7 +4637,7 @@ mod tests {
             .await
             .err()
             .ok_or_else(|| ReactError::Other("failed tool unexpectedly succeeded".to_string()))?;
-        assert_eq!(failure.result.error.as_deref(), Some("execution failed"));
+        assert_eq!(failure.result.error.as_deref(), Some(""));
         assert_eq!(failure.result.output, "");
         let terminal_outputs: Vec<_> = audit
             .snapshot()
@@ -3468,44 +4654,89 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn error_only_audit_uses_guarded_diagnostic() -> Result<()> {
-        let audit = Arc::new(crate::audit::InMemoryAuditLogger::new());
-        let agent = crate::agent::ReactAgentBuilder::new()
-            .model("test-model")
-            .audit_logger(audit.clone())
-            .guard(Arc::new(EmptyOutputGuard))
-            .tool(Box::new(ErrorOnlyTool))
-            .build()?;
-        let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
-        let failure = snapshot
-            .execute_tool_with_policy(
-                "error-only".to_string(),
-                "error_only",
-                &ToolParameters::new(),
-                &serde_json::json!({}),
-                None,
-            )
-            .await
-            .err()
-            .ok_or_else(|| {
-                ReactError::Other("error-only tool unexpectedly succeeded".to_string())
-            })?;
-        assert_eq!(
-            failure.result.error.as_deref(),
-            Some("Bearer sensitive-token")
-        );
-        assert_eq!(failure.result.output, "");
-        let terminal_outputs: Vec<_> = audit
-            .snapshot()
-            .into_iter()
-            .filter_map(|event| match event.event_type {
-                crate::audit::AuditEventType::ToolCall {
-                    output, success, ..
-                } => Some((output, success)),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(terminal_outputs, vec![(String::new(), false)]);
+    async fn error_only_diagnostic_is_guarded_for_caller_trace_audit_and_callback() -> Result<()> {
+        use crate::trace::{InMemoryRunStore, RunEvent, RunStore};
+
+        for (guard, expected) in [
+            (
+                Arc::new(EmptyOutputGuard) as Arc<dyn crate::guard::Guard>,
+                "".to_string(),
+            ),
+            (
+                Arc::new(BlockOutputGuard) as Arc<dyn crate::guard::Guard>,
+                "Output content filtered by safety guard: tool result policy rejected output"
+                    .to_string(),
+            ),
+            (
+                Arc::new(FailOutputGuard) as Arc<dyn crate::guard::Guard>,
+                "Output content blocked: guard check error (guard backend unavailable)".to_string(),
+            ),
+        ] {
+            let audit = Arc::new(crate::audit::InMemoryAuditLogger::new());
+            let callback = Arc::new(RecordingCallback::default());
+            let store = Arc::new(InMemoryRunStore::new());
+            let agent = crate::agent::ReactAgentBuilder::new()
+                .model("test-model")
+                .with_run_store(store.clone())
+                .audit_logger(audit.clone())
+                .callback(callback.clone())
+                .guard(guard)
+                .tool(Box::new(ErrorOnlyTool))
+                .build()?;
+            let legacy = agent.capture_legacy_external_context();
+            let run_id = agent
+                .start_legacy_trace_run("error-only tool", &legacy)
+                .await
+                .ok_or_else(|| ReactError::Other("trace did not start".to_string()))?;
+            let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+            let failure = snapshot
+                .execute_tool_with_policy(
+                    "error-only".to_string(),
+                    "error_only",
+                    &ToolParameters::new(),
+                    &serde_json::json!({}),
+                    None,
+                )
+                .await
+                .err()
+                .ok_or_else(|| {
+                    ReactError::Other("error-only tool unexpectedly succeeded".to_string())
+                })?;
+            assert_eq!(failure.result.error.as_deref(), Some(expected.as_str()));
+            assert!(!failure.error.to_string().contains("sensitive-token"));
+            assert_eq!(failure.result.output, "");
+            assert!(failure.result.effects.iter().any(|effect| matches!(
+                effect,
+                echo_core::tools::ToolEffect::FileEdit { path } if path == "src/error-only.rs"
+            )));
+            let run = store
+                .load(&run_id)
+                .await?
+                .ok_or_else(|| ReactError::Other("trace run disappeared".to_string()))?;
+            assert!(run.events.iter().any(|event| matches!(
+                event,
+                RunEvent::ToolError { message, .. } if message == &expected
+            )));
+            assert!(run.events.iter().any(|event| matches!(
+                event,
+                RunEvent::FileEdit { path, .. } if path == "src/error-only.rs"
+            )));
+            assert!(audit.snapshot().iter().any(|event| matches!(
+                &event.event_type,
+                crate::audit::AuditEventType::ToolCall { output, success: false, .. }
+                    if output == &expected
+            )));
+            let callback_errors = callback
+                .tool_error_messages
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            assert_eq!(callback_errors.len(), 1);
+            assert!(
+                callback_errors
+                    .iter()
+                    .all(|error| !error.contains("sensitive-token"))
+            );
+        }
         Ok(())
     }
 
@@ -3741,6 +4972,105 @@ mod tests {
             })
             .collect();
         assert_eq!(audit_terminals, vec![(false, "real effect")]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn post_hook_block_reason_uses_guarded_terminal_diagnostic() -> Result<()> {
+        use crate::skills::hooks::{HookAction, HookEvent, HookRule, HooksDefinition};
+        use crate::trace::{InMemoryRunStore, RunEvent, RunStore};
+
+        let callback = Arc::new(RecordingCallback::default());
+        let store = Arc::new(InMemoryRunStore::new());
+        let agent = crate::agent::ReactAgentBuilder::new()
+            .model("test-model")
+            .callback(callback.clone())
+            .with_run_store(store.clone())
+            .guard(Arc::new(BlockOutputGuard))
+            .tool(Box::new(TypedEffectTool))
+            .build()?;
+        let (command, shell) = if cfg!(target_os = "windows") {
+            (
+                "$context=[Console]::In.ReadToEnd(); [Console]::Error.WriteLine($context); exit 2",
+                Some("powershell".to_string()),
+            )
+        } else {
+            (
+                "read -r hook_context; printf '%s\\n' \"$hook_context\" >&2; exit 2",
+                None,
+            )
+        };
+        let mut hooks = HooksDefinition::default();
+        hooks.add_rules(
+            HookEvent::PostToolUse,
+            vec![HookRule {
+                matcher: "shell".to_string(),
+                hooks: vec![HookAction::Command {
+                    command: command.to_string(),
+                    shell,
+                    timeout: 10,
+                }],
+            }],
+        );
+        agent
+            .hook_registry()
+            .write()
+            .await
+            .register_user_hooks(hooks);
+        let legacy = agent.capture_legacy_external_context();
+        let run_id = agent
+            .start_legacy_trace_run("guarded post-hook block", &legacy)
+            .await
+            .ok_or_else(|| ReactError::Other("trace did not start".to_string()))?;
+        let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+        let failure = snapshot
+            .execute_tool_with_policy(
+                "post-hook-guard".to_string(),
+                "shell",
+                &ToolParameters::new(),
+                &serde_json::json!({}),
+                None,
+            )
+            .await
+            .err()
+            .ok_or_else(|| ReactError::Other("post-hook block was not enforced".to_string()))?;
+        let diagnostic = failure
+            .result
+            .error
+            .as_deref()
+            .ok_or_else(|| ReactError::Other("guarded terminal reason missing".to_string()))?;
+        assert!(!diagnostic.contains("opaque output"));
+        assert!(!failure.error.to_string().contains("opaque output"));
+        assert!(failure.error.to_string().contains(diagnostic));
+        assert!(failure.result.failure.as_ref().is_some_and(|value| {
+            value.category == crate::tools::ToolFailureCategory::PartialSideEffect
+        }));
+        assert!(failure.result.effects.iter().any(|effect| matches!(
+            effect,
+            echo_core::tools::ToolEffect::FileEdit { path } if path == "src/lib.rs"
+        )));
+        let run = store
+            .load(&run_id)
+            .await?
+            .ok_or_else(|| ReactError::Other("trace run disappeared".to_string()))?;
+        assert!(run.events.iter().any(|event| matches!(
+            event,
+            RunEvent::ToolError { message, .. } if message == diagnostic
+        )));
+        assert!(run.events.iter().any(|event| matches!(
+            event,
+            RunEvent::FileEdit { path, .. } if path == "src/lib.rs"
+        )));
+        let callback_errors = callback
+            .tool_error_messages
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        assert_eq!(callback_errors.len(), 1);
+        assert!(
+            callback_errors
+                .iter()
+                .all(|error| !error.contains("opaque output"))
+        );
         Ok(())
     }
 }

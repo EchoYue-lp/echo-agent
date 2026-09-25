@@ -5,15 +5,15 @@ kind: audit
 boundary_ref: boundary.tool-permission-sandbox
 lens: permission_external
 freshness: examined
-revision: source:33686a6a0273c6f8ea85608bff92fed9774f00bfefe1bbd34aa1a2316b236cbc
+revision: source:bd676c53ff6a431d3ef88581ad7a92a4db718dad7e88dd872b64e20170f61b93
 finding_refs: [finding.approval-authority]
 challenges:
   permission-request-rewrite-order:
-    revision: source:33686a6a0273c6f8ea85608bff92fed9774f00bfefe1bbd34aa1a2316b236cbc
+    revision: source:bd676c53ff6a431d3ef88581ad7a92a4db718dad7e88dd872b64e20170f61b93
     source_refs: [src/agent/react/run/pipeline.rs, src/agent/snapshot.rs]
     evidence_refs: [evidence.approval-authority-repair, evidence.approval-authority-verification]
   exact-effect-receipt:
-    revision: source:33686a6a0273c6f8ea85608bff92fed9774f00bfefe1bbd34aa1a2316b236cbc
+    revision: source:bd676c53ff6a431d3ef88581ad7a92a4db718dad7e88dd872b64e20170f61b93
     source_refs: [echo-core/src/tools/permission.rs, echo-core/src/tools/mod.rs, echo-tools/src/shell.rs]
     evidence_refs: [evidence.approval-authority-repair, evidence.approval-authority-verification]
 ---

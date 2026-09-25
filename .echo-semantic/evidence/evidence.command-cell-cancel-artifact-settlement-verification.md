@@ -41,4 +41,4 @@ limitations:
 
 ## 处理记录
 
-对应 Finding #44 与 #45；修复提交为 `19dab55d1017b444585798984676e578a3b0db24`，竞态测试补充提交为 `f44fcb47c31668ec32104096fa0a729e75a1d39a`，源码摘要为 `source:33686a6a0273c6f8ea85608bff92fed9774f00bfefe1bbd34aa1a2316b236cbc`。
+对应 Finding #44 与 #45；修复提交为 `19dab55d1017b444585798984676e578a3b0db24`，竞态测试补充提交为 `f44fcb47c31668ec32104096fa0a729e75a1d39a`，源码摘要为 `source:bd676c53ff6a431d3ef88581ad7a92a4db718dad7e88dd872b64e20170f61b93`。
