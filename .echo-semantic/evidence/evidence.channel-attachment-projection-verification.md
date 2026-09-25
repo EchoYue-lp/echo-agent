@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.channel-attachment-projection-verification
 kind: evidence
-observed_at: source:e2f3b5f8a9af67e4a9534a49815f6da72fb3c17c5834b86ce5221c121838a99f
+observed_at: source:b9df4130cf07d2561e8e61ec24d127607ce21112eca995952c64c1290ede3b74
 source_refs:
   - src/channels.rs
   - docs/adr/0077-channel-attachment-projection.md

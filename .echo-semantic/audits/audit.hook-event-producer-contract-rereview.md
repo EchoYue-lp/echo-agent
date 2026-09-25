@@ -5,11 +5,11 @@ kind: audit
 boundary_ref: boundary.extension-lifecycle
 lens: contract_evidence
 freshness: examined
-revision: source:e2f3b5f8a9af67e4a9534a49815f6da72fb3c17c5834b86ce5221c121838a99f
+revision: source:b9df4130cf07d2561e8e61ec24d127607ce21112eca995952c64c1290ede3b74
 finding_refs: [finding.hook-event-producer-contract]
 challenges:
   exhaustive-matrix:
-    revision: source:e2f3b5f8a9af67e4a9534a49815f6da72fb3c17c5834b86ce5221c121838a99f
+    revision: source:b9df4130cf07d2561e8e61ec24d127607ce21112eca995952c64c1290ede3b74
     source_refs: [echo-core/src/hooks/types.rs, docs/en/23-hooks.md, docs/zh/23-hooks.md, tests/hook_event_producer_contract.rs]
     evidence_refs: [evidence.hook-event-producer-contract-repair, evidence.hook-event-producer-contract-verification]
 ---

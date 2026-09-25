@@ -17,7 +17,7 @@
    ├─ 用户显式/应用调度 ─ BackgroundReviewer ─ ReviewCandidate（提案）
    └─ 已确认/显式记忆证据 ───────────────────────────┤
                                                        ▼
-                                    MemoryLayerManager（热/暖/冷分层）
+                                    MemoryLayerManager（热/暖分层）
                                                        │
                            ┌───────────────┬──────────┴──────────┬───────────────┐
                            ▼               ▼                     ▼               ▼
@@ -62,7 +62,7 @@
 | **PromptGenerator** | LLM 驱动的提示词改进 | `improve/` |
 | **TrajectorySaver** | 将运行转为 ShareGPT 微调数据 | `improve/` |
 | **TypedMemoryStore** | 带元数据的结构化记忆读写 | `echo-state` |
-| **MemoryLayerManager** | 热/暖/冷三层记忆管理 | `evolution/` |
+| **MemoryLayerManager** | 热/暖两层记忆管理；Archived 留在暖层 | `evolution/` |
 | **ChangeLog** | append-only 业务变更审计；`MemoryLayerManager` 负责带 generation fencing 的记忆事后回滚 | `evolution/` |
 | **TriggerDetector** | 在线对话信号→新记忆 | `evolution/` |
 | **MemoryReviewer** | 陈旧评分、冲突检测、合并、归档（GC） | `evolution/` |
@@ -173,7 +173,11 @@ let entries = saver.list(Some("2026-05-29")).await?;
 
 每条记忆都带结构化元数据 `MemoryMeta`：类型、置信度、稳定性、风险、状态、来源、主题。向后兼容——未类型化的旧条目读取时自动获得默认元数据。
 
+以下示例展示底层 typed Store API。需要进入运行时召回的记忆必须经由
+`MemoryLayerManager` 写入并审阅激活；直接写 Store 不执行其持久操作、审计和批准流程。
+
 ```rust
+use echo_agent::evolution::layer::WARM_NAMESPACE;
 use echo_agent::memory::typed_store::{TypedMemoryStore, MemoryFilter};
 use echo_agent::prelude::{MemoryMeta, MemorySource, MemoryType, MemoryStatus};
 
@@ -184,14 +188,14 @@ let meta = MemoryMeta::new(MemoryType::ProjectFact, MemorySource::UserCorrection
     .with_confidence(0.9)
     .with_stability(0.8);
 store
-    .put_typed(&["agent", "typed_memories"], "build:java8", "项目用 Java 8", meta)
+    .put_typed(WARM_NAMESPACE, "build:java8", "项目用 Java 8", meta)
     .await?;
 
 // 按条件过滤检索
 let filter = MemoryFilter::new()
     .with_type(MemoryType::ProjectFact)
     .with_min_confidence(0.7);
-let entries = store.list_typed(&["agent", "typed_memories"], &filter).await?;
+let entries = store.list_typed(WARM_NAMESPACE, &filter).await?;
 ```
 
 #### MemoryType 分类
@@ -214,7 +218,7 @@ let entries = store.list_typed(&["agent", "typed_memories"], &filter).await?;
 
 - **热层**（`.echo-agent/MEMORY.md`）：最高价值，YAML frontmatter + markdown 正文，上限 ~2000 token，人类与 Agent 都可编辑。
 - **暖层**（Store KV `["agent","memories"]`）：统一类型化存储，`Archived` 条目仍在此层并按衰减权重召回。
-- **冷层**（可选公共 API `["agent","cold_memories"]`）：默认路径不使用独立冷存储；有独立归档需求的复用方可自行接入。
+- **独立冷存储**（可选常量 `COLD_NAMESPACE = ["agent", "cold_memories"]`）：复用方可以自行实现归档层。`MemoryLayerManager` 不读写或迁移该命名空间；常量和 `MemoryLayer::Cold` 不会自动启用第三层。
 
 ```rust
 use echo_agent::evolution::{MemoryLayerManager, JsonlChangeLog, MemoryMeta, MemorySource, MemoryType};
@@ -456,33 +460,26 @@ for report in monitor.analyze_all_skills().await? {
 
 ---
 
-## 文件布局
+## 分层记忆文件
 
 ```
 .echo-agent/
-  MEMORY.md                        # 热层（人类可读，Agent 与人类都可编辑）
-  AGENTS.md                        # 自动晋升的规则
-  project.md / local.md            # 已有的静态提示文件
-  memory/
-    topics/*.md                    # 暖层主题文件
-    archive/                       # 冷层归档
+  MEMORY.md                        # 热层（人类可读）
   evolution/
-    change-log.jsonl               # 变更审计日志
-    skill_candidates/              # 候选提案
-    patches/                       # 技能补丁
-  skills/
-    _drafts/<name>/SKILL.md        # 草稿技能
-  curator_state.json               # Curator 状态
+    memory-operations.jsonl        # MemoryLayerManager 的恢复 journal
+    change-log.jsonl               # MemoryRuntimeIntegrationBuilder 的默认业务审计路径
 ```
 
-框架复用方可以选择其它路径。embedding application 注入 workspace scope，使用 `<application-data>/evolution/evidence-candidates.jsonl` 与 `<application-data>/evolution/curator-state.json`。
+暖层是 `WARM_NAMESPACE` 下的 Store KV，并非 `memory/topics` 或 `memory/archive`
+目录。复用方注入 Store 实现及根路径；change-log 路径可配置。其它产品文件与技能
+产物有各自的 owner。
 
 ## Store 命名空间
 
 | 命名空间 | 用途 |
 |---------|------|
-| `["agent", "typed_memories"]` | 类型化记忆（暖层） |
-| `["agent", "cold_memories"]` | 归档记忆（冷层） |
+| `["agent", "memories"]` | `WARM_NAMESPACE`：统一类型化暖层，包含 `MemoryStatus::Archived` |
+| `["agent", "cold_memories"]` | 可选的 `COLD_NAMESPACE` 常量，供复用方自行实现独立冷层；`MemoryLayerManager` 不读写此层 |
 | `["agent", "skill_candidates"]` | 技能候选提案 |
 | `["agent", "skill_telemetry"]` | 技能遥测 |
 | `["agent", "profile"]` | Agent 配置 |
