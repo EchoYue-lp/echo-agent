@@ -84,7 +84,7 @@ let fmt = ResponseFormat::json_schema(
 );
 ```
 
-`JsonSchema` 的 `strict: true` 会在本地编译并执行 Schema 校验。非法 Schema 在一次性 LLM 请求前被拒绝；JSON 语法错误与严格 Schema 不匹配共用配置的有界修复重试预算，耗尽后返回类型化错误。`strict: false` 仅向 Provider 发送提示；`JsonObject` 只检查 JSON 语法。当前本地校验器拒绝外部 Schema 引用，最终策略待 #96/#97 集成 ADR 裁决。
+`JsonSchema` 的 `strict: true` 会在本地编译并执行 Schema 校验。非法 Schema 在一次性 LLM 请求前被拒绝；JSON 语法错误与严格 Schema 不匹配共用配置的有界修复重试预算，耗尽后返回类型化错误。`strict: false` 仅向 Provider 发送提示；`JsonObject` 只检查 JSON 语法。ADR 0079 规定在模型调用前拒绝外部 HTTP/文件 `$ref`，可将定义打包为本地 `$defs`。
 
 ---
 
@@ -98,9 +98,19 @@ let fmt = ResponseFormat::json_schema(
 use echo_agent::prelude::*;
 use serde_json::json;
 
-let config = AgentConfig::new("qwen3-235b-a22b", "extractor", "你是一个信息提取助手")
-    .enable_cot(false);  // 纯提取无需推理链
-let agent = ReactAgent::new(config);
+let llm_config = LlmConfig::for_provider(
+    "openai",
+    "https://api.openai.com/v1",
+    std::env::var("OPENAI_API_KEY")?,
+    "gpt-5.5",
+    LlmApiProtocol::Responses,
+)?;
+let agent = ReactAgentBuilder::new()
+    .llm_config(llm_config)
+    .name("extractor")
+    .system_prompt("你是一个信息提取助手")
+    .disable_cot()
+    .build()?;
 
 let schema = ResponseFormat::json_schema(
     "person",
@@ -163,12 +173,22 @@ println!("情感: {}", result.sentiment);    // "positive"
 println!("置信: {:.0}%", result.confidence * 100.0); // "95%"
 ```
 
-### 方式三：`AgentConfig::response_format()` — 全局配置
+### 方式三：`ReactAgentBuilder::response_format()` — 全局配置
 
-保存 Agent 级预期格式。主 ReAct 请求透传仍由 #96 接线，此配置目前不能单独保证每次模型请求都携带格式提示；配置严格 Schema 时，`execute_typed()` 会校验最终值：
+格式随运行快照进入每次主 ReAct JSON 请求。模型事实必须明确支持结构化输出；未知或不支持的模型在调用前拒绝。严格 JSON Schema 还会在文本或 `final_answer` 工具结果成为成功终态前由框架本地校验；JSON 或 Schema 错误可在独立预算内有界修正，耗尽则失败。`execute_typed()` 再将合格值反序列化为请求的 Rust 类型：
 
 ```rust
-let config = AgentConfig::new("qwen3-235b-a22b", "translator", "你是一个翻译助手")
+let llm_config = LlmConfig::for_provider(
+    "openai",
+    "https://api.openai.com/v1",
+    std::env::var("OPENAI_API_KEY")?,
+    "gpt-5.5",
+    LlmApiProtocol::Responses,
+)?;
+let mut agent = ReactAgentBuilder::new()
+    .llm_config(llm_config)
+    .name("translator")
+    .system_prompt("你是一个翻译助手")
     .response_format(ResponseFormat::json_schema(
         "translation_result",
         json!({
@@ -182,9 +202,8 @@ let config = AgentConfig::new("qwen3-235b-a22b", "translator", "你是一个翻�
             "additionalProperties": false
         }),
     ))
-    .enable_cot(false);
-
-let mut agent = ReactAgent::new(config);
+    .disable_cot()
+    .build()?;
 
 let v: serde_json::Value = agent.execute_typed("人工智能正在改变世界。").await?;
 println!("translation: {}", v["translation"]);
@@ -275,10 +294,11 @@ let report: SalesReport = extractor_agent.extract(&raw_answer, schema).await?;
 
 ## 注意事项
 
-1. **模型兼容性**：Provider 支持有助于生成合格输出；即使 Provider 忽略提示，本地严格校验也会拒绝不匹配值。不支持的模型可使用仅检查语法的 `JsonObject`。
+1. **模型兼容性**：JSON 格式需要新鲜且明确的结构化输出能力事实。Provider 支持有助于生成合格输出；即使 Provider 忽略提示，本地严格校验也会拒绝不匹配值。显式 `Text` 会按未约束的默认请求发送。
 2. **`additionalProperties: false`**：JSON Schema 中建议始终设置此项，防止模型输出多余字段
 3. **与 CoT 的关系**：结构化提取场景通常不需要推理链，建议 `.enable_cot(false)` 以减少干扰
 4. **temperature**：`extract_json()` 内部固定使用 `temperature=0.0`，保证输出稳定；`AgentConfig::response_format()` 方式仍使用 Agent 默认温度
+5. **Schema 引用**：严格校验支持 `$defs` 等本地引用；外部 HTTP/文件 `$ref` 会在模型调用前拒绝。请将外部定义打包进传入的 Schema。
 
 ---
 

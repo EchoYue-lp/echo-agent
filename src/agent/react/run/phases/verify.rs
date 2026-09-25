@@ -8,10 +8,63 @@
 use super::{IterOutcome, LoopState, ThinkOutput, with_reasoning_content};
 use crate::agent::AgentEvent;
 use crate::agent::snapshot::AgentRunSnapshot;
-use crate::error::Result;
+use crate::error::{ReactError, Result, StructuredOutputError};
 use crate::llm::types::Message;
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
+
+/// Validate a candidate before any success terminal observer can see it.
+/// Returns false only after recording a bounded, content-free repair prompt.
+pub(crate) async fn validate_structured_final(
+    prepared: Option<&crate::agent::react::extract::PreparedResponseFormat>,
+    snap: &AgentRunSnapshot,
+    context: &Arc<Mutex<crate::compression::ContextManager>>,
+    tx: &mpsc::Sender<Result<AgentEvent>>,
+    state: &mut LoopState,
+    iteration: usize,
+    answer: &str,
+) -> Result<bool> {
+    let Some(prepared) = prepared else {
+        return Ok(true);
+    };
+    match prepared.parse_text(answer) {
+        Ok(_) => Ok(true),
+        Err(error) => {
+            let repairable = matches!(
+                &error,
+                ReactError::StructuredOutput(inner)
+                    if matches!(
+                        inner.as_ref(),
+                        StructuredOutputError::InvalidJson { .. }
+                            | StructuredOutputError::SchemaMismatch { .. }
+                    )
+            );
+            if !repairable
+                || state.schema_retry_count >= snap.config.llm_max_retries
+                || iteration.saturating_add(1) >= snap.config.max_iterations
+            {
+                super::finalize::settle_terminal_projection(
+                    snap,
+                    context,
+                    Some(error.to_string()),
+                    tx,
+                )
+                .await?;
+                return Err(error);
+            }
+            state.schema_retry_count = state.schema_retry_count.saturating_add(1);
+            super::super::context::push_runtime_context_note(
+                context,
+                "StructuredOutput:Retry",
+                &format!(
+                    "The previous final answer was rejected: {error}. Return only corrected JSON matching the requested format."
+                ),
+            )
+            .await;
+            Ok(false)
+        }
+    }
+}
 
 /// Verify a final answer with the configured Critic.
 ///

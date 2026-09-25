@@ -377,7 +377,11 @@ impl ReactAgent {
                         &terminal_snapshot,
                         &context,
                         terminal_reason.clone(),
-                        AgentEvent::FinalAnswer(terminal_reason),
+                        phases::pre_model_block_terminal(
+                            self.config.response_format.as_ref(),
+                            "input_guard",
+                            terminal_reason,
+                        ),
                     )
                     .await;
                     turn_lease.settle();
@@ -493,7 +497,11 @@ impl ReactAgent {
                     &terminal_snapshot,
                     &context,
                     reason.clone(),
-                    AgentEvent::FinalAnswer(reason),
+                    phases::pre_model_block_terminal(
+                        self.config.response_format.as_ref(),
+                        "user_prompt_hook",
+                        reason,
+                    ),
                 )
                 .await;
                 active_turn_lease.settle(outcome);
@@ -810,6 +818,27 @@ impl AgentSnapshot {
         // (acquired in run_stream_channel via lock_owned()), so we don't
         // need to lock again here.
 
+        let structured_format_result = self
+            .config
+            .response_format
+            .as_ref()
+            .filter(|format| format.is_json())
+            .map(crate::agent::react::extract::PreparedResponseFormat::new)
+            .transpose();
+        let structured_format = match structured_format_result {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                phases::finalize::settle_terminal_projection(
+                    &self,
+                    &context,
+                    Some(error.to_string()),
+                    &tx,
+                )
+                .await?;
+                return Err(error);
+            }
+        };
+
         // ── Pre-loop preparation ─────────────────────────────────────
         let mut state = match phases::prepare::prepare_turn(
             &self,
@@ -1019,6 +1048,19 @@ impl AgentSnapshot {
                 {
                     continue;
                 }
+                if !phases::verify::validate_structured_final(
+                    structured_format.as_ref(),
+                    &self,
+                    &context,
+                    &tx,
+                    &mut state,
+                    iteration,
+                    &think.content_buffer,
+                )
+                .await?
+                {
+                    continue;
+                }
                 let pt = think.pt;
                 let ct = think.ct;
                 match phases::verify::verify_final_text(
@@ -1064,6 +1106,19 @@ impl AgentSnapshot {
                     if self.drain_steer_into_context(&context, None).await > 0 {
                         continue;
                     }
+                    if !phases::verify::validate_structured_final(
+                        structured_format.as_ref(),
+                        &self,
+                        &context,
+                        &tx,
+                        &mut state,
+                        iteration,
+                        &output,
+                    )
+                    .await?
+                    {
+                        continue;
+                    }
                     match phases::finalize::finalize_completed_run(
                         &self, &context, &label, &output, iteration, &state, &tx,
                     )
@@ -1086,6 +1141,19 @@ impl AgentSnapshot {
                     reasoning_content,
                     reasoning_blocks,
                 } => {
+                    if !phases::verify::validate_structured_final(
+                        structured_format.as_ref(),
+                        &self,
+                        &context,
+                        &tx,
+                        &mut state,
+                        iteration,
+                        &answer,
+                    )
+                    .await?
+                    {
+                        continue;
+                    }
                     let pt = 0;
                     let ct = 0;
                     match phases::finalize::emit_final_text(
@@ -4684,6 +4752,267 @@ mod tests {
         );
         assert_eq!(llm.all_response_formats().len(), 1);
         assert!(llm.all_response_formats().iter().all(Option::is_none));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn strict_schema_retries_text_before_success_terminal() -> Result<()> {
+        let llm = Arc::new(
+            MockLlmClient::new()
+                .with_response(r#"{"age":"wrong"}"#)
+                .with_response(r#"{"age":28}"#),
+        );
+        let agent = ReactAgentBuilder::new()
+            .llm_client(llm.clone())
+            .model_profile(
+                echo_core::llm::capabilities::ModelProfile::from_provider_name(
+                    "mock-model",
+                    "openai",
+                ),
+            )
+            .response_format(crate::llm::ResponseFormat::json_schema(
+                "person",
+                serde_json::json!({"type":"object","properties":{"age":{"type":"integer"}},"required":["age"]}),
+            ))
+            .build()?;
+
+        let events = collect_events(&agent, "run").await;
+        let final_answers: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::FinalAnswer(answer) => Some(answer.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(final_answers, vec![r#"{"age":28}"#]);
+        assert_eq!(llm.call_count(), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn strict_schema_retries_final_answer_tool_before_success_terminal() -> Result<()> {
+        let llm = Arc::new(
+            MockLlmClient::new()
+                .then_tool_call(
+                    "bad-final",
+                    "final_answer",
+                    serde_json::json!({"answer": r#"{"age":"wrong"}"#}).to_string(),
+                )
+                .then_tool_call(
+                    "good-final",
+                    "final_answer",
+                    serde_json::json!({"answer": r#"{"age":28}"#}).to_string(),
+                ),
+        );
+        let agent = ReactAgentBuilder::new()
+            .llm_client(llm.clone())
+            .model_profile(
+                echo_core::llm::capabilities::ModelProfile::from_provider_name(
+                    "mock-model",
+                    "openai",
+                ),
+            )
+            .response_format(crate::llm::ResponseFormat::json_schema(
+                "person",
+                serde_json::json!({"type":"object","properties":{"age":{"type":"integer"}},"required":["age"]}),
+            ))
+            .build()?;
+
+        let events = collect_events(&agent, "run").await;
+        let final_answers: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::FinalAnswer(answer) => Some(answer.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(final_answers, vec![r#"{"age":28}"#]);
+        assert_eq!(llm.call_count(), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn strict_schema_exhaustion_fails_without_final_answer() -> Result<()> {
+        let llm = Arc::new(MockLlmClient::new().with_response(r#"{"age":"private-value"}"#));
+        let agent = ReactAgentBuilder::new()
+            .llm_client(llm.clone())
+            .model_profile(
+                echo_core::llm::capabilities::ModelProfile::from_provider_name(
+                    "mock-model",
+                    "openai",
+                ),
+            )
+            .response_format(crate::llm::ResponseFormat::json_schema(
+                "person",
+                serde_json::json!({"type":"object","properties":{"age":{"type":"integer"}},"required":["age"]}),
+            ))
+            .max_iterations(1)
+            .build()?;
+
+        let events = collect_events(&agent, "run").await;
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::FinalAnswer(_)))
+        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AgentEvent::Error { message, .. }
+                if message.contains("does not match JSON Schema")
+                    && !message.contains("private-value")
+        )));
+        assert_eq!(llm.call_count(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn structured_input_guard_block_is_failure_in_stream_and_execute() -> Result<()> {
+        let mut agent = ReactAgent::new(
+            AgentConfig::new("mock-model", "guarded", "system")
+                .response_format(crate::llm::ResponseFormat::JsonObject),
+        );
+        let mut guards = GuardManager::new();
+        guards.add(Arc::new(BlockingGuard));
+        agent.set_guard_manager(guards);
+
+        let events = collect_events(&agent, "blocked input").await;
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::Error { .. }))
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::FinalAnswer(_)))
+        );
+        assert!(agent.execute("blocked input").await.is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn structured_prompt_hook_block_is_failure_in_stream_and_execute() -> Result<()> {
+        let mut definition = crate::skills::hooks::HooksDefinition::default();
+        definition.add_rules(
+            crate::skills::hooks::HookEvent::UserPromptSubmit,
+            vec![crate::skills::hooks::HookRule {
+                matcher: String::new(),
+                hooks: vec![crate::skills::hooks::HookAction::Permission {
+                    decision: "deny".to_string(),
+                    reason: Some("not allowed".to_string()),
+                    suggestions: Vec::new(),
+                }],
+            }],
+        );
+        let mut registry = crate::skills::hooks::HookRegistry::new();
+        registry.register("structured-blocker", "/tmp", definition);
+        let mut agent = ReactAgent::new(
+            AgentConfig::new("mock-model", "hooked", "system")
+                .response_format(crate::llm::ResponseFormat::JsonObject),
+        );
+        agent.set_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)));
+
+        let events = collect_events(&agent, "blocked input").await;
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::Error { .. }))
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::FinalAnswer(_)))
+        );
+        assert!(agent.execute("blocked input").await.is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn structured_schema_failure_settles_managed_terminal_checkpoint() -> Result<()> {
+        let conversation_root = tempfile::tempdir()?;
+        let runtime_root = tempfile::tempdir()?;
+        let conversations = Arc::new(crate::memory::FileConversationStore::new(
+            conversation_root.path(),
+        )?);
+        let runtime = Arc::new(crate::state::FileRuntimeStateStore::new(
+            runtime_root.path(),
+        )?);
+        let llm = Arc::new(MockLlmClient::new().with_response(r#"{"age":"wrong"}"#));
+        let mut agent = ReactAgent::new(
+            AgentConfig::new("mock-model", "schema-agent", "system")
+                .conversation_id("schema-failure")
+                .model_profile(
+                    echo_core::llm::capabilities::ModelProfile::from_provider_name(
+                        "mock-model",
+                        "openai",
+                    ),
+                )
+                .response_format(crate::llm::ResponseFormat::json_schema(
+                    "person",
+                    serde_json::json!({"type":"object","properties":{"age":{"type":"integer"}},"required":["age"]}),
+                ))
+                .max_iterations(1),
+        )
+        .with_llm_client(llm);
+        agent.set_conversation_store(conversations);
+        agent.set_state_store(runtime.clone());
+
+        let events = collect_events(&agent, "run").await;
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::Error { .. }))
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::FinalAnswer(_)))
+        );
+        let checkpoint = crate::state::RuntimeStateStore::load_runtime_state(
+            runtime.as_ref(),
+            "schema-failure",
+            "schema-failure",
+        )
+        .await?
+        .and_then(|state| state.checkpoint)
+        .ok_or_else(|| ReactError::Other("schema failure checkpoint missing".to_string()))?;
+        assert!(
+            checkpoint
+                .blocked_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("does not match JSON Schema"))
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn invalid_strict_schema_is_rejected_before_react_model_call() -> Result<()> {
+        let llm = Arc::new(MockLlmClient::new().with_response(r#"{"age":28}"#));
+        let agent = ReactAgentBuilder::new()
+            .llm_client(llm.clone())
+            .model_profile(
+                echo_core::llm::capabilities::ModelProfile::from_provider_name(
+                    "mock-model",
+                    "openai",
+                ),
+            )
+            .response_format(crate::llm::ResponseFormat::json_schema(
+                "invalid",
+                serde_json::json!({"type":7}),
+            ))
+            .build()?;
+
+        let events = collect_events(&agent, "run").await;
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::FinalAnswer(_)))
+        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AgentEvent::Error { message, .. } if message.contains("invalid JSON Schema")
+        )));
+        assert_eq!(llm.call_count(), 0);
         Ok(())
     }
 

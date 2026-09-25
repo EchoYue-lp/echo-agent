@@ -232,19 +232,22 @@ impl Critic for LlmCritic {
                 critique_output_schema(),
             ));
 
-            let content = if self.should_skip_structured_response_format() {
+            let (content, structured_hint_used) = if self.should_skip_structured_response_format() {
                 debug!(
                     model = %self.model,
                     "critique: skipping response_format for provider without json_schema support"
                 );
-                self.call_llm(&self.fallback_messages(&user_content), None)
-                    .await
-                    .map_err(|e| ReactError::Other(format!("LLM critique call failed: {e}")))?
+                (
+                    self.call_llm(&self.fallback_messages(&user_content), None)
+                        .await
+                        .map_err(|e| ReactError::Other(format!("LLM critique call failed: {e}")))?,
+                    false,
+                )
             } else {
-                // First attempt: structured output via json_schema (preferred —
-                // guarantees schema-conformant JSON when the provider supports it).
+                // First attempt requests a structured response; local validation
+                // remains the authority for accepting the returned critique.
                 match self.call_llm(&messages, response_format).await {
-                    Ok(text) => text,
+                    Ok(text) => (text, true),
                     Err(e) if Self::is_response_format_unsupported(&e.to_string()) => {
                         // Provider rejects structured output — retry once without
                         // response_format. The system prompt already asks for JSON;
@@ -256,11 +259,14 @@ impl Critic for LlmCritic {
                             error = %e,
                             "critique: structured output unsupported, retrying as plain text"
                         );
-                        self.call_llm(&self.fallback_messages(&user_content), None)
-                            .await
-                            .map_err(|e| {
-                                ReactError::Other(format!("LLM critique call failed: {e}"))
-                            })?
+                        (
+                            self.call_llm(&self.fallback_messages(&user_content), None)
+                                .await
+                                .map_err(|e| {
+                                    ReactError::Other(format!("LLM critique call failed: {e}"))
+                                })?,
+                            false,
+                        )
                     }
                     Err(e) => {
                         return Err(ReactError::Other(format!("LLM critique call failed: {e}")));
@@ -268,7 +274,12 @@ impl Critic for LlmCritic {
                 }
             };
 
-            debug!(response = %content, "LlmCritic raw response");
+            if structured_hint_used {
+                let prepared = crate::agent::react::PreparedResponseFormat::new(
+                    &ResponseFormat::json_schema("critique_output", critique_output_schema()),
+                )?;
+                prepared.parse_text(&content)?;
+            }
 
             let output = Self::parse_critique_output(&content)?;
             let mut critique: Critique = output.into();
@@ -407,6 +418,41 @@ mod tests {
         assert!(critique.passed);
         assert_eq!(client.call_count(), 1);
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn strict_critique_rejects_serde_permissive_missing_field() {
+        let client = Arc::new(
+            MockLlmClient::new()
+                .with_model_name("prepared-model")
+                .with_response(r#"{"score":9,"passed":true,"feedback":"ok"}"#),
+        );
+        let critic = LlmCritic::new(client.clone());
+
+        let result = critic.critique("task", "answer", "").await;
+        assert!(matches!(
+            result,
+            Err(ReactError::StructuredOutput(inner))
+                if matches!(inner.as_ref(), crate::error::StructuredOutputError::SchemaMismatch { .. })
+        ));
+        assert_eq!(client.call_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn strict_critique_rejects_additional_field() {
+        let client = Arc::new(
+            MockLlmClient::new().with_model_name("prepared-model").with_response(
+                r#"{"score":9,"passed":true,"feedback":"ok","suggestions":[],"private":"value"}"#,
+            ),
+        );
+        let critic = LlmCritic::new(client);
+
+        let result = critic.critique("task", "answer", "").await;
+        assert!(matches!(
+            result,
+            Err(ReactError::StructuredOutput(inner))
+                if matches!(inner.as_ref(), crate::error::StructuredOutputError::SchemaMismatch { .. })
+        ));
     }
 
     #[tokio::test]

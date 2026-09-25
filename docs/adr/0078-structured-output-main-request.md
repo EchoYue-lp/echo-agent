@@ -44,5 +44,5 @@ provider hint and framework final-result validation as separate responsibilities
 - Unknown or stale provider/model facts cannot elevate JSON response capability.
 - A provider can still reject a format it does not implement; the framework
   propagates that error rather than silently retrying without the format.
-- This ADR does not close DU-97. Strict local schema validation, bounded retry,
-  and safe error projection remain part of the #97 integration.
+- ADR 0079 defines the separate framework-local validation and bounded repair
+  authority required by DU-97. Provider hints alone never establish success.

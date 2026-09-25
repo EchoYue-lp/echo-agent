@@ -4,6 +4,8 @@ use echo_agent::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+mod support;
+
 #[derive(Debug, Serialize, Deserialize)]
 struct EventList {
     events: Vec<HistoryEvent>,
@@ -28,7 +30,7 @@ struct SentimentResult {
 async fn main() -> echo_agent::error::Result<()> {
     // 使用 AgentBuilder 创建通用提取 Agent
     let agent = ReactAgentBuilder::new()
-        .model("qwen3-max")
+        .llm_config(support::llm_config(None)?)
         .name("extractor")
         .system_prompt("你是一个精准的信息提取助手，请仅根据用户提供的文本进行提取。")
         .disable_cot()
@@ -177,7 +179,7 @@ async fn demo_output_type() -> echo_agent::error::Result<()> {
     }
 
     let mut agent = ReactAgentBuilder::new()
-        .model("qwen3-max")
+        .llm_config(support::llm_config(None)?)
         .name("typed_translator")
         .system_prompt("你是一个翻译助手，将用户输入翻译为英文，返回 JSON 格式的翻译结果。")
         .output_type::<TranslationResult>()
@@ -186,17 +188,10 @@ async fn demo_output_type() -> echo_agent::error::Result<()> {
     let input = "今天天气真好";
     println!("  输入: {input}");
 
-    match agent.execute_typed::<TranslationResult>(input).await {
-        Ok(result) => {
-            println!("  结果: {:?}", result);
-            println!("    original    = {}", result.original);
-            println!("    translated  = {}", result.translated);
-        }
-        Err(e) => {
-            println!("  execute_typed 失败（可能 LLM 返回格式不符）: {e}");
-            println!("  （提示：output_type 需要 LLM 支持 JSON mode）");
-        }
-    }
+    let result = agent.execute_typed::<TranslationResult>(input).await?;
+    println!("  结果: {:?}", result);
+    println!("    original    = {}", result.original);
+    println!("    translated  = {}", result.translated);
     Ok(())
 }
 
@@ -204,7 +199,7 @@ async fn demo_config_level() -> echo_agent::error::Result<()> {
     println!("\n══════════════════════════════════════════════════════");
     println!("  演示 5：AgentBuilder 全局设置 response_format");
 
-    let _schema = ResponseFormat::json_schema(
+    let schema = ResponseFormat::json_schema(
         "translation_result",
         json!({
             "type": "object",
@@ -219,9 +214,10 @@ async fn demo_config_level() -> echo_agent::error::Result<()> {
 
     // 使用 AgentBuilder 创建翻译 Agent
     let agent = ReactAgentBuilder::new()
-        .model("qwen3-max")
+        .llm_config(support::llm_config(None)?)
         .name("translator")
         .system_prompt("你是一个专业翻译助手，将用户输入翻译成英文。")
+        .response_format(schema)
         .disable_cot()
         .build()?;
 
