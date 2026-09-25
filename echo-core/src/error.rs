@@ -99,6 +99,43 @@ impl From<&ReactError> for AgentFailure {
                 "parse",
                 None,
             ),
+            ReactError::StructuredOutput(inner) => match inner.as_ref() {
+                StructuredOutputError::MissingResponseFormat => (
+                    AgentFailureCategory::Config,
+                    AgentTerminalKind::Failed,
+                    false,
+                    "structured_missing_response_format",
+                    None,
+                ),
+                StructuredOutputError::InvalidSchema { .. } => (
+                    AgentFailureCategory::Config,
+                    AgentTerminalKind::Failed,
+                    false,
+                    "structured_invalid_schema",
+                    None,
+                ),
+                StructuredOutputError::SchemaMismatch { .. } => (
+                    AgentFailureCategory::Parse,
+                    AgentTerminalKind::Failed,
+                    false,
+                    "structured_schema_mismatch",
+                    None,
+                ),
+                StructuredOutputError::InvalidJson { .. } => (
+                    AgentFailureCategory::Parse,
+                    AgentTerminalKind::Failed,
+                    false,
+                    "structured_invalid_json",
+                    None,
+                ),
+                StructuredOutputError::InvalidTargetType => (
+                    AgentFailureCategory::Parse,
+                    AgentTerminalKind::Failed,
+                    false,
+                    "structured_invalid_target_type",
+                    None,
+                ),
+            },
             ReactError::Agent(inner) => match inner.as_ref() {
                 AgentError::Interrupted | AgentError::Cancelled(_) => (
                     AgentFailureCategory::Agent,
@@ -308,6 +345,9 @@ pub enum ReactError {
     /// Parse error
     #[error("Parse Error: {0}")]
     Parse(Box<ParseError>),
+    /// Structured output validation error
+    #[error("Structured Output Error: {0}")]
+    StructuredOutput(Box<StructuredOutputError>),
     /// Agent execution error
     #[error("Agent Error: {0}")]
     Agent(Box<AgentError>),
@@ -337,6 +377,27 @@ pub enum ReactError {
     /// Other error
     #[error("{0}")]
     Other(String),
+}
+
+/// Content-free failures for structured output. Model response values are never
+/// retained in these errors because they may contain secrets.
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum StructuredOutputError {
+    /// A typed Agent execution has no declared response format.
+    #[error("typed execution requires output_type or response_format")]
+    MissingResponseFormat,
+    /// The caller's strict schema cannot be compiled locally.
+    #[error("invalid JSON Schema '{name}' at {schema_path}")]
+    InvalidSchema { name: String, schema_path: String },
+    /// The response is valid JSON but violates the caller's strict schema.
+    #[error("response does not match JSON Schema '{name}' at {schema_path}")]
+    SchemaMismatch { name: String, schema_path: String },
+    /// The response is not syntactically valid JSON.
+    #[error("response is not valid JSON at line {line}, column {column}")]
+    InvalidJson { line: usize, column: usize },
+    /// The JSON value cannot deserialize into the requested Rust type.
+    #[error("response does not match the requested Rust type")]
+    InvalidTargetType,
 }
 
 /// Memory system error
@@ -653,6 +714,12 @@ impl From<ParseError> for ReactError {
     }
 }
 
+impl From<StructuredOutputError> for ReactError {
+    fn from(err: StructuredOutputError) -> Self {
+        ReactError::StructuredOutput(Box::new(err))
+    }
+}
+
 impl From<AgentError> for ReactError {
     fn from(err: AgentError) -> Self {
         ReactError::Agent(Box::new(err))
@@ -721,6 +788,23 @@ pub type Result<T> = std::result::Result<T, ReactError>;
 #[cfg(test)]
 mod agent_failure_tests {
     use super::*;
+
+    #[test]
+    fn structured_output_failures_preserve_typed_codes() {
+        let mismatch = ReactError::from(StructuredOutputError::SchemaMismatch {
+            name: "person".to_string(),
+            schema_path: "/properties/age/type".to_string(),
+        });
+        let failure = AgentFailure::from(&mismatch);
+        assert_eq!(failure.category, AgentFailureCategory::Parse);
+        assert_eq!(failure.code, "structured_schema_mismatch");
+        assert!(!failure.retryable);
+
+        let missing = ReactError::from(StructuredOutputError::MissingResponseFormat);
+        let failure = AgentFailure::from(&missing);
+        assert_eq!(failure.category, AgentFailureCategory::Config);
+        assert_eq!(failure.code, "structured_missing_response_format");
+    }
 
     #[test]
     fn preserves_terminal_and_retry_facts() -> std::result::Result<(), serde_json::Error> {

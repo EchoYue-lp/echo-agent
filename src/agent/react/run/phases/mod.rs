@@ -18,7 +18,10 @@
 //! `Result<…>` for that "abandon stream" behavior to bubble up to the loop
 //! driver — which then exits with `Ok(())`.
 
-use crate::llm::types::Message;
+use crate::agent::AgentEvent;
+use crate::agent::snapshot::AgentRunSnapshot;
+use crate::error::ReactError;
+use crate::llm::types::{Message, ResponseFormat};
 use std::collections::HashMap;
 
 pub(crate) mod compact;
@@ -27,6 +30,47 @@ pub(crate) mod prepare;
 pub(crate) mod think;
 pub(crate) mod tools;
 pub(crate) mod verify;
+
+pub(crate) fn cancellation_requested(snap: &AgentRunSnapshot) -> bool {
+    snap.cancel_token
+        .as_ref()
+        .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
+        || snap
+            .external_cancel
+            .as_ref()
+            .is_some_and(|cancel| cancel.is_cancelled())
+}
+
+pub(crate) async fn wait_for_cancellation(snap: &AgentRunSnapshot) {
+    let invocation = async {
+        match snap.cancel_token.as_ref() {
+            Some(cancel) => cancel.cancelled().await,
+            None => std::future::pending::<()>().await,
+        }
+    };
+    let external = async {
+        match snap.external_cancel.as_ref() {
+            Some(cancel) => cancel.cancelled().await,
+            None => std::future::pending::<()>().await,
+        }
+    };
+    tokio::select! {
+        _ = invocation => {}
+        _ = external => {}
+    }
+}
+
+pub(crate) fn pre_model_block_terminal(
+    format: Option<&ResponseFormat>,
+    source: &str,
+    reason: String,
+) -> AgentEvent {
+    if format.is_some_and(ResponseFormat::is_json) {
+        AgentEvent::from_error(source, &ReactError::Other(reason))
+    } else {
+        AgentEvent::FinalAnswer(reason)
+    }
+}
 
 // ── Loop-level mutable state ─────────────────────────────────────────
 
@@ -40,6 +84,8 @@ pub(crate) struct LoopState {
     pub stop_hook_continued: bool,
     /// Number of times the verifier has rejected an answer this turn.
     pub verifier_retry_count: usize,
+    /// JSON/schema repair attempts are independent of the optional critic.
+    pub schema_retry_count: usize,
     /// Invocation-local budget counters. They remain in the loop state while
     /// HITL approval awaits and therefore are preserved across pause/resume.
     pub budget: RunBudgetState,
@@ -66,6 +112,7 @@ impl LoopState {
         Self {
             stop_hook_continued: false,
             verifier_retry_count: 0,
+            schema_retry_count: 0,
             budget: RunBudgetState {
                 usage_complete: true,
                 ..RunBudgetState::default()
@@ -132,9 +179,9 @@ pub(crate) struct ThinkOutput {
 pub(crate) enum IterOutcome {
     /// Verifier-fail or hook-continue: go to the next iteration.
     Continue,
-    /// Tools branch: a `final_answer` tool call was verified and accepted.
-    /// The driver invokes `phases::finalize::finalize_completed_run`.
-    Finish { output: String },
+    /// Tools branch: every tool result was durably settled. The driver owns
+    /// steer/cancellation fences before selecting a final-answer candidate.
+    FinishCandidates { outputs: Vec<String> },
     /// Text-only branch: the LLM produced a content answer that passed
     /// verification. The driver invokes `phases::finalize::emit_final_text`.
     FinalText {

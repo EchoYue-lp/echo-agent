@@ -8,10 +8,90 @@
 use super::{IterOutcome, LoopState, ThinkOutput, with_reasoning_content};
 use crate::agent::AgentEvent;
 use crate::agent::snapshot::AgentRunSnapshot;
-use crate::error::Result;
+use crate::error::{ReactError, Result, StructuredOutputError};
 use crate::llm::types::Message;
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
+
+/// Validate a candidate before any success terminal observer can see it.
+/// Returns false only after recording a bounded, content-free repair prompt.
+pub(crate) async fn validate_structured_final(
+    prepared: Option<&crate::agent::react::extract::PreparedResponseFormat>,
+    snap: &AgentRunSnapshot,
+    context: &Arc<Mutex<crate::compression::ContextManager>>,
+    state: &mut LoopState,
+    iteration: usize,
+    answer: &str,
+) -> Result<bool> {
+    let Some(prepared) = prepared else {
+        return Ok(true);
+    };
+    match prepared.parse_text(answer) {
+        Ok(_) => Ok(true),
+        Err(error) => {
+            let repairable = matches!(
+                &error,
+                ReactError::StructuredOutput(inner)
+                    if matches!(
+                        inner.as_ref(),
+                        StructuredOutputError::InvalidJson { .. }
+                            | StructuredOutputError::SchemaMismatch { .. }
+                    )
+            );
+            if !repairable
+                || state.schema_retry_count >= snap.config.llm_max_retries
+                || iteration.saturating_add(1) >= snap.config.max_iterations
+            {
+                return Err(error);
+            }
+            state.schema_retry_count = state.schema_retry_count.saturating_add(1);
+            super::super::context::push_runtime_context_note(
+                context,
+                "StructuredOutput:Retry",
+                &format!(
+                    "The previous final answer was rejected: {error}. Return only corrected JSON matching the requested format."
+                ),
+            )
+            .await;
+            Ok(false)
+        }
+    }
+}
+
+/// Choose the last schema- and Critic-accepted answer after the complete tool
+/// batch. Only a batch with no schema-valid candidate consumes repair budget.
+pub(crate) async fn select_final_answer(
+    prepared: Option<&crate::agent::react::PreparedResponseFormat>,
+    snap: &AgentRunSnapshot,
+    context: &Arc<Mutex<crate::compression::ContextManager>>,
+    state: &mut LoopState,
+    iteration: usize,
+    outputs: Vec<String>,
+) -> Result<Option<String>> {
+    let mut accepted = None;
+    let mut last_schema_rejection = None;
+    let mut saw_schema_valid_candidate = false;
+    for output in outputs {
+        match prepared
+            .map(|format| format.parse_text(&output))
+            .transpose()
+        {
+            Ok(_) => {
+                saw_schema_valid_candidate = true;
+                if verify_answer(snap, context, &output, state.verifier_retry_count).await {
+                    accepted = Some(output);
+                } else {
+                    state.verifier_retry_count = state.verifier_retry_count.saturating_add(1);
+                }
+            }
+            Err(_) => last_schema_rejection = Some(output),
+        }
+    }
+    if !saw_schema_valid_candidate && let Some(rejected) = last_schema_rejection {
+        validate_structured_final(prepared, snap, context, state, iteration, &rejected).await?;
+    }
+    Ok(accepted)
+}
 
 /// Verify a final answer with the configured Critic.
 ///

@@ -63,12 +63,12 @@ async fn settle_final_intervention(
     Ok(None)
 }
 
-async fn settle_final_guard_failure(
+pub(crate) async fn settle_final_guard_failure(
     snap: &AgentRunSnapshot,
     context: &Arc<Mutex<crate::compression::ContextManager>>,
     tx: &mpsc::Sender<Result<AgentEvent>>,
     error: ReactError,
-) -> Result<ControlFlow<crate::agent::AgentSteerTurnOutcome, ()>> {
+) -> Result<crate::agent::AgentSteerTurnOutcome> {
     let detail = error.to_string();
     settle_terminal_projection(snap, context, Some(detail.clone()), tx).await?;
     snap.finalize_run(crate::trace::RunStatus::Failed, None, Some(&detail))
@@ -78,9 +78,25 @@ async fn settle_final_guard_failure(
         .await;
     snap.fire_hook(crate::skills::hooks::HookEvent::SessionEnd, Some("blocked"))
         .await;
-    Ok(ControlFlow::Break(
-        crate::agent::AgentSteerTurnOutcome::Failed,
-    ))
+    Ok(crate::agent::AgentSteerTurnOutcome::Failed)
+}
+
+pub(crate) async fn settle_cancelled_final_candidate(
+    snap: &AgentRunSnapshot,
+    context: &Arc<Mutex<crate::compression::ContextManager>>,
+    tx: &mpsc::Sender<Result<AgentEvent>>,
+) -> Result<crate::agent::AgentSteerTurnOutcome> {
+    let reason = "Agent execution cancelled before final answer";
+    settle_terminal_projection(snap, context, Some(reason.to_string()), tx).await?;
+    snap.finalize_run(crate::trace::RunStatus::Cancelled, None, Some(reason))
+        .await;
+    let _ = tx.send(Ok(AgentEvent::Cancelled)).await;
+    snap.fire_hook(
+        crate::skills::hooks::HookEvent::SessionEnd,
+        Some("cancelled"),
+    )
+    .await;
+    Ok(crate::agent::AgentSteerTurnOutcome::Cancelled)
 }
 
 pub(crate) async fn settle_terminal_projection(
@@ -147,6 +163,11 @@ pub(crate) async fn finalize_completed_run(
     );
     let reg = snap.tools.hook_registry.read().await.clone();
     let sr = reg.run_lifecycle_hooks(&hc).await;
+    if super::cancellation_requested(snap) {
+        return Ok(ControlFlow::Break(
+            settle_cancelled_final_candidate(snap, context, tx).await?,
+        ));
+    }
     if let Some(reason) = &sr.continue_reason
         && !state.stop_hook_continued
     {
@@ -157,6 +178,12 @@ pub(crate) async fn finalize_completed_run(
         )
         .await;
         return Ok(ControlFlow::Continue(()));
+    }
+
+    if super::cancellation_requested(snap) {
+        return Ok(ControlFlow::Break(
+            settle_cancelled_final_candidate(snap, context, tx).await?,
+        ));
     }
 
     for cb in snap.config.callbacks.iter() {
@@ -223,22 +250,33 @@ pub(crate) async fn emit_final_text(
     answer: String,
     reasoning_content: String,
     reasoning_blocks: Vec<crate::llm::types::ReasoningBlock>,
+    // True only when the ReAct driver already applied Output Guard before
+    // schema validation and the optional Critic.
+    guard_already_checked: bool,
 ) -> Result<ControlFlow<crate::agent::AgentSteerTurnOutcome, ()>> {
-    let answer = match snap.check_final_answer_guard(&answer).await {
-        Ok(answer) => answer,
-        Err(error) => return settle_final_guard_failure(snap, context, tx, error).await,
+    let answer = if guard_already_checked {
+        answer
+    } else {
+        match snap.check_final_answer_guard(&answer).await {
+            Ok(answer) => answer,
+            Err(error) => {
+                return Ok(ControlFlow::Break(
+                    settle_final_guard_failure(snap, context, tx, error).await?,
+                ));
+            }
+        }
     };
+    if super::cancellation_requested(snap) {
+        return Ok(ControlFlow::Break(
+            settle_cancelled_final_candidate(snap, context, tx).await?,
+        ));
+    }
     let agent = &snap.config.agent_name;
 
     let ts = vec![crate::agent::react::StepType::Thought(answer.clone())];
     for cb in snap.config.callbacks.iter() {
         cb.on_think_end(agent, &ts, pt, ct).await;
     }
-    context.lock().await.push(with_reasoning_content(
-        Message::assistant(answer.clone()),
-        reasoning_content,
-        reasoning_blocks,
-    ));
     let hc = crate::skills::hooks::HookContext::for_stop(
         None,
         snap.config.session_id.as_deref().unwrap_or(""),
@@ -247,9 +285,19 @@ pub(crate) async fn emit_final_text(
     );
     let reg = snap.tools.hook_registry.read().await.clone();
     let sr = reg.run_lifecycle_hooks(&hc).await;
+    if super::cancellation_requested(snap) {
+        return Ok(ControlFlow::Break(
+            settle_cancelled_final_candidate(snap, context, tx).await?,
+        ));
+    }
     if let Some(reason) = &sr.continue_reason
         && !state.stop_hook_continued
     {
+        context.lock().await.push(with_reasoning_content(
+            Message::assistant(answer.clone()),
+            reasoning_content.clone(),
+            reasoning_blocks.clone(),
+        ));
         super::super::context::push_runtime_context_note(
             context,
             "Hook:Stop",
@@ -265,6 +313,11 @@ pub(crate) async fn emit_final_text(
     if let Some(outcome) = settle_final_intervention(snap, context, &answer, tx).await? {
         return Ok(ControlFlow::Break(outcome));
     }
+    context.lock().await.push(with_reasoning_content(
+        Message::assistant(answer.clone()),
+        reasoning_content,
+        reasoning_blocks,
+    ));
     snap.auto_snapshot(context, iteration).await;
     if snap.guard.audit_logger.is_some() {
         let ev = crate::audit::AuditEvent::now(
@@ -698,6 +751,7 @@ mod tests {
             "blocked answer".to_string(),
             String::new(),
             Vec::new(),
+            false,
         )
         .await?;
         assert!(matches!(
@@ -757,6 +811,7 @@ mod tests {
             "raw answer".to_string(),
             String::new(),
             Vec::new(),
+            false,
         )
         .await?;
         assert!(matches!(

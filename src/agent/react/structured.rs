@@ -22,9 +22,10 @@
 //! ```
 
 use crate::agent::Agent;
-use crate::error::{ReactError, Result};
+use crate::error::{Result, StructuredOutputError};
 
 use super::ReactAgent;
+use super::extract::{PreparedResponseFormat, parse_json_text};
 
 /// Wrapper that automatically parses Agent text output into type `T`
 ///
@@ -59,14 +60,28 @@ where
 
     /// Execute a task and parse the result as type `T`
     pub async fn execute(&mut self, task: &str) -> Result<T> {
+        let prepared = self
+            .inner
+            .config
+            .response_format
+            .as_ref()
+            .map(PreparedResponseFormat::new)
+            .transpose()?;
         let text = self.inner.execute(task).await?;
-        parse_json_output(&text)
+        parse_json_output(&text, prepared.as_ref())
     }
 
     /// Chat and parse the result as type `T`
     pub async fn chat(&mut self, message: &str) -> Result<T> {
+        let prepared = self
+            .inner
+            .config
+            .response_format
+            .as_ref()
+            .map(PreparedResponseFormat::new)
+            .transpose()?;
         let text = self.inner.chat(message).await?;
-        parse_json_output(&text)
+        parse_json_output(&text, prepared.as_ref())
     }
 }
 
@@ -75,24 +90,23 @@ where
 /// Supports two formats:
 /// 1. Pure JSON string
 /// 2. JSON wrapped in Markdown code block (```json ... ```)
-fn parse_json_output<T: serde::de::DeserializeOwned>(text: &str) -> Result<T> {
+fn parse_json_output<T: serde::de::DeserializeOwned>(
+    text: &str,
+    prepared: Option<&PreparedResponseFormat>,
+) -> Result<T> {
     let trimmed = text.trim();
 
-    // Try direct JSON parsing
-    if let Ok(v) = serde_json::from_str::<T>(trimmed) {
-        return Ok(v);
+    let value = match parse_json_text(trimmed) {
+        Ok(value) => value,
+        Err(error) => match extract_json_from_markdown(trimmed) {
+            Some(json_str) => parse_json_text(json_str)?,
+            None => return Err(error),
+        },
+    };
+    if let Some(prepared) = prepared {
+        prepared.validate(&value)?;
     }
-
-    // Try extracting JSON from markdown code block
-    if let Some(json_str) = extract_json_from_markdown(trimmed)
-        && let Ok(v) = serde_json::from_str::<T>(json_str)
-    {
-        return Ok(v);
-    }
-
-    Err(ReactError::Other(format!(
-        "Failed to parse LLM output as target type. Raw output:\n{text}"
-    )))
+    serde_json::from_value(value).map_err(|_| StructuredOutputError::InvalidTargetType.into())
 }
 
 /// Extract JSON content from a markdown code block
@@ -116,7 +130,10 @@ fn extract_json_from_markdown(text: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::ReactError;
+    use crate::llm::ResponseFormat;
     use serde::Deserialize;
+    use serde_json::json;
 
     #[derive(Debug, Deserialize, PartialEq)]
     struct Person {
@@ -125,8 +142,8 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_json_direct() {
-        let result: Person = parse_json_output(r#"{"name": "Alice", "age": 30}"#).unwrap();
+    fn test_parse_json_direct() -> Result<()> {
+        let result: Person = parse_json_output(r#"{"name": "Alice", "age": 30}"#, None)?;
         assert_eq!(
             result,
             Person {
@@ -134,30 +151,64 @@ mod tests {
                 age: 30
             }
         );
+        Ok(())
     }
 
     #[test]
-    fn test_parse_json_with_whitespace() {
-        let result: Person = parse_json_output("  \n{\"name\": \"Bob\", \"age\": 25}\n  ").unwrap();
+    fn test_parse_json_with_whitespace() -> Result<()> {
+        let result: Person = parse_json_output("  \n{\"name\": \"Bob\", \"age\": 25}\n  ", None)?;
         assert_eq!(result.name, "Bob");
+        Ok(())
     }
 
     #[test]
-    fn test_parse_json_from_markdown() {
+    fn test_parse_json_from_markdown() -> Result<()> {
         let text = r#"Here is the result:
 ```json
 {"name": "Charlie", "age": 35}
 ```
 "#;
-        let result: Person = parse_json_output(text).unwrap();
+        let result: Person = parse_json_output(text, None)?;
         assert_eq!(result.name, "Charlie");
         assert_eq!(result.age, 35);
+        Ok(())
     }
 
     #[test]
     fn test_parse_json_failure() {
-        let result = parse_json_output::<Person>("not json at all");
+        let result = parse_json_output::<Person>("not json at all", None);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn strict_schema_rejects_value_that_deserializes_into_target_type() -> Result<()> {
+        let format = ResponseFormat::json_schema(
+            "person",
+            json!({
+                "type": "object",
+                "properties": {"name": {"type": "string"}, "age": {"type": "integer", "minimum": 18}},
+                "required": ["name", "age"]
+            }),
+        );
+        let prepared = PreparedResponseFormat::new(&format)?;
+        let result = parse_json_output::<Person>(r#"{"name":"Alice","age":17}"#, Some(&prepared));
+
+        assert!(matches!(
+            result,
+            Err(ReactError::StructuredOutput(inner))
+                if matches!(inner.as_ref(), StructuredOutputError::SchemaMismatch { .. })
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn parse_failure_never_echoes_raw_output() {
+        let result = parse_json_output::<Person>("private malformed output", None);
+        let message = result
+            .err()
+            .map(|error| error.to_string())
+            .unwrap_or_default();
+        assert!(!message.contains("private malformed output"));
     }
 
     #[test]
