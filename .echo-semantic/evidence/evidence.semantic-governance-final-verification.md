@@ -97,7 +97,7 @@ ADR0040记录三页概念导航、事实源和open Finding承诺上限。ADR0041
 
 ## 语义连续性
 
-最终候选以排除`.echo-semantic`后的`source:33686a6a0273c6f8ea85608bff92fed9774f00bfefe1bbd34aa1a2316b236cbc`绑定。与共同基准和唯一前置版本`b21aba01b34e74c93d783a89db895282ba831c3c`比较共428个受保护义务：408 preserved、4 replaced、16 retired，零missing/conflicted/unknown，`passed=true`且errors为空。
+当时的最终候选以排除`.echo-semantic`后的`source:269f99e8904fd56ec35e795640c0f2a742d18a792e88ff4f5b15b4852c1b64f4`绑定。与共同基准和唯一前置版本`b21aba01b34e74c93d783a89db895282ba831c3c`比较共428个受保护义务：408 preserved、4 replaced、16 retired，零missing/conflicted/unknown，`passed=true`且errors为空。此历史结果不宣称验证后续源码快照。
 
 四个replaced义务经`evidence.sdk-governance-scope-equivalence`和ADR0041收敛到`map.sdk-facade-parity#scenario:sdk-contract-scope`。16个retired义务是三条旧SDK-only discovery unknown和十三个旧source blob dependency，不删除API、runtime path、SDK artifact或test。首轮review发现当前workspace discovery/protocol map仍残留4076 intrinsic旧口径后，Issue #116与独立Plan 14建立；两处现统一为1441 deferred capability backlog，包含修复的候选continuity仍维持408/4/16并通过。
 
