@@ -19,7 +19,6 @@ pub(crate) async fn validate_structured_final(
     prepared: Option<&crate::agent::react::extract::PreparedResponseFormat>,
     snap: &AgentRunSnapshot,
     context: &Arc<Mutex<crate::compression::ContextManager>>,
-    tx: &mpsc::Sender<Result<AgentEvent>>,
     state: &mut LoopState,
     iteration: usize,
     answer: &str,
@@ -43,13 +42,6 @@ pub(crate) async fn validate_structured_final(
                 || state.schema_retry_count >= snap.config.llm_max_retries
                 || iteration.saturating_add(1) >= snap.config.max_iterations
             {
-                super::finalize::settle_terminal_projection(
-                    snap,
-                    context,
-                    Some(error.to_string()),
-                    tx,
-                )
-                .await?;
                 return Err(error);
             }
             state.schema_retry_count = state.schema_retry_count.saturating_add(1);
@@ -64,6 +56,41 @@ pub(crate) async fn validate_structured_final(
             Ok(false)
         }
     }
+}
+
+/// Choose the last schema- and Critic-accepted answer after the complete tool
+/// batch. Only a batch with no schema-valid candidate consumes repair budget.
+pub(crate) async fn select_final_answer(
+    prepared: Option<&crate::agent::react::PreparedResponseFormat>,
+    snap: &AgentRunSnapshot,
+    context: &Arc<Mutex<crate::compression::ContextManager>>,
+    state: &mut LoopState,
+    iteration: usize,
+    outputs: Vec<String>,
+) -> Result<Option<String>> {
+    let mut accepted = None;
+    let mut last_schema_rejection = None;
+    let mut saw_schema_valid_candidate = false;
+    for output in outputs {
+        match prepared
+            .map(|format| format.parse_text(&output))
+            .transpose()
+        {
+            Ok(_) => {
+                saw_schema_valid_candidate = true;
+                if verify_answer(snap, context, &output, state.verifier_retry_count).await {
+                    accepted = Some(output);
+                } else {
+                    state.verifier_retry_count = state.verifier_retry_count.saturating_add(1);
+                }
+            }
+            Err(_) => last_schema_rejection = Some(output),
+        }
+    }
+    if !saw_schema_valid_candidate && let Some(rejected) = last_schema_rejection {
+        validate_structured_final(prepared, snap, context, state, iteration, &rejected).await?;
+    }
+    Ok(accepted)
 }
 
 /// Verify a final answer with the configured Critic.

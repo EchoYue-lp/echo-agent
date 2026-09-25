@@ -1033,9 +1033,9 @@ impl AgentSnapshot {
 
             // Branch: tool calls vs text answer vs no-response
             let outcome = if !think.tool_call_map.is_empty() {
-                phases::tools::run_tools(&self, &context, &tx, &mut state, iteration, think, &label)
-                    .await?
+                phases::tools::run_tools(&self, &context, &tx, iteration, think, &label).await?
             } else if !think.content_buffer.is_empty() {
+                let mut think = think;
                 let assistant_draft = phases::with_reasoning_content(
                     Message::assistant(think.content_buffer.clone()),
                     think.reasoning_buffer.clone(),
@@ -1048,26 +1048,64 @@ impl AgentSnapshot {
                 {
                     continue;
                 }
-                if !phases::verify::validate_structured_final(
+                think.content_buffer =
+                    match self.check_final_answer_guard(&think.content_buffer).await {
+                        Ok(answer) => answer,
+                        Err(error) => {
+                            return phases::finalize::settle_final_guard_failure(
+                                &self, &context, &tx, error,
+                            )
+                            .await;
+                        }
+                    };
+                match phases::verify::validate_structured_final(
                     structured_format.as_ref(),
                     &self,
                     &context,
-                    &tx,
                     &mut state,
                     iteration,
                     &think.content_buffer,
                 )
-                .await?
+                .await
                 {
-                    continue;
+                    Ok(true) => {}
+                    Ok(false) => continue,
+                    Err(error) => {
+                        phases::finalize::settle_terminal_projection(
+                            &self,
+                            &context,
+                            Some(error.to_string()),
+                            &tx,
+                        )
+                        .await?;
+                        return Err(error);
+                    }
                 }
                 let pt = think.pt;
                 let ct = think.ct;
-                match phases::verify::verify_final_text(
-                    &self, &context, &tx, &mut state, iteration, think, &label,
-                )
-                .await?
-                {
+                if phases::cancellation_requested(&self) {
+                    return phases::finalize::settle_cancelled_final_candidate(
+                        &self, &context, &tx,
+                    )
+                    .await;
+                }
+                let verified = tokio::select! {
+                    verified = phases::verify::verify_final_text(
+                        &self, &context, &tx, &mut state, iteration, think, &label,
+                    ) => verified,
+                    _ = phases::wait_for_cancellation(&self) => {
+                        return phases::finalize::settle_cancelled_final_candidate(
+                            &self, &context, &tx,
+                        ).await;
+                    }
+                };
+                if phases::cancellation_requested(&self) {
+                    return phases::finalize::settle_cancelled_final_candidate(
+                        &self, &context, &tx,
+                    )
+                    .await;
+                }
+                match verified? {
                     IterOutcome::Continue => continue,
                     IterOutcome::FinalText {
                         answer,
@@ -1085,6 +1123,7 @@ impl AgentSnapshot {
                             answer,
                             reasoning_content,
                             reasoning_blocks,
+                            true,
                         )
                         .await?
                         {
@@ -1102,23 +1141,51 @@ impl AgentSnapshot {
                 IterOutcome::Continue => {
                     continue;
                 }
-                IterOutcome::Finish { output } => {
+                IterOutcome::FinishCandidates { outputs } => {
                     if self.drain_steer_into_context(&context, None).await > 0 {
                         continue;
                     }
-                    if !phases::verify::validate_structured_final(
-                        structured_format.as_ref(),
-                        &self,
-                        &context,
-                        &tx,
-                        &mut state,
-                        iteration,
-                        &output,
-                    )
-                    .await?
-                    {
-                        continue;
+                    if phases::cancellation_requested(&self) {
+                        return phases::finalize::settle_cancelled_final_candidate(
+                            &self, &context, &tx,
+                        )
+                        .await;
                     }
+                    let selected = tokio::select! {
+                        selected = phases::verify::select_final_answer(
+                            structured_format.as_ref(),
+                            &self,
+                            &context,
+                            &mut state,
+                            iteration,
+                            outputs,
+                        ) => selected,
+                        _ = phases::wait_for_cancellation(&self) => {
+                            return phases::finalize::settle_cancelled_final_candidate(
+                                &self, &context, &tx,
+                            ).await;
+                        }
+                    };
+                    if phases::cancellation_requested(&self) {
+                        return phases::finalize::settle_cancelled_final_candidate(
+                            &self, &context, &tx,
+                        )
+                        .await;
+                    }
+                    let output = match selected {
+                        Ok(Some(output)) => output,
+                        Ok(None) => continue,
+                        Err(error) => {
+                            phases::finalize::settle_terminal_projection(
+                                &self,
+                                &context,
+                                Some(error.to_string()),
+                                &tx,
+                            )
+                            .await?;
+                            return Err(error);
+                        }
+                    };
                     match phases::finalize::finalize_completed_run(
                         &self, &context, &label, &output, iteration, &state, &tx,
                     )
@@ -1141,18 +1208,37 @@ impl AgentSnapshot {
                     reasoning_content,
                     reasoning_blocks,
                 } => {
-                    if !phases::verify::validate_structured_final(
+                    let answer = match self.check_final_answer_guard(&answer).await {
+                        Ok(answer) => answer,
+                        Err(error) => {
+                            return phases::finalize::settle_final_guard_failure(
+                                &self, &context, &tx, error,
+                            )
+                            .await;
+                        }
+                    };
+                    match phases::verify::validate_structured_final(
                         structured_format.as_ref(),
                         &self,
                         &context,
-                        &tx,
                         &mut state,
                         iteration,
                         &answer,
                     )
-                    .await?
+                    .await
                     {
-                        continue;
+                        Ok(true) => {}
+                        Ok(false) => continue,
+                        Err(error) => {
+                            phases::finalize::settle_terminal_projection(
+                                &self,
+                                &context,
+                                Some(error.to_string()),
+                                &tx,
+                            )
+                            .await?;
+                            return Err(error);
+                        }
                     }
                     let pt = 0;
                     let ct = 0;
@@ -1167,6 +1253,7 @@ impl AgentSnapshot {
                         answer,
                         reasoning_content,
                         reasoning_blocks,
+                        true,
                     )
                     .await?
                     {
@@ -1374,6 +1461,111 @@ mod tests {
         calls: Arc<std::sync::atomic::AtomicUsize>,
     }
 
+    struct InvalidFinalJsonGuard;
+
+    struct BlockDraftFinalGuard;
+
+    struct SequentialMarkerTool;
+
+    struct BlockingFinalCritic {
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    impl echo_core::agent::Critic for BlockingFinalCritic {
+        fn critique<'a>(
+            &'a self,
+            _task: &'a str,
+            _answer: &'a str,
+            _context: &'a str,
+        ) -> BoxFuture<'a, Result<echo_core::agent::Critique>> {
+            Box::pin(async move {
+                self.entered.notify_one();
+                self.release.notified().await;
+                Ok(echo_core::agent::Critique {
+                    score: 10.0,
+                    passed: true,
+                    feedback: "accepted".to_string(),
+                    suggestions: Vec::new(),
+                })
+            })
+        }
+    }
+
+    impl crate::tools::Tool for SequentialMarkerTool {
+        fn name(&self) -> &str {
+            "sequential_marker"
+        }
+
+        fn description(&self) -> &str {
+            "Return a marker after the preceding tool call"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type":"object","properties":{}})
+        }
+
+        fn execute(
+            &self,
+            _parameters: crate::tools::ToolParameters,
+        ) -> BoxFuture<'_, Result<crate::tools::ToolResult>> {
+            Box::pin(async { Ok(crate::tools::ToolResult::success("later tool result")) })
+        }
+
+        fn risk_level(&self) -> crate::tools::ToolRiskLevel {
+            crate::tools::ToolRiskLevel::ReadOnly
+        }
+
+        fn allows_parallel_batch_execution(&self) -> bool {
+            false
+        }
+    }
+
+    impl Guard for BlockDraftFinalGuard {
+        fn name(&self) -> &str {
+            "block-draft-final"
+        }
+
+        fn check<'a>(
+            &'a self,
+            content: &'a str,
+            direction: GuardDirection,
+        ) -> BoxFuture<'a, Result<GuardResult>> {
+            Box::pin(async move {
+                if direction == GuardDirection::Output && content == "draft answer" {
+                    Ok(GuardResult::Block {
+                        reason: "draft answer is stale".to_string(),
+                    })
+                } else {
+                    Ok(GuardResult::Pass)
+                }
+            })
+        }
+    }
+
+    impl Guard for InvalidFinalJsonGuard {
+        fn name(&self) -> &str {
+            "invalid-final-json"
+        }
+
+        fn check<'a>(
+            &'a self,
+            _content: &'a str,
+            direction: GuardDirection,
+        ) -> BoxFuture<'a, Result<GuardResult>> {
+            Box::pin(async move {
+                if direction == GuardDirection::Output {
+                    Ok(GuardResult::Transform {
+                        content: r#"{"age":"invalid"}"#.to_string(),
+                        reasons: vec!["test transform".to_string()],
+                    })
+                } else {
+                    Ok(GuardResult::Pass)
+                }
+            })
+        }
+    }
+
     impl Guard for CountingGuard {
         fn name(&self) -> &str {
             "counting-guard"
@@ -1557,9 +1749,9 @@ mod tests {
     async fn managed_guard_block_hydrates_before_terminal_settlement() -> Result<()> {
         let conversation_root = tempfile::tempdir()?;
         let runtime_root = tempfile::tempdir()?;
-        let conversations = Arc::new(crate::memory::FileConversationStore::new(
-            conversation_root.path(),
-        )?);
+        let conversations: Arc<dyn echo_core::memory::ConversationStore> = Arc::new(
+            crate::memory::FileConversationStore::new(conversation_root.path())?,
+        );
         let runtime = Arc::new(crate::state::FileRuntimeStateStore::new(
             runtime_root.path(),
         )?);
@@ -1907,7 +2099,7 @@ mod tests {
             ))
             .system_prompt("system")
             .conversation_id("text-final-intervention")
-            .conversation_store(conversations)
+            .conversation_store(conversations.clone())
             .state_store(runtime)
             .intervention_callback(Arc::new(BlockFinalAnswer))
             .build()?;
@@ -1949,6 +2141,17 @@ mod tests {
                 .iter()
                 .all(|event| !matches!(event, AgentEvent::FinalAnswer(_)))
         );
+        let stored = echo_core::memory::ConversationStore::get_messages(
+            conversations.as_ref(),
+            "text-final-intervention",
+        )
+        .await?;
+        assert!(stored.iter().all(|message| {
+            message
+                .content
+                .as_deref()
+                .is_none_or(|content| !content.contains("candidate answer"))
+        }));
         Ok(())
     }
 
@@ -4790,6 +4993,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn output_guard_transform_cannot_publish_invalid_strict_json() -> Result<()> {
+        let llm = Arc::new(MockLlmClient::new().with_response(r#"{"age":28}"#));
+        let mut agent = ReactAgentBuilder::new()
+            .llm_client(llm.clone())
+            .model_profile(
+                echo_core::llm::capabilities::ModelProfile::from_provider_name(
+                    "mock-model",
+                    "openai",
+                ),
+            )
+            .response_format(crate::llm::ResponseFormat::json_schema(
+                "person",
+                serde_json::json!({"type":"object","properties":{"age":{"type":"integer"}},"required":["age"]}),
+            ))
+            .max_iterations(1)
+            .build()?;
+        let mut guards = GuardManager::new();
+        guards.add(Arc::new(InvalidFinalJsonGuard));
+        agent.set_guard_manager(guards);
+
+        let events = collect_events(&agent, "run").await;
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::FinalAnswer(_)))
+        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AgentEvent::Error { message, .. } if message.contains("does not match JSON Schema")
+        )));
+        assert_eq!(llm.call_count(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn strict_schema_retries_final_answer_tool_before_success_terminal() -> Result<()> {
         let llm = Arc::new(
             MockLlmClient::new()
@@ -4827,6 +5065,427 @@ mod tests {
             })
             .collect();
         assert_eq!(final_answers, vec![r#"{"age":28}"#]);
+        assert_eq!(llm.call_count(), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn strict_final_answer_schema_precedes_optional_critic() -> Result<()> {
+        let llm = Arc::new(MockLlmClient::new().then_tool_call(
+            "bad-final",
+            "final_answer",
+            serde_json::json!({"answer": r#"{"age":"wrong"}"#}).to_string(),
+        ));
+        let mut agent = ReactAgent::new(
+            AgentConfig::new("mock-model", "critic-agent", "system")
+                .model_profile(
+                    echo_core::llm::capabilities::ModelProfile::from_provider_name(
+                        "mock-model",
+                        "openai",
+                    ),
+                )
+                .response_format(crate::llm::ResponseFormat::json_schema(
+                    "person",
+                    serde_json::json!({"type":"object","properties":{"age":{"type":"integer"}},"required":["age"]}),
+                ))
+                .verifier_enabled(true)
+                .max_iterations(1),
+        )
+        .with_llm_client(llm.clone());
+        agent.set_critic(Arc::new(echo_core::agent::StaticCritic::always_fail()));
+
+        let events = collect_events(&agent, "run").await;
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::FinalAnswer(_)))
+        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AgentEvent::Error { message, .. } if message.contains("does not match JSON Schema")
+        )));
+        assert_eq!(llm.call_count(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn later_valid_final_answer_in_same_batch_is_not_poisoned_by_invalid_peer() -> Result<()>
+    {
+        let final_call = |id: &str, answer: &str| crate::llm::types::ToolCall {
+            id: id.to_string(),
+            call_type: "function".to_string(),
+            function: crate::llm::types::FunctionCall {
+                name: "final_answer".to_string(),
+                arguments: serde_json::json!({"answer": answer}).to_string(),
+            },
+        };
+        let llm = Arc::new(MockLlmClient::new().then_tool_calls(vec![
+            final_call("bad-final", r#"{"age":"wrong"}"#),
+            final_call("good-final", r#"{"age":28}"#),
+        ]));
+        let agent = ReactAgentBuilder::new()
+            .llm_client(llm.clone())
+            .model_profile(
+                echo_core::llm::capabilities::ModelProfile::from_provider_name(
+                    "mock-model",
+                    "openai",
+                ),
+            )
+            .response_format(crate::llm::ResponseFormat::json_schema(
+                "person",
+                serde_json::json!({"type":"object","properties":{"age":{"type":"integer"}},"required":["age"]}),
+            ))
+            .max_iterations(1)
+            .build()?;
+
+        let events = collect_events(&agent, "run").await;
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AgentEvent::FinalAnswer(answer) if answer == r#"{"age":28}"#
+        )));
+        assert_eq!(llm.call_count(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn invalid_tool_final_does_not_preempt_accepted_steer() -> Result<()> {
+        use std::time::Duration;
+
+        let llm = Arc::new(
+            MockLlmClient::new()
+                .then_tool_call(
+                    "bad-final",
+                    "final_answer",
+                    serde_json::json!({"answer": r#"{"age":"wrong"}"#}).to_string(),
+                )
+                .with_response(r#"{"age":28}"#)
+                .with_delay(Duration::from_millis(150)),
+        );
+        let agent = ReactAgent::new(
+            AgentConfig::new("mock-model", "steered", "system")
+                .model_profile(
+                    echo_core::llm::capabilities::ModelProfile::from_provider_name(
+                        "mock-model",
+                        "openai",
+                    ),
+                )
+                .response_format(crate::llm::ResponseFormat::json_schema(
+                    "person",
+                    serde_json::json!({"type":"object","properties":{"age":{"type":"integer"}},"required":["age"]}),
+                ))
+                .llm_max_retries(0)
+                .max_iterations(2),
+        )
+        .with_llm_client(llm.clone());
+
+        let stream = agent
+            .run_stream_channel(
+                StreamInit {
+                    text: "initial request".to_string(),
+                    message: None,
+                    label: String::new(),
+                    invocation: None,
+                },
+                StreamMode::Chat,
+            )
+            .await?;
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        let mut receipt = agent
+            .steer_input_tracked(None, Message::user("correct the final answer".to_string()))
+            .map_err(|error| ReactError::Other(error.to_string()))?;
+        let events = stream.collect::<Vec<_>>().await;
+        assert!(events.iter().any(|event| matches!(
+            event,
+            Ok(AgentEvent::FinalAnswer(answer)) if answer == r#"{"age":28}"#
+        )));
+        assert_eq!(llm.call_count(), 2);
+        assert_eq!(
+            receipt.wait_for_turn_settled().await,
+            crate::agent::AgentSteerState::TurnSettled {
+                outcome: crate::agent::AgentSteerTurnOutcome::Completed,
+                drained: true,
+            }
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancellation_during_final_critic_cannot_complete_run() -> Result<()> {
+        use futures::StreamExt;
+
+        let llm = Arc::new(MockLlmClient::new().then_tool_call(
+            "valid-final",
+            "final_answer",
+            serde_json::json!({"answer": r#"{"age":28}"#}).to_string(),
+        ));
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let run_store = Arc::new(crate::trace::InMemoryRunStore::new());
+        let mut agent = ReactAgent::new(
+            AgentConfig::new("mock-model", "cancellable", "system")
+                .model_profile(
+                    echo_core::llm::capabilities::ModelProfile::from_provider_name(
+                        "mock-model",
+                        "openai",
+                    ),
+                )
+                .response_format(crate::llm::ResponseFormat::json_schema(
+                    "person",
+                    serde_json::json!({"type":"object","properties":{"age":{"type":"integer"}},"required":["age"]}),
+                ))
+                .verifier_enabled(true)
+                .max_iterations(1),
+        )
+        .with_llm_client(llm);
+        agent.set_critic(Arc::new(BlockingFinalCritic {
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+        }));
+        agent.set_run_store(run_store.clone());
+        let cancel = crate::agent::CancellationToken::new();
+        let mut stream = agent
+            .execute_stream_with_cancel("run", cancel.clone())
+            .await?;
+        while let Some(event) = stream.next().await {
+            if matches!(event?, AgentEvent::ToolBatchEnd) {
+                break;
+            }
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(2), entered.notified())
+            .await
+            .map_err(|_| ReactError::Other("critic did not start".to_string()))?;
+        cancel.cancel();
+        let remaining_result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            stream.collect::<Vec<_>>(),
+        )
+        .await;
+        release.notify_one();
+        let remaining = remaining_result
+            .map_err(|_| ReactError::Other("cancel waited for blocked critic".to_string()))?;
+        assert!(
+            remaining
+                .iter()
+                .any(|event| matches!(event, Ok(AgentEvent::Cancelled)))
+        );
+        assert!(
+            !remaining
+                .iter()
+                .any(|event| matches!(event, Ok(AgentEvent::FinalAnswer(_))))
+        );
+        let summary = crate::trace::RunStore::list_all(run_store.as_ref(), 1)
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| ReactError::Other("cancelled run trace missing".to_string()))?;
+        let run = crate::trace::RunStore::load(run_store.as_ref(), &summary.run_id)
+            .await?
+            .ok_or_else(|| ReactError::Other("cancelled trace body missing".to_string()))?;
+        assert_eq!(run.status, crate::trace::RunStatus::Cancelled);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancellation_during_text_critic_cannot_complete_run() -> Result<()> {
+        use futures::StreamExt;
+
+        let llm = Arc::new(MockLlmClient::new().with_response(r#"{"age":28}"#));
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let run_store = Arc::new(crate::trace::InMemoryRunStore::new());
+        let mut agent = ReactAgent::new(
+            AgentConfig::new("mock-model", "text-cancellable", "system")
+                .model_profile(
+                    echo_core::llm::capabilities::ModelProfile::from_provider_name(
+                        "mock-model",
+                        "openai",
+                    ),
+                )
+                .response_format(crate::llm::ResponseFormat::json_schema(
+                    "person",
+                    serde_json::json!({"type":"object","properties":{"age":{"type":"integer"}},"required":["age"]}),
+                ))
+                .verifier_enabled(true)
+                .max_iterations(1),
+        )
+        .with_llm_client(llm);
+        agent.set_critic(Arc::new(BlockingFinalCritic {
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+        }));
+        agent.set_run_store(run_store.clone());
+        let cancel = crate::agent::CancellationToken::new();
+        let stream = agent
+            .execute_stream_with_cancel("run", cancel.clone())
+            .await?;
+        tokio::time::timeout(std::time::Duration::from_secs(2), entered.notified())
+            .await
+            .map_err(|_| ReactError::Other("text critic did not start".to_string()))?;
+        cancel.cancel();
+        let remaining_result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            stream.collect::<Vec<_>>(),
+        )
+        .await;
+        release.notify_one();
+        let remaining = remaining_result
+            .map_err(|_| ReactError::Other("cancel waited for blocked text critic".to_string()))?;
+        assert!(
+            remaining
+                .iter()
+                .any(|event| matches!(event, Ok(AgentEvent::Cancelled)))
+        );
+        assert!(
+            !remaining
+                .iter()
+                .any(|event| matches!(event, Ok(AgentEvent::FinalAnswer(_))))
+        );
+        let summary = crate::trace::RunStore::list_all(run_store.as_ref(), 1)
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| ReactError::Other("text cancel trace missing".to_string()))?;
+        let run = crate::trace::RunStore::load(run_store.as_ref(), &summary.run_id)
+            .await?
+            .ok_or_else(|| ReactError::Other("text cancel trace body missing".to_string()))?;
+        assert_eq!(run.status, crate::trace::RunStatus::Cancelled);
+        Ok(())
+    }
+
+    async fn assert_cancelled_stop_hook_does_not_project_draft(continue_hook: bool) -> Result<()> {
+        let conversation_root = tempfile::tempdir()?;
+        let runtime_root = tempfile::tempdir()?;
+        let conversations: Arc<dyn echo_core::memory::ConversationStore> = Arc::new(
+            crate::memory::FileConversationStore::new(conversation_root.path())?,
+        );
+        let runtime = Arc::new(crate::state::FileRuntimeStateStore::new(
+            runtime_root.path(),
+        )?);
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let entered_hook = Arc::clone(&entered);
+        let release_hook = Arc::clone(&release);
+        let mut agent = ReactAgentBuilder::new()
+            .llm_client(Arc::new(MockLlmClient::new().with_response("draft answer")))
+            .conversation_id("stop-cancel")
+            .build()?;
+        agent.set_conversation_store(Arc::clone(&conversations));
+        agent.set_state_store(runtime);
+        agent.hook_registry().write().await.set_programmatic_hook(
+            "blocking-stop",
+            &[crate::skills::hooks::HookEvent::Stop],
+            Arc::new(move |_context| {
+                let entered = Arc::clone(&entered_hook);
+                let release = Arc::clone(&release_hook);
+                Box::pin(async move {
+                    entered.notify_one();
+                    release.notified().await;
+                    let mut result = crate::skills::hooks::HookResult::allow();
+                    if continue_hook {
+                        result.continue_reason = Some("keep working".to_string());
+                    }
+                    result
+                })
+            }),
+        );
+
+        let cancel = crate::agent::CancellationToken::new();
+        let stream = agent
+            .execute_stream_with_cancel("run", cancel.clone())
+            .await?;
+        tokio::time::timeout(std::time::Duration::from_secs(2), entered.notified())
+            .await
+            .map_err(|_| ReactError::Other("stop hook did not start".to_string()))?;
+        cancel.cancel();
+        release.notify_one();
+        let events = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            stream.collect::<Vec<_>>(),
+        )
+        .await
+        .map_err(|_| ReactError::Other("stop cancellation did not settle".to_string()))?;
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, Ok(AgentEvent::Cancelled)))
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, Ok(AgentEvent::FinalAnswer(_))))
+        );
+        let messages = echo_core::memory::ConversationStore::get_messages(
+            conversations.as_ref(),
+            "stop-cancel",
+        )
+        .await?;
+        assert!(!messages.iter().any(|message| {
+            message
+                .content
+                .as_deref()
+                .is_some_and(|content| content.contains("draft answer"))
+        }));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn schema_retry_note_follows_every_tool_result_in_its_batch() -> Result<()> {
+        let call = |id: &str, name: &str, arguments: String| crate::llm::types::ToolCall {
+            id: id.to_string(),
+            call_type: "function".to_string(),
+            function: crate::llm::types::FunctionCall {
+                name: name.to_string(),
+                arguments,
+            },
+        };
+        let llm = Arc::new(
+            MockLlmClient::new()
+                .then_tool_calls(vec![
+                    call(
+                        "bad-final",
+                        "final_answer",
+                        serde_json::json!({"answer": r#"{"age":"wrong"}"#}).to_string(),
+                    ),
+                    call("later", "sequential_marker", "{}".to_string()),
+                ])
+                .with_response(r#"{"age":28}"#),
+        );
+        let agent = ReactAgentBuilder::new()
+            .llm_client(llm.clone())
+            .model_profile(
+                echo_core::llm::capabilities::ModelProfile::from_provider_name(
+                    "mock-model",
+                    "openai",
+                ),
+            )
+            .response_format(crate::llm::ResponseFormat::json_schema(
+                "person",
+                serde_json::json!({"type":"object","properties":{"age":{"type":"integer"}},"required":["age"]}),
+            ))
+            .tool(Box::new(SequentialMarkerTool))
+            .max_iterations(2)
+            .build()?;
+
+        let events = collect_events(&agent, "run").await;
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AgentEvent::FinalAnswer(answer) if answer == r#"{"age":28}"#
+        )));
+        let messages = agent.memory.context.lock().await.messages().to_vec();
+        let position = |needle: &str| {
+            messages.iter().position(|message| {
+                message
+                    .text_content()
+                    .is_some_and(|text| text.contains(needle))
+            })
+        };
+        let final_result = position(r#"{"age":"wrong"}"#)
+            .ok_or_else(|| ReactError::Other("final tool result missing".to_string()))?;
+        let later_result = position("later tool result")
+            .ok_or_else(|| ReactError::Other("sequential tool result missing".to_string()))?;
+        let retry_note = position("[runtime_context:StructuredOutput:Retry]")
+            .ok_or_else(|| ReactError::Other("schema retry note missing".to_string()))?;
+        assert!(final_result < later_result && later_result < retry_note);
         assert_eq!(llm.call_count(), 2);
         Ok(())
     }
@@ -4983,6 +5642,17 @@ mod tests {
                 .is_some_and(|reason| reason.contains("does not match JSON Schema"))
         );
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancellation_during_stop_hook_does_not_project_assistant_draft() -> Result<()> {
+        assert_cancelled_stop_hook_does_not_project_draft(false).await
+    }
+
+    #[tokio::test]
+    async fn cancellation_during_stop_continuation_does_not_project_assistant_draft() -> Result<()>
+    {
+        assert_cancelled_stop_hook_does_not_project_draft(true).await
     }
 
     #[tokio::test]
@@ -5651,6 +6321,59 @@ mod tests {
                 message.content.as_text().as_deref() == Some("steer correction")
             })
         );
+        assert_eq!(
+            receipt.wait_for_turn_settled().await,
+            crate::agent::AgentSteerState::TurnSettled {
+                outcome: crate::agent::AgentSteerTurnOutcome::Completed,
+                drained: true,
+            }
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn output_guard_does_not_block_superseded_text_before_steer() -> Result<()> {
+        use std::time::Duration;
+
+        let llm = Arc::new(
+            MockLlmClient::new()
+                .with_responses(["draft answer", "corrected answer"])
+                .with_delay(Duration::from_millis(150)),
+        );
+        let mut agent = ReactAgentBuilder::new()
+            .llm_client(llm.clone())
+            .max_iterations(4)
+            .build()?;
+        let mut guards = GuardManager::new();
+        guards.add(Arc::new(BlockDraftFinalGuard));
+        agent.set_guard_manager(guards);
+
+        let stream = agent
+            .run_stream_channel(
+                StreamInit {
+                    text: "initial request".to_string(),
+                    message: None,
+                    label: String::new(),
+                    invocation: None,
+                },
+                StreamMode::Chat,
+            )
+            .await?;
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        let mut receipt = agent
+            .steer_input_tracked(None, Message::user("steer correction".to_string()))
+            .map_err(|error| ReactError::Other(error.to_string()))?;
+        let events = stream.collect::<Vec<_>>().await;
+        assert!(events.iter().any(|event| matches!(
+            event,
+            Ok(AgentEvent::FinalAnswer(answer)) if answer == "corrected answer"
+        )));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, Ok(AgentEvent::Error { .. })))
+        );
+        assert_eq!(llm.call_count(), 2);
         assert_eq!(
             receipt.wait_for_turn_settled().await,
             crate::agent::AgentSteerState::TurnSettled {

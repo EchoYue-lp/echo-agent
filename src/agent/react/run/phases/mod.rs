@@ -19,6 +19,7 @@
 //! driver — which then exits with `Ok(())`.
 
 use crate::agent::AgentEvent;
+use crate::agent::snapshot::AgentRunSnapshot;
 use crate::error::ReactError;
 use crate::llm::types::{Message, ResponseFormat};
 use std::collections::HashMap;
@@ -29,6 +30,35 @@ pub(crate) mod prepare;
 pub(crate) mod think;
 pub(crate) mod tools;
 pub(crate) mod verify;
+
+pub(crate) fn cancellation_requested(snap: &AgentRunSnapshot) -> bool {
+    snap.cancel_token
+        .as_ref()
+        .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
+        || snap
+            .external_cancel
+            .as_ref()
+            .is_some_and(|cancel| cancel.is_cancelled())
+}
+
+pub(crate) async fn wait_for_cancellation(snap: &AgentRunSnapshot) {
+    let invocation = async {
+        match snap.cancel_token.as_ref() {
+            Some(cancel) => cancel.cancelled().await,
+            None => std::future::pending::<()>().await,
+        }
+    };
+    let external = async {
+        match snap.external_cancel.as_ref() {
+            Some(cancel) => cancel.cancelled().await,
+            None => std::future::pending::<()>().await,
+        }
+    };
+    tokio::select! {
+        _ = invocation => {}
+        _ = external => {}
+    }
+}
 
 pub(crate) fn pre_model_block_terminal(
     format: Option<&ResponseFormat>,
@@ -149,9 +179,9 @@ pub(crate) struct ThinkOutput {
 pub(crate) enum IterOutcome {
     /// Verifier-fail or hook-continue: go to the next iteration.
     Continue,
-    /// Tools branch: a `final_answer` tool call was verified and accepted.
-    /// The driver invokes `phases::finalize::finalize_completed_run`.
-    Finish { output: String },
+    /// Tools branch: every tool result was durably settled. The driver owns
+    /// steer/cancellation fences before selecting a final-answer candidate.
+    FinishCandidates { outputs: Vec<String> },
     /// Text-only branch: the LLM produced a content answer that passed
     /// verification. The driver invokes `phases::finalize::emit_final_text`.
     FinalText {
