@@ -4,13 +4,13 @@ id: map.eval-evolution
 kind: capability_map
 title: Trace、Eval、Improve 与 Evolution
 risk: high
-observed_at: 733d352fc719f922b21bab1cd46206139564367f
+observed_at: source:6fdcc1782b7aa2c97a148f7c377d60b4ed26b9d470f02c05a651de1e8e2eac74
 boundary_refs: [boundary.eval-evolution]
 behavior_refs: [behavior.eval-evolution]
 rule_refs: [rule.quality-observation-boundary, rule.fact-projection-separation]
-evidence_refs: [evidence.provider-protocol-quality, evidence.persistence-observation, evidence.high-risk-audit-frontier, evidence.improve-singleton-split-repair, evidence.improve-singleton-split-verification, evidence.improve-iteration-config-repair, evidence.improve-iteration-config-verification, evidence.eval-workspace-generation-repair, evidence.eval-workspace-generation-verification, evidence.eval-timeout-turn-settlement-repair, evidence.eval-timeout-turn-settlement-verification, evidence.eval-trace-correlation-repair, evidence.eval-trace-correlation-verification, evidence.evolution-memory-audit-repair, evidence.evolution-memory-audit-verification, evidence.memory-provenance-authority-repair, evidence.memory-provenance-authority-verification, evidence.skill-candidate-audit-repair, evidence.skill-candidate-audit-verification, evidence.skill-lifecycle-authority-repair, evidence.skill-lifecycle-authority-verification]
+evidence_refs: [evidence.provider-protocol-quality, evidence.persistence-observation, evidence.high-risk-audit-frontier, evidence.improve-singleton-split-repair, evidence.improve-singleton-split-verification, evidence.improve-iteration-config-repair, evidence.improve-iteration-config-verification, evidence.eval-workspace-generation-repair, evidence.eval-workspace-generation-verification, evidence.eval-timeout-turn-settlement-repair, evidence.eval-timeout-turn-settlement-verification, evidence.eval-trace-correlation-repair, evidence.eval-trace-correlation-verification, evidence.background-review-application-repair, evidence.background-review-application-verification, evidence.evolution-memory-audit-repair, evidence.evolution-memory-audit-verification, evidence.memory-provenance-authority-repair, evidence.memory-provenance-authority-verification, evidence.skill-candidate-audit-repair, evidence.skill-candidate-audit-verification, evidence.skill-lifecycle-authority-repair, evidence.skill-lifecycle-authority-verification]
 finding_refs: [finding.eval-trace-identity, finding.eval-timeout-settlement, finding.improve-iteration-config, finding.improve-single-case-panic, finding.eval-workspace-generation-isolation, finding.background-review-detached-persistence-settlement, finding.evolution-audit-atomicity, finding.evolution-changelog-rollback-authority, finding.evolution-skill-promotion-audit, finding.skill-candidate-reinforcement-audit-gap, finding.evolution-doc-namespace, finding.pre-compaction-memory-trust-provenance]
-audit_refs: [audit.eval-evolution.data-durability, audit.eval-evolution.failure-concurrency, audit.eval-evolution.permission-external, audit.improve-singleton-split-rereview, audit.improve-iteration-config-rereview, audit.eval-workspace-generation-rereview, audit.eval-timeout-turn-settlement-rereview, audit.eval-trace-correlation-rereview, audit.evolution-memory-audit-atomicity-rereview, audit.evolution-memory-rollback-rereview, audit.memory-provenance-authority-rereview, audit.skill-candidate-audit-rereview, audit.skill-lifecycle-authority-rereview]
+audit_refs: [audit.eval-evolution.data-durability, audit.eval-evolution.failure-concurrency, audit.eval-evolution.permission-external, audit.improve-singleton-split-rereview, audit.improve-iteration-config-rereview, audit.eval-workspace-generation-rereview, audit.eval-timeout-turn-settlement-rereview, audit.eval-trace-correlation-rereview, audit.background-review-application-rereview, audit.evolution-memory-audit-atomicity-rereview, audit.evolution-memory-rollback-rereview, audit.memory-provenance-authority-rereview, audit.skill-candidate-audit-rereview, audit.skill-lifecycle-authority-rereview]
 related_map_refs: [map.observation-persistence-delivery, map.agent-session-turn, map.llm-provider-runtime, map.extension-lifecycle]
 scenarios:
   trace-record-and-analysis:
@@ -37,8 +37,11 @@ scenarios:
     status: needs_review
     source_refs: [src/evolution/background_review.rs, src/evolution/dreaming.rs, src/evolution/runtime_integration.rs, src/evolution/review.rs]
     rule_refs: [rule.quality-observation-boundary]
-    unknown: proposal-only review、可选 auto-persistence、deterministic dreaming 与 application scheduling 的协调 owner 未闭合
-    next_step: 区分 observation/proposal 与 mutation，并审计 join/取消/失败结算
+    finding_refs: [finding.background-review-detached-persistence-settlement]
+    evidence_refs: [evidence.background-review-application-repair, evidence.background-review-application-verification]
+    audit_refs: [audit.background-review-application-rereview]
+    unknown: Background Review caller-owned settlement 已在 EKO main 闭合；Dreaming 与其它应用调度策略仍需按各自产品边界验收
+    next_step: 审计 Dreaming 与其它应用调度策略，不重新打开已闭合的 #38 owner 合同
   evolution-memory-mutation:
     status: needs_review
     source_refs: [src/evolution/layer.rs, src/evolution/mutation.rs, src/evolution/audit.rs, src/evolution/review.rs, src/evolution/runtime_integration.rs, src/tools/builtin/memory.rs, src/memory_promoter.rs, src/agent/react/run/context.rs, src/evolution/security.rs, docs/adr/0065-evolution-memory-audit-reconciliation.md]
@@ -71,8 +74,10 @@ scenarios:
     status: needs_review
     source_refs: [src/agent/react/run/context.rs, src/evolution/runtime_integration.rs, src/evolution/review.rs]
     finding_refs: [finding.background-review-detached-persistence-settlement, finding.pre-compaction-memory-trust-provenance]
-    unknown: Background Review task settlement和应用调度仍由 #38 及产品owner追踪；记忆Draft/approval由MemoryLayerManager拥有
-    next_step: "#38 处理detached review的join、取消、deadline和持久终态"
+    evidence_refs: [evidence.background-review-application-repair, evidence.background-review-application-verification]
+    audit_refs: [audit.background-review-application-rereview]
+    unknown: Background Review #38 的任务结算已由 EKO owner 验收；其它 runtime trigger 与记忆 Draft/approval 仍按独立边界治理
+    next_step: 继续核对非 Background Review 的 runtime trigger 与人类审批策略
 ---
 
 # Trace、Eval、Improve 与 Evolution
