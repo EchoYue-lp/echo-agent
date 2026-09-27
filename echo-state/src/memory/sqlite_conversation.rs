@@ -10,13 +10,14 @@ pub use echo_core::memory::conversation::{
     ConversationProjectionEpochStatus, ConversationProjectionLifecycle, ConversationStore,
     EnsureConversationProjectionRequest, ManagedConversationDelete,
     ManagedConversationDeleteReceipt, ManagedConversationDeleteStatus, ManagedConversationImport,
-    ManagedConversationMetadataUpdate, ManagedConversationMetadataUpdateReceipt,
-    ManagedConversationMetadataUpdateStatus, NewConversation, PersistenceCallCapability,
-    PersistenceCallContext, StoredMessage, TranscriptProjectionApplyReceipt,
-    TranscriptProjectionApplyStatus, TranscriptProjectionBatch, TranscriptProjectionConflictKind,
+    ManagedConversationImportLocator, ManagedConversationMetadataUpdate,
+    ManagedConversationMetadataUpdateReceipt, ManagedConversationMetadataUpdateStatus,
+    NewConversation, PersistenceCallCapability, PersistenceCallContext, StoredMessage,
+    TranscriptProjectionApplyReceipt, TranscriptProjectionApplyStatus, TranscriptProjectionBatch,
+    TranscriptProjectionConflictKind,
 };
 use futures::future::BoxFuture;
-use rusqlite::{Connection, Transaction, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use tracing::info;
@@ -200,6 +201,31 @@ impl SqliteConversationStore {
         Ok(Some(state))
     }
 
+    fn import_locator(
+        conn: &Connection,
+        conversation_id: &str,
+    ) -> Result<Option<ManagedConversationImportLocator>> {
+        let raw = conn
+            .query_row(
+                "SELECT locator_json FROM managed_import_locator WHERE conversation_id = ?1",
+                params![conversation_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|error| memory_io_error("failed to query managed import locator", error))?;
+        raw.map(|raw| {
+            let locator: ManagedConversationImportLocator = serde_json::from_str(&raw)?;
+            if locator.conversation_id != conversation_id {
+                return Err(MemoryError::SerializationError(
+                    "managed import locator belongs to another conversation".to_string(),
+                )
+                .into());
+            }
+            Ok(locator)
+        })
+        .transpose()
+    }
+
     fn sqlite_u64(value: u64, field: &str) -> Result<i64> {
         i64::try_from(value).map_err(|_| {
             MemoryError::Unsupported(format!(
@@ -315,6 +341,11 @@ impl SqliteConversationStore {
                 PRIMARY KEY (conversation_id, generation_id, ordinal)
             );
 
+            CREATE TABLE IF NOT EXISTS managed_import_locator (
+                conversation_id TEXT PRIMARY KEY REFERENCES conversation(conversation_id) ON DELETE CASCADE,
+                locator_json    TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS managed_conversation_delete_receipt (
                 conversation_id TEXT NOT NULL REFERENCES conversation(conversation_id) ON DELETE CASCADE,
                 operation_id    TEXT NOT NULL,
@@ -386,6 +417,18 @@ impl ConversationStore for SqliteConversationStore {
         Box::pin(async move {
             context.ensure_not_expired()?;
             store.import_managed_messages(request).await
+        })
+    }
+
+    fn get_latest_managed_import_with_context<'a>(
+        &'a self,
+        context: PersistenceCallContext,
+        conversation_id: &'a str,
+    ) -> BoxFuture<'a, Result<Option<ManagedConversationImportLocator>>> {
+        let store = self.with_persistence_call_context(context);
+        Box::pin(async move {
+            context.ensure_not_expired()?;
+            store.get_latest_managed_import(conversation_id).await
         })
     }
 
@@ -1034,6 +1077,29 @@ impl ConversationStore for SqliteConversationStore {
         })
     }
 
+    fn get_latest_managed_import<'a>(
+        &'a self,
+        conversation_id: &'a str,
+    ) -> BoxFuture<'a, Result<Option<ManagedConversationImportLocator>>> {
+        Box::pin(async move {
+            let conversation_id = conversation_id.to_string();
+            self.run_db(move |conn| {
+                let state = Self::projection_state(conn, &conversation_id)?;
+                let locator = Self::import_locator(conn, &conversation_id)?;
+                Ok(match (state, locator) {
+                    (Some(state), Some(locator))
+                        if state.lifecycle == ConversationProjectionLifecycle::Live
+                            && state.epoch == locator.applied_epoch =>
+                    {
+                        Some(locator)
+                    }
+                    _ => None,
+                })
+            })
+            .await
+        })
+    }
+
     fn apply_transcript_projection<'a>(
         &'a self,
         batch: TranscriptProjectionBatch,
@@ -1290,6 +1356,17 @@ impl ConversationStore for SqliteConversationStore {
     ) -> BoxFuture<'a, Result<TranscriptProjectionApplyReceipt>> {
         Box::pin(async move {
             request.validate()?;
+            let import_digests = request
+                .generation_id
+                .as_deref()
+                .map(|_| {
+                    crate::memory::conversation::managed_import_projection_digests(
+                        &request.conversation_id,
+                        &request.messages,
+                    )?;
+                    request.ordinal_digests()
+                })
+                .transpose()?;
             let context = self.persistence_call_context;
             self.run_db(move |conn| {
                 let tx = conn
@@ -1310,10 +1387,19 @@ impl ConversationStore for SqliteConversationStore {
                 );
                 match existing_operation {
                     Ok(existing_digest) => {
+                        let mut authority = state.authority(&request.conversation_id);
+                        if existing_digest == request.payload_digest
+                            && let Some(locator) =
+                                Self::import_locator(&tx, &request.conversation_id)?
+                                    .filter(|locator| locator.matches(&request))
+                        {
+                            authority.epoch = locator.applied_epoch;
+                            authority.revision = locator.applied_revision;
+                        }
                         return Ok(TranscriptProjectionApplyReceipt {
                             operation_id: request.operation_id,
                             payload_digest: request.payload_digest.clone(),
-                            authority: state.authority(&request.conversation_id),
+                            authority,
                             status: if existing_digest == request.payload_digest {
                                 TranscriptProjectionApplyStatus::AlreadyApplied
                             } else {
@@ -1368,6 +1454,14 @@ impl ConversationStore for SqliteConversationStore {
                         MemoryError::ProjectionEpochExhausted(request.conversation_id.clone())
                     })?;
                 let next_revision = state.next_revision(&request.conversation_id)?;
+                let applied_authority = SqliteProjectionState {
+                    epoch: next_epoch,
+                    revision: next_revision,
+                    ..state
+                }
+                .authority(&request.conversation_id);
+                let locator =
+                    ManagedConversationImportLocator::from_applied(&request, &applied_authority)?;
                 Self::replace_messages(&tx, &request.conversation_id, &request.messages)?;
                 tx.execute(
                     "DELETE FROM transcript_projection_receipt WHERE conversation_id = ?1",
@@ -1383,6 +1477,46 @@ impl ConversationStore for SqliteConversationStore {
                 .map_err(|error| {
                     memory_io_error("failed to clear pre-import projection ordinals", error)
                 })?;
+                tx.execute(
+                    "DELETE FROM managed_import_locator WHERE conversation_id = ?1",
+                    params![request.conversation_id],
+                )
+                .map_err(|error| memory_io_error("failed to clear pre-import locator", error))?;
+                if let Some(locator) = locator {
+                    tx.execute(
+                        "INSERT INTO managed_import_locator (conversation_id, locator_json)
+                         VALUES (?1, ?2)",
+                        params![request.conversation_id, serde_json::to_string(&locator)?,],
+                    )
+                    .map_err(|error| {
+                        memory_io_error("failed to record managed import locator", error)
+                    })?;
+                }
+                if let (Some(generation_id), Some(digests)) =
+                    (&request.generation_id, import_digests)
+                {
+                    for (ordinal, digest) in digests.into_iter().enumerate() {
+                        let ordinal = u64::try_from(ordinal).map_err(|_| {
+                            MemoryError::SerializationError(
+                                "managed import ordinal capacity exhausted".to_string(),
+                            )
+                        })?;
+                        tx.execute(
+                            "INSERT INTO transcript_projection_ordinal
+                             (conversation_id, generation_id, ordinal, digest)
+                             VALUES (?1, ?2, ?3, ?4)",
+                            params![
+                                request.conversation_id,
+                                generation_id,
+                                Self::sqlite_u64(ordinal, "ordinal")?,
+                                digest,
+                            ],
+                        )
+                        .map_err(|error| {
+                            memory_io_error("failed to seed managed import ordinal", error)
+                        })?;
+                    }
+                }
                 tx.execute(
                     "INSERT INTO transcript_projection_receipt
                      (conversation_id, operation_id, payload_digest) VALUES (?1, ?2, ?3)",
@@ -1418,12 +1552,7 @@ impl ConversationStore for SqliteConversationStore {
                 let receipt = TranscriptProjectionApplyReceipt {
                     operation_id: request.operation_id,
                     payload_digest: request.payload_digest,
-                    authority: SqliteProjectionState {
-                        epoch: next_epoch,
-                        revision: next_revision,
-                        ..state
-                    }
-                    .authority(&request.conversation_id),
+                    authority: applied_authority,
                     status: TranscriptProjectionApplyStatus::Applied,
                 };
                 tx.commit()
@@ -2653,6 +2782,85 @@ mod tests {
                 .and_then(|message| message.content.as_deref()),
             Some("restored")
         );
+        drop(store);
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn generation_bound_import_seeds_projection_frontier() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!("echo-test-{}", uuid::Uuid::new_v4()));
+        let store = SqliteConversationStore::new(dir.join("conversations.db"))?;
+        let acquired = store
+            .ensure_projection_epoch(ensure_projection_request("import-frontier", None))
+            .await?;
+        let imported_message = stored_message("import-frontier", None, "restored");
+        let import = ManagedConversationImport::prepare_for_generation(
+            "import-frontier",
+            acquired.authority.epoch,
+            acquired.authority.revision,
+            "import-frontier",
+            vec![imported_message.clone()],
+        )?;
+        let imported = store.import_managed_messages(import.clone()).await?;
+        assert_eq!(imported.status, TranscriptProjectionApplyStatus::Applied);
+        let locator = store
+            .get_latest_managed_import("import-frontier")
+            .await?
+            .ok_or_else(|| MemoryError::NotFound("managed import locator".to_string()))?;
+        assert!(locator.matches(&import));
+        let renamed = store
+            .update_managed_conversation(ManagedConversationMetadataUpdate::prepare(
+                "import-frontier",
+                imported.authority.epoch,
+                imported.authority.revision,
+                Some("Renamed".to_string()),
+                None,
+                None,
+            )?)
+            .await?;
+        assert_eq!(
+            renamed.status,
+            ManagedConversationMetadataUpdateStatus::Updated
+        );
+        let repeated = store.import_managed_messages(import).await?;
+        assert_eq!(
+            repeated.status,
+            TranscriptProjectionApplyStatus::AlreadyApplied
+        );
+        assert_eq!(repeated.authority.revision, imported.authority.revision);
+        assert_eq!(
+            store
+                .get_latest_managed_import("import-frontier")
+                .await?
+                .map(|locator| locator.applied_revision),
+            Some(imported.authority.revision)
+        );
+        let replay = TranscriptProjectionBatch::prepare(
+            "import-frontier",
+            imported.authority.epoch,
+            "import-frontier",
+            0,
+            vec![imported_message],
+        )?;
+        assert!(matches!(
+            store.apply_transcript_projection(replay).await?.status,
+            TranscriptProjectionApplyStatus::Conflict {
+                kind: TranscriptProjectionConflictKind::OrdinalDigest,
+                ..
+            }
+        ));
+        let appended = store
+            .apply_transcript_projection(projection_batch(
+                "import-frontier",
+                imported.authority.epoch,
+                "import-frontier",
+                1,
+                &["next"],
+            )?)
+            .await?;
+        assert_eq!(appended.status, TranscriptProjectionApplyStatus::Applied);
+        assert_eq!(store.get_messages("import-frontier").await?.len(), 2);
         drop(store);
         std::fs::remove_dir_all(dir)?;
         Ok(())

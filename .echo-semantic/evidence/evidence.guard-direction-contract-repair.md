@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.guard-direction-contract-repair
 kind: evidence
-observed_at: source:5e9a01f48cdf8338bbf8ccfdf225290e1c3f3db90fbea6c30cf1219b92cd1f48
+observed_at: 1465a37101a6cc30f7e884ab3c138353aa8f1cda
 source_refs:
   - echo-core/src/guard/mod.rs
   - src/agent/react/run/pipeline.rs

@@ -5,19 +5,19 @@ kind: audit
 boundary_ref: boundary.eval-evolution
 lens: data_durability
 freshness: examined
-revision: source:5e9a01f48cdf8338bbf8ccfdf225290e1c3f3db90fbea6c30cf1219b92cd1f48
+revision: 07e4270380c40df3f412f99c0aecb6145410cb2a
 finding_refs: [finding.evolution-doc-namespace]
 challenges:
   warm-and-archived-authority:
-    revision: source:5e9a01f48cdf8338bbf8ccfdf225290e1c3f3db90fbea6c30cf1219b92cd1f48
+    revision: 07e4270380c40df3f412f99c0aecb6145410cb2a
     source_refs: [src/evolution/layer.rs, src/evolution/recall.rs, docs/en/25-self-improvement.md, docs/zh/25-self-improvement.md]
     evidence_refs: [evidence.evolution-doc-namespace-repair, evidence.evolution-doc-namespace-verification]
   store-and-file-isolation:
-    revision: source:5e9a01f48cdf8338bbf8ccfdf225290e1c3f3db90fbea6c30cf1219b92cd1f48
+    revision: 07e4270380c40df3f412f99c0aecb6145410cb2a
     source_refs: [echo-state/src/memory/store.rs, src/evolution/layer.rs, src/evolution/runtime_integration.rs, docs/en/03-memory.md, docs/zh/03-memory.md]
     evidence_refs: [evidence.evolution-doc-namespace-repair, evidence.evolution-doc-namespace-verification]
   executable-doc-contract-and-snapshot:
-    revision: source:5e9a01f48cdf8338bbf8ccfdf225290e1c3f3db90fbea6c30cf1219b92cd1f48
+    revision: 07e4270380c40df3f412f99c0aecb6145410cb2a
     source_refs: [echo-agent-learning/tests/documentation_contract.rs, .echo-semantic/baseline.md]
     evidence_refs: [evidence.evolution-doc-namespace-verification]
 ---

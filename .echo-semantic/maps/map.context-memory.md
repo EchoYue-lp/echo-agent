@@ -4,11 +4,11 @@ id: map.context-memory
 kind: capability_map
 title: Context、Memory、Compression 与 Checkpoint
 risk: high
-observed_at: 733d352fc719f922b21bab1cd46206139564367f
+observed_at: source:6fdcc1782b7aa2c97a148f7c377d60b4ed26b9d470f02c05a651de1e8e2eac74
 boundary_refs: [boundary.context-memory]
 behavior_refs: [behavior.context-memory-lifecycle]
 rule_refs: [rule.context-persistence-separation]
-evidence_refs: [evidence.agent-context-execution, evidence.persistence-observation, evidence.high-risk-audit-frontier, evidence.framework-concept-navigation, evidence.transcript-projection-settlement-repair, evidence.transcript-projection-settlement-verification, evidence.checkpoint-plan-authority-repair, evidence.checkpoint-plan-authority-verification, evidence.memory-provenance-authority-repair, evidence.memory-provenance-authority-verification]
+evidence_refs: [evidence.agent-context-execution, evidence.persistence-observation, evidence.high-risk-audit-frontier, evidence.framework-concept-navigation, evidence.transcript-projection-settlement-repair, evidence.transcript-projection-settlement-verification, evidence.managed-import-generation-repair, evidence.checkpoint-plan-authority-repair, evidence.checkpoint-plan-authority-verification, evidence.memory-provenance-authority-repair, evidence.memory-provenance-authority-verification]
 finding_refs: [finding.transcript-projection-settlement, finding.transcript-generation-runtime-identity, finding.checkpoint-current-plan-orphan-authority, finding.pre-compaction-memory-trust-provenance]
 audit_refs: [audit.context-memory.data-durability, audit.transcript-generation-runtime-identity-rereview, audit.transcript-projection-settlement-rereview, audit.checkpoint-plan-authority-rereview, audit.memory-provenance-authority-rereview]
 related_map_refs: [map.agent-session-turn, map.observation-persistence-delivery, map.eval-evolution]
@@ -30,6 +30,12 @@ scenarios:
     rule_refs: [rule.context-persistence-separation, rule.fact-projection-separation]
     evidence_refs: [evidence.transcript-projection-settlement-repair, evidence.transcript-projection-settlement-verification]
     finding_refs: [finding.transcript-projection-settlement]
+  managed-import-generation:
+    status: mapped
+    source_refs: [echo-core/src/memory/conversation.rs, echo-state/src/memory/conversation.rs, echo-state/src/memory/file_conversation.rs, echo-state/src/memory/sqlite_conversation.rs, src/state/mod.rs, src/state/file.rs, src/state/sqlite.rs, docs/adr/0080-managed-transcript-import-generation.md]
+    behavior_refs: [behavior.context-memory-lifecycle]
+    rule_refs: [rule.context-persistence-separation]
+    evidence_refs: [evidence.managed-import-generation-repair]
   runtime-incarnation-clear:
     status: mapped
     source_refs: [src/state/mod.rs, src/state/file.rs, src/state/sqlite.rs, docs/adr/0006-runtime-state-scope-lineage.md]
@@ -81,7 +87,7 @@ ContextManager、RuntimeStateStore、ConversationStore、Store 各自拥有不�
 
 ## 状态与数据流
 
-Stable conversation scope 可以拥有多个 runtime incarnation；checkpoint 保存 ReAct state 和 transcript cursor，不拥有 Task DAG。
+Stable conversation scope 可以拥有多个 runtime incarnation；checkpoint 保存 ReAct state 和 transcript cursor，不拥有 Task DAG。Managed import 在 transcript Store 内原子重建 generation frontier，RuntimeStateStore 只凭完整导入请求和回执允许一次匹配的 epoch CAS。
 
 ## 策略来源与优先级
 
