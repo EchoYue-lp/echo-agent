@@ -1266,7 +1266,7 @@ mod tests {
         fn create(&self, _instance: &ChannelSessionInstance) -> Box<dyn MessageHandler> {
             let generation = self
                 .created
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
                     current.checked_add(1)
                 })
                 .map(|previous| previous.saturating_add(1))
@@ -1347,7 +1347,7 @@ mod tests {
         fn create(&self, _instance: &ChannelSessionInstance) -> Box<dyn MessageHandler> {
             let instance_id = self
                 .created
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
                     current.checked_add(1)
                 })
                 .map(|previous| previous.saturating_add(1))

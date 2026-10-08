@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Replaced deprecated atomic `fetch_update` calls with the equivalent
+  `try_update` API so Rust 1.99 lint passes. Ordering, overflow handling and the
+  existing Rust 1.95 minimum are unchanged; the renamed API is stable since 1.95.
+- Replaced the private Subagent dispatch boxing macro with the equivalent lazy
+  boxed future and removed its unused dependency, avoiding Rust 1.99's duplicate
+  must-use lint. Also removed a needless borrow in the trace UTF-8 regression test.
+
 - Layered memory now records source-role evidence and trust separately from
   extraction mechanism. Pre-compaction and other automatic writers save Draft
   candidates; only a journal-generation-bound, caller-approved activation

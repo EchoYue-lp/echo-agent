@@ -39,7 +39,7 @@ impl LspManager {
     /// Create a new empty manager.
     pub fn new() -> Self {
         let generation = NEXT_MANAGER_GENERATION
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                 current.checked_add(1)
             })
             .unwrap_or(1);

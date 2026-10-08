@@ -278,7 +278,7 @@ impl CircuitBreaker {
 
     fn release_probe(&self) {
         self.probes_in_flight
-            .fetch_update(
+            .try_update(
                 std::sync::atomic::Ordering::Release,
                 std::sync::atomic::Ordering::Acquire,
                 |v| if v > 0 { Some(v - 1) } else { Some(0) },

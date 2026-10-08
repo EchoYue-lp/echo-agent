@@ -6,7 +6,7 @@ title: RuntimeStateStore 与 AgentCheckpoint
 asset_type: state_authority
 status: active
 risk: high
-observed_at: source:6fdcc1782b7aa2c97a148f7c377d60b4ed26b9d470f02c05a651de1e8e2eac74
+observed_at: 6fd66621e0671028d6aa94c69933b63f38e299cd
 boundary_refs: [boundary.context-memory, boundary.observation-persistence-delivery]
 code_refs: [src/state/mod.rs, src/state/file.rs, src/state/sqlite.rs, src/agent/snapshot.rs]
 consumer_refs: [src/agent/react/run/context.rs, src/agent/react/run/phases/compact.rs, src/agent/react/run/phases/tools.rs, src/agent/react/run/phases/finalize.rs, docs/en/03-memory.md]

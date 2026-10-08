@@ -2133,7 +2133,7 @@ mod tests {
         fn close(&self) -> futures::future::BoxFuture<'_, crate::error::Result<()>> {
             let fail = self
                 .failures_remaining
-                .fetch_update(
+                .try_update(
                     std::sync::atomic::Ordering::AcqRel,
                     std::sync::atomic::Ordering::Acquire,
                     |remaining| remaining.checked_sub(1),
