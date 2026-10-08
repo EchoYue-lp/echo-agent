@@ -22,4 +22,8 @@ Framework main run 37758607806 的 Linux foundations 在 empty_or_invalid_create
 
 确定性回归在修复前退出 101：create-delayed-bad 返回 Sandbox::IoError(create control stage timed out)，而不是 StartFailed；改为普通 deadline 后 Docker 28/28 通过，包含三种 create 输出、100ms hung info/create/rm 分类、有界 cleanup、cancel/caller-drop 和输出 budget。没有降低断言或跳过用例。
 
-完整门禁及远端 main 复验结果在完成后追加；当前不提前宣称通过。Examples 已进入 all-target gate，不消费 test-only CLI override；CLI/SDK/echo-website 无需改动。
+Rust 1.99 本地完整命令链退出 0：fmt check、workspace/all-target/all-feature Clippy、lib/bins unwrap/expect/panic/unreachable Clippy、workspace/all-target/all-feature tests 和 workspace/lib no-default check。受影响 echo_execution 331 项全部通过；examples、learning contracts 与其它 workspace 测试纳入同一完整链路。strict source snapshot/change-evidence 也通过。
+
+旧 main 的相同失败任务重跑后通过，印证该用例间歇性依赖进程调度；此修复用确定性有限延迟回归防止同类问题重现，不以单纯重跑充当修复。
+
+远端候选与 main 复验须另行确认，本地证据不替代 Linux/Windows 信号。Examples 不消费 test-only CLI override；CLI/SDK/echo-website 无需改动。
