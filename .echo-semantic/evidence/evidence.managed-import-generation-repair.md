@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.managed-import-generation-repair
 kind: evidence
-observed_at: source:6fdcc1782b7aa2c97a148f7c377d60b4ed26b9d470f02c05a651de1e8e2eac74
+observed_at: 6fd66621e0671028d6aa94c69933b63f38e299cd
 source_refs:
   - echo-core/src/memory/conversation.rs
   - echo-state/src/memory/conversation.rs

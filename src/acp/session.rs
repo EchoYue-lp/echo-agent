@@ -780,7 +780,7 @@ mod tests {
                 .saturating_add(1);
             let fail = self
                 .failures_remaining
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+                .try_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
                     remaining.checked_sub(1)
                 })
                 .is_ok();

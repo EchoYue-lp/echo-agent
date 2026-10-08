@@ -1395,410 +1395,416 @@ impl SubagentExecutor {
         }
     }
 
-    #[async_recursion::async_recursion]
-    async fn dispatch_inner(
+    // Keep dispatch lazy and boxed: strategies can dispatch further Subagents,
+    // while the future itself already carries Rust's must-use contract.
+    fn dispatch_inner(
         &self,
         mut req: DispatchRequest,
         control: Option<SubagentAttemptBinding>,
-    ) -> Result<SubagentResult> {
-        let mut retry_count: u32 = 0;
-        let max_retries: u32 = 3; // Prevent infinite retry loops
-        // Save parent cancel token so retry/delegate paths propagate cancellation
-        // instead of creating independent tokens (P1 — CancellationToken propagation).
-        let parent_cancel = req.cancel.clone();
+    ) -> futures::future::BoxFuture<'_, Result<SubagentResult>> {
+        Box::pin(async move {
+            let mut retry_count: u32 = 0;
+            let max_retries: u32 = 3; // Prevent infinite retry loops
+            // Save parent cancel token so retry/delegate paths propagate cancellation
+            // instead of creating independent tokens (P1 — CancellationToken propagation).
+            let parent_cancel = req.cancel.clone();
 
-        // Stamp identity and create the single attempt-scoped ordering
-        // authority before any accepted dispatch can settle or fail setup.
-        self.enrich_dispatch_context(&mut req);
-        let event_publisher = self.event_publisher(&req)?;
-        let initial_registration = self.registry.get(&req.agent_name).await;
-        let initial_mode = req
-            .mode_override
-            .clone()
-            .or_else(|| {
-                initial_registration
-                    .as_ref()
-                    .map(|registered| registered.definition.execution_mode.clone())
-            })
-            .unwrap_or(ExecutionMode::Sync);
-        let runtime = req.runtime_context.as_ref();
-        event_publisher.emit(SubagentEvent::DispatchStarted {
-            parent: req.parent_agent.clone(),
-            agent: req.agent_name.clone(),
-            mode: initial_mode.clone(),
-            task: req.task.clone(),
-            execution_id: runtime.and_then(|context| context.execution_id.clone()),
-            run_id: runtime.and_then(|context| context.run_id.clone()),
-            conversation_id: runtime.and_then(|context| context.conversation_id.clone()),
-            message_id: runtime.and_then(|context| context.message_id.clone()),
-            background: req.background,
-        })?;
-
-        if parent_cancel.is_cancelled() {
-            let result = SubagentResult::cancelled(
-                req.agent_name.clone(),
-                "Cancelled before execution",
-                initial_mode,
-            );
-            event_publisher.emit(SubagentEvent::DispatchCancelled {
+            // Stamp identity and create the single attempt-scoped ordering
+            // authority before any accepted dispatch can settle or fail setup.
+            self.enrich_dispatch_context(&mut req);
+            let event_publisher = self.event_publisher(&req)?;
+            let initial_registration = self.registry.get(&req.agent_name).await;
+            let initial_mode = req
+                .mode_override
+                .clone()
+                .or_else(|| {
+                    initial_registration
+                        .as_ref()
+                        .map(|registered| registered.definition.execution_mode.clone())
+                })
+                .unwrap_or(ExecutionMode::Sync);
+            let runtime = req.runtime_context.as_ref();
+            event_publisher.emit(SubagentEvent::DispatchStarted {
                 parent: req.parent_agent.clone(),
                 agent: req.agent_name.clone(),
-                outcome: result.outcome.clone(),
+                mode: initial_mode.clone(),
+                task: req.task.clone(),
                 execution_id: runtime.and_then(|context| context.execution_id.clone()),
                 run_id: runtime.and_then(|context| context.run_id.clone()),
+                conversation_id: runtime.and_then(|context| context.conversation_id.clone()),
+                message_id: runtime.and_then(|context| context.message_id.clone()),
+                background: req.background,
             })?;
-            return Ok(result);
-        }
 
-        if req.delegation_policy.delegate_depth > req.delegation_policy.max_delegate_depth {
-            let error = ReactError::Other(format!(
-                "Delegation depth exceeded (max {}): agent '{}'",
-                req.delegation_policy.max_delegate_depth, req.agent_name
-            ));
-            Self::emit_pre_execution_failure(&event_publisher, &req, &error)?;
-            return Err(error);
-        }
-        if initial_registration.is_none() {
-            let error = ReactError::Other(format!("Subagent '{}' not found", req.agent_name));
-            Self::emit_pre_execution_failure(&event_publisher, &req, &error)?;
-            return Err(error);
-        }
+            if parent_cancel.is_cancelled() {
+                let result = SubagentResult::cancelled(
+                    req.agent_name.clone(),
+                    "Cancelled before execution",
+                    initial_mode,
+                );
+                event_publisher.emit(SubagentEvent::DispatchCancelled {
+                    parent: req.parent_agent.clone(),
+                    agent: req.agent_name.clone(),
+                    outcome: result.outcome.clone(),
+                    execution_id: runtime.and_then(|context| context.execution_id.clone()),
+                    run_id: runtime.and_then(|context| context.run_id.clone()),
+                })?;
+                return Ok(result);
+            }
 
-        loop {
-            // Guard against excessive retries
-            if retry_count > max_retries {
-                let error = ReactError::Agent(Box::new(AgentError::ContextLimitExceeded(format!(
-                    "Max retry count exceeded ({}): agent '{}'",
-                    max_retries, req.agent_name
-                ))));
+            if req.delegation_policy.delegate_depth > req.delegation_policy.max_delegate_depth {
+                let error = ReactError::Other(format!(
+                    "Delegation depth exceeded (max {}): agent '{}'",
+                    req.delegation_policy.max_delegate_depth, req.agent_name
+                ));
+                Self::emit_pre_execution_failure(&event_publisher, &req, &error)?;
+                return Err(error);
+            }
+            if initial_registration.is_none() {
+                let error = ReactError::Other(format!("Subagent '{}' not found", req.agent_name));
                 Self::emit_pre_execution_failure(&event_publisher, &req, &error)?;
                 return Err(error);
             }
 
-            // Look up definition
-            let registered = match self.registry.get(&req.agent_name).await {
-                Some(registered) => registered,
-                None => {
+            loop {
+                // Guard against excessive retries
+                if retry_count > max_retries {
                     let error =
-                        ReactError::Other(format!("Subagent '{}' not found", req.agent_name));
+                        ReactError::Agent(Box::new(AgentError::ContextLimitExceeded(format!(
+                            "Max retry count exceeded ({}): agent '{}'",
+                            max_retries, req.agent_name
+                        ))));
                     Self::emit_pre_execution_failure(&event_publisher, &req, &error)?;
                     return Err(error);
                 }
-            };
 
-            let mode = req
-                .mode_override
-                .as_ref()
-                .unwrap_or(&registered.definition.execution_mode)
-                .clone();
-            let runtime_run_id = req
-                .runtime_context
-                .as_ref()
-                .and_then(|ctx| ctx.run_id.as_deref())
-                .unwrap_or("<none>");
-            // Extract stable identity for event payload (Option<String>).
-            // Used by all Dispatch* events so the bridge/frontend can route
-            // thinking/tool/token streams without temp id allocation.
-            let event_execution_id = req
-                .runtime_context
-                .as_ref()
-                .and_then(|ctx| ctx.execution_id.clone());
-            let event_run_id = req
-                .runtime_context
-                .as_ref()
-                .and_then(|ctx| ctx.run_id.clone());
-            let has_trace_sink = req
-                .runtime_context
-                .as_ref()
-                .is_some_and(|ctx| ctx.trace_sink.is_some());
-            let has_cancel = req
-                .runtime_context
-                .as_ref()
-                .is_some_and(|ctx| ctx.cancel.is_some());
-            info!(
-                parent = %req.parent_agent,
-                subagent = %req.agent_name,
-                mode = ?mode,
-                attempt = retry_count + 1,
-                delegate_depth = req.delegation_policy.delegate_depth,
-                runtime_run_id = %runtime_run_id,
-                has_runtime_context = req.runtime_context.is_some(),
-                has_trace_sink,
-                has_cancel,
-                task_chars = req.task.chars().count(),
-                "subagent_dispatch_start"
-            );
+                // Look up definition
+                let registered = match self.registry.get(&req.agent_name).await {
+                    Some(registered) => registered,
+                    None => {
+                        let error =
+                            ReactError::Other(format!("Subagent '{}' not found", req.agent_name));
+                        Self::emit_pre_execution_failure(&event_publisher, &req, &error)?;
+                        return Err(error);
+                    }
+                };
 
-            // Build hook context
-            let hook_ctx = SubagentHookContext {
-                parent_agent: req.parent_agent.clone(),
-                subagent_name: req.agent_name.clone(),
-                execution_mode: mode.clone(),
-                task: req.task.clone(),
-                attempt: 1 + retry_count,
-            };
-
-            if self.config.enable_hooks {
-                self.hooks.before_dispatch(&hook_ctx).await;
-            }
-
-            // Snapshot fields needed in error path before `req` is moved
-            let req_agent_name = req.agent_name.clone();
-            let req_parent_agent = req.parent_agent.clone();
-            let delegation_policy = req.delegation_policy;
-
-            // Fire unified SubagentStart for this concrete dispatch attempt.
-            if let Some(ref executor) = self.config.unified_hook_executor {
-                let ctx = correlate_subagent_hook(
-                    crate::skills::hooks::HookContext::for_subagent_start(
-                        &req_agent_name,
-                        &mode.to_string(),
-                        &req.task,
-                        "", // session_id not available at this layer
-                        &req_parent_agent,
-                    ),
-                    event_run_id.as_deref(),
-                    event_execution_id.as_deref(),
-                    hook_ctx.attempt,
+                let mode = req
+                    .mode_override
+                    .as_ref()
+                    .unwrap_or(&registered.definition.execution_mode)
+                    .clone();
+                let runtime_run_id = req
+                    .runtime_context
+                    .as_ref()
+                    .and_then(|ctx| ctx.run_id.as_deref())
+                    .unwrap_or("<none>");
+                // Extract stable identity for event payload (Option<String>).
+                // Used by all Dispatch* events so the bridge/frontend can route
+                // thinking/tool/token streams without temp id allocation.
+                let event_execution_id = req
+                    .runtime_context
+                    .as_ref()
+                    .and_then(|ctx| ctx.execution_id.clone());
+                let event_run_id = req
+                    .runtime_context
+                    .as_ref()
+                    .and_then(|ctx| ctx.run_id.clone());
+                let has_trace_sink = req
+                    .runtime_context
+                    .as_ref()
+                    .is_some_and(|ctx| ctx.trace_sink.is_some());
+                let has_cancel = req
+                    .runtime_context
+                    .as_ref()
+                    .is_some_and(|ctx| ctx.cancel.is_some());
+                info!(
+                    parent = %req.parent_agent,
+                    subagent = %req.agent_name,
+                    mode = ?mode,
+                    attempt = retry_count + 1,
+                    delegate_depth = req.delegation_policy.delegate_depth,
+                    runtime_run_id = %runtime_run_id,
+                    has_runtime_context = req.runtime_context.is_some(),
+                    has_trace_sink,
+                    has_cancel,
+                    task_chars = req.task.chars().count(),
+                    "subagent_dispatch_start"
                 );
-                executor(ctx).await;
-            }
 
-            // Dispatch based on mode
-            let start = Instant::now();
-            let result = match mode {
-                ExecutionMode::Sync => {
-                    self.dispatch_sync(&req, control.clone(), event_publisher.clone())
-                        .await
-                }
-                ExecutionMode::Fork => {
-                    self.dispatch_fork(&req, control.clone(), event_publisher.clone())
-                        .await
-                }
-                ExecutionMode::Teammate => {
-                    // Teammate mode: spawn independently, then await result
-                    match self
-                        .dispatch_teammate_with_control(
-                            req.clone(),
-                            control.clone(),
-                            event_publisher.clone(),
-                            false,
-                        )
-                        .await
-                    {
-                        Ok(handle) => handle.join().await,
-                        Err(e) => Err(e),
-                    }
-                }
-                ExecutionMode::Team => self.dispatch_team(&req, event_publisher.clone()).await,
-            };
+                // Build hook context
+                let hook_ctx = SubagentHookContext {
+                    parent_agent: req.parent_agent.clone(),
+                    subagent_name: req.agent_name.clone(),
+                    execution_mode: mode.clone(),
+                    task: req.task.clone(),
+                    attempt: 1 + retry_count,
+                };
 
-            let duration = start.elapsed();
+                if self.config.enable_hooks {
+                    self.hooks.before_dispatch(&hook_ctx).await;
+                }
 
-            match result {
-                Ok(mut sub_result) => {
-                    sub_result.duration = duration;
-                    sub_result.mode = mode.clone();
-                    info!(
-                        parent = %req_parent_agent,
-                        subagent = %req_agent_name,
-                        mode = ?mode,
-                        duration_ms = duration.as_millis() as u64,
-                        output_chars = sub_result.output.chars().count(),
-                        tokens_used = ?sub_result.tokens_used,
-                        iterations = sub_result.iterations,
-                        "subagent_dispatch_complete"
+                // Snapshot fields needed in error path before `req` is moved
+                let req_agent_name = req.agent_name.clone();
+                let req_parent_agent = req.parent_agent.clone();
+                let delegation_policy = req.delegation_policy;
+
+                // Fire unified SubagentStart for this concrete dispatch attempt.
+                if let Some(ref executor) = self.config.unified_hook_executor {
+                    let ctx = correlate_subagent_hook(
+                        crate::skills::hooks::HookContext::for_subagent_start(
+                            &req_agent_name,
+                            &mode.to_string(),
+                            &req.task,
+                            "", // session_id not available at this layer
+                            &req_parent_agent,
+                        ),
+                        event_run_id.as_deref(),
+                        event_execution_id.as_deref(),
+                        hook_ctx.attempt,
                     );
+                    executor(ctx).await;
+                }
 
-                    event_publisher.emit(Self::terminal_event_for_result(
-                        &req_parent_agent,
-                        &req_agent_name,
-                        &mut sub_result,
-                        event_execution_id.clone(),
-                        event_run_id.clone(),
-                    ))?;
-
-                    if self.config.enable_hooks {
-                        self.hooks.after_dispatch(&hook_ctx, &sub_result).await;
+                // Dispatch based on mode
+                let start = Instant::now();
+                let result = match mode {
+                    ExecutionMode::Sync => {
+                        self.dispatch_sync(&req, control.clone(), event_publisher.clone())
+                            .await
                     }
+                    ExecutionMode::Fork => {
+                        self.dispatch_fork(&req, control.clone(), event_publisher.clone())
+                            .await
+                    }
+                    ExecutionMode::Teammate => {
+                        // Teammate mode: spawn independently, then await result
+                        match self
+                            .dispatch_teammate_with_control(
+                                req.clone(),
+                                control.clone(),
+                                event_publisher.clone(),
+                                false,
+                            )
+                            .await
+                        {
+                            Ok(handle) => handle.join().await,
+                            Err(e) => Err(e),
+                        }
+                    }
+                    ExecutionMode::Team => self.dispatch_team(&req, event_publisher.clone()).await,
+                };
 
-                    // Every Start has exactly one Stop. An executor may return a
-                    // structured cancelled/failed outcome inside Ok, so map the
-                    // outcome instead of assuming Completed from the Result arm.
-                    if let Some(ref executor) = self.config.unified_hook_executor {
-                        let ctx = correlate_subagent_hook(
-                            crate::skills::hooks::HookContext::for_subagent_stop(
-                                &req_agent_name,
-                                &mode.to_string(),
-                                &sub_result.output,
-                                hook_stop_status(sub_result.outcome.status),
-                                "",
-                                &req_parent_agent,
-                            ),
-                            event_run_id.as_deref(),
-                            event_execution_id.as_deref(),
-                            hook_ctx.attempt,
+                let duration = start.elapsed();
+
+                match result {
+                    Ok(mut sub_result) => {
+                        sub_result.duration = duration;
+                        sub_result.mode = mode.clone();
+                        info!(
+                            parent = %req_parent_agent,
+                            subagent = %req_agent_name,
+                            mode = ?mode,
+                            duration_ms = duration.as_millis() as u64,
+                            output_chars = sub_result.output.chars().count(),
+                            tokens_used = ?sub_result.tokens_used,
+                            iterations = sub_result.iterations,
+                            "subagent_dispatch_complete"
                         );
-                        executor(ctx).await;
+
+                        event_publisher.emit(Self::terminal_event_for_result(
+                            &req_parent_agent,
+                            &req_agent_name,
+                            &mut sub_result,
+                            event_execution_id.clone(),
+                            event_run_id.clone(),
+                        ))?;
+
+                        if self.config.enable_hooks {
+                            self.hooks.after_dispatch(&hook_ctx, &sub_result).await;
+                        }
+
+                        // Every Start has exactly one Stop. An executor may return a
+                        // structured cancelled/failed outcome inside Ok, so map the
+                        // outcome instead of assuming Completed from the Result arm.
+                        if let Some(ref executor) = self.config.unified_hook_executor {
+                            let ctx = correlate_subagent_hook(
+                                crate::skills::hooks::HookContext::for_subagent_stop(
+                                    &req_agent_name,
+                                    &mode.to_string(),
+                                    &sub_result.output,
+                                    hook_stop_status(sub_result.outcome.status),
+                                    "",
+                                    &req_parent_agent,
+                                ),
+                                event_run_id.as_deref(),
+                                event_execution_id.as_deref(),
+                                hook_ctx.attempt,
+                            );
+                            executor(ctx).await;
+                        }
+
+                        return Ok(sub_result);
                     }
-
-                    return Ok(sub_result);
-                }
-                Err(e) => {
-                    let error_str = e.to_string();
-                    let status = subagent_status_from_error(&e);
-                    let terminal_result = SubagentOutcome::terminal(
-                        status,
-                        error_str.clone(),
-                        vec![error_str.clone()],
-                    );
-                    warn!(
-                        parent = %req_parent_agent,
-                        subagent = %req_agent_name,
-                        mode = ?mode,
-                        error = %error_str,
-                        "subagent_dispatch_failed"
-                    );
-
-                    // Close this attempt before cancellation returns or a hook
-                    // policy starts another attempt. Previously cancellation
-                    // returned above the only Stop call, while retries emitted
-                    // multiple Starts followed by one terminal Stop.
-                    if let Some(ref executor) = self.config.unified_hook_executor {
-                        let ctx = correlate_subagent_hook(
-                            crate::skills::hooks::HookContext::for_subagent_stop(
-                                &req_agent_name,
-                                &mode.to_string(),
-                                &format!("error: {error_str}"),
-                                hook_stop_status(status),
-                                "",
-                                &req_parent_agent,
-                            ),
-                            event_run_id.as_deref(),
-                            event_execution_id.as_deref(),
-                            hook_ctx.attempt,
+                    Err(e) => {
+                        let error_str = e.to_string();
+                        let status = subagent_status_from_error(&e);
+                        let terminal_result = SubagentOutcome::terminal(
+                            status,
+                            error_str.clone(),
+                            vec![error_str.clone()],
                         );
-                        executor(ctx).await;
-                    }
+                        warn!(
+                            parent = %req_parent_agent,
+                            subagent = %req_agent_name,
+                            mode = ?mode,
+                            error = %error_str,
+                            "subagent_dispatch_failed"
+                        );
 
-                    if status == SubagentStatus::Cancelled {
-                        event_publisher.emit(SubagentEvent::DispatchCancelled {
+                        // Close this attempt before cancellation returns or a hook
+                        // policy starts another attempt. Previously cancellation
+                        // returned above the only Stop call, while retries emitted
+                        // multiple Starts followed by one terminal Stop.
+                        if let Some(ref executor) = self.config.unified_hook_executor {
+                            let ctx = correlate_subagent_hook(
+                                crate::skills::hooks::HookContext::for_subagent_stop(
+                                    &req_agent_name,
+                                    &mode.to_string(),
+                                    &format!("error: {error_str}"),
+                                    hook_stop_status(status),
+                                    "",
+                                    &req_parent_agent,
+                                ),
+                                event_run_id.as_deref(),
+                                event_execution_id.as_deref(),
+                                hook_ctx.attempt,
+                            );
+                            executor(ctx).await;
+                        }
+
+                        if status == SubagentStatus::Cancelled {
+                            event_publisher.emit(SubagentEvent::DispatchCancelled {
+                                parent: req_parent_agent.clone(),
+                                agent: req_agent_name.clone(),
+                                outcome: terminal_result,
+                                execution_id: event_execution_id.clone(),
+                                run_id: event_run_id.clone(),
+                            })?;
+                            return Err(e);
+                        }
+
+                        if self.config.enable_hooks {
+                            let decision = self.hooks.on_failure(&hook_ctx, &error_str).await;
+                            match decision {
+                                super::hooks::SubagentRetryDecision::Delegate {
+                                    alternative_agent,
+                                } => {
+                                    if let Some(child_policy) = delegation_policy.child_policy() {
+                                        info!(
+                                            from = %hook_ctx.subagent_name,
+                                            to = %alternative_agent,
+                                            depth = child_policy.delegate_depth,
+                                            "Delegating to alternative subagent"
+                                        );
+                                        retry_count = retry_count.saturating_add(1);
+                                        let rt_ctx = req.runtime_context.clone();
+                                        let retry_msg = req.message.clone();
+                                        let prompt_payload = req.prompt_payload.clone();
+                                        let prompt_context = req.prompt_context.clone();
+                                        let parent_context = req.parent_context.clone();
+                                        let constraints = req.constraints.clone();
+                                        req = DispatchRequest {
+                                            agent_name: alternative_agent,
+                                            task: hook_ctx.task.clone(),
+                                            mode_override: Some(hook_ctx.execution_mode.clone()),
+                                            cancel: parent_cancel.child_token(),
+                                            parent_agent: hook_ctx.parent_agent.clone(),
+                                            parent_context,
+                                            delegation_policy: child_policy,
+                                            runtime_context: rt_ctx,
+                                            message: retry_msg,
+                                            prompt_payload,
+                                            prompt_context,
+                                            constraints,
+                                            background: false,
+                                        };
+                                        Self::retarget_dispatch_context(&mut req);
+                                        event_publisher.retarget_from_lineage(
+                                            req.parent_agent.clone(),
+                                            req.agent_name.clone(),
+                                            req.runtime_context.as_ref().and_then(|context| {
+                                                context.subagent_lineage.as_ref()
+                                            }),
+                                        )?;
+                                        // This attempt is recoverable, so it is not a terminal event.
+                                        continue;
+                                    }
+                                    warn!(
+                                        agent = %hook_ctx.subagent_name,
+                                        max_depth = delegation_policy.max_delegate_depth,
+                                        "subagent delegation rejected at depth limit"
+                                    );
+                                }
+                                super::hooks::SubagentRetryDecision::Retry { delay_secs } => {
+                                    if retry_count < max_retries {
+                                        info!(
+                                            delay_secs,
+                                            attempt = retry_count.saturating_add(2),
+                                            "Retrying subagent dispatch"
+                                        );
+                                        tokio::time::sleep(Duration::from_secs(delay_secs)).await;
+                                        retry_count = retry_count.saturating_add(1);
+                                        let rt_ctx = req.runtime_context.clone();
+                                        let retry_msg = req.message.clone();
+                                        let prompt_payload = req.prompt_payload.clone();
+                                        let prompt_context = req.prompt_context.clone();
+                                        let parent_context = req.parent_context.clone();
+                                        let constraints = req.constraints.clone();
+                                        req = DispatchRequest {
+                                            agent_name: hook_ctx.subagent_name.clone(),
+                                            task: hook_ctx.task.clone(),
+                                            mode_override: Some(hook_ctx.execution_mode.clone()),
+                                            cancel: parent_cancel.child_token(),
+                                            parent_agent: hook_ctx.parent_agent.clone(),
+                                            parent_context,
+                                            delegation_policy,
+                                            runtime_context: rt_ctx,
+                                            message: retry_msg,
+                                            prompt_payload,
+                                            prompt_context,
+                                            constraints,
+                                            background: false,
+                                        };
+                                        // This attempt is recoverable, so it is not a terminal event.
+                                        continue;
+                                    }
+                                    warn!(
+                                        agent = %hook_ctx.subagent_name,
+                                        max_retries,
+                                        "subagent retry limit reached"
+                                    );
+                                }
+                                super::hooks::SubagentRetryDecision::Fail => {}
+                            }
+                        }
+
+                        event_publisher.emit(SubagentEvent::DispatchFailed {
                             parent: req_parent_agent.clone(),
                             agent: req_agent_name.clone(),
+                            error: error_str.clone(),
+                            status,
                             outcome: terminal_result,
                             execution_id: event_execution_id.clone(),
                             run_id: event_run_id.clone(),
                         })?;
+
                         return Err(e);
                     }
-
-                    if self.config.enable_hooks {
-                        let decision = self.hooks.on_failure(&hook_ctx, &error_str).await;
-                        match decision {
-                            super::hooks::SubagentRetryDecision::Delegate { alternative_agent } => {
-                                if let Some(child_policy) = delegation_policy.child_policy() {
-                                    info!(
-                                        from = %hook_ctx.subagent_name,
-                                        to = %alternative_agent,
-                                        depth = child_policy.delegate_depth,
-                                        "Delegating to alternative subagent"
-                                    );
-                                    retry_count = retry_count.saturating_add(1);
-                                    let rt_ctx = req.runtime_context.clone();
-                                    let retry_msg = req.message.clone();
-                                    let prompt_payload = req.prompt_payload.clone();
-                                    let prompt_context = req.prompt_context.clone();
-                                    let parent_context = req.parent_context.clone();
-                                    let constraints = req.constraints.clone();
-                                    req = DispatchRequest {
-                                        agent_name: alternative_agent,
-                                        task: hook_ctx.task.clone(),
-                                        mode_override: Some(hook_ctx.execution_mode.clone()),
-                                        cancel: parent_cancel.child_token(),
-                                        parent_agent: hook_ctx.parent_agent.clone(),
-                                        parent_context,
-                                        delegation_policy: child_policy,
-                                        runtime_context: rt_ctx,
-                                        message: retry_msg,
-                                        prompt_payload,
-                                        prompt_context,
-                                        constraints,
-                                        background: false,
-                                    };
-                                    Self::retarget_dispatch_context(&mut req);
-                                    event_publisher.retarget_from_lineage(
-                                        req.parent_agent.clone(),
-                                        req.agent_name.clone(),
-                                        req.runtime_context
-                                            .as_ref()
-                                            .and_then(|context| context.subagent_lineage.as_ref()),
-                                    )?;
-                                    // This attempt is recoverable, so it is not a terminal event.
-                                    continue;
-                                }
-                                warn!(
-                                    agent = %hook_ctx.subagent_name,
-                                    max_depth = delegation_policy.max_delegate_depth,
-                                    "subagent delegation rejected at depth limit"
-                                );
-                            }
-                            super::hooks::SubagentRetryDecision::Retry { delay_secs } => {
-                                if retry_count < max_retries {
-                                    info!(
-                                        delay_secs,
-                                        attempt = retry_count.saturating_add(2),
-                                        "Retrying subagent dispatch"
-                                    );
-                                    tokio::time::sleep(Duration::from_secs(delay_secs)).await;
-                                    retry_count = retry_count.saturating_add(1);
-                                    let rt_ctx = req.runtime_context.clone();
-                                    let retry_msg = req.message.clone();
-                                    let prompt_payload = req.prompt_payload.clone();
-                                    let prompt_context = req.prompt_context.clone();
-                                    let parent_context = req.parent_context.clone();
-                                    let constraints = req.constraints.clone();
-                                    req = DispatchRequest {
-                                        agent_name: hook_ctx.subagent_name.clone(),
-                                        task: hook_ctx.task.clone(),
-                                        mode_override: Some(hook_ctx.execution_mode.clone()),
-                                        cancel: parent_cancel.child_token(),
-                                        parent_agent: hook_ctx.parent_agent.clone(),
-                                        parent_context,
-                                        delegation_policy,
-                                        runtime_context: rt_ctx,
-                                        message: retry_msg,
-                                        prompt_payload,
-                                        prompt_context,
-                                        constraints,
-                                        background: false,
-                                    };
-                                    // This attempt is recoverable, so it is not a terminal event.
-                                    continue;
-                                }
-                                warn!(
-                                    agent = %hook_ctx.subagent_name,
-                                    max_retries,
-                                    "subagent retry limit reached"
-                                );
-                            }
-                            super::hooks::SubagentRetryDecision::Fail => {}
-                        }
-                    }
-
-                    event_publisher.emit(SubagentEvent::DispatchFailed {
-                        parent: req_parent_agent.clone(),
-                        agent: req_agent_name.clone(),
-                        error: error_str.clone(),
-                        status,
-                        outcome: terminal_result,
-                        execution_id: event_execution_id.clone(),
-                        run_id: event_run_id.clone(),
-                    })?;
-
-                    return Err(e);
                 }
             }
-        }
+        })
     }
 
     /// Clone internals so a background subagent can own an executor on a spawned task.

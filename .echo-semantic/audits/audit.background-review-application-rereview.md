@@ -5,19 +5,19 @@ kind: audit
 boundary_ref: boundary.eval-evolution
 lens: failure_concurrency
 freshness: examined
-revision: source:6fdcc1782b7aa2c97a148f7c377d60b4ed26b9d470f02c05a651de1e8e2eac74
+revision: 6fd66621e0671028d6aa94c69933b63f38e299cd
 finding_refs: [finding.background-review-detached-persistence-settlement]
 challenges:
   before-poll-admission:
-    revision: source:6fdcc1782b7aa2c97a148f7c377d60b4ed26b9d470f02c05a651de1e8e2eac74
+    revision: 6fd66621e0671028d6aa94c69933b63f38e299cd
     source_refs: [src/evolution/background_review.rs, docs/adr/0058-background-review-settlement-ownership.md]
     evidence_refs: [evidence.background-review-application-repair, evidence.background-review-application-verification]
   partial-memory-write-and-owner-loss:
-    revision: source:6fdcc1782b7aa2c97a148f7c377d60b4ed26b9d470f02c05a651de1e8e2eac74
+    revision: 6fd66621e0671028d6aa94c69933b63f38e299cd
     source_refs: [src/evolution/background_review.rs, docs/adr/0065-evolution-memory-audit-reconciliation.md]
     evidence_refs: [evidence.background-review-application-repair, evidence.background-review-application-verification]
   post-poll-receipt-failure:
-    revision: source:6fdcc1782b7aa2c97a148f7c377d60b4ed26b9d470f02c05a651de1e8e2eac74
+    revision: 6fd66621e0671028d6aa94c69933b63f38e299cd
     source_refs: [src/evolution/background_review.rs, docs/adr/0058-background-review-settlement-ownership.md]
     evidence_refs: [evidence.background-review-application-verification]
 ---

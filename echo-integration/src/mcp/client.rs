@@ -1140,7 +1140,7 @@ mod tests {
             self.close_count.fetch_add(1, Ordering::AcqRel);
             let fail = self
                 .failures_remaining
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+                .try_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
                     remaining.checked_sub(1)
                 })
                 .is_ok();
@@ -1180,7 +1180,7 @@ mod tests {
             self.close_count.fetch_add(1, Ordering::AcqRel);
             let fail = self
                 .failures_remaining
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+                .try_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
                     remaining.checked_sub(1)
                 })
                 .is_ok();

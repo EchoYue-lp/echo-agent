@@ -7,7 +7,7 @@ expectation: human_confirmed
 risk: high
 primary_focus: data_durability
 focus: [state_authority, time_lifecycle, failure_concurrency]
-observed_at: source:6fdcc1782b7aa2c97a148f7c377d60b4ed26b9d470f02c05a651de1e8e2eac74
+observed_at: 6fd66621e0671028d6aa94c69933b63f38e299cd
 behavior_refs: [behavior.agent-turn-lifecycle, behavior.context-memory-lifecycle]
 code_refs: [echo-state/src/compression/mod.rs, src/agent/snapshot.rs, src/agent/react/run/phases/compact.rs, src/agent/react/run/phases/tools.rs, src/agent/react/run/phases/finalize.rs, src/state/mod.rs, echo-core/src/memory/conversation.rs, echo-core/src/memory/store.rs, docs/en/41-persistence-concepts.md]
 evidence_refs: [evidence.agent-context-execution, evidence.persistence-observation, evidence.transcript-generation-runtime-identity-repair, evidence.transcript-generation-runtime-identity-verification, evidence.transcript-projection-settlement-repair, evidence.transcript-projection-settlement-verification, evidence.managed-import-generation-repair, evidence.memory-provenance-authority-repair, evidence.memory-provenance-authority-verification]

@@ -2776,7 +2776,7 @@ mod tests {
                     ..
                 } => {
                     assert_eq!(call_id, "result-call");
-                    assert!(output_preview.as_deref().is_some_and(&bounded_chars));
+                    assert!(output_preview.as_deref().is_some_and(bounded_chars));
                 }
                 other => {
                     return Err(ReactError::Other(format!("unexpected event: {other:?}")));

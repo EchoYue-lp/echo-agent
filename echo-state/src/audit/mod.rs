@@ -181,10 +181,9 @@ struct DiagnosticDeliveryNotification {
 }
 
 fn increment_diagnostic_delivery_dropped() {
-    let _ =
-        DIAGNOSTIC_DELIVERY_DROPPED.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
-            Some(value.saturating_add(1))
-        });
+    let _ = DIAGNOSTIC_DELIVERY_DROPPED.try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+        Some(value.saturating_add(1))
+    });
 }
 
 fn diagnostic_delivery_sender() -> Option<&'static SyncSender<DiagnosticDeliveryNotification>> {

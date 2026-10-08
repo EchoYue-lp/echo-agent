@@ -953,7 +953,7 @@ impl PluginIntegrator {
 
     fn next_generation() -> Option<u64> {
         NEXT_PREPARED_GENERATION
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |generation| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |generation| {
                 generation.checked_add(1).filter(|next| *next < u64::MAX)
             })
             .ok()?
