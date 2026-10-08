@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Docker injected-CLI tests now use the ordinary production control deadline;
+  only hung-stage tests opt into 100 ms. A delayed invalid-create regression
+  verifies that ordinary startup errors retain named-container cleanup instead
+  of being misclassified by an unrelated fixture timeout. Production timeouts
+  and cleanup behavior are unchanged.
+
 - Replaced deprecated atomic `fetch_update` calls with the equivalent
   `try_update` API so Rust 1.99 lint passes. Ordering, overflow handling and the
   existing Rust 1.95 minimum are unchanged; the renamed API is stable since 1.95.
