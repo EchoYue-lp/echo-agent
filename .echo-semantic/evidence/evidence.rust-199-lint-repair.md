@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.rust-199-lint-repair
 kind: evidence
-observed_at: source:e332d13ddf185538ab63e85dfa4b2d28d7217ea992651df484ec7ff027dc54ea
+observed_at: d8a73701768a3433c8b2afd5de08da573754673c
 source_refs: [CHANGELOG.md, Cargo.toml, Cargo.lock, echo-core/src/circuit_breaker.rs, echo-integration/src/channels/session.rs, echo-integration/src/lsp/manager.rs, echo-integration/src/mcp/client.rs, echo-integration/src/mcp/mod.rs, echo-state/src/audit/mod.rs, echo-state/src/journal/mod.rs, src/acp/session.rs, src/agent/react/capabilities.rs, src/agent/subagent/executor.rs, src/plugin/prepared.rs, src/trace/mod.rs]
 supports: [behavior.workspace-composition, rule.framework-layer-ownership]
 limitations: [本地候选验证不等于远端交付, SDK 和 website 没有公共行为变化，无需修改]

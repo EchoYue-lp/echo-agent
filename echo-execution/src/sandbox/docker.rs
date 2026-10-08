@@ -271,7 +271,9 @@ impl DockerSandbox {
         Self {
             config,
             docker_program,
-            control_timeout: Duration::from_millis(100),
+            // Injecting a CLI must not change the ordinary control policy.
+            // Timeout tests explicitly opt into their short deadline below.
+            control_timeout: DEFAULT_DOCKER_CONTROL_TIMEOUT,
             availability_cache: Arc::new(Mutex::new(None)),
             resources: Arc::new(ResourceOwnerRegistry::default()),
         }
@@ -1451,6 +1453,7 @@ case "$1" in
       hung-create) hang_forever ;;
       create-empty) exit 0 ;;
       create-bad) printf 'not-a-container-id\n'; exit 0 ;;
+      create-delayed-bad) sleep 0.2; printf 'not-a-container-id\n'; exit 0 ;;
       *) printf '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n'; exit 0 ;;
     esac
     ;;
@@ -1674,17 +1677,20 @@ exit 64
     #[tokio::test]
     async fn empty_or_invalid_create_output_still_uses_named_cleanup_authority()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
-        for mode in ["create-empty", "create-bad"] {
+        for mode in ["create-empty", "create-bad", "create-delayed-bad"] {
             let fake = FakeDocker::new(mode)?;
             let result = fake
                 .sandbox()
                 .execute(SandboxCommand::shell("never starts"))
                 .await;
-            assert!(matches!(
-                result,
-                Err(echo_core::error::ReactError::Sandbox(error))
-                    if matches!(*error, SandboxError::StartFailed(_))
-            ));
+            assert!(
+                matches!(
+                    &result,
+                    Err(echo_core::error::ReactError::Sandbox(error))
+                        if matches!(error.as_ref(), SandboxError::StartFailed(_))
+                ),
+                "unexpected create result for {mode}: {result:?}"
+            );
             assert_eq!(fake.operations()?, ["info", "create", "rm"]);
         }
         Ok(())
@@ -1842,9 +1848,10 @@ exit 64
     async fn hung_control_stages_are_bounded_and_typed()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let hung_info = FakeDocker::new("hung-info")?;
+        let mut info_sandbox = hung_info.sandbox();
+        info_sandbox.control_timeout = Duration::from_millis(100);
         let info_started = Instant::now();
-        let info_error = hung_info
-            .sandbox()
+        let info_error = info_sandbox
             .execute(SandboxCommand::shell("never starts"))
             .await
             .err()
@@ -1858,9 +1865,10 @@ exit 64
         assert_eq!(hung_info.operations()?, ["info"]);
 
         let hung_create = FakeDocker::new("hung-create")?;
+        let mut create_sandbox = hung_create.sandbox();
+        create_sandbox.control_timeout = Duration::from_millis(100);
         let create_started = Instant::now();
-        let create_error = hung_create
-            .sandbox()
+        let create_error = create_sandbox
             .execute(SandboxCommand::shell("never starts"))
             .await
             .err()
@@ -1874,9 +1882,10 @@ exit 64
         assert_eq!(hung_create.operations()?, ["info", "create", "rm"]);
 
         let hung_rm = FakeDocker::new("hung-rm")?;
+        let mut rm_sandbox = hung_rm.sandbox();
+        rm_sandbox.control_timeout = Duration::from_millis(100);
         let rm_started = Instant::now();
-        let rm_error = hung_rm
-            .sandbox()
+        let rm_error = rm_sandbox
             .execute(SandboxCommand::shell("completes"))
             .await
             .err()
