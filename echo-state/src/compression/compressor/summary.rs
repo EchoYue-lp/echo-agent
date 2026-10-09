@@ -1,4 +1,5 @@
 use crate::compression::compressor::SlidingWindowCompressor;
+use crate::compression::compressor::sliding_window::{message_tokens, select_recent_tail};
 use crate::compression::{
     CompressionCheckpoint, CompressionInput, CompressionOutput, ContextCompressor,
     StructuredSummary,
@@ -189,6 +190,7 @@ pub struct SummaryCompressor {
     prompt_fn: SummaryPromptFn,
     /// 最近多少条对话消息保持原样（不参与摘要）
     keep_recent: usize,
+    recent_token_budget: Option<usize>,
 }
 
 impl SummaryCompressor {
@@ -198,6 +200,7 @@ impl SummaryCompressor {
             llm,
             prompt_fn: Box::new(default_summary_prompt),
             keep_recent,
+            recent_token_budget: None,
         }
     }
 
@@ -229,7 +232,14 @@ impl SummaryCompressor {
             llm,
             prompt_fn: Box::new(prompt_fn),
             keep_recent,
+            recent_token_budget: None,
         }
+    }
+
+    /// Use a token allowance for recent turns instead of the legacy message cap.
+    pub fn with_recent_token_budget(mut self, tokens: usize) -> Self {
+        self.recent_token_budget = (tokens > 0).then_some(tokens);
+        self
     }
 }
 
@@ -329,6 +339,7 @@ impl ContextCompressor for SummaryCompressor {
 
     fn compress(&self, input: CompressionInput) -> BoxFuture<'_, Result<CompressionOutput>> {
         Box::pin(async move {
+            check_cancelled(&input)?;
             let start = Instant::now();
             let tokenizer = input.tokenizer();
             let focus = input
@@ -354,16 +365,20 @@ impl ContextCompressor for SummaryCompressor {
                 .filter(|message| message.role != Role::System || is_generated_summary(message))
                 .cloned()
                 .collect();
-            let system_count = system_msgs.len();
+            let (to_summarize, to_keep) = select_recent_tail(
+                conv_msgs,
+                input
+                    .token_limit
+                    .saturating_sub(message_tokens(&system_msgs, tokenizer.as_ref())),
+                self.recent_token_budget,
+                self.keep_recent,
+                true,
+                tokenizer.as_ref(),
+            )?;
 
-            if conv_msgs.len() <= self.keep_recent {
-                if tokens_before > input.token_limit {
-                    return SlidingWindowCompressor::new(self.keep_recent)
-                        .compress(input)
-                        .await;
-                }
+            if to_summarize.is_empty() {
                 let mut messages = system_msgs;
-                messages.extend(conv_msgs);
+                messages.extend(to_keep);
                 let tokens_after: usize = messages
                     .iter()
                     .filter_map(|m| m.content.as_text())
@@ -381,14 +396,11 @@ impl ContextCompressor for SummaryCompressor {
                 });
             }
 
-            let split_at = conv_msgs.len() - self.keep_recent;
-            let to_summarize = &conv_msgs[..split_at];
-            let to_keep = conv_msgs[split_at..].to_vec();
-
             // Try structured output first; fall back to natural language
             let (summary_text, structured) = self
-                .try_structured_summary(to_summarize, focus.as_deref(), input.cancel_token.clone())
+                .try_structured_summary(&to_summarize, focus.as_deref(), input.cancel_token.clone())
                 .await;
+            check_cancelled(&input)?;
 
             let (final_summary, summary_for_checkpoint) = match (summary_text, structured) {
                 (Some(_text), Some(ref s)) => {
@@ -403,6 +415,9 @@ impl ContextCompressor for SummaryCompressor {
                     // LLM call itself failed — fall back to sliding window
                     warn!("⚠️ LLM 摘要生成失败，回退到滑动窗口压缩");
                     return SlidingWindowCompressor::new(self.keep_recent)
+                        .with_recent_token_budget(
+                            self.recent_token_budget.unwrap_or(input.token_limit),
+                        )
                         .compress(input)
                         .await;
                 }
@@ -411,7 +426,8 @@ impl ContextCompressor for SummaryCompressor {
             let mut provisional = system_msgs;
             provisional.push(Message::system(final_summary));
             provisional.extend(to_keep);
-            let bounded = SlidingWindowCompressor::new(self.keep_recent)
+            let bounded_result = SlidingWindowCompressor::new(self.keep_recent)
+                .with_recent_token_budget(input.token_limit)
                 .compress(CompressionInput {
                     messages: provisional,
                     token_limit: input.token_limit,
@@ -420,10 +436,30 @@ impl ContextCompressor for SummaryCompressor {
                     cancel_token: input.cancel_token.clone(),
                     tokenizer: Some(tokenizer.clone()),
                 })
-                .await?;
+                .await;
+            let bounded = match bounded_result {
+                Ok(value) => value,
+                Err(_) => {
+                    return SlidingWindowCompressor::new(self.keep_recent)
+                        .with_recent_token_budget(
+                            self.recent_token_budget.unwrap_or(input.token_limit),
+                        )
+                        .compress(input)
+                        .await;
+                }
+            };
             let messages = bounded.messages;
-            let mut evicted = to_summarize.to_vec();
-            evicted.extend(bounded.evicted);
+            // The candidate summary is first in the bounded conversation. If
+            // the oldest prefix is evicted, exclude this newly generated item
+            // from historical eviction/promotion and checkpoint provenance.
+            let candidate_evicted = bounded.evicted.first().is_some_and(is_generated_summary);
+            let mut evicted = to_summarize;
+            evicted.extend(
+                bounded
+                    .evicted
+                    .into_iter()
+                    .skip(usize::from(candidate_evicted)),
+            );
 
             let tokens_after: usize = messages
                 .iter()
@@ -431,16 +467,14 @@ impl ContextCompressor for SummaryCompressor {
                 .map(|c| tokenizer.count_tokens(&c))
                 .sum();
 
-            let checkpoint = CompressionCheckpoint::new(self.name())
-                .with_covered_range(
-                    system_count,
-                    system_count.saturating_add(split_at).saturating_sub(1),
-                )
-                .with_summary(summary_for_checkpoint.unwrap_or_default())
+            let mut checkpoint = CompressionCheckpoint::new(self.name())
                 .with_counts(messages.len(), evicted.len())
                 .with_tokens(tokens_before, tokens_after)
                 .with_duration_ms(start.elapsed().as_millis() as u64)
                 .with_focus(focus);
+            if !candidate_evicted {
+                checkpoint = checkpoint.with_summary(summary_for_checkpoint.unwrap_or_default());
+            }
 
             Ok(CompressionOutput {
                 messages,
@@ -451,11 +485,24 @@ impl ContextCompressor for SummaryCompressor {
     }
 }
 
-fn is_generated_summary(message: &Message) -> bool {
+pub(crate) fn is_generated_summary(message: &Message) -> bool {
     message
         .content
         .as_text_ref()
         .is_some_and(|text| text.starts_with("[对话历史摘要]"))
+}
+
+fn check_cancelled(input: &CompressionInput) -> Result<()> {
+    if input
+        .cancel_token
+        .as_ref()
+        .is_some_and(|cancel| cancel.is_cancelled())
+    {
+        return Err(
+            echo_core::error::AgentError::Cancelled("context compression".to_string()).into(),
+        );
+    }
+    Ok(())
 }
 
 // ── Incremental Summary ───────────────────────────────────────────────────────
@@ -498,7 +545,9 @@ const INCREMENTAL_SUMMARY_PROMPT: &str = "You are maintaining a running summary 
 pub struct IncrementalSummaryCompressor {
     llm: Arc<dyn LlmClient>,
     keep_recent: usize,
-    /// The previous structured summary, updated after each successful compression.
+    recent_token_budget: Option<usize>,
+    /// Observation of the summary accepted by the context owner. Input messages
+    /// remain the recovery authority; rejected calculations do not alter this cache.
     previous_summary: Mutex<Option<StructuredSummary>>,
 }
 
@@ -507,8 +556,15 @@ impl IncrementalSummaryCompressor {
         Self {
             llm,
             keep_recent,
+            recent_token_budget: None,
             previous_summary: Mutex::new(None),
         }
+    }
+
+    /// Use the same token-based recent-turn selection as SummaryCompressor.
+    pub fn with_recent_token_budget(mut self, tokens: usize) -> Self {
+        self.recent_token_budget = (tokens > 0).then_some(tokens);
+        self
     }
 
     /// Get the current stored summary as a JSON string (for backward compat).
@@ -577,8 +633,19 @@ impl IncrementalSummaryCompressor {
 
         // Natural language fallback
         let prompt = default_summary_prompt_with_focus(messages, focus);
-        match self.llm.chat_simple(vec![Message::user(prompt)]).await {
-            Ok(text) => (Some(text), None),
+        match self
+            .llm
+            .chat(echo_core::llm::ChatRequest {
+                messages: vec![Message::user(prompt)],
+                cancel_token,
+                ..Default::default()
+            })
+            .await
+        {
+            Ok(response) => (
+                response.content().filter(|text| !text.trim().is_empty()),
+                None,
+            ),
             Err(_) => (None, None),
         }
     }
@@ -625,7 +692,7 @@ impl IncrementalSummaryCompressor {
                     tool_choice: None,
                     response_format: Some(ResponseFormat::JsonObject),
                     thinking: None,
-                    cancel_token,
+                    cancel_token: cancel_token.clone(),
                     timeouts: None,
                     user_id: None,
                     cache_hints: None,
@@ -670,20 +737,43 @@ impl IncrementalSummaryCompressor {
             INCREMENTAL_SUMMARY_PROMPT, focus_note, prev_json, new_history
         );
 
-        match self.llm.chat_simple(vec![Message::user(prompt)]).await {
-            Ok(text) => (Some(text), None),
+        match self
+            .llm
+            .chat(echo_core::llm::ChatRequest {
+                messages: vec![Message::user(prompt)],
+                cancel_token,
+                ..Default::default()
+            })
+            .await
+        {
+            Ok(response) => (
+                response.content().filter(|text| !text.trim().is_empty()),
+                None,
+            ),
             Err(_) => (None, None),
         }
     }
 }
 
 impl ContextCompressor for IncrementalSummaryCompressor {
+    fn context_committed(&self, messages: &[Message]) {
+        let accepted = messages
+            .iter()
+            .filter(|message| is_generated_summary(message))
+            .filter_map(|message| message.content.as_text_ref())
+            .filter_map(|text| text.strip_prefix("[对话历史摘要]\n"))
+            .find_map(StructuredSummary::from_llm_response);
+        if let Ok(mut cache) = self.previous_summary.lock() {
+            *cache = accepted;
+        }
+    }
     fn name(&self) -> &str {
         "IncrementalSummary"
     }
 
     fn compress(&self, input: CompressionInput) -> BoxFuture<'_, Result<CompressionOutput>> {
         Box::pin(async move {
+            check_cancelled(&input)?;
             let start = Instant::now();
             let tokenizer = input.tokenizer();
             let focus = input
@@ -709,16 +799,20 @@ impl ContextCompressor for IncrementalSummaryCompressor {
                 .filter(|message| message.role != Role::System || is_generated_summary(message))
                 .cloned()
                 .collect();
-            let system_count = system_msgs.len();
+            let (to_summarize, to_keep) = select_recent_tail(
+                conv_msgs,
+                input
+                    .token_limit
+                    .saturating_sub(message_tokens(&system_msgs, tokenizer.as_ref())),
+                self.recent_token_budget,
+                self.keep_recent,
+                true,
+                tokenizer.as_ref(),
+            )?;
 
-            if conv_msgs.len() <= self.keep_recent {
-                if tokens_before > input.token_limit {
-                    return SlidingWindowCompressor::new(self.keep_recent)
-                        .compress(input)
-                        .await;
-                }
+            if to_summarize.is_empty() {
                 let mut messages = system_msgs;
-                messages.extend(conv_msgs);
+                messages.extend(to_keep);
                 let tokens_after: usize = messages
                     .iter()
                     .filter_map(|m| m.content.as_text())
@@ -736,17 +830,21 @@ impl ContextCompressor for IncrementalSummaryCompressor {
                 });
             }
 
-            let split_at = conv_msgs.len() - self.keep_recent;
-            let to_summarize = &conv_msgs[..split_at];
-            let to_keep = conv_msgs[split_at..].to_vec();
-
-            let prev_structured = self.current_structured_summary();
+            // Accepted input, rather than a prior calculation's private cache,
+            // is the sole authority for the previous checkpoint.
+            let prev_structured = input
+                .messages
+                .iter()
+                .filter(|message| is_generated_summary(message))
+                .filter_map(|message| message.content.as_text_ref())
+                .filter_map(|text| text.strip_prefix("[对话历史摘要]\n"))
+                .find_map(StructuredSummary::from_llm_response);
 
             // Decide: first compression or incremental?
             let (summary_text, structured) = if let Some(ref prev) = prev_structured {
                 // Incremental path: summarize new messages, then merge field-by-field
                 self.incremental_structured_summary(
-                    to_summarize,
+                    &to_summarize,
                     prev,
                     focus.as_deref(),
                     input.cancel_token.clone(),
@@ -755,12 +853,14 @@ impl ContextCompressor for IncrementalSummaryCompressor {
             } else {
                 // First compression: full structured summary (with natural language fallback)
                 self.try_first_structured_summary(
-                    to_summarize,
+                    &to_summarize,
                     focus.as_deref(),
                     input.cancel_token.clone(),
                 )
                 .await
             };
+
+            check_cancelled(&input)?;
 
             let (final_text, _final_structured, summary_for_checkpoint) =
                 match (summary_text, structured) {
@@ -773,26 +873,21 @@ impl ContextCompressor for IncrementalSummaryCompressor {
                         } else {
                             s.clone()
                         };
-                        // Store for next incremental pass
-                        if let Ok(mut guard) = self.previous_summary.lock() {
-                            *guard = Some(merged.clone());
-                        }
                         let checkpoint_json = merged.to_json();
                         (merged.to_system_message(), Some(merged), checkpoint_json)
                     }
                     (Some(text), None) => {
                         // Natural language fallback
                         let content = format!("[对话历史摘要]\n{}", text);
-                        // Also store as text for backward compat
-                        if let Ok(mut guard) = self.previous_summary.lock() {
-                            *guard = None; // Reset structured state on fallback
-                        }
                         (content, None, text)
                     }
                     (None, _) => {
                         // LLM failed entirely
                         warn!("Incremental summary LLM failed, falling back to sliding window");
                         return SlidingWindowCompressor::new(self.keep_recent)
+                            .with_recent_token_budget(
+                                self.recent_token_budget.unwrap_or(input.token_limit),
+                            )
                             .compress(input)
                             .await;
                     }
@@ -801,7 +896,8 @@ impl ContextCompressor for IncrementalSummaryCompressor {
             let mut provisional = system_msgs;
             provisional.push(Message::system(final_text));
             provisional.extend(to_keep);
-            let bounded = SlidingWindowCompressor::new(self.keep_recent)
+            let bounded_result = SlidingWindowCompressor::new(self.keep_recent)
+                .with_recent_token_budget(input.token_limit)
                 .compress(CompressionInput {
                     messages: provisional,
                     token_limit: input.token_limit,
@@ -810,10 +906,29 @@ impl ContextCompressor for IncrementalSummaryCompressor {
                     cancel_token: input.cancel_token.clone(),
                     tokenizer: Some(tokenizer.clone()),
                 })
-                .await?;
+                .await;
+            let bounded = match bounded_result {
+                Ok(value) => value,
+                Err(_) => {
+                    return SlidingWindowCompressor::new(self.keep_recent)
+                        .with_recent_token_budget(
+                            self.recent_token_budget.unwrap_or(input.token_limit),
+                        )
+                        .compress(input)
+                        .await;
+                }
+            };
             let messages = bounded.messages;
-            let mut evicted = to_summarize.to_vec();
-            evicted.extend(bounded.evicted);
+            // Same candidate-prefix provenance rule as SummaryCompressor:
+            // unpublished synthetic summaries are not historical evictions.
+            let candidate_evicted = bounded.evicted.first().is_some_and(is_generated_summary);
+            let mut evicted = to_summarize;
+            evicted.extend(
+                bounded
+                    .evicted
+                    .into_iter()
+                    .skip(usize::from(candidate_evicted)),
+            );
 
             let tokens_after: usize = messages
                 .iter()
@@ -821,16 +936,14 @@ impl ContextCompressor for IncrementalSummaryCompressor {
                 .map(|c| tokenizer.count_tokens(&c))
                 .sum();
 
-            let checkpoint = CompressionCheckpoint::new(self.name())
-                .with_covered_range(
-                    system_count,
-                    system_count.saturating_add(split_at).saturating_sub(1),
-                )
-                .with_summary(summary_for_checkpoint)
+            let mut checkpoint = CompressionCheckpoint::new(self.name())
                 .with_counts(messages.len(), evicted.len())
                 .with_tokens(tokens_before, tokens_after)
                 .with_duration_ms(start.elapsed().as_millis() as u64)
                 .with_focus(focus);
+            if !candidate_evicted {
+                checkpoint = checkpoint.with_summary(summary_for_checkpoint);
+            }
 
             Ok(CompressionOutput {
                 messages,
@@ -884,6 +997,210 @@ mod tests {
         fn capabilities(&self) -> ProviderCapabilities {
             ProviderCapabilities::anthropic()
         }
+    }
+
+    #[tokio::test]
+    async fn token_summary_and_incremental_keep_recent_turns_across_repeated_compaction()
+    -> Result<()> {
+        let request = "current instruction 中文🚀";
+        let initial = vec![
+            Message::user("old ".repeat(100)),
+            Message::assistant("old answer".to_string()),
+            Message::user(request.to_string()),
+            Message::assistant("recent work".to_string()),
+        ];
+        let strategies: Vec<Box<dyn ContextCompressor>> = vec![
+            Box::new(
+                SummaryCompressor::new(Arc::new(StaticSummaryLlm), 1).with_recent_token_budget(30),
+            ),
+            Box::new(
+                IncrementalSummaryCompressor::new(Arc::new(StaticSummaryLlm), 1)
+                    .with_recent_token_budget(30),
+            ),
+        ];
+        for strategy in strategies {
+            let mut messages = initial.clone();
+            for _ in 0..3 {
+                let output = strategy
+                    .compress(CompressionInput {
+                        messages,
+                        token_limit: 100,
+                        current_query: Some(request.to_string()),
+                        focus_instructions: None,
+                        cancel_token: None,
+                        tokenizer: None,
+                    })
+                    .await?;
+                assert!(message_tokens(&output.messages, &HeuristicTokenizer) <= 100);
+                assert!(
+                    output
+                        .messages
+                        .iter()
+                        .any(|message| message.content.as_text_ref() == Some(request))
+                );
+                assert_eq!(
+                    output
+                        .messages
+                        .iter()
+                        .filter(|message| is_generated_summary(message))
+                        .count(),
+                    1
+                );
+                messages = output.messages;
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn summary_preserves_latest_request_before_long_tool_batch() -> Result<()> {
+        use echo_core::llm::types::{FunctionCall, ToolCall};
+        let request = "请保留当前用户的精确约束🚀";
+        let mut call = Message::assistant(String::new());
+        call.tool_calls = Some(vec![ToolCall {
+            id: "lookup".to_string(),
+            call_type: "function".to_string(),
+            function: FunctionCall {
+                name: "lookup".to_string(),
+                arguments: "{}".to_string(),
+            },
+        }]);
+        let output = SummaryCompressor::new(Arc::new(StaticSummaryLlm), 2)
+            .compress(CompressionInput {
+                messages: vec![
+                    Message::user("old request".to_string()),
+                    Message::assistant("old answer".to_string()),
+                    Message::user(request.to_string()),
+                    call,
+                    Message::tool_result(
+                        "lookup".to_string(),
+                        "lookup".to_string(),
+                        "evidence".to_string(),
+                    ),
+                    Message::assistant("ongoing work".to_string()),
+                ],
+                token_limit: 200,
+                current_query: Some(request.to_string()),
+                focus_instructions: None,
+                cancel_token: None,
+                tokenizer: None,
+            })
+            .await?;
+        assert!(
+            output
+                .messages
+                .iter()
+                .any(|message| message.content.as_text_ref() == Some(request))
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn near_limit_request_wins_over_a_new_summary() -> Result<()> {
+        let request = "r".repeat(360);
+        let strategies: Vec<Box<dyn ContextCompressor>> = vec![
+            Box::new(
+                SummaryCompressor::new(Arc::new(StaticSummaryLlm), 20).with_recent_token_budget(20),
+            ),
+            Box::new(
+                IncrementalSummaryCompressor::new(Arc::new(StaticSummaryLlm), 20)
+                    .with_recent_token_budget(20),
+            ),
+        ];
+        for strategy in strategies {
+            let output = strategy
+                .compress(CompressionInput {
+                    messages: vec![
+                        Message::system("[对话历史摘要]\nold summary ".repeat(20)),
+                        Message::user("old ".repeat(100)),
+                        Message::user(request.clone()),
+                    ],
+                    token_limit: 100,
+                    current_query: Some(request.clone()),
+                    focus_instructions: None,
+                    cancel_token: None,
+                    tokenizer: None,
+                })
+                .await?;
+            assert!(
+                output
+                    .messages
+                    .iter()
+                    .any(|message| message.content.as_text_ref() == Some(request.as_str()))
+            );
+            assert!(message_tokens(&output.messages, &HeuristicTokenizer) <= 100);
+            assert_eq!(output.evicted.len(), 2);
+            assert_eq!(output.messages.len(), 1);
+            assert!(output.checkpoint.as_ref().is_some_and(|checkpoint| {
+                checkpoint.evicted_count == 2 && checkpoint.summary.is_none()
+            }));
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rejected_context_transform_keeps_incremental_observation_cache() -> Result<()> {
+        use crate::compression::{ContextManager, MemoryPromoter, MemoryPromotionReceipt};
+        struct SharedIncremental(Arc<IncrementalSummaryCompressor>);
+        impl ContextCompressor for SharedIncremental {
+            fn compress(
+                &self,
+                input: CompressionInput,
+            ) -> BoxFuture<'_, Result<CompressionOutput>> {
+                self.0.compress(input)
+            }
+            fn context_committed(&self, messages: &[Message]) {
+                self.0.context_committed(messages);
+            }
+        }
+        struct FailingPromotion;
+        impl MemoryPromoter for FailingPromotion {
+            fn promote(
+                &self,
+                _messages: &[Message],
+            ) -> BoxFuture<'_, Result<MemoryPromotionReceipt>> {
+                Box::pin(async {
+                    Err(echo_core::error::AgentError::ContextLimitExceeded(
+                        "promotion failed".to_string(),
+                    )
+                    .into())
+                })
+            }
+        }
+        let strategy = Arc::new(
+            IncrementalSummaryCompressor::new(Arc::new(StaticSummaryLlm), 20)
+                .with_recent_token_budget(30),
+        );
+        let accepted = StructuredSummary {
+            goal: "accepted goal".to_string(),
+            constraints: vec!["accepted constraint".to_string()],
+            ..Default::default()
+        };
+        let mut context = ContextManager::builder(500)
+            .compressor(SharedIncremental(strategy.clone()))
+            .build();
+        context.set_messages(vec![
+            Message::system(accepted.to_system_message()),
+            Message::user("old ".repeat(200)),
+            Message::assistant("old result".repeat(40)),
+            Message::user("current precise request".to_string()),
+        ]);
+        let cache = strategy.current_summary();
+        let before = serde_json::to_value(context.messages())?;
+        context.set_memory_promoter(Arc::new(FailingPromotion));
+        assert!(context.force_compress(20).await.is_err());
+        assert_eq!(strategy.current_summary(), cache);
+        assert_eq!(before, serde_json::to_value(context.messages())?);
+        context.remove_memory_promoter();
+        context
+            .force_compress_with(&SlidingWindowCompressor::new(2).with_recent_token_budget(30))
+            .await?;
+        assert!(strategy.current_summary().is_none());
+        context.set_messages(vec![Message::system(accepted.to_system_message())]);
+        assert!(strategy.current_summary().is_some());
+        context.clear();
+        assert!(strategy.current_summary().is_none());
+        Ok(())
     }
 
     #[tokio::test]

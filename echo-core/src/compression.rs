@@ -479,6 +479,11 @@ fn extract_json_from_text(text: &str) -> Option<String> {
 pub trait ContextCompressor: Send + Sync {
     fn compress(&self, input: CompressionInput) -> BoxFuture<'_, Result<CompressionOutput>>;
 
+    /// Notify optional observation caches only after the context owner accepts
+    /// the final transform. Calculation and rejected candidates do not publish state.
+    /// Standalone callers may invoke this after accepting CompressionOutput.messages.
+    fn context_committed(&self, _messages: &[Message]) {}
+
     /// Human-readable name of this compressor, used for metrics tracking.
     /// Override in implementations for a descriptive name.
     fn name(&self) -> &str {
@@ -495,6 +500,10 @@ impl ContextCompressor for Box<dyn ContextCompressor> {
 
     fn name(&self) -> &str {
         (**self).name()
+    }
+
+    fn context_committed(&self, messages: &[Message]) {
+        (**self).context_committed(messages);
     }
 }
 

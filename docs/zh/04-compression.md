@@ -1,5 +1,27 @@
 # 上下文压缩（Context Compression）
 
+`FrameworkConfig` 的 `agent.compress_window: 0` 启用近期 token 预算：取实际
+Agent 窗口的 25%，至多 20K token；正数保留旧消息条数上限。直接使用 Rust
+压缩器时，可调用 `with_recent_token_budget(tokens)`；`0` 恢复旧构造器行为。
+Summary、IncrementalSummary 与 SlidingWindow 复用同一个尾部选择器：较旧 turn
+整轮保留，过大的当前 turn 保留精确用户请求和近期完整工具组，其余执行记录进入摘要。
+最近请求超过软预算时可以扩展保留量；超过扣除 system/protected 内容后的硬输入预算则
+返回超限错误。压缩不会静默截断用户文本，也不会永久发送所有历史用户输入。
+
+生成摘要重新参与下一次摘要，不成为永久 canonical system 内容。自动 compact 从当前
+上下文提取最新真实请求作为 focus；projection、Hook 和其它运行态提示不冒充用户请求。
+手动入口 `force_compress_context_with_options(focus, cancel)` 共享一次 hook/trace 生命周期，
+把取消传给摘要 provider，并在成功变换后由应用继续提交 journal safe point。
+工具组之外可能出现不连续驱逐，checkpoint 此时不声明虚假的连续 `covered_range`。
+完整取舍见 [ADR 0081](../adr/0081-token-budgeted-compression-tail.md)。
+
+增量摘要从输入中的已接受摘要继续合并，私有缓存只提供观察。`ContextManager` 在预算、
+校验和 memory promotion 全部成功后调用 `ContextCompressor::context_committed`，恢复/清空
+时同步缓存；Hybrid 转发通知。直接使用压缩器的调用方接受 `output.messages` 后，应显式
+调用 `context_committed(&output.messages)`，再读取 `current_summary()`。
+取消或失败计算不发布缓存。工具 Hook 和图片注释使用运行态来源标记；工具组按 call ID
+闭合，原子边界不会被这些注释或多模态 User-role 消息打散。
+
 ## 是什么
 
 LLM 的上下文窗口（Context Window）是有限的。当对话历史积累到一定长度时，如果直接发送全部消息，会超出 token 限制导致请求失败，或因 token 数量激增导致推理变慢、成本激增。
@@ -104,7 +126,7 @@ Echo Agent 据此保持四个权威边界：`ConversationStore` 保存完整展�
 
 > **新增于 v0.2.2。** 复用历史摘要的增量 LLM 摘要压缩器。
 
-与 `SummaryCompressor` 每次全量重新摘要不同，`IncrementalSummaryCompressor` 维护上次的摘要文本，后续压缩时只发送 `[上次摘要] + [新增消息]` 给 LLM。对于需要多次压缩的长对话，可显著降低 LLM 成本和延迟。
+与 `SummaryCompressor` 每次全量重新摘要不同，`IncrementalSummaryCompressor` 从已接受的输入消息读取上次摘要，后续压缩只发送 `[上次摘要] + [新增消息]` 给 LLM。`current_summary()` 是 ContextManager 接受最终变换后发布的观察缓存，失败或取消的候选不会更新它；独立调用方接受输出后调用 `ContextCompressor::context_committed(&output.messages)` 发布缓存。
 
 ```rust
 use echo_agent::compression::compressor::IncrementalSummaryCompressor;
@@ -115,14 +137,14 @@ let compressor = IncrementalSummaryCompressor::new(llm, 6);
 // 第二次压缩：只发送上次摘要 + 新增消息
 // 第三次压缩：同上，更便宜
 
-// 查看或重置存储的摘要：
+// 查看或重置观察缓存（它不是输入历史的权威）：
 println!("当前摘要: {:?}", compressor.current_summary());
 compressor.reset();
 ```
 
 **优点**：长对话多次压缩时成本大幅降低。
 
-**缺点**：需要维护内部状态（`Mutex` 保护）；逻辑略复杂。
+**缺点**：观察缓存使用 `Mutex`，独立调用方须在接受输出后通知缓存。重置缓存不会删除已接受输入中的摘要。
 
 ---
 

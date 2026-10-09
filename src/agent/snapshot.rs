@@ -3606,18 +3606,29 @@ mod transcript_filter_tests {
         let mut profile =
             echo_core::llm::capabilities::ModelProfile::from_provider_name("model", "openai");
         profile.prompt_suffix = Some("Use compact tool arguments.".to_string());
-        let agent = crate::agent::ReactAgentBuilder::new()
-            .model("model")
-            .system_prompt("Base prompt")
+        // This tests model-profile canonical text, independent of the checkout's
+        // optional project-rules feature and local instruction files.
+        let config = crate::agent::AgentConfig::new("model", "assistant", "Base prompt")
+            .enable_tool(false)
+            .auto_project_rules(false)
             .model_profile(profile)
-            .token_limit(64)
-            .build()?;
+            .token_limit(64);
+        let agent = crate::agent::ReactAgent::new(config);
 
         let mut context = agent.memory.context.lock().await;
+        // Full-feature prompts can exceed the old 64-token fixture. Exercise
+        // canonical retention within a valid budget, with real history eviction.
+        let input_limit = context.token_estimate().saturating_add(64);
+        context.set_token_limit(input_limit, None);
+        context.push(echo_core::llm::types::Message::user(
+            "old context ".repeat(200),
+        ));
         context.push(echo_core::llm::types::Message::user(
             "temporary context".to_string(),
         ));
-        let _ = context.force_compress(1).await?;
+        let (stats, _) = context.force_compress(1).await?;
+        assert!(stats.evicted > 0);
+        assert!(stats.after_tokens <= input_limit);
         assert!(context.messages().iter().any(|message| {
             message.text_content().is_some_and(|text| {
                 text.contains("Base prompt") && text.contains("Use compact tool arguments.")

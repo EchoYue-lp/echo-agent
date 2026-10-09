@@ -72,9 +72,10 @@ pub(crate) async fn run_compact(
         {
             let mut context = context.lock().await;
             context.apply_projection_scope("pre-model", &projections);
+            let current_query = context.latest_user_request();
             context
                 .prepare_with_cancel(
-                    None,
+                    current_query.as_deref(),
                     request_overhead_tokens,
                     snap.external_cancel.as_deref().cloned(),
                 )
@@ -282,6 +283,7 @@ mod tests {
             let mut context = agent.memory.context.lock().await;
             context.push(Message::user("first message ".repeat(5_000)));
             context.push(Message::assistant("second message ".repeat(500)));
+            context.push(Message::user("continue".to_string()));
         }
         let snap = AgentRunSnapshot::from_agent(&agent);
         let (tx, mut rx) = mpsc::channel::<Result<AgentEvent>>(8);

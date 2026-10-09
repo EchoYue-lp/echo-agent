@@ -462,9 +462,25 @@ impl ReactAgent {
     pub async fn force_compress_context(
         &self,
     ) -> Result<(ForceCompressStats, Option<CompressionCheckpoint>)> {
+        self.force_compress_context_with_options(None, None).await
+    }
+
+    /// Surface-neutral manual compression: focus and provider cancellation
+    /// follow the installed compressor, with one trace and hook lifecycle.
+    pub async fn force_compress_context_with_options(
+        &self,
+        focus: Option<&str>,
+        cancel: Option<crate::agent::CancellationToken>,
+    ) -> Result<(ForceCompressStats, Option<CompressionCheckpoint>)> {
         self.fire_lifecycle_hook(crate::skills::hooks::HookEvent::PreCompact, Some("manual"))
             .await;
-        let (stats, checkpoint) = self.memory.context.lock().await.force_compress(40).await?;
+        let (stats, checkpoint) = self
+            .memory
+            .context
+            .lock()
+            .await
+            .force_compress_with_options(focus, 40, cancel)
+            .await?;
         let (protected_message_count, protected_context_tokens) = {
             let context = self.memory.context.lock().await;
             (

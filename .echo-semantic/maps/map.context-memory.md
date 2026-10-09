@@ -4,7 +4,7 @@ id: map.context-memory
 kind: capability_map
 title: Context、Memory、Compression 与 Checkpoint
 risk: high
-observed_at: 6fd66621e0671028d6aa94c69933b63f38e299cd
+observed_at: source:964ce207864933a5ba4a0c5bf0ed5357db5def80d6006eb96abf1fb7f79a816d
 boundary_refs: [boundary.context-memory]
 behavior_refs: [behavior.context-memory-lifecycle]
 rule_refs: [rule.context-persistence-separation]
@@ -13,6 +13,12 @@ finding_refs: [finding.transcript-projection-settlement, finding.transcript-gene
 audit_refs: [audit.context-memory.data-durability, audit.transcript-generation-runtime-identity-rereview, audit.transcript-projection-settlement-rereview, audit.checkpoint-plan-authority-rereview, audit.memory-provenance-authority-rereview]
 related_map_refs: [map.agent-session-turn, map.observation-persistence-delivery, map.eval-evolution]
 scenarios:
+  token-budgeted-recent-tail:
+    status: mapped
+    source_refs: [echo-state/src/compression/compressor/sliding_window.rs, echo-state/src/compression/compressor/summary.rs, echo-state/src/compression/mod.rs, src/config.rs, src/agent/react/capabilities.rs, src/agent/react/run/phases/compact.rs, docs/adr/0081-token-budgeted-compression-tail.md]
+    behavior_refs: [behavior.context-memory-lifecycle]
+    rule_refs: [rule.context-persistence-separation]
+    evidence_refs: [evidence.compression-token-tail]
   active-context-and-compression:
     status: mapped
     source_refs: [echo-state/src/compression/mod.rs, src/agent/react/run/context.rs]
