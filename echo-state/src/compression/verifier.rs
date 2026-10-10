@@ -137,7 +137,10 @@ fn check_last_query_presence(
     checkpoint: &CompressionCheckpoint,
 ) -> VerificationCheck {
     // Find the last user message in original
-    let last_user = original.iter().rev().find(|m| m.role == Role::User);
+    let last_user = original
+        .iter()
+        .rev()
+        .find(|message| super::compressor::sliding_window::is_user_request(message));
 
     match last_user {
         Some(msg) => {

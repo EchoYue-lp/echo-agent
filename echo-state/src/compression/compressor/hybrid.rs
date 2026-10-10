@@ -39,6 +39,12 @@ pub struct HybridCompressor {
 }
 
 impl ContextCompressor for HybridCompressor {
+    fn context_committed(&self, messages: &[Message]) {
+        for stage in &self.stages {
+            stage.context_committed(messages);
+        }
+    }
+
     fn name(&self) -> &str {
         "Hybrid"
     }

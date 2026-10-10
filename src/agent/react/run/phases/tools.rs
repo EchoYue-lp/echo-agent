@@ -55,7 +55,7 @@ async fn project_typed_tool_result(
         return None;
     }
     let mut parts = vec![ContentPart::Text {
-        text: "Rich content returned by the preceding tool call.".to_string(),
+        text: "[runtime_context:ToolResultAttachment]\nRich content returned by the preceding tool call.".to_string(),
     }];
     parts.extend(result.model_content.iter().map(|content| match content {
         echo_core::tools::ToolResultContent::ImageUrl { url, detail } => ContentPart::ImageUrl {
@@ -1296,6 +1296,14 @@ mod tests {
         let Some(message) = project_typed_tool_result(&context, &result, true).await else {
             return Err(std::io::Error::other("image result should create a model message").into());
         };
+        context.lock().await.push(crate::llm::types::Message::user(
+            "exact real request".to_string(),
+        ));
+        context.lock().await.push(message.clone());
+        assert_eq!(
+            context.lock().await.latest_user_request(),
+            Some("exact real request".to_string())
+        );
         let MessageContent::Parts(parts) = message.content else {
             return Err(std::io::Error::other("image result should be multimodal").into());
         };

@@ -95,13 +95,27 @@ impl FrameworkConfig {
         let resolution = self.model.resolve_model_profile_at(SystemTime::now());
         let context_window = resolve_context_window(&resolution);
         let window = self.agent.compress_window.max(2);
+        // A bounded recent tail scales to the live Agent, including a selected
+        // runtime model rather than only the bootstrap model config.
+        let recent_tokens = if self.agent.compress_window == 0 {
+            agent
+                .config()
+                .get_token_limit()
+                .saturating_div(4)
+                .clamp(1, 20_000)
+        } else {
+            0
+        }; // Positive windows retain the explicit legacy message cap.
         match self.agent.compress_strategy.as_str() {
             "summary" => {
                 use crate::compression::compressor::SummaryCompressor;
                 match agent.llm_client().cloned() {
                     Some(llm) => {
                         agent
-                            .set_compressor(SummaryCompressor::new(llm, window))
+                            .set_compressor(
+                                SummaryCompressor::new(llm, window)
+                                    .with_recent_token_budget(recent_tokens),
+                            )
                             .await
                     }
                     None => {
@@ -109,7 +123,10 @@ impl FrameworkConfig {
                             "summary compression requires an LLM client; using sliding window"
                         );
                         agent
-                            .set_compressor(SlidingWindowCompressor::new(window))
+                            .set_compressor(
+                                SlidingWindowCompressor::new(window)
+                                    .with_recent_token_budget(recent_tokens),
+                            )
                             .await;
                     }
                 }
@@ -119,7 +136,20 @@ impl FrameworkConfig {
                 match agent.llm_client().cloned() {
                     Some(llm) => {
                         agent
-                            .set_compressor(HybridCompressor::summary_buffer(llm, window))
+                            .set_compressor(
+                                HybridCompressor::builder()
+                                    .stage(
+                                        crate::compression::compressor::SummaryCompressor::new(
+                                            llm, window,
+                                        )
+                                        .with_recent_token_budget(recent_tokens),
+                                    )
+                                    .stage(
+                                        SlidingWindowCompressor::new(window)
+                                            .with_recent_token_budget(recent_tokens),
+                                    )
+                                    .build(),
+                            )
                             .await;
                     }
                     None => {
@@ -127,7 +157,10 @@ impl FrameworkConfig {
                             "hybrid compression requires an LLM client; using sliding window"
                         );
                         agent
-                            .set_compressor(SlidingWindowCompressor::new(window))
+                            .set_compressor(
+                                SlidingWindowCompressor::new(window)
+                                    .with_recent_token_budget(recent_tokens),
+                            )
                             .await;
                     }
                 }
@@ -142,7 +175,10 @@ impl FrameworkConfig {
             }
             "sliding" | "" => {
                 agent
-                    .set_compressor(SlidingWindowCompressor::new(window))
+                    .set_compressor(
+                        SlidingWindowCompressor::new(window)
+                            .with_recent_token_budget(recent_tokens),
+                    )
                     .await;
             }
             other => {
@@ -151,7 +187,10 @@ impl FrameworkConfig {
                     "unknown compression strategy; using sliding"
                 );
                 agent
-                    .set_compressor(SlidingWindowCompressor::new(window))
+                    .set_compressor(
+                        SlidingWindowCompressor::new(window)
+                            .with_recent_token_budget(recent_tokens),
+                    )
                     .await;
             }
         }

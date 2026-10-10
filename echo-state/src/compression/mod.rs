@@ -495,6 +495,15 @@ impl ContextManager {
         &self.messages
     }
 
+    /// Latest real request, excluding replaceable projections and runtime notes.
+    pub fn latest_user_request(&self) -> Option<String> {
+        self.messages
+            .iter()
+            .rev()
+            .find(|message| compressor::sliding_window::is_user_request(message))
+            .and_then(|message| message.content.as_text())
+    }
+
     /// Whether compression is imminent on the next `prepare()` call — i.e. a
     /// compressor is installed AND the token budget is exceeded.
     ///
@@ -561,6 +570,9 @@ impl ContextManager {
     pub fn set_messages(&mut self, messages: Vec<Message>) {
         self.messages = messages;
         self.projection_scopes.clear();
+        if let Some(compressor) = &self.compressor {
+            compressor.context_committed(&self.messages);
+        }
     }
 
     /// Estimate the token count of the current context
@@ -590,6 +602,9 @@ impl ContextManager {
     pub fn clear(&mut self) {
         self.messages.clear();
         self.projection_scopes.clear();
+        if let Some(compressor) = &self.compressor {
+            compressor.context_committed(&self.messages);
+        }
     }
 
     /// Register a content marker that protects messages from compression.
@@ -1119,78 +1134,8 @@ impl ContextManager {
         &mut self,
         fallback_window: usize,
     ) -> Result<(ForceCompressStats, Option<CompressionCheckpoint>)> {
-        let before_count = self.messages.len();
-        let before_tokens = self.token_estimate();
-        let original_messages = self.messages.clone();
-
-        let (compressible, protected) = self.split_protected(self.messages.clone());
-
-        let output = if let Some(compressor) = &self.compressor {
-            compressor
-                .compress(CompressionInput {
-                    messages: compressible,
-                    token_limit: self.token_limit,
-                    current_query: None,
-                    focus_instructions: None,
-                    cancel_token: None,
-                    tokenizer: Some(self.tokenizer.clone()),
-                })
-                .await?
-        } else {
-            SlidingWindowCompressor::new(fallback_window)
-                .compress(CompressionInput {
-                    messages: compressible,
-                    token_limit: self.token_limit,
-                    current_query: None,
-                    focus_instructions: None,
-                    cancel_token: None,
-                    tokenizer: Some(self.tokenizer.clone()),
-                })
-                .await?
-        };
-
-        let checkpoint = output
-            .checkpoint
-            .map(|cp| cp.with_protected_count(protected.len()));
-
-        let evicted_messages = output.evicted;
-        let evicted = evicted_messages.len();
-        self.messages = Self::merge_protected(output.messages, protected);
-
-        // ── Memory promotion + sanitize ──
-        let memory_promotion_count = match self.promote_and_sanitize(&evicted_messages).await {
-            Ok(count) => count,
-            Err(error) => {
-                self.messages = original_messages;
-                return Err(error);
-            }
-        };
-
-        let checkpoint =
-            checkpoint.map(|cp| cp.with_memory_promotion_count(memory_promotion_count));
-
-        if self.canonical_context.is_some() {
-            self.reinject_canonical_context();
-        }
-        let checkpoint = self.finalize_checkpoint(checkpoint);
-
-        let stats = ForceCompressStats {
-            before_count,
-            after_count: self.messages.len(),
-            evicted,
-            before_tokens,
-            after_tokens: self.token_estimate(),
-        };
-        let name = if self.compressor.is_some() {
-            self.compressor
-                .as_ref()
-                .map(|c| c.name())
-                .unwrap_or("unknown")
-        } else {
-            "SlidingWindow(fallback)"
-        };
-        self.metrics.record(&stats, name);
-        Ok((stats, checkpoint))
+        self.force_compress_with_options(None, fallback_window, None)
+            .await
     }
 
     /// Force-compress with user-provided focus instructions.
@@ -1203,20 +1148,67 @@ impl ContextManager {
         focus_instructions: &str,
         fallback_window: usize,
     ) -> Result<(ForceCompressStats, Option<CompressionCheckpoint>)> {
+        self.force_compress_with_options(Some(focus_instructions), fallback_window, None)
+            .await
+    }
+
+    /// Manual compression with the same protected input allowance as prepare.
+    /// The window is only a legacy fallback; installed policy remains authoritative.
+    pub async fn force_compress_with_options(
+        &mut self,
+        focus_instructions: Option<&str>,
+        fallback_window: usize,
+        cancel_token: Option<echo_core::compression::CancellationToken>,
+    ) -> Result<(ForceCompressStats, Option<CompressionCheckpoint>)> {
+        self.force_compress_with_policy(focus_instructions, fallback_window, cancel_token, None)
+            .await
+    }
+
+    async fn force_compress_with_policy(
+        &mut self,
+        focus_instructions: Option<&str>,
+        fallback_window: usize,
+        cancel_token: Option<echo_core::compression::CancellationToken>,
+        override_compressor: Option<&dyn ContextCompressor>,
+    ) -> Result<(ForceCompressStats, Option<CompressionCheckpoint>)> {
+        if cancel_token
+            .as_ref()
+            .is_some_and(|cancel| cancel.is_cancelled())
+        {
+            return Err(
+                echo_core::error::AgentError::Cancelled("manual compression".to_string()).into(),
+            );
+        }
         let before_count = self.messages.len();
         let before_tokens = self.token_estimate();
         let original_messages = self.messages.clone();
 
         let (compressible, protected) = self.split_protected(self.messages.clone());
+        let effective_limit = self.input_budget(0).effective_limit;
+        let protected_tokens = protected.iter().fold(0usize, |total, value| {
+            total.saturating_add(
+                value
+                    .message
+                    .content
+                    .estimated_tokens(self.tokenizer.as_ref()),
+            )
+        });
+        let compressor_limit = effective_limit.saturating_sub(protected_tokens);
+        compressor::sliding_window::ensure_request_fits(
+            &compressible,
+            compressor_limit,
+            self.tokenizer.as_ref(),
+        )?;
+        let current_query = self.latest_user_request();
 
-        let output = if let Some(compressor) = &self.compressor {
+        let output = if let Some(compressor) = override_compressor.or(self.compressor.as_deref()) {
             compressor
                 .compress(CompressionInput {
                     messages: compressible,
-                    token_limit: self.token_limit,
-                    current_query: None,
-                    focus_instructions: Some(focus_instructions.to_string()),
-                    cancel_token: None,
+                    token_limit: compressor_limit,
+                    current_query: current_query.clone(),
+                    focus_instructions: focus_instructions.map(str::to_string),
+                    cancel_token: cancel_token.clone(),
                     tokenizer: Some(self.tokenizer.clone()),
                 })
                 .await?
@@ -1224,22 +1216,64 @@ impl ContextManager {
             SlidingWindowCompressor::new(fallback_window)
                 .compress(CompressionInput {
                     messages: compressible,
-                    token_limit: self.token_limit,
-                    current_query: None,
-                    focus_instructions: Some(focus_instructions.to_string()),
-                    cancel_token: None,
+                    token_limit: compressor_limit,
+                    current_query,
+                    focus_instructions: focus_instructions.map(str::to_string),
+                    cancel_token: cancel_token.clone(),
                     tokenizer: Some(self.tokenizer.clone()),
                 })
                 .await?
         };
 
-        let checkpoint = output
+        if cancel_token
+            .as_ref()
+            .is_some_and(|cancel| cancel.is_cancelled())
+        {
+            return Err(
+                echo_core::error::AgentError::Cancelled("manual compression".to_string()).into(),
+            );
+        }
+
+        let mut checkpoint = output
             .checkpoint
             .map(|cp| cp.with_protected_count(protected.len()));
 
         let evicted_messages = output.evicted;
         let evicted = evicted_messages.len();
         self.messages = Self::merge_protected(output.messages, protected);
+
+        let (sanitized, fixes) = sanitize_tool_call_pairing(&self.messages);
+        self.messages = sanitized;
+        if let Some(value) = &mut checkpoint {
+            value.tool_pair_fixes = fixes;
+            value.token_before = before_tokens;
+            value.token_after = self.token_estimate();
+            if value.summary.is_some()
+                && !verifier::verify_compression(&self.messages, value, &original_messages).passed
+            {
+                self.messages = original_messages;
+                let fallback = SlidingWindowCompressor::new(fallback_window)
+                    .with_recent_token_budget(compressor_limit);
+                return Box::pin(self.force_compress_with_policy(
+                    focus_instructions,
+                    fallback_window,
+                    cancel_token,
+                    Some(&fallback),
+                ))
+                .await;
+            }
+        }
+
+        if self.canonical_context.is_some() {
+            self.reinject_canonical_context();
+        }
+        if self.token_estimate() > effective_limit {
+            self.messages = original_messages;
+            return Err(echo_core::error::AgentError::ContextLimitExceeded(
+                "manual compression exceeds its input allowance".to_string(),
+            )
+            .into());
+        }
 
         // ── Memory promotion + sanitize ──
         let memory_promotion_count = match self.promote_and_sanitize(&evicted_messages).await {
@@ -1253,10 +1287,9 @@ impl ContextManager {
         let checkpoint =
             checkpoint.map(|cp| cp.with_memory_promotion_count(memory_promotion_count));
 
-        if self.canonical_context.is_some() {
-            self.reinject_canonical_context();
-        }
-        let checkpoint = self.finalize_checkpoint(checkpoint);
+        let checkpoint = self
+            .finalize_checkpoint(checkpoint)
+            .map(|value| value.with_tokens(before_tokens, self.token_estimate()));
 
         let stats = ForceCompressStats {
             before_count,
@@ -1265,15 +1298,19 @@ impl ContextManager {
             before_tokens,
             after_tokens: self.token_estimate(),
         };
-        let name = if self.compressor.is_some() {
-            self.compressor
-                .as_ref()
-                .map(|c| c.name())
-                .unwrap_or("unknown")
-        } else {
-            "SlidingWindow(fallback)"
-        };
+        let name = override_compressor
+            .or(self.compressor.as_deref())
+            .map(|compressor| compressor.name())
+            .unwrap_or("SlidingWindow(fallback)");
         self.metrics.record(&stats, name);
+        // Installed observers follow every accepted context, including temporary
+        // overrides and verifier fallback that replace an incremental summary.
+        if let Some(compressor) = self.compressor.as_deref() {
+            compressor.context_committed(&self.messages);
+        }
+        if let Some(compressor) = override_compressor {
+            compressor.context_committed(&self.messages);
+        }
         Ok((stats, checkpoint))
     }
 
@@ -1284,57 +1321,8 @@ impl ContextManager {
         &mut self,
         compressor: &dyn ContextCompressor,
     ) -> Result<(ForceCompressStats, Option<CompressionCheckpoint>)> {
-        let before_count = self.messages.len();
-        let before_tokens = self.token_estimate();
-        let original_messages = self.messages.clone();
-
-        let (compressible, protected) = self.split_protected(self.messages.clone());
-
-        let output = compressor
-            .compress(CompressionInput {
-                messages: compressible,
-                token_limit: self.token_limit,
-                current_query: None,
-                focus_instructions: None,
-                cancel_token: None,
-                tokenizer: Some(self.tokenizer.clone()),
-            })
-            .await?;
-
-        let checkpoint = output
-            .checkpoint
-            .map(|cp| cp.with_protected_count(protected.len()));
-
-        let evicted_messages = output.evicted;
-        let evicted = evicted_messages.len();
-        self.messages = Self::merge_protected(output.messages, protected);
-
-        // ── Memory promotion + sanitize ──
-        let memory_promotion_count = match self.promote_and_sanitize(&evicted_messages).await {
-            Ok(count) => count,
-            Err(error) => {
-                self.messages = original_messages;
-                return Err(error);
-            }
-        };
-
-        let checkpoint =
-            checkpoint.map(|cp| cp.with_memory_promotion_count(memory_promotion_count));
-
-        if self.canonical_context.is_some() {
-            self.reinject_canonical_context();
-        }
-        let checkpoint = self.finalize_checkpoint(checkpoint);
-
-        let stats = ForceCompressStats {
-            before_count,
-            after_count: self.messages.len(),
-            evicted,
-            before_tokens,
-            after_tokens: self.token_estimate(),
-        };
-        self.metrics.record(&stats, compressor.name());
-        Ok((stats, checkpoint))
+        self.force_compress_with_policy(None, 40, None, Some(compressor))
+            .await
     }
 
     /// Update the system message content
@@ -1378,8 +1366,17 @@ impl ContextManager {
         request_overhead_tokens: usize,
         cancel_token: Option<echo_core::compression::CancellationToken>,
     ) -> Result<PrepareResult> {
+        if cancel_token
+            .as_ref()
+            .is_some_and(|cancel| cancel.is_cancelled())
+        {
+            return Err(
+                echo_core::error::AgentError::Cancelled("context preparation".to_string()).into(),
+            );
+        }
         // ── Snapshot original messages for verification ──
         let original_messages = self.messages.clone();
+        let original_metrics = self.metrics.clone();
 
         // ── Pre-compression: Visibility Horizon pass ──────────────────
         // Compact tool traces beyond the active window before the main
@@ -1444,7 +1441,7 @@ impl ContextManager {
             needs_compression,
         } = self.input_budget(request_overhead_tokens);
 
-        let (compressed, mut combined_checkpoint) = if let Some(compressor) = &self.compressor
+        let (mut compressed, mut combined_checkpoint) = if let Some(compressor) = &self.compressor
             && needs_compression
         {
             let before_count = self.messages.len();
@@ -1468,6 +1465,15 @@ impl ContextManager {
                 total.saturating_add(value.message.content.estimated_tokens(&*self.tokenizer))
             });
             let compressor_limit = effective_limit.saturating_sub(protected_tokens);
+            if let Err(error) = compressor::sliding_window::ensure_request_fits(
+                &compressible,
+                compressor_limit,
+                self.tokenizer.as_ref(),
+            ) {
+                self.messages = original_messages;
+                self.metrics = original_metrics;
+                return Err(error);
+            }
 
             let compress_result = compressor
                 .compress(CompressionInput {
@@ -1479,6 +1485,18 @@ impl ContextManager {
                     tokenizer: Some(self.tokenizer.clone()),
                 })
                 .await;
+
+            if cancel_token
+                .as_ref()
+                .is_some_and(|cancel| cancel.is_cancelled())
+            {
+                self.messages = original_messages;
+                self.metrics = original_metrics;
+                return Err(echo_core::error::AgentError::Cancelled(
+                    "context preparation".to_string(),
+                )
+                .into());
+            }
 
             match compress_result {
                 Ok(output) => {
@@ -1497,6 +1515,7 @@ impl ContextManager {
                                 Ok(receipt) => receipt.promoted,
                                 Err(error) => {
                                     self.messages = original_messages.clone();
+                                    self.metrics = original_metrics.clone();
                                     return Err(error);
                                 }
                             }
@@ -1516,7 +1535,6 @@ impl ContextManager {
                         after_tokens,
                     };
                     let elapsed = start.elapsed();
-                    self.metrics.record(&stats, compressor_name);
 
                     tracing::info!(
                         compressor = compressor_name,
@@ -1545,7 +1563,8 @@ impl ContextManager {
                         error = %e,
                         "Primary compressor failed, falling back to SlidingWindowCompressor"
                     );
-                    let fallback = SlidingWindowCompressor::new(40);
+                    let fallback =
+                        SlidingWindowCompressor::new(40).with_recent_token_budget(compressor_limit);
                     match fallback
                         .compress(CompressionInput {
                             messages: compressible,
@@ -1566,7 +1585,6 @@ impl ContextManager {
                                 before_tokens,
                                 after_tokens: self.token_estimate(),
                             };
-                            self.metrics.record(&stats, "SlidingWindow(fallback)");
                             // Return the fallback result, not the original error
                             (Some(stats), fb_output.checkpoint)
                         }
@@ -1574,6 +1592,7 @@ impl ContextManager {
                             // Even the fallback failed — restore the original buffer before
                             // returning so callers that retry do not observe truncated state.
                             self.messages = original_messages.clone();
+                            self.metrics = original_metrics.clone();
                             tracing::error!(
                                 primary_error = %e,
                                 fallback_error = %fb_err,
@@ -1629,6 +1648,9 @@ impl ContextManager {
                                 )
                             });
                         if let Ok(fb_output) = SlidingWindowCompressor::new(40)
+                            .with_recent_token_budget(
+                                effective_limit.saturating_sub(orig_protected_tokens),
+                            )
                             .compress(CompressionInput {
                                 messages: orig_compressible,
                                 token_limit: effective_limit.saturating_sub(orig_protected_tokens),
@@ -1681,6 +1703,7 @@ impl ContextManager {
         }
         if self.token_estimate() > effective_limit {
             self.messages = original_messages;
+            self.metrics = original_metrics;
             return Err(echo_core::error::AgentError::ContextLimitExceeded(format!(
                 "prepared context exceeds its effective input budget: system={system_tokens}, request_overhead={request_overhead_tokens}, conversation={conversation_tokens}, effective_limit={effective_limit}, window={}",
                 self.token_limit
@@ -1688,6 +1711,36 @@ impl ContextManager {
             .into());
         }
         combined_checkpoint = self.finalize_checkpoint(combined_checkpoint);
+
+        if cancel_token
+            .as_ref()
+            .is_some_and(|cancel| cancel.is_cancelled())
+        {
+            self.messages = original_messages;
+            self.metrics = original_metrics;
+            return Err(
+                echo_core::error::AgentError::Cancelled("context preparation".to_string()).into(),
+            );
+        }
+        if let Some(compressor) = &self.compressor {
+            compressor.context_committed(&self.messages);
+        }
+
+        if let Some(stats) = &mut compressed {
+            stats.after_count = self.messages.len();
+            stats.after_tokens = self.token_estimate();
+            if let Some(checkpoint) = &mut combined_checkpoint {
+                stats.evicted = checkpoint.evicted_count;
+                checkpoint.token_before = stats.before_tokens;
+            }
+            self.metrics.record(
+                stats,
+                combined_checkpoint
+                    .as_ref()
+                    .map(|value| value.strategy.as_str())
+                    .unwrap_or("compression"),
+            );
+        }
 
         Ok(PrepareResult {
             messages: self.messages.clone(),
@@ -2042,6 +2095,7 @@ mod tests {
         ctx.add_protected_marker("<protected>".to_string());
         ctx.push(Message::user("<protected>123456789".to_string()));
         ctx.push(Message::user("x".repeat(100)));
+        ctx.push(Message::user("current".to_string()));
 
         let _ = ctx.prepare(None).await?;
 
@@ -2071,6 +2125,95 @@ mod tests {
         assert!(result.messages.iter().any(|message| {
             message.content.as_text_ref() == Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
         }));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn manual_options_reserve_protected_budget_and_cancel_before_mutation() -> Result<()> {
+        let limit = Arc::new(AtomicUsize::new(0));
+        let mut ctx = ContextManager::builder(100)
+            .tokenizer(Arc::new(CharacterTokenizer))
+            .compressor(LimitRecorder {
+                limit: Arc::clone(&limit),
+            })
+            .with_system("sys".to_string())
+            .build();
+        ctx.add_protected_marker("pin:".to_string());
+        ctx.push(Message::user(format!("pin:{}", "p".repeat(36))));
+        ctx.push(Message::user("exact current request".to_string()));
+        ctx.push(Message::user(
+            "[runtime_context:Hook] generated note".to_string(),
+        ));
+        assert_eq!(
+            ctx.latest_user_request(),
+            Some("exact current request".to_string())
+        );
+        let (stats, checkpoint) = ctx
+            .force_compress_with_options(Some("keep evidence"), 2, None)
+            .await?;
+        assert_eq!(limit.load(Ordering::SeqCst), 60);
+        assert!(stats.after_tokens <= 100);
+        assert!(checkpoint.is_none()); // This custom test compressor emits no checkpoint.
+        assert_eq!(ctx.protected_message_count(), 1);
+        let before = ctx.messages().to_vec();
+        let cancel = echo_core::compression::CancellationToken::new();
+        cancel.cancel();
+        assert!(
+            ctx.force_compress_with_options(None, 2, Some(cancel))
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            serde_json::to_value(ctx.messages())?,
+            serde_json::to_value(before)?
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn zero_remaining_budget_and_cancelled_calculation_restore_context() -> Result<()> {
+        struct CancelDuringCalculation(echo_core::compression::CancellationToken);
+        impl ContextCompressor for CancelDuringCalculation {
+            fn compress(
+                &self,
+                input: CompressionInput,
+            ) -> BoxFuture<'_, Result<CompressionOutput>> {
+                self.0.cancel();
+                Box::pin(async move {
+                    Ok(CompressionOutput {
+                        messages: Vec::new(),
+                        evicted: input.messages,
+                        checkpoint: None,
+                    })
+                })
+            }
+        }
+        let mut context = ContextManager::builder(10)
+            .tokenizer(Arc::new(CharacterTokenizer))
+            .compressor(SlidingWindowCompressor::new(20).with_recent_token_budget(5))
+            .build();
+        context.add_protected_marker("pin:".to_string());
+        context.push(Message::user("pin:123456".to_string()));
+        context.push(Message::user("request".to_string()));
+        let before = serde_json::to_value(context.messages())?;
+        assert!(context.prepare(Some("request")).await.is_err());
+        assert_eq!(before, serde_json::to_value(context.messages())?);
+        let cancel = echo_core::compression::CancellationToken::new();
+        let mut context = ContextManager::builder(10)
+            .tokenizer(Arc::new(CharacterTokenizer))
+            .compressor(CancelDuringCalculation(cancel.clone()))
+            .build();
+        context.push(Message::user("old ".repeat(20)));
+        context.push(Message::user("current".to_string()));
+        let before = serde_json::to_value(context.messages())?;
+        assert!(
+            context
+                .prepare_with_cancel(Some("current"), 0, Some(cancel))
+                .await
+                .is_err()
+        );
+        assert_eq!(before, serde_json::to_value(context.messages())?);
+        assert_eq!(context.compression_metrics().total_compressions, 0);
         Ok(())
     }
 
@@ -2380,6 +2523,7 @@ mod tests {
         ctx.push(Message::user(
             "enough conversation content to force compression ".repeat(80),
         ));
+        ctx.push(Message::user("continue".to_string()));
         ctx
     }
 
@@ -2513,7 +2657,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_protected_messages_keep_relative_position_after_compression() -> Result<()> {
-        let mut ctx = ContextManager::builder(10)
+        // Include the protected payload in the hard budget; this test checks
+        // relative placement rather than intentionally overfilling the window.
+        let mut ctx = ContextManager::builder(12)
             .compressor(SlidingWindowCompressor::new(2))
             .build();
         ctx.add_protected_marker("<skill>".to_string());

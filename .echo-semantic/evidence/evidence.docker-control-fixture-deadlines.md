@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.docker-control-fixture-deadlines
 kind: evidence
-observed_at: source:01ef6cf7171a2b93c7e5ece6961c95f0059198a235b967650ce30e06f3b13dab
+observed_at: a8c2d1ae3fce675633ea20d4e3d49258c327f634
 source_refs: [echo-execution/src/sandbox/docker.rs, echo-execution/src/sandbox/manager.rs, CHANGELOG.md]
 supports: [behavior.effect-permission-execution, rule.permission-effect-order]
 limitations: [原生 Docker Engine 不由 CLI fixture 证明, 本次只验证 Docker test fixture 的控制时序，不宣称全 sandbox Finding 闭合]
