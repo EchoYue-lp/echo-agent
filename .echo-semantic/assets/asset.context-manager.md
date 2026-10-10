@@ -6,7 +6,7 @@ title: 默认 ReAct ContextManager
 asset_type: state_authority
 status: active
 risk: high
-observed_at: source:964ce207864933a5ba4a0c5bf0ed5357db5def80d6006eb96abf1fb7f79a816d
+observed_at: e5372b8ca3dc308ce8dde4a0092ea58b8d7dd21d
 boundary_refs: [boundary.context-memory]
 code_refs: [echo-core/src/compression.rs, echo-state/src/compression/mod.rs, echo-state/src/compression/compressor/sliding_window.rs, echo-state/src/compression/compressor/summary.rs, echo-state/src/compression/compressor/hybrid.rs, src/agent/react/run/context.rs, src/config.rs, src/agent/react/capabilities.rs, src/agent/react/run/phases/compact.rs, src/agent/react/run/phases/tools.rs]
 consumer_refs: [src/agent/react/mod.rs, src/agent/react/run/phases/think.rs]

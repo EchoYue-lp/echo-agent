@@ -1818,14 +1818,22 @@ async fn kill_process_group(child: &mut tokio::process::Child) {
 fn kill_process_group_id(pid: Option<u32>) {
     #[cfg(unix)]
     if let Some(pid) = pid {
-        let _ = std::process::Command::new("kill")
-            .args(["-KILL", &format!("-{pid}")])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        let _ = process_group_kill_command(pid).status();
     }
     #[cfg(not(unix))]
     let _ = pid;
+}
+
+#[cfg(unix)]
+fn process_group_kill_command(pid: u32) -> std::process::Command {
+    let mut command = std::process::Command::new("kill");
+    command
+        // The negative PGID is a target, not an option. procps kill can
+        // otherwise parse it as a signal and target an unrelated process group.
+        .args(["-KILL", "--", &format!("-{pid}")])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    command
 }
 
 // ── Tests ───────────────────────────────────────────────────────────
@@ -1835,6 +1843,14 @@ mod tests {
     use super::*;
     use echo_core::sandbox::{ExecutionResult, IsolationLevel};
     use echo_core::tools::cell::CommandCellRegistry;
+
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_delimits_negative_process_group_target() {
+        let command = process_group_kill_command(2443);
+        let args: Vec<_> = command.get_args().collect();
+        assert_eq!(args, ["-KILL", "--", "-2443"]);
+    }
 
     struct TestSandbox {
         executions: AtomicU64,

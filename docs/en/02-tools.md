@@ -2,6 +2,11 @@
 
 ## What It Is
 
+On Unix, command-cell and direct-shell cancellation clean up the launched process
+group. Cleanup passes the negative group ID after `kill -KILL --` so it remains
+a positional target across platform utility parsers; child reaping keeps its
+existing lifecycle owner.
+
 Tools are the only mechanism through which an Agent interacts with the external world. The LLM learns about a tool's capabilities via JSON Schema, decides when to call it and with what parameters, and the framework handles the actual execution and returns the result back to the LLM.
 
 ## Problem It Solves

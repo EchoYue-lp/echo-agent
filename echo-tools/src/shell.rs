@@ -1072,14 +1072,22 @@ async fn send_output(
 async fn cleanup_direct_child(child: &mut tokio::process::Child) {
     #[cfg(unix)]
     if let Some(pid) = child.id() {
-        let _ = std::process::Command::new("kill")
-            .args(["-KILL", &format!("-{pid}")])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        let _ = process_group_kill_command(pid).status();
     }
     let _ = child.kill().await;
     let _ = child.wait().await;
+}
+
+#[cfg(unix)]
+fn process_group_kill_command(pid: u32) -> std::process::Command {
+    let mut command = std::process::Command::new("kill");
+    command
+        // Delimit the negative PGID so platform kill utilities cannot reinterpret
+        // the cleanup target as an option or signal number.
+        .args(["-KILL", "--", &format!("-{pid}")])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    command
 }
 
 #[derive(Default)]
@@ -1326,6 +1334,14 @@ fn combined_process_output(stdout: &str, stderr: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_delimits_negative_process_group_target() {
+        let command = process_group_kill_command(2443);
+        let args: Vec<_> = command.get_args().collect();
+        assert_eq!(args, ["-KILL", "--", "-2443"]);
+    }
     use echo_core::sandbox::{ExecutionResult, IsolationLevel};
     use echo_core::tools::cell::{
         CommandCellArtifactStatus, CommandCellDelta, CommandCellError, CommandCellLaunchReceipt,
