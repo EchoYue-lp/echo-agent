@@ -4,7 +4,7 @@ id: map.context-memory
 kind: capability_map
 title: Context、Memory、Compression 与 Checkpoint
 risk: high
-observed_at: source:964ce207864933a5ba4a0c5bf0ed5357db5def80d6006eb96abf1fb7f79a816d
+observed_at: e5372b8ca3dc308ce8dde4a0092ea58b8d7dd21d
 boundary_refs: [boundary.context-memory]
 behavior_refs: [behavior.context-memory-lifecycle]
 rule_refs: [rule.context-persistence-separation]

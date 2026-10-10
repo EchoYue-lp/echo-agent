@@ -4,7 +4,7 @@ id: map.tool-permission-sandbox
 kind: capability_map
 title: Tool、Permission、Sandbox 与外部 Effect
 risk: high
-observed_at: 07e4270380c40df3f412f99c0aecb6145410cb2a
+observed_at: source:cd5860e15353dbaf0c833ba1c224671c8b990e521a70f884e40ff2760884d5d0
 boundary_refs: [boundary.tool-permission-sandbox]
 behavior_refs: [behavior.effect-permission-execution]
 rule_refs: [rule.permission-effect-order]
@@ -13,6 +13,11 @@ finding_refs: [finding.tool-read-cache-scope, finding.tool-read-cache-inflight-i
 audit_refs: [audit.tool-permission-sandbox.permission-external, audit.tool-permission-sandbox.failure-concurrency, audit.tool-permission-sandbox.result-side-effect, audit.streaming-tool-validation-rereview, audit.tool-read-cache-authority-rereview, audit.tool-registry-owned-handle-rereview, audit.mcp-tool-local-classification-rereview, audit.hook-protected-path-rereview, audit.readonly-tool-capability-rereview, audit.k8s-sandbox-cleanup-settlement-rereview, audit.effect-cleanup-owner-rereview]
 related_map_refs: [map.agent-session-turn, map.task-subagent-workflow, map.observation-persistence-delivery, map.extension-lifecycle]
 scenarios:
+  exact-process-group-cleanup:
+    status: mapped
+    source_refs: [echo-orchestration/src/tasks/command_cell.rs, echo-tools/src/shell.rs, docs/en/02-tools.md, docs/zh/02-tools.md]
+    evidence_refs: [evidence.process-group-kill-delimiter]
+    rule_refs: [rule.permission-effect-order]
   agent-automated-policy-pipeline:
     status: needs_review
     source_refs: [echo-core/src/tools/mod.rs, echo-execution/src/tools.rs, src/agent/react/run/pipeline.rs, src/agent/snapshot.rs]
