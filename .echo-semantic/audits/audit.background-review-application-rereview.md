@@ -5,7 +5,7 @@ kind: audit
 boundary_ref: boundary.eval-evolution
 lens: failure_concurrency
 freshness: examined
-revision: 6fd66621e0671028d6aa94c69933b63f38e299cd
+revision: 1486d2f4a26adbefab393679c58da2804e5f4a75
 finding_refs: [finding.background-review-detached-persistence-settlement]
 challenges:
   before-poll-admission:
@@ -20,6 +20,10 @@ challenges:
     revision: 6fd66621e0671028d6aa94c69933b63f38e299cd
     source_refs: [src/evolution/background_review.rs, docs/adr/0058-background-review-settlement-ownership.md]
     evidence_refs: [evidence.background-review-application-verification]
+  application-entry-recovery:
+    revision: 1486d2f4a26adbefab393679c58da2804e5f4a75
+    source_refs: [src/evolution/background_review.rs, docs/adr/0058-background-review-settlement-ownership.md]
+    evidence_refs: [evidence.background-review-application-repair, evidence.background-review-application-verification]
 ---
 
 # Background Review application-owner independent rereview
@@ -33,6 +37,17 @@ Terminal`, exact-key Memory reconciliation, and restart recovery. It
 specifically required and then rechecked real owner-path fault injection for
 Outcome and Terminal append failures. The merged CLI main tree equals the
 reviewed and CI-validated candidate tree.
+
+Two further independent read-only reviews covered the reopened entry defects in
+CLI candidate `b34df102`: desktop return/settlement, real bootstrap recovery and
+rollback, shared owner/Store/generation, closed admission, weak projection
+fanout, explicit P/Q contexts, idempotent linking, Memory attribution and actual
+post-write observer cancellation. Both reviewed the final 94/94 log and returned
+pass, zero blocking findings. Lifecycle review diff SHA-256 is
+`5f5d8c586f301da4e1d0354265385fd76d8143f00512861dcd47999ae694601a`;
+owner/projection review diff SHA-256 is
+`48dfea25feeffd412d8bfd0127ede1dcbbf0fa87be3ca30cdf5b546cf9ed7ce7`.
+The sole final Clippy syntax adjustment was independently confirmed equivalent.
 
 ## 已检查故障假设
 
@@ -70,3 +85,11 @@ remains an interrupted/unknown result, not a synthesized success.
 
 The reviewer did not operate a real Tauri window or execute CI. The separate
 mainline run and its result are recorded in Verification Evidence.
+For the new repair, local complete gates and PR CI are green; signed CLI main
+`f57b90a2` has the reviewed candidate's exact tree and passed strict semantic
+validation. Exact-main CI passed all four checks; the framework-owned evidence
+requires its own mainline acceptance. Native window operation, restart/setup
+panic and full
+cleanup of early post-fork initialization errors remain unproven. The publication
+fence's explicit cleanup and durable EffectsApplied retry are the narrower
+verified properties.

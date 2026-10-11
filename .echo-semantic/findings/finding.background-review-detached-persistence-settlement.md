@@ -53,3 +53,12 @@ consumer 已随 PR #5 合入签名的远端 main `d65c47a`；其 exact main CI r
 的 Linux Rust 与 frontend 均通过。repair、verification 与独立 rereview 分别绑定对应 Evidence
 和 Audit。进程 crash 发生在 durable Outcome 之前时，应用只报告 interrupted/unknown 与
 Memory key 归因，不伪造成功；该诚实终态是本 Finding 的闭合合同。
+
+2026-10-11 的真实入口审计重新打开 #38：Tauri 正常退出绕过结算、workspace cwd 的
+bootstrap 以 global 身份恢复 scoped 债务，且回滚先等 ProductData 后释放 command flow。
+应用候选 `b34df102` 修复这些入口，并补齐共享 owner 的多目标规则发布、显式项目保留、
+同项目 link 幂等和 recall/legacy 指纹归因。94/94 定向、完整本地 Rust/GUI 门禁及两份
+独立复审已通过。CLI PR #11 的 4 项 CI 全绿后合入签名有效的 main `f57b90a2`，tree
+与已审候选一致，actual main strict semantic 校验通过；精确 main run 38106297341 的
+4 项 CI 全绿。本轮关闭还要求这些 framework 证据进入远端 main 并完成验收；外部
+Issue 是关闭状态权威。旧 PR #5 的 resolved 记录不代替这次验收。
