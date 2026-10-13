@@ -1,0 +1,4499 @@
+{
+  "crate": {
+    "id": "quinn-proto",
+    "name": "quinn-proto",
+    "updated_at": "2026-09-30T09:13:59.040527Z",
+    "versions": [
+      3363177,
+      3232910,
+      3017804,
+      2713294,
+      2625456,
+      2102665,
+      1703426,
+      1556484,
+      1534239,
+      1486943,
+      1338155,
+      1257595,
+      1256486,
+      1223742,
+      1223626,
+      1223128,
+      1167930,
+      1154517,
+      1139351,
+      1136446,
+      948011,
+      920458,
+      902864,
+      902862,
+      879901,
+      876573,
+      860740,
+      851809,
+      797634,
+      797079,
+      761395,
+      677455,
+      664666,
+      650272,
+      601214,
+      555275,
+      523578,
+      502724,
+      453459,
+      374103,
+      361570,
+      354592,
+      346628,
+      227863,
+      220376,
+      196563,
+      193737,
+      175052,
+      145548,
+      129334,
+      110561
+    ],
+    "keywords": [
+      "quic"
+    ],
+    "categories": [
+      "asynchronous",
+      "network-programming"
+    ],
+    "badges": [],
+    "created_at": "2018-10-02T20:17:22.135216Z",
+    "downloads": 359522571,
+    "recent_downloads": 126004497,
+    "default_version": "0.11.19",
+    "num_versions": 51,
+    "yanked": false,
+    "max_version": "0.11.19",
+    "newest_version": "0.11.19",
+    "max_stable_version": "0.11.19",
+    "description": "State machine for the QUIC transport protocol",
+    "homepage": null,
+    "documentation": null,
+    "repository": "https://github.com/quinn-rs/quinn",
+    "links": {
+      "version_downloads": "/api/v1/crates/quinn-proto/downloads",
+      "versions": null,
+      "owners": "/api/v1/crates/quinn-proto/owners",
+      "owner_team": "/api/v1/crates/quinn-proto/owner_team",
+      "owner_user": "/api/v1/crates/quinn-proto/owner_user",
+      "reverse_dependencies": "/api/v1/crates/quinn-proto/reverse_dependencies"
+    },
+    "exact_match": false,
+    "trustpub_only": false
+  },
+  "versions": [
+    {
+      "id": 3363177,
+      "crate": "quinn-proto",
+      "num": "0.11.19",
+      "dl_path": "/api/v1/crates/quinn-proto/0.11.19/download",
+      "readme_path": "/api/v1/crates/quinn-proto/0.11.19/readme",
+      "updated_at": "2026-09-30T09:13:59.040527Z",
+      "created_at": "2026-09-30T09:13:59.040527Z",
+      "downloads": 3399462,
+      "features": {
+        "__rustls-post-quantum-test": [],
+        "aws-lc-rs": [
+          "dep:aws-lc-rs",
+          "aws-lc-rs?/aws-lc-sys",
+          "aws-lc-rs?/prebuilt-nasm"
+        ],
+        "aws-lc-rs-fips": [
+          "aws-lc-rs",
+          "aws-lc-rs?/fips"
+        ],
+        "bloom": [
+          "dep:fastbloom"
+        ],
+        "default": [
+          "rustls-ring",
+          "log",
+          "bloom"
+        ],
+        "log": [
+          "tracing/log"
+        ],
+        "platform-verifier": [
+          "dep:rustls-platform-verifier"
+        ],
+        "qlog": [
+          "dep:qlog"
+        ],
+        "ring": [
+          "dep:ring"
+        ],
+        "rustls": [
+          "rustls-ring"
+        ],
+        "rustls-aws-lc-rs": [
+          "dep:rustls",
+          "rustls?/aws-lc-rs",
+          "aws-lc-rs"
+        ],
+        "rustls-aws-lc-rs-fips": [
+          "rustls-aws-lc-rs",
+          "aws-lc-rs-fips"
+        ],
+        "rustls-log": [
+          "rustls?/logging"
+        ],
+        "rustls-ring": [
+          "dep:rustls",
+          "rustls?/ring",
+          "ring"
+        ]
+      },
+      "yanked": false,
+      "yank_message": null,
+      "lib_links": null,
+      "license": "MIT OR Apache-2.0",
+      "links": {
+        "dependencies": "/api/v1/crates/quinn-proto/0.11.19/dependencies",
+        "version_downloads": "/api/v1/crates/quinn-proto/0.11.19/downloads",
+        "authors": "/api/v1/crates/quinn-proto/0.11.19/authors"
+      },
+      "crate_size": 258920,
+      "published_by": {
+        "id": 4556,
+        "login": "djc",
+        "name": "Dirkjan Ochtman",
+        "avatar": "https://avatars.githubusercontent.com/u/158471?v=4",
+        "url": "https://github.com/djc",
+        "github_username_matches": true,
+        "created_at": "2009-11-26T12:00:10Z"
+      },
+      "audit_actions": [
+        {
+          "action": "publish",
+          "user": {
+            "id": 4556,
+            "login": "djc",
+            "name": "Dirkjan Ochtman",
+            "avatar": "https://avatars.githubusercontent.com/u/158471?v=4",
+            "url": "https://github.com/djc",
+            "github_username_matches": true,
+            "created_at": "2009-11-26T12:00:10Z"
+          },
+          "time": "2026-09-30T09:13:59.040527Z"
+        }
+      ],
+      "checksum": "0e750cca55fe4f0439a15d0bb529da9651e79993e8e72c61a899a36d462befbe",
+      "rust_version": "1.85",
+      "has_lib": true,
+      "bin_names": [],
+      "edition": "2021",
+      "description": "State machine for the QUIC transport protocol",
+      "homepage": null,
+      "documentation": null,
+      "repository": "https://github.com/quinn-rs/quinn",
+      "trustpub_data": null,
+      "linecounts": {
+        "languages": {
+          "Rust": {
+            "code_lines": 19072,
+            "comment_lines": 1306,
+            "files": 49
+          }
+        },
+        "total_code_lines": 19072,
+        "total_comment_lines": 1306
+      }
+    },
+    {
+      "id": 3232910,
+      "crate": "quinn-proto",
+      "num": "0.11.18",
+      "dl_path": "/api/v1/crates/quinn-proto/0.11.18/download",
+      "readme_path": "/api/v1/crates/quinn-proto/0.11.18/readme",
+      "updated_at": "2026-09-14T10:08:32.833754Z",
+      "created_at": "2026-09-14T10:08:32.833754Z",
+      "downloads": 7304088,
+      "features": {
+        "__rustls-post-quantum-test": [],
+        "aws-lc-rs": [
+          "dep:aws-lc-rs",
+          "aws-lc-rs?/aws-lc-sys",
+          "aws-lc-rs?/prebuilt-nasm"
+        ],
+        "aws-lc-rs-fips": [
+          "aws-lc-rs",
+          "aws-lc-rs?/fips"
+        ],
+        "bloom": [
+          "dep:fastbloom"
+        ],
+        "default": [
+          "rustls-ring",
+          "log",
+          "bloom"
+        ],
+        "log": [
+          "tracing/log"
+        ],
+        "platform-verifier": [
+          "dep:rustls-platform-verifier"
+        ],
+        "qlog": [
+          "dep:qlog"
+        ],
+        "ring": [
+          "dep:ring"
+        ],
+        "rustls": [
+          "rustls-ring"
+        ],
+        "rustls-aws-lc-rs": [
+          "dep:rustls",
+          "rustls?/aws-lc-rs",
+          "aws-lc-rs"
+        ],
+        "rustls-aws-lc-rs-fips": [
+          "rustls-aws-lc-rs",
+          "aws-lc-rs-fips"
+        ],
+        "rustls-log": [
+          "rustls?/logging"
+        ],
+        "rustls-ring": [
+          "dep:rustls",
+          "rustls?/ring",
+          "ring"
+        ]
+      },
+      "yanked": false,
+      "yank_message": null,
+      "lib_links": null,
+      "license": "MIT OR Apache-2.0",
+      "links": {
+        "dependencies": "/api/v1/crates/quinn-proto/0.11.18/dependencies",
+        "version_downloads": "/api/v1/crates/quinn-proto/0.11.18/downloads",
+        "authors": "/api/v1/crates/quinn-proto/0.11.18/authors"
+      },
+      "crate_size": 255396,
+      "published_by": {
+        "id": 4556,
+        "login": "djc",
+        "name": "Dirkjan Ochtman",
+        "avatar": "https://avatars.githubusercontent.com/u/158471?v=4",
+        "url": "https://github.com/djc",
+        "github_username_matches": true,
+        "created_at": "2009-11-26T12:00:10Z"
+      },
+      "audit_actions": [
+        {
+          "action": "publish",
+          "user": {
+            "id": 4556,
+            "login": "djc",
+            "name": "Dirkjan Ochtman",
+            "avatar": "https://avatars.githubusercontent.com/u/158471?v=4",
+            "url": "https://github.com/djc",
+            "github_username_matches": true,
+            "created_at": "2009-11-26T12:00:10Z"
+          },
+          "time": "2026-09-14T10:08:32.833754Z"
+        }
+      ],
+      "checksum": "a9746dbde176634f4f2f1faf2404e30a31b2bc1e9cafb5329c95d8177a18c9fc",
+      "rust_version": "1.85",
+      "has_lib": true,
+      "bin_names": [],
+      "edition": "2021",
+      "description": "State machine for the QUIC transport protocol",
+      "homepage": null,
+      "documentation": null,
+      "repository": "https://github.com/quinn-rs/quinn",
+      "trustpub_data": null,
+      "linecounts": {
+        "languages": {
+          "Rust": {
+            "code_lines": 18954,
+            "comment_lines": 1295,
+            "files": 49
+          }
+        },
+        "total_code_lines": 18954,
+        "total_comment_lines": 1295
+      }
+    },
+    {
+      "id": 3017804,
+      "crate": "quinn-proto",
+      "num": "0.11.17",
+      "dl_path": "/api/v1/crates/quinn-proto/0.11.17/download",
+      "readme_path": "/api/v1/crates/quinn-proto/0.11.17/readme",
+      "updated_at": "2026-08-17T17:32:41.972491Z",
+      "created_at": "2026-08-17T17:32:41.972491Z",
+      "downloads": 15627450,
+      "features": {
+        "__rustls-post-quantum-test": [],
+        "aws-lc-rs": [
+          "dep:aws-lc-rs",
+          "aws-lc-rs?/aws-lc-sys",
+          "aws-lc-rs?/prebuilt-nasm"
+        ],
+        "aws-lc-rs-fips": [
+          "aws-lc-rs",
+          "aws-lc-rs?/fips"
+        ],
+        "bloom": [
+          "dep:fastbloom"
+        ],
+        "default": [
+          "rustls-ring",
+          "log",
+          "bloom"
+        ],
+        "log": [
+          "tracing/log"
+        ],
+        "platform-verifier": [
+          "dep:rustls-platform-verifier"
+        ],
+        "qlog": [
+          "dep:qlog"
+        ],
+        "ring": [
+          "dep:ring"
+        ],
+        "rustls": [
+          "rustls-ring"
+        ],
+        "rustls-aws-lc-rs": [
+          "dep:rustls",
+          "rustls?/aws-lc-rs",
+          "aws-lc-rs"
+        ],
+        "rustls-aws-lc-rs-fips": [
+          "rustls-aws-lc-rs",
+          "aws-lc-rs-fips"
+        ],
+        "rustls-log": [
+          "rustls?/logging"
+        ],
+        "rustls-ring": [
+          "dep:rustls",
+          "rustls?/ring",
+          "ring"
+        ]
+      },
+      "yanked": false,
+      "yank_message": null,
+      "lib_links": null,
+      "license": "MIT OR Apache-2.0",
+      "links": {
+        "dependencies": "/api/v1/crates/quinn-proto/0.11.17/dependencies",
+        "version_downloads": "/api/v1/crates/quinn-proto/0.11.17/downloads",
+        "authors": "/api/v1/crates/quinn-proto/0.11.17/authors"
+      },
+      "crate_size": 246202,
+      "published_by": {
+        "id": 5298,
+        "login": "Ralith",
+        "name": "Benjamin Saunders",
+        "avatar": "https://avatars.githubusercontent.com/u/104558?v=4",
+        "url": "https://github.com/Ralith",
+        "github_username_matches": true,
+        "created_at": "2009-07-13T21:05:55Z"
+      },
+      "audit_actions": [
+        {
+          "action": "publish",
+          "user": {
+            "id": 5298,
+            "login": "Ralith",
+            "name": "Benjamin Saunders",
+            "avatar": "https://avatars.githubusercontent.com/u/104558?v=4",
+            "url": "https://github.com/Ralith",
+            "github_username_matches": true,
+            "created_at": "2009-07-13T21:05:55Z"
+          },
+          "time": "2026-08-17T17:32:41.972491Z"
+        }
+      ],
+      "checksum": "04759210543be93709136e28212294a659ef5001836ff4eab4d663e4529bba83",
+      "rust_version": "1.85",
+      "has_lib": true,
+      "bin_names": [],
+      "edition": "2021",
+      "description": "State machine for the QUIC transport protocol",
+      "homepage": null,
+      "documentation": null,
+      "repository": "https://github.com/quinn-rs/quinn",
+      "trustpub_data": null,
+      "linecounts": {
+        "languages": {
+          "Rust": {
+            "code_lines": 18380,
+            "comment_lines": 1256,
+            "files": 49
+          }
+        },
+        "total_code_lines": 18380,
+        "total_comment_lines": 1256
+      }
+    },
+    {
+      "id": 2713294,
+      "crate": "quinn-proto",
+      "num": "0.11.16",
+      "dl_path": "/api/v1/crates/quinn-proto/0.11.16/download",
+      "readme_path": "/api/v1/crates/quinn-proto/0.11.16/readme",
+      "updated_at": "2026-07-04T19:17:45.066838Z",
+      "created_at": "2026-07-04T19:17:45.066838Z",
+      "downloads": 35001244,
+      "features": {
+        "__rustls-post-quantum-test": [],
+        "aws-lc-rs": [
+          "dep:aws-lc-rs",
+          "aws-lc-rs?/aws-lc-sys",
+          "aws-lc-rs?/prebuilt-nasm"
+        ],
+        "aws-lc-rs-fips": [
+          "aws-lc-rs",
+          "aws-lc-rs?/fips"
+        ],
+        "bloom": [
+          "dep:fastbloom"
+        ],
+        "default": [
+          "rustls-ring",
+          "log",
+          "bloom"
+        ],
+        "log": [
+          "tracing/log"
+        ],
+        "platform-verifier": [
+          "dep:rustls-platform-verifier"
+        ],
+        "qlog": [
+          "dep:qlog"
+        ],
+        "ring": [
+          "dep:ring"
+        ],
+        "rustls": [
+          "rustls-ring"
+        ],
+        "rustls-aws-lc-rs": [
+          "dep:rustls",
+          "rustls?/aws-lc-rs",
+          "aws-lc-rs"
+        ],
+        "rustls-aws-lc-rs-fips": [
+          "rustls-aws-lc-rs",
+          "aws-lc-rs-fips"
+        ],
+        "rustls-log": [
+          "rustls?/logging"
+        ],
+        "rustls-ring": [
+          "dep:rustls",
+          "rustls?/ring",
+          "ring"
+        ]
+      },
+      "yanked": false,
+      "yank_message": null,
+      "lib_links": null,
+      "license": "MIT OR Apache-2.0",
+      "links": {
+        "dependencies": "/api/v1/crates/quinn-proto/0.11.16/dependencies",
+        "version_downloads": "/api/v1/crates/quinn-proto/0.11.16/downloads",
+        "authors": "/api/v1/crates/quinn-proto/0.11.16/authors"
+      },
+      "crate_size": 244786,
+      "published_by": {
+        "id": 4556,
+        "login": "djc",
+        "name": "Dirkjan Ochtman",
+        "avatar": "https://avatars.githubusercontent.com/u/158471?v=4",
+        "url": "https://github.com/djc",
+        "github_username_matches": true,
+        "created_at": "2009-11-26T12:00:10Z"
+      },
+      "audit_actions": [
+        {
+          "action": "publish",
+          "user": {
+            "id": 4556,
+            "login": "djc",
+            "name": "Dirkjan Ochtman",
+            "avatar": "https://avatars.githubusercontent.com/u/158471?v=4",
+            "url": "https://github.com/djc",
+            "github_username_matches": true,
+            "created_at": "2009-11-26T12:00:10Z"
+          },
+          "time": "2026-07-04T19:17:45.066838Z"
+        }
+      ],
+      "checksum": "2f4bfc015262b9df63c8845072ce59068853ff5872180c2ce2f13038b970e560",
+      "rust_version": "1.85",
+      "has_lib": true,
+      "bin_names": [],
+      "edition": "2021",
+      "description": "State machine for the QUIC transport protocol",
+      "homepage": null,
+      "documentation": null,
+      "repository": "https://github.com/quinn-rs/quinn",
+      "trustpub_data": null,
+      "linecounts": {
+        "languages": {
+          "Rust": {
+            "code_lines": 18290,
+            "comment_lines": 1241,
+            "files": 49
+          }
+        },
+        "total_code_lines": 18290,
+        "total_comment_lines": 1241
+      }
+    },
+    {
+      "id": 2625456,
+      "crate": "quinn-proto",
+      "num": "0.11.15",
+      "dl_path": "/api/v1/crates/quinn-proto/0.11.15/download",
+      "readme_path": "/api/v1/crates/quinn-proto/0.11.15/readme",
+      "updated_at": "2026-06-22T09:43:03.177163Z",
+      "created_at": "2026-06-22T09:43:03.177163Z",
+      "downloads": 23862526,
+      "features": {
+        "__rustls-post-quantum-test": [],
+        "aws-lc-rs": [
+          "dep:aws-lc-rs",
+          "aws-lc-rs?/aws-lc-sys",
+          "aws-lc-rs?/prebuilt-nasm"
+        ],
+        "aws-lc-rs-fips": [
+          "aws-lc-rs",
+          "aws-lc-rs?/fips"
+        ],
+        "bloom": [
+          "dep:fastbloom"
+        ],
+        "default": [
+          "rustls-ring",
+          "log",
+          "bloom"
+        ],
+        "log": [
+          "tracing/log"
+        ],
+        "platform-verifier": [
+          "dep:rustls-platform-verifier"
+        ],
+        "qlog": [
+          "dep:qlog"
+        ],
+        "ring": [
+          "dep:ring"
+        ],
+        "rustls": [
+          "rustls-ring"
+        ],
+        "rustls-aws-lc-rs": [
+          "dep:rustls",
+          "rustls?/aws-lc-rs",
+          "aws-lc-rs"
+        ],
+        "rustls-aws-lc-rs-fips": [
+          "rustls-aws-lc-rs",
+          "aws-lc-rs-fips"
+        ],
+        "rustls-log": [
+          "rustls?/logging"
+        ],
+        "rustls-ring": [
+          "dep:rustls",
+          "rustls?/ring",
+          "ring"
+        ]
+      },
+      "yanked": false,
+      "yank_message": null,
+      "lib_links": null,
+      "license": "MIT OR Apache-2.0",
+      "links": {
+        "dependencies": "/api/v1/crates/quinn-proto/0.11.15/dependencies",
+        "version_downloads": "/api/v1/crates/quinn-proto/0.11.15/downloads",
+        "authors": "/api/v1/crates/quinn-proto/0.11.15/authors"
+      },
+      "crate_size": 245016,
+      "published_by": {
+        "id": 4556,
+        "login": "djc",
+        "name": "Dirkjan Ochtman",
+        "avatar": "https://avatars.githubusercontent.com/u/158471?v=4",
+        "url": "https://github.com/djc",
+        "github_username_matches": true,
+        "created_at": "2009-11-26T12:00:10Z"
+      },
+      "audit_actions": [
+        {
+          "action": "publish",
+          "user": {
+            "id": 4556,
+            "login": "djc",
+            "name": "Dirkjan Ochtman",
+            "avatar": "https://avatars.githubusercontent.com/u/158471?v=4",
+            "url": "https://github.com/djc",
+            "github_username_matches": true,
+            "created_at": "2009-11-26T12:00:10Z"
+          },
+          "time": "2026-06-22T09:43:03.177163Z"
+        }
+      ],
+      "checksum": "4fcb935c5bec503c2f0e306bdd3e58bb9029dcb14fa8d9ac76e3a5256ac0763e",
+      "rust_version": "1.85",
+      "has_lib": true,
+      "bin_names": [],
+      "edition": "2021",
+      "description": "State machine for the QUIC transport protocol",
+      "homepage": null,
+      "documentation": null,
+      "repository": "https://github.com/quinn-rs/quinn",
+      "trustpub_data": null,
+      "linecounts": {
+        "languages": {
+          "Rust": {
+            "code_lines": 18283,
+            "comment_lines": 1241,
+            "files": 49
+          }
+        },
+        "total_code_lines": 18283,
+        "total_comment_lines": 1241
+      }
+    },
+    {
+      "id": 2102665,
+      "crate": "quinn-proto",
+      "num": "0.11.14",
+      "dl_path": "/api/v1/crates/quinn-proto/0.11.14/download",
+      "readme_path": "/api/v1/crates/quinn-proto/0.11.14/readme",
+      "updated_at": "2026-03-09T10:22:45.715223Z",
+      "created_at": "2026-03-09T10:22:45.715223Z",
+      "downloads": 94262237,
+      "features": {
+        "__rustls-post-quantum-test": [],
+        "aws-lc-rs": [
+          "dep:aws-lc-rs",
+          "aws-lc-rs?/aws-lc-sys",
+          "aws-lc-rs?/prebuilt-nasm"
+        ],
+        "aws-lc-rs-fips": [
+          "aws-lc-rs",
+          "aws-lc-rs?/fips"
+        ],
+        "bloom": [
+          "dep:fastbloom"
+        ],
+        "default": [
+          "rustls-ring",
+          "log",
+          "bloom"
+        ],
+        "log": [
+          "tracing/log"
+        ],
+        "platform-verifier": [
+          "dep:rustls-platform-verifier"
+        ],
+        "qlog": [
+          "dep:qlog"
+        ],
+        "ring": [
+          "dep:ring"
+        ],
+        "rustls": [
+          "rustls-ring"
+        ],
+        "rustls-aws-lc-rs": [
+          "dep:rustls",
+          "rustls?/aws-lc-rs",
+          "aws-lc-rs"
+        ],
+        "rustls-aws-lc-rs-fips": [
+          "rustls-aws-lc-rs",
+          "aws-lc-rs-fips"
+        ],
+        "rustls-log": [
+          "rustls?/logging"
+        ],
+        "rustls-ring": [
+          "dep:rustls",
+          "rustls?/ring",
+          "ring"
+        ]
+      },
+      "yanked": false,
+      "yank_message": null,
+      "lib_links": null,
+      "license": "MIT OR Apache-2.0",
+      "links": {
+        "dependencies": "/api/v1/crates/quinn-proto/0.11.14/dependencies",
+        "version_downloads": "/api/v1/crates/quinn-proto/0.11.14/downloads",
+        "authors": "/api/v1/crates/quinn-proto/0.11.14/authors"
+      },
+      "crate_size": 244123,
+      "published_by": {
+        "id": 4556,
+        "login": "djc",
+        "name": "Dirkjan Ochtman",
+        "avatar": "https://avatars.githubusercontent.com/u/158471?v=4",
+        "url": "https://github.com/djc",
+        "github_username_matches": true,
+        "created_at": "2009-11-26T12:00:10Z"
+      },
+      "audit_actions": [
+        {
+          "action": "publish",
+          "user": {
+            "id": 4556,
+            "login": "djc",
+            "name": "Dirkjan Ochtman",
+            "avatar": "https://avatars.githubusercontent.com/u/158471?v=4",
+            "url": "https://github.com/djc",
+            "github_username_matches": true,
+            "created_at": "2009-11-26T12:00:10Z"
+          },
+          "time": "2026-03-09T10:22:45.715223Z"
+        }
+      ],
+      "checksum": "434b42fec591c96ef50e21e886936e66d3cc3f737104fdb9b737c40ffb94c098",
+      "rust_version": "1.74.1",
+      "has_lib": true,
+      "bin_names": [],
+      "edition": "2021",
+      "description": "State machine for the QUIC transport protocol",
+      "homepage": null,
+      "documentation": null,
+      "repository": "https://github.com/quinn-rs/quinn",
+      "trustpub_data": null,
+      "linecounts": {
+        "languages": {
+          "Rust": {
+            "code_lines": 18261,
+            "comment_lines": 1233,
+            "files": 49
+          }
+        },
+        "total_code_lines": 18261,
+        "total_comment_lines": 1233
+      }
+    },
+    {
+      "id": 1703426,
+      "crate": "quinn-proto",
+      "num": "0.11.13",
+      "dl_path": "/api/v1/crates/quinn-proto/0.11.13/download",
+      "readme_path": "/api/v1/crates/quinn-proto/0.11.13/readme",
+      "updated_at": "2025-08-27T21:51:24.562756Z",
+      "created_at": "2025-08-27T21:51:24.562756Z",
+      "downloads": 67393306,
+      "features": {
+        "aws-lc-rs": [
+          "dep:aws-lc-rs",
+          "aws-lc-rs?/aws-lc-sys",
+          "aws-lc-rs?/prebuilt-nasm"
+        ],
+        "aws-lc-rs-fips": [
+          "aws-lc-rs",
+          "aws-lc-rs?/fips"
+        ],
+        "bloom": [
+          "dep:fastbloom"
+        ],
+        "default": [
+          "rustls-ring",
+          "log",
+          "bloom"
+        ],
+        "log": [
+          "tracing/log"
+        ],
+        "platform-verifier": [
+          "dep:rustls-platform-verifier"
+        ],
+        "qlog": [
+          "dep:qlog"
+        ],
+        "ring": [
+          "dep:ring"
+        ],
+        "rustls": [
+          "rustls-ring"
+        ],
+        "rustls-aws-lc-rs": [
+          "dep:rustls",
+          "rustls?/aws-lc-rs",
+          "aws-lc-rs"
+        ],
+        "rustls-aws-lc-rs-fips": [
+          "rustls-aws-lc-rs",
+          "aws-lc-rs-fips"
+        ],
+        "rustls-log": [
+          "rustls?/logging"
+        ],
+        "rustls-ring": [
+          "dep:rustls",
+          "rustls?/ring",
+          "ring"
+        ]
+      },
+      "yanked": false,
+      "yank_message": null,
+      "lib_links": null,
+      "license": "MIT OR Apache-2.0",
+      "links": {
+        "dependencies": "/api/v1/crates/quinn-proto/0.11.13/dependencies",
+        "version_downloads": "/api/v1/crates/quinn-proto/0.11.13/downloads",
+        "authors": "/api/v1/crates/quinn-proto/0.11.13/authors"
+      },
+      "crate_size": 243837,
+      "published_by": {
+        "id": 4556,
+        "login": "djc",
+        "name": "Dirkjan Ochtman",
+        "avatar": "https://avatars.githubusercontent.com/u/158471?v=4",
+        "url": "https://github.com/djc",
+        "github_username_matches": true,
+        "created_at": "2009-11-26T12:00:10Z"
+      },
+      "audit_actions": [
+        {
+          "action": "publish",
+          "user": {
+            "id": 4556,
+            "login": "djc",
+            "name": "Dirkjan Ochtman",
+            "avatar": "https://avatars.githubusercontent.com/u/158471?v=4",
+            "url": "https://github.com/djc",
+            "github_username_matches": true,
+            "created_at": "2009-11-26T12:00:10Z"
+          },
+          "time": "2025-08-27T21:51:24.562756Z"
+        }
+      ],
+      "checksum": "f1906b49b0c3bc04b5fe5d86a77925ae6524a19b816ae38ce1e426255f1d8a31",
+      "rust_version": "1.74.1",
+      "has_lib": true,
+      "bin_names": [],
+      "edition": "2021",
+      "description": "State machine for the QUIC transport protocol",
+      "homepage": null,
+      "documentation": null,
+      "repository": "https://github.com/quinn-rs/quinn",
+      "trustpub_data": null,
+      "linecounts": {
+        "languages": {
+          "Rust": {
+            "code_lines": 18253,
+            "comment_lines": 1233,
+            "files": 49
+          }
+        },
+        "total_code_lines": 18253,
+        "total_comment_lines": 1233
+      }
+    },
+    {
+      "id": 1556484,
+      "crate": "quinn-proto",
+      "num": "0.11.12",
+      "dl_path": "/api/v1/crates/quinn-proto/0.11.12/download",
+      "readme_path": "/api/v1/crates/quinn-proto/0.11.12/readme",
+      "updated_at": "2025-05-09T07:46:17.085806Z",
+      "created_at": "2025-05-09T07:46:17.085806Z",
+      "downloads": 31102386,
+      "features": {
+        "aws-lc-rs": [
+          "dep:aws-lc-rs",
+          "aws-lc-rs?/aws-lc-sys",
+          "aws-lc-rs?/prebuilt-nasm"
+        ],
+        "aws-lc-rs-fips": [
+          "aws-lc-rs",
+          "aws-lc-rs?/fips"
+        ],
+        "bloom": [
+          "dep:fastbloom"
+        ],
+        "default": [
+          "rustls-ring",
+          "log",
+          "bloom"
+        ],
+        "log": [
+          "tracing/log"
+        ],
+        "platform-verifier": [
+          "dep:rustls-platform-verifier"
+        ],
+        "ring": [
+          "dep:ring"
+        ],
+        "rustls": [
+          "rustls-ring"
+        ],
+        "rustls-aws-lc-rs": [
+          "dep:rustls",
+          "rustls?/aws-lc-rs",
+          "aws-lc-rs"
+        ],
+        "rustls-aws-lc-rs-fips": [
+          "rustls-aws-lc-rs",
+          "aws-lc-rs-fips"
+        ],
+        "rustls-log": [
+          "rustls?/logging"
+        ],
+        "rustls-ring": [
+          "dep:rustls",
+          "rustls?/ring",
+          "ring"
+        ]
+      },
+      "yanked": false,
+      "yank_message": null,
+      "lib_links": null,
+      "license": "MIT OR Apache-2.0",
+      "links": {
+        "dependencies": "/api/v1/crates/quinn-proto/0.11.12/dependencies",
+        "version_downloads": "/api/v1/crates/quinn-proto/0.11.12/downloads",
+        "authors": "/api/v1/crates/quinn-proto/0.11.12/authors"
+      },
+      "crate_size": 235821,
+      "published_by": {
+        "id": 4556,
+        "login": "djc",
+        "name": "Dirkjan Ochtman",
+        "avatar": "https://avatars.githubusercontent.com/u/158471?v=4",
+        "url": "https://github.com/djc",
+        "github_username_matches": true,
+        "created_at": "2009-11-26T12:00:10Z"
+      },
+      "audit_actions": [
+        {
+          "action": "publish",
+          "user": {
+            "id": 4556,
+            "login": "djc",
+            "name": "Dirkjan Ochtman",
+            "avatar": "https://avatars.githubusercontent.com/u/158471?v=4",
+            "url": "https://github.com/djc",
+            "github_username_matches": true,
+            "created_at": "2009-11-26T12:00:10Z"
+          },
+          "time": "2025-05-09T07:46:17.085806Z"
+        }
+      ],
+      "checksum": "49df843a9161c85bb8aae55f101bc0bac8bcafd637a620d9122fd7e0b2f7422e",
+      "rust_version": "1.71",
+      "has_lib": true,
+      "bin_names": [],
+      "edition": "2021",
+      "description": "State machine for the QUIC transport protocol",
+      "homepage": null,
+      "documentation": null,
+      "repository": "https://github.com/quinn-rs/quinn",
+      "trustpub_data": null,
+      "linecounts": {
+        "languages": {
+          "Rust": {
+            "code_lines": 17608,
+            "comment_lines": 1200,
+            "files": 48
+          }
+        },
+        "total_code_lines": 17608,
+        "total_comment_lines": 1200
+      }
+    },
+    {
+      "id": 1534239,
+      "crate": "quinn-proto",
+      "num": "0.11.11",
+      "dl_path": "/api/v1/crates/quinn-proto/0.11.11/download",
+      "readme_path": "/api/v1/crates/quinn-proto/0.11.11/readme",
+      "updated_at": "2025-04-22T13:47:51.211513Z",
+      "created_at": "2025-04-22T13:47:51.211513Z",
+      "downloads": 3795060,
+      "features": {
+        "aws-lc-rs": [
+          "dep:aws-lc-rs",
+          "aws-lc-rs?/aws-lc-sys",
+          "aws-lc-rs?/prebuilt-nasm"
+        ],
+        "aws-lc-rs-fips": [
+          "aws-lc-rs",
+          "aws-lc-rs?/fips"
+        ],
+        "default": [
+          "rustls-ring",
+          "log"
+        ],
+        "log": [
+          "tracing/log"
+        ],
+        "platform-verifier": [
+          "dep:rustls-platform-verifier"
+        ],
+        "ring": [
+          "dep:ring"
+        ],
+        "rustls": [
+          "rustls-ring"
+        ],
+        "rustls-aws-lc-rs": [
+          "dep:rustls",
+          "rustls?/aws-lc-rs",
+          "aws-lc-rs"
+        ],
+        "rustls-aws-lc-rs-fips": [
+          "rustls-aws-lc-rs",
+          "aws-lc-rs-fips"
+        ],
+        "rustls-log": [
+          "rustls?/logging"
+        ],
+        "rustls-ring": [
+          "dep:rustls",
+          "rustls?/ring",
+          "ring"
+        ]
+      },
+      "yanked": false,
+      "yank_message": null,
+      "lib_links": null,
+      "license": "MIT OR Apache-2.0",
+      "links": {
+        "dependencies": "/api/v1/crates/quinn-proto/0.11.11/dependencies",
+        "version_downloads": "/api/v1/crates/quinn-proto/0.11.11/downloads",
+        "authors": "/api/v1/crates/quinn-proto/0.11.11/authors"
+      },
+      "crate_size": 229381,
+      "published_by": {
+        "id": 4556,
+        "login": "djc",
+        "name": "Dirkjan Ochtman",
+        "avatar": "https://avatars.githubusercontent.com/u/158471?v=4",
+        "url": "https://github.com/djc",
+        "github_username_matches": true,
+        "created_at": "2009-11-26T12:00:10Z"
+      },
+      "audit_actions": [
+        {
+          "action": "publish",
+          "user": {
+            "id": 4556,
+            "login": "djc",
+            "name": "Dirkjan Ochtman",
+            "avatar": "https://avatars.githubusercontent.com/u/158471?v=4",
+            "url": "https://github.com/djc",
+            "github_username_matches": true,
+            "created_at": "2009-11-26T12:00:10Z"
+          },
+          "time": "2025-04-22T13:47:51.211513Z"
+        }
+      ],
+      "checksum": "bcbafbbdbb0f638fe3f35f3c56739f77a8a1d070cb25603226c83339b391472b",
+      "rust_version": "1.71",
+      "has_lib": true,
+      "bin_names": [],
+      "edition": "2021",
+      "description": "State machine for the QUIC transport protocol",
+      "homepage": null,
+      "documentation": null,
+      "repository": "https://github.com/quinn-rs/quinn",
+      "trustpub_data": null,
+      "linecounts": {
+        "languages": {
+          "Rust": {
+            "code_lines": 17147,
+            "comment_lines": 1142,
+            "files": 46
+          }
+        },
+        "total_code_lines": 17147,
+        "total_comment_lines": 1142
+      }
+    },
+    {
+      "id": 1486943,
+      "crate": "quinn-proto",
+      "num": "0.11.10",
+      "dl_path": "/api/v1/crates/quinn-proto/0.11.10/download",
+      "readme_path": "/api/v1/crates/quinn-proto/0.11.10/readme",
+      "updated_at": "2025-03-18T09:41:15.343315Z",
+      "created_at": "2025-03-18T09:41:15.343315Z",
+      "downloads": 7562468,
+      "features": {
+        "aws-lc-rs": [
+          "dep:aws-lc-rs",
+          "aws-lc-rs?/aws-lc-sys",
+          "aws-lc-rs?/prebuilt-nasm"
+        ],
+        "aws-lc-rs-fips": [
+          "aws-lc-rs",
+          "aws-lc-rs?/fips"
+        ],
+        "default": [
+          "rustls-ring",
+          "log"
+        ],
+        "log": [
+          "tracing/log"
+        ],
+        "platform-verifier": [
+          "dep:rustls-platform-verifier"
+        ],
+        "ring": [
+          "dep:ring"
+        ],
+        "rustls": [
+          "rustls-ring"
+        ],
+        "rustls-aws-lc-rs": [
+          "dep:rustls",
+          "rustls?/aws-lc-rs",
+          "aws-lc-rs"
+        ],
+        "rustls-aws-lc-rs-fips": [
+          "rustls-aws-lc-rs",
+          "aws-lc-rs-fips"
+        ],
+        "rustls-log": [
+          "rustls?/logging"
+        ],
+        "rustls-ring": [
+          "dep:rustls",
+          "rustls?/ring",
+          "ring"
+        ]
+      },
+      "yanked": false,
+      "yank_message": null,
+      "lib_links": null,
+      "license": "MIT OR Apache-2.0",
+      "links": {
+        "dependencies": "/api/v1/crates/quinn-proto/0.11.10/dependencies",
+        "version_downloads": "/api/v1/crates/quinn-proto/0.11.10/downloads",
+        "authors": "/api/v1/crates/quinn-proto/0.11.10/authors"
+      },
+      "crate_size": 229164,
+      "published_by": {
+        "id": 4556,
+        "login": "djc",
+        "name": "Dirkjan Ochtman",
+        "avatar": "https://avatars.githubusercontent.com/u/158471?v=4",
+        "url": "https://github.com/djc",
+        "github_username_matches": true,
+        "created_at": "2009-11-26T12:00:10Z"
+      },
+      "audit_actions": [
+        {
+          "action": "publish",
+          "user": {
+            "id": 4556,
+            "login": "djc",
+            "name": "Dirkjan Ochtman",
+            "avatar": "https://avatars.githubusercontent.com/u/158471?v=4",
+            "url": "https://github.com/djc",
+            "github_username_matches": true,
+            "created_at": "2009-11-26T12:00:10Z"
+          },
+          "time": "2025-03-18T09:41:15.343315Z"
+        }
+      ],
+      "checksum": "b820744eb4dc9b57a3398183639c511b5a26d2ed702cedd3febaa1393caa22cc",
+      "rust_version": "1.71",
+      "has_lib": true,
+      "bin_names": [],
+      "edition": "2021",
+      "description": "State machine for the QUIC transport protocol",
+      "homepage": null,
+      "documentation": null,
+      "repository": "https://github.com/quinn-rs/quinn",
+      "trustpub_data": null,
+      "linecounts": {
+        "languages": {
+          "Rust": {
+            "code_lines": 17153,
+            "comment_lines": 1142,
+            "files": 46
+          }
+        },
+        "total_code_lines": 17153,
+        "total_comment_lines": 1142
+      }
+    },
+    {
+      "id": 1338155,
+      "crate": "quinn-proto",
+      "num": "0.11.9",
+      "dl_path": "/api/v1/crates/quinn-proto/0.11.9/download",
+      "readme_path": "/api/v1/crates/quinn-proto/0.11.9/readme",
+      "updated_at": "2024-11-13T09:59:32.642187Z",
+      "created_at": "2024-11-13T09:59:32.642187Z",
+      "downloads": 21688190,
+      "features": {
+        "aws-lc-rs": [
+          "dep:aws-lc-rs",
+          "aws-lc-rs?/aws-lc-sys",
+          "aws-lc-rs?/prebuilt-nasm"
+        ],
+        "aws-lc-rs-fips": [
+          "aws-lc-rs",
+          "aws-lc-rs?/fips"
+        ],
+        "default": [
+          "rustls-ring",
+          "log"
+        ],
+        "log": [
+          "tracing/log"
+        ],
+        "platform-verifier": [
+          "dep:rustls-platform-verifier"
+        ],
+        "ring": [
+          "dep:ring"
+        ],
+        "rustls": [
+          "rustls-ring"
+        ],
+        "rustls-aws-lc-rs": [
+          "dep:rustls",
+          "rustls?/aws-lc-rs",
+          "aws-lc-rs"
+        ],
+        "rustls-aws-lc-rs-fips": [
+          "rustls-aws-lc-rs",
+          "aws-lc-rs-fips"
+        ],
+        "rustls-log": [
+          "rustls?/logging"
+        ],
+        "rustls-ring": [
+          "dep:rustls",
+          "rustls?/ring",
+          "ring"
+        ]
+      },
+      "yanked": false,
+      "yank_message": null,
+      "lib_links": null,
+      "license": "MIT OR Apache-2.0",
+      "links": {
+        "dependencies": "/api/v1/crates/quinn-proto/0.11.9/dependencies",
+        "version_downloads": "/api/v1/crates/quinn-proto/0.11.9/downloads",
+        "authors": "/api/v1/crates/quinn-proto/0.11.9/authors"
+      },
+      "crate_size": 209286,
+      "published_by": {
+        "id": 4556,
+        "login": "djc",
+        "name": "Dirkjan Ochtman",
+        "avatar": "https://avatars.githubusercontent.com/u/158471?v=4",
+        "url": "https://github.com/djc",
+        "github_username_matches": true,
+        "created_at": "2009-11-26T12:00:10Z"
+      },
+      "audit_actions": [
+        {
+          "action": "publish",
+          "user": {
+            "id": 4556,
+            "login": "djc",
+            "name": "Dirkjan Ochtman",
+            "avatar": "https://avatars.githubusercontent.com/u/158471?v=4",
+            "url": "https://github.com/djc",
+            "github_username_matches": true,
+            "created_at": "2009-11-26T12:00:10Z"
+          },
+          "time": "2024-11-13T09:59:32.642187Z"
+        }
+      ],
+      "checksum": "a2fe5ef3495d7d2e377ff17b1a8ce2ee2ec2a18cde8b6ad6619d65d0701c135d",
+      "rust_version": "1.70.0",
+      "has_lib": true,
+      "bin_names": [],
+      "edition": "2021",
+      "description": "State machine for the QUIC transport protocol",
+      "homepage": null,
+      "documentation": null,
+      "repository": "https://github.com/quinn-rs/quinn",
+      "trustpub_data": null,
+      "linecounts": {
+        "languages": {
+          "Rust": {
+            "code_lines": 16579,
+            "comment_lines": 1105,
+            "files": 45
+          }
+        },
+        "total_code_lines": 16579,
+        "total_comment_lines": 1105
+      }
+    },
+    {
+      "id": 1257595,
+      "crate": "quinn-proto",
+      "num": "0.11.8",
+      "dl_path": "/api/v1/crates/quinn-proto/0.11.8/download",
+      "readme_path": "/api/v1/crates/quinn-proto/0.11.8/readme",
+      "updated_at": "2024-09-03T08:50:50.801465Z",
+      "created_at": "2024-09-03T08:50:50.801465Z",
+      "downloads": 22189318,
+      "features": {
+        "default": [
+          "rustls",
+          "log"
+        ],
+        "log": [
+          "tracing/log"
+        ],
+        "platform-verifier": [
+          "dep:rustls-platform-verifier"
+        ],
+        "ring": [
+          "dep:ring"
+        ],
+        "rustls": [
+          "dep:rustls",
+          "ring"
+        ]
+      },
+      "yanked": false,
+      "yank_message": null,
+      "lib_links": null,
+      "license": "MIT OR Apache-2.0",
+      "links": {
+        "dependencies": "/api/v1/crates/quinn-proto/0.11.8/dependencies",
+        "version_downloads": "/api/v1/crates/quinn-proto/0.11.8/downloads",
+        "authors": "/api/v1/crates/quinn-proto/0.11.8/authors"
+      },
+      "crate_size": 204226,
+      "published_by": {
+        "id": 4556,
+        "login": "djc",
+        "name": "Dirkjan Ochtman",
+        "avatar": "https://avatars.githubusercontent.com/u/158471?v=4",
+        "url": "https://github.com/djc",
+        "github_username_matches": true,
+        "created_at": "2009-11-26T12:00:10Z"
+      },
+      "audit_actions": [
+        {
+          "action": "publish",
+          "user": {
+            "id": 4556,
+            "login": "djc",
+            "name": "Dirkjan Ochtman",
+            "avatar": "https://avatars.githubusercontent.com/u/158471?v=4",
+            "url": "https://github.com/djc",
+            "github_username_matches": true,
+            "created_at": "2009-11-26T12:00:10Z"
+          },
+          "time": "2024-09-03T08:50:50.801465Z"
+        }
+      ],
+      "checksum": "fadfaed2cd7f389d0161bb73eeb07b7b78f8691047a6f3e73caaeae55310a4a6",
+      "rust_version": "1.70.0",
+      "has_lib": true,
+      "bin_names": [],
+      "edition": "2021",
+      "description": "State machine for the QUIC transport protocol",
+      "homepage": null,
+      "documentation": null,
+      "repository": "https://github.com/quinn-rs/quinn",
+      "trustpub_data": null,
+      "linecounts": {
+        "languages": {
+          "Rust": {
+            "code_lines": 16255,
+            "comment_lines": 1081,
+            "files": 45
+          }
+        },
+        "total_code_lines": 16255,
+        "total_comment_lines": 1081
+      }
+    },
+    {
+      "id": 1256486,
+      "crate": "quinn-proto",
+      "num": "0.11.7",
+      "dl_path": "/api/v1/crates/quinn-proto/0.11.7/download",
+      "readme_path": "/api/v1/crates/quinn-proto/0.11.7/readme",
+      "updated_at": "2024-09-02T08:58:07.921231Z",
+      "created_at": "2024-09-02T08:58:07.921231Z",
+      "downloads": 2523023,
+      "features": {
+        "default": [
+          "rustls",
+          "log"
+        ],
+        "log": [
+          "tracing/log"
+        ],
+        "platform-verifier": [
+          "dep:rustls-platform-verifier"
+        ],
+        "ring": [
+          "dep:ring"
+        ],
+        "rustls": [
+          "dep:rustls",
+          "ring"
+        ]
+      },
+      "yanked": false,
+      "yank_message": null,
+      "lib_links": null,
+      "license": "MIT OR Apache-2.0",
+      "links": {
+        "dependencies": "/api/v1/crates/quinn-proto/0.11.7/dependencies",
+        "version_downloads": "/api/v1/crates/quinn-proto/0.11.7/downloads",
+        "authors": "/api/v1/crates/quinn-proto/0.11.7/authors"
+      },
+      "crate_size": 204211,
+      "published_by": {
+        "id": 4556,
+        "login": "djc",
+        "name": "Dirkjan Ochtman",
+        "avatar": "https://avatars.githubusercontent.com/u/158471?v=4",
+        "url": "https://github.com/djc",
+        "github_username_matches": true,
+        "created_at": "2009-11-26T12:00:10Z"
+      },
+      "audit_actions": [
+        {
+          "action": "publish",
+          "user": {
+            "id": 4556,
+            "login": "djc",
+            "name": "Dirkjan Ochtman",
+            "avatar": "https://avatars.githubusercontent.com/u/158471?v=4",
+            "url": "https://github.com/djc",
+            "github_username_matches": true,
+            "created_at": "2009-11-26T12:00:10Z"
+          },
+          "time": "2024-09-02T08:58:07.921231Z"
+        }
+      ],
+      "checksum": "ea0a9b3a42929fad8a7c3de7f86ce0814cfa893328157672680e9fb1145549c5",
+      "rust_version": "1.70.0",
+      "has_lib": true,
+      "bin_names": [],
+      "edition": "2021",
+      "description": "State machine for the QUIC transport protocol",
+      "homepage": null,
+      "documentation": null,
+      "repository": "https://github.com/quinn-rs/quinn",
+      "trustpub_data": null,
+      "linecounts": {
+        "languages": {
+          "Rust": {
+            "code_lines": 16256,
+            "comment_lines": 1081,
+            "files": 45
+          }
+        },
+        "total_code_lines": 16256,
+        "total_comment_lines": 1081
+      }
+    },
+    {
+      "id": 1223742,
+      "crate": "quinn-proto",
+      "num": "0.11.6",
+      "dl_path": "/api/v1/crates/quinn-proto/0.11.6/download",
+      "readme_path": "/api/v1/crates/quinn-proto/0.11.6/readme",
+      "updated_at": "2024-08-04T20:29:46.410306Z",
+      "created_at": "2024-08-04T20:29:46.410306Z",
+      "downloads": 2970351,
+      "features": {
+        "default": [
+          "rustls",
+          "log"
+        ],
+        "log": [
+          "tracing/log"
+        ],
+        "platform-verifier": [
+          "dep:rustls-platform-verifier"
+        ],
+        "ring": [
+          "dep:ring"
+        ],
+        "rustls": [
+          "dep:rustls",
+          "ring"
+        ]
+      },
+      "yanked": false,
+      "yank_message": null,
+      "lib_links": null,
+      "license": "MIT OR Apache-2.0",
+      "links": {
+        "dependencies": "/api/v1/crates/quinn-proto/0.11.6/dependencies",
+        "version_downloads": "/api/v1/crates/quinn-proto/0.11.6/downloads",
+        "authors": "/api/v1/crates/quinn-proto/0.11.6/authors"
+      },
+      "crate_size": 203803,
+      "published_by": {
+        "id": 5298,
+        "login": "Ralith",
+        "name": "Benjamin Saunders",
+        "avatar": "https://avatars.githubusercontent.com/u/104558?v=4",
+        "url": "https://github.com/Ralith",
+        "github_username_matches": true,
+        "created_at": "2009-07-13T21:05:55Z"
+      },
+      "audit_actions": [
+        {
+          "action": "publish",
+          "user": {
+            "id": 5298,
+            "login": "Ralith",
+            "name": "Benjamin Saunders",
+            "avatar": "https://avatars.githubusercontent.com/u/104558?v=4",
+            "url": "https://github.com/Ralith",
+            "github_username_matches": true,
+            "created_at": "2009-07-13T21:05:55Z"
+          },
+          "time": "2024-08-04T20:29:46.410306Z"
+        }
+      ],
+      "checksum": "ba92fb39ec7ad06ca2582c0ca834dfeadcaf06ddfc8e635c80aa7e1c05315fdd",
+      "rust_version": "1.70.0",
+      "has_lib": true,
+      "bin_names": [],
+      "edition": "2021",
+      "description": "State machine for the QUIC transport protocol",
+      "homepage": null,
+      "documentation": null,
+      "repository": "https://github.com/quinn-rs/quinn",
+      "trustpub_data": null,
+      "linecounts": {
+        "languages": {
+          "Rust": {
+            "code_lines": 16244,
+            "comment_lines": 1081,
+            "files": 45
+          }
+        },
+        "total_code_lines": 16244,
+        "total_comment_lines": 1081
+      }
+    },
+    {
+      "id": 1223626,
+      "crate": "quinn-proto",
+      "num": "0.11.5",
+      "dl_path": "/api/v1/crates/quinn-proto/0.11.5/download",
+      "readme_path": "/api/v1/crates/quinn-proto/0.11.5/readme",
+      "updated_at": "2024-08-04T16:55:21.157065Z",
+      "created_at": "2024-08-04T16:49:44.125761Z",
+      "downloads": 1654,
+      "features": {
+        "default": [
+          "rustls",
+          "log"
+        ],
+        "log": [
+          "tracing/log"
+        ],
+        "platform-verifier": [
+          "dep:rustls-platform-verifier"
+        ],
+        "ring": [
+          "dep:ring"
+        ],
+        "rustls": [
+          "dep:rustls",
+          "ring"
+        ]
+      },
+      "yanked": true,
+      "yank_message": null,
+      "lib_links": null,
+      "license": "MIT OR Apache-2.0",
+      "links": {
+        "dependencies": "/api/v1/crates/quinn-proto/0.11.5/dependencies",
+        "version_downloads": "/api/v1/crates/quinn-proto/0.11.5/downloads",
+        "authors": "/api/v1/crates/quinn-proto/0.11.5/authors"
+      },
+      "crate_size": 203910,
+      "published_by": {
+        "id": 5298,
+        "login": "Ralith",
+        "name": "Benjamin Saunders",
+        "avatar": "https://avatars.githubusercontent.com/u/104558?v=4",
+        "url": "https://github.com/Ralith",
+        "github_username_matches": true,
+        "created_at": "2009-07-13T21:05:55Z"
+      },
+      "audit_actions": [
+        {
+          "action": "publish",
+          "user": {
+            "id": 5298,
+            "login": "Ralith",
+            "name": "Benjamin Saunders",
+            "avatar": "https://avatars.githubusercontent.com/u/104558?v=4",
+            "url": "https://github.com/Ralith",
+            "github_username_matches": true,
+            "created_at": "2009-07-13T21:05:55Z"
+          },
+          "time": "2024-08-04T16:49:44.125761Z"
+        },
+        {
+          "action": "yank",
+          "user": {
+            "id": 5298,
+            "login": "Ralith",
+            "name": "Benjamin Saunders",
+            "avatar": "https://avatars.githubusercontent.com/u/104558?v=4",
+            "url": "https://github.com/Ralith",
+            "github_username_matches": true,
+            "created_at": "2009-07-13T21:05:55Z"
+          },
+          "time": "2024-08-04T16:55:21.158578Z"
+        }
+      ],
+      "checksum": "595a12c71e12ed4804220eda9b358d71c920de0aeb02bfc0754fa37f1608871f",
+      "rust_version": "1.70.0",
+      "has_lib": true,
+      "bin_names": [],
+      "edition": "2021",
+      "description": "State machine for the QUIC transport protocol",
+      "homepage": null,
+      "documentation": null,
+      "repository": "https://github.com/quinn-rs/quinn",
+      "trustpub_data": null,
+      "linecounts": {
+        "languages": {
+          "Rust": {
+            "code_lines": 16249,
+            "comment_lines": 1081,
+            "files": 45
+          }
+        },
+        "total_code_lines": 16249,
+        "total_comment_lines": 1081
+      }
+    },
+    {
+      "id": 1223128,
+      "crate": "quinn-proto",
+      "num": "0.11.4",
+      "dl_path": "/api/v1/crates/quinn-proto/0.11.4/download",
+      "readme_path": "/api/v1/crates/quinn-proto/0.11.4/readme",
+      "updated_at": "2024-08-03T22:52:37.152097Z",
+      "created_at": "2024-08-03T22:29:38.380374Z",
+      "downloads": 1749,
+      "features": {
+        "default": [
+          "rustls",
+          "log"
+        ],
+        "log": [
+          "tracing/log"
+        ],
+        "platform-verifier": [
+          "dep:rustls-platform-verifier"
+        ],
+        "ring": [
+          "dep:ring"
+        ],
+        "rustls": [
+          "dep:rustls",
+          "ring"
+        ]
+      },
+      "yanked": true,
+      "yank_message": null,
+      "lib_links": null,
+      "license": "MIT OR Apache-2.0",
+      "links": {
+        "dependencies": "/api/v1/crates/quinn-proto/0.11.4/dependencies",
+        "version_downloads": "/api/v1/crates/quinn-proto/0.11.4/downloads",
+        "authors": "/api/v1/crates/quinn-proto/0.11.4/authors"
+      },
+      "crate_size": 203753,
+      "published_by": {
+        "id": 5298,
+        "login": "Ralith",
+        "name": "Benjamin Saunders",
+        "avatar": "https://avatars.githubusercontent.com/u/104558?v=4",
+        "url": "https://github.com/Ralith",
+        "github_username_matches": true,
+        "created_at": "2009-07-13T21:05:55Z"
+      },
+      "audit_actions": [
+        {
+          "action": "publish",
+          "user": {
+            "id": 5298,
+            "login": "Ralith",
+            "name": "Benjamin Saunders",
+            "avatar": "https://avatars.githubusercontent.com/u/104558?v=4",
+            "url": "https://github.com/Ralith",
+            "github_username_matches": true,
+            "created_at": "2009-07-13T21:05:55Z"
+          },
+          "time": "2024-08-03T22:29:38.380374Z"
+        },
+        {
+          "action": "yank",
+          "user": {
+            "id": 5298,
+            "login": "Ralith",
+            "name": "Benjamin Saunders",
+            "avatar": "https://avatars.githubusercontent.com/u/104558?v=4",
+            "url": "https://github.com/Ralith",
+            "github_username_matches": true,
+            "created_at": "2009-07-13T21:05:55Z"
+          },
+          "time": "2024-08-03T22:52:37.153551Z"
+        }
+      ],
+      "checksum": "03653d0fc51e8dd91076ea8026968b1b3f327fab80a4997050fbcece86bb5cb0",
+      "rust_version": "1.70.0",
+      "has_lib": true,
+      "bin_names": [],
+      "edition": "2021",
+      "description": "State machine for the QUIC transport protocol",
+      "homepage": null,
+      "documentation": null,
+      "repository": "https://github.com/quinn-rs/quinn",
+      "trustpub_data": null,
+      "linecounts": {
+        "languages": {
+          "Rust": {
+            "code_lines": 16249,
+            "comment_lines": 1081,
+            "files": 45
+          }
+        },
+        "total_code_lines": 16249,
+        "total_comment_lines": 1081
+      }
+    },
+    {
+      "id": 1167930,
+      "crate": "quinn-proto",
+      "num": "0.11.3",
+      "dl_path": "/api/v1/crates/quinn-proto/0.11.3/download",
+      "readme_path": "/api/v1/crates/quinn-proto/0.11.3/readme",
+      "updated_at": "2024-06-07T21:11:02.839777Z",
+      "created_at": "2024-06-07T21:11:02.839777Z",
+      "downloads": 3876683,
+      "features": {
+        "default": [
+          "rustls",
+          "log"
+        ],
+        "log": [
+          "tracing/log"
+        ],
+        "platform-verifier": [
+          "dep:rustls-platform-verifier"
+        ],
+        "ring": [
+          "dep:ring"
+        ],
+        "rustls": [
+          "dep:rustls",
+          "ring"
+        ]
+      },
+      "yanked": false,
+      "yank_message": null,
+      "lib_links": null,
+      "license": "MIT OR Apache-2.0",
+      "links": {
+        "dependencies": "/api/v1/crates/quinn-proto/0.11.3/dependencies",
+        "version_downloads": "/api/v1/crates/quinn-proto/0.11.3/downloads",
+        "authors": "/api/v1/crates/quinn-proto/0.11.3/authors"
+      },
+      "crate_size": 202348,
+      "published_by": {
+        "id": 4556,
+        "login": "djc",
+        "name": "Dirkjan Ochtman",
+        "avatar": "https://avatars.githubusercontent.com/u/158471?v=4",
+        "url": "https://github.com/djc",
+        "github_username_matches": true,
+        "created_at": "2009-11-26T12:00:10Z"
+      },
+      "audit_actions": [
+        {
+          "action": "publish",
+          "user": {
+            "id": 4556,
+            "login": "djc",
+            "name": "Dirkjan Ochtman",
+            "avatar": "https://avatars.githubusercontent.com/u/158471?v=4",
+            "url": "https://github.com/djc",
+            "github_username_matches": true,
+            "created_at": "2009-11-26T12:00:10Z"
+          },
+          "time": "2024-06-07T21:11:02.839777Z"
+        }
+      ],
+      "checksum": "ddf517c03a109db8100448a4be38d498df8a210a99fe0e1b9eaf39e78c640efe",
+      "rust_version": "1.66",
+      "has_lib": true,
+      "bin_names": [],
+      "edition": "2021",
+      "description": "State machine for the QUIC transport protocol",
+      "homepage": null,
+      "documentation": null,
+      "repository": "https://github.com/quinn-rs/quinn",
+      "trustpub_data": null,
+      "linecounts": {
+        "languages": {
+          "Rust": {
+            "code_lines": 16220,
+            "comment_lines": 1074,
+            "files": 45
+          }
+        },
+        "total_code_lines": 16220,
+        "total_comment_lines": 1074
+      }
+    },
+    {
+      "id": 1154517,
+      "crate": "quinn-proto",
+      "num": "0.11.2",
+      "dl_path": "/api/v1/crates/quinn-proto/0.11.2/download",
+      "readme_path": "/api/v1/crates/quinn-proto/0.11.2/readme",
+      "updated_at": "2024-05-24T08:00:19.672435Z",
+      "created_at": "2024-05-24T08:00:19.672435Z",
+      "downloads": 183852,
+      "features": {
+        "default": [
+          "rustls",
+          "log"
+        ],
+        "log": [
+          "tracing/log"
+        ],
+        "platform-verifier": [
+          "dep:rustls-platform-verifier"
+        ],
+        "ring": [
+          "dep:ring"
+        ],
+        "rustls": [
+          "dep:rustls",
+          "ring"
+        ]
+      },
+      "yanked": false,
+      "yank_message": null,
+      "lib_links": null,
+      "license": "MIT OR Apache-2.0",
+      "links": {
+        "dependencies": "/api/v1/crates/quinn-proto/0.11.2/dependencies",
+        "version_downloads": "/api/v1/crates/quinn-proto/0.11.2/downloads",
+        "authors": "/api/v1/crates/quinn-proto/0.11.2/authors"
+      },
+      "crate_size": 202033,
+      "published_by": {
+        "id": 4556,
+        "login": "djc",
+        "name": "Dirkjan Ochtman",
+        "avatar": "https://avatars.githubusercontent.com/u/158471?v=4",
+        "url": "https://github.com/djc",
+        "github_username_matches": true,
+        "created_at": "2009-11-26T12:00:10Z"
+      },
+      "audit_actions": [
+        {
+          "action": "publish",
+          "user": {
+            "id": 4556,
+            "login": "djc",
+            "name": "Dirkjan Ochtman",
+            "avatar": "https://avatars.githubusercontent.com/u/158471?v=4",
+            "url": "https://github.com/djc",
+            "github_username_matches": true,
+            "created_at": "2009-11-26T12:00:10Z"
+          },
+          "time": "2024-05-24T08:00:19.672435Z"
+        }
+      ],
+      "checksum": "e974563a4b1c2206bbc61191ca4da9c22e4308b4c455e8906751cc7828393f08",
+      "rust_version": "1.66",
+      "has_lib": true,
+      "bin_names": [],
+      "edition": "2021",
+      "description": "State machine for the QUIC transport protocol",
+      "homepage": null,
+      "documentation": null,
+      "repository": "https://github.com/quinn-rs/quinn",
+      "trustpub_data": null,
+      "linecounts": {
+        "languages": {
+          "Rust": {
+            "code_lines": 16198,
+            "comment_lines": 1073,
+            "files": 45
+          }
+        },
+        "total_code_lines": 16198,
+        "total_comment_lines": 1073
+      }
+    },
+    {
+      "id": 1139351,
+      "crate": "quinn-proto",
+      "num": "0.11.1",
+      "dl_path": "/api/v1/crates/quinn-proto/0.11.1/download",
+      "readme_path": "/api/v1/crates/quinn-proto/0.11.1/readme",
+      "updated_at": "2024-05-08T22:24:11.696187Z",
+      "created_at": "2024-05-08T22:24:11.696187Z",
+      "downloads": 14328,
+      "features": {
+        "default": [
+          "rustls",
+          "log"
+        ],
+        "log": [
+          "tracing/log"
+        ],
+        "platform-verifier": [
+          "dep:rustls-platform-verifier"
+        ],
+        "ring": [
+          "dep:ring"
+        ],
+        "rustls": [
+          "dep:rustls",
+          "ring"
+        ]
+      },
+      "yanked": false,
+      "yank_message": null,
+      "lib_links": null,
+      "license": "MIT OR Apache-2.0",
+      "links": {
+        "dependencies": "/api/v1/crates/quinn-proto/0.11.1/dependencies",
+        "version_downloads": "/api/v1/crates/quinn-proto/0.11.1/downloads",
+        "authors": "/api/v1/crates/quinn-proto/0.11.1/authors"
+      },
+      "crate_size": 198185,
+      "published_by": {
+        "id": 5298,
+        "login": "Ralith",
+        "name": "Benjamin Saunders",
+        "avatar": "https://avatars.githubusercontent.com/u/104558?v=4",
+        "url": "https://github.com/Ralith",
+        "github_username_matches": true,
+        "created_at": "2009-07-13T21:05:55Z"
+      },
+      "audit_actions": [
+        {
+          "action": "publish",
+          "user": {
+            "id": 5298,
+            "login": "Ralith",
+            "name": "Benjamin Saunders",
+            "avatar": "https://avatars.githubusercontent.com/u/104558?v=4",
+            "url": "https://github.com/Ralith",
+            "github_username_matches": true,
+            "created_at": "2009-07-13T21:05:55Z"
+          },
+          "time": "2024-05-08T22:24:11.696187Z"
+        }
+      ],
+      "checksum": "a063a47a1aaee4b3b1c2dd44edb7867c10107a2ef171f3543ac40ec5e9092002",
+      "rust_version": "1.66",
+      "has_lib": true,
+      "bin_names": [],
+      "edition": "2021",
+      "description": "State machine for the QUIC transport protocol",
+      "homepage": null,
+      "documentation": null,
+      "repository": "https://github.com/quinn-rs/quinn",
+      "trustpub_data": null,
+      "linecounts": {
+        "languages": {
+          "Rust": {
+            "code_lines": 15931,
+            "comment_lines": 1044,
+            "files": 45
+          }
+        },
+        "total_code_lines": 15931,
+        "total_comment_lines": 1044
+      }
+    },
+    {
+      "id": 1136446,
+      "crate": "quinn-proto",
+      "num": "0.11.0",
+      "dl_path": "/api/v1/crates/quinn-proto/0.11.0/download",
+      "readme_path": "/api/v1/crates/quinn-proto/0.11.0/readme",
+      "updated_at": "2024-05-06T21:46:56.865668Z",
+      "created_at": "2024-05-06T21:46:56.865668Z",
+      "downloads": 4417,
+      "features": {
+        "default": [
+          "rustls",
+          "log"
+        ],
+        "log": [
+          "tracing/log"
+        ],
+        "platform-verifier": [
+          "dep:rustls-platform-verifier"
+        ],
+        "ring": [
+          "dep:ring"
+        ],
+        "rustls": [
+          "dep:rustls",
+          "ring"
+        ]
+      },
+      "yanked": false,
+      "yank_message": null,
+      "lib_links": null,
+      "license": "MIT OR Apache-2.0",
+      "links": {
+        "dependencies": "/api/v1/crates/quinn-proto/0.11.0/dependencies",
+        "version_downloads": "/api/v1/crates/quinn-proto/0.11.0/downloads",
+        "authors": "/api/v1/crates/quinn-proto/0.11.0/authors"
+      },
+      "crate_size": 197662,
+      "published_by": {
+        "id": 4556,
+        "login": "djc",
+        "name": "Dirkjan Ochtman",
+        "avatar": "https://avatars.githubusercontent.com/u/158471?v=4",
+        "url": "https://github.com/djc",
+        "github_username_matches": true,
+        "created_at": "2009-11-26T12:00:10Z"
+      },
+      "audit_actions": [
+        {
+          "action": "publish",
+          "user": {
+            "id": 4556,
+            "login": "djc",
+            "name": "Dirkjan Ochtman",
+            "avatar": "https://avatars.githubusercontent.com/u/158471?v=4",
+            "url": "https://github.com/djc",
+            "github_username_matches": true,
+            "created_at": "2009-11-26T12:00:10Z"
+          },
+          "time": "2024-05-06T21:46:56.865668Z"
+        }
+      ],
+      "checksum": "eac69c3e6d3775039134c012eadcdc76c85765215b344780fd17c76f8c54b409",
+      "rust_version": "1.66",
+      "has_lib": true,
+      "bin_names": [],
+      "edition": "2021",
+      "description": "State machine for the QUIC transport protocol",
+      "homepage": null,
+      "documentation": null,
+      "repository": "https://github.com/quinn-rs/quinn",
+      "trustpub_data": null,
+      "linecounts": {
+        "languages": {
+          "Rust": {
+            "code_lines": 15922,
+            "comment_lines": 1037,
+            "files": 45
+          }
+        },
+        "total_code_lines": 15922,
+        "total_comment_lines": 1037
+      }
+    },
+    {
+      "id": 948011,
+      "crate": "quinn-proto",
+      "num": "0.10.6",
+      "dl_path": "/api/v1/crates/quinn-proto/0.10.6/download",
+      "readme_path": "/api/v1/crates/quinn-proto/0.10.6/readme",
+      "updated_at": "2023-11-07T09:15:41.247895Z",
+      "created_at": "2023-11-07T09:15:41.247895Z",
+      "downloads": 5050956,
+      "features": {
+        "default": [
+          "tls-rustls",
+          "log"
+        ],
+        "log": [
+          "tracing/log"
+        ],
+        "native-certs": [
+          "rustls-native-certs"
+        ],
+        "tls-rustls": [
+          "rustls",
+          "ring"
+        ]
+      },
+      "yanked": false,
+      "yank_message": null,
+      "lib_links": null,
+      "license": "MIT OR Apache-2.0",
+      "links": {
+        "dependencies": "/api/v1/crates/quinn-proto/0.10.6/dependencies",
+        "version_downloads": "/api/v1/crates/quinn-proto/0.10.6/downloads",
+        "authors": "/api/v1/crates/quinn-proto/0.10.6/authors"
+      },
+      "crate_size": 166677,
+      "published_by": {
+        "id": 4556,
+        "login": "djc",
+        "name": "Dirkjan Ochtman",
+        "avatar": "https://avatars.githubusercontent.com/u/158471?v=4",
+        "url": "https://github.com/djc",
+        "github_username_matches": true,
+        "created_at": "2009-11-26T12:00:10Z"
+      },
+      "audit_actions": [
+        {
+          "action": "publish",
+          "user": {
+            "id": 4556,
+            "login": "djc",
+            "name": "Dirkjan Ochtman",
+            "avatar": "https://avatars.githubusercontent.com/u/158471?v=4",
+            "url": "https://github.com/djc",
+            "github_username_matches": true,
+            "created_at": "2009-11-26T12:00:10Z"
+          },
+          "time": "2023-11-07T09:15:41.247895Z"
+        }
+      ],
+      "checksum": "141bf7dfde2fbc246bfd3fe12f2455aa24b0fbd9af535d8c86c7bd1381ff2b1a",
+      "rust_version": "1.63",
+      "has_lib": true,
+      "bin_names": [],
+      "edition": "2021",
+      "description": "State machine for the QUIC transport protocol",
+      "homepage": null,
+      "documentation": null,
+      "repository": "https://github.com/quinn-rs/quinn",
+      "trustpub_data": null,
+      "linecounts": {
+        "languages": {
+          "Rust": {
+            "code_lines": 14365,
+            "comment_lines": 862,
+            "files": 43
+          }
+        },
+        "total_code_lines": 14365,
+        "total_comment_lines": 862
+      }
+    },
+    {
+      "id": 920458,
+      "crate": "quinn-proto",
+      "num": "0.9.6",
+      "dl_path": "/api/v1/crates/quinn-proto/0.9.6/download",
+      "readme_path": "/api/v1/crates/quinn-proto/0.9.6/readme",
+      "updated_at": "2023-10-09T11:10:50.286794Z",
+      "created_at": "2023-10-09T11:10:50.286794Z",
+      "downloads": 2063449,
+      "features": {
+        "default": [
+          "tls-rustls"
+        ],
+        "native-certs": [
+          "rustls-native-certs"
+        ],
+        "tls-rustls": [
+          "rustls",
+          "webpki",
+          "ring"
+        ]
+      },
+      "yanked": false,
+      "yank_message": null,
+      "lib_links": null,
+      "license": "MIT OR Apache-2.0",
+      "links": {
+        "dependencies": "/api/v1/crates/quinn-proto/0.9.6/dependencies",
+        "version_downloads": "/api/v1/crates/quinn-proto/0.9.6/downloads",
+        "authors": "/api/v1/crates/quinn-proto/0.9.6/authors"
+      },
+      "crate_size": 153728,
+      "published_by": {
+        "id": 4556,
+        "login": "djc",
+        "name": "Dirkjan Ochtman",
+        "avatar": "https://avatars.githubusercontent.com/u/158471?v=4",
+        "url": "https://github.com/djc",
+        "github_username_matches": true,
+        "created_at": "2009-11-26T12:00:10Z"
+      },
+      "audit_actions": [
+        {
+          "action": "publish",
+          "user": {
+            "id": 4556,
+            "login": "djc",
+            "name": "Dirkjan Ochtman",
+            "avatar": "https://avatars.githubusercontent.com/u/158471?v=4",
+            "url": "https://github.com/djc",
+            "github_username_matches": true,
+            "created_at": "2009-11-26T12:00:10Z"
+          },
+          "time": "2023-10-09T11:10:50.286794Z"
+        }
+      ],
+      "checksum": "94b0b33c13a79f669c85defaf4c275dc86a0c0372807d0ca3d78e0bb87274863",
+      "rust_version": "1.63",
+      "has_lib": true,
+      "bin_names": [],
+      "edition": "2021",
+      "description": "State machine for the QUIC transport protocol",
+      "homepage": null,
+      "documentation": null,
+      "repository": "https://github.com/quinn-rs/quinn",
+      "trustpub_data": null,
+      "linecounts": {
+        "languages": {
+          "Rust": {
+            "code_lines": 13572,
+            "comment_lines": 807,
+            "files": 42
+          }
+        },
+        "total_code_lines": 13572,
+        "total_comment_lines": 807
+      }
+    },
+    {
+      "id": 902864,
+      "crate": "quinn-proto",
+      "num": "0.10.5",
+      "dl_path": "/api/v1/crates/quinn-proto/0.10.5/download",
+      "readme_path": "/api/v1/crates/quinn-proto/0.10.5/readme",
+      "updated_at": "2023-09-20T21:20:25.545109Z",
+      "created_at": "2023-09-20T21:20:25.545109Z",
+      "downloads": 3294392,
+      "features": {
+        "default": [
+          "tls-rustls",
+          "log"
+        ],
+        "log": [
+          "tracing/log"
+        ],
+        "native-certs": [
+          "rustls-native-certs"
+        ],
+        "tls-rustls": [
+          "rustls",
+          "ring"
+        ]
+      },
+      "yanked": false,
+      "yank_message": null,
+      "lib_links": null,
+      "license": "MIT OR Apache-2.0",
+      "links": {
+        "dependencies": "/api/v1/crates/quinn-proto/0.10.5/dependencies",
+        "version_downloads": "/api/v1/crates/quinn-proto/0.10.5/downloads",
+        "authors": "/api/v1/crates/quinn-proto/0.10.5/authors"
+      },
+      "crate_size": 166064,
+      "published_by": {
+        "id": 4556,
+        "login": "djc",
+        "name": "Dirkjan Ochtman",
+        "avatar": "https://avatars.githubusercontent.com/u/158471?v=4",
+        "url": "https://github.com/djc",
+        "github_username_matches": true,
+        "created_at": "2009-11-26T12:00:10Z"
+      },
+      "audit_actions": [
+        {
+          "action": "publish",
+          "user": {
+            "id": 4556,
+            "login": "djc",
+            "name": "Dirkjan Ochtman",
+            "avatar": "https://avatars.githubusercontent.com/u/158471?v=4",
+            "url": "https://github.com/djc",
+            "github_username_matches": true,
+            "created_at": "2009-11-26T12:00:10Z"
+          },
+          "time": "2023-09-20T21:20:25.545109Z"
+        }
+      ],
+      "checksum": "2c78e758510582acc40acb90458401172d41f1016f8c9dde89e49677afb7eec1",
+      "rust_version": "1.63",
+      "has_lib": true,
+      "bin_names": [],
+      "edition": "2021",
+      "description": "State machine for the QUIC transport protocol",
+      "homepage": null,
+      "documentation": null,
+      "repository": "https://github.com/quinn-rs/quinn",
+      "trustpub_data": null,
+      "linecounts": {
+        "languages": {
+          "Rust": {
+            "code_lines": 14312,
+            "comment_lines": 856,
+            "files": 43
+          }
+        },
+        "total_code_lines": 14312,
+        "total_comment_lines": 856
+      }
+    },
+    {
+      "id": 902862,
+      "crate": "quinn-proto",
+      "num": "0.9.5",
+      "dl_path": "/api/v1/crates/quinn-proto/0.9.5/download",
+      "readme_path": "/api/v1/crates/quinn-proto/0.9.5/readme",
+      "updated_at": "2023-09-20T21:19:50.278634Z",
+      "created_at": "2023-09-20T21:19:50.278634Z",
+      "downloads": 1057388,
+      "features": {
+        "default": [
+          "tls-rustls"
+        ],
+        "native-certs": [
+          "rustls-native-certs"
+        ],
+        "tls-rustls": [
+          "rustls",
+          "webpki",
+          "ring"
+        ]
+      },
+      "yanked": false,
+      "yank_message": null,
+      "lib_links": null,
+      "license": "MIT OR Apache-2.0",
+      "links": {
+        "dependencies": "/api/v1/crates/quinn-proto/0.9.5/dependencies",
+        "version_downloads": "/api/v1/crates/quinn-proto/0.9.5/downloads",
+        "authors": "/api/v1/crates/quinn-proto/0.9.5/authors"
+      },
+      "crate_size": 153417,
+      "published_by": {
+        "id": 4556,
+        "login": "djc",
+        "name": "Dirkjan Ochtman",
+        "avatar": "https://avatars.githubusercontent.com/u/158471?v=4",
+        "url": "https://github.com/djc",
+        "github_username_matches": true,
+        "created_at": "2009-11-26T12:00:10Z"
+      },
+      "audit_actions": [
+        {
+          "action": "publish",
+          "user": {
+            "id": 4556,
+            "login": "djc",
+            "name": "Dirkjan Ochtman",
+            "avatar": "https://avatars.githubusercontent.com/u/158471?v=4",
+            "url": "https://github.com/djc",
+            "github_username_matches": true,
+            "created_at": "2009-11-26T12:00:10Z"
+          },
+          "time": "2023-09-20T21:19:50.278634Z"
+        }
+      ],
+      "checksum": "c956be1b23f4261676aed05a0046e204e8a6836e50203902683a718af0797989",
+      "rust_version": "1.63",
+      "has_lib": true,
+      "bin_names": [],
+      "edition": "2021",
+      "description": "State machine for the QUIC transport protocol",
+      "homepage": null,
+      "documentation": null,
+      "repository": "https://github.com/quinn-rs/quinn",
+      "trustpub_data": null,
+      "linecounts": {
+        "languages": {
+          "Rust": {
+            "code_lines": 13563,
+            "comment_lines": 807,
+            "files": 42
+          }
+        },
+        "total_code_lines": 13563,
+        "total_comment_lines": 807
+      }
+    },
+    {
+      "id": 879901,
+      "crate": "quinn-proto",
+      "num": "0.10.4",
+      "dl_path": "/api/v1/crates/quinn-proto/0.10.4/download",
+      "readme_path": "/api/v1/crates/quinn-proto/0.10.4/readme",
+      "updated_at": "2023-08-24T05:12:39.722654Z",
+      "created_at": "2023-08-24T05:12:39.722654Z",
+      "downloads": 331742,
+      "features": {
+        "default": [
+          "tls-rustls",
+          "log"
+        ],
+        "log": [
+          "tracing/log"
+        ],
+        "native-certs": [
+          "rustls-native-certs"
+        ],
+        "tls-rustls": [
+          "rustls",
+          "ring"
+        ]
+      },
+      "yanked": false,
+      "yank_message": null,
+      "lib_links": null,
+      "license": "MIT OR Apache-2.0",
+      "links": {
+        "dependencies": "/api/v1/crates/quinn-proto/0.10.4/dependencies",
+        "version_downloads": "/api/v1/crates/quinn-proto/0.10.4/downloads",
+        "authors": "/api/v1/crates/quinn-proto/0.10.4/authors"
+      },
+      "crate_size": 165976,
+      "published_by": {
+        "id": 5298,
+        "login": "Ralith",
+        "name": "Benjamin Saunders",
+        "avatar": "https://avatars.githubusercontent.com/u/104558?v=4",
+        "url": "https://github.com/Ralith",
+        "github_username_matches": true,
+        "created_at": "2009-07-13T21:05:55Z"
+      },
+      "audit_actions": [
+        {
+          "action": "publish",
+          "user": {
+            "id": 5298,
+            "login": "Ralith",
+            "name": "Benjamin Saunders",
+            "avatar": "https://avatars.githubusercontent.com/u/104558?v=4",
+            "url": "https://github.com/Ralith",
+            "github_username_matches": true,
+            "created_at": "2009-07-13T21:05:55Z"
+          },
+          "time": "2023-08-24T05:12:39.722654Z"
+        }
+      ],
+      "checksum": "e13f81c9a9d574310b8351f8666f5a93ac3b0069c45c28ad52c10291389a7cf9",
+      "rust_version": "1.63",
+      "has_lib": true,
+      "bin_names": [],
+      "edition": "2021",
+      "description": "State machine for the QUIC transport protocol",
+      "homepage": null,
+      "documentation": null,
+      "repository": "https://github.com/quinn-rs/quinn",
+      "trustpub_data": null,
+      "linecounts": {
+        "languages": {
+          "Rust": {
+            "code_lines": 14302,
+            "comment_lines": 856,
+            "files": 43
+          }
+        },
+        "total_code_lines": 14302,
+        "total_comment_lines": 856
+      }
+    },
+    {
+      "id": 876573,
+      "crate": "quinn-proto",
+      "num": "0.10.3",
+      "dl_path": "/api/v1/crates/quinn-proto/0.10.3/download",
+      "readme_path": "/api/v1/crates/quinn-proto/0.10.3/readme",
+      "updated_at": "2023-08-20T23:02:03.145509Z",
+      "created_at": "2023-08-20T23:02:03.145509Z",
+      "downloads": 11678,
+      "features": {
+        "default": [
+          "tls-rustls",
+          "log"
+        ],
+        "log": [
+          "tracing/log"
+        ],
+        "native-certs": [
+          "rustls-native-certs"
+        ],
+        "tls-rustls": [
+          "rustls",
+          "ring"
+        ]
+      },
+      "yanked": false,
+      "yank_message": null,
+      "lib_links": null,
+      "license": "MIT OR Apache-2.0",
+      "links": {
+        "dependencies": "/api/v1/crates/quinn-proto/0.10.3/dependencies",
+        "version_downloads": "/api/v1/crates/quinn-proto/0.10.3/downloads",
+        "authors": "/api/v1/crates/quinn-proto/0.10.3/authors"
+      },
+      "crate_size": 165984,
+      "published_by": {
+        "id": 5298,
+        "login": "Ralith",
+        "name": "Benjamin Saunders",
+        "avatar": "https://avatars.githubusercontent.com/u/104558?v=4",
+        "url": "https://github.com/Ralith",
+        "github_username_matches": true,
+        "created_at": "2009-07-13T21:05:55Z"
+      },
+      "audit_actions": [
+        {
+          "action": "publish",
+          "user": {
+            "id": 5298,
+            "login": "Ralith",
+            "name": "Benjamin Saunders",
+            "avatar": "https://avatars.githubusercontent.com/u/104558?v=4",
+            "url": "https://github.com/Ralith",
+            "github_username_matches": true,
+            "created_at": "2009-07-13T21:05:55Z"
+          },
+          "time": "2023-08-20T23:02:03.145509Z"
+        }
+      ],
+      "checksum": "b83c2a964b8b68e6c9c616f09b735b436a78843704fa6979a076073e622f69dc",
+      "rust_version": "1.63",
+      "has_lib": true,
+      "bin_names": [],
+      "edition": "2021",
+      "description": "State machine for the QUIC transport protocol",
+      "homepage": null,
+      "documentation": null,
+      "repository": "https://github.com/quinn-rs/quinn",
+      "trustpub_data": null,
+      "linecounts": {
+        "languages": {
+          "Rust": {
+            "code_lines": 14307,
+            "comment_lines": 856,
+            "files": 43
+          }
+        },
+        "total_code_lines": 14307,
+        "total_comment_lines": 856
+      }
+    },
+    {
+      "id": 860740,
+      "crate": "quinn-proto",
+      "num": "0.10.2",
+      "dl_path": "/api/v1/crates/quinn-proto/0.10.2/download",
+      "readme_path": "/api/v1/crates/quinn-proto/0.10.2/readme",
+      "updated_at": "2023-08-02T08:19:49.629378Z",
+      "created_at": "2023-08-02T08:19:49.629378Z",
+      "downloads": 65977,
+      "features": {
+        "default": [
+          "tls-rustls",
+          "log"
+        ],
+        "log": [
+          "tracing/log"
+        ],
+        "native-certs": [
+          "rustls-native-certs"
+        ],
+        "tls-rustls": [
+          "rustls",
+          "ring"
+        ]
+      },
+      "yanked": false,
+      "yank_message": null,
+      "lib_links": null,
+      "license": "MIT OR Apache-2.0",
+      "links": {
+        "dependencies": "/api/v1/crates/quinn-proto/0.10.2/dependencies",
+        "version_downloads": "/api/v1/crates/quinn-proto/0.10.2/downloads",
+        "authors": "/api/v1/crates/quinn-proto/0.10.2/authors"
+      },
+      "crate_size": 165684,
+      "published_by": {
+        "id": 4556,
+        "login": "djc",
+        "name": "Dirkjan Ochtman",
+        "avatar": "https://avatars.githubusercontent.com/u/158471?v=4",
+        "url": "https://github.com/djc",
+        "github_username_matches": true,
+        "created_at": "2009-11-26T12:00:10Z"
+      },
+      "audit_actions": [
+        {
+          "action": "publish",
+          "user": {
+            "id": 4556,
+            "login": "djc",
+            "name": "Dirkjan Ochtman",
+            "avatar": "https://avatars.githubusercontent.com/u/158471?v=4",
+            "url": "https://github.com/djc",
+            "github_username_matches": true,
+            "created_at": "2009-11-26T12:00:10Z"
+          },
+          "time": "2023-08-02T08:19:49.629378Z"
+        }
+      ],
+      "checksum": "f8c8bb234e70c863204303507d841e7fa2295e95c822b2bb4ca8ebf57f17b1cb",
+      "rust_version": "1.63",
+      "has_lib": true,
+      "bin_names": [],
+      "edition": "2021",
+      "description": "State machine for the QUIC transport protocol",
+      "homepage": null,
+      "documentation": null,
+      "repository": "https://github.com/quinn-rs/quinn",
+      "trustpub_data": null,
+      "linecounts": {
+        "languages": {
+          "Rust": {
+            "code_lines": 14298,
+            "comment_lines": 856,
+            "files": 43
+          }
+        },
+        "total_code_lines": 14298,
+        "total_comment_lines": 856
+      }
+    },
+    {
+      "id": 851809,
+      "crate": "quinn-proto",
+      "num": "0.9.4",
+      "dl_path": "/api/v1/crates/quinn-proto/0.9.4/download",
+      "readme_path": "/api/v1/crates/quinn-proto/0.9.4/readme",
+      "updated_at": "2023-07-21T21:33:23.387198Z",
+      "created_at": "2023-07-21T21:33:23.387198Z",
+      "downloads": 445684,
+      "features": {
+        "default": [
+          "tls-rustls"
+        ],
+        "native-certs": [
+          "rustls-native-certs"
+        ],
+        "tls-rustls": [
+          "rustls",
+          "webpki",
+          "ring"
+        ]
+      },
+      "yanked": false,
+      "yank_message": null,
+      "lib_links": null,
+      "license": "MIT OR Apache-2.0",
+      "links": {
+        "dependencies": "/api/v1/crates/quinn-proto/0.9.4/dependencies",
+        "version_downloads": "/api/v1/crates/quinn-proto/0.9.4/downloads",
+        "authors": "/api/v1/crates/quinn-proto/0.9.4/authors"
+      },
+      "crate_size": 153353,
+      "published_by": {
+        "id": 5298,
+        "login": "Ralith",
+        "name": "Benjamin Saunders",
+        "avatar": "https://avatars.githubusercontent.com/u/104558?v=4",
+        "url": "https://github.com/Ralith",
+        "github_username_matches": true,
+        "created_at": "2009-07-13T21:05:55Z"
+      },
+      "audit_actions": [
+        {
+          "action": "publish",
+          "user": {
+            "id": 5298,
+            "login": "Ralith",
+            "name": "Benjamin Saunders",
+            "avatar": "https://avatars.githubusercontent.com/u/104558?v=4",
+            "url": "https://github.com/Ralith",
+            "github_username_matches": true,
+            "created_at": "2009-07-13T21:05:55Z"
+          },
+          "time": "2023-07-21T21:33:23.387198Z"
+        }
+      ],
+      "checksum": "f31999cfc7927c4e212e60fd50934ab40e8e8bfd2d493d6095d2d306bc0764d9",
+      "rust_version": "1.59",
+      "has_lib": true,
+      "bin_names": [],
+      "edition": "2021",
+      "description": "State machine for the QUIC transport protocol",
+      "homepage": null,
+      "documentation": null,
+      "repository": "https://github.com/quinn-rs/quinn",
+      "trustpub_data": null,
+      "linecounts": {
+        "languages": {
+          "Rust": {
+            "code_lines": 13553,
+            "comment_lines": 807,
+            "files": 42
+          }
+        },
+        "total_code_lines": 13553,
+        "total_comment_lines": 807
+      }
+    },
+    {
+      "id": 797634,
+      "crate": "quinn-proto",
+      "num": "0.10.1",
+      "dl_path": "/api/v1/crates/quinn-proto/0.10.1/download",
+      "readme_path": "/api/v1/crates/quinn-proto/0.10.1/readme",
+      "updated_at": "2023-05-11T21:07:00.887025Z",
+      "created_at": "2023-05-11T21:07:00.887025Z",
+      "downloads": 326698,
+      "features": {
+        "default": [
+          "tls-rustls",
+          "log"
+        ],
+        "log": [
+          "tracing/log"
+        ],
+        "native-certs": [
+          "rustls-native-certs"
+        ],
+        "tls-rustls": [
+          "rustls",
+          "ring"
+        ]
+      },
+      "yanked": false,
+      "yank_message": null,
+      "lib_links": null,
+      "license": "MIT OR Apache-2.0",
+      "links": {
+        "dependencies": "/api/v1/crates/quinn-proto/0.10.1/dependencies",
+        "version_downloads": "/api/v1/crates/quinn-proto/0.10.1/downloads",
+        "authors": "/api/v1/crates/quinn-proto/0.10.1/authors"
+      },
+      "crate_size": 164718,
+      "published_by": {
+        "id": 4556,
+        "login": "djc",
+        "name": "Dirkjan Ochtman",
+        "avatar": "https://avatars.githubusercontent.com/u/158471?v=4",
+        "url": "https://github.com/djc",
+        "github_username_matches": true,
+        "created_at": "2009-11-26T12:00:10Z"
+      },
+      "audit_actions": [
+        {
+          "action": "publish",
+          "user": {
+            "id": 4556,
+            "login": "djc",
+            "name": "Dirkjan Ochtman",
+            "avatar": "https://avatars.githubusercontent.com/u/158471?v=4",
+            "url": "https://github.com/djc",
+            "github_username_matches": true,
+            "created_at": "2009-11-26T12:00:10Z"
+          },
+          "time": "2023-05-11T21:07:00.887025Z"
+        }
+      ],
+      "checksum": "85af4ed6ee5a89f26a26086e9089a6643650544c025158449a3626ebf72884b3",
+      "rust_version": "1.63",
+      "has_lib": true,
+      "bin_names": [],
+      "edition": "2021",
+      "description": "State machine for the QUIC transport protocol",
+      "homepage": null,
+      "documentation": null,
+      "repository": "https://github.com/quinn-rs/quinn",
+      "trustpub_data": null,
+      "linecounts": {
+        "languages": {
+          "Rust": {
+            "code_lines": 14258,
+            "comment_lines": 856,
+            "files": 43
+          }
+        },
+        "total_code_lines": 14258,
+        "total_comment_lines": 856
+      }
+    },
+    {
+      "id": 797079,
+      "crate": "quinn-proto",
+      "num": "0.10.0",
+      "dl_path": "/api/v1/crates/quinn-proto/0.10.0/download",
+      "readme_path": "/api/v1/crates/quinn-proto/0.10.0/readme",
+      "updated_at": "2023-05-11T07:07:59.800804Z",
+      "created_at": "2023-05-11T07:07:59.800804Z",
+      "downloads": 4444,
+      "features": {
+        "default": [
+          "tls-rustls",
+          "log"
+        ],
+        "log": [
+          "tracing/log"
+        ],
+        "native-certs": [
+          "rustls-native-certs"
+        ],
+        "tls-rustls": [
+          "rustls",
+          "webpki",
+          "ring"
+        ]
+      },
+      "yanked": false,
+      "yank_message": null,
+      "lib_links": null,
+      "license": "MIT OR Apache-2.0",
+      "links": {
+        "dependencies": "/api/v1/crates/quinn-proto/0.10.0/dependencies",
+        "version_downloads": "/api/v1/crates/quinn-proto/0.10.0/downloads",
+        "authors": "/api/v1/crates/quinn-proto/0.10.0/authors"
+      },
+      "crate_size": 164764,
+      "published_by": {
+        "id": 4556,
+        "login": "djc",
+        "name": "Dirkjan Ochtman",
+        "avatar": "https://avatars.githubusercontent.com/u/158471?v=4",
+        "url": "https://github.com/djc",
+        "github_username_matches": true,
+        "created_at": "2009-11-26T12:00:10Z"
+      },
+      "audit_actions": [
+        {
+          "action": "publish",
+          "user": {
+            "id": 4556,
+            "login": "djc",
+            "name": "Dirkjan Ochtman",
+            "avatar": "https://avatars.githubusercontent.com/u/158471?v=4",
+            "url": "https://github.com/djc",
+            "github_username_matches": true,
+            "created_at": "2009-11-26T12:00:10Z"
+          },
+          "time": "2023-05-11T07:07:59.800804Z"
+        }
+      ],
+      "checksum": "547652fe7b0a44c295fb6c7559160c11afd39a7d210f177a1e050974214c56ee",
+      "rust_version": "1.63",
+      "has_lib": true,
+      "bin_names": [],
+      "edition": "2021",
+      "description": "State machine for the QUIC transport protocol",
+      "homepage": null,
+      "documentation": null,
+      "repository": "https://github.com/quinn-rs/quinn",
+      "trustpub_data": null,
+      "linecounts": {
+        "languages": {
+          "Rust": {
+            "code_lines": 14258,
+            "comment_lines": 856,
+            "files": 43
+          }
+        },
+        "total_code_lines": 14258,
+        "total_comment_lines": 856
+      }
+    },
+    {
+      "id": 761395,
+      "crate": "quinn-proto",
+      "num": "0.9.3",
+      "dl_path": "/api/v1/crates/quinn-proto/0.9.3/download",
+      "readme_path": "/api/v1/crates/quinn-proto/0.9.3/readme",
+      "updated_at": "2023-03-28T07:33:12.155311Z",
+      "created_at": "2023-03-28T07:33:12.155311Z",
+      "downloads": 915498,
+      "features": {
+        "default": [
+          "tls-rustls",
+          "log"
+        ],
+        "log": [
+          "tracing/log"
+        ],
+        "native-certs": [
+          "rustls-native-certs"
+        ],
+        "tls-rustls": [
+          "rustls",
+          "webpki",
+          "ring"
+        ]
+      },
+      "yanked": false,
+      "yank_message": null,
+      "lib_links": null,
+      "license": "MIT OR Apache-2.0",
+      "links": {
+        "dependencies": "/api/v1/crates/quinn-proto/0.9.3/dependencies",
+        "version_downloads": "/api/v1/crates/quinn-proto/0.9.3/downloads",
+        "authors": "/api/v1/crates/quinn-proto/0.9.3/authors"
+      },
+      "crate_size": 153076,
+      "published_by": {
+        "id": 4556,
+        "login": "djc",
+        "name": "Dirkjan Ochtman",
+        "avatar": "https://avatars.githubusercontent.com/u/158471?v=4",
+        "url": "https://github.com/djc",
+        "github_username_matches": true,
+        "created_at": "2009-11-26T12:00:10Z"
+      },
+      "audit_actions": [
+        {
+          "action": "publish",
+          "user": {
+            "id": 4556,
+            "login": "djc",
+            "name": "Dirkjan Ochtman",
+            "avatar": "https://avatars.githubusercontent.com/u/158471?v=4",
+            "url": "https://github.com/djc",
+            "github_username_matches": true,
+            "created_at": "2009-11-26T12:00:10Z"
+          },
+          "time": "2023-03-28T07:33:12.155311Z"
+        }
+      ],
+      "checksum": "67c10f662eee9c94ddd7135043e544f3c82fa839a1e7b865911331961b53186c",
+      "rust_version": "1.59",
+      "has_lib": true,
+      "bin_names": [],
+      "edition": "2021",
+      "description": "State machine for the QUIC transport protocol",
+      "homepage": null,
+      "documentation": null,
+      "repository": "https://github.com/quinn-rs/quinn",
+      "trustpub_data": null,
+      "linecounts": {
+        "languages": {
+          "Rust": {
+            "code_lines": 13516,
+            "comment_lines": 808,
+            "files": 42
+          }
+        },
+        "total_code_lines": 13516,
+        "total_comment_lines": 808
+      }
+    },
+    {
+      "id": 677455,
+      "crate": "quinn-proto",
+      "num": "0.9.2",
+      "dl_path": "/api/v1/crates/quinn-proto/0.9.2/download",
+      "readme_path": "/api/v1/crates/quinn-proto/0.9.2/readme",
+      "updated_at": "2022-12-05T21:45:41.939542Z",
+      "created_at": "2022-12-05T21:45:41.939542Z",
+      "downloads": 1061056,
+      "features": {
+        "default": [
+          "tls-rustls"
+        ],
+        "native-certs": [
+          "rustls-native-certs"
+        ],
+        "tls-rustls": [
+          "rustls",
+          "webpki",
+          "ring"
+        ]
+      },
+      "yanked": false,
+      "yank_message": null,
+      "lib_links": null,
+      "license": "MIT OR Apache-2.0",
+      "links": {
+        "dependencies": "/api/v1/crates/quinn-proto/0.9.2/dependencies",
+        "version_downloads": "/api/v1/crates/quinn-proto/0.9.2/downloads",
+        "authors": "/api/v1/crates/quinn-proto/0.9.2/authors"
+      },
+      "crate_size": 152609,
+      "published_by": {
+        "id": 5298,
+        "login": "Ralith",
+        "name": "Benjamin Saunders",
+        "avatar": "https://avatars.githubusercontent.com/u/104558?v=4",
+        "url": "https://github.com/Ralith",
+        "github_username_matches": true,
+        "created_at": "2009-07-13T21:05:55Z"
+      },
+      "audit_actions": [
+        {
+          "action": "publish",
+          "user": {
+            "id": 5298,
+            "login": "Ralith",
+            "name": "Benjamin Saunders",
+            "avatar": "https://avatars.githubusercontent.com/u/104558?v=4",
+            "url": "https://github.com/Ralith",
+            "github_username_matches": true,
+            "created_at": "2009-07-13T21:05:55Z"
+          },
+          "time": "2022-12-05T21:45:41.939542Z"
+        }
+      ],
+      "checksum": "72ef4ced82a24bb281af338b9e8f94429b6eca01b4e66d899f40031f074e74c9",
+      "rust_version": "1.59",
+      "has_lib": true,
+      "bin_names": [],
+      "edition": "2021",
+      "description": "State machine for the QUIC transport protocol",
+      "homepage": null,
+      "documentation": null,
+      "repository": "https://github.com/quinn-rs/quinn",
+      "trustpub_data": null,
+      "linecounts": {
+        "languages": {
+          "Rust": {
+            "code_lines": 13512,
+            "comment_lines": 807,
+            "files": 42
+          }
+        },
+        "total_code_lines": 13512,
+        "total_comment_lines": 807
+      }
+    },
+    {
+      "id": 664666,
+      "crate": "quinn-proto",
+      "num": "0.9.1",
+      "dl_path": "/api/v1/crates/quinn-proto/0.9.1/download",
+      "readme_path": "/api/v1/crates/quinn-proto/0.9.1/readme",
+      "updated_at": "2022-11-16T06:18:02.916252Z",
+      "created_at": "2022-11-16T06:18:02.916252Z",
+      "downloads": 58418,
+      "features": {
+        "default": [
+          "tls-rustls"
+        ],
+        "native-certs": [
+          "rustls-native-certs"
+        ],
+        "tls-rustls": [
+          "rustls",
+          "webpki",
+          "ring"
+        ]
+      },
+      "yanked": false,
+      "yank_message": null,
+      "lib_links": null,
+      "license": "MIT OR Apache-2.0",
+      "links": {
+        "dependencies": "/api/v1/crates/quinn-proto/0.9.1/dependencies",
+        "version_downloads": "/api/v1/crates/quinn-proto/0.9.1/downloads",
+        "authors": "/api/v1/crates/quinn-proto/0.9.1/authors"
+      },
+      "crate_size": 152323,
+      "published_by": {
+        "id": 5298,
+        "login": "Ralith",
+        "name": "Benjamin Saunders",
+        "avatar": "https://avatars.githubusercontent.com/u/104558?v=4",
+        "url": "https://github.com/Ralith",
+        "github_username_matches": true,
+        "created_at": "2009-07-13T21:05:55Z"
+      },
+      "audit_actions": [
+        {
+          "action": "publish",
+          "user": {
+            "id": 5298,
+            "login": "Ralith",
+            "name": "Benjamin Saunders",
+            "avatar": "https://avatars.githubusercontent.com/u/104558?v=4",
+            "url": "https://github.com/Ralith",
+            "github_username_matches": true,
+            "created_at": "2009-07-13T21:05:55Z"
+          },
+          "time": "2022-11-16T06:18:02.916252Z"
+        }
+      ],
+      "checksum": "57098b1a3d2159d13dc3a98c0e3a5f8ab91ac3dd2471e52b1d712ea0c1085555",
+      "rust_version": "1.59",
+      "has_lib": true,
+      "bin_names": [],
+      "edition": "2021",
+      "description": "State machine for the QUIC transport protocol",
+      "homepage": null,
+      "documentation": null,
+      "repository": "https://github.com/quinn-rs/quinn",
+      "trustpub_data": null,
+      "linecounts": {
+        "languages": {
+          "Rust": {
+            "code_lines": 13496,
+            "comment_lines": 805,
+            "files": 42
+          }
+        },
+        "total_code_lines": 13496,
+        "total_comment_lines": 805
+      }
+    },
+    {
+      "id": 650272,
+      "crate": "quinn-proto",
+      "num": "0.9.0",
+      "dl_path": "/api/v1/crates/quinn-proto/0.9.0/download",
+      "readme_path": "/api/v1/crates/quinn-proto/0.9.0/readme",
+      "updated_at": "2022-10-26T10:52:34.074632Z",
+      "created_at": "2022-10-26T10:52:34.074632Z",
+      "downloads": 12143,
+      "features": {
+        "default": [
+          "tls-rustls"
+        ],
+        "native-certs": [
+          "rustls-native-certs"
+        ],
+        "tls-rustls": [
+          "rustls",
+          "webpki",
+          "ring"
+        ]
+      },
+      "yanked": false,
+      "yank_message": null,
+      "lib_links": null,
+      "license": "MIT OR Apache-2.0",
+      "links": {
+        "dependencies": "/api/v1/crates/quinn-proto/0.9.0/dependencies",
+        "version_downloads": "/api/v1/crates/quinn-proto/0.9.0/downloads",
+        "authors": "/api/v1/crates/quinn-proto/0.9.0/authors"
+      },
+      "crate_size": 152207,
+      "published_by": {
+        "id": 4556,
+        "login": "djc",
+        "name": "Dirkjan Ochtman",
+        "avatar": "https://avatars.githubusercontent.com/u/158471?v=4",
+        "url": "https://github.com/djc",
+        "github_username_matches": true,
+        "created_at": "2009-11-26T12:00:10Z"
+      },
+      "audit_actions": [
+        {
+          "action": "publish",
+          "user": {
+            "id": 4556,
+            "login": "djc",
+            "name": "Dirkjan Ochtman",
+            "avatar": "https://avatars.githubusercontent.com/u/158471?v=4",
+            "url": "https://github.com/djc",
+            "github_username_matches": true,
+            "created_at": "2009-11-26T12:00:10Z"
+          },
+          "time": "2022-10-26T10:52:34.074632Z"
+        }
+      ],
+      "checksum": "e1268269057c3f78dab82fe8d8b7834e656710cff55b97dbc890a67dcc113b2e",
+      "rust_version": "1.59",
+      "has_lib": true,
+      "bin_names": [],
+      "edition": "2021",
+      "description": "State machine for the QUIC transport protocol",
+      "homepage": null,
+      "documentation": null,
+      "repository": "https://github.com/quinn-rs/quinn",
+      "trustpub_data": null,
+      "linecounts": {
+        "languages": {
+          "Rust": {
+            "code_lines": 13503,
+            "comment_lines": 803,
+            "files": 42
+          }
+        },
+        "total_code_lines": 13503,
+        "total_comment_lines": 803
+      }
+    },
+    {
+      "id": 601214,
+      "crate": "quinn-proto",
+      "num": "0.8.4",
+      "dl_path": "/api/v1/crates/quinn-proto/0.8.4/download",
+      "readme_path": "/api/v1/crates/quinn-proto/0.8.4/readme",
+      "updated_at": "2022-08-12T15:48:51.232511Z",
+      "created_at": "2022-08-12T15:48:51.232511Z",
+      "downloads": 906094,
+      "features": {
+        "default": [
+          "tls-rustls"
+        ],
+        "native-certs": [
+          "rustls-native-certs"
+        ],
+        "tls-rustls": [
+          "rustls",
+          "webpki",
+          "ring",
+          "rustls-pemfile"
+        ]
+      },
+      "yanked": false,
+      "yank_message": null,
+      "lib_links": null,
+      "license": "MIT OR Apache-2.0",
+      "links": {
+        "dependencies": "/api/v1/crates/quinn-proto/0.8.4/dependencies",
+        "version_downloads": "/api/v1/crates/quinn-proto/0.8.4/downloads",
+        "authors": "/api/v1/crates/quinn-proto/0.8.4/authors"
+      },
+      "crate_size": 150422,
+      "published_by": {
+        "id": 4556,
+        "login": "djc",
+        "name": "Dirkjan Ochtman",
+        "avatar": "https://avatars.githubusercontent.com/u/158471?v=4",
+        "url": "https://github.com/djc",
+        "github_username_matches": true,
+        "created_at": "2009-11-26T12:00:10Z"
+      },
+      "audit_actions": [
+        {
+          "action": "publish",
+          "user": {
+            "id": 4556,
+            "login": "djc",
+            "name": "Dirkjan Ochtman",
+            "avatar": "https://avatars.githubusercontent.com/u/158471?v=4",
+            "url": "https://github.com/djc",
+            "github_username_matches": true,
+            "created_at": "2009-11-26T12:00:10Z"
+          },
+          "time": "2022-08-12T15:48:51.232511Z"
+        }
+      ],
+      "checksum": "3fce546b9688f767a57530652488420d419a8b1f44a478b451c3d1ab6d992a55",
+      "rust_version": "1.53",
+      "has_lib": true,
+      "bin_names": [],
+      "edition": "2018",
+      "description": "State machine for the QUIC transport protocol",
+      "homepage": null,
+      "documentation": null,
+      "repository": "https://github.com/quinn-rs/quinn",
+      "trustpub_data": null,
+      "linecounts": {
+        "languages": {
+          "Rust": {
+            "code_lines": 13413,
+            "comment_lines": 794,
+            "files": 42
+          }
+        },
+        "total_code_lines": 13413,
+        "total_comment_lines": 794
+      }
+    },
+    {
+      "id": 555275,
+      "crate": "quinn-proto",
+      "num": "0.8.3",
+      "dl_path": "/api/v1/crates/quinn-proto/0.8.3/download",
+      "readme_path": "/api/v1/crates/quinn-proto/0.8.3/readme",
+      "updated_at": "2022-05-25T07:46:59.302166Z",
+      "created_at": "2022-05-25T07:46:59.302166Z",
+      "downloads": 359817,
+      "features": {
+        "default": [
+          "tls-rustls"
+        ],
+        "native-certs": [
+          "rustls-native-certs"
+        ],
+        "tls-rustls": [
+          "rustls",
+          "webpki",
+          "ring",
+          "rustls-pemfile"
+        ]
+      },
+      "yanked": false,
+      "yank_message": null,
+      "lib_links": null,
+      "license": "MIT OR Apache-2.0",
+      "links": {
+        "dependencies": "/api/v1/crates/quinn-proto/0.8.3/dependencies",
+        "version_downloads": "/api/v1/crates/quinn-proto/0.8.3/downloads",
+        "authors": "/api/v1/crates/quinn-proto/0.8.3/authors"
+      },
+      "crate_size": 149672,
+      "published_by": {
+        "id": 4556,
+        "login": "djc",
+        "name": "Dirkjan Ochtman",
+        "avatar": "https://avatars.githubusercontent.com/u/158471?v=4",
+        "url": "https://github.com/djc",
+        "github_username_matches": true,
+        "created_at": "2009-11-26T12:00:10Z"
+      },
+      "audit_actions": [
+        {
+          "action": "publish",
+          "user": {
+            "id": 4556,
+            "login": "djc",
+            "name": "Dirkjan Ochtman",
+            "avatar": "https://avatars.githubusercontent.com/u/158471?v=4",
+            "url": "https://github.com/djc",
+            "github_username_matches": true,
+            "created_at": "2009-11-26T12:00:10Z"
+          },
+          "time": "2022-05-25T07:46:59.302166Z"
+        }
+      ],
+      "checksum": "3a13a5c0a674c1ce7150c9df7bc4a1e46c2fbbe7c710f56c0dc78b1a810e779e",
+      "rust_version": "1.53",
+      "has_lib": true,
+      "bin_names": [],
+      "edition": "2018",
+      "description": "State machine for the QUIC transport protocol",
+      "homepage": null,
+      "documentation": null,
+      "repository": "https://github.com/quinn-rs/quinn",
+      "trustpub_data": null,
+      "linecounts": {
+        "languages": {
+          "Rust": {
+            "code_lines": 13331,
+            "comment_lines": 789,
+            "files": 42
+          }
+        },
+        "total_code_lines": 13331,
+        "total_comment_lines": 789
+      }
+    },
+    {
+      "id": 523578,
+      "crate": "quinn-proto",
+      "num": "0.8.2",
+      "dl_path": "/api/v1/crates/quinn-proto/0.8.2/download",
+      "readme_path": "/api/v1/crates/quinn-proto/0.8.2/readme",
+      "updated_at": "2022-03-28T19:04:59.679540Z",
+      "created_at": "2022-03-28T19:04:59.679540Z",
+      "downloads": 172634,
+      "features": {
+        "default": [
+          "tls-rustls"
+        ],
+        "native-certs": [
+          "rustls-native-certs"
+        ],
+        "tls-rustls": [
+          "rustls",
+          "webpki",
+          "ring",
+          "rustls-pemfile"
+        ]
+      },
+      "yanked": false,
+      "yank_message": null,
+      "lib_links": null,
+      "license": "MIT OR Apache-2.0",
+      "links": {
+        "dependencies": "/api/v1/crates/quinn-proto/0.8.2/dependencies",
+        "version_downloads": "/api/v1/crates/quinn-proto/0.8.2/downloads",
+        "authors": "/api/v1/crates/quinn-proto/0.8.2/authors"
+      },
+      "crate_size": 148676,
+      "published_by": {
+        "id": 5298,
+        "login": "Ralith",
+        "name": "Benjamin Saunders",
+        "avatar": "https://avatars.githubusercontent.com/u/104558?v=4",
+        "url": "https://github.com/Ralith",
+        "github_username_matches": true,
+        "created_at": "2009-07-13T21:05:55Z"
+      },
+      "audit_actions": [
+        {
+          "action": "publish",
+          "user": {
+            "id": 5298,
+            "login": "Ralith",
+            "name": "Benjamin Saunders",
+            "avatar": "https://avatars.githubusercontent.com/u/104558?v=4",
+            "url": "https://github.com/Ralith",
+            "github_username_matches": true,
+            "created_at": "2009-07-13T21:05:55Z"
+          },
+          "time": "2022-03-28T19:04:59.679540Z"
+        }
+      ],
+      "checksum": "359c5eb33845f3ee05c229e65f87cdbc503eea394964b8f1330833d460b4ff3e",
+      "rust_version": "1.53",
+      "has_lib": true,
+      "bin_names": [],
+      "edition": "2018",
+      "description": "State machine for the QUIC transport protocol",
+      "homepage": null,
+      "documentation": null,
+      "repository": "https://github.com/quinn-rs/quinn",
+      "trustpub_data": null,
+      "linecounts": {
+        "languages": {
+          "Rust": {
+            "code_lines": 13133,
+            "comment_lines": 777,
+            "files": 42
+          }
+        },
+        "total_code_lines": 13133,
+        "total_comment_lines": 777
+      }
+    },
+    {
+      "id": 502724,
+      "crate": "quinn-proto",
+      "num": "0.8.1",
+      "dl_path": "/api/v1/crates/quinn-proto/0.8.1/download",
+      "readme_path": "/api/v1/crates/quinn-proto/0.8.1/readme",
+      "updated_at": "2022-02-19T19:00:14.461010Z",
+      "created_at": "2022-02-19T19:00:14.461010Z",
+      "downloads": 68975,
+      "features": {
+        "default": [
+          "tls-rustls"
+        ],
+        "native-certs": [
+          "rustls-native-certs"
+        ],
+        "tls-rustls": [
+          "rustls",
+          "webpki",
+          "ring",
+          "rustls-pemfile"
+        ]
+      },
+      "yanked": false,
+      "yank_message": null,
+      "lib_links": null,
+      "license": "MIT OR Apache-2.0",
+      "links": {
+        "dependencies": "/api/v1/crates/quinn-proto/0.8.1/dependencies",
+        "version_downloads": "/api/v1/crates/quinn-proto/0.8.1/downloads",
+        "authors": "/api/v1/crates/quinn-proto/0.8.1/authors"
+      },
+      "crate_size": 148680,
+      "published_by": {
+        "id": 5298,
+        "login": "Ralith",
+        "name": "Benjamin Saunders",
+        "avatar": "https://avatars.githubusercontent.com/u/104558?v=4",
+        "url": "https://github.com/Ralith",
+        "github_username_matches": true,
+        "created_at": "2009-07-13T21:05:55Z"
+      },
+      "audit_actions": [
+        {
+          "action": "publish",
+          "user": {
+            "id": 5298,
+            "login": "Ralith",
+            "name": "Benjamin Saunders",
+            "avatar": "https://avatars.githubusercontent.com/u/104558?v=4",
+            "url": "https://github.com/Ralith",
+            "github_username_matches": true,
+            "created_at": "2009-07-13T21:05:55Z"
+          },
+          "time": "2022-02-19T19:00:14.461010Z"
+        }
+      ],
+      "checksum": "d2b1562bf4998b0c6d1841a4742b7103bb82cdde61374833de826bab9e8ad498",
+      "rust_version": "1.53",
+      "has_lib": true,
+      "bin_names": [],
+      "edition": "2018",
+      "description": "State machine for the QUIC transport protocol",
+      "homepage": null,
+      "documentation": null,
+      "repository": "https://github.com/quinn-rs/quinn",
+      "trustpub_data": null,
+      "linecounts": {
+        "languages": {
+          "Rust": {
+            "code_lines": 13132,
+            "comment_lines": 777,
+            "files": 42
+          }
+        },
+        "total_code_lines": 13132,
+        "total_comment_lines": 777
+      }
+    },
+    {
+      "id": 453459,
+      "crate": "quinn-proto",
+      "num": "0.8.0",
+      "dl_path": "/api/v1/crates/quinn-proto/0.8.0/download",
+      "readme_path": "/api/v1/crates/quinn-proto/0.8.0/readme",
+      "updated_at": "2021-11-14T21:40:40.054153Z",
+      "created_at": "2021-11-14T21:40:40.054153Z",
+      "downloads": 91799,
+      "features": {
+        "default": [
+          "tls-rustls"
+        ],
+        "native-certs": [
+          "rustls-native-certs"
+        ],
+        "tls-rustls": [
+          "rustls",
+          "webpki",
+          "ring",
+          "rustls-pemfile"
+        ]
+      },
+      "yanked": false,
+      "yank_message": null,
+      "lib_links": null,
+      "license": "MIT OR Apache-2.0",
+      "links": {
+        "dependencies": "/api/v1/crates/quinn-proto/0.8.0/dependencies",
+        "version_downloads": "/api/v1/crates/quinn-proto/0.8.0/downloads",
+        "authors": "/api/v1/crates/quinn-proto/0.8.0/authors"
+      },
+      "crate_size": 148285,
+      "published_by": {
+        "id": 4556,
+        "login": "djc",
+        "name": "Dirkjan Ochtman",
+        "avatar": "https://avatars.githubusercontent.com/u/158471?v=4",
+        "url": "https://github.com/djc",
+        "github_username_matches": true,
+        "created_at": "2009-11-26T12:00:10Z"
+      },
+      "audit_actions": [
+        {
+          "action": "publish",
+          "user": {
+            "id": 4556,
+            "login": "djc",
+            "name": "Dirkjan Ochtman",
+            "avatar": "https://avatars.githubusercontent.com/u/158471?v=4",
+            "url": "https://github.com/djc",
+            "github_username_matches": true,
+            "created_at": "2009-11-26T12:00:10Z"
+          },
+          "time": "2021-11-14T21:40:40.054153Z"
+        }
+      ],
+      "checksum": "063dedf7983c8d57db474218f258daa85b627de6f2dbc458b690a93b1de790e8",
+      "rust_version": null,
+      "has_lib": true,
+      "bin_names": [],
+      "edition": "2018",
+      "description": "State machine for the QUIC transport protocol",
+      "homepage": null,
+      "documentation": null,
+      "repository": "https://github.com/quinn-rs/quinn",
+      "trustpub_data": null,
+      "linecounts": {
+        "languages": {
+          "Rust": {
+            "code_lines": 13134,
+            "comment_lines": 766,
+            "files": 42
+          }
+        },
+        "total_code_lines": 13134,
+        "total_comment_lines": 766
+      }
+    },
+    {
+      "id": 374103,
+      "crate": "quinn-proto",
+      "num": "0.7.3",
+      "dl_path": "/api/v1/crates/quinn-proto/0.7.3/download",
+      "readme_path": "/api/v1/crates/quinn-proto/0.7.3/readme",
+      "updated_at": "2021-05-03T20:45:15.282228Z",
+      "created_at": "2021-05-03T20:45:15.282228Z",
+      "downloads": 224284,
+      "features": {
+        "certificate-transparency": [
+          "ct-logs"
+        ],
+        "default": [
+          "tls-rustls"
+        ],
+        "native-certs": [
+          "rustls-native-certs"
+        ],
+        "tls-rustls": [
+          "rustls",
+          "webpki",
+          "ring"
+        ]
+      },
+      "yanked": false,
+      "yank_message": null,
+      "lib_links": null,
+      "license": "MIT OR Apache-2.0",
+      "links": {
+        "dependencies": "/api/v1/crates/quinn-proto/0.7.3/dependencies",
+        "version_downloads": "/api/v1/crates/quinn-proto/0.7.3/downloads",
+        "authors": "/api/v1/crates/quinn-proto/0.7.3/authors"
+      },
+      "crate_size": 132472,
+      "published_by": {
+        "id": 4556,
+        "login": "djc",
+        "name": "Dirkjan Ochtman",
+        "avatar": "https://avatars.githubusercontent.com/u/158471?v=4",
+        "url": "https://github.com/djc",
+        "github_username_matches": true,
+        "created_at": "2009-11-26T12:00:10Z"
+      },
+      "audit_actions": [
+        {
+          "action": "publish",
+          "user": {
+            "id": 4556,
+            "login": "djc",
+            "name": "Dirkjan Ochtman",
+            "avatar": "https://avatars.githubusercontent.com/u/158471?v=4",
+            "url": "https://github.com/djc",
+            "github_username_matches": true,
+            "created_at": "2009-11-26T12:00:10Z"
+          },
+          "time": "2021-05-03T20:45:15.282228Z"
+        }
+      ],
+      "checksum": "047aa96ec7ee6acabad7a1318dff72e9aff8994316bf2166c9b94cbec78ca54c",
+      "rust_version": null,
+      "has_lib": true,
+      "bin_names": [],
+      "edition": "2018",
+      "description": "State machine for the QUIC transport protocol",
+      "homepage": null,
+      "documentation": null,
+      "repository": "https://github.com/djc/quinn",
+      "trustpub_data": null,
+      "linecounts": {
+        "languages": {
+          "Rust": {
+            "code_lines": 11819,
+            "comment_lines": 556,
+            "files": 36
+          }
+        },
+        "total_code_lines": 11819,
+        "total_comment_lines": 556
+      }
+    },
+    {
+      "id": 361570,
+      "crate": "quinn-proto",
+      "num": "0.7.2",
+      "dl_path": "/api/v1/crates/quinn-proto/0.7.2/download",
+      "readme_path": "/api/v1/crates/quinn-proto/0.7.2/readme",
+      "updated_at": "2021-04-04T21:56:33.211326Z",
+      "created_at": "2021-04-04T21:56:33.211326Z",
+      "downloads": 14489,
+      "features": {
+        "certificate-transparency": [
+          "ct-logs"
+        ],
+        "default": [
+          "tls-rustls"
+        ],
+        "native-certs": [
+          "rustls-native-certs"
+        ],
+        "tls-rustls": [
+          "rustls",
+          "webpki",
+          "ring"
+        ]
+      },
+      "yanked": false,
+      "yank_message": null,
+      "lib_links": null,
+      "license": "MIT OR Apache-2.0",
+      "links": {
+        "dependencies": "/api/v1/crates/quinn-proto/0.7.2/dependencies",
+        "version_downloads": "/api/v1/crates/quinn-proto/0.7.2/downloads",
+        "authors": "/api/v1/crates/quinn-proto/0.7.2/authors"
+      },
+      "crate_size": 132057,
+      "published_by": {
+        "id": 5298,
+        "login": "Ralith",
+        "name": "Benjamin Saunders",
+        "avatar": "https://avatars.githubusercontent.com/u/104558?v=4",
+        "url": "https://github.com/Ralith",
+        "github_username_matches": true,
+        "created_at": "2009-07-13T21:05:55Z"
+      },
+      "audit_actions": [
+        {
+          "action": "publish",
+          "user": {
+            "id": 5298,
+            "login": "Ralith",
+            "name": "Benjamin Saunders",
+            "avatar": "https://avatars.githubusercontent.com/u/104558?v=4",
+            "url": "https://github.com/Ralith",
+            "github_username_matches": true,
+            "created_at": "2009-07-13T21:05:55Z"
+          },
+          "time": "2021-04-04T21:56:33.211326Z"
+        }
+      ],
+      "checksum": "09027365a21874b71e1fbd9d31cb99bff8e11ba81cc9ef2b9425bb607e42d3b2",
+      "rust_version": null,
+      "has_lib": true,
+      "bin_names": [],
+      "edition": "2018",
+      "description": "State machine for the QUIC transport protocol",
+      "homepage": null,
+      "documentation": null,
+      "repository": "https://github.com/djc/quinn",
+      "trustpub_data": null,
+      "linecounts": {
+        "languages": {
+          "Rust": {
+            "code_lines": 11734,
+            "comment_lines": 555,
+            "files": 36
+          }
+        },
+        "total_code_lines": 11734,
+        "total_comment_lines": 555
+      }
+    },
+    {
+      "id": 354592,
+      "crate": "quinn-proto",
+      "num": "0.7.1",
+      "dl_path": "/api/v1/crates/quinn-proto/0.7.1/download",
+      "readme_path": "/api/v1/crates/quinn-proto/0.7.1/readme",
+      "updated_at": "2021-03-20T20:17:06.497713Z",
+      "created_at": "2021-03-20T20:17:06.497713Z",
+      "downloads": 6635,
+      "features": {
+        "certificate-transparency": [
+          "ct-logs"
+        ],
+        "default": [
+          "tls-rustls"
+        ],
+        "native-certs": [
+          "rustls-native-certs"
+        ],
+        "tls-rustls": [
+          "rustls",
+          "webpki",
+          "ring"
+        ]
+      },
+      "yanked": false,
+      "yank_message": null,
+      "lib_links": null,
+      "license": "MIT OR Apache-2.0",
+      "links": {
+        "dependencies": "/api/v1/crates/quinn-proto/0.7.1/dependencies",
+        "version_downloads": "/api/v1/crates/quinn-proto/0.7.1/downloads",
+        "authors": "/api/v1/crates/quinn-proto/0.7.1/authors"
+      },
+      "crate_size": 131767,
+      "published_by": {
+        "id": 4556,
+        "login": "djc",
+        "name": "Dirkjan Ochtman",
+        "avatar": "https://avatars.githubusercontent.com/u/158471?v=4",
+        "url": "https://github.com/djc",
+        "github_username_matches": true,
+        "created_at": "2009-11-26T12:00:10Z"
+      },
+      "audit_actions": [
+        {
+          "action": "publish",
+          "user": {
+            "id": 4556,
+            "login": "djc",
+            "name": "Dirkjan Ochtman",
+            "avatar": "https://avatars.githubusercontent.com/u/158471?v=4",
+            "url": "https://github.com/djc",
+            "github_username_matches": true,
+            "created_at": "2009-11-26T12:00:10Z"
+          },
+          "time": "2021-03-20T20:17:06.497713Z"
+        }
+      ],
+      "checksum": "72b2ef51cf07e3d73ef0b2374423efe1a7fe6d439f8aec92514d9ccb28e95f5a",
+      "rust_version": null,
+      "has_lib": true,
+      "bin_names": [],
+      "edition": "2018",
+      "description": "State machine for the QUIC transport protocol",
+      "homepage": null,
+      "documentation": null,
+      "repository": "https://github.com/djc/quinn",
+      "trustpub_data": null,
+      "linecounts": {
+        "languages": {
+          "Rust": {
+            "code_lines": 11715,
+            "comment_lines": 545,
+            "files": 36
+          }
+        },
+        "total_code_lines": 11715,
+        "total_comment_lines": 545
+      }
+    },
+    {
+      "id": 346628,
+      "crate": "quinn-proto",
+      "num": "0.7.0",
+      "dl_path": "/api/v1/crates/quinn-proto/0.7.0/download",
+      "readme_path": "/api/v1/crates/quinn-proto/0.7.0/readme",
+      "updated_at": "2021-03-02T20:24:46.037081Z",
+      "created_at": "2021-03-02T20:24:46.037081Z",
+      "downloads": 8671,
+      "features": {
+        "certificate-transparency": [
+          "ct-logs"
+        ],
+        "default": [
+          "tls-rustls"
+        ],
+        "native-certs": [
+          "rustls-native-certs"
+        ],
+        "tls-rustls": [
+          "rustls",
+          "webpki",
+          "ring"
+        ]
+      },
+      "yanked": false,
+      "yank_message": null,
+      "lib_links": null,
+      "license": "MIT OR Apache-2.0",
+      "links": {
+        "dependencies": "/api/v1/crates/quinn-proto/0.7.0/dependencies",
+        "version_downloads": "/api/v1/crates/quinn-proto/0.7.0/downloads",
+        "authors": "/api/v1/crates/quinn-proto/0.7.0/authors"
+      },
+      "crate_size": 131488,
+      "published_by": {
+        "id": 4556,
+        "login": "djc",
+        "name": "Dirkjan Ochtman",
+        "avatar": "https://avatars.githubusercontent.com/u/158471?v=4",
+        "url": "https://github.com/djc",
+        "github_username_matches": true,
+        "created_at": "2009-11-26T12:00:10Z"
+      },
+      "audit_actions": [
+        {
+          "action": "publish",
+          "user": {
+            "id": 4556,
+            "login": "djc",
+            "name": "Dirkjan Ochtman",
+            "avatar": "https://avatars.githubusercontent.com/u/158471?v=4",
+            "url": "https://github.com/djc",
+            "github_username_matches": true,
+            "created_at": "2009-11-26T12:00:10Z"
+          },
+          "time": "2021-03-02T20:24:46.037081Z"
+        }
+      ],
+      "checksum": "819acc105414fe4eacc122dc6a59d39b9b65915e66b8f7a787a9490c9d71e836",
+      "rust_version": null,
+      "has_lib": true,
+      "bin_names": [],
+      "edition": "2018",
+      "description": "State machine for the QUIC transport protocol",
+      "homepage": null,
+      "documentation": null,
+      "repository": "https://github.com/djc/quinn",
+      "trustpub_data": null,
+      "linecounts": {
+        "languages": {
+          "Rust": {
+            "code_lines": 11685,
+            "comment_lines": 540,
+            "files": 36
+          }
+        },
+        "total_code_lines": 11685,
+        "total_comment_lines": 540
+      }
+    },
+    {
+      "id": 227863,
+      "crate": "quinn-proto",
+      "num": "0.6.1",
+      "dl_path": "/api/v1/crates/quinn-proto/0.6.1/download",
+      "readme_path": "/api/v1/crates/quinn-proto/0.6.1/readme",
+      "updated_at": "2020-04-04T20:43:22.877785Z",
+      "created_at": "2020-04-04T20:43:22.877785Z",
+      "downloads": 83270,
+      "features": {
+        "certificate-transparency": [
+          "ct-logs"
+        ],
+        "default": [
+          "tls-rustls"
+        ],
+        "native-certs": [
+          "rustls-native-certs"
+        ],
+        "tls-rustls": [
+          "rustls",
+          "webpki",
+          "ring"
+        ]
+      },
+      "yanked": false,
+      "yank_message": null,
+      "lib_links": null,
+      "license": "MIT/Apache-2.0",
+      "links": {
+        "dependencies": "/api/v1/crates/quinn-proto/0.6.1/dependencies",
+        "version_downloads": "/api/v1/crates/quinn-proto/0.6.1/downloads",
+        "authors": "/api/v1/crates/quinn-proto/0.6.1/authors"
+      },
+      "crate_size": 97568,
+      "published_by": {
+        "id": 4556,
+        "login": "djc",
+        "name": "Dirkjan Ochtman",
+        "avatar": "https://avatars.githubusercontent.com/u/158471?v=4",
+        "url": "https://github.com/djc",
+        "github_username_matches": true,
+        "created_at": "2009-11-26T12:00:10Z"
+      },
+      "audit_actions": [
+        {
+          "action": "publish",
+          "user": {
+            "id": 4556,
+            "login": "djc",
+            "name": "Dirkjan Ochtman",
+            "avatar": "https://avatars.githubusercontent.com/u/158471?v=4",
+            "url": "https://github.com/djc",
+            "github_username_matches": true,
+            "created_at": "2009-11-26T12:00:10Z"
+          },
+          "time": "2020-04-04T20:43:22.877785Z"
+        }
+      ],
+      "checksum": "f0ea0a358c179c6b7af34805c675d1664a9c6a234a7acd7efdbb32d2f39d3d2a",
+      "rust_version": null,
+      "has_lib": true,
+      "bin_names": [],
+      "edition": "2018",
+      "description": "State machine for the QUIC transport protocol",
+      "homepage": null,
+      "documentation": null,
+      "repository": "https://github.com/djc/quinn",
+      "trustpub_data": null,
+      "linecounts": {
+        "languages": {
+          "Rust": {
+            "code_lines": 8874,
+            "comment_lines": 333,
+            "files": 21
+          }
+        },
+        "total_code_lines": 8874,
+        "total_comment_lines": 333
+      }
+    },
+    {
+      "id": 220376,
+      "crate": "quinn-proto",
+      "num": "0.6.0",
+      "dl_path": "/api/v1/crates/quinn-proto/0.6.0/download",
+      "readme_path": "/api/v1/crates/quinn-proto/0.6.0/readme",
+      "updated_at": "2020-03-12T20:38:17.436026Z",
+      "created_at": "2020-03-12T20:38:17.436026Z",
+      "downloads": 10544,
+      "features": {
+        "certificate-transparency": [
+          "ct-logs"
+        ],
+        "default": [
+          "tls-rustls"
+        ],
+        "native-certs": [
+          "rustls-native-certs"
+        ],
+        "tls-rustls": [
+          "rustls",
+          "webpki",
+          "ring"
+        ]
+      },
+      "yanked": false,
+      "yank_message": null,
+      "lib_links": null,
+      "license": "MIT/Apache-2.0",
+      "links": {
+        "dependencies": "/api/v1/crates/quinn-proto/0.6.0/dependencies",
+        "version_downloads": "/api/v1/crates/quinn-proto/0.6.0/downloads",
+        "authors": "/api/v1/crates/quinn-proto/0.6.0/authors"
+      },
+      "crate_size": 96290,
+      "published_by": {
+        "id": 4556,
+        "login": "djc",
+        "name": "Dirkjan Ochtman",
+        "avatar": "https://avatars.githubusercontent.com/u/158471?v=4",
+        "url": "https://github.com/djc",
+        "github_username_matches": true,
+        "created_at": "2009-11-26T12:00:10Z"
+      },
+      "audit_actions": [
+        {
+          "action": "publish",
+          "user": {
+            "id": 4556,
+            "login": "djc",
+            "name": "Dirkjan Ochtman",
+            "avatar": "https://avatars.githubusercontent.com/u/158471?v=4",
+            "url": "https://github.com/djc",
+            "github_username_matches": true,
+            "created_at": "2009-11-26T12:00:10Z"
+          },
+          "time": "2020-03-12T20:38:17.436026Z"
+        }
+      ],
+      "checksum": "8b70cb5efbbd520ef4a5361fb0ec64360dcd873cfb76c1be2f1d2594729d7b5a",
+      "rust_version": null,
+      "has_lib": true,
+      "bin_names": [],
+      "edition": "2018",
+      "description": "State machine for the QUIC transport protocol",
+      "homepage": null,
+      "documentation": null,
+      "repository": "https://github.com/djc/quinn",
+      "trustpub_data": null,
+      "linecounts": {
+        "languages": {
+          "Rust": {
+            "code_lines": 8699,
+            "comment_lines": 332,
+            "files": 20
+          }
+        },
+        "total_code_lines": 8699,
+        "total_comment_lines": 332
+      }
+    },
+    {
+      "id": 196563,
+      "crate": "quinn-proto",
+      "num": "0.5.2",
+      "dl_path": "/api/v1/crates/quinn-proto/0.5.2/download",
+      "readme_path": "/api/v1/crates/quinn-proto/0.5.2/readme",
+      "updated_at": "2019-12-15T15:23:27.574595Z",
+      "created_at": "2019-12-15T15:23:27.574595Z",
+      "downloads": 8711,
+      "features": {
+        "default": [
+          "tls-rustls"
+        ],
+        "tls-rustls": [
+          "rustls",
+          "webpki",
+          "ring"
+        ]
+      },
+      "yanked": false,
+      "yank_message": null,
+      "lib_links": null,
+      "license": "MIT/Apache-2.0",
+      "links": {
+        "dependencies": "/api/v1/crates/quinn-proto/0.5.2/dependencies",
+        "version_downloads": "/api/v1/crates/quinn-proto/0.5.2/downloads",
+        "authors": "/api/v1/crates/quinn-proto/0.5.2/authors"
+      },
+      "crate_size": 89950,
+      "published_by": {
+        "id": 4556,
+        "login": "djc",
+        "name": "Dirkjan Ochtman",
+        "avatar": "https://avatars.githubusercontent.com/u/158471?v=4",
+        "url": "https://github.com/djc",
+        "github_username_matches": true,
+        "created_at": "2009-11-26T12:00:10Z"
+      },
+      "audit_actions": [
+        {
+          "action": "publish",
+          "user": {
+            "id": 4556,
+            "login": "djc",
+            "name": "Dirkjan Ochtman",
+            "avatar": "https://avatars.githubusercontent.com/u/158471?v=4",
+            "url": "https://github.com/djc",
+            "github_username_matches": true,
+            "created_at": "2009-11-26T12:00:10Z"
+          },
+          "time": "2019-12-15T15:23:27.574595Z"
+        }
+      ],
+      "checksum": "36f238b2b3252726f41171302f3976bc22ef4d4845bad6bc2f4fce000a833ee7",
+      "rust_version": null,
+      "has_lib": true,
+      "bin_names": [],
+      "edition": "2018",
+      "description": "State machine for the QUIC transport protocol",
+      "homepage": null,
+      "documentation": null,
+      "repository": "https://github.com/djc/quinn",
+      "trustpub_data": null,
+      "linecounts": {
+        "languages": {
+          "Rust": {
+            "code_lines": 8329,
+            "comment_lines": 294,
+            "files": 18
+          }
+        },
+        "total_code_lines": 8329,
+        "total_comment_lines": 294
+      }
+    },
+    {
+      "id": 193737,
+      "crate": "quinn-proto",
+      "num": "0.5.0",
+      "dl_path": "/api/v1/crates/quinn-proto/0.5.0/download",
+      "readme_path": "/api/v1/crates/quinn-proto/0.5.0/readme",
+      "updated_at": "2019-12-03T19:01:55.822467Z",
+      "created_at": "2019-12-03T19:01:55.822467Z",
+      "downloads": 3655,
+      "features": {
+        "default": [
+          "tls-rustls"
+        ],
+        "tls-rustls": [
+          "rustls",
+          "webpki",
+          "ring"
+        ]
+      },
+      "yanked": false,
+      "yank_message": null,
+      "lib_links": null,
+      "license": "MIT/Apache-2.0",
+      "links": {
+        "dependencies": "/api/v1/crates/quinn-proto/0.5.0/dependencies",
+        "version_downloads": "/api/v1/crates/quinn-proto/0.5.0/downloads",
+        "authors": "/api/v1/crates/quinn-proto/0.5.0/authors"
+      },
+      "crate_size": 89929,
+      "published_by": {
+        "id": 4556,
+        "login": "djc",
+        "name": "Dirkjan Ochtman",
+        "avatar": "https://avatars.githubusercontent.com/u/158471?v=4",
+        "url": "https://github.com/djc",
+        "github_username_matches": true,
+        "created_at": "2009-11-26T12:00:10Z"
+      },
+      "audit_actions": [],
+      "checksum": "fdc04086222193131a32eb4705dfe2b68d53ea2974c60435aed7be5e5c86e38d",
+      "rust_version": null,
+      "has_lib": true,
+      "bin_names": [],
+      "edition": "2018",
+      "description": "State machine for the QUIC transport protocol",
+      "homepage": null,
+      "documentation": null,
+      "repository": "https://github.com/djc/quinn",
+      "trustpub_data": null,
+      "linecounts": {
+        "languages": {
+          "Rust": {
+            "code_lines": 8329,
+            "comment_lines": 294,
+            "files": 18
+          }
+        },
+        "total_code_lines": 8329,
+        "total_comment_lines": 294
+      }
+    },
+    {
+      "id": 175052,
+      "crate": "quinn-proto",
+      "num": "0.4.0",
+      "dl_path": "/api/v1/crates/quinn-proto/0.4.0/download",
+      "readme_path": "/api/v1/crates/quinn-proto/0.4.0/readme",
+      "updated_at": "2019-09-09T07:39:12.094737Z",
+      "created_at": "2019-09-09T07:39:12.094737Z",
+      "downloads": 2819,
+      "features": {
+        "default": [
+          "tls-rustls"
+        ],
+        "tls-rustls": [
+          "rustls",
+          "webpki",
+          "ring"
+        ]
+      },
+      "yanked": false,
+      "yank_message": null,
+      "lib_links": null,
+      "license": "MIT/Apache-2.0",
+      "links": {
+        "dependencies": "/api/v1/crates/quinn-proto/0.4.0/dependencies",
+        "version_downloads": "/api/v1/crates/quinn-proto/0.4.0/downloads",
+        "authors": "/api/v1/crates/quinn-proto/0.4.0/authors"
+      },
+      "crate_size": 86826,
+      "published_by": {
+        "id": 4556,
+        "login": "djc",
+        "name": "Dirkjan Ochtman",
+        "avatar": "https://avatars.githubusercontent.com/u/158471?v=4",
+        "url": "https://github.com/djc",
+        "github_username_matches": true,
+        "created_at": "2009-11-26T12:00:10Z"
+      },
+      "audit_actions": [],
+      "checksum": "22939ebaae6c7b797a33202bcd9284888946cf6e74917771b7a3e2b326c6fe2b",
+      "rust_version": null,
+      "has_lib": true,
+      "bin_names": [],
+      "edition": "2018",
+      "description": "State machine for the QUIC transport protocol",
+      "homepage": null,
+      "documentation": null,
+      "repository": "https://github.com/djc/quinn",
+      "trustpub_data": null,
+      "linecounts": {
+        "languages": {
+          "Rust": {
+            "code_lines": 8280,
+            "comment_lines": 252,
+            "files": 18
+          }
+        },
+        "total_code_lines": 8280,
+        "total_comment_lines": 252
+      }
+    },
+    {
+      "id": 145548,
+      "crate": "quinn-proto",
+      "num": "0.3.0",
+      "dl_path": "/api/v1/crates/quinn-proto/0.3.0/download",
+      "readme_path": "/api/v1/crates/quinn-proto/0.3.0/readme",
+      "updated_at": "2019-04-18T15:49:34.228219Z",
+      "created_at": "2019-04-18T15:49:34.228219Z",
+      "downloads": 27262,
+      "features": {},
+      "yanked": false,
+      "yank_message": null,
+      "lib_links": null,
+      "license": "MIT/Apache-2.0",
+      "links": {
+        "dependencies": "/api/v1/crates/quinn-proto/0.3.0/dependencies",
+        "version_downloads": "/api/v1/crates/quinn-proto/0.3.0/downloads",
+        "authors": "/api/v1/crates/quinn-proto/0.3.0/authors"
+      },
+      "crate_size": 79752,
+      "published_by": {
+        "id": 5298,
+        "login": "Ralith",
+        "name": "Benjamin Saunders",
+        "avatar": "https://avatars.githubusercontent.com/u/104558?v=4",
+        "url": "https://github.com/Ralith",
+        "github_username_matches": true,
+        "created_at": "2009-07-13T21:05:55Z"
+      },
+      "audit_actions": [],
+      "checksum": "a5aeb6dc5d670066a6c90a666139f92d95f73b4ca8883d80e33b0693ef103f65",
+      "rust_version": null,
+      "has_lib": true,
+      "bin_names": [],
+      "edition": "2018",
+      "description": "State machine for the QUIC transport protocol",
+      "homepage": null,
+      "documentation": null,
+      "repository": "https://github.com/djc/quinn",
+      "trustpub_data": null,
+      "linecounts": {
+        "languages": {
+          "Rust": {
+            "code_lines": 7787,
+            "comment_lines": 237,
+            "files": 15
+          }
+        },
+        "total_code_lines": 7787,
+        "total_comment_lines": 237
+      }
+    },
+    {
+      "id": 129334,
+      "crate": "quinn-proto",
+      "num": "0.2.0",
+      "dl_path": "/api/v1/crates/quinn-proto/0.2.0/download",
+      "readme_path": "/api/v1/crates/quinn-proto/0.2.0/readme",
+      "updated_at": "2019-01-21T19:27:52.299173Z",
+      "created_at": "2019-01-21T19:27:52.299173Z",
+      "downloads": 2872,
+      "features": {
+        "dangerous_configuration": [
+          "rustls/dangerous_configuration"
+        ]
+      },
+      "yanked": false,
+      "yank_message": null,
+      "lib_links": null,
+      "license": "MIT/Apache-2.0",
+      "links": {
+        "dependencies": "/api/v1/crates/quinn-proto/0.2.0/dependencies",
+        "version_downloads": "/api/v1/crates/quinn-proto/0.2.0/downloads",
+        "authors": "/api/v1/crates/quinn-proto/0.2.0/authors"
+      },
+      "crate_size": 72015,
+      "published_by": null,
+      "audit_actions": [],
+      "checksum": "2afb92b0ee95ea8ff237cfa56391dbb75e5b3a1a94c89604976596f1d802261b",
+      "rust_version": null,
+      "has_lib": true,
+      "bin_names": [],
+      "edition": "2018",
+      "description": "State machine for the QUIC transport protocol",
+      "homepage": null,
+      "documentation": null,
+      "repository": "https://github.com/djc/quinn",
+      "trustpub_data": null,
+      "linecounts": {
+        "languages": {
+          "Rust": {
+            "code_lines": 8366,
+            "comment_lines": 233,
+            "files": 14
+          }
+        },
+        "total_code_lines": 8366,
+        "total_comment_lines": 233
+      }
+    },
+    {
+      "id": 110561,
+      "crate": "quinn-proto",
+      "num": "0.1.0",
+      "dl_path": "/api/v1/crates/quinn-proto/0.1.0/download",
+      "readme_path": "/api/v1/crates/quinn-proto/0.1.0/readme",
+      "updated_at": "2018-10-02T20:17:22.135216Z",
+      "created_at": "2018-10-02T20:17:22.135216Z",
+      "downloads": 2778,
+      "features": {},
+      "yanked": false,
+      "yank_message": null,
+      "lib_links": null,
+      "license": "MIT/Apache-2.0",
+      "links": {
+        "dependencies": "/api/v1/crates/quinn-proto/0.1.0/dependencies",
+        "version_downloads": "/api/v1/crates/quinn-proto/0.1.0/downloads",
+        "authors": "/api/v1/crates/quinn-proto/0.1.0/authors"
+      },
+      "crate_size": 54187,
+      "published_by": null,
+      "audit_actions": [],
+      "checksum": "b609e562b296937ddf8368b96f7e96f7a017f5395bc785aae95cfe73a076b835",
+      "rust_version": null,
+      "has_lib": true,
+      "bin_names": [],
+      "edition": null,
+      "description": "State machine for the QUIC transport protocol",
+      "homepage": null,
+      "documentation": null,
+      "repository": "https://github.com/Ralith/quicr",
+      "trustpub_data": null,
+      "linecounts": {
+        "languages": {
+          "Rust": {
+            "code_lines": 6189,
+            "comment_lines": 386,
+            "files": 14
+          }
+        },
+        "total_code_lines": 6189,
+        "total_comment_lines": 386
+      }
+    }
+  ],
+  "keywords": [
+    {
+      "id": "quic",
+      "keyword": "quic",
+      "created_at": "2016-04-21T19:35:37.938576Z",
+      "crates_cnt": 525
+    }
+  ],
+  "categories": [
+    {
+      "id": "asynchronous",
+      "category": "Asynchronous",
+      "slug": "asynchronous",
+      "description": "Crates to help you deal with events independently of the main program flow, using techniques like futures, promises, waiting, or eventing.",
+      "created_at": "2017-01-17T19:13:05.112025Z",
+      "crates_cnt": 11944
+    },
+    {
+      "id": "network-programming",
+      "category": "Network programming",
+      "slug": "network-programming",
+      "description": "Crates dealing with higher-level network protocols such as FTP, HTTP, or SSH, or lower-level network protocols such as TCP or UDP.",
+      "created_at": "2017-01-17T19:13:05.112025Z",
+      "crates_cnt": 14859
+    }
+  ]
+}

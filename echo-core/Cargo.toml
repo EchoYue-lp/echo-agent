@@ -34,7 +34,7 @@ async-stream = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["arbitrary_precision"] }
 schemars = "0.8"
-serde_yaml_ng = "0.10"
+serde_yaml_ng = { package = "yaml_serde", version = "0.10.7" }
 chrono = { version = "0.4", features = ["serde"] }
 semver = "1"
 tokio-util = { version = "0.7", features = ["rt"] }

@@ -34,10 +34,10 @@ pub use progress::{Phase, PhasePlan, ProgressReporter, TaskProgress};
 pub use revisioned::{
     DefaultTaskToolPolicy, InMemoryRevisionedTaskStore, PreparedTaskPolicy, RevisionedTaskGraph,
     RevisionedTaskStore, RevisionedTaskStoreError, TaskCreateInput, TaskCreateOutcome, TaskDraft,
-    TaskGraphCommit, TaskGraphContext, TaskGraphExecutionMode, TaskPatchApplication,
-    TaskPatchEffects, TaskPatchEngine, TaskPlanPatch, TaskPlanPatchInputOp, TaskPlanPatchOp,
-    TaskPolicyError, TaskRevisionError, TaskRevisionService, TaskSpecPatch, TaskToolPolicy,
-    TaskUpdateInput,
+    TaskExecutionCommit, TaskGraphCommit, TaskGraphContext, TaskGraphExecutionMode,
+    TaskPatchApplication, TaskPatchEffects, TaskPatchEngine, TaskPlanPatch, TaskPlanPatchInputOp,
+    TaskPlanPatchOp, TaskPolicyError, TaskRevisionError, TaskRevisionService, TaskSpecPatch,
+    TaskToolPolicy, TaskUpdateInput,
 };
 pub use runtime::{
     DagDependencyState, DagExecutionState, DagRefresh, NestedDelegationPolicy,
@@ -57,9 +57,10 @@ pub use runtime_service::{
     RuntimeTaskAttemptInterruptProjectionError, RuntimeTaskAttemptInterruptReceipt,
     RuntimeTaskMutationError, RuntimeTaskRequeueOutcome, RuntimeTaskResumeOutcome,
     RuntimeTaskRetryOutcome, RuntimeTaskService, RuntimeTaskSettlementOutcome,
-    cancel_unfinished_runtime_tasks, claim_runtime_task, requeue_runtime_claim,
-    resume_runtime_task, retry_runtime_task, runtime_claim_is_current, settle_runtime_claim,
-    settle_runtime_interruption, settle_runtime_resolution, validate_runtime_snapshot_claims,
+    cancel_unfinished_runtime_tasks, claim_runtime_task, request_runtime_task_interruption,
+    requeue_runtime_claim, resume_runtime_task, retry_runtime_task, runtime_claim_is_current,
+    settle_runtime_claim, settle_runtime_interruption, settle_runtime_resolution,
+    validate_runtime_snapshot_claims,
 };
 pub use task_tools::{
     TaskCreateTool, TaskListTool, TaskUpdateTool, build_task_create_tool, build_task_list_tool,

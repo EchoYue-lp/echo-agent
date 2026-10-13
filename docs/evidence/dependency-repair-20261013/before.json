@@ -1,0 +1,25 @@
+{
+  "classification": "bugfix cross-crate dependency change; no authority/protocol change",
+  "base": "4eb005c15b9c0036b73e409026c668c02f0a9575",
+  "branch": "fix/Echoyue/task-runtime-store-control",
+  "allowed": [
+    "Cargo.toml",
+    "Cargo.lock",
+    "echo-core/Cargo.toml",
+    "echo-execution/Cargo.toml",
+    "echo-integration/Cargo.toml",
+    "echo-agent-learning/Cargo.toml",
+    "docs/dependencyrepair.md"
+  ],
+  "before": {
+    "Cargo.toml": "0dbc61b2499b7e1ff7b94e38cab2ac91e4fae6b8c5ba536cd45a5fe2e3233fbd",
+    "Cargo.lock": "17fd37bb62427a9981730c784f080443c3ea809aa0f266bc7b478e5eff70470e",
+    "echo-core/Cargo.toml": "acf970eefc0db2cf77b84fe3a735074333c518d855b500c50c8b6404c907c8db",
+    "echo-execution/Cargo.toml": "a647c8627b77ce7a5a06f16251596dec0929778f7276924b1a2eef7e1bca7c8a",
+    "echo-integration/Cargo.toml": "dc8f09c45ac4ff4f709c7848889da212e986d6c53eaaa4114f27756757a63ade",
+    "echo-agent-learning/Cargo.toml": "515230c87fc2bfbbb092c2cca7ed822fc5fa5cd3fb9f9525a2610dcfa6fcba4a"
+  },
+  "reuse": "existing serde_yaml_ng alias and established generic Value API; package-only replacement",
+  "layer": "framework YAML configuration/skills/workflow serialization; client product policies unchanged",
+  "verify": "deterministic lock delta, current DB audit --deny warnings, deny advisories/licenses/sources, YAML API parity and all affected native test families"
+}

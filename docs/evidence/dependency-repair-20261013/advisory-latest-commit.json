@@ -1,0 +1,114 @@
+{
+  "sha": "29d1a60c3361576d366b1740bba2254dc6173434",
+  "node_id": "C_kwDOBPTSmdoAKDI5ZDFhNjBjMzM2MTU3NmQzNjZiMTc0MGJiYTIyNTRkYzYxNzM0MzQ",
+  "commit": {
+    "author": {
+      "name": "djc",
+      "email": "158471+djc@users.noreply.github.com",
+      "date": "2026-10-13T12:18:34Z"
+    },
+    "committer": {
+      "name": "Dirkjan Ochtman",
+      "email": "dirkjan@ochtman.nl",
+      "date": "2026-10-13T13:53:07Z"
+    },
+    "message": "Assigned RUSTSEC-2026-0345 to kuva",
+    "tree": {
+      "sha": "73d9f95b0e83c7f8ee6e2283e87599515379c796",
+      "url": "https://api.github.com/repos/rustsec/advisory-db/git/trees/73d9f95b0e83c7f8ee6e2283e87599515379c796"
+    },
+    "url": "https://api.github.com/repos/rustsec/advisory-db/git/commits/29d1a60c3361576d366b1740bba2254dc6173434",
+    "comment_count": 0,
+    "verification": {
+      "verified": false,
+      "reason": "unsigned",
+      "signature": null,
+      "payload": null,
+      "verified_at": null
+    }
+  },
+  "url": "https://api.github.com/repos/rustsec/advisory-db/commits/29d1a60c3361576d366b1740bba2254dc6173434",
+  "html_url": "https://github.com/rustsec/advisory-db/commit/29d1a60c3361576d366b1740bba2254dc6173434",
+  "comments_url": "https://api.github.com/repos/rustsec/advisory-db/commits/29d1a60c3361576d366b1740bba2254dc6173434/comments",
+  "author": {
+    "login": "djc",
+    "id": 158471,
+    "node_id": "MDQ6VXNlcjE1ODQ3MQ==",
+    "avatar_url": "https://avatars.githubusercontent.com/u/158471?v=4",
+    "gravatar_id": "",
+    "url": "https://api.github.com/users/djc",
+    "html_url": "https://github.com/djc",
+    "followers_url": "https://api.github.com/users/djc/followers",
+    "following_url": "https://api.github.com/users/djc/following{/other_user}",
+    "gists_url": "https://api.github.com/users/djc/gists{/gist_id}",
+    "starred_url": "https://api.github.com/users/djc/starred{/owner}{/repo}",
+    "subscriptions_url": "https://api.github.com/users/djc/subscriptions",
+    "organizations_url": "https://api.github.com/users/djc/orgs",
+    "repos_url": "https://api.github.com/users/djc/repos",
+    "events_url": "https://api.github.com/users/djc/events{/privacy}",
+    "received_events_url": "https://api.github.com/users/djc/received_events",
+    "type": "User",
+    "user_view_type": "public",
+    "site_admin": false
+  },
+  "committer": {
+    "login": "djc",
+    "id": 158471,
+    "node_id": "MDQ6VXNlcjE1ODQ3MQ==",
+    "avatar_url": "https://avatars.githubusercontent.com/u/158471?v=4",
+    "gravatar_id": "",
+    "url": "https://api.github.com/users/djc",
+    "html_url": "https://github.com/djc",
+    "followers_url": "https://api.github.com/users/djc/followers",
+    "following_url": "https://api.github.com/users/djc/following{/other_user}",
+    "gists_url": "https://api.github.com/users/djc/gists{/gist_id}",
+    "starred_url": "https://api.github.com/users/djc/starred{/owner}{/repo}",
+    "subscriptions_url": "https://api.github.com/users/djc/subscriptions",
+    "organizations_url": "https://api.github.com/users/djc/orgs",
+    "repos_url": "https://api.github.com/users/djc/repos",
+    "events_url": "https://api.github.com/users/djc/events{/privacy}",
+    "received_events_url": "https://api.github.com/users/djc/received_events",
+    "type": "User",
+    "user_view_type": "public",
+    "site_admin": false
+  },
+  "parents": [
+    {
+      "sha": "64a0302dc836df15a10ac27ebdcdf8f9b4ce845a",
+      "url": "https://api.github.com/repos/rustsec/advisory-db/commits/64a0302dc836df15a10ac27ebdcdf8f9b4ce845a",
+      "html_url": "https://github.com/rustsec/advisory-db/commit/64a0302dc836df15a10ac27ebdcdf8f9b4ce845a"
+    }
+  ],
+  "stats": {
+    "total": 4,
+    "additions": 2,
+    "deletions": 2
+  },
+  "files": [
+    {
+      "sha": "4da364e1fd0ea1c8bd742f04c93d13ec19c020d6",
+      "filename": ".duplicate-id-guard",
+      "status": "modified",
+      "additions": 1,
+      "deletions": 1,
+      "changes": 2,
+      "blob_url": "https://github.com/rustsec/advisory-db/blob/29d1a60c3361576d366b1740bba2254dc6173434/.duplicate-id-guard",
+      "raw_url": "https://github.com/rustsec/advisory-db/raw/29d1a60c3361576d366b1740bba2254dc6173434/.duplicate-id-guard",
+      "contents_url": "https://api.github.com/repos/rustsec/advisory-db/contents/.duplicate-id-guard?ref=29d1a60c3361576d366b1740bba2254dc6173434",
+      "patch": "@@ -1,3 +1,3 @@\n This file causes merge conflicts if two ID assignment jobs run concurrently.\n This prevents duplicate ID assignment due to a race between those jobs.\n-5d93db370865e78210dd6f63e5655e1b56a132928a1b1a4403467d32162878fb  -\n+000dc52c9b9fbd0dc07d961aec151b31fd7c58072d3bc53b9efe5bdd6a9d1b01  -"
+    },
+    {
+      "sha": "de31d7932a1fa7726104d1f8296b03219b2c1200",
+      "filename": "crates/kuva/RUSTSEC-2026-0345.md",
+      "status": "renamed",
+      "additions": 1,
+      "deletions": 1,
+      "changes": 2,
+      "blob_url": "https://github.com/rustsec/advisory-db/blob/29d1a60c3361576d366b1740bba2254dc6173434/crates%2Fkuva%2FRUSTSEC-2026-0345.md",
+      "raw_url": "https://github.com/rustsec/advisory-db/raw/29d1a60c3361576d366b1740bba2254dc6173434/crates%2Fkuva%2FRUSTSEC-2026-0345.md",
+      "contents_url": "https://api.github.com/repos/rustsec/advisory-db/contents/crates%2Fkuva%2FRUSTSEC-2026-0345.md?ref=29d1a60c3361576d366b1740bba2254dc6173434",
+      "patch": "@@ -1,6 +1,6 @@\n ```toml\n [advisory]\n-id = \"RUSTSEC-0000-0000\"\n+id = \"RUSTSEC-2026-0345\"\n package = \"kuva\"\n date = \"2026-08-07\"\n url = \"https://github.com/Psy-Fer/kuva/commit/2b53ceb796bbb0e9bb537836ad19faac53a51852\"",
+      "previous_filename": "crates/kuva/RUSTSEC-0000-0000.md"
+    }
+  ]
+}

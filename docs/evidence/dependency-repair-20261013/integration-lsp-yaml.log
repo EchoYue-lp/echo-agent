@@ -1,0 +1,47 @@
+   Compiling futures-util v0.3.34
+   Compiling tokio v1.53.1
+   Compiling serde v1.0.229
+   Compiling digest v0.10.7
+   Compiling serde_json v1.0.151
+   Compiling icu_normalizer v2.2.0
+   Compiling tokio-util v0.7.19
+   Compiling h2 v0.4.16
+   Compiling num-traits v0.2.19
+   Compiling idna_adapter v1.2.2
+   Compiling idna v1.1.0
+   Compiling tower v0.5.3
+   Compiling tokio-native-tls v0.3.1
+   Compiling hyper v1.11.0
+   Compiling rand v0.8.7
+   Compiling hyper-util v0.1.20
+   Compiling url v2.5.8
+   Compiling serde_urlencoded v0.7.1
+   Compiling sha1 v0.10.7
+   Compiling futures-executor v0.3.34
+   Compiling tungstenite v0.24.0
+   Compiling yaml_serde v0.10.7
+   Compiling schemars v0.8.22
+   Compiling axum-core v0.4.5
+   Compiling chrono v0.4.45
+   Compiling futures v0.3.34
+   Compiling hyper-tls v0.6.0
+   Compiling tower-http v0.6.11
+   Compiling sha2 v0.10.9
+   Compiling serde_path_to_error v0.1.20
+   Compiling echo_core v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/task-runtime-store-control/echo-core)
+   Compiling axum v0.7.9
+   Compiling reqwest v0.12.28
+   Compiling prost v0.13.5
+   Compiling tokio-tungstenite v0.24.0
+   Compiling hmac v0.12.1
+   Compiling echo_integration v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/task-runtime-store-control/echo-integration)
+    Finished `test` profile [unoptimized] target(s) in 24.97s
+     Running unittests src/lib.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/deps/echo_integration-1aa3593f9d93c4fa)
+
+running 3 tests
+test lsp::config::tests::test_parse_config ... ok
+test lsp::config::tests::discovers_installed_server_for_project_language ... ok
+test lsp::config::tests::rejects_executable_that_fails_probe ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 295 filtered out; finished in 0.03s
+

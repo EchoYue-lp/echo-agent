@@ -6,14 +6,48 @@ status: verified
 expectation: human_confirmed
 risk: high
 primary_focus: state_authority
-focus: [contract_evidence, permission_external, time_lifecycle]
+focus:
+- contract_evidence
+- permission_external
+- time_lifecycle
 boundary: boundary.workspace-architecture
-observed_at: 44b2ed68772c7c016d09af6c2e1adac9fe4fea70
-code_refs: [Cargo.toml, src/lib.rs, echo-core/src/lib.rs, echo-execution/src/lib.rs, echo-integration/src/lib.rs, echo-state/src/lib.rs, echo-orchestration/src/lib.rs, echo-tools/src/lib.rs]
-rule_refs: [rule.framework-layer-ownership]
-evidence_refs: [evidence.workspace-structure, evidence.workspace-topology-doc-repair, evidence.workspace-topology-doc-verification, evidence.feature-table-doc-repair, evidence.feature-table-doc-verification, evidence.readme-example-target-repair, evidence.readme-example-target-verification, evidence.framework-concept-navigation]
-finding_refs: []
+observed_at: source:1c515c09873968a279e6076cf6abf659923f1fa96137144423970bfcd0e1881c
+code_refs:
+- Cargo.toml
+- src/lib.rs
+- echo-core/src/lib.rs
+- echo-execution/src/lib.rs
+- echo-integration/src/lib.rs
+- echo-state/src/lib.rs
+- echo-orchestration/src/lib.rs
+- echo-tools/src/lib.rs
+- Cargo.lock
+- echo-core/Cargo.toml
+- echo-execution/Cargo.toml
+- echo-integration/Cargo.toml
+- echo-agent-learning/Cargo.toml
+- docs/dependencyrepair.md
+- docs/evidence/dependency-repair-20261013/receipt.json
+rule_refs:
+- rule.framework-layer-ownership
+evidence_refs:
+- evidence.workspace-structure
+- evidence.workspace-topology-doc-repair
+- evidence.workspace-topology-doc-verification
+- evidence.feature-table-doc-repair
+- evidence.feature-table-doc-verification
+- evidence.readme-example-target-repair
+- evidence.readme-example-target-verification
+- evidence.framework-concept-navigation
+- evidence.framework-dependency-policy-repair
+- evidence.framework-dependency-policy-focused-verification
+- evidence.framework-dependency-final-full-verification
+- evidence.framework-dependency-final-gate-archive
+finding_refs:
+- finding.framework-dependency-policy-ci
 ---
+
+
 
 # Workspace 组合行为
 
@@ -44,3 +78,9 @@ Workspace manifests、各 crate 根模块、root facade、facade smoke、learnin
 ## 裁决记录
 
 用户确认全 workspace 治理按语义边界推进；ADR 0014 确认 framework/application 分层。
+
+
+本轮依赖边界：六Cargo文件的maintained YAML alias与quinn锁替换属于框架编译实现，复用原公共API与调用路径，原audit/deny门禁权威保持；focused/policyredgreen不代新全量与交付验收。旧已verified分层规则未改为其它risk/依赖全部通过。
+
+
+依赖本地修复收口：新23完整工程最终通过及独立源码review PASS/action0见 evidence.framework-dependency-final-full-verification / audit.framework-dependency-policy-rereview，原分层/状态不扩展为remote/consumer/全risk已验。

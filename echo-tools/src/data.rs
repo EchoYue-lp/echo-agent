@@ -3438,10 +3438,24 @@ impl Tool for PivotTool {
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| ToolError::MissingParameter("values".to_string()))?;
 
-            let agg_function = parameters
-                .get("agg_function")
-                .and_then(|v| v.as_str())
-                .unwrap_or("sum");
+            let agg_function = match parameters.get("agg_function") {
+                None => "sum",
+                Some(Value::String(function))
+                    if matches!(
+                        function.as_str(),
+                        "sum" | "mean" | "count" | "min" | "max" | "first" | "last"
+                    ) =>
+                {
+                    function.as_str()
+                }
+                Some(_) => {
+                    return Err(ToolError::InvalidParameter {
+                        name: "agg_function".to_string(),
+                        message: "Expected sum, mean, count, min, max, first or last".to_string(),
+                    }
+                    .into());
+                }
+            };
 
             let df = load_dataframe(&path, None)?;
 
@@ -3532,12 +3546,53 @@ impl Tool for PivotTool {
                         message: format!("Failed to get unique pivot values: {}", e),
                     })?;
 
-            let pivot_values: Vec<String> = (0..unique_vals.len())
-                .map(|i| match unique_vals.get(i) {
-                    Ok(v) => format!("{}", v),
-                    Err(_) => "null".to_string(),
+            // Display text is a column label, never the value used to filter:
+            // String display includes quotes and numeric/null values need
+            // their native Polars scalar type to retain matching rows.
+            let pivot_values = (0..unique_vals.len())
+                .map(|position| {
+                    let value =
+                        unique_vals
+                            .get(position)
+                            .map_err(|error| ToolError::ExecutionFailed {
+                                tool: "pivot_data".to_string(),
+                                message: format!("Failed to read pivot value: {error}"),
+                            })?;
+                    let label = match &value {
+                        AnyValue::String(text) => (*text).to_string(),
+                        AnyValue::StringOwned(text) => text.to_string(),
+                        _ => value.to_string(),
+                    };
+                    let predicate = if value.is_null() {
+                        col(columns_str).is_null()
+                    } else {
+                        col(columns_str).eq(lit(LiteralValue::from(value)))
+                    };
+                    Ok((label, predicate))
                 })
-                .collect();
+                .collect::<Result<Vec<_>>>()?;
+
+            // Distinct typed values may share a display label (null and the
+            // string "null"). Refuse ambiguous output rather than silently
+            // suffixing columns and changing the accepted result meaning.
+            let mut output_labels: std::collections::HashSet<String> =
+                index_cols.iter().cloned().collect();
+            for (label, _) in &pivot_values {
+                for value_column in &value_cols {
+                    let output_label = if value_cols.len() == 1 {
+                        label.clone()
+                    } else {
+                        format!("{label}_{value_column}")
+                    };
+                    if !output_labels.insert(output_label.clone()) {
+                        return Err(ToolError::InvalidParameter {
+                            name: "columns".to_string(),
+                            message: format!("ambiguous pivot column label '{output_label}'"),
+                        }
+                        .into());
+                    }
+                }
+            }
 
             // Step 3: For each pivot value, filter + rename value columns, then join
             let index_exprs: Vec<Expr> = index_cols.iter().map(col).collect();
@@ -3563,10 +3618,9 @@ impl Tool for PivotTool {
                     message: format!("Failed to get unique index rows: {}", e),
                 })?;
 
-            for pval in &pivot_values {
+            for (pval, filter_expr) in &pivot_values {
                 for val_col in &value_cols {
                     // Filter grouped data for this pivot value
-                    let filter_expr = col(columns_str).eq(lit(pval.as_str()));
                     let new_col_name = if value_cols.len() == 1 {
                         pval.clone()
                     } else {
@@ -3576,7 +3630,7 @@ impl Tool for PivotTool {
                     let filtered = grouped
                         .clone()
                         .lazy()
-                        .filter(filter_expr)
+                        .filter(filter_expr.clone())
                         .select(
                             index_cols
                                 .iter()
@@ -3593,14 +3647,13 @@ impl Tool for PivotTool {
                     // Left join with result
                     let left_on: Vec<Expr> = index_cols.iter().map(col).collect();
                     let right_on: Vec<Expr> = index_cols.iter().map(col).collect();
+                    let mut join_arguments = JoinArgs::new(JoinType::Left);
+                    // Null is a real group key from the preceding aggregation.
+                    // Matching it preserves that group's computed cells.
+                    join_arguments.nulls_equal = true;
                     result = result
                         .lazy()
-                        .join(
-                            filtered.lazy(),
-                            left_on,
-                            right_on,
-                            JoinArgs::new(JoinType::Left),
-                        )
+                        .join(filtered.lazy(), left_on, right_on, join_arguments)
                         .collect()
                         .map_err(|e| ToolError::ExecutionFailed {
                             tool: "pivot_data".to_string(),
@@ -3619,7 +3672,7 @@ impl Tool for PivotTool {
                 "pivot_result": {
                     "index": index_cols,
                     "columns": columns_str,
-                    "pivot_values": pivot_values,
+                    "pivot_values": pivot_values.iter().map(|(label, _)| label).collect::<Vec<_>>(),
                     "values": value_cols,
                     "agg_function": agg_function,
                     "shape": [result.height(), result.width()],
@@ -3747,5 +3800,186 @@ mod tests {
             detect_format(&PathBuf::from("data.txt"), Some("json")),
             "json"
         );
+    }
+    async fn execute_pivot_fixture(
+        csv: &str,
+        aggregation: &str,
+    ) -> std::result::Result<Value, Box<dyn std::error::Error>> {
+        let work = tempfile::tempdir()?;
+        let path = work.path().join("pivot.csv");
+        std::fs::write(&path, csv)?;
+        let mut parameters = ToolParameters::new();
+        parameters.insert(
+            "file_path".to_string(),
+            serde_json::json!(path.to_string_lossy()),
+        );
+        parameters.insert("index".to_string(), serde_json::json!("group"));
+        parameters.insert("columns".to_string(), serde_json::json!("quarter"));
+        parameters.insert("values".to_string(), serde_json::json!("value"));
+        parameters.insert("agg_function".to_string(), serde_json::json!(aggregation));
+        let result = PivotTool.execute(parameters).await?;
+        assert!(result.success);
+        Ok(serde_json::from_str(&result.output)?)
+    }
+
+    fn pivot_cells(
+        output: &Value,
+    ) -> std::result::Result<std::collections::BTreeMap<String, Value>, Box<dyn std::error::Error>>
+    {
+        let rows = output
+            .get("pivot_result")
+            .and_then(|value| value.get("data"))
+            .and_then(Value::as_array)
+            .ok_or("pivot result requires rows")?;
+        rows.iter()
+            .map(|row| {
+                let key = row
+                    .get("group")
+                    .and_then(Value::as_str)
+                    .ok_or("group missing")?;
+                Ok((key.to_string(), row.clone()))
+            })
+            .collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pivot_string_columns_keep_original_values_and_aggregate_cells()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let result = execute_pivot_fixture(
+            "group,quarter,value\na,中😀,1\na,中😀,2\na,q2,4\nb,中😀,3\nb,q2,5\n",
+            "sum",
+        )
+        .await?;
+        let cells = pivot_cells(&result)?;
+        assert_eq!(
+            cells.get("a"),
+            Some(&serde_json::json!({"group":"a","中😀":3,"q2":4}))
+        );
+        assert_eq!(
+            cells.get("b"),
+            Some(&serde_json::json!({"group":"b","中😀":3,"q2":5}))
+        );
+        let headers = result
+            .get("pivot_result")
+            .and_then(|value| value.get("pivot_values"))
+            .and_then(Value::as_array)
+            .ok_or("pivot values missing")?;
+        assert_eq!(
+            headers
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<std::collections::BTreeSet<_>>(),
+            std::collections::BTreeSet::from(["中😀", "q2"])
+        );
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pivot_numeric_columns_match_typed_values()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let result =
+            execute_pivot_fixture("group,quarter,value\na,1,2\na,2,4\nb,1,3\nb,2,5\n", "sum")
+                .await?;
+        let cells = pivot_cells(&result)?;
+        assert_eq!(
+            cells.get("a"),
+            Some(&serde_json::json!({"group":"a","1":2,"2":4}))
+        );
+        assert_eq!(
+            cells.get("b"),
+            Some(&serde_json::json!({"group":"b","1":3,"2":5}))
+        );
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pivot_null_values_keep_null_bucket_and_missing_combinations_distinct()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let result =
+            execute_pivot_fixture("group,quarter,value\na,q1,1\na,,2\nb,q1,3\n", "sum").await?;
+        let cells = pivot_cells(&result)?;
+        assert_eq!(
+            cells.get("a"),
+            Some(&serde_json::json!({"group":"a","q1":1,"null":2}))
+        );
+        assert_eq!(
+            cells.get("b"),
+            Some(&serde_json::json!({"group":"b","q1":3,"null":null}))
+        );
+        Ok(())
+    }
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pivot_rejects_ambiguous_string_and_null_headers()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let error = execute_pivot_fixture("group,quarter,value\na,null,1\na,,2\n", "sum")
+            .await
+            .err()
+            .ok_or("distinct pivot values with same header must be rejected")?;
+        assert!(error.to_string().contains("ambiguous pivot column label"));
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pivot_keeps_null_index_rows_when_joining_aggregates()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let result =
+            execute_pivot_fixture("group,quarter,value\n,q1,2\n,q2,3\na,q1,4\n", "sum").await?;
+        let rows = result
+            .get("pivot_result")
+            .and_then(|value| value.get("data"))
+            .and_then(Value::as_array)
+            .ok_or("pivot requires rows")?;
+        let null_row = rows
+            .iter()
+            .find(|row| row.get("group").is_some_and(Value::is_null))
+            .ok_or("null index group must survive")?;
+        assert_eq!(null_row, &serde_json::json!({"group":null,"q1":2,"q2":3}));
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pivot_rejects_invalid_aggregation_instead_of_default_sum()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let error = execute_pivot_fixture("group,quarter,value\na,q1,2\n", "unknown")
+            .await
+            .err()
+            .ok_or("unknown aggregation must not compute a default sum")?;
+        assert!(error.to_string().contains("agg_function"));
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pivot_rejects_wrong_aggregation_type_but_defaults_only_when_absent()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let work = tempfile::tempdir()?;
+        let path = work.path().join("pivot.csv");
+        std::fs::write(&path, "group,quarter,value\na,q1,2\n")?;
+        let mut parameters = ToolParameters::new();
+        parameters.insert(
+            "file_path".to_string(),
+            serde_json::json!(path.to_string_lossy()),
+        );
+        parameters.insert("index".to_string(), serde_json::json!("group"));
+        parameters.insert("columns".to_string(), serde_json::json!("quarter"));
+        parameters.insert("values".to_string(), serde_json::json!("value"));
+        for invalid in [Value::Null, serde_json::json!(3), serde_json::json!(true)] {
+            parameters.insert("agg_function".to_string(), invalid);
+            let error = PivotTool
+                .execute(parameters.clone())
+                .await
+                .err()
+                .ok_or("wrong aggregation type must fail")?;
+            assert!(error.to_string().contains("agg_function"));
+        }
+        parameters.remove("agg_function");
+        let result = PivotTool.execute(parameters).await?;
+        let value: Value = serde_json::from_str(&result.output)?;
+        assert_eq!(
+            value
+                .get("pivot_result")
+                .and_then(|value| value.get("agg_function")),
+            Some(&serde_json::json!("sum"))
+        );
+        Ok(())
     }
 }

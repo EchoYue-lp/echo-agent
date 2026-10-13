@@ -1,0 +1,102 @@
+{
+  "dependencies": [
+    {
+      "id": 33810156,
+      "version_id": 3025532,
+      "crate_id": "anyhow",
+      "req": "^1.0.79",
+      "optional": false,
+      "default_features": true,
+      "features": [],
+      "target": null,
+      "kind": "dev",
+      "downloads": 0
+    },
+    {
+      "id": 33810151,
+      "version_id": 3025532,
+      "crate_id": "indexmap",
+      "req": "^2.2.1",
+      "optional": false,
+      "default_features": false,
+      "features": [],
+      "target": null,
+      "kind": "normal",
+      "downloads": 0
+    },
+    {
+      "id": 33810157,
+      "version_id": 3025532,
+      "crate_id": "indoc",
+      "req": "^2.0",
+      "optional": false,
+      "default_features": true,
+      "features": [],
+      "target": null,
+      "kind": "dev",
+      "downloads": 0
+    },
+    {
+      "id": 33810152,
+      "version_id": 3025532,
+      "crate_id": "itoa",
+      "req": "^1.0",
+      "optional": false,
+      "default_features": true,
+      "features": [],
+      "target": null,
+      "kind": "normal",
+      "downloads": 0
+    },
+    {
+      "id": 33810153,
+      "version_id": 3025532,
+      "crate_id": "libyaml-rs",
+      "req": "^0.3",
+      "optional": false,
+      "default_features": true,
+      "features": [],
+      "target": null,
+      "kind": "normal",
+      "downloads": 0
+    },
+    {
+      "id": 33810154,
+      "version_id": 3025532,
+      "crate_id": "ryu",
+      "req": "^1.0",
+      "optional": false,
+      "default_features": true,
+      "features": [],
+      "target": null,
+      "kind": "normal",
+      "downloads": 0
+    },
+    {
+      "id": 33810155,
+      "version_id": 3025532,
+      "crate_id": "serde",
+      "req": "^1.0.195",
+      "optional": false,
+      "default_features": false,
+      "features": [
+        "alloc"
+      ],
+      "target": null,
+      "kind": "normal",
+      "downloads": 0
+    },
+    {
+      "id": 33810158,
+      "version_id": 3025532,
+      "crate_id": "serde_derive",
+      "req": "^1.0.195",
+      "optional": false,
+      "default_features": true,
+      "features": [],
+      "target": null,
+      "kind": "dev",
+      "downloads": 0
+    }
+  ]
+}

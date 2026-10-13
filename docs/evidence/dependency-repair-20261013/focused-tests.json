@@ -1,0 +1,32 @@
+{
+  "execution-skills": {
+    "passed": 197,
+    "failed": 0,
+    "ignored": 0
+  },
+  "integration-lsp-yaml": {
+    "passed": 3,
+    "failed": 0,
+    "ignored": 0
+  },
+  "root-workflow-yaml": {
+    "passed": 6,
+    "failed": 0,
+    "ignored": 0
+  },
+  "root-evolution-yaml": {
+    "passed": 230,
+    "failed": 0,
+    "ignored": 0
+  },
+  "learning-yaml-contract": {
+    "passed": 3,
+    "failed": 0,
+    "ignored": 0
+  },
+  "root-plugin-yaml": {
+    "passed": 20,
+    "failed": 0,
+    "ignored": 0
+  }
+}

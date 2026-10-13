@@ -1,0 +1,22 @@
+    Updating `rsproxy-sparse` index
+     Locking 16 packages to highest compatible versions
+ Downloading crates ...
+  Downloaded libyaml-rs v0.3.0 (registry `rsproxy-sparse`)
+  Downloaded unicode-ident v1.0.27 (registry `rsproxy-sparse`)
+  Downloaded syn v3.0.9 (registry `rsproxy-sparse`)
+  Downloaded yaml_serde v0.10.7 (registry `rsproxy-sparse`)
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.27
+   Compiling serde_core v1.0.229
+   Compiling serde v1.0.229
+   Compiling syn v3.0.9
+   Compiling indexmap v2.14.2
+   Compiling serde_derive v1.0.229
+   Compiling libyaml-rs v0.3.0
+   Compiling yaml_serde v0.10.7
+   Compiling serde_yaml_ng v0.10.0
+   Compiling echo-yaml-dependency-parity v0.0.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/admin/framework-dependency-repair/yaml-parity)
+    Finished `dev` profile [unoptimized] target(s) in 6.24s
+     Running `/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/echo-yaml-dependency-parity`
+YAML API parity: 7 Value/Mapping/anchors/null/UTF8 documents, 4 typed/tagged variants, 4 exact errors; roundtrip and serialization bytes match

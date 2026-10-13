@@ -1,0 +1,380 @@
+﻿2026-10-13T14:56:05.8438878Z Current runner version: '2.337.0'
+2026-10-13T14:56:05.8464983Z ##[group]Runner Image Provisioner
+2026-10-13T14:56:05.8465888Z Hosted Compute Agent
+2026-10-13T14:56:05.8466494Z Version: 20261002.596
+2026-10-13T14:56:05.8467111Z Commit: c3d12f3313a95f25162a1503be624f3b0617f8c0
+2026-10-13T14:56:05.8467917Z Build Date: 2026-10-02T22:28:27Z
+2026-10-13T14:56:05.8468645Z Worker ID: {1f83e98d-e0b1-4eb3-a0d4-ab8546af3915}
+2026-10-13T14:56:05.8469408Z Region: eastus2
+2026-10-13T14:56:05.8469996Z Cloud: Azure
+2026-10-13T14:56:05.8470523Z ##[endgroup]
+2026-10-13T14:56:05.8472105Z ##[group]Operating System
+2026-10-13T14:56:05.8473002Z Ubuntu
+2026-10-13T14:56:05.8473509Z 24.04.5
+2026-10-13T14:56:05.8474083Z LTS
+2026-10-13T14:56:05.8474583Z ##[endgroup]
+2026-10-13T14:56:05.8475193Z ##[group]Runner Image
+2026-10-13T14:56:05.8475842Z Image: ubuntu-24.04
+2026-10-13T14:56:05.8476385Z Version: 20261004.327.1
+2026-10-13T14:56:05.8477679Z Included Software: https://github.com/actions/runner-images/blob/ubuntu24/20261004.327/images/ubuntu/Ubuntu2404-Readme.md
+2026-10-13T14:56:05.8479263Z Image Release: https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20261004.327
+2026-10-13T14:56:05.8480322Z ##[endgroup]
+2026-10-13T14:56:05.8481426Z ##[group]GITHUB_TOKEN Permissions
+2026-10-13T14:56:05.8483562Z Contents: read
+2026-10-13T14:56:05.8484189Z Metadata: read
+2026-10-13T14:56:05.8484858Z ##[endgroup]
+2026-10-13T14:56:05.8486906Z Secret source: Actions
+2026-10-13T14:56:05.8487942Z Cache mode: write
+2026-10-13T14:56:05.8488692Z Prepare workflow directory
+2026-10-13T14:56:05.8829023Z Prepare all required actions
+2026-10-13T14:56:05.8876801Z Getting action download info
+2026-10-13T14:56:06.1918183Z Download action repository 'actions/checkout@v6' (SHA:d23441a48e516b6c34aea4fa41551a30e30af803)
+2026-10-13T14:56:06.3143917Z Download action repository 'taiki-e/install-action@cargo-audit' (SHA:977cdbe2e748fc9d5798e3098868c4c4463bf31b)
+2026-10-13T14:56:06.5475761Z Download action repository 'EmbarkStudios/cargo-deny-action@v2' (SHA:3c6349835b2b7b196a839186cb8b78e02f7b5f25)
+2026-10-13T14:56:06.7519329Z Complete job name: dependency-policy
+2026-10-13T14:56:06.7987542Z ##[group]Build container for action use: '/home/runner/work/_actions/EmbarkStudios/cargo-deny-action/v2/Dockerfile'.
+2026-10-13T14:56:06.8100750Z ##[command]/usr/bin/docker build -t 95458d:e2d06a06b34c4707af83e361a9d5f761 -f "/home/runner/work/_actions/EmbarkStudios/cargo-deny-action/v2/Dockerfile" "/home/runner/work/_actions/EmbarkStudios/cargo-deny-action/v2"
+2026-10-13T14:56:10.1808797Z #0 building with "default" instance using docker driver
+2026-10-13T14:56:10.1809796Z 
+2026-10-13T14:56:10.1810248Z #1 [internal] load build definition from Dockerfile
+2026-10-13T14:56:10.1811280Z #1 transferring dockerfile: 508B 0.1s done
+2026-10-13T14:56:10.1812200Z #1 DONE 0.1s
+2026-10-13T14:56:10.1812780Z 
+2026-10-13T14:56:10.1813275Z #2 [auth] library/rust:pull token for registry-1.docker.io
+2026-10-13T14:56:10.3305268Z #2 DONE 0.0s
+2026-10-13T14:56:10.3305967Z 
+2026-10-13T14:56:10.3307845Z #3 [internal] load metadata for docker.io/library/rust:1.85.0-alpine3.20@sha256:f0cef6c65992995b1c7816cb667de95799852e3fbed9d06f95855cbc512a0fd0
+2026-10-13T14:56:10.5700935Z #3 DONE 0.4s
+2026-10-13T14:56:10.6935521Z 
+2026-10-13T14:56:10.6937135Z #4 [internal] load .dockerignore
+2026-10-13T14:56:10.6937987Z #4 transferring context: 2B done
+2026-10-13T14:56:10.6938933Z #4 DONE 0.0s
+2026-10-13T14:56:10.6939535Z 
+2026-10-13T14:56:10.6940053Z #5 [internal] load build context
+2026-10-13T14:56:10.6941314Z #5 transferring context: 1.12kB done
+2026-10-13T14:56:10.6941850Z #5 DONE 0.0s
+2026-10-13T14:56:10.6942088Z 
+2026-10-13T14:56:10.6942965Z #6 [1/3] FROM docker.io/library/rust:1.85.0-alpine3.20@sha256:f0cef6c65992995b1c7816cb667de95799852e3fbed9d06f95855cbc512a0fd0
+2026-10-13T14:56:10.6945656Z #6 resolve docker.io/library/rust:1.85.0-alpine3.20@sha256:f0cef6c65992995b1c7816cb667de95799852e3fbed9d06f95855cbc512a0fd0 done
+2026-10-13T14:56:10.6947190Z #6 extracting sha256:0a9a5dfd008f05ebc27e4790db0709a29e527690c21bcbcd01481eaeb6bb49dc
+2026-10-13T14:56:10.7944442Z #6 sha256:7c38e59fb99c1014ea6d250d396bb9bf55981f1d69fe17ed05047b90cd119ca9 2.53kB / 2.53kB done
+2026-10-13T14:56:10.7946026Z #6 sha256:0a9a5dfd008f05ebc27e4790db0709a29e527690c21bcbcd01481eaeb6bb49dc 3.63MB / 3.63MB 0.1s done
+2026-10-13T14:56:10.7947584Z #6 sha256:d0430b4a2b30329b0c06034d1df61c2f3533c436834a54b76def8756d804d888 2.10MB / 55.32MB 0.1s
+2026-10-13T14:56:10.7948963Z #6 sha256:8fda7dd06f6e434e3727cd86155430a51568846533e3824548334e20f1078e28 1.05MB / 239.16MB 0.1s
+2026-10-13T14:56:10.7950416Z #6 sha256:f0cef6c65992995b1c7816cb667de95799852e3fbed9d06f95855cbc512a0fd0 2.63kB / 2.63kB done
+2026-10-13T14:56:10.7951586Z #6 sha256:6d824fef86a8532aecead5889d49d432d19e0dd58b958266c994cca9eb7a3357 1.54kB / 1.54kB done
+2026-10-13T14:56:10.9097421Z #6 extracting sha256:0a9a5dfd008f05ebc27e4790db0709a29e527690c21bcbcd01481eaeb6bb49dc 0.1s done
+2026-10-13T14:56:10.9099109Z #6 sha256:d0430b4a2b30329b0c06034d1df61c2f3533c436834a54b76def8756d804d888 55.32MB / 55.32MB 0.3s done
+2026-10-13T14:56:10.9100227Z #6 sha256:8fda7dd06f6e434e3727cd86155430a51568846533e3824548334e20f1078e28 102.76MB / 239.16MB 0.3s
+2026-10-13T14:56:11.0097131Z #6 sha256:8fda7dd06f6e434e3727cd86155430a51568846533e3824548334e20f1078e28 155.19MB / 239.16MB 0.4s
+2026-10-13T14:56:11.0099055Z #6 extracting sha256:d0430b4a2b30329b0c06034d1df61c2f3533c436834a54b76def8756d804d888
+2026-10-13T14:56:11.1669460Z #6 sha256:8fda7dd06f6e434e3727cd86155430a51568846533e3824548334e20f1078e28 199.23MB / 239.16MB 0.5s
+2026-10-13T14:56:11.3102197Z #6 sha256:8fda7dd06f6e434e3727cd86155430a51568846533e3824548334e20f1078e28 239.16MB / 239.16MB 0.7s
+2026-10-13T14:56:11.6660608Z #6 sha256:8fda7dd06f6e434e3727cd86155430a51568846533e3824548334e20f1078e28 239.16MB / 239.16MB 0.9s done
+2026-10-13T14:56:12.1761971Z #6 extracting sha256:d0430b4a2b30329b0c06034d1df61c2f3533c436834a54b76def8756d804d888 1.1s done
+2026-10-13T14:56:13.6620877Z #6 extracting sha256:8fda7dd06f6e434e3727cd86155430a51568846533e3824548334e20f1078e28
+2026-10-13T14:56:16.7133439Z #6 extracting sha256:8fda7dd06f6e434e3727cd86155430a51568846533e3824548334e20f1078e28 2.9s done
+2026-10-13T14:56:18.0529632Z #6 DONE 7.5s
+2026-10-13T14:56:18.1889967Z 
+2026-10-13T14:56:18.1891825Z #7 [2/3] RUN set -eux;     apk update;     apk add bash curl git tar openssh;     curl --silent -L https://github.com/EmbarkStudios/cargo-deny/releases/download/0.20.2/cargo-deny-0.20.2-x86_64-unknown-linux-musl.tar.gz | tar -xzv -C /usr/bin --strip-components=1;
+2026-10-13T14:56:18.1893699Z #7 0.135 + apk update
+2026-10-13T14:56:18.3024879Z #7 0.142 fetch https://dl-cdn.alpinelinux.org/alpine/v3.20/main/x86_64/APKINDEX.tar.gz
+2026-10-13T14:56:18.3025879Z #7 0.249 fetch https://dl-cdn.alpinelinux.org/alpine/v3.20/community/x86_64/APKINDEX.tar.gz
+2026-10-13T14:56:18.5963653Z #7 0.543 v3.20.10-114-ga410d2306e5 [https://dl-cdn.alpinelinux.org/alpine/v3.20/main]
+2026-10-13T14:56:18.5964706Z #7 0.543 v3.20.10-106-gcfb1a4769c3 [https://dl-cdn.alpinelinux.org/alpine/v3.20/community]
+2026-10-13T14:56:18.5965516Z #7 0.543 OK: 24182 distinct packages available
+2026-10-13T14:56:18.8102672Z #7 0.606 + apk add bash curl git tar openssh
+2026-10-13T14:56:18.9321736Z #7 0.878 (1/26) Installing ncurses-terminfo-base (6.4_p20240420-r2)
+2026-10-13T14:56:19.0331779Z #7 0.927 (2/26) Installing libncursesw (6.4_p20240420-r2)
+2026-10-13T14:56:19.0332698Z #7 0.946 (3/26) Installing readline (8.2.10-r0)
+2026-10-13T14:56:19.0333041Z #7 0.955 (4/26) Installing bash (5.2.26-r0)
+2026-10-13T14:56:19.0333376Z #7 0.977 Executing bash-5.2.26-r0.post-install
+2026-10-13T14:56:19.0333724Z #7 0.980 (5/26) Installing brotli-libs (1.1.0-r2)
+2026-10-13T14:56:19.1335785Z #7 0.993 (6/26) Installing c-ares (1.33.1-r0)
+2026-10-13T14:56:19.1336852Z #7 1.000 (7/26) Installing libunistring (1.2-r0)
+2026-10-13T14:56:19.1337300Z #7 1.018 (8/26) Installing libidn2 (2.3.7-r0)
+2026-10-13T14:56:19.2500530Z #7 1.026 (9/26) Installing nghttp2-libs (1.62.1-r0)
+2026-10-13T14:56:19.2501346Z #7 1.033 (10/26) Installing libpsl (0.21.5-r1)
+2026-10-13T14:56:19.2502827Z #7 1.044 (11/26) Installing libcurl (8.14.1-r2)
+2026-10-13T14:56:19.2503608Z #7 1.055 (12/26) Installing curl (8.14.1-r2)
+2026-10-13T14:56:19.2504358Z #7 1.063 (13/26) Installing libexpat (2.8.1-r0)
+2026-10-13T14:56:19.2505099Z #7 1.070 (14/26) Installing pcre2 (10.43-r0)
+2026-10-13T14:56:19.2505782Z #7 1.080 (15/26) Installing git (2.45.4-r0)
+2026-10-13T14:56:19.2506535Z #7 1.149 (16/26) Installing git-init-template (2.45.4-r0)
+2026-10-13T14:56:19.2507429Z #7 1.156 (17/26) Installing openssh-keygen (9.7_p1-r5)
+2026-10-13T14:56:19.2507912Z #7 1.167 (18/26) Installing libedit (20240517.3.1-r0)
+2026-10-13T14:56:19.2508470Z #7 1.174 (19/26) Installing openssh-client-common (9.7_p1-r5)
+2026-10-13T14:56:19.2508973Z #7 1.196 (20/26) Installing openssh-client-default (9.7_p1-r5)
+2026-10-13T14:56:19.3906692Z #7 1.210 (21/26) Installing openssh-sftp-server (9.7_p1-r5)
+2026-10-13T14:56:19.3907611Z #7 1.217 (22/26) Installing openssh-server-common (9.7_p1-r5)
+2026-10-13T14:56:19.3908304Z #7 1.224 (23/26) Installing openssh-server (9.7_p1-r5)
+2026-10-13T14:56:19.3908949Z #7 1.240 (24/26) Installing openssh (9.7_p1-r5)
+2026-10-13T14:56:19.3909503Z #7 1.248 (25/26) Installing libacl (2.3.2-r0)
+2026-10-13T14:56:19.3910037Z #7 1.255 (26/26) Installing tar (1.35-r2)
+2026-10-13T14:56:19.3910549Z #7 1.265 Executing busybox-1.36.1-r29.trigger
+2026-10-13T14:56:19.3911034Z #7 1.271 OK: 167 MiB in 53 packages
+2026-10-13T14:56:19.3911888Z #7 1.337 + curl --silent -L https://github.com/EmbarkStudios/cargo-deny/releases/download/0.20.2/cargo-deny-0.20.2-x86_64-unknown-linux-musl.tar.gz
+2026-10-13T14:56:19.5752785Z #7 1.337 + tar -xzv -C /usr/bin '--strip-components=1'
+2026-10-13T14:56:19.5753599Z #7 1.414 cargo-deny-0.20.2-x86_64-unknown-linux-musl/README.md
+2026-10-13T14:56:19.5755022Z #7 1.414 cargo-deny-0.20.2-x86_64-unknown-linux-musl/LICENSE-APACHE
+2026-10-13T14:56:19.5756676Z #7 1.414 cargo-deny-0.20.2-x86_64-unknown-linux-musl/cargo-deny
+2026-10-13T14:56:19.5757638Z #7 1.522 cargo-deny-0.20.2-x86_64-unknown-linux-musl/LICENSE-MIT
+2026-10-13T14:56:19.7792937Z #7 DONE 1.5s
+2026-10-13T14:56:19.7793555Z 
+2026-10-13T14:56:19.7794329Z #8 [3/3] COPY entrypoint.sh /entrypoint.sh
+2026-10-13T14:56:19.7795011Z #8 DONE 0.0s
+2026-10-13T14:56:19.7795268Z 
+2026-10-13T14:56:19.7795474Z #9 exporting to image
+2026-10-13T14:56:19.7795978Z #9 exporting layers
+2026-10-13T14:56:20.0062241Z #9 exporting layers 0.4s done
+2026-10-13T14:56:20.0227779Z #9 writing image sha256:94fae43e414eeb9a54a4ab2ce3a13e98267daa016fbb4345b31e59dba1e9e41a done
+2026-10-13T14:56:20.0228856Z #9 naming to docker.io/library/95458d:e2d06a06b34c4707af83e361a9d5f761 done
+2026-10-13T14:56:20.0230314Z #9 DONE 0.4s
+2026-10-13T14:56:20.0279877Z ##[endgroup]
+2026-10-13T14:56:20.0580608Z ##[group]Run actions/checkout@v6
+2026-10-13T14:56:20.0581161Z with:
+2026-10-13T14:56:20.0581384Z   repository: EchoYue-lp/echo-agent
+2026-10-13T14:56:20.0584587Z   token: ***
+2026-10-13T14:56:20.0584797Z   ssh-strict: true
+2026-10-13T14:56:20.0584999Z   ssh-user: git
+2026-10-13T14:56:20.0585212Z   persist-credentials: true
+2026-10-13T14:56:20.0585464Z   clean: true
+2026-10-13T14:56:20.0585680Z   sparse-checkout-cone-mode: true
+2026-10-13T14:56:20.0585930Z   fetch-depth: 1
+2026-10-13T14:56:20.0586123Z   fetch-tags: false
+2026-10-13T14:56:20.0586325Z   show-progress: true
+2026-10-13T14:56:20.0586528Z   lfs: false
+2026-10-13T14:56:20.0586712Z   submodules: false
+2026-10-13T14:56:20.0586917Z   set-safe-directory: true
+2026-10-13T14:56:20.0587161Z   allow-unsafe-pr-checkout: false
+2026-10-13T14:56:20.0587630Z ##[endgroup]
+2026-10-13T14:56:20.1757868Z Syncing repository: EchoYue-lp/echo-agent
+2026-10-13T14:56:20.1759876Z ##[group]Getting Git version info
+2026-10-13T14:56:20.1760674Z Working directory is '/home/runner/work/echo-agent/echo-agent'
+2026-10-13T14:56:20.1761784Z [command]/usr/bin/git version
+2026-10-13T14:56:20.1769245Z git version 2.55.0
+2026-10-13T14:56:20.1793281Z ##[endgroup]
+2026-10-13T14:56:20.1809873Z Temporarily overriding HOME='/home/runner/work/_temp/9aec876c-9abe-472b-9179-0749186094d7' before making global git config changes
+2026-10-13T14:56:20.1811916Z Adding repository directory to the temporary git global config as a safe directory
+2026-10-13T14:56:20.1816180Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/echo-agent/echo-agent
+2026-10-13T14:56:20.1868589Z Deleting the contents of '/home/runner/work/echo-agent/echo-agent'
+2026-10-13T14:56:20.1874096Z ##[group]Determining repository object format
+2026-10-13T14:56:20.1876500Z ##[endgroup]
+2026-10-13T14:56:20.1877422Z ##[group]Initializing the repository
+2026-10-13T14:56:20.1881793Z [command]/usr/bin/git init /home/runner/work/echo-agent/echo-agent
+2026-10-13T14:56:20.2005306Z hint: Using 'master' as the name for the initial branch. This default branch name
+2026-10-13T14:56:20.2006457Z hint: will change to "main" in Git 3.0. To configure the initial branch name
+2026-10-13T14:56:20.2007575Z hint: to use in all of your new repositories, which will suppress this warning,
+2026-10-13T14:56:20.2008547Z hint: call:
+2026-10-13T14:56:20.2009101Z hint:
+2026-10-13T14:56:20.2009790Z hint: 	git config --global init.defaultBranch <name>
+2026-10-13T14:56:20.2010521Z hint:
+2026-10-13T14:56:20.2011281Z hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
+2026-10-13T14:56:20.2012543Z hint: 'development'. The just-created branch can be renamed via this command:
+2026-10-13T14:56:20.2013499Z hint:
+2026-10-13T14:56:20.2014070Z hint: 	git branch -m <name>
+2026-10-13T14:56:20.2014737Z hint:
+2026-10-13T14:56:20.2015491Z hint: Disable this message with "git config set advice.defaultBranchName false"
+2026-10-13T14:56:20.2016635Z Initialized empty Git repository in /home/runner/work/echo-agent/echo-agent/.git/
+2026-10-13T14:56:20.2024636Z [command]/usr/bin/git remote add origin https://github.com/EchoYue-lp/echo-agent
+2026-10-13T14:56:20.2073878Z ##[endgroup]
+2026-10-13T14:56:20.2074592Z ##[group]Disabling automatic garbage collection
+2026-10-13T14:56:20.2078025Z [command]/usr/bin/git config --local gc.auto 0
+2026-10-13T14:56:20.2109409Z ##[endgroup]
+2026-10-13T14:56:20.2110195Z ##[group]Setting up auth
+2026-10-13T14:56:20.2111078Z Removing SSH command configuration
+2026-10-13T14:56:20.2119404Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+2026-10-13T14:56:20.2154339Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+2026-10-13T14:56:20.2572201Z Removing HTTP extra header
+2026-10-13T14:56:20.2573445Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+2026-10-13T14:56:20.2615518Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+2026-10-13T14:56:20.2850118Z Removing includeIf entries pointing to credentials config files
+2026-10-13T14:56:20.2850869Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+2026-10-13T14:56:20.2887431Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+2026-10-13T14:56:20.3118729Z [command]/usr/bin/git config --file /home/runner/work/_temp/git-credentials-f4dc8e57-39ea-449d-9b57-1d9dd3f183b6.config http.https://github.com/.extraheader AUTHORIZATION: basic ***
+2026-10-13T14:56:20.3159471Z [command]/usr/bin/git config --local includeIf.gitdir:/home/runner/work/echo-agent/echo-agent/.git.path /home/runner/work/_temp/git-credentials-f4dc8e57-39ea-449d-9b57-1d9dd3f183b6.config
+2026-10-13T14:56:20.3197547Z [command]/usr/bin/git config --local includeIf.gitdir:/home/runner/work/echo-agent/echo-agent/.git/worktrees/*.path /home/runner/work/_temp/git-credentials-f4dc8e57-39ea-449d-9b57-1d9dd3f183b6.config
+2026-10-13T14:56:20.3270823Z [command]/usr/bin/git config --local includeIf.gitdir:/github/workspace/.git.path /github/runner_temp/git-credentials-f4dc8e57-39ea-449d-9b57-1d9dd3f183b6.config
+2026-10-13T14:56:20.3310507Z [command]/usr/bin/git config --local includeIf.gitdir:/github/workspace/.git/worktrees/*.path /github/runner_temp/git-credentials-f4dc8e57-39ea-449d-9b57-1d9dd3f183b6.config
+2026-10-13T14:56:20.3351859Z ##[endgroup]
+2026-10-13T14:56:20.3352801Z ##[group]Fetching the repository
+2026-10-13T14:56:20.3354255Z [command]/usr/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules --depth=1 origin +595d0f0715d1f4935991951b3bbe17630bd3bf71:refs/remotes/pull/181/merge
+2026-10-13T14:56:21.4455107Z From https://github.com/EchoYue-lp/echo-agent
+2026-10-13T14:56:21.4456038Z  * [new ref]         595d0f0715d1f4935991951b3bbe17630bd3bf71 -> pull/181/merge
+2026-10-13T14:56:21.4463102Z ##[endgroup]
+2026-10-13T14:56:21.4463891Z ##[group]Determining the checkout info
+2026-10-13T14:56:21.4465033Z ##[endgroup]
+2026-10-13T14:56:21.4471593Z [command]/usr/bin/git sparse-checkout disable
+2026-10-13T14:56:21.4525901Z [command]/usr/bin/git config --local --unset-all extensions.worktreeConfig
+2026-10-13T14:56:21.4558236Z ##[group]Checking out the ref
+2026-10-13T14:56:21.4563025Z [command]/usr/bin/git checkout --progress --force refs/remotes/pull/181/merge
+2026-10-13T14:56:21.5797529Z Note: switching to 'refs/remotes/pull/181/merge'.
+2026-10-13T14:56:21.5797913Z 
+2026-10-13T14:56:21.5798138Z You are in 'detached HEAD' state. You can look around, make experimental
+2026-10-13T14:56:21.5798644Z changes and commit them, and you can discard any commits you make in this
+2026-10-13T14:56:21.5799126Z state without impacting any branches by switching back to a branch.
+2026-10-13T14:56:21.5799427Z 
+2026-10-13T14:56:21.5799681Z If you want to create a new branch to retain commits you create, you may
+2026-10-13T14:56:21.5800137Z do so (now or later) by using -c with the switch command. Example:
+2026-10-13T14:56:21.5800397Z 
+2026-10-13T14:56:21.5800509Z   git switch -c <new-branch-name>
+2026-10-13T14:56:21.5800689Z 
+2026-10-13T14:56:21.5800805Z Or undo this operation with:
+2026-10-13T14:56:21.5800969Z 
+2026-10-13T14:56:21.5801051Z   git switch -
+2026-10-13T14:56:21.5801174Z 
+2026-10-13T14:56:21.5801391Z Turn off this advice by setting config variable advice.detachedHead to false
+2026-10-13T14:56:21.5801714Z 
+2026-10-13T14:56:21.5802070Z HEAD is now at 595d0f0 Merge 4eb005c15b9c0036b73e409026c668c02f0a9575 into 95ec66c6083a8feb17a1c28de0d01e1a24ca8a28
+2026-10-13T14:56:21.5811872Z ##[endgroup]
+2026-10-13T14:56:21.5862015Z [command]/usr/bin/git log -1 --format=%H
+2026-10-13T14:56:21.5890148Z 595d0f0715d1f4935991951b3bbe17630bd3bf71
+2026-10-13T14:56:21.6169435Z ##[group]Run taiki-e/install-action@cargo-audit
+2026-10-13T14:56:21.6169776Z with:
+2026-10-13T14:56:21.6169973Z   tool: cargo-audit
+2026-10-13T14:56:21.6170186Z   checksum: true
+2026-10-13T14:56:21.6170408Z   fallback: cargo-binstall
+2026-10-13T14:56:21.6170634Z ##[endgroup]
+2026-10-13T14:56:21.6276857Z ##[start-action display=Run bail() {;id=__taiki-e_install-action.__run]
+2026-10-13T14:56:21.6325445Z ##[group]Run bail() {
+2026-10-13T14:56:21.6325753Z [36;1mbail() {[0m
+2026-10-13T14:56:21.6326043Z [36;1m  printf '::error::install-action: %s\n' "$*"[0m
+2026-10-13T14:56:21.6326352Z [36;1m  exit 1[0m
+2026-10-13T14:56:21.6326539Z [36;1m}[0m
+2026-10-13T14:56:21.6326924Z [36;1m# If /bin/sh is dash, environment variable containing % is not imported, but is fine[0m
+2026-10-13T14:56:21.6327481Z [36;1m# because it also means that it will not be exposed to subprocess.[0m
+2026-10-13T14:56:21.6327900Z [36;1mif /usr/bin/env | grep -Eq '^BASH_FUNC_'; then[0m
+2026-10-13T14:56:21.6328490Z [36;1m  bail 'bash function injection via BASH_FUNC_ environment variable is not allowed for security reasons'[0m
+2026-10-13T14:56:21.6328982Z [36;1mfi[0m
+2026-10-13T14:56:21.6329203Z [36;1mif ! command -v bash >/dev/null; then[0m
+2026-10-13T14:56:21.6329546Z [36;1m  if grep -Eq '^ID=alpine' /etc/os-release; then[0m
+2026-10-13T14:56:21.6329986Z [36;1m    printf '::group::Install packages required for install-action (bash)\n'[0m
+2026-10-13T14:56:21.6330624Z [36;1m    # NB: sync with apk_install in main.sh[0m
+2026-10-13T14:56:21.6330932Z [36;1m    if command -v sudo >/dev/null; then[0m
+2026-10-13T14:56:21.6331262Z [36;1m      sudo apk --no-cache add bash[0m
+2026-10-13T14:56:21.6331582Z [36;1m    elif command -v doas >/dev/null; then[0m
+2026-10-13T14:56:21.6331880Z [36;1m      doas apk --no-cache add bash[0m
+2026-10-13T14:56:21.6332143Z [36;1m    else[0m
+2026-10-13T14:56:21.6332602Z [36;1m      apk --no-cache add bash[0m
+2026-10-13T14:56:21.6332861Z [36;1m    fi[0m
+2026-10-13T14:56:21.6333072Z [36;1m    printf '::endgroup::\n'[0m
+2026-10-13T14:56:21.6333316Z [36;1m  else[0m
+2026-10-13T14:56:21.6333531Z [36;1m    bail 'this action requires bash'[0m
+2026-10-13T14:56:21.6333798Z [36;1m  fi[0m
+2026-10-13T14:56:21.6333982Z [36;1mfi[0m
+2026-10-13T14:56:21.6334268Z [36;1mbash --noprofile --norc "${GITHUB_ACTION_PATH:?}/main.sh"[0m
+2026-10-13T14:56:21.6337296Z shell: /usr/bin/env -u ENV -u BASH_ENV -u CDPATH -u SHELLOPTS -u BASHOPTS /bin/sh -eu {0}
+2026-10-13T14:56:21.6337735Z env:
+2026-10-13T14:56:21.6337934Z   INPUT_TOOL: cargo-audit
+2026-10-13T14:56:21.6338168Z   INPUT_CHECKSUM: true
+2026-10-13T14:56:21.6338400Z   INPUT_FALLBACK: cargo-binstall
+2026-10-13T14:56:21.6341466Z   DEFAULT_GITHUB_TOKEN: ***
+2026-10-13T14:56:21.6341788Z   ACTION_USER_AGENT: taiki-e/install-action (cargo-audit)
+2026-10-13T14:56:21.6342111Z   RUNNER_OS: Linux
+2026-10-13T14:56:21.6342548Z   RUNNER_ARCH: X64
+2026-10-13T14:56:21.6342754Z ##[endgroup]
+2026-10-13T14:56:21.6505054Z info: host platform: x86_64_linux
+2026-10-13T14:56:21.6670024Z info: installing cargo-audit@latest
+2026-10-13T14:56:21.6859055Z info: downloading https://github.com/rustsec/rustsec/releases/download/cargo-audit/v0.22.2/cargo-audit-x86_64-unknown-linux-musl-v0.22.2.tgz
+2026-10-13T14:56:21.8500008Z info: verifying sha256 checksum for cargo-audit-x86_64-unknown-linux-musl-v0.22.2.tgz
+2026-10-13T14:56:21.9725759Z info: cargo-audit installed at /home/runner/.cargo/bin/cargo-audit
+2026-10-13T14:56:21.9729280Z + cargo-audit audit --version
+2026-10-13T14:56:21.9738516Z cargo-audit-audit 0.22.2
+2026-10-13T14:56:21.9741198Z 
+2026-10-13T14:56:21.9763420Z ##[end-action id=__taiki-e_install-action.__run;outcome=success;conclusion=success;duration_ms=348]
+2026-10-13T14:56:21.9770606Z ##[start-action display=Run Set-StrictMode -Version Latest;id=__taiki-e_install-action.__run_2]
+2026-10-13T14:56:21.9776827Z ##[end-action id=__taiki-e_install-action.__run_2;outcome=skipped;conclusion=skipped;duration_ms=0]
+2026-10-13T14:56:21.9817604Z ##[group]Run cargo audit --deny warnings
+2026-10-13T14:56:21.9817953Z [36;1mcargo audit --deny warnings[0m
+2026-10-13T14:56:22.0023532Z shell: /usr/bin/bash -e {0}
+2026-10-13T14:56:22.0023842Z ##[endgroup]
+2026-10-13T14:56:22.8933609Z     Fetching advisory database from `https://github.com/RustSec/advisory-db.git`
+2026-10-13T14:56:26.5676116Z       Loaded 1310 security advisories (from /home/runner/.cargo/advisory-db)
+2026-10-13T14:56:26.5676773Z     Updating crates.io index
+2026-10-13T14:56:26.6035982Z     Scanning Cargo.lock for vulnerabilities (681 crate dependencies)
+2026-10-13T14:56:27.4717918Z Crate:     quinn-proto
+2026-10-13T14:56:27.4718472Z error: 5 vulnerabilities found!
+2026-10-13T14:56:27.4719000Z error: 1 denied warning found!
+2026-10-13T14:56:27.4719473Z Version:   0.11.16
+2026-10-13T14:56:27.4720244Z Title:     Stream reassembly memory-exhaustion guard in quinn-proto can be bypassed
+2026-10-13T14:56:27.4721088Z Date:      2026-08-17
+2026-10-13T14:56:27.4721671Z ID:        RUSTSEC-2026-0341
+2026-10-13T14:56:27.4722671Z URL:       https://rustsec.org/advisories/RUSTSEC-2026-0341
+2026-10-13T14:56:27.4723449Z Severity:  7.5 (high)
+2026-10-13T14:56:27.4723885Z Solution:  Upgrade to >=0.11.17
+2026-10-13T14:56:27.4724183Z 
+2026-10-13T14:56:27.4724333Z Crate:     quinn-proto
+2026-10-13T14:56:27.4724699Z Version:   0.11.16
+2026-10-13T14:56:27.4725296Z Title:     Unbounded growth of pending connection ID retirements in quinn-proto
+2026-10-13T14:56:27.4726371Z Date:      2026-08-17
+2026-10-13T14:56:27.4726793Z ID:        RUSTSEC-2026-0339
+2026-10-13T14:56:27.4727333Z URL:       https://rustsec.org/advisories/RUSTSEC-2026-0339
+2026-10-13T14:56:27.4727996Z Solution:  Upgrade to >=0.11.17
+2026-10-13T14:56:27.4728362Z 
+2026-10-13T14:56:27.4728511Z Crate:     quinn-proto
+2026-10-13T14:56:27.4728911Z Version:   0.11.16
+2026-10-13T14:56:27.4729580Z Title:     Zero-length DATAGRAM frames bypass the receive buffer limit in quinn-proto
+2026-10-13T14:56:27.4730375Z Date:      2026-08-17
+2026-10-13T14:56:27.4730819Z ID:        RUSTSEC-2026-0342
+2026-10-13T14:56:27.4731410Z URL:       https://rustsec.org/advisories/RUSTSEC-2026-0342
+2026-10-13T14:56:27.4732503Z Solution:  Upgrade to >=0.11.17
+2026-10-13T14:56:27.4732811Z 
+2026-10-13T14:56:27.4732961Z Crate:     quinn-proto
+2026-10-13T14:56:27.4733327Z Version:   0.11.16
+2026-10-13T14:56:27.4734016Z Title:     Peer minimum ACK delay can panic quinn-proto when ACK_FREQUENCY transmission is enabled
+2026-10-13T14:56:27.4734993Z Date:      2026-09-14
+2026-10-13T14:56:27.4735394Z ID:        RUSTSEC-2026-0340
+2026-10-13T14:56:27.4736003Z URL:       https://rustsec.org/advisories/RUSTSEC-2026-0340
+2026-10-13T14:56:27.4736656Z Severity:  7.5 (high)
+2026-10-13T14:56:27.4737100Z Solution:  Upgrade to >=0.11.18
+2026-10-13T14:56:27.4737454Z 
+2026-10-13T14:56:27.4737653Z Crate:     quinn-proto
+2026-10-13T14:56:27.4738078Z Version:   0.11.16
+2026-10-13T14:56:27.4738927Z Title:     Remote peer can panic quinn-proto with zero-length STREAM frames during unordered reads
+2026-10-13T14:56:27.4739889Z Date:      2026-09-14
+2026-10-13T14:56:27.4740273Z ID:        RUSTSEC-2026-0338
+2026-10-13T14:56:27.4741073Z URL:       https://rustsec.org/advisories/RUSTSEC-2026-0338
+2026-10-13T14:56:27.4741413Z Solution:  Upgrade to >=0.11.18
+2026-10-13T14:56:27.4741576Z 
+2026-10-13T14:56:27.4741666Z Crate:     unsafe-libyaml
+2026-10-13T14:56:27.4741883Z Version:   0.2.11
+2026-10-13T14:56:27.4742084Z Warning:   unmaintained
+2026-10-13T14:56:27.4742595Z Title:     unsafe-libyaml is unmaintained
+2026-10-13T14:56:27.4742995Z Date:      2024-03-25
+2026-10-13T14:56:27.4743221Z ID:        RUSTSEC-2024-0449
+2026-10-13T14:56:27.4743512Z URL:       https://rustsec.org/advisories/RUSTSEC-2024-0449
+2026-10-13T14:56:27.4743748Z 
+2026-10-13T14:56:27.4783291Z ##[error]Process completed with exit code 1.
+2026-10-13T14:56:27.4963496Z Post job cleanup.
+2026-10-13T14:56:27.5848046Z [command]/usr/bin/git version
+2026-10-13T14:56:27.5893199Z git version 2.55.0
+2026-10-13T14:56:27.5937776Z Temporarily overriding HOME='/home/runner/work/_temp/ff74a5fc-6cb6-422c-a0b4-aff1239e734f' before making global git config changes
+2026-10-13T14:56:27.5938960Z Adding repository directory to the temporary git global config as a safe directory
+2026-10-13T14:56:27.5943848Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/echo-agent/echo-agent
+2026-10-13T14:56:27.5976866Z Removing SSH command configuration
+2026-10-13T14:56:27.5984328Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+2026-10-13T14:56:27.6021146Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+2026-10-13T14:56:27.6263603Z Removing HTTP extra header
+2026-10-13T14:56:27.6269341Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+2026-10-13T14:56:27.6307357Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+2026-10-13T14:56:27.6557631Z Removing includeIf entries pointing to credentials config files
+2026-10-13T14:56:27.6567628Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+2026-10-13T14:56:27.6603030Z includeif.gitdir:/home/runner/work/echo-agent/echo-agent/.git.path
+2026-10-13T14:56:27.6604641Z includeif.gitdir:/home/runner/work/echo-agent/echo-agent/.git/worktrees/*.path
+2026-10-13T14:56:27.6605517Z includeif.gitdir:/github/workspace/.git.path
+2026-10-13T14:56:27.6606292Z includeif.gitdir:/github/workspace/.git/worktrees/*.path
+2026-10-13T14:56:27.6610744Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/home/runner/work/echo-agent/echo-agent/.git.path
+2026-10-13T14:56:27.6638464Z /home/runner/work/_temp/git-credentials-f4dc8e57-39ea-449d-9b57-1d9dd3f183b6.config
+2026-10-13T14:56:27.6651928Z [command]/usr/bin/git config --local --unset includeif.gitdir:/home/runner/work/echo-agent/echo-agent/.git.path /home/runner/work/_temp/git-credentials-f4dc8e57-39ea-449d-9b57-1d9dd3f183b6.config
+2026-10-13T14:56:27.6695519Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/home/runner/work/echo-agent/echo-agent/.git/worktrees/*.path
+2026-10-13T14:56:27.6723066Z /home/runner/work/_temp/git-credentials-f4dc8e57-39ea-449d-9b57-1d9dd3f183b6.config
+2026-10-13T14:56:27.6734210Z [command]/usr/bin/git config --local --unset includeif.gitdir:/home/runner/work/echo-agent/echo-agent/.git/worktrees/*.path /home/runner/work/_temp/git-credentials-f4dc8e57-39ea-449d-9b57-1d9dd3f183b6.config
+2026-10-13T14:56:27.6774167Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/github/workspace/.git.path
+2026-10-13T14:56:27.6800403Z /github/runner_temp/git-credentials-f4dc8e57-39ea-449d-9b57-1d9dd3f183b6.config
+2026-10-13T14:56:27.6810838Z [command]/usr/bin/git config --local --unset includeif.gitdir:/github/workspace/.git.path /github/runner_temp/git-credentials-f4dc8e57-39ea-449d-9b57-1d9dd3f183b6.config
+2026-10-13T14:56:27.6855002Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/github/workspace/.git/worktrees/*.path
+2026-10-13T14:56:27.6881827Z /github/runner_temp/git-credentials-f4dc8e57-39ea-449d-9b57-1d9dd3f183b6.config
+2026-10-13T14:56:27.6891563Z [command]/usr/bin/git config --local --unset includeif.gitdir:/github/workspace/.git/worktrees/*.path /github/runner_temp/git-credentials-f4dc8e57-39ea-449d-9b57-1d9dd3f183b6.config
+2026-10-13T14:56:27.6948002Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+2026-10-13T14:56:27.7167169Z Removing credentials config '/home/runner/work/_temp/git-credentials-f4dc8e57-39ea-449d-9b57-1d9dd3f183b6.config'
+2026-10-13T14:56:27.7311750Z Cleaning up orphan processes

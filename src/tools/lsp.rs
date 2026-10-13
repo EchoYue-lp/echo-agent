@@ -85,13 +85,14 @@ impl Tool for LspDiagnosticsTool {
                     );
                     for diag in &diagnostics {
                         let severity = match diag.severity {
-                            DiagnosticSeverity::Error => "ERROR",
-                            DiagnosticSeverity::Warning => "WARNING",
-                            DiagnosticSeverity::Information => "INFO",
-                            DiagnosticSeverity::Hint => "HINT",
+                            Some(DiagnosticSeverity::Error) => "ERROR",
+                            Some(DiagnosticSeverity::Warning) => "WARNING",
+                            Some(DiagnosticSeverity::Information) => "INFO",
+                            Some(DiagnosticSeverity::Hint) => "HINT",
+                            None => "UNSPECIFIED",
                         };
-                        let line = diag.range.start.line + 1;
-                        let col = diag.range.start.character + 1;
+                        let line = diag.range.start.line.saturating_add(1);
+                        let col = diag.range.start.character.saturating_add(1);
                         output.push_str(&format!(
                             "  [{severity}] line {line}:{col} — {}\n",
                             diag.message

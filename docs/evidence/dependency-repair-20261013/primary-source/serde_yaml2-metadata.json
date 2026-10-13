@@ -1,0 +1,374 @@
+{
+  "crate": {
+    "id": "serde_yaml2",
+    "name": "serde_yaml2",
+    "updated_at": "2025-05-12T11:53:11.305700Z",
+    "versions": [
+      1560468,
+      1175229,
+      1120623,
+      1119000
+    ],
+    "keywords": [
+      "serialization",
+      "yaml",
+      "serde",
+      "deserialization"
+    ],
+    "categories": [
+      "encoding"
+    ],
+    "badges": [],
+    "created_at": "2024-04-18T18:00:50.342050Z",
+    "downloads": 2314506,
+    "recent_downloads": 718524,
+    "default_version": "0.1.3",
+    "num_versions": 4,
+    "yanked": false,
+    "max_version": "0.1.3",
+    "newest_version": "0.1.3",
+    "max_stable_version": "0.1.3",
+    "description": "Serde integration for yaml_rust2 crate",
+    "homepage": null,
+    "documentation": null,
+    "repository": "https://github.com/zim32/serde_yaml2",
+    "links": {
+      "version_downloads": "/api/v1/crates/serde_yaml2/downloads",
+      "versions": null,
+      "owners": "/api/v1/crates/serde_yaml2/owners",
+      "owner_team": "/api/v1/crates/serde_yaml2/owner_team",
+      "owner_user": "/api/v1/crates/serde_yaml2/owner_user",
+      "reverse_dependencies": "/api/v1/crates/serde_yaml2/reverse_dependencies"
+    },
+    "exact_match": false,
+    "trustpub_only": false
+  },
+  "versions": [
+    {
+      "id": 1560468,
+      "crate": "serde_yaml2",
+      "num": "0.1.3",
+      "dl_path": "/api/v1/crates/serde_yaml2/0.1.3/download",
+      "readme_path": "/api/v1/crates/serde_yaml2/0.1.3/readme",
+      "updated_at": "2025-05-12T11:53:11.305700Z",
+      "created_at": "2025-05-12T11:53:11.305700Z",
+      "downloads": 562157,
+      "features": {},
+      "yanked": false,
+      "yank_message": null,
+      "lib_links": null,
+      "license": "MIT OR Apache-2.0",
+      "links": {
+        "dependencies": "/api/v1/crates/serde_yaml2/0.1.3/dependencies",
+        "version_downloads": "/api/v1/crates/serde_yaml2/0.1.3/downloads",
+        "authors": "/api/v1/crates/serde_yaml2/0.1.3/authors"
+      },
+      "crate_size": 15509,
+      "published_by": {
+        "id": 265947,
+        "login": "zim32",
+        "name": null,
+        "avatar": "https://avatars.githubusercontent.com/u/538976?v=4",
+        "url": "https://github.com/zim32",
+        "github_username_matches": true,
+        "created_at": "2010-12-28T12:13:05Z"
+      },
+      "audit_actions": [
+        {
+          "action": "publish",
+          "user": {
+            "id": 265947,
+            "login": "zim32",
+            "name": null,
+            "avatar": "https://avatars.githubusercontent.com/u/538976?v=4",
+            "url": "https://github.com/zim32",
+            "github_username_matches": true,
+            "created_at": "2010-12-28T12:13:05Z"
+          },
+          "time": "2025-05-12T11:53:11.305700Z"
+        }
+      ],
+      "checksum": "63a7808e70b0b09116f01a4730d8976bcab457ea4a5e2e638e9b12ed3e01f27c",
+      "rust_version": null,
+      "has_lib": true,
+      "bin_names": [],
+      "edition": "2021",
+      "description": "Serde integration for yaml_rust2 crate",
+      "homepage": null,
+      "documentation": null,
+      "repository": "https://github.com/zim32/serde_yaml2",
+      "trustpub_data": null,
+      "linecounts": {
+        "languages": {
+          "Rust": {
+            "code_lines": 1175,
+            "comment_lines": 8,
+            "files": 4
+          }
+        },
+        "total_code_lines": 1175,
+        "total_comment_lines": 8
+      }
+    },
+    {
+      "id": 1175229,
+      "crate": "serde_yaml2",
+      "num": "0.1.2",
+      "dl_path": "/api/v1/crates/serde_yaml2/0.1.2/download",
+      "readme_path": "/api/v1/crates/serde_yaml2/0.1.2/readme",
+      "updated_at": "2024-06-15T14:32:59.042339Z",
+      "created_at": "2024-06-15T14:32:59.042339Z",
+      "downloads": 1748721,
+      "features": {},
+      "yanked": false,
+      "yank_message": null,
+      "lib_links": null,
+      "license": "MIT OR Apache-2.0",
+      "links": {
+        "dependencies": "/api/v1/crates/serde_yaml2/0.1.2/dependencies",
+        "version_downloads": "/api/v1/crates/serde_yaml2/0.1.2/downloads",
+        "authors": "/api/v1/crates/serde_yaml2/0.1.2/authors"
+      },
+      "crate_size": 15207,
+      "published_by": {
+        "id": 265947,
+        "login": "zim32",
+        "name": null,
+        "avatar": "https://avatars.githubusercontent.com/u/538976?v=4",
+        "url": "https://github.com/zim32",
+        "github_username_matches": true,
+        "created_at": "2010-12-28T12:13:05Z"
+      },
+      "audit_actions": [
+        {
+          "action": "publish",
+          "user": {
+            "id": 265947,
+            "login": "zim32",
+            "name": null,
+            "avatar": "https://avatars.githubusercontent.com/u/538976?v=4",
+            "url": "https://github.com/zim32",
+            "github_username_matches": true,
+            "created_at": "2010-12-28T12:13:05Z"
+          },
+          "time": "2024-06-15T14:32:59.042339Z"
+        }
+      ],
+      "checksum": "fd7f24fd25093e571f588ca14dd4f92b6aead6e1b97862824d519101dbd2b8d5",
+      "rust_version": null,
+      "has_lib": true,
+      "bin_names": [],
+      "edition": "2021",
+      "description": "Serde integration for yaml_rust2 crate",
+      "homepage": null,
+      "documentation": null,
+      "repository": "https://github.com/zim32/serde_yaml2",
+      "trustpub_data": null,
+      "linecounts": {
+        "languages": {
+          "Rust": {
+            "code_lines": 1175,
+            "comment_lines": 8,
+            "files": 4
+          }
+        },
+        "total_code_lines": 1175,
+        "total_comment_lines": 8
+      }
+    },
+    {
+      "id": 1120623,
+      "crate": "serde_yaml2",
+      "num": "0.1.1",
+      "dl_path": "/api/v1/crates/serde_yaml2/0.1.1/download",
+      "readme_path": "/api/v1/crates/serde_yaml2/0.1.1/readme",
+      "updated_at": "2024-04-20T10:46:21.487678Z",
+      "created_at": "2024-04-20T10:46:21.487678Z",
+      "downloads": 2503,
+      "features": {},
+      "yanked": false,
+      "yank_message": null,
+      "lib_links": null,
+      "license": "MIT OR Apache-2.0",
+      "links": {
+        "dependencies": "/api/v1/crates/serde_yaml2/0.1.1/dependencies",
+        "version_downloads": "/api/v1/crates/serde_yaml2/0.1.1/downloads",
+        "authors": "/api/v1/crates/serde_yaml2/0.1.1/authors"
+      },
+      "crate_size": 15218,
+      "published_by": {
+        "id": 265947,
+        "login": "zim32",
+        "name": null,
+        "avatar": "https://avatars.githubusercontent.com/u/538976?v=4",
+        "url": "https://github.com/zim32",
+        "github_username_matches": true,
+        "created_at": "2010-12-28T12:13:05Z"
+      },
+      "audit_actions": [
+        {
+          "action": "publish",
+          "user": {
+            "id": 265947,
+            "login": "zim32",
+            "name": null,
+            "avatar": "https://avatars.githubusercontent.com/u/538976?v=4",
+            "url": "https://github.com/zim32",
+            "github_username_matches": true,
+            "created_at": "2010-12-28T12:13:05Z"
+          },
+          "time": "2024-04-20T10:46:21.487678Z"
+        }
+      ],
+      "checksum": "14156a69ff1709dfef106b82cd83191740670d59c429fc5511f259e11644b2c4",
+      "rust_version": null,
+      "has_lib": true,
+      "bin_names": [],
+      "edition": "2021",
+      "description": "Serde integration for yaml_rust2 crate",
+      "homepage": null,
+      "documentation": null,
+      "repository": "https://github.com/zim32/serde_yaml2",
+      "trustpub_data": null,
+      "linecounts": {
+        "languages": {
+          "Rust": {
+            "code_lines": 1186,
+            "comment_lines": 8,
+            "files": 4
+          }
+        },
+        "total_code_lines": 1186,
+        "total_comment_lines": 8
+      }
+    },
+    {
+      "id": 1119000,
+      "crate": "serde_yaml2",
+      "num": "0.1.0",
+      "dl_path": "/api/v1/crates/serde_yaml2/0.1.0/download",
+      "readme_path": "/api/v1/crates/serde_yaml2/0.1.0/readme",
+      "updated_at": "2024-04-20T08:24:52.560472Z",
+      "created_at": "2024-04-18T18:00:50.342050Z",
+      "downloads": 1125,
+      "features": {},
+      "yanked": false,
+      "yank_message": null,
+      "lib_links": null,
+      "license": "MIT OR Apache-2.0",
+      "links": {
+        "dependencies": "/api/v1/crates/serde_yaml2/0.1.0/dependencies",
+        "version_downloads": "/api/v1/crates/serde_yaml2/0.1.0/downloads",
+        "authors": "/api/v1/crates/serde_yaml2/0.1.0/authors"
+      },
+      "crate_size": 15122,
+      "published_by": {
+        "id": 265947,
+        "login": "zim32",
+        "name": null,
+        "avatar": "https://avatars.githubusercontent.com/u/538976?v=4",
+        "url": "https://github.com/zim32",
+        "github_username_matches": true,
+        "created_at": "2010-12-28T12:13:05Z"
+      },
+      "audit_actions": [
+        {
+          "action": "publish",
+          "user": {
+            "id": 265947,
+            "login": "zim32",
+            "name": null,
+            "avatar": "https://avatars.githubusercontent.com/u/538976?v=4",
+            "url": "https://github.com/zim32",
+            "github_username_matches": true,
+            "created_at": "2010-12-28T12:13:05Z"
+          },
+          "time": "2024-04-18T18:00:50.342050Z"
+        },
+        {
+          "action": "yank",
+          "user": {
+            "id": 265947,
+            "login": "zim32",
+            "name": null,
+            "avatar": "https://avatars.githubusercontent.com/u/538976?v=4",
+            "url": "https://github.com/zim32",
+            "github_username_matches": true,
+            "created_at": "2010-12-28T12:13:05Z"
+          },
+          "time": "2024-04-20T08:24:50.097911Z"
+        },
+        {
+          "action": "unyank",
+          "user": {
+            "id": 265947,
+            "login": "zim32",
+            "name": null,
+            "avatar": "https://avatars.githubusercontent.com/u/538976?v=4",
+            "url": "https://github.com/zim32",
+            "github_username_matches": true,
+            "created_at": "2010-12-28T12:13:05Z"
+          },
+          "time": "2024-04-20T08:24:52.563903Z"
+        }
+      ],
+      "checksum": "b4355aed9059015e8db451a6618e50a0222d0c0406e7f2df390fcdd8dea31ae9",
+      "rust_version": null,
+      "has_lib": true,
+      "bin_names": [],
+      "edition": "2021",
+      "description": "Serde integration for yaml_rust2 crate",
+      "homepage": null,
+      "documentation": null,
+      "repository": "https://github.com/zim32/serde_yaml2",
+      "trustpub_data": null,
+      "linecounts": {
+        "languages": {
+          "Rust": {
+            "code_lines": 1182,
+            "comment_lines": 8,
+            "files": 4
+          }
+        },
+        "total_code_lines": 1182,
+        "total_comment_lines": 8
+      }
+    }
+  ],
+  "keywords": [
+    {
+      "id": "serialization",
+      "keyword": "serialization",
+      "created_at": "2014-11-20T20:14:31.726180Z",
+      "crates_cnt": 1635
+    },
+    {
+      "id": "yaml",
+      "keyword": "yaml",
+      "created_at": "2014-12-02T21:40:55.859764Z",
+      "crates_cnt": 539
+    },
+    {
+      "id": "serde",
+      "keyword": "serde",
+      "created_at": "2015-08-10T17:10:09.021436Z",
+      "crates_cnt": 1618
+    },
+    {
+      "id": "deserialization",
+      "keyword": "deserialization",
+      "created_at": "2016-02-18T19:42:05.526313Z",
+      "crates_cnt": 285
+    }
+  ],
+  "categories": [
+    {
+      "id": "encoding",
+      "category": "Encoding",
+      "slug": "encoding",
+      "description": "Encoding and/or decoding data from one data format to another.",
+      "created_at": "2017-01-17T19:13:05.112025Z",
+      "crates_cnt": 7554
+    }
+  ]
+}

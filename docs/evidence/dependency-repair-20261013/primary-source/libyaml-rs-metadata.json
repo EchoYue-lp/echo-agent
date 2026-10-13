@@ -1,0 +1,147 @@
+{
+  "crate": {
+    "id": "libyaml-rs",
+    "name": "libyaml-rs",
+    "updated_at": "2026-03-11T18:39:38.625632Z",
+    "versions": [
+      2111880
+    ],
+    "keywords": [
+      "yaml"
+    ],
+    "categories": [
+      "parser-implementations",
+      "no-std",
+      "encoding"
+    ],
+    "badges": [],
+    "created_at": "2026-03-11T18:39:38.625632Z",
+    "downloads": 3131111,
+    "recent_downloads": 2397900,
+    "default_version": "0.3.0",
+    "num_versions": 1,
+    "yanked": false,
+    "max_version": "0.3.0",
+    "newest_version": "0.3.0",
+    "max_stable_version": "0.3.0",
+    "description": "libyaml transpiled to rust by c2rust",
+    "homepage": null,
+    "documentation": "https://docs.rs/libyaml-rs",
+    "repository": "https://github.com/yaml/libyaml-rs",
+    "links": {
+      "version_downloads": "/api/v1/crates/libyaml-rs/downloads",
+      "versions": null,
+      "owners": "/api/v1/crates/libyaml-rs/owners",
+      "owner_team": "/api/v1/crates/libyaml-rs/owner_team",
+      "owner_user": "/api/v1/crates/libyaml-rs/owner_user",
+      "reverse_dependencies": "/api/v1/crates/libyaml-rs/reverse_dependencies"
+    },
+    "exact_match": false,
+    "trustpub_only": false
+  },
+  "versions": [
+    {
+      "id": 2111880,
+      "crate": "libyaml-rs",
+      "num": "0.3.0",
+      "dl_path": "/api/v1/crates/libyaml-rs/0.3.0/download",
+      "readme_path": "/api/v1/crates/libyaml-rs/0.3.0/readme",
+      "updated_at": "2026-03-11T18:39:38.625632Z",
+      "created_at": "2026-03-11T18:39:38.625632Z",
+      "downloads": 3131111,
+      "features": {},
+      "yanked": false,
+      "yank_message": null,
+      "lib_links": null,
+      "license": "MIT",
+      "links": {
+        "dependencies": "/api/v1/crates/libyaml-rs/0.3.0/dependencies",
+        "version_downloads": "/api/v1/crates/libyaml-rs/0.3.0/downloads",
+        "authors": "/api/v1/crates/libyaml-rs/0.3.0/authors"
+      },
+      "crate_size": 64160,
+      "published_by": {
+        "id": 165876,
+        "login": "ingydotnet",
+        "name": "Ingy d\u00f6t Net",
+        "avatar": "https://avatars.githubusercontent.com/u/21826?v=4",
+        "url": "https://github.com/ingydotnet",
+        "github_username_matches": true,
+        "created_at": "2008-08-25T07:13:26Z"
+      },
+      "audit_actions": [
+        {
+          "action": "publish",
+          "user": {
+            "id": 165876,
+            "login": "ingydotnet",
+            "name": "Ingy d\u00f6t Net",
+            "avatar": "https://avatars.githubusercontent.com/u/21826?v=4",
+            "url": "https://github.com/ingydotnet",
+            "github_username_matches": true,
+            "created_at": "2008-08-25T07:13:26Z"
+          },
+          "time": "2026-03-11T18:39:38.625632Z"
+        }
+      ],
+      "checksum": "2e126dda6f34391ab7b444f9922055facc83c07a910da3eb16f1e4d9c45dc777",
+      "rust_version": "1.60",
+      "has_lib": true,
+      "bin_names": [
+        "run-emitter-test-suite",
+        "run-parser-test-suite"
+      ],
+      "edition": "2021",
+      "description": "libyaml transpiled to rust by c2rust",
+      "homepage": null,
+      "documentation": "https://docs.rs/libyaml-rs",
+      "repository": "https://github.com/yaml/libyaml-rs",
+      "trustpub_data": null,
+      "linecounts": {
+        "languages": {
+          "Rust": {
+            "code_lines": 11326,
+            "comment_lines": 33,
+            "files": 16
+          }
+        },
+        "total_code_lines": 11326,
+        "total_comment_lines": 33
+      }
+    }
+  ],
+  "keywords": [
+    {
+      "id": "yaml",
+      "keyword": "yaml",
+      "created_at": "2014-12-02T21:40:55.859764Z",
+      "crates_cnt": 539
+    }
+  ],
+  "categories": [
+    {
+      "id": "parser-implementations",
+      "category": "Parser implementations",
+      "slug": "parser-implementations",
+      "description": "Parsers implemented for particular formats or languages.",
+      "created_at": "2017-02-05T21:31:23.444608Z",
+      "crates_cnt": 7878
+    },
+    {
+      "id": "no-std",
+      "category": "No standard library",
+      "slug": "no-std",
+      "description": "Crates that are able to function without the Rust standard library.",
+      "created_at": "2017-02-10T01:52:09.447906Z",
+      "crates_cnt": 13854
+    },
+    {
+      "id": "encoding",
+      "category": "Encoding",
+      "slug": "encoding",
+      "description": "Encoding and/or decoding data from one data format to another.",
+      "created_at": "2017-01-17T19:13:05.112025Z",
+      "crates_cnt": 7554
+    }
+  ]
+}

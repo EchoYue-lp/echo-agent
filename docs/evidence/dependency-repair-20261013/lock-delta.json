@@ -1,0 +1,53 @@
+{
+  "removed": [
+    [
+      "quinn-proto",
+      "0.11.16"
+    ],
+    [
+      "serde_yaml_ng",
+      "0.10.0"
+    ],
+    [
+      "unsafe-libyaml",
+      "0.2.11"
+    ]
+  ],
+  "added": [
+    [
+      "libyaml-rs",
+      "0.3.0"
+    ],
+    [
+      "quinn-proto",
+      "0.11.18"
+    ],
+    [
+      "yaml_serde",
+      "0.10.7"
+    ]
+  ],
+  "changed_workspace_dependencies": [
+    [
+      "echo-agent-learning",
+      "0.1.0"
+    ],
+    [
+      "echo_agent",
+      "0.2.0"
+    ],
+    [
+      "echo_core",
+      "0.2.0"
+    ],
+    [
+      "echo_execution",
+      "0.2.0"
+    ],
+    [
+      "echo_integration",
+      "0.2.0"
+    ]
+  ],
+  "all_other_registry_entries_byte_identical": true
+}

@@ -1,0 +1,8 @@
+{
+  "Cargo.lock": "7995a2ebdf82573dcf87bbd251e03338ac4c997e2ce6281479b9d28e34236202",
+  "Cargo.toml": "90426e1bdd3754908dec10c54e3c44b4decc993945d0a408f1ab0c0332c13045",
+  "echo-core/Cargo.toml": "d94be3d0e758d26b1319d4a52a2c6ea0973e0137d3b125cfdcf116d86aa29583",
+  "echo-execution/Cargo.toml": "c561e5772fbb78397e2fc872a3c087f96db1c3759e4f8a707e6b3467900299eb",
+  "echo-integration/Cargo.toml": "2b533c75dac48d55590c29d30155d90a799dd989288542f4151ec22f5f09c67b",
+  "echo-agent-learning/Cargo.toml": "c36104550d113ffb92a61c6ff12b765771cbd9d4ea9815031cae7e067b619b32"
+}

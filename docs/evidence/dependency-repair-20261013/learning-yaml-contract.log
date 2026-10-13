@@ -1,0 +1,13 @@
+   Compiling echo_execution v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/task-runtime-store-control/echo-execution)
+   Compiling echo_agent v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/task-runtime-store-control)
+   Compiling echo-agent-learning v0.1.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/task-runtime-store-control/echo-agent-learning)
+    Finished `test` profile [unoptimized] target(s) in 28.22s
+     Running tests/semantic_baseline_contract.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/deps/semantic_baseline_contract-d0d112da6be2c4ae)
+
+running 3 tests
+test rust_ci_supplies_target_revision_and_full_history ... ok
+test semantic_baseline_revision_is_ancestor_of_target_main ... ok
+test squash_drops_feature_only_revision_from_target_history ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s
+

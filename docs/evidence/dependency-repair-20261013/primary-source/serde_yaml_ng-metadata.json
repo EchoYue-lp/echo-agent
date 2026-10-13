@@ -1,0 +1,283 @@
+{
+  "crate": {
+    "id": "serde_yaml_ng",
+    "name": "serde_yaml_ng",
+    "updated_at": "2024-05-26T19:57:45.710414Z",
+    "versions": [
+      1156387,
+      1134334,
+      1134331
+    ],
+    "keywords": [
+      "serialization",
+      "yaml",
+      "serde"
+    ],
+    "categories": [
+      "parser-implementations",
+      "encoding"
+    ],
+    "badges": [],
+    "created_at": "2024-05-03T22:36:08.609383Z",
+    "downloads": 16369087,
+    "recent_downloads": 10011627,
+    "default_version": "0.10.0",
+    "num_versions": 3,
+    "yanked": false,
+    "max_version": "0.10.0",
+    "newest_version": "0.10.0",
+    "max_stable_version": "0.10.0",
+    "description": "YAML data format for Serde",
+    "homepage": null,
+    "documentation": "https://docs.rs/serde_yaml_ng/",
+    "repository": "https://github.com/acatton/serde-yaml-ng",
+    "links": {
+      "version_downloads": "/api/v1/crates/serde_yaml_ng/downloads",
+      "versions": null,
+      "owners": "/api/v1/crates/serde_yaml_ng/owners",
+      "owner_team": "/api/v1/crates/serde_yaml_ng/owner_team",
+      "owner_user": "/api/v1/crates/serde_yaml_ng/owner_user",
+      "reverse_dependencies": "/api/v1/crates/serde_yaml_ng/reverse_dependencies"
+    },
+    "exact_match": false,
+    "trustpub_only": false
+  },
+  "versions": [
+    {
+      "id": 1156387,
+      "crate": "serde_yaml_ng",
+      "num": "0.10.0",
+      "dl_path": "/api/v1/crates/serde_yaml_ng/0.10.0/download",
+      "readme_path": "/api/v1/crates/serde_yaml_ng/0.10.0/readme",
+      "updated_at": "2024-05-26T19:57:45.710414Z",
+      "created_at": "2024-05-26T19:57:45.710414Z",
+      "downloads": 16237702,
+      "features": {},
+      "yanked": false,
+      "yank_message": null,
+      "lib_links": null,
+      "license": "MIT",
+      "links": {
+        "dependencies": "/api/v1/crates/serde_yaml_ng/0.10.0/dependencies",
+        "version_downloads": "/api/v1/crates/serde_yaml_ng/0.10.0/downloads",
+        "authors": "/api/v1/crates/serde_yaml_ng/0.10.0/authors"
+      },
+      "crate_size": 63772,
+      "published_by": {
+        "id": 141900,
+        "login": "acatton",
+        "name": "Antoine Catton",
+        "avatar": "https://avatars.githubusercontent.com/u/3966553?v=4",
+        "url": "https://github.com/acatton",
+        "github_username_matches": true,
+        "created_at": "2013-03-25T16:48:38Z"
+      },
+      "audit_actions": [
+        {
+          "action": "publish",
+          "user": {
+            "id": 141900,
+            "login": "acatton",
+            "name": "Antoine Catton",
+            "avatar": "https://avatars.githubusercontent.com/u/3966553?v=4",
+            "url": "https://github.com/acatton",
+            "github_username_matches": true,
+            "created_at": "2013-03-25T16:48:38Z"
+          },
+          "time": "2024-05-26T19:57:45.710414Z"
+        }
+      ],
+      "checksum": "7b4db627b98b36d4203a7b458cf3573730f2bb591b28871d916dfa9efabfd41f",
+      "rust_version": "1.64",
+      "has_lib": true,
+      "bin_names": [],
+      "edition": "2021",
+      "description": "YAML data format for Serde",
+      "homepage": null,
+      "documentation": "https://docs.rs/serde_yaml_ng/",
+      "repository": "https://github.com/acatton/serde-yaml-ng",
+      "trustpub_data": null,
+      "linecounts": {
+        "languages": {
+          "Rust": {
+            "code_lines": 8727,
+            "comment_lines": 59,
+            "files": 24
+          }
+        },
+        "total_code_lines": 8727,
+        "total_comment_lines": 59
+      }
+    },
+    {
+      "id": 1134334,
+      "crate": "serde_yaml_ng",
+      "num": "0.9.36",
+      "dl_path": "/api/v1/crates/serde_yaml_ng/0.9.36/download",
+      "readme_path": "/api/v1/crates/serde_yaml_ng/0.9.36/readme",
+      "updated_at": "2024-05-03T22:51:59.362428Z",
+      "created_at": "2024-05-03T22:51:59.362428Z",
+      "downloads": 129569,
+      "features": {},
+      "yanked": false,
+      "yank_message": null,
+      "lib_links": null,
+      "license": "MIT OR Apache-2.0",
+      "links": {
+        "dependencies": "/api/v1/crates/serde_yaml_ng/0.9.36/dependencies",
+        "version_downloads": "/api/v1/crates/serde_yaml_ng/0.9.36/downloads",
+        "authors": "/api/v1/crates/serde_yaml_ng/0.9.36/authors"
+      },
+      "crate_size": 65769,
+      "published_by": {
+        "id": 141900,
+        "login": "acatton",
+        "name": "Antoine Catton",
+        "avatar": "https://avatars.githubusercontent.com/u/3966553?v=4",
+        "url": "https://github.com/acatton",
+        "github_username_matches": true,
+        "created_at": "2013-03-25T16:48:38Z"
+      },
+      "audit_actions": [
+        {
+          "action": "publish",
+          "user": {
+            "id": 141900,
+            "login": "acatton",
+            "name": "Antoine Catton",
+            "avatar": "https://avatars.githubusercontent.com/u/3966553?v=4",
+            "url": "https://github.com/acatton",
+            "github_username_matches": true,
+            "created_at": "2013-03-25T16:48:38Z"
+          },
+          "time": "2024-05-03T22:51:59.362428Z"
+        }
+      ],
+      "checksum": "bd24347956e682cf958c95e82deb9914cad4010d3efc035d579f81f4c426038c",
+      "rust_version": "1.64",
+      "has_lib": true,
+      "bin_names": [],
+      "edition": "2021",
+      "description": "YAML data format for Serde",
+      "homepage": null,
+      "documentation": "https://docs.rs/serde_yaml_ng/",
+      "repository": "https://github.com/acatton/serde-yaml-ng",
+      "trustpub_data": null,
+      "linecounts": {
+        "languages": {
+          "Rust": {
+            "code_lines": 8728,
+            "comment_lines": 59,
+            "files": 24
+          }
+        },
+        "total_code_lines": 8728,
+        "total_comment_lines": 59
+      }
+    },
+    {
+      "id": 1134331,
+      "crate": "serde_yaml_ng",
+      "num": "0.9.35",
+      "dl_path": "/api/v1/crates/serde_yaml_ng/0.9.35/download",
+      "readme_path": "/api/v1/crates/serde_yaml_ng/0.9.35/readme",
+      "updated_at": "2024-05-03T22:36:08.609383Z",
+      "created_at": "2024-05-03T22:36:08.609383Z",
+      "downloads": 1816,
+      "features": {},
+      "yanked": false,
+      "yank_message": null,
+      "lib_links": null,
+      "license": "MIT OR Apache-2.0",
+      "links": {
+        "dependencies": "/api/v1/crates/serde_yaml_ng/0.9.35/dependencies",
+        "version_downloads": "/api/v1/crates/serde_yaml_ng/0.9.35/downloads",
+        "authors": "/api/v1/crates/serde_yaml_ng/0.9.35/authors"
+      },
+      "crate_size": 65752,
+      "published_by": {
+        "id": 141900,
+        "login": "acatton",
+        "name": "Antoine Catton",
+        "avatar": "https://avatars.githubusercontent.com/u/3966553?v=4",
+        "url": "https://github.com/acatton",
+        "github_username_matches": true,
+        "created_at": "2013-03-25T16:48:38Z"
+      },
+      "audit_actions": [
+        {
+          "action": "publish",
+          "user": {
+            "id": 141900,
+            "login": "acatton",
+            "name": "Antoine Catton",
+            "avatar": "https://avatars.githubusercontent.com/u/3966553?v=4",
+            "url": "https://github.com/acatton",
+            "github_username_matches": true,
+            "created_at": "2013-03-25T16:48:38Z"
+          },
+          "time": "2024-05-03T22:36:08.609383Z"
+        }
+      ],
+      "checksum": "afbbcde3a271f8b25c184a837a10fd9800ba015bdc346898737833cb221b134f",
+      "rust_version": "1.64",
+      "has_lib": true,
+      "bin_names": [],
+      "edition": "2021",
+      "description": "YAML data format for Serde",
+      "homepage": null,
+      "documentation": "https://docs.rs/serde_yaml_ng/",
+      "repository": "https://github.com/acatton/serde-yaml-ng",
+      "trustpub_data": null,
+      "linecounts": {
+        "languages": {
+          "Rust": {
+            "code_lines": 8728,
+            "comment_lines": 59,
+            "files": 24
+          }
+        },
+        "total_code_lines": 8728,
+        "total_comment_lines": 59
+      }
+    }
+  ],
+  "keywords": [
+    {
+      "id": "serialization",
+      "keyword": "serialization",
+      "created_at": "2014-11-20T20:14:31.726180Z",
+      "crates_cnt": 1635
+    },
+    {
+      "id": "yaml",
+      "keyword": "yaml",
+      "created_at": "2014-12-02T21:40:55.859764Z",
+      "crates_cnt": 539
+    },
+    {
+      "id": "serde",
+      "keyword": "serde",
+      "created_at": "2015-08-10T17:10:09.021436Z",
+      "crates_cnt": 1618
+    }
+  ],
+  "categories": [
+    {
+      "id": "parser-implementations",
+      "category": "Parser implementations",
+      "slug": "parser-implementations",
+      "description": "Parsers implemented for particular formats or languages.",
+      "created_at": "2017-02-05T21:31:23.444608Z",
+      "crates_cnt": 7878
+    },
+    {
+      "id": "encoding",
+      "category": "Encoding",
+      "slug": "encoding",
+      "description": "Encoding and/or decoding data from one data format to another.",
+      "created_at": "2017-01-17T19:13:05.112025Z",
+      "crates_cnt": 7554
+    }
+  ]
+}

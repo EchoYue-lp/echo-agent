@@ -56,6 +56,16 @@ adapter.connect_retaining_close_owner(transport)`，在 poll、await 或 spawn `
 全部关闭成功；接纳后提前 drop 会放弃重试所有权，属于违反调用合同。连接启动前 drop
 则会拒绝建立连接，不创建 Agent。
 
+Adapter 从持久化 native Run identity 恢复 ACP Session 时，在发布恢复后的 Session
+或接纳下一 Turn 前调用 `session.reserve_recovered_turn_ids(&persisted_run_ids)`。
+现有 `TurnSlot` 在同一锁内拥有恢复预留与分配权威；framework 校验自身 Session
+namespace、规范正整数 sequence，整批校验后才推进 frontier。活跃或已关闭的 Session、
+无效的恢复 identity 明确报错。合法末次 `u64::MAX` identity 仍可恢复历史，
+只有接纳下一 Turn 时才报告耗尽；重复或旧值不会降低 frontier。Adapter 把 ID 当作 opaque
+值传递，不解析或生成替代 ID。历史 receipt 保持不变，下一 Turn 是新 execution，
+不会重放历史 Effect；Task/Subagent 等非 ACP identity 不属于此恢复原语。
+参见 [ADR 0061](../adr/0061-acp-recovered-turn-identity.md)。
+
 详见 [ReAct Agent](./01-react-agent.md)、[流式输出](./10-streaming.md)和
 [Headless](./33-headless-mode.md)。Adapter-specific 保证仍属于各自协议章节；本页不声称所有
 adapter 都已进入 driven Turn 路径。
@@ -239,3 +249,11 @@ process 已结算后才返回成功，manager 会继续尝试全部 client 后�
 - [持久化概念](./41-persistence-concepts.md)
 - [Framework 与应用边界](./39-framework-application-boundary.md)
 - [ADR 0040](../adr/0040-framework-concept-documentation-authority.md)
+
+**ACP 扩展调用取消边界。**
+
+`ExtensionInvocationAuthority` 为每次反向调用创建传入 framework/run/connection
+取消 token 的 child。父取消传播到所有 child；单次调用取消、超时或释放不能取消父级
+及其它 sibling。连接关闭拒绝新调用并取消 fallback child；`cancel_all` 同时取消
+custom-run child，而不会取消其父 token。调用结算与 bounded drain 保持独立，不成为
+Agent 或 Task 终态的第二权威。见 [ADR 0060](../adr/0060-task-execution-store-cas-and-local-interruption.md)。

@@ -1,0 +1,46 @@
+[package]
+name = "echo_execution"
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT"
+description = "Execution layer for echo-agent framework (sandbox, skills, tools)"
+repository = "https://github.com/EchoYue-lp/echo-agent"
+homepage = "https://github.com/EchoYue-lp/echo-agent"
+documentation = "https://docs.rs/echo_execution"
+keywords = ["ai", "agent", "sandbox", "tools"]
+categories = ["api-bindings", "asynchronous"]
+readme = "README.md"
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+exclude = ["**/.DS_Store"]
+
+[features]
+default = []
+
+[dependencies]
+echo_core = { version = "0.2.0", path = "../echo-core" }
+# From echo-sandbox
+futures = "0.3"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1", features = ["process", "time", "macros", "rt", "io-util", "sync", "fs"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+dashmap = "6"
+tracing = "0.1"
+uuid = { version = "1", features = ["v4"] }
+# From echo-skills
+serde_yaml_ng = "0.10"
+regex = "1"
+dirs = "6"
+shlex = "1"
+glob = "0.3"
+parking_lot = "0.12"
+jsonschema = { version = "0.49.9", default-features = false }
+reqwest = { version = "0.12", features = ["json"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

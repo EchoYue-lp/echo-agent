@@ -4,64 +4,195 @@ id: map.workspace-architecture
 kind: capability_map
 title: Workspace 架构与公共组合
 risk: high
-observed_at: 44b2ed68772c7c016d09af6c2e1adac9fe4fea70
-boundary_refs: [boundary.workspace-architecture]
-behavior_refs: [behavior.workspace-composition]
-rule_refs: [rule.framework-layer-ownership]
-evidence_refs: [evidence.workspace-structure, evidence.high-risk-audit-frontier, evidence.workspace-topology-doc-repair, evidence.workspace-topology-doc-verification, evidence.feature-table-doc-repair, evidence.feature-table-doc-verification, evidence.readme-example-target-repair, evidence.readme-example-target-verification, evidence.framework-concept-navigation, evidence.semantic-baseline-squash-ancestry-repair, evidence.semantic-baseline-squash-ancestry-verification, evidence.rust-199-lint-repair]
-finding_refs: [finding.workspace-topology-doc-drift, finding.public-feature-table-drift, finding.readme-example-target-drift, finding.semantic-baseline-squash-ancestry]
-audit_refs: [audit.workspace-architecture.contract-evidence, audit.workspace-topology-doc-rereview, audit.feature-table-doc-rereview, audit.readme-example-target-rereview, audit.framework-concept-navigation-rereview, audit.semantic-baseline-squash-ancestry-rereview]
-related_map_refs: [map.agent-session-turn, map.context-memory, map.task-subagent-workflow, map.observation-persistence-delivery, map.tool-permission-sandbox, map.extension-lifecycle, map.llm-provider-runtime, map.protocol-surfaces, map.eval-evolution]
+observed_at: source:1c515c09873968a279e6076cf6abf659923f1fa96137144423970bfcd0e1881c
+boundary_refs:
+- boundary.workspace-architecture
+behavior_refs:
+- behavior.workspace-composition
+rule_refs:
+- rule.framework-layer-ownership
+evidence_refs:
+- evidence.workspace-structure
+- evidence.high-risk-audit-frontier
+- evidence.workspace-topology-doc-repair
+- evidence.workspace-topology-doc-verification
+- evidence.feature-table-doc-repair
+- evidence.feature-table-doc-verification
+- evidence.readme-example-target-repair
+- evidence.readme-example-target-verification
+- evidence.framework-concept-navigation
+- evidence.semantic-baseline-squash-ancestry-repair
+- evidence.semantic-baseline-squash-ancestry-verification
+- evidence.rust-199-lint-repair
+- evidence.framework-dependency-policy-repair
+- evidence.framework-dependency-policy-focused-verification
+- evidence.framework-dependency-final-full-verification
+- evidence.framework-dependency-final-gate-archive
+finding_refs:
+- finding.workspace-topology-doc-drift
+- finding.public-feature-table-drift
+- finding.readme-example-target-drift
+- finding.semantic-baseline-squash-ancestry
+- finding.framework-dependency-policy-ci
+audit_refs:
+- audit.workspace-architecture.contract-evidence
+- audit.workspace-topology-doc-rereview
+- audit.feature-table-doc-rereview
+- audit.readme-example-target-rereview
+- audit.framework-concept-navigation-rereview
+- audit.semantic-baseline-squash-ancestry-rereview
+- audit.framework-dependency-policy-rereview
+related_map_refs:
+- map.agent-session-turn
+- map.context-memory
+- map.task-subagent-workflow
+- map.observation-persistence-delivery
+- map.tool-permission-sandbox
+- map.extension-lifecycle
+- map.llm-provider-runtime
+- map.protocol-surfaces
+- map.eval-evolution
 scenarios:
   framework-concept-navigation:
     status: mapped
-    source_refs: [README.md, README.zh.md, docs/en/README.md, docs/zh/README.md, docs/en/architecture.md, docs/zh/architecture.md, docs/en/concepts.md, docs/zh/concepts.md, docs/en/lifecycles.md, docs/zh/lifecycles.md, docs/adr/0040-framework-concept-documentation-authority.md, echo-agent-learning/tests/documentation_contract.rs]
-    behavior_refs: [behavior.workspace-composition]
-    rule_refs: [rule.framework-layer-ownership]
-    evidence_refs: [evidence.framework-concept-navigation]
-    audit_refs: [audit.framework-concept-navigation-rereview]
+    source_refs:
+    - README.md
+    - README.zh.md
+    - docs/en/README.md
+    - docs/zh/README.md
+    - docs/en/architecture.md
+    - docs/zh/architecture.md
+    - docs/en/concepts.md
+    - docs/zh/concepts.md
+    - docs/en/lifecycles.md
+    - docs/zh/lifecycles.md
+    - docs/adr/0040-framework-concept-documentation-authority.md
+    - echo-agent-learning/tests/documentation_contract.rs
+    behavior_refs:
+    - behavior.workspace-composition
+    rule_refs:
+    - rule.framework-layer-ownership
+    evidence_refs:
+    - evidence.framework-concept-navigation
+    audit_refs:
+    - audit.framework-concept-navigation-rereview
   crate-dag-and-layering:
     status: mapped
-    source_refs: [Cargo.toml, src/lib.rs, echo-core/src/lib.rs]
-    behavior_refs: [behavior.workspace-composition]
-    rule_refs: [rule.framework-layer-ownership]
-    finding_refs: [finding.workspace-topology-doc-drift]
-    evidence_refs: [evidence.workspace-structure, evidence.workspace-topology-doc-repair, evidence.workspace-topology-doc-verification]
-    audit_refs: [audit.workspace-topology-doc-rereview]
+    source_refs:
+    - Cargo.toml
+    - src/lib.rs
+    - echo-core/src/lib.rs
+    behavior_refs:
+    - behavior.workspace-composition
+    rule_refs:
+    - rule.framework-layer-ownership
+    finding_refs:
+    - finding.workspace-topology-doc-drift
+    evidence_refs:
+    - evidence.workspace-structure
+    - evidence.workspace-topology-doc-repair
+    - evidence.workspace-topology-doc-verification
+    audit_refs:
+    - audit.workspace-topology-doc-rereview
   feature-topology:
     status: mapped
-    source_refs: [Cargo.toml, echo-core/Cargo.toml, echo-execution/Cargo.toml, echo-integration/Cargo.toml, echo-macros/Cargo.toml, echo-orchestration/Cargo.toml, echo-state/Cargo.toml, echo-tools/Cargo.toml, echo-agent-learning/Cargo.toml]
-    rule_refs: [rule.framework-layer-ownership]
-    evidence_refs: [evidence.workspace-structure, evidence.feature-table-doc-repair, evidence.feature-table-doc-verification]
-    finding_refs: [finding.public-feature-table-drift]
-    audit_refs: [audit.feature-table-doc-rereview]
+    source_refs:
+    - Cargo.toml
+    - echo-core/Cargo.toml
+    - echo-execution/Cargo.toml
+    - echo-integration/Cargo.toml
+    - echo-macros/Cargo.toml
+    - echo-orchestration/Cargo.toml
+    - echo-state/Cargo.toml
+    - echo-tools/Cargo.toml
+    - echo-agent-learning/Cargo.toml
+    rule_refs:
+    - rule.framework-layer-ownership
+    evidence_refs:
+    - evidence.workspace-structure
+    - evidence.feature-table-doc-repair
+    - evidence.feature-table-doc-verification
+    finding_refs:
+    - finding.public-feature-table-drift
+    audit_refs:
+    - audit.feature-table-doc-rereview
   public-and-background-entrypoints:
     status: mapped
-    source_refs: [src/lib.rs, echo-orchestration/src/scheduler/runner.rs, echo-orchestration/src/tasks/background_task.rs]
-    behavior_refs: [behavior.workspace-composition]
-    evidence_refs: [evidence.workspace-structure, evidence.readme-example-target-repair, evidence.readme-example-target-verification]
-    finding_refs: [finding.readme-example-target-drift]
-    audit_refs: [audit.readme-example-target-rereview]
+    source_refs:
+    - src/lib.rs
+    - echo-orchestration/src/scheduler/runner.rs
+    - echo-orchestration/src/tasks/background_task.rs
+    behavior_refs:
+    - behavior.workspace-composition
+    evidence_refs:
+    - evidence.workspace-structure
+    - evidence.readme-example-target-repair
+    - evidence.readme-example-target-verification
+    finding_refs:
+    - finding.readme-example-target-drift
+    audit_refs:
+    - audit.readme-example-target-rereview
   semantic-baseline-target-ancestry:
     status: mapped
-    source_refs: [.echo-semantic/baseline.md, echo-agent-learning/tests/semantic_baseline_contract.rs, .github/workflows/rust-ci.yml, AGENTS.md]
-    behavior_refs: [behavior.workspace-composition]
-    rule_refs: [rule.framework-layer-ownership]
-    evidence_refs: [evidence.semantic-baseline-squash-ancestry-repair, evidence.semantic-baseline-squash-ancestry-verification]
-    finding_refs: [finding.semantic-baseline-squash-ancestry]
-    audit_refs: [audit.semantic-baseline-squash-ancestry-rereview]
+    source_refs:
+    - .echo-semantic/baseline.md
+    - echo-agent-learning/tests/semantic_baseline_contract.rs
+    - .github/workflows/rust-ci.yml
+    - AGENTS.md
+    behavior_refs:
+    - behavior.workspace-composition
+    rule_refs:
+    - rule.framework-layer-ownership
+    evidence_refs:
+    - evidence.semantic-baseline-squash-ancestry-repair
+    - evidence.semantic-baseline-squash-ancestry-verification
+    finding_refs:
+    - finding.semantic-baseline-squash-ancestry
+    audit_refs:
+    - audit.semantic-baseline-squash-ancestry-rereview
   dynamic-registration-inventory:
     status: needs_review
-    source_refs: [echo-macros/src/lib.rs, echo-execution/src/skills/registry.rs, echo-core/src/plugin/registry.rs, src/workflow/loader.rs]
+    source_refs:
+    - echo-macros/src/lib.rs
+    - echo-execution/src/skills/registry.rs
+    - echo-core/src/plugin/registry.rs
+    - src/workflow/loader.rs
     unknown: procedural macro、Plugin/Skill/Hook、MCP config 和 declarative workflow 的全部 runtime consumers 尚未形成单一静态闭集
     next_step: 在 extension 与 protocol 高风险 audit 中验证每个注册入口的 owner、generation 和卸载路径
   product-workspace-device:
     status: excluded
-    source_refs: [docs/en/39-framework-application-boundary.md]
+    source_refs:
+    - docs/en/39-framework-application-boundary.md
     reason: EKO Workspace identity、Device sync、UI/TUI/CLI projection 是应用策略，不属于通用 framework 状态权威
     risk: high
     recheck_when: 出现不依赖 EKO product types 且可独立编译测试的通用能力提案时
+  locked-dependency-policy:
+    status: mapped
+    source_refs:
+    - Cargo.lock
+    - Cargo.toml
+    - echo-core/Cargo.toml
+    - echo-execution/Cargo.toml
+    - echo-integration/Cargo.toml
+    - echo-agent-learning/Cargo.toml
+    - docs/dependencyrepair.md
+    - docs/evidence/dependency-repair-20261013/receipt.json
+    behavior_refs:
+    - behavior.workspace-composition
+    rule_refs:
+    - rule.framework-layer-ownership
+    evidence_refs:
+    - evidence.framework-dependency-policy-repair
+    - evidence.framework-dependency-policy-focused-verification
+    - evidence.framework-dependency-final-full-verification
+    - evidence.framework-dependency-final-gate-archive
+    finding_refs:
+    - finding.framework-dependency-policy-ci
+    audit_refs:
+    - audit.framework-dependency-policy-rereview
 ---
+
+
 
 # Workspace 架构与公共组合
 
@@ -106,3 +237,9 @@ Rust facade、外部 SDK Host、docs 与 examples 展示同一 capability；采�
 ## 未展开项
 
 各运行时状态机、持久化、协议和 effect 由 related maps 展开。
+
+
+依赖策略场景：Cargo manifest/lock唯一编译权威，maintained alias替换不改变framework运行层或应用策略。原始远端失败已转限定Finding，修复候选复用YAML API并保留原deny/audit；新工程/独立审查与远端main继续分别验收。
+
+
+依赖当前结论：独立源码review PASS/action0、新23完整命令最终0已齐，localFinding resolved；old34d5历史Git保持，不替代finalmetadata/remote/main/SDK验收。
