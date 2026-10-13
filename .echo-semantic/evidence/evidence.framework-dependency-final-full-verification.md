@@ -1,7 +1,7 @@
 ---
 schema_version: 1
 kind: evidence
-observed_at: source:1c515c09873968a279e6076cf6abf659923f1fa96137144423970bfcd0e1881c
+observed_at: 77de6ca90ad842eb4b7b2921a4baa954f41cccfe
 source_refs:
 - Cargo.lock
 - Cargo.toml
@@ -633,7 +633,7 @@ index_unchanged: true
 
 ## 支持的结论
 
-当前source:1c515c09873968a279e6076cf6abf659923f1fa96137144423970bfcd0e1881c 新23完整命令最终全部exit0/warnings0，source/index不变；24次真实attempt保留一次test失败及同命令重跑成功。最新完整test日志3471 passed/0 failed/3外部optin ignored、86targets、59examples。initial/latest/current全文件SHA一致。
+当前77de6ca90ad842eb4b7b2921a4baa954f41cccfe 新23完整命令最终全部exit0/warnings0，source/index不变；24次真实attempt保留一次test失败及同命令重跑成功。最新完整test日志3471 passed/0 failed/3外部optin ignored、86targets、59examples。initial/latest/current全文件SHA一致。
 
 ## 来源与范围
 

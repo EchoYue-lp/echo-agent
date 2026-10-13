@@ -1,0 +1,15 @@
+   Compiling echo_integration v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward/echo-integration)
+error[E0716]: temporary value dropped while borrowed
+    --> echo-integration/src/channels/manager.rs:1469:27
+     |
+1469 |                 let ids = self.0.lock().await.channel_ids();
+     |                           ^^^^^^^^^^^^^^^^^^^              - temporary value is freed at the end of this statement
+     |                           |
+     |                           creates a temporary value which is freed while still in use
+1470 |                 if !ids.iter().any(|id| *id == "forward") {
+     |                     --- borrow later used here
+     |
+     = note: consider using a `let` binding to create a longer lived value
+
+For more information about this error, try `rustc --explain E0716`.
+error: could not compile `echo_integration` (lib test) due to 1 previous error

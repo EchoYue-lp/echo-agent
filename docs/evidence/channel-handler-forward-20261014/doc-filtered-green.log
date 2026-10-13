@@ -1,0 +1,10 @@
+   Compiling echo_integration v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward/echo-integration)
+    Finished `test` profile [unoptimized] target(s) in 5.11s
+   Doc-tests echo_integration
+
+running 1 test
+test echo-integration/src/channels/session.rs - channels::session (line 11) - compile ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+all doctests ran in 0.55s; merged doctests compilation took 0.54s

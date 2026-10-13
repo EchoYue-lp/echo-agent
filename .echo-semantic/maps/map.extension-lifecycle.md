@@ -4,10 +4,11 @@ id: map.extension-lifecycle
 kind: capability_map
 title: MCP、Hook、Skill、Plugin 与 LSP 生命周期
 risk: high
-observed_at: source:1c515c09873968a279e6076cf6abf659923f1fa96137144423970bfcd0e1881c
+observed_at: source:d0568a66d7ccb8955e15a0d6f7aaaf0799ae25c287264ded14a9f167a4e01fbe
 boundary_refs:
 - boundary.extension-lifecycle
 behavior_refs:
+- behavior.channel-handler-invocation
 - behavior.extension-publication
 rule_refs:
 - rule.extension-generation-authority
@@ -58,6 +59,7 @@ finding_refs:
 - finding.mcp-version-doc-drift
 - finding.channel-manager-borrowed-await
 audit_refs:
+- audit.channel-handler-invocation-rereview
 - audit.extension-lifecycle.state-authority
 - audit.extension-lifecycle.time-lifecycle
 - audit.extension-lifecycle.permission-external
@@ -79,6 +81,13 @@ related_map_refs:
 - map.tool-permission-sandbox
 - map.protocol-surfaces
 scenarios:
+  channel-handler-forward-invocation:
+    status: mapped
+    source_refs: [echo-core/src/error.rs, echo-integration/src/channels/manager.rs, echo-integration/src/channels/types.rs, echo-integration/src/channels/session.rs, src/channels.rs, docs/adr/0085-channel-handler-invocation-ownership.md]
+    behavior_refs: [behavior.channel-handler-invocation, behavior.channel-handler-invocation]
+    rule_refs: [rule.channel-invocation-generation]
+    finding_refs: [finding.channel-handler-invocation-settlement]
+    evidence_refs: [evidence.channel-handler-forward-repair, evidence.channel-handler-forward-focused]
   mcp-connect-discover-close:
     status: needs_review
     source_refs:
@@ -300,3 +309,11 @@ EKO Plugin fan-out、preferences 和 UI catalog 属应用边界。
 
 
 当前候选最终复审：audit.framework-final-34d5-gate-rereview 绑定新23真实工程收据与完整已审源码，implementation review PASS/action0；不替代独立SDK/main验收，不升级原broad状态。
+
+
+本轮channel-handler-forward归原entry及原Session/Turn边界；新场景mapped表示owner、
+生命周期、开放Finding和验证缺口有明确去向。23/80的新mutex修复与full23/exactmain
+尚待，不能由历史22/79或本轮mapping代替。其它开放场景不在此关闭。
+
+
+Channel forward当前本地三链闭合见audit.channel-handler-invocation-rereview；仅此场景具精确源码/工程收据复核，原其它needs_review不变。

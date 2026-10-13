@@ -5,12 +5,12 @@ kind: audit
 boundary_ref: boundary.workspace-architecture
 lens: contract_evidence
 freshness: examined
-revision: source:1c515c09873968a279e6076cf6abf659923f1fa96137144423970bfcd0e1881c
+revision: 77de6ca90ad842eb4b7b2921a4baa954f41cccfe
 finding_refs:
 - finding.framework-dependency-policy-ci
 challenges:
   locked-packages-and-existing-yaml-contract:
-    revision: source:1c515c09873968a279e6076cf6abf659923f1fa96137144423970bfcd0e1881c
+    revision: 77de6ca90ad842eb4b7b2921a4baa954f41cccfe
     source_refs:
     - Cargo.lock
     - Cargo.toml

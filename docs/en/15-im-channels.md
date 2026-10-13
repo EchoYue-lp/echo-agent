@@ -33,6 +33,38 @@ echo-agent supports connecting your Agent to mainstream IM platforms (QQ Bot, Fe
 
 ## Quick Start
 
+### Forwarding through an owned channel
+
+After successful start, `ChannelHandle::handle_message(message, cancel)` invokes
+the original bound handler and returns its outbound message.
+`reply_message(outbound, cancel)` awaits that handler's reply; it is distinct from
+the channel plugin's existing `send`. `handle_message_stream(message, cancel)`
+returns `ChannelMessageStream`, containing an owned
+`BoxStream<'static, Result<OutboundMessage>>` and its exact invocation's child
+cancellation token. It implements Stream and offers into_parts. An adapter with
+its own bounded send buffer must watch that token as well as its consumer token,
+so entry stop unblocks the send and prevents stale output. It does not
+automatically call reply.
+
+Each token belongs to that invocation. Cancelling a call or dropping its waiter
+does not cancel siblings or retire the session. Stop closes the original handler
+generation to admission, cancels its active calls, stops the transport and awaits
+their actual receipts before handler close. Failed/cancelled close retains the
+same retry owner. Start must succeed before messages are admitted; failed start's
+cleanup debt is not an active handler, and captured calls never switch to a
+replacement generation after restart.
+
+Drivers own the original handler and invocation lease, so a stream can be moved
+out of the manager borrow without leaked guards or unsafe lifetime conversion.
+Legacy local futures may be dropped on cancellation. A handler declaring
+`settles_on_cancel` must forward the token through `handle_with_cancel`,
+`reply_with_cancel` and `handle_stream_with_cancel` and retain actual driver
+settlement. Cancellation itself does not prove an external Run terminal or OS
+process cleanup. Callbacks may read manager metadata after the external registry
+guard is released; recursively awaiting mutation or close of their own entry is
+unsupported. These are framework APIs; SDK wire and language contracts are owned
+and verified separately by the SDK repository.
+
 ### 1. Add Dependencies
 
 ```toml

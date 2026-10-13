@@ -1,0 +1,473 @@
+# IM Channels —— Integrating with Messaging Platforms
+
+echo-agent supports connecting your Agent to mainstream IM platforms (QQ Bot, Feishu, etc.) through a pluggable architecture for automatic messaging.
+
+## Architecture Overview
+
+```
+┌──────────────┐    ┌──────────────┐
+│   QQ Bot     │    │    Feishu    │
+│ (WebSocket)  │    │ (HTTP Webhook)│
+└──────┬───────┘    └──────┬───────┘
+       │                   │
+       ▼                   ▼
+┌──────────────────────────────────┐
+│       ChannelManager             │
+│  ┌────────┐  ┌────────┐         │
+│  │ QQ     │  │ Feishu │         │
+│  └───┬────┘  └───┬────┘         │
+└──────┼───────────┼──────────────┘
+       │           │
+       ▼           ▼
+┌──────────────────────────────────┐
+│       ChannelHandler             │
+│  IM message → Agent → auto reply  │
+└──────────────────────────────────┘
+       │
+       ▼
+┌──────────────────────────────────┐
+│       Agent Core (ReAct)          │
+│  Tools / Memory / Skills / MCP    │
+└──────────────────────────────────┘
+```
+
+## Quick Start
+
+### Forwarding through an owned channel
+
+After successful start, `ChannelHandle::handle_message(message, cancel)` invokes
+the original bound handler and returns its outbound message.
+`reply_message(outbound, cancel)` awaits that handler's reply; it is distinct from
+the channel plugin's existing `send`. `handle_message_stream(message, cancel)`
+returns `ChannelMessageStream`, containing an owned
+`BoxStream<'static, Result<OutboundMessage>>` and its exact invocation's child
+cancellation token. It implements Stream and offers into_parts. An adapter with
+its own bounded send buffer must watch that token as well as its consumer token,
+so entry stop unblocks the send and prevents stale output. It does not
+automatically call reply.
+
+Each token belongs to that invocation. Cancelling a call or dropping its waiter
+does not cancel siblings or retire the session. Stop closes the original handler
+generation to admission, cancels its active calls, stops the transport and awaits
+their actual receipts before handler close. Failed/cancelled close retains the
+same retry owner. Start must succeed before messages are admitted; failed start's
+cleanup debt is not an active handler, and captured calls never switch to a
+replacement generation after restart.
+
+Drivers own the original handler and invocation lease, so a stream can be moved
+out of the manager borrow without leaked guards or unsafe lifetime conversion.
+Legacy local futures may be dropped on cancellation. A handler declaring
+`settles_on_cancel` must forward the token through `handle_with_cancel`,
+`reply_with_cancel` and `handle_stream_with_cancel` and retain actual driver
+settlement. Cancellation itself does not prove an external Run terminal or OS
+process cleanup. Callbacks may read manager metadata after the external registry
+guard is released; recursively awaiting mutation or close of their own entry is
+unsupported. These are framework APIs; SDK wire and language contracts are owned
+and verified separately by the SDK repository.
+
+### 1. Add Dependencies
+
+```toml
+[dependencies]
+echo_agent = { path = "echo-agent", features = ["channels"] }
+```
+
+### 2. Configure Environment Variables
+
+```bash
+# QQ Bot
+export QQ_APP_ID="your-qq-app-id"
+export QQ_CLIENT_SECRET="your-qq-client-secret"
+
+# Feishu
+export FEISHU_APP_ID="your-feishu-app-id"
+export FEISHU_APP_SECRET="your-feishu-app-secret"
+export FEISHU_WEBHOOK_BIND="0.0.0.0:8080"
+
+# LLM
+export OPENAI_API_KEY="your-api-key"
+export OPENAI_BASE_URL="https://dashscope.aliyuncs.com/compatible-mode/v1"
+```
+
+### 3. Launch
+
+```rust
+use std::sync::Arc;
+use echo_agent::channels::{
+    AgentChannelHandler, ChannelManager, ChannelSessionInstance, FeishuChannel, FeishuConfig,
+    MessageHandler, QqChannel, QqConfig, SessionConfig, SessionHandler,
+};
+use echo_agent::prelude::{AgentConfig, LlmApiProtocol, LlmClient, LlmConfig};
+
+#[tokio::main]
+async fn main() -> echo_agent::error::Result<()> {
+    let api_key = std::env::var("OPENAI_API_KEY").map_err(|_| {
+        echo_agent::error::ReactError::Other(
+            "OPENAI_API_KEY is required for the IM channel provider".to_string(),
+        )
+    })?;
+    let llm_config = LlmConfig::for_provider(
+        "openai",
+        std::env::var("OPENAI_BASE_URL")
+            .unwrap_or_else(|_| "https://api.openai.com/v1".to_string()),
+        api_key,
+        "gpt-5.5",
+        LlmApiProtocol::Responses,
+    )?;
+
+    // For one standalone channel, construct the handler directly.
+    let _standalone_handler = AgentChannelHandler::from_config(
+        AgentConfig::standard("gpt-5.5", "im-assistant", "Answer clearly."),
+        llm_config.clone(),
+    )?;
+
+    // Session factories share one provider transport while each sender in each
+    // conversation keeps independent Agent state, including in group chats.
+    let llm_client: Arc<dyn LlmClient> = Arc::from(llm_config.build_client()?);
+
+    let mut manager = ChannelManager::new();
+
+    if let (Ok(app_id), Ok(secret)) = (
+        std::env::var("QQ_APP_ID"),
+        std::env::var("QQ_CLIENT_SECRET"),
+    ) {
+        manager.register(Box::new(QqChannel::new(QqConfig::new(app_id, secret))?))?;
+    }
+    if let (Ok(app_id), Ok(secret)) = (
+        std::env::var("FEISHU_APP_ID"),
+        std::env::var("FEISHU_APP_SECRET"),
+    ) {
+        manager.register(Box::new(FeishuChannel::new(FeishuConfig::new_long_poll(
+            app_id, secret,
+        ))?))?;
+    }
+
+    let session_config = SessionConfig::default().with_timeout_minutes(60);
+    let handler_factory = move |_channel_id: &str| -> Arc<dyn MessageHandler> {
+        let llm_client = Arc::clone(&llm_client);
+        Arc::new(SessionHandler::new(
+            session_config.clone(),
+            move |instance: &ChannelSessionInstance| -> Box<dyn MessageHandler> {
+                // Include this in ephemeral runtime keys when timeout/reset
+                // must not restore the previous model context.
+                let _runtime_incarnation = instance.incarnation_id();
+                Box::new(AgentChannelHandler::from_config_with_client(
+                    AgentConfig::standard("gpt-5.5", "im-assistant", "Answer clearly."),
+                    Arc::clone(&llm_client),
+                ))
+            },
+        ))
+    };
+    for started in manager.start_all(handler_factory).await {
+        started.result?;
+    }
+
+    tokio::signal::ctrl_c().await.ok();
+    manager.stop_all().await
+}
+```
+
+## ChannelPlugin Interface
+
+All IM channels implement a unified interface:
+
+```rust
+#[async_trait]
+pub trait ChannelPlugin: Send + Sync {
+    /// Unique channel ID
+    fn id(&self) -> &str;
+    /// User-visible label
+    fn label(&self) -> &str;
+    /// Capability description
+    fn capabilities(&self) -> &ChannelCapabilities;
+    /// Start the channel
+    async fn start(&mut self, handler: Arc<dyn MessageHandler>) -> Result<()>;
+    /// Stop the channel
+    async fn stop(&mut self) -> Result<()>;
+    /// Send a message
+    async fn send(&self, msg: OutboundMessage) -> Result<()>;
+}
+```
+
+## Message Flow
+
+`AgentChannelHandler` drives every inbound message through `AgentTurnDriver`.
+Its standard handler returns a reply only after the receipt reports
+`Completed + Delivered` and contains a final answer; cancellation or a failed
+Turn cannot be mistaken for a successful reply. Framework callers needing
+the exact Turn identity, usage, or cancellation result can call
+`AgentChannelHandler::drive_turn(&message, cancel_token)` and inspect the
+returned `TurnReceipt`. Receipt delivery means event-sink acceptance, while
+the channel's transport generation fence governs outbound network admission.
+`drive_turn_with_sink` accepts a caller-owned Journal or projection sink when
+events must be retained. The default sink is only an in-process acceptance
+boundary and is not a QQ/Feishu delivery acknowledgement. Framework session
+reset passes cancellation to this driven handler and waits for that Turn to
+settle before publishing the replacement reply.
+When an inbound message has attachments, the same Turn carries a typed user
+message: non-empty text first, followed by attachments in their original order.
+Image bytes are identified as PNG, JPEG, GIF, or WebP before being encoded as
+MIME-correct data URLs; unknown image data is rejected before model admission.
+Files retain their bytes as base64 `ContentPart::File` values and use a stable
+generated name when the transport did not supply one. Audio and video have no
+matching core content part and are rejected rather than silently reduced to
+text. Text-only messages retain the existing plain-text path. This preserves
+attachment bytes and part order at the framework projection boundary, but is
+not a promise that every transport metadata field is represented or that every
+provider can read every file: provider adapters may render unsupported binary
+files as name-only placeholders. See
+[ADR 0077](../adr/0077-channel-attachment-projection.md).
+Resource close is a separate boundary: `ChannelManager::stop_all` stops each
+transport before awaiting its retained `MessageHandler::close`. A
+`SessionHandler` then cancels sender generations, waits for active streams and
+delivery leases, and awaits each sender Agent close. Shutdown waits for every
+accepted/polled stream, including legacy/custom handlers that do not publish a
+driven terminal; this is resource lifetime only and does not create another
+Turn terminal. Reset retains its existing driven-only terminal settlement
+policy. Reset or timeout
+replacement closes the previous Agent before publishing the next one. A
+failed or cancelled close keeps the handler/session owner for a later `stop`
+or `close` retry; it does not reopen new message admission. Resourceful custom
+handlers implement `MessageHandler::close`, while stateless handlers use its
+default no-op. See [ADR 0066](../adr/0066-agent-adapter-close-ownership.md).
+Raw `Agent::chat` remains available for lower-level Rust consumers. See
+[ADR 0046](../adr/0046-turn-execution-delivery-settlement.md).
+
+### InboundMessage —— Received Messages
+
+```rust
+pub struct InboundMessage {
+    pub channel_id: String,   // "qqbot" | "feishu"
+    pub sender_id: String,    // Canonical transport-scoped sender identity
+    pub chat_id: String,      // Session identifier
+    pub chat_type: ChatType,  // Direct | Group
+    pub text: String,
+    pub message_id: String,   // Platform message ID (for replies)
+    pub timestamp: u64,
+    pub attachments: Vec<MessageAttachment>,
+}
+```
+
+`SessionHandler` keys an Agent session by `channel_id + chat_id + sender_id`.
+Messages from the same sender in the same conversation reuse one handler, while
+different group members have independent conversation state, execution locks,
+interaction state, timeout replacement, and reset lifecycle. Empty channel,
+conversation, or sender identifiers and the `unknown` sender sentinel are
+rejected because they cannot form a stable per-user session key. Identifiers
+with surrounding whitespace are also rejected instead of being silently
+rewritten. Built-in transports never forward these malformed messages to an
+Agent. Feishu normalizes its two identity namespaces to `open_id:{value}` or
+`user_id:{value}` before session lookup.
+
+Each factory call receives a `ChannelSessionInstance`. Its stable channel,
+conversation, and sender coordinates identify the product conversation, while
+`incarnation_id()` identifies only the concrete handler lifetime. The same
+retained handler keeps its incarnation. Framework timeout/reset replacement
+creates a fresh incarnation, and `rotate()` lets an application-owned reset
+move the same framework authority only after its own work has settled. All
+clones and `SessionEndInfo` observe that rotation, so consumers can retire the
+exact old model/runtime context while keeping journals and task history under a
+stable product conversation ID.
+
+A reset retires the old generation and cancels its stream. A chunk already
+accepted by the built-in transport is allowed to settle before reset is
+acknowledged; later chunks from the old generation are rejected before queue or
+network admission. The replacement handler and reset reply are published only
+after that delivery barrier, so stale output cannot appear after the reset
+acknowledgement. An admitted stream that has never been polled still owns its
+receipt, so its `SessionEndInfo` cleanup callback runs when that stream is
+dropped. If consumer callback code panics, `SessionHandler` contains that panic
+at the lifecycle boundary; it does not propagate from stream teardown or poison
+the replacement session. See
+[ADR 0057](../adr/0057-channel-generation-delivery-fence.md).
+
+For custom Agent drivers, carry the stable product ID in
+`AgentInvocationContext.runtime.conversation_id`, and use the instance-derived runtime key for
+both `runtime_state_id` and `transcript_generation_id`. This keeps checkpoint load/save symmetric
+within one incarnation and makes stable transcript appends idempotent without injecting older
+product history back into the model.
+The context is value-scoped even when a consumer intentionally shares one
+`ReactAgent`: changing `runtime_state_id` forces exact reset/restore before the
+next model request, and only repeated calls for the same identity reuse warm
+messages. The runtime publishes a `Hydrating` marker before cancellable restore
+work and clears rollback snapshots at that boundary, so an aborted switch cannot
+make partial context or an older snapshot look valid for another identity.
+
+### OutboundMessage —— Sent Messages
+
+```rust
+pub struct OutboundMessage {
+    pub channel_id: String,
+    pub to: String,
+    pub chat_type: ChatType,
+    pub text: String,
+    pub reply_to: Option<String>,  // Replied message ID
+    // SessionHandler attaches an opaque process-local delivery fence.
+}
+```
+
+### Custom MessageHandler
+
+```rust
+struct MyHandler {
+    llm_client: Arc<dyn LlmClient>,
+}
+
+#[async_trait::async_trait]
+impl MessageHandler for MyHandler {
+    async fn handle(&self, msg: InboundMessage)
+        -> echo_agent::error::Result<OutboundMessage>
+    {
+        let mut agent = ReactAgentBuilder::new()
+            .model("qwen3-max")
+            .system_prompt("You are a helpful assistant")
+            .enable_tools()
+            .llm_client(self.llm_client.clone())
+            .build()?;
+
+        let reply = agent.chat(&msg.text).await?;
+
+        Ok(OutboundMessage::new(
+            &msg.channel_id, msg.reply_target(),
+            msg.chat_type, &reply,
+        ))
+    }
+
+    async fn reply(&self, _msg: OutboundMessage)
+        -> echo_agent::error::Result<()>
+    {
+        // Channel auto-sends via send_tx, no manual handling needed
+        Ok(())
+    }
+}
+```
+
+## QQ Bot
+
+### Connection Method
+
+QQ Bot uses **WebSocket Gateway** to receive messages and **HTTP API** to send messages.
+
+```
+Client ──WS Connection──▶ QQ Gateway ◀──HTTP Send── Client
+```
+
+### Configuration
+
+```rust
+pub struct QqConfig {
+    pub app_id: String,
+    pub client_secret: String,
+}
+```
+
+### Supported Events
+
+| Event | Description |
+|-------|-------------|
+| `C2C_MESSAGE_CREATE` | Direct message |
+| `GROUP_AT_MESSAGE_CREATE` | Group @message |
+
+### Token Management
+
+Tokens are automatically cached and refreshed 5 minutes before expiration.
+
+`QqConfig` and `FeishuConfig` implement credential-safe `Debug`. Client/app
+secrets, webhook verification tokens, and signing keys are represented as
+`[REDACTED]`. Channel transport logs and returned diagnostics also sanitize
+credential-shaped response text and URLs before formatting them; request and
+connection behavior is unchanged.
+
+## Feishu
+
+### Connection Method
+
+Feishu uses **HTTP Webhook** to receive event pushes and **HTTP API** to send messages.
+
+```
+Feishu Server ──HTTP POST──▶ Your Webhook Server
+Your Webhook Server ──HTTP POST──▶ Feishu API
+```
+
+### Configuration
+
+```rust
+pub struct FeishuConfig {
+    pub app_id: String,
+    pub app_secret: String,
+    pub webhook_bind: String,       // e.g. "0.0.0.0:8080"
+    pub webhook_path: String,       // e.g. "/webhook"
+    pub verification_token: Option<String>,
+}
+```
+
+### Webhook Deployment
+
+1. After starting the app, configure `http://your-public-ip:port/webhook` in Feishu Open Platform
+2. Feishu will send a challenge verification request, which is automatically responded to
+3. Events are received after verification
+
+### Supported Events
+
+| Event | Description |
+|-------|-------------|
+| `im.message.receive_v1` | Receive message (text only) |
+
+## ChannelManager
+
+Manages the lifecycle of multiple channels:
+
+```rust
+let mut manager = ChannelManager::new();
+manager.register(Box::new(QqChannel::new(config)?));
+manager.register(Box::new(FeishuChannel::new(config)?));
+
+// Create independent Handler for each channel
+for started in manager.start_all(|_channel_id| {
+    Arc::new(MyHandler::new(llm_client.clone()))
+}).await {
+    started.result?;
+}
+
+// Stop transports, drain handlers, and await each sender Agent close.
+manager.stop_all().await?;
+```
+
+ChannelManager fixes each plugin's ID, label and capabilities at registration.
+Managed `get` / `get_mut` return that declaration even if a third-party plugin
+changes its internal metadata later; changing a declaration requires a new
+registration lifecycle. Their asynchronous methods still invoke the original
+plugin. `get_mut` remains available with owned handles and invalidates a previous
+transport-stop fact.
+
+For a manager protected by an external async mutex, obtain an owned operation
+under a short guard, release the guard, then await:
+
+```rust
+let channel = {
+    let guard = shared_manager.lock().await;
+    guard.get_owned("qqbot")
+};
+if let Some(channel) = channel {
+    channel.health_check().await?;
+}
+let shutdown = { shared_manager.lock().await.stop_all_owned() };
+shutdown.await?;
+```
+
+`ChannelHandle` retains the same plugin instance and cleanup responsibility.
+`start_all_owned` / `stop_all_owned` snapshot registrations when called; later
+registrations belong to the next batch. An unpolled future has no plugin or
+handler-factory side effects. Start publishes handler ownership before awaiting
+the plugin. Failed or cancelled cleanup remains retryable; after successful
+transport stop only handler close is retried. Success does not unregister a
+channel, and dropping the manager is not awaited shutdown. Same-channel callback
+recursion that awaits its own lifecycle lock is unsupported. See
+[ADR 0084](../adr/0084-channel-owned-operations.md).
+
+## Running the Full Example
+
+```bash
+# After configuring environment variables
+cargo run -p echo-agent-learning --example demo38_im_channels --features channels
+```

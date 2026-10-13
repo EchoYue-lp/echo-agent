@@ -274,7 +274,15 @@ fn channel_reply_from_receipt(receipt: TurnReceipt) -> Result<String> {
 #[async_trait]
 impl MessageHandler for AgentChannelHandler {
     async fn handle(&self, msg: InboundMessage) -> echo_core::error::Result<OutboundMessage> {
-        let receipt = self.drive_turn(&msg, CancellationToken::new()).await?;
+        self.handle_with_cancel(msg, CancellationToken::new()).await
+    }
+
+    async fn handle_with_cancel(
+        &self,
+        msg: InboundMessage,
+        cancel: CancellationToken,
+    ) -> echo_core::error::Result<OutboundMessage> {
+        let receipt = self.drive_turn(&msg, cancel).await?;
         let reply = channel_reply_from_receipt(receipt)?;
 
         Ok(OutboundMessage::new(
@@ -634,6 +642,23 @@ mod tests {
             channel_reply_from_receipt(cancelled),
             Err(ReactError::Agent(_))
         ));
+
+        // The cancellation-aware public consumer must reach that same driven
+        // terminal path, rather than dropping an unrelated local handle future.
+        let cancelled_token = CancellationToken::new();
+        cancelled_token.cancel();
+        let client = Arc::new(MockLlmClient::new().with_response("not delivered"));
+        let cancelled_handler = AgentChannelHandler::from_config_with_client(
+            AgentConfig::minimal("mock-model", "cancelled-channel-agent"),
+            client.clone(),
+        );
+        assert!(
+            cancelled_handler
+                .handle_with_cancel(test_message("incoming-5"), cancelled_token)
+                .await
+                .is_err()
+        );
+        assert_eq!(client.call_count(), 0);
 
         let mut undelivered = TurnReceipt::failed(
             "undelivered-turn",

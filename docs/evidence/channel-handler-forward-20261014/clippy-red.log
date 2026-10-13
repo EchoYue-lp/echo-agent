@@ -1,0 +1,41 @@
+    Checking echo_core v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward/echo-core)
+   Compiling echo_macros v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward/echo-macros)
+    Checking echo_state v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward/echo-state)
+    Checking echo_execution v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward/echo-execution)
+    Checking echo_orchestration v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward/echo-orchestration)
+    Checking echo_tools v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward/echo-tools)
+    Checking echo_integration v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward/echo-integration)
+    Checking echo_agent v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward)
+error: this `if` statement can be collapsed
+   --> echo-integration/src/channels/manager.rs:974:21
+    |
+974 | /                     if self.driven {
+975 | |                         if let Err(error) = self.release.acquire().await.map(|permit| permit.forget()) {
+976 | |                             yield Err(channel_error(error.to_string()));
+977 | |                         }
+978 | |                     }
+    | |_____________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#collapsible_if
+    = note: `-D clippy::collapsible-if` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::collapsible_if)]`
+help: collapse nested if block
+    |
+974 ~                     if self.driven
+975 ~                         && let Err(error) = self.release.acquire().await.map(|permit| permit.forget()) {
+976 |                             yield Err(channel_error(error.to_string()));
+977 ~                         }
+    |
+
+error: using `contains()` instead of `iter().any()` is more efficient
+    --> echo-integration/src/channels/manager.rs:1474:21
+     |
+1474 |                 if !ids.iter().any(|id| *id == "forward") {
+     |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `ids.contains(&"forward")`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#manual_contains
+     = note: `-D clippy::manual-contains` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::manual_contains)]`
+
+error: could not compile `echo_integration` (lib test) due to 2 previous errors
+warning: build failed, waiting for other jobs to finish...
