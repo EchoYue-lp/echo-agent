@@ -1,0 +1,4 @@
+语义治理校验失败，共 3 项：
+- /Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/database-describe-fidelity/.echo-semantic: 预检未声明机器识别的高风险信号：publicApi
+- /Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/database-describe-fidelity/.echo-semantic: 预检未声明机器识别的高风险信号：newStateAuthority
+- /Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/database-describe-fidelity/.echo-semantic: 高风险变化没有同次更新语义对象

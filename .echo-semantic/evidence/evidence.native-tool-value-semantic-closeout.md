@@ -1,0 +1,52 @@
+---
+schema_version: 1
+id: evidence.native-tool-value-semantic-closeout
+kind: evidence
+observed_at: 848fa138e1edc077e017b399d891918ca1d3f949
+source_refs:
+- echo-tools/src/database.rs
+- echo-tools/src/rag.rs
+- echo-tools/src/research/clinical_trials.rs
+supports:
+- behavior.native-tool-value-fidelity
+- rule.native-tool-value-authority
+limitations:
+- Only final full-project semantic strict snapshot and change-evidence validation;
+  no remote CI/public-main/SDK proof.
+- Task-scope history reader limitation remains preserved separately; no historical
+  SDK references were deleted to obtain strict success.
+---
+
+# 原生值保真最终语义验证
+
+## 支持的结论
+
+同源码1d52/978文件，baseline祖先95ec保持；最终新增三项三链和有限Behavior/Rule、
+原始47门禁归档写完后实际full strict/base554f/require-change-evidence退出0，diffcheck0。
+这不是Cargo测试或远端main收据；本地完整23和独立复审另见各Evidence/Audit。
+
+## 来源与范围
+
+以下2文件为实际完整校验stdout和精确命令/exit/sourceDigest收据的原始字节base64。
+新增归档只在.echo-semantic，不改变当前非语义source1d52。
+
+## 已知缺口
+
+公开CI/main、新Host三语言和官网待验；历史task-scope614reader缺陷保留原日志与说明。
+本次full strict使用正确Git历史来源读取，不伪造零错误或修改插件。
+
+### strict-final.log
+
+SHA-256: `68d35fef5072b42883d4135dfe9ef8c93c8425ab07d08b92cd3d661f48bcf729`
+
+```base64
+6K+t5LmJ5rK755CG5qCh6aqM6YCa6L+H77yaL1VzZXJzL2xzL015V29yay9jb2RlL3lscF9hZ2VudF9sZWFybi9scC1hZ2VudC8ud29ya3RyZWVzL2VjaG8tYWdlbnQtd29ya3RyZWVzL2RhdGFiYXNlLWRlc2NyaWJlLWZpZGVsaXR5Ly5lY2hvLXNlbWFudGljCg==
+```
+
+### strict-final.receipt.json
+
+SHA-256: `c523fc136ad6531ac3865c24d794c9aad518f5b48302165505057f3ac07cd127`
+
+```base64
+ewogICJjbGFzc2lmaWNhdGlvbiI6ICJhY3R1YWwgZmluYWwgc2VtYW50aWMgc3RyaWN0IHZlcmlmaWNhdGlvbjsgbm90IENhcmdvIG9yIFNESy9tYWluIHByb29mIiwKICAiY29tbWFuZCI6IFsKICAgICJweXRob24iLAogICAgIi9Vc2Vycy9scy8uY29kZXgvcGx1Z2lucy9jYWNoZS9lY2hvLXNlbWFudGljL2VjaG8tc2VtYW50aWMvMC41LjAvc2tpbGxzL3NlbWFudGljLWNvbnRyYWN0L3NjcmlwdHMvdmVyaWZ5X3NlbWFudGljLnB5IiwKICAgICItLXJvb3QiLAogICAgIi9Vc2Vycy9scy9NeVdvcmsvY29kZS95bHBfYWdlbnRfbGVhcm4vbHAtYWdlbnQvLndvcmt0cmVlcy9lY2hvLWFnZW50LXdvcmt0cmVlcy9kYXRhYmFzZS1kZXNjcmliZS1maWRlbGl0eSIsCiAgICAiLS1zdHJpY3Qtc25hcHNob3QiLAogICAgIi0tYmFzZSIsCiAgICAiNTU0ZjJmNTBkMzcwNWQyMTk1MTlmMzA2MDU1YTNkMjZkNmE1MjExYyIsCiAgICAiLS1yZXF1aXJlLWNoYW5nZS1ldmlkZW5jZSIKICBdLAogICJleGl0Q29kZSI6IDAsCiAgImxvZ1NoYTI1NiI6ICI2OGQzNWZlZjUwNzJiNDI4ODNkNDEzNWRmZTllZjhjOTNjODQyNWFiMDdkMDhiOTJjZDNkNjYxZjQ4YmNmNzI5IiwKICAic291cmNlRGlnZXN0IjogIjFkNTJkYTYxNTgyYTM2M2VjM2EzNDY4NzcyZjJiNzg5ZTc2YjRlMDQzZTc3OTdlODVmODk3NDExMzYxYTIyZmQiCn0K
+```

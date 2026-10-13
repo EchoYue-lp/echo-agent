@@ -4,13 +4,15 @@ id: map.tool-permission-sandbox
 kind: capability_map
 title: Tool、Permission、Sandbox 与外部 Effect
 risk: high
-observed_at: 77de6ca90ad842eb4b7b2921a4baa954f41cccfe
+observed_at: source:1d52da61582a363ec3a3468772f2b789e76b4e043e7797e85f897411361a22fd
 boundary_refs:
 - boundary.tool-permission-sandbox
 behavior_refs:
 - behavior.effect-permission-execution
+- behavior.native-tool-value-fidelity
 rule_refs:
 - rule.permission-effect-order
+- rule.native-tool-value-authority
 evidence_refs:
 - evidence.effects-extensions
 - evidence.high-risk-audit-frontier
@@ -39,6 +41,13 @@ evidence_refs:
 - evidence.data-pivot-value-fidelity-verification
 - evidence.framework-final-34d5-full-verification
 - evidence.framework-final-34d5-gate-archive
+- evidence.database-runtime-cell-repair
+- evidence.database-runtime-cell-verification
+- evidence.rag-preview-unicode-repair
+- evidence.rag-preview-unicode-verification
+- evidence.clinical-trials-total-repair
+- evidence.clinical-trials-total-verification
+- evidence.native-tool-value-full-gates
 finding_refs:
 - finding.tool-read-cache-scope
 - finding.tool-read-cache-inflight-invalidation-race
@@ -62,6 +71,9 @@ finding_refs:
 - finding.tool-pipeline-example-drift
 - finding.guard-overlap-redaction
 - finding.data-pivot-value-fidelity
+- finding.database-runtime-cell-fidelity
+- finding.rag-preview-unicode-count
+- finding.clinical-trials-total-fidelity
 audit_refs:
 - audit.tool-permission-sandbox.permission-external
 - audit.tool-permission-sandbox.failure-concurrency
@@ -77,6 +89,9 @@ audit_refs:
 - audit.guard-overlap-redaction-rereview
 - audit.data-pivot-value-fidelity-rereview
 - audit.framework-final-34d5-gate-rereview
+- audit.native-tool-value-fidelity-rereview
+- audit.native-tool-value-final-rereview
+- audit.clinical-trials-total-rereview
 related_map_refs:
 - map.agent-session-turn
 - map.task-subagent-workflow
@@ -120,8 +135,8 @@ scenarios:
     audit_refs:
     - audit.streaming-tool-validation-rereview
     - audit.hook-protected-path-rereview
-    unknown: ReactAgent自动工具路径有确定stage顺序，streaming validation与Hook Allow protected-path反例已闭合；其它permission precedence、secret
-      retention与示例合同尚未闭合
+    unknown: ReactAgent自动工具路径有确定stage顺序，streaming validation与Hook Allow protected-path反例已闭合；其它permission
+      precedence、secret retention与示例合同尚未闭合
     next_step: 沿真实 15-stage pipeline 执行 focused audit，不以静态示例数组作为权威
   programmatic-tool-manager:
     status: mapped
@@ -169,8 +184,8 @@ scenarios:
     - evidence.readonly-tool-capability-verification
     audit_refs:
     - audit.readonly-tool-capability-rereview
-    unknown: 构造期 readonly_tools 的 custom registration、晚注入可见性与执行反例已闭合；Plan mode 的 effect-boundary 修复已有真实 Hook、permit
-      与动态替换回归，仍待独立复审与交付
+    unknown: 构造期 readonly_tools 的 custom registration、晚注入可见性与执行反例已闭合；Plan mode 的 effect-boundary
+      修复已有真实 Hook、permit 与动态替换回归，仍待独立复审与交付
     next_step: 复核真实运行期拒绝的 blocked/Unavailable 与 observation 结算，不影响 direct-user surface
   permission-and-approval:
     status: mapped
@@ -226,7 +241,8 @@ scenarios:
     - finding.guard-direction-contract
     - finding.trace-effect-event-producers
     - finding.trace-audit-secret-boundary
-    unknown: Guard directions/event producers 未闭合，trace 与 in-memory audit 原样保存输入，不能作全局 secret-redaction 保证
+    unknown: Guard directions/event producers 未闭合，trace 与 in-memory audit 原样保存输入，不能作全局
+      secret-redaction 保证
     next_step: audit 每个 observation backend 的 retention/redaction contract
   command-cell-runtime:
     status: needs_review
@@ -264,9 +280,11 @@ scenarios:
     status: excluded
     source_refs:
     - docs/en/39-framework-application-boundary.md
-    reason: 用户主动 terminal/MCP/file-picker 的产品交互与 Agent 自动工具 permission 不是同一 framework 入口
+    reason: 用户主动 terminal/MCP/file-picker 的产品交互与 Agent 自动工具 permission 不是同一 framework
+      入口
     risk: high
-    recheck_when: embedding application 将 direct-user 操作通过 framework Agent pipeline 执行时
+    recheck_when: embedding application 将 direct-user 操作通过 framework Agent pipeline
+      执行时
   direct-tool-input-validation:
     status: needs_review
     source_refs:
@@ -313,6 +331,60 @@ scenarios:
     evidence_refs:
     - evidence.data-pivot-value-fidelity-repair
     - evidence.data-pivot-value-fidelity-verification
+  database-runtime-cell-fidelity:
+    status: mapped
+    source_refs:
+    - echo-tools/src/database.rs
+    - docs/evidence/database-describe-fidelity/README.md
+    behavior_refs:
+    - behavior.native-tool-value-fidelity
+    rule_refs:
+    - rule.native-tool-value-authority
+    finding_refs:
+    - finding.database-runtime-cell-fidelity
+    evidence_refs:
+    - evidence.database-runtime-cell-repair
+    - evidence.database-runtime-cell-verification
+    - evidence.native-tool-value-full-gates
+    audit_refs:
+    - audit.native-tool-value-fidelity-rereview
+    - audit.native-tool-value-final-rereview
+  rag-preview-unicode-count:
+    status: mapped
+    source_refs:
+    - echo-tools/src/rag.rs
+    - docs/evidence/database-describe-fidelity/README.md
+    behavior_refs:
+    - behavior.native-tool-value-fidelity
+    rule_refs:
+    - rule.native-tool-value-authority
+    finding_refs:
+    - finding.rag-preview-unicode-count
+    evidence_refs:
+    - evidence.rag-preview-unicode-repair
+    - evidence.rag-preview-unicode-verification
+    - evidence.native-tool-value-full-gates
+    audit_refs:
+    - audit.native-tool-value-fidelity-rereview
+    - audit.native-tool-value-final-rereview
+  clinical-trials-total-fidelity:
+    status: mapped
+    source_refs:
+    - echo-tools/src/research/clinical_trials.rs
+    - docs/en/22-research-tools.md
+    - docs/zh/22-research-tools.md
+    behavior_refs:
+    - behavior.native-tool-value-fidelity
+    rule_refs:
+    - rule.native-tool-value-authority
+    finding_refs:
+    - finding.clinical-trials-total-fidelity
+    evidence_refs:
+    - evidence.clinical-trials-total-repair
+    - evidence.clinical-trials-total-verification
+    - evidence.native-tool-value-full-gates
+    audit_refs:
+    - audit.native-tool-value-final-rereview
 ---
 
 
@@ -378,3 +450,12 @@ Agent pipeline、programmatic primitive、trusted Hook effect 与 CommandCell �
 
 
 当前候选最终复审：audit.framework-final-34d5-gate-rereview 绑定新23真实工程收据与完整已审源码，implementation review PASS/action0；不替代独立SDK/main验收，不升级原broad状态。
+
+
+本轮原生值场景：数据库 actual-cell type/null 和 RAG scalar preview 的两项具体故障已具真实旧红/新绿与独立源码复审；mapped只表示有明确处置。完整新门禁、公开pin、新Host三语言及精确main仍另验，不刷新旧broad审查状态。
+
+
+ClinicalTrials总量增量已映射：官方原始响应与3真实反例及新4通过证明局部修复；Finding保留open待第三文件独立复审，不把DB/RAG历史PASS变成当前三项整体通过。
+
+
+当前本地收口：三个值保真场景均具原反例、修复、当前验证和独立复审。23完整门禁实际3504/0/3optin、978source不变；三个localFinding resolved。该增量不提升原broad Tool map风险状态，不代替远端main、新SDK三语言或官网。

@@ -7,6 +7,7 @@
 可用工具：
 - `arxiv_search` — 搜索 ArXiv 预印本
 - `semantic_scholar_search` — 搜索 Semantic Scholar 已发表论文
+- `clinical_trials_search` — 搜索 ClinicalTrials.gov 研究元数据
 - `pdf_fetch` — 下载并解析 PDF 文档
 - `bibtex_generate` — 从论文元数据生成 BibTeX 引用
 
@@ -114,6 +115,22 @@
   ]
 }
 ```
+
+---
+
+## clinical_trials_search
+
+检索 ClinicalTrials.gov API v2 的研究元数据。`query` 必填，`max_results` 默认 10，
+上限 100；可选 `status`、`phase`、`country` 过滤条件保持原有请求行为。
+
+工具向原 API endpoint 明确请求 `countTotal=true`。`total_results` 是服务端返回的
+非负整数 `totalCount`，`returned` 是当前响应页的研究条数，两者可以不同。归档中的
+一条研究响应为 `total_results: 386`、`returned: 1`；这是已捕获的例子，不代表该查询
+当前固定总量。服务端明确返回 0 时保留 0；`totalCount` 缺失、null、负数、小数或类型
+错误时返回明确 Tool 执行错误，不将缺失总量填为 0。
+
+研究标识、标题、状态、阶段、疾病、干预、结局指标、人数、日期及 URL 保持原有转换。
+无需增加 SDK 参数或响应字段；所有消费者共用框架原 Tool 的 HTTP 响应解析。
 
 ---
 

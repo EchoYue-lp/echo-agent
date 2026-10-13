@@ -1,0 +1,8 @@
+{
+  "default.json": "86d34643e66abc0c1528faef1bfd804c75e35c5a370a206e4ea6d447a1b0571a",
+  "requested.json": "f71dbad9151502899033b3c619877cdb10c7ddd35ea5c1580969d3f4ea32005c",
+  "default-receipt.json": "5b1edd8331bbb1dbbff9ae2c1ec6f963d56a4f5eee6631dcc2a594b42a0e5445",
+  "requested-receipt.json": "d63beaa2eb6ca4cccef19c4093e87281f4d481dc103851e67711f222271776e2",
+  "original-source-base64.txt": "7bc3b70712dce618332cddad0d79bce9a8eb9f5eb6b0102e95b6a86d8d0ed0bd",
+  "old-behavior-regression-source-base64.txt": "9b93942876dcfedfa694f57c66b23fec00134986adef00ab2b7bacc3380e86da"
+}

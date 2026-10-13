@@ -1,0 +1,23 @@
+# Forwarded independent source review
+
+Reviewer: /root/sdk_capability_acceptance_audit
+Delivery: parent /root forwarded the actual review message in this task conversation.
+Classification: conversation review transcript, not command stdout or a separately executed test receipt.
+Scope: frozen database/RAG source, four formal documentation files, 20 original archived evidence files.
+The original 20-file SHA256SUMS.json is preserved unchanged; this transcript is a later addition.
+
+Verbatim forwarded conclusion:
+
+pass（限定数据库/RAG修复源码）；Critical/Important/Minor均为0。六个变更文件与20份归档摘要匹配；数据库a53610a7…、RAGd7dacc21…，前后源码可精确恢复。数据库统一按SQLx实际单元格类型解码；真实NULL、缺失值和非有限浮点数明确区分。整数Unicode BLOB保留原值，转换失败不填默认null。四个数据库反例由失败转通过，原两项回归仍通过，共6项。RAG字符数/preview/truncated统一Unicode标量；两个旧反例转绿，覆盖4字符70/200/201字符边界，原字符统计Important源码缺陷已修。Focused lint、四项paniclint、格式通过；任务范围semantic检查通过，globalclosure仍未检查。唯一下一步：最终框架门禁发布后新Host三语言验证，旧0435字节计数证据保持历史，不证明修后消费/main。
+
+Parent's forwarded detail, distinguished from the quoted conclusion:
+
+The reviewer traced SQLx 0.8.6 AnyRow.try_get_raw through fallible values.get,
+ValueRef.is_null, runtime type_info and try_get compatibility. The f32-to-f64
+conversion remains exact, Number::from_f64 failure becomes ExecutionFailed,
+and actual SQL NULL alone is represented as JSON null. This source review does
+not certify the unrun full workspace gates, published main or new SDK Host.
+
+Frozen reviewed source SHA256:
+- echo-tools/src/database.rs: a53610a7f1f3250a749eff3306aebe577157b4984bc572e9589da66bffdf3a0a
+- echo-tools/src/rag.rs: d7dacc2133e935b982237807cbb13b7b3de7d11cbdb85d4662793f357bd77f6f

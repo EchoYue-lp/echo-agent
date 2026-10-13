@@ -1,0 +1,75 @@
+{
+  "schemaVersion": 1,
+  "classification": "ClinicalTrials accepted total field local repair after published Channel main; no final SDK or public-main proof",
+  "baseRevision": "554f2f50d3705d219519f306055a3d26d6a5211c",
+  "worktree": "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/database-describe-fidelity",
+  "sourceSha256": {
+    "echo-tools/src/research/clinical_trials.rs": "6bfe4c12a2ad77022c9426b9bf21b5e0ecad68c4df7fd1d7efe1ad28759ccd7d",
+    "docs/en/22-research-tools.md": "680dcd62052ebfda8408cf98487292668b9fbf8f1b2dd90ba27238c7a6cf6cbc",
+    "docs/zh/22-research-tools.md": "1e210bdc3a95c1626275069c9539162552e6c4039ae2d57a96fe0361cb07f64e"
+  },
+  "before": {
+    "log": "before.log",
+    "exitCode": 101,
+    "passed": 1,
+    "failed": 3,
+    "ignored": 0,
+    "classification": "mechanical private extraction preserving original URL and normalization behavior plus four new regressions; not a byte-identical whole old-main test binary"
+  },
+  "after": {
+    "log": "after.log",
+    "exitCode": 0,
+    "passed": 4,
+    "failed": 0,
+    "ignored": 0
+  },
+  "commandsPassed": [
+    {
+      "log": "format.log",
+      "exitCode": 0
+    },
+    {
+      "log": "format-check.log",
+      "exitCode": 0
+    },
+    {
+      "log": "after.log",
+      "exitCode": 0
+    },
+    {
+      "log": "clippy.log",
+      "exitCode": 0
+    },
+    {
+      "log": "panic-lints.log",
+      "exitCode": 0
+    }
+  ],
+  "officialResponses": [
+    {
+      "receipt": "default-receipt.json",
+      "response": "default.json",
+      "status": 200,
+      "totalCountPresent": false,
+      "studies": 1
+    },
+    {
+      "receipt": "requested-receipt.json",
+      "response": "requested.json",
+      "status": 200,
+      "totalCountPresent": true,
+      "totalCount": 386,
+      "studies": 1
+    }
+  ],
+  "decodedSourceSha256": {
+    "after-source-base64.txt": "6bfe4c12a2ad77022c9426b9bf21b5e0ecad68c4df7fd1d7efe1ad28759ccd7d",
+    "old-behavior-regression-source-base64.txt": "28b8f20514a4c8219ff2036e0eb6c6b6869101430b2d23998ec8e302ef676ff5",
+    "original-source-base64.txt": "788d2f3d22c846173a49fad11ca4ee49ff5e1ba00811f588173a69e6b82828a8"
+  },
+  "limitations": [
+    "Official HTTP probe receipts copied byte-identically from SDK Tool value evidence, not fetched by this lane; do not claim current fixed total386.",
+    "Offline regressions exercise original Tool private URL construction and normalization; no network test or new published SDK Host in this lane.",
+    "Independent third-file review, final exact-source workspace23 gates, CI, published main and three-language E2E remain required."
+  ]
+}

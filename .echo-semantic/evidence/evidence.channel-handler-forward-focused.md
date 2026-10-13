@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.channel-handler-forward-focused
 kind: evidence
-observed_at: source:d0568a66d7ccb8955e15a0d6f7aaaf0799ae25c287264ded14a9f167a4e01fbe
+observed_at: 554f2f50d3705d219519f306055a3d26d6a5211c
 source_refs:
 - docs/evidence/channel-handler-forward-20261014/previous-sources/echo-integration/src/channels/session.rs.txt
 - docs/evidence/channel-handler-forward-20261014/previous-sources/echo-integration/src/channels/manager.rs.txt
@@ -52,3 +52,8 @@ previous-sources精确校验后给完整review-increment diff。以真实8035350
 新mutexrace是同guard线性化修复，OSbarrier测试针对signal边界锁持有而非宣称真实
 message误准入。旧日志不可冒新sourcegreen。新的23/80与lint、final全23和独立复核
 以及框架/SDKmain交付尚待。不得以此Evidence关闭无关Finding或扩完整Rustinventory。
+
+
+## 已发布历史快照定位
+
+本对象原 source:d0568a66d7ccb8955e15a0d6f7aaaf0799ae25c287264ded14a9f167a4e01fbe 的完整非语义源码与已发布 Git 554f2f50d3705d219519f306055a3d26d6a5211c 唯一摘要相同。全部本对象code/source引用逐blob核对当前仍相同，现只重绑定可恢复Git定位；原N审查范围、运行时间、状态与结论保持。此历史事实不覆盖D新增Database/RAG/Clinical三源码、其测试或消费者，更不冒作本轮门禁通过。

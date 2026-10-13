@@ -5,11 +5,11 @@ kind: audit
 boundary_ref: boundary.extension-lifecycle
 lens: failure_concurrency
 freshness: examined
-revision: source:d0568a66d7ccb8955e15a0d6f7aaaf0799ae25c287264ded14a9f167a4e01fbe
+revision: 554f2f50d3705d219519f306055a3d26d6a5211c
 finding_refs: [finding.channel-handler-invocation-settlement]
 challenges:
   entry-admission-cancellation-settlement:
-    revision: source:d0568a66d7ccb8955e15a0d6f7aaaf0799ae25c287264ded14a9f167a4e01fbe
+    revision: 554f2f50d3705d219519f306055a3d26d6a5211c
     source_refs: [echo-core/src/error.rs, echo-integration/src/channels/manager.rs, echo-integration/src/channels/types.rs, echo-integration/src/channels/session.rs, echo-integration/src/channels/mod.rs, src/channels.rs, docs/adr/0085-channel-handler-invocation-ownership.md, docs/en/15-im-channels.md, docs/zh/15-im-channels.md]
     evidence_refs: [evidence.channel-handler-forward-repair, evidence.channel-handler-forward-focused, evidence.channel-handler-forward-full-gates]
 ---
@@ -56,3 +56,8 @@ Rust/Host inventory，不扩大accepted crosslanguage scope。crossrepoPlan保�
 
 不宣称框架全历史Behavior/Rule verified，不关闭其它Finding，不用source pass
 代替消费者或官网交付。最终.semantic轻增量需strict及父baseline3验证。
+
+
+## 已发布历史快照定位
+
+本对象原 source:d0568a66d7ccb8955e15a0d6f7aaaf0799ae25c287264ded14a9f167a4e01fbe 的完整非语义源码与已发布 Git 554f2f50d3705d219519f306055a3d26d6a5211c 唯一摘要相同。全部本对象code/source引用逐blob核对当前仍相同，现只重绑定可恢复Git定位；原N审查范围、运行时间、状态与结论保持。此历史事实不覆盖D新增Database/RAG/Clinical三源码、其测试或消费者，更不冒作本轮门禁通过。

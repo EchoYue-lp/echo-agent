@@ -4,7 +4,7 @@ id: baseline.repository
 kind: baseline
 source_snapshot:
   base_revision: 95ec66c6083a8feb17a1c28de0d01e1a24ca8a28
-  content_digest: d0568a66d7ccb8955e15a0d6f7aaaf0799ae25c287264ded14a9f167a4e01fbe
+  content_digest: 1d52da61582a363ec3a3468772f2b789e76b4e043e7797e85f897411361a22fd
 inventory_closure: closed
 behavior_model_closure: closed
 map_refs:
@@ -493,3 +493,10 @@ Channel handler forward当前模型已归原extension/session边界与开放Find
 
 
 Channel invocation本地三链现已闭合：same source d056完整23/current23/80回归及独立源码/receipt审查通过。仅新有限Behavior/Rule verified、具体Finding resolved，SDK/官网/目标main仍独立待交付，旧宽对象不由此verified。
+
+
+## Database、RAG与Clinical本轮范围
+
+当前D候选绑定source:1d52da61582a363ec3a3468772f2b789e76b4e043e7797e85f897411361a22fd，可恢复主线祖先仍95ec66c6083a8feb17a1c28de0d01e1a24ca8a28。DB/RAG原focused与独立复审保持真实52eb905fe03711151508d1f439f87a863edaa839（source782）历史，不扩大至Clinical。Clinical新增URL countTotal及响应totalCount错误合同有独立原始old/new证据，当前Finding仍open等新复审。新3场景归原Tool map及限定native value Behavior/Rule；原宽对象未提升状态，未新增公共API/状态权威或接受新语言identity。
+
+原N11对象原source:d056精确等已发布554f，全部引用逐blob同，已改为历史Git定位保留原审查范围/时间/状态。614项任务范围校验错误来自installed0.5对历史SDK引用直接读当前树的限制，原始命令及stderr见evidence.native-value-semantic-history-reader-limit；不删引用或恢复迁出的SDK。全项目strict snapshot/change-evidence按真实历史Git继续执行；该限制不代替新完整23、baseline native3、独立复审、SDK消费者或精确main验收。
