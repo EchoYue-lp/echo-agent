@@ -20,7 +20,8 @@ pub type TaskId = String;
 /// The framework owns how claims and unfinished tasks are settled. An
 /// application only decides whether its current stop request is a terminal
 /// cancellation or a resumable pause, and supplies the pause reason.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RuntimeInterruptionDisposition {
     /// Stop the run permanently and cancel every unfinished task.
     #[default]
@@ -208,6 +209,27 @@ pub struct TaskExecution {
     pub failure_fingerprint: Option<String>,
     #[serde(default)]
     pub claim: Option<TaskClaim>,
+    /// Canonical successful output, committed with terminal completion.
+    /// `None` means no output was supplied; an explicit JSON null remains
+    /// `Some(Value::Null)` and must not be manufactured by adapters.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_present_result"
+    )]
+    pub result: Option<serde_json::Value>,
+    /// Exact-claim interruption fact. Live cancellation tokens project this
+    /// request; they do not decide its durable terminal disposition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interruption_requested: Option<RuntimeInterruptionDisposition>,
+}
+
+// `Option<Value>` normally turns a present JSON null into None. Deserialize
+// the present value directly; serde's field default handles absence separately.
+fn deserialize_present_result<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<serde_json::Value>, D::Error> {
+    serde_json::Value::deserialize(deserializer).map(Some)
 }
 
 impl TaskExecution {
@@ -218,6 +240,8 @@ impl TaskExecution {
             retry_count: 0,
             failure_fingerprint: None,
             claim: None,
+            result: None,
+            interruption_requested: None,
         }
     }
 }
@@ -438,7 +462,8 @@ pub struct DagExecutionState {
 ///
 /// This is a projection, never a persisted task lifecycle. In particular,
 /// [`BlockedByFailure`](Self::BlockedByFailure) disappears automatically when
-/// its failed ancestor is retried in a newer snapshot. Applications may still
+/// its failed ancestor is retried in a newer snapshot. Cancelled ancestors also
+/// derive a non-success blocker; cancellation is never a dependency waiver. Applications may still
 /// persist [`TaskStatus::Blocked`] for product-owned review or input policy,
 /// but dependency traversal must not encode this projection as a status string.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -577,6 +602,7 @@ impl DagExecutionState {
         let mut failed_ancestors: HashMap<TaskId, HashSet<TaskId>> = self
             .failed
             .iter()
+            .chain(self.cancelled.iter())
             .map(|task_id| (task_id.clone(), HashSet::from([task_id.clone()])))
             .collect();
         loop {
@@ -880,6 +906,8 @@ mod tests {
                 retry_count: 0,
                 failure_fingerprint: None,
                 claim: None,
+                result: None,
+                interruption_requested: None,
             },
         }
     }

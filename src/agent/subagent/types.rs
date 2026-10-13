@@ -714,7 +714,8 @@ fn extract_markdown_section<'a>(raw: &'a str, heading: &str) -> Option<&'a str> 
 }
 
 /// Result returned by a subagent execution.
-#[derive(Debug, Clone)]
+/// Serializable as a complete recoverable Task execution result.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubagentResult {
     /// Agent name that produced this result.
     pub agent_name: String,
@@ -926,6 +927,47 @@ mod tests {
         let def = SubagentDefinition::simple_sync("subagent");
         assert_eq!(def.name, "subagent");
         assert!(def.description.contains("subagent"));
+    }
+
+    #[test]
+    fn subagent_result_roundtrip_preserves_complete_execution_facts() -> Result<(), String> {
+        let mut result = SubagentResult::sync_result(
+            "助手🚀",
+            "完成\n路径 /tmp/中文".to_string(),
+            Duration::new(u64::MAX, 999_999_999),
+        );
+        result.iterations = usize::MAX;
+        result.tokens_used = Some(usize::MAX);
+        result.was_truncated = true;
+        result.mode = ExecutionMode::Team;
+        result.isolation_observed = ObservedIsolation::new("isolated中文");
+        result.outcome.summary = "明确结果".to_string();
+        result.outcome.remaining_work = vec!["follow up".to_string()];
+        result.llm_usage = Some(LlmUsageStats {
+            model: "模型".to_string(),
+            prompt_tokens: u64::MAX,
+            completion_tokens: u64::MAX,
+            total_tokens: u64::MAX,
+            cached_prompt_tokens: u64::MAX,
+            cache_creation_prompt_tokens: u64::MAX,
+            usage_reported: true,
+            call_count: u64::MAX,
+        });
+        let encoded = serde_json::to_value(&result).map_err(|error| error.to_string())?;
+        let restored: SubagentResult =
+            serde_json::from_value(encoded.clone()).map_err(|error| error.to_string())?;
+        assert_eq!(
+            serde_json::to_value(&restored).map_err(|error| error.to_string())?,
+            encoded
+        );
+        assert_eq!(restored.duration, result.duration);
+        assert_eq!(restored.iterations, usize::MAX);
+        assert_eq!(restored.tokens_used, Some(usize::MAX));
+        assert_eq!(
+            restored.llm_usage.as_ref().map(|usage| usage.total_tokens),
+            Some(u64::MAX)
+        );
+        Ok(())
     }
 
     #[test]

@@ -2,8 +2,9 @@
 //! communicates via JSON-RPC over stdin/stdout.
 
 use echo_core::lsp::{
-    CompletionItem, Diagnostic, HoverInfo, Location, LspClient, LspError, LspResult,
-    LspServerConfig, LspServerStatus, Position, TextChange,
+    CompletionItem, CompletionItemKind, Diagnostic, DiagnosticCode, DiagnosticSeverity, HoverInfo,
+    Location, LspClient, LspError, LspResult, LspServerConfig, LspServerStatus, Position, Range,
+    TextChange,
 };
 use futures::future::BoxFuture;
 use std::collections::HashMap;
@@ -50,14 +51,372 @@ fn accepts_lsp_message_size(bytes: usize) -> bool {
     bytes <= MAX_LSP_MESSAGE_BYTES
 }
 
+fn invalid_result(method: &str, message: impl std::fmt::Display) -> LspError {
+    // Report schema failures without copying arbitrary server content to logs/errors.
+    LspError::ServerError(format!("Invalid {method} result: {message}"))
+}
+
+fn decode_result<T: serde::de::DeserializeOwned>(
+    method: &str,
+    value: serde_json::Value,
+) -> LspResult<T> {
+    serde_json::from_value(value)
+        .map_err(|_| invalid_result(method, "response does not match the expected value shape"))
+}
+
+fn range_object(method: &str, value: &serde_json::Value) -> LspResult<Range> {
+    let range = value
+        .as_object()
+        .ok_or_else(|| invalid_result(method, "range must be an object"))?;
+    for name in ["start", "end"] {
+        let position = range
+            .get(name)
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| invalid_result(method, "range positions must be objects"))?;
+        for coordinate in ["line", "character"] {
+            let value = position
+                .get(coordinate)
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| invalid_result(method, "position coordinates must be integers"))?;
+            if value > 2_147_483_647 {
+                return Err(invalid_result(
+                    method,
+                    "coordinate exceeds LSP uinteger range",
+                ));
+            }
+        }
+    }
+    let range = decode_result::<Range>(method, value.clone())?;
+    validate_range(method, &range)?;
+    Ok(range)
+}
+
+fn location_object(method: &str, value: &serde_json::Value) -> LspResult<Location> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| invalid_result(method, "location must be an object"))?;
+    let uri = object
+        .get("uri")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| invalid_result(method, "location URI must be a string"))?;
+    let range = object
+        .get("range")
+        .ok_or_else(|| invalid_result(method, "missing location range"))?;
+    Ok(Location {
+        uri: uri.to_string(),
+        range: range_object(method, range)?,
+    })
+}
+
+fn validate_range(method: &str, range: &Range) -> LspResult<()> {
+    if [
+        range.start.line,
+        range.start.character,
+        range.end.line,
+        range.end.character,
+    ]
+    .into_iter()
+    .any(|coordinate| coordinate > 2_147_483_647)
+    {
+        return Err(invalid_result(
+            method,
+            "coordinate exceeds LSP uinteger range",
+        ));
+    }
+    let start = (range.start.line, range.start.character);
+    let end = (range.end.line, range.end.character);
+    if start > end {
+        return Err(invalid_result(method, "range end precedes start"));
+    }
+    Ok(())
+}
+
+fn decode_locations(
+    method: &str,
+    result: serde_json::Value,
+    single: bool,
+) -> LspResult<Vec<Location>> {
+    if result.is_null() {
+        return Ok(Vec::new());
+    }
+    if single && result.is_object() {
+        return location_object(method, &result).map(|location| vec![location]);
+    }
+    let items = result
+        .as_array()
+        .ok_or_else(|| invalid_result(method, "locations must be an array"))?;
+    items
+        .iter()
+        .map(|value| location_object(method, value))
+        .collect()
+}
+
+fn marked_string(method: &str, value: &serde_json::Value) -> LspResult<String> {
+    if let Some(text) = value.as_str() {
+        return Ok(text.to_string());
+    }
+    let object = value
+        .as_object()
+        .ok_or_else(|| invalid_result(method, "expected a marked string"))?;
+    let language = object
+        .get("language")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| invalid_result(method, "marked string language must be a string"))?;
+    let text = object
+        .get("value")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| invalid_result(method, "marked string value must be a string"))?;
+    // Retain the language and code text through the existing Markdown projection.
+    // Choose a fence longer than any run of backticks in the server text.
+    let longest = text
+        .chars()
+        .fold((0usize, 0usize), |(run, longest), ch| {
+            let run = if ch == '`' { run.saturating_add(1) } else { 0 };
+            (run, longest.max(run))
+        })
+        .1;
+    let fence: String = std::iter::repeat_n('`', longest.saturating_add(1).max(3)).collect();
+    Ok(format!("{fence}{language}\n{text}\n{fence}"))
+}
+
+fn markup_content(method: &str, value: &serde_json::Value) -> LspResult<String> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| invalid_result(method, "expected markup content"))?;
+    match object.get("kind").and_then(serde_json::Value::as_str) {
+        Some("markdown" | "plaintext") => {}
+        _ => {
+            return Err(invalid_result(
+                method,
+                "markup kind must be markdown or plaintext",
+            ));
+        }
+    }
+    object
+        .get("value")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| invalid_result(method, "markup value must be a string"))
+}
+
+fn hover_contents(method: &str, value: &serde_json::Value) -> LspResult<String> {
+    if let Some(items) = value.as_array() {
+        return items
+            .iter()
+            .map(|item| marked_string(method, item))
+            .collect::<LspResult<Vec<_>>>()
+            .map(|items| items.join("\n\n"));
+    }
+    if value.get("kind").is_some() {
+        markup_content(method, value)
+    } else {
+        marked_string(method, value)
+    }
+}
+
+fn decode_hover(result: serde_json::Value) -> LspResult<Option<HoverInfo>> {
+    let method = "textDocument/hover";
+    if result.is_null() {
+        return Ok(None);
+    }
+    let object = result
+        .as_object()
+        .ok_or_else(|| invalid_result(method, "expected a Hover object"))?;
+    let contents = object
+        .get("contents")
+        .ok_or_else(|| invalid_result(method, "missing contents"))?;
+    let range = object
+        .get("range")
+        .map(|value| range_object(method, value))
+        .transpose()?;
+    if let Some(range) = &range {
+        validate_range(method, range)?;
+    }
+    Ok(Some(HoverInfo {
+        contents: hover_contents(method, contents)?,
+        range,
+    }))
+}
+
+fn optional_string(
+    method: &str,
+    object: &serde_json::Map<String, serde_json::Value>,
+    name: &str,
+) -> LspResult<Option<String>> {
+    match object.get(name) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(value)) => Ok(Some(value.clone())),
+        Some(_) => Err(invalid_result(method, format!("{name} must be a string"))),
+    }
+}
+
+fn completion_kind(value: &serde_json::Value) -> LspResult<CompletionItemKind> {
+    use CompletionItemKind::*;
+    match value.as_u64() {
+        Some(1) => Ok(Text),
+        Some(2) => Ok(Method),
+        Some(3) => Ok(Function),
+        Some(4) => Ok(Constructor),
+        Some(5) => Ok(Field),
+        Some(6) => Ok(Variable),
+        Some(7) => Ok(Class),
+        Some(8) => Ok(Interface),
+        Some(9) => Ok(Module),
+        Some(10) => Ok(Property),
+        Some(11) => Ok(Unit),
+        Some(12) => Ok(Value),
+        Some(13) => Ok(Enum),
+        Some(14) => Ok(Keyword),
+        Some(15) => Ok(Snippet),
+        Some(16) => Ok(Color),
+        Some(17) => Ok(File),
+        Some(18) => Ok(Reference),
+        Some(19) => Ok(Folder),
+        Some(20) => Ok(EnumMember),
+        Some(21) => Ok(Constant),
+        Some(22) => Ok(Struct),
+        Some(23) => Ok(Event),
+        Some(24) => Ok(Operator),
+        Some(25) => Ok(TypeParameter),
+        _ => Err(invalid_result(
+            "textDocument/completion",
+            "kind must be an integer from 1 through 25",
+        )),
+    }
+}
+
+fn decode_completions(result: serde_json::Value) -> LspResult<Vec<CompletionItem>> {
+    let method = "textDocument/completion";
+    if result.is_null() {
+        return Ok(Vec::new());
+    }
+    let items = if let Some(object) = result.as_object() {
+        if object
+            .get("isIncomplete")
+            .and_then(serde_json::Value::as_bool)
+            .is_none()
+        {
+            return Err(invalid_result(
+                method,
+                "CompletionList isIncomplete must be a boolean",
+            ));
+        }
+        object.get("items").and_then(serde_json::Value::as_array)
+    } else {
+        result.as_array()
+    }
+    .ok_or_else(|| invalid_result(method, "expected completion items array"))?;
+    items
+        .iter()
+        .map(|value| {
+            let object = value
+                .as_object()
+                .ok_or_else(|| invalid_result(method, "expected a completion item object"))?;
+            let label = object
+                .get("label")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| invalid_result(method, "completion label must be a string"))?
+                .to_string();
+            let kind = match object.get("kind") {
+                None | Some(serde_json::Value::Null) => None,
+                Some(value) => Some(completion_kind(value)?),
+            };
+            let documentation = match object.get("documentation") {
+                None | Some(serde_json::Value::Null) => None,
+                Some(serde_json::Value::String(text)) => Some(text.clone()),
+                Some(value) => Some(markup_content(method, value)?),
+            };
+            Ok(CompletionItem {
+                label,
+                kind,
+                detail: optional_string(method, object, "detail")?,
+                insert_text: optional_string(method, object, "insertText")?,
+                documentation,
+            })
+        })
+        .collect()
+}
+
+// One URI entry owns either the latest complete diagnostics or its schema
+// failure. A rejected update cannot masquerade as empty or retain old success.
+type DiagnosticsCache = Arc<Mutex<HashMap<String, Result<Vec<Diagnostic>, String>>>>;
+
+fn decode_diagnostics(params: &serde_json::Value) -> LspResult<Vec<Diagnostic>> {
+    let method = "textDocument/publishDiagnostics";
+    let items = params
+        .get("diagnostics")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| invalid_result(method, "diagnostics must be an array"))?;
+    items
+        .iter()
+        .map(|value| {
+            let object = value
+                .as_object()
+                .ok_or_else(|| invalid_result(method, "diagnostic must be an object"))?;
+            let range = object
+                .get("range")
+                .ok_or_else(|| invalid_result(method, "missing diagnostic range"))?;
+            let message = object
+                .get("message")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| invalid_result(method, "diagnostic message must be a string"))?
+                .to_string();
+            let severity = match object.get("severity") {
+                None | Some(serde_json::Value::Null) => None,
+                Some(value) => Some(match value.as_u64() {
+                    Some(1) => DiagnosticSeverity::Error,
+                    Some(2) => DiagnosticSeverity::Warning,
+                    Some(3) => DiagnosticSeverity::Information,
+                    Some(4) => DiagnosticSeverity::Hint,
+                    _ => {
+                        return Err(invalid_result(
+                            method,
+                            "severity must be an integer from 1 through 4",
+                        ));
+                    }
+                }),
+            };
+            let code = match object.get("code") {
+                None | Some(serde_json::Value::Null) => None,
+                Some(serde_json::Value::String(value)) => {
+                    Some(DiagnosticCode::String(value.clone()))
+                }
+                Some(value) => {
+                    let value = value
+                        .as_i64()
+                        .and_then(|number| i32::try_from(number).ok())
+                        .ok_or_else(|| {
+                            invalid_result(
+                                method,
+                                "diagnostic code must be an i32 integer or string",
+                            )
+                        })?;
+                    Some(DiagnosticCode::Integer(value))
+                }
+            };
+            Ok(Diagnostic {
+                range: range_object(method, range)?,
+                severity,
+                message,
+                source: optional_string(method, object, "source")?,
+                code,
+            })
+        })
+        .collect()
+}
+
 struct LspRuntime {
     status: LspServerStatus,
-    pending: HashMap<u64, oneshot::Sender<JsonRpcResponse>>,
+    pending: HashMap<u64, oneshot::Sender<LspResult<JsonRpcResponse>>>,
     accepting: bool,
 }
 
 impl LspRuntime {
-    fn register(&mut self, id: u64, tx: oneshot::Sender<JsonRpcResponse>) -> LspResult<()> {
+    fn register(
+        &mut self,
+        id: u64,
+        tx: oneshot::Sender<LspResult<JsonRpcResponse>>,
+    ) -> LspResult<()> {
         if !self.status.running || !self.accepting {
             return Err(LspError::NotInitialized);
         }
@@ -105,7 +464,7 @@ pub struct StdioLspClient {
     /// Status and request admission share one atomic failure boundary.
     runtime: Arc<StdMutex<LspRuntime>>,
     /// Cached diagnostics per file URI.
-    diagnostics_cache: Arc<Mutex<HashMap<String, Vec<Diagnostic>>>>,
+    diagnostics_cache: DiagnosticsCache,
     /// Manager lifecycle captured when this derived handle was created.
     lifecycle: Arc<LspLifecycle>,
     /// Generation associated with this client handle.
@@ -347,7 +706,7 @@ impl StdioLspClient {
     async fn read_loop(
         mut reader: BufReader<tokio::process::ChildStdout>,
         runtime: Arc<StdMutex<LspRuntime>>,
-        diagnostics_cache: Arc<Mutex<HashMap<String, Vec<Diagnostic>>>>,
+        diagnostics_cache: DiagnosticsCache,
     ) -> String {
         let mut header_line = String::new();
 
@@ -399,23 +758,45 @@ impl StdioLspClient {
 
             // Check if it's a notification (no id) or a response (has id)
             if let Some(id) = value.get("id").and_then(|v| v.as_u64()) {
-                // Response to a request
-                if let Ok(resp) = serde_json::from_value::<JsonRpcResponse>(value) {
-                    let mut runtime = runtime.lock().unwrap_or_else(|poison| poison.into_inner());
-                    if let Some(tx) = runtime.pending.remove(&id) {
-                        let _ = tx.send(resp);
-                    }
+                // Matching malformed responses settle that request explicitly. Do not
+                // drop their frame and make the caller wait for a transport timeout.
+                let response = serde_json::from_value::<JsonRpcResponse>(value).map_err(|_| {
+                    LspError::ServerError("Invalid JSON-RPC response shape".to_string())
+                });
+                let mut runtime = runtime.lock().unwrap_or_else(|poison| poison.into_inner());
+                if let Some(tx) = runtime.pending.remove(&id) {
+                    let _ = tx.send(response);
                 }
             } else if let Some(method) = value.get("method").and_then(|v| v.as_str()) {
                 // Server notification
-                if method == "textDocument/publishDiagnostics"
-                    && let Some(params) = value.get("params")
-                    && let Some(uri) = params.get("uri").and_then(|v| v.as_str())
-                {
-                    let diagnostics: Vec<Diagnostic> = params
-                        .get("diagnostics")
-                        .and_then(|v| serde_json::from_value(v.clone()).ok())
-                        .unwrap_or_default();
+                if method == "textDocument/publishDiagnostics" {
+                    let Some(params) = value.get("params").filter(|params| params.is_object())
+                    else {
+                        return "Invalid textDocument/publishDiagnostics: params must be an object"
+                            .to_string();
+                    };
+                    let Some(uri) = params
+                        .get("uri")
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|uri| !uri.is_empty())
+                    else {
+                        // No document identity exists to own this error. Use the
+                        // established connection/process settlement boundary.
+                        return "Invalid textDocument/publishDiagnostics: URI must be a nonempty string".to_string();
+                    };
+                    let diagnostics = if value.get("jsonrpc").and_then(serde_json::Value::as_str)
+                        == Some("2.0")
+                    {
+                        decode_diagnostics(params).map_err(|error| match error {
+                            LspError::ServerError(message) => message,
+                            other => other.to_string(),
+                        })
+                    } else {
+                        Err(
+                            "Invalid textDocument/publishDiagnostics: JSON-RPC version must be 2.0"
+                                .to_string(),
+                        )
+                    };
                     if runtime
                         .lock()
                         .unwrap_or_else(|poison| poison.into_inner())
@@ -467,7 +848,7 @@ impl StdioLspClient {
         }
 
         let response = match tokio::time::timeout(REQUEST_TIMEOUT, rx).await {
-            Ok(Ok(response)) => response,
+            Ok(Ok(response)) => response.map_err(|error| invalid_result(method, error))?,
             Ok(Err(_)) => {
                 self.runtime
                     .lock()
@@ -501,6 +882,13 @@ impl StdioLspClient {
         self.ensure_live()?;
         if !self.is_running() {
             return Err(LspError::NotInitialized);
+        }
+
+        if response.jsonrpc != "2.0" || (response.error.is_some() && response.result.is_some()) {
+            return Err(invalid_result(
+                method,
+                "expected one JSON-RPC 2.0 result or error",
+            ));
         }
 
         if let Some(err) = response.error {
@@ -589,7 +977,7 @@ impl LspClient for StdioLspClient {
                         "definition": {},
                         "references": {},
                         "publishDiagnostics": {
-                            "relatedInformation": true
+                            "relatedInformation": false
                         }
                     }
                 }
@@ -650,11 +1038,26 @@ impl LspClient for StdioLspClient {
     fn diagnostics<'a>(&'a self, uri: &'a str) -> BoxFuture<'a, LspResult<Vec<Diagnostic>>> {
         Box::pin(async move {
             self.ensure_live()?;
-            if !self.is_initialized() {
-                return Err(LspError::NotInitialized);
-            }
             let cache = self.diagnostics_cache.lock().await;
-            Ok(cache.get(uri).cloned().unwrap_or_default())
+            self.ensure_live()?;
+            // The existing admission boundary is the read's linearization
+            // point, after cache acquisition. Fatal cleanup closes admission
+            // before clearing cache or awaiting the real process exit.
+            let runtime = self
+                .runtime
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            if !runtime.accepting || !runtime.status.initialized {
+                return Err(match &runtime.status.last_error {
+                    Some(error) => LspError::ServerError(error.clone()),
+                    None => LspError::NotInitialized,
+                });
+            }
+            match cache.get(uri) {
+                Some(Ok(diagnostics)) => Ok(diagnostics.clone()),
+                Some(Err(error)) => Err(LspError::ServerError(error.clone())),
+                None => Ok(Vec::new()),
+            }
         })
     }
 
@@ -673,15 +1076,7 @@ impl LspClient for StdioLspClient {
                 .send_request("textDocument/definition", Some(params))
                 .await?;
 
-            // Result can be a single Location or an array
-            let locations: Vec<Location> =
-                if let Ok(loc) = serde_json::from_value::<Location>(result.clone()) {
-                    vec![loc]
-                } else {
-                    serde_json::from_value(result).unwrap_or_default()
-                };
-
-            Ok(locations)
+            decode_locations("textDocument/definition", result, true)
         })
     }
 
@@ -701,8 +1096,7 @@ impl LspClient for StdioLspClient {
                 .send_request("textDocument/references", Some(params))
                 .await?;
 
-            let locations: Vec<Location> = serde_json::from_value(result).unwrap_or_default();
-            Ok(locations)
+            decode_locations("textDocument/references", result, false)
         })
     }
 
@@ -721,31 +1115,7 @@ impl LspClient for StdioLspClient {
                 .send_request("textDocument/hover", Some(params))
                 .await?;
 
-            if result.is_null() {
-                return Ok(None);
-            }
-
-            // Extract contents from hover result
-            let contents = result
-                .get("contents")
-                .map(|v| {
-                    if let Some(s) = v.as_str() {
-                        s.to_string()
-                    } else if let Some(obj) = v.as_object() {
-                        obj.get("value")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string()
-                    } else {
-                        v.to_string()
-                    }
-                })
-                .unwrap_or_default();
-
-            Ok(Some(HoverInfo {
-                contents,
-                range: None,
-            }))
+            decode_hover(result)
         })
     }
 
@@ -764,14 +1134,7 @@ impl LspClient for StdioLspClient {
                 .send_request("textDocument/completion", Some(params))
                 .await?;
 
-            // Result can be CompletionItem[] or CompletionList
-            let items: Vec<CompletionItem> = if let Some(items) = result.get("items") {
-                serde_json::from_value(items.clone()).unwrap_or_default()
-            } else {
-                serde_json::from_value(result).unwrap_or_default()
-            };
-
-            Ok(items)
+            decode_completions(result)
         })
     }
 
@@ -855,6 +1218,160 @@ impl LspClient for StdioLspClient {
 #[cfg(test)]
 mod message_size_tests {
     use super::*;
+
+    const DIAGNOSTIC_FATAL_SERVER: &str = r#"
+import json, sys
+while True:
+    line = sys.stdin.buffer.readline()
+    if not line: break
+    size = int(line.split(b':', 1)[1].strip())
+    sys.stdin.buffer.readline()
+    request = json.loads(sys.stdin.buffer.read(size))
+    if request.get('method') == 'initialize':
+        reply = {'jsonrpc':'2.0','id':request['id'],'result':{'capabilities':{}}}
+    elif request.get('method') == 'textDocument/hover':
+        reply = {'jsonrpc':'2.0','method':'textDocument/publishDiagnostics','params':{'diagnostics':[]}}
+    else: continue
+    body = json.dumps(reply).encode()
+    sys.stdout.buffer.write(b'Content-Length: %d\r\n\r\n' % len(body) + body)
+    sys.stdout.buffer.flush()
+"#;
+
+    #[tokio::test]
+    async fn diagnostic_fidelity_terminal_admission_rejects_reads_while_child_teardown_is_blocked()
+    -> Result<(), String> {
+        let mut client = StdioLspClient::new(LspServerConfig {
+            language: "test".to_string(),
+            command: "python3".to_string(),
+            args: vec![
+                "-u".to_string(),
+                "-c".to_string(),
+                DIAGNOSTIC_FATAL_SERVER.to_string(),
+            ],
+            extensions: Vec::new(),
+            env: HashMap::new(),
+            initialization_options: None,
+            max_restarts: 0,
+        });
+        client
+            .initialize("file:///fixture")
+            .await
+            .map_err(|error| error.to_string())?;
+        let child = client.child.as_ref().ok_or("missing process")?.clone();
+        // Block the real existing cleanup owner at its Child mutex, making the
+        // admission-closed / process-still-live interval deterministic.
+        let child_guard = child.lock().await;
+        let read = async {
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                loop {
+                    let closed = !client
+                        .runtime
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner())
+                        .accepting;
+                    if closed {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .map_err(|_| {
+                LspError::CommunicationError("reader did not close admission".to_string())
+            })?;
+            let status = client.status();
+            assert!(
+                status.running && status.initialized && status.pid.is_some(),
+                "must not invent process exit"
+            );
+            client.diagnostics("file:///unseen.test").await.map(|_| ())
+        };
+        let request = client.hover(
+            "file:///fatal",
+            Position {
+                line: 0,
+                character: 3,
+            },
+        );
+        let (pending, diagnostics) = tokio::join!(request, read);
+        drop(child_guard);
+        client.shutdown().await.map_err(|error| error.to_string())?;
+        assert!(pending.is_err());
+        assert!(
+            matches!(diagnostics, Err(LspError::ServerError(_))),
+            "terminal admission fabricated clean diagnostics: {diagnostics:?}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn diagnostic_fidelity_terminal_admission_rechecks_after_cache_wait() -> Result<(), String>
+    {
+        let mut client = StdioLspClient::new(LspServerConfig {
+            language: "test".to_string(),
+            command: "python3".to_string(),
+            args: vec![
+                "-u".to_string(),
+                "-c".to_string(),
+                DIAGNOSTIC_FATAL_SERVER.to_string(),
+            ],
+            extensions: Vec::new(),
+            env: HashMap::new(),
+            initialization_options: None,
+            max_restarts: 0,
+        });
+        client
+            .initialize("file:///fixture")
+            .await
+            .map_err(|error| error.to_string())?;
+        let child = client.child.as_ref().ok_or("missing process")?.clone();
+        let child_guard = child.lock().await;
+        let cache_guard = client.diagnostics_cache.lock().await;
+        let mut retrieval = client.diagnostics("file:///unseen.test");
+        assert!(
+            futures::poll!(&mut retrieval).is_pending(),
+            "retrieve must wait on held cache"
+        );
+        let release = async {
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                loop {
+                    if !client
+                        .runtime
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner())
+                        .accepting
+                    {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .map_err(|_| "fatal did not close admission".to_string())?;
+            drop(cache_guard);
+            Ok::<_, String>(())
+        };
+        let (pending, released) = tokio::join!(
+            client.hover(
+                "file:///fatal",
+                Position {
+                    line: 0,
+                    character: 3
+                }
+            ),
+            release
+        );
+        released?;
+        let diagnostics = retrieval.await;
+        drop(child_guard);
+        client.shutdown().await.map_err(|error| error.to_string())?;
+        assert!(pending.is_err());
+        assert!(
+            matches!(diagnostics, Err(LspError::ServerError(_))),
+            "cache wait crossed closed admission and returned success: {diagnostics:?}"
+        );
+        Ok(())
+    }
 
     #[test]
     fn rejects_unbounded_content_length() {

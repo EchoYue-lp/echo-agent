@@ -22,9 +22,9 @@ use tokio_util::sync::CancellationToken;
 
 use echo_orchestration::tasks::{
     DefaultTaskToolPolicy, InMemoryRevisionedTaskStore, NestedDelegationPolicy,
-    RevisionedTaskGraph, RevisionedTaskStore, RuntimeAttemptControlCleanupReceipt,
-    RuntimeClaimAbandonment, RuntimeDagController, RuntimeDagOutcome,
-    RuntimeInterruptionDisposition, RuntimeInterruptionSettlementOutcome, RuntimePlanSnapshot,
+    RevisionedTaskGraph, RuntimeAttemptControlCleanupReceipt, RuntimeClaimAbandonment,
+    RuntimeDagController, RuntimeDagOutcome, RuntimeInterruptionDisposition,
+    RuntimeInterruptionSettlementOutcome, RuntimePlanSnapshot,
     RuntimeTaskAttemptInterruptDisposition, RuntimeTaskAttemptInterruptProjectionError,
     RuntimeTaskClaimOutcome, RuntimeTaskResolution, RuntimeTaskResolutionRequest,
     RuntimeTaskService, RuntimeTaskServiceConfig, Task, TaskClaim, TaskExecution, TaskGraphContext,
@@ -474,6 +474,28 @@ impl TeamRuntimeHandle {
         echo_orchestration::tasks::RuntimeTaskAttemptInterruptReceipt,
         echo_orchestration::tasks::RuntimeTaskAttemptInterruptError,
     > {
+        use echo_orchestration::tasks::RuntimeTaskAttemptInterruptError;
+        let requested = self
+            .service
+            .runtime()
+            .revisions()
+            .request_runtime_task_interruption(
+                &self.run_id,
+                task_id,
+                claim,
+                RuntimeInterruptionDisposition::Cancelled,
+            )
+            .await
+            .map_err(|error| RuntimeTaskAttemptInterruptError::DurableAuthority {
+                message: error.to_string(),
+            })?;
+        if !requested {
+            return Err(RuntimeTaskAttemptInterruptError::StaleOrSettledClaim {
+                run_id: self.run_id.clone(),
+                task_id: task_id.to_string(),
+                execution_id: claim.execution_id(&self.run_id, task_id),
+            });
+        }
         self.service
             .runtime_tasks()
             .request_attempt_interrupt(&self.run_id, task_id, claim)
@@ -1521,20 +1543,9 @@ fn set_team_task_phase(task: &mut Task, phase: &str) -> Result<()> {
     Ok(())
 }
 
-#[derive(Clone)]
-struct StagedTeamOutput {
-    run_id: String,
-    task_id: String,
-    output: SubagentResult,
-}
-
 struct TeamRuntimeController {
-    store: Arc<InMemoryRevisionedTaskStore>,
     revisions: TaskRevisionService,
     dispatch_controller: Arc<dyn TeamDispatchController>,
-    outputs: Mutex<HashMap<String, HashMap<String, SubagentResult>>>,
-    staged_outputs: Mutex<HashMap<String, StagedTeamOutput>>,
-    settlement: Mutex<()>,
 }
 
 impl TeamRuntimeController {
@@ -1552,12 +1563,8 @@ impl TeamRuntimeController {
             Arc::new(DefaultTaskToolPolicy::new("team-runtime")),
         );
         Self {
-            store,
             revisions,
             dispatch_controller,
-            outputs: Mutex::new(HashMap::new()),
-            staged_outputs: Mutex::new(HashMap::new()),
-            settlement: Mutex::new(()),
         }
     }
 }
@@ -1567,7 +1574,7 @@ impl RuntimeDagController for TeamRuntimeController {
     type DispatchOutput = SubagentResult;
 
     async fn load_snapshot(&self, run_id: &str) -> Result<RuntimePlanSnapshot> {
-        self.store
+        self.revisions
             .load(run_id)
             .await
             .map_err(|error| ReactError::Other(error.to_string()))?
@@ -1581,7 +1588,7 @@ impl RuntimeDagController for TeamRuntimeController {
         task: &Task,
         expected_revision: u64,
     ) -> Result<RuntimeTaskClaimOutcome> {
-        self.store
+        self.revisions
             .claim_runtime_task(run_id, task, expected_revision)
             .await
             .map_err(|error| ReactError::Other(error.to_string()))
@@ -1593,7 +1600,7 @@ impl RuntimeDagController for TeamRuntimeController {
         task_id: &str,
         claim: &TaskClaim,
     ) -> Result<bool> {
-        self.store
+        self.revisions
             .runtime_claim_is_current(run_id, task_id, claim)
             .await
             .map_err(|error| ReactError::Other(error.to_string()))
@@ -1647,8 +1654,6 @@ impl RuntimeDagController for TeamRuntimeController {
         context: TaskSubagentContext,
         task: Task,
     ) -> Result<Self::DispatchOutput> {
-        let outputs = self.outputs.lock().await;
-        let run_outputs = outputs.get(context.run_id());
         let mut dependency_outputs = Vec::with_capacity(task.spec.depends_on.len());
         let waived_dependencies: HashSet<&str> = context
             .waived_dependency_ids()
@@ -1659,8 +1664,9 @@ impl RuntimeDagController for TeamRuntimeController {
             if waived_dependencies.contains(dependency.as_str()) {
                 continue;
             }
-            let output = run_outputs
-                .and_then(|values| values.get(dependency))
+            let output = self
+                .task_result(context.run_id(), dependency)
+                .await?
                 .ok_or_else(|| {
                     ReactError::Other(format!(
                         "Team dependency '{dependency}' completed without a reusable result"
@@ -1688,7 +1694,6 @@ impl RuntimeDagController for TeamRuntimeController {
             }
             prompt
         };
-        drop(outputs);
         if pipeline_phase && task.spec.depends_on.is_empty() {
             prompt = task.spec.description.clone();
         }
@@ -1713,29 +1718,32 @@ impl RuntimeDagController for TeamRuntimeController {
 
     async fn resolve_dispatch(
         &self,
-        run_id: &str,
-        claim: TaskClaim,
-        task: Task,
+        _run_id: &str,
+        _claim: TaskClaim,
+        _task: Task,
         dispatch: Result<Self::DispatchOutput>,
     ) -> Result<RuntimeTaskResolutionRequest> {
-        let (request, output) = match dispatch {
+        Ok(match dispatch {
             Ok(output) if output.outcome.status == SubagentStatus::Completed => {
-                (RuntimeTaskResolutionRequest::Completed, Some(output))
+                RuntimeTaskResolutionRequest::CompletedWithResult {
+                    result: serde_json::to_value(output).map_err(|error| {
+                        ReactError::Other(format!("Failed to encode Team result: {error}"))
+                    })?,
+                }
             }
             Ok(output) if output.outcome.status == SubagentStatus::Cancelled => {
-                (RuntimeTaskResolutionRequest::Cancelled, None)
+                RuntimeTaskResolutionRequest::Cancelled
             }
-            Ok(output) => {
-                let error = if output.outcome.summary.is_empty() {
-                    output.output.clone()
+            Ok(output) => RuntimeTaskResolutionRequest::Failed {
+                error: if output.outcome.summary.is_empty() {
+                    output.output
                 } else {
-                    output.outcome.summary.clone()
-                };
-                (RuntimeTaskResolutionRequest::Failed { error }, None)
-            }
+                    output.outcome.summary
+                },
+            },
             Err(error) => {
                 let message = error.to_string();
-                let request = match AgentFailure::from(&error).terminal_kind {
+                match AgentFailure::from(&error).terminal_kind {
                     AgentTerminalKind::Cancelled => RuntimeTaskResolutionRequest::Cancelled,
                     AgentTerminalKind::TimedOut => {
                         RuntimeTaskResolutionRequest::TimedOut { error: message }
@@ -1743,28 +1751,9 @@ impl RuntimeDagController for TeamRuntimeController {
                     AgentTerminalKind::Failed | AgentTerminalKind::PermissionDenied => {
                         RuntimeTaskResolutionRequest::Failed { error: message }
                     }
-                };
-                (request, None)
+                }
             }
-        };
-        if let Some(output) = output {
-            let mut staged_outputs = self.staged_outputs.lock().await;
-            if staged_outputs.contains_key(&claim.claim_id) {
-                return Err(ReactError::Other(format!(
-                    "Team result for claim '{}' was staged more than once",
-                    claim.claim_id
-                )));
-            }
-            staged_outputs.insert(
-                claim.claim_id.clone(),
-                StagedTeamOutput {
-                    run_id: run_id.to_string(),
-                    task_id: task.spec.id,
-                    output,
-                },
-            );
-        }
-        Ok(request)
+        })
     }
 
     async fn settle_resolution(
@@ -1774,46 +1763,10 @@ impl RuntimeDagController for TeamRuntimeController {
         task: &Task,
         request: RuntimeTaskResolutionRequest,
     ) -> Result<RuntimeTaskResolution> {
-        let _settlement = self.settlement.lock().await;
-        let staged_candidate = self.staged_outputs.lock().await.remove(&claim.claim_id);
-        if request == RuntimeTaskResolutionRequest::Completed
-            && !staged_candidate
-                .as_ref()
-                .is_some_and(|staged| staged.run_id == run_id && staged.task_id == task.spec.id)
-        {
-            return Err(ReactError::Other(format!(
-                "Team result for claim '{}' was not staged before completion",
-                claim.claim_id
-            )));
-        }
-        let mut outputs = if staged_candidate.is_some() {
-            Some(self.outputs.lock().await)
-        } else {
-            None
-        };
-        let settlement = self
-            .store
+        self.revisions
             .settle_runtime_resolution(run_id, &task.spec.id, claim, request)
             .await
-            .map_err(|error| ReactError::Other(error.to_string()));
-        if matches!(&settlement, Ok(RuntimeTaskResolution::Completed)) {
-            // Candidate ownership and the output lock precede CAS. Keep the
-            // commit-to-publication section below free of cancellation points.
-            let staged = staged_candidate.ok_or_else(|| {
-                ReactError::Other(format!(
-                    "Team result for settled claim '{}' disappeared",
-                    claim.claim_id
-                ))
-            })?;
-            let outputs = outputs.as_mut().ok_or_else(|| {
-                ReactError::Other("Team output publication lock is unavailable".to_string())
-            })?;
-            outputs
-                .entry(staged.run_id)
-                .or_default()
-                .insert(staged.task_id, staged.output);
-        }
-        settlement
+            .map_err(|error| ReactError::Other(error.to_string()))
     }
 
     async fn abandon_claim(
@@ -1830,7 +1783,7 @@ impl RuntimeDagController for TeamRuntimeController {
             },
             RuntimeClaimAbandonment::Failed { error } => TaskStatus::Failed(error),
         };
-        self.store
+        self.revisions
             .settle_runtime_claim(run_id, &task.spec.id, claim, status)
             .await
             .map_err(|error| ReactError::Other(error.to_string()))
@@ -1842,7 +1795,7 @@ impl RuntimeDagController for TeamRuntimeController {
         expected_revision: u64,
         disposition: RuntimeInterruptionDisposition,
     ) -> Result<RuntimeInterruptionSettlementOutcome> {
-        self.store
+        self.revisions
             .settle_runtime_interruption(run_id, expected_revision, disposition)
             .await
             .map_err(|error| ReactError::Other(error.to_string()))
@@ -1856,24 +1809,63 @@ impl TeamRuntime for TeamRuntimeController {
     }
 
     async fn task_result(&self, run_id: &str, task_id: &str) -> Result<Option<SubagentResult>> {
-        Ok(self
-            .outputs
-            .lock()
+        let graph = self
+            .revisions
+            .load(run_id)
             .await
-            .get(run_id)
-            .and_then(|outputs| outputs.get(task_id))
-            .cloned())
+            .map_err(|error| ReactError::Other(error.to_string()))?
+            .ok_or_else(|| ReactError::Other(format!("Team graph '{run_id}' not found")))?;
+        let Some(task) = graph
+            .snapshot
+            .tasks
+            .iter()
+            .find(|task| task.spec.id == task_id)
+        else {
+            return Ok(None);
+        };
+        decode_team_task_result(task)
     }
 
     async fn task_results(&self, run_id: &str) -> Result<Vec<SubagentResult>> {
-        Ok(self
-            .outputs
-            .lock()
+        let graph = self
+            .revisions
+            .load(run_id)
             .await
-            .get(run_id)
-            .map(|outputs| outputs.values().cloned().collect())
-            .unwrap_or_default())
+            .map_err(|error| ReactError::Other(error.to_string()))?
+            .ok_or_else(|| ReactError::Other(format!("Team graph '{run_id}' not found")))?;
+        graph
+            .snapshot
+            .tasks
+            .iter()
+            .filter(|task| task.execution.status == TaskStatus::Completed)
+            .filter_map(|task| decode_team_task_result(task).transpose())
+            .collect()
     }
+}
+
+fn decode_team_task_result(task: &Task) -> Result<Option<SubagentResult>> {
+    if task.execution.status != TaskStatus::Completed {
+        return Ok(None);
+    }
+    let result = task.execution.result.clone().ok_or_else(|| {
+        ReactError::Other(format!(
+            "Team task '{}' completed without a reusable result",
+            task.spec.id
+        ))
+    })?;
+    let decoded: SubagentResult = serde_json::from_value(result).map_err(|error| {
+        ReactError::Other(format!(
+            "Invalid persisted Team result for '{}': {error}",
+            task.spec.id,
+        ))
+    })?;
+    if decoded.outcome.status != SubagentStatus::Completed {
+        return Err(ReactError::Other(format!(
+            "Team task '{}' has Completed state but a non-success result",
+            task.spec.id,
+        )));
+    }
+    Ok(Some(decoded))
 }
 
 fn aggregate_usage<'a>(outputs: impl Iterator<Item = &'a SubagentResult>) -> Option<LlmUsageStats> {
@@ -2165,6 +2157,87 @@ mod tests {
         assert_eq!(resumed.final_revision, 2);
         assert_eq!(resumed.output, first.output);
         assert_eq!(*calls.lock().await, first_call_count);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn restored_team_controller_reuses_persisted_success_without_redispatch() -> Result<()> {
+        let dispatch: TeamDispatchFn = Arc::new(|request| {
+            Box::pin(async move { Ok(successful_result(request.member, &request.task)) })
+        });
+        let store = Arc::new(InMemoryRevisionedTaskStore::new());
+        let runtime = Arc::new(TeamRuntimeController {
+            revisions: TaskRevisionService::new(
+                store.clone(),
+                Arc::new(DefaultTaskToolPolicy::new("team-runtime")),
+            ),
+            dispatch_controller: closure_dispatch_controller(
+                dispatch,
+                TeamDispatchControl::default(),
+            ),
+        });
+        let spec = TeamSpec {
+            strategy: TeamStrategy::Pipeline(vec!["first".to_string(), "second".to_string()]),
+            manager: String::new(),
+            subagents: Vec::new(),
+            config: TeamConfig::default(),
+        };
+        let first = execute_team_on_runtime(
+            &spec,
+            "restore completed team",
+            "restored-team",
+            CancellationToken::new(),
+            runtime.clone(),
+        )
+        .await?;
+        let restored_dispatch: TeamDispatchFn = Arc::new(|_| {
+            Box::pin(async {
+                Err(ReactError::Other(
+                    "restoration redispatched successful work".to_string(),
+                ))
+            })
+        });
+        let restored = Arc::new(TeamRuntimeController {
+            revisions: TaskRevisionService::new(
+                store,
+                Arc::new(DefaultTaskToolPolicy::new("team-runtime")),
+            ),
+            dispatch_controller: closure_dispatch_controller(
+                restored_dispatch,
+                TeamDispatchControl::default(),
+            ),
+        });
+        let resumed = execute_team_on_runtime(
+            &spec,
+            "restore completed team",
+            "restored-team",
+            CancellationToken::new(),
+            restored.clone(),
+        )
+        .await?;
+        assert_eq!(resumed.output, first.output);
+        assert_eq!(restored.task_results("restored-team").await?.len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn persisted_team_result_rejects_missing_and_invalid_success_data() -> Result<()> {
+        let mut task = team_task(
+            "result-task",
+            "member",
+            "result contract".to_string(),
+            Vec::new(),
+        );
+        task.execution.status = TaskStatus::Completed;
+        assert!(decode_team_task_result(&task).is_err());
+        task.execution.result = Some(serde_json::Value::Null);
+        assert!(decode_team_task_result(&task).is_err());
+        let mut invalid = successful_result("member".to_string(), "result contract");
+        invalid.outcome.status = SubagentStatus::Cancelled;
+        task.execution.result = Some(
+            serde_json::to_value(invalid).map_err(|error| ReactError::Other(error.to_string()))?,
+        );
+        assert!(decode_team_task_result(&task).is_err());
         Ok(())
     }
 
@@ -2915,6 +2988,160 @@ mod tests {
                 .await
                 .first()
                 .is_some_and(|input| input.contains("first-output"))
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn review_team_handle_durable_cancel_wins_over_late_success() -> Result<()> {
+        let release = Arc::new(tokio::sync::Notify::new());
+        let dispatch: TeamDispatchFn = Arc::new({
+            let release = release.clone();
+            move |request| {
+                let release = release.clone();
+                Box::pin(async move {
+                    request.context.cancellation_token().cancelled().await;
+                    release.notified().await;
+                    Ok(successful_result(request.member, &request.task))
+                })
+            }
+        });
+        let runtime = Arc::new(TeamRuntimeController::new(dispatch));
+        let handle = Arc::new(TeamRuntimeHandle::new(
+            "cancel-late-success".to_string(),
+            runtime,
+            RuntimeTaskServiceConfig::default(),
+        ));
+        let spec = TeamSpec {
+            strategy: TeamStrategy::Pipeline(vec!["member".to_string()]),
+            manager: String::new(),
+            subagents: Vec::new(),
+            config: TeamConfig::default(),
+        };
+        let execution = tokio::spawn({
+            let handle = handle.clone();
+            async move {
+                handle
+                    .execute(&spec, "late success", CancellationToken::new())
+                    .await
+            }
+        });
+        let (task_id, claim) = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let Ok(snapshot) = handle.snapshot().await else {
+                    tokio::task::yield_now().await;
+                    continue;
+                };
+                if let Some((task_id, claim)) = snapshot.tasks.iter().find_map(|task| {
+                    task.execution
+                        .claim
+                        .clone()
+                        .map(|claim| (task.spec.id.clone(), claim))
+                }) {
+                    break Ok::<_, ReactError>((task_id, claim));
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .map_err(|_| ReactError::Other("Team claim was not observable".to_string()))??;
+        assert!(
+            handle
+                .request_attempt_interrupt(&task_id, &claim)
+                .await?
+                .requested
+        );
+        release.notify_one();
+        let result = tokio::time::timeout(Duration::from_secs(2), execution)
+            .await
+            .map_err(|_| ReactError::Other("Team cancellation did not settle".to_string()))?
+            .map_err(|error| ReactError::Other(format!("Team execution join failed: {error}")))?;
+        assert!(result.is_err());
+        let snapshot = handle.snapshot().await?;
+        let settled = snapshot
+            .tasks
+            .iter()
+            .find(|task| task.spec.id == task_id)
+            .ok_or_else(|| ReactError::Other("settled Team task missing".to_string()))?;
+        assert_eq!(settled.execution.status, TaskStatus::Cancelled);
+        assert_eq!(settled.execution.result, None);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn review_team_handle_late_cancel_preserves_committed_success() -> Result<()> {
+        let dispatch: TeamDispatchFn = Arc::new(|request| {
+            Box::pin(async move { Ok(successful_result(request.member, &request.task)) })
+        });
+        let runtime = Arc::new(TeamRuntimeController::new(dispatch));
+        let handle = TeamRuntimeHandle::new(
+            "completed-late-cancel".to_string(),
+            runtime.clone(),
+            RuntimeTaskServiceConfig::default(),
+        );
+        let task = team_task("a", "member", "success".to_string(), Vec::new());
+        runtime
+            .revisions
+            .create_prepared(
+                "completed-late-cancel",
+                team_graph_context(
+                    &TeamSpec {
+                        strategy: TeamStrategy::Pipeline(vec!["member".to_string()]),
+                        manager: String::new(),
+                        subagents: Vec::new(),
+                        config: TeamConfig::default(),
+                    },
+                    "success",
+                )?,
+                vec![task.clone()],
+                "create".to_string(),
+            )
+            .await
+            .map_err(|error| ReactError::Other(error.to_string()))?;
+        let RuntimeTaskClaimOutcome::Claimed(claim) = runtime
+            .revisions
+            .claim_runtime_task("completed-late-cancel", &task, 1)
+            .await
+            .map_err(|error| ReactError::Other(error.to_string()))?
+        else {
+            return Err(ReactError::Other("claim rejected".to_string()));
+        };
+        runtime
+            .revisions
+            .settle_runtime_resolution(
+                "completed-late-cancel",
+                "a",
+                &claim,
+                RuntimeTaskResolutionRequest::CompletedWithResult {
+                    result: serde_json::to_value(successful_result(
+                        "member".to_string(),
+                        "success",
+                    ))
+                    .map_err(|error| ReactError::Other(error.to_string()))?,
+                },
+            )
+            .await
+            .map_err(|error| ReactError::Other(error.to_string()))?;
+        assert!(matches!(
+            handle.request_attempt_interrupt("a", &claim).await,
+            Err(
+                echo_orchestration::tasks::RuntimeTaskAttemptInterruptError::StaleOrSettledClaim { .. }
+            )
+        ));
+        assert_eq!(
+            handle
+                .snapshot()
+                .await?
+                .tasks
+                .first()
+                .map(|task| &task.execution.status),
+            Some(&TaskStatus::Completed)
+        );
+        assert!(
+            runtime
+                .task_result("completed-late-cancel", "a")
+                .await?
+                .is_some()
         );
         Ok(())
     }
