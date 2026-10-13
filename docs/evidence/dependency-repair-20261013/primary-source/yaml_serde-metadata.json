@@ -1,0 +1,582 @@
+{
+  "crate": {
+    "id": "yaml_serde",
+    "name": "yaml_serde",
+    "updated_at": "2026-08-18T16:56:51.839798Z",
+    "versions": [
+      3025532,
+      2983280,
+      2975750,
+      2111910,
+      1970934,
+      1970432,
+      1970315
+    ],
+    "keywords": [
+      "serialization",
+      "yaml",
+      "data",
+      "serde"
+    ],
+    "categories": [
+      "encoding",
+      "parser-implementations"
+    ],
+    "badges": [],
+    "created_at": "2026-01-24T21:25:28.543340Z",
+    "downloads": 3216671,
+    "recent_downloads": 2449341,
+    "default_version": "0.10.7",
+    "num_versions": 7,
+    "yanked": false,
+    "max_version": "0.10.7",
+    "newest_version": "0.10.7",
+    "max_stable_version": "0.10.7",
+    "description": "serde_yaml maintained by The YAML Organization",
+    "homepage": null,
+    "documentation": "https://docs.rs/yaml_serde/",
+    "repository": "https://github.com/yaml/yaml-serde",
+    "links": {
+      "version_downloads": "/api/v1/crates/yaml_serde/downloads",
+      "versions": null,
+      "owners": "/api/v1/crates/yaml_serde/owners",
+      "owner_team": "/api/v1/crates/yaml_serde/owner_team",
+      "owner_user": "/api/v1/crates/yaml_serde/owner_user",
+      "reverse_dependencies": "/api/v1/crates/yaml_serde/reverse_dependencies"
+    },
+    "exact_match": false,
+    "trustpub_only": false
+  },
+  "versions": [
+    {
+      "id": 3025532,
+      "crate": "yaml_serde",
+      "num": "0.10.7",
+      "dl_path": "/api/v1/crates/yaml_serde/0.10.7/download",
+      "readme_path": "/api/v1/crates/yaml_serde/0.10.7/readme",
+      "updated_at": "2026-08-18T16:56:51.839798Z",
+      "created_at": "2026-08-18T16:56:51.839798Z",
+      "downloads": 958609,
+      "features": {
+        "default": [
+          "std"
+        ],
+        "std": [
+          "serde/std",
+          "indexmap/std"
+        ]
+      },
+      "yanked": false,
+      "yank_message": null,
+      "lib_links": null,
+      "license": "MIT OR Apache-2.0",
+      "links": {
+        "dependencies": "/api/v1/crates/yaml_serde/0.10.7/dependencies",
+        "version_downloads": "/api/v1/crates/yaml_serde/0.10.7/downloads",
+        "authors": "/api/v1/crates/yaml_serde/0.10.7/authors"
+      },
+      "crate_size": 72752,
+      "published_by": {
+        "id": 165876,
+        "login": "ingydotnet",
+        "name": "Ingy d\u00f6t Net",
+        "avatar": "https://avatars.githubusercontent.com/u/21826?v=4",
+        "url": "https://github.com/ingydotnet",
+        "github_username_matches": true,
+        "created_at": "2008-08-25T07:13:26Z"
+      },
+      "audit_actions": [
+        {
+          "action": "publish",
+          "user": {
+            "id": 165876,
+            "login": "ingydotnet",
+            "name": "Ingy d\u00f6t Net",
+            "avatar": "https://avatars.githubusercontent.com/u/21826?v=4",
+            "url": "https://github.com/ingydotnet",
+            "github_username_matches": true,
+            "created_at": "2008-08-25T07:13:26Z"
+          },
+          "time": "2026-08-18T16:56:51.839798Z"
+        }
+      ],
+      "checksum": "33b729a08a9a6be689bbad3e2bf8015926db54b6622cc89c3a5f7dc174b9e918",
+      "rust_version": "1.82",
+      "has_lib": true,
+      "bin_names": [],
+      "edition": "2021",
+      "description": "serde_yaml maintained by The YAML Organization",
+      "homepage": null,
+      "documentation": "https://docs.rs/yaml_serde/",
+      "repository": "https://github.com/yaml/yaml-serde",
+      "trustpub_data": null,
+      "linecounts": {
+        "languages": {
+          "Rust": {
+            "code_lines": 8873,
+            "comment_lines": 61,
+            "files": 25
+          }
+        },
+        "total_code_lines": 8873,
+        "total_comment_lines": 61
+      }
+    },
+    {
+      "id": 2983280,
+      "crate": "yaml_serde",
+      "num": "0.10.6",
+      "dl_path": "/api/v1/crates/yaml_serde/0.10.6/download",
+      "readme_path": "/api/v1/crates/yaml_serde/0.10.6/readme",
+      "updated_at": "2026-08-12T19:16:07.177157Z",
+      "created_at": "2026-08-12T19:16:07.177157Z",
+      "downloads": 76091,
+      "features": {
+        "default": [
+          "std"
+        ],
+        "std": [
+          "serde/std",
+          "indexmap/std"
+        ]
+      },
+      "yanked": false,
+      "yank_message": null,
+      "lib_links": null,
+      "license": "MIT OR Apache-2.0",
+      "links": {
+        "dependencies": "/api/v1/crates/yaml_serde/0.10.6/dependencies",
+        "version_downloads": "/api/v1/crates/yaml_serde/0.10.6/downloads",
+        "authors": "/api/v1/crates/yaml_serde/0.10.6/authors"
+      },
+      "crate_size": 72507,
+      "published_by": {
+        "id": 165876,
+        "login": "ingydotnet",
+        "name": "Ingy d\u00f6t Net",
+        "avatar": "https://avatars.githubusercontent.com/u/21826?v=4",
+        "url": "https://github.com/ingydotnet",
+        "github_username_matches": true,
+        "created_at": "2008-08-25T07:13:26Z"
+      },
+      "audit_actions": [
+        {
+          "action": "publish",
+          "user": {
+            "id": 165876,
+            "login": "ingydotnet",
+            "name": "Ingy d\u00f6t Net",
+            "avatar": "https://avatars.githubusercontent.com/u/21826?v=4",
+            "url": "https://github.com/ingydotnet",
+            "github_username_matches": true,
+            "created_at": "2008-08-25T07:13:26Z"
+          },
+          "time": "2026-08-12T19:16:07.177157Z"
+        }
+      ],
+      "checksum": "ad7a8266fc7ce9d77db272ca5b40b704a1753e2a2e2ab7b1f2da22672941bf93",
+      "rust_version": "1.82",
+      "has_lib": true,
+      "bin_names": [],
+      "edition": "2021",
+      "description": "serde_yaml maintained by The YAML Organization",
+      "homepage": null,
+      "documentation": "https://docs.rs/yaml_serde/",
+      "repository": "https://github.com/yaml/yaml-serde",
+      "trustpub_data": null,
+      "linecounts": {
+        "languages": {
+          "Rust": {
+            "code_lines": 8873,
+            "comment_lines": 61,
+            "files": 25
+          }
+        },
+        "total_code_lines": 8873,
+        "total_comment_lines": 61
+      }
+    },
+    {
+      "id": 2975750,
+      "crate": "yaml_serde",
+      "num": "0.10.5",
+      "dl_path": "/api/v1/crates/yaml_serde/0.10.5/download",
+      "readme_path": "/api/v1/crates/yaml_serde/0.10.5/readme",
+      "updated_at": "2026-08-11T20:41:49.954320Z",
+      "created_at": "2026-08-11T20:41:49.954320Z",
+      "downloads": 82734,
+      "features": {
+        "default": [
+          "std"
+        ],
+        "std": [
+          "serde/std",
+          "indexmap/std"
+        ]
+      },
+      "yanked": false,
+      "yank_message": null,
+      "lib_links": null,
+      "license": "MIT OR Apache-2.0",
+      "links": {
+        "dependencies": "/api/v1/crates/yaml_serde/0.10.5/dependencies",
+        "version_downloads": "/api/v1/crates/yaml_serde/0.10.5/downloads",
+        "authors": "/api/v1/crates/yaml_serde/0.10.5/authors"
+      },
+      "crate_size": 72404,
+      "published_by": {
+        "id": 165876,
+        "login": "ingydotnet",
+        "name": "Ingy d\u00f6t Net",
+        "avatar": "https://avatars.githubusercontent.com/u/21826?v=4",
+        "url": "https://github.com/ingydotnet",
+        "github_username_matches": true,
+        "created_at": "2008-08-25T07:13:26Z"
+      },
+      "audit_actions": [
+        {
+          "action": "publish",
+          "user": {
+            "id": 165876,
+            "login": "ingydotnet",
+            "name": "Ingy d\u00f6t Net",
+            "avatar": "https://avatars.githubusercontent.com/u/21826?v=4",
+            "url": "https://github.com/ingydotnet",
+            "github_username_matches": true,
+            "created_at": "2008-08-25T07:13:26Z"
+          },
+          "time": "2026-08-11T20:41:49.954320Z"
+        }
+      ],
+      "checksum": "6552d7b747c58f1042cb51562c172e0fad554cfc3d4965ef5e7b4bc762a086af",
+      "rust_version": "1.82",
+      "has_lib": true,
+      "bin_names": [],
+      "edition": "2021",
+      "description": "serde_yaml maintained by The YAML Organization",
+      "homepage": null,
+      "documentation": "https://docs.rs/yaml_serde/",
+      "repository": "https://github.com/yaml/yaml-serde",
+      "trustpub_data": null,
+      "linecounts": {
+        "languages": {
+          "Rust": {
+            "code_lines": 8873,
+            "comment_lines": 61,
+            "files": 25
+          }
+        },
+        "total_code_lines": 8873,
+        "total_comment_lines": 61
+      }
+    },
+    {
+      "id": 2111910,
+      "crate": "yaml_serde",
+      "num": "0.10.4",
+      "dl_path": "/api/v1/crates/yaml_serde/0.10.4/download",
+      "readme_path": "/api/v1/crates/yaml_serde/0.10.4/readme",
+      "updated_at": "2026-03-11T18:58:13.360534Z",
+      "created_at": "2026-03-11T18:58:13.360534Z",
+      "downloads": 2034453,
+      "features": {},
+      "yanked": false,
+      "yank_message": null,
+      "lib_links": null,
+      "license": "MIT OR Apache-2.0",
+      "links": {
+        "dependencies": "/api/v1/crates/yaml_serde/0.10.4/dependencies",
+        "version_downloads": "/api/v1/crates/yaml_serde/0.10.4/downloads",
+        "authors": "/api/v1/crates/yaml_serde/0.10.4/authors"
+      },
+      "crate_size": 70031,
+      "published_by": {
+        "id": 165876,
+        "login": "ingydotnet",
+        "name": "Ingy d\u00f6t Net",
+        "avatar": "https://avatars.githubusercontent.com/u/21826?v=4",
+        "url": "https://github.com/ingydotnet",
+        "github_username_matches": true,
+        "created_at": "2008-08-25T07:13:26Z"
+      },
+      "audit_actions": [
+        {
+          "action": "publish",
+          "user": {
+            "id": 165876,
+            "login": "ingydotnet",
+            "name": "Ingy d\u00f6t Net",
+            "avatar": "https://avatars.githubusercontent.com/u/21826?v=4",
+            "url": "https://github.com/ingydotnet",
+            "github_username_matches": true,
+            "created_at": "2008-08-25T07:13:26Z"
+          },
+          "time": "2026-03-11T18:58:13.360534Z"
+        }
+      ],
+      "checksum": "08c7c1b1a6a7c8a6b2741a6c21a4f8918e51899b111cfa08d1288202656e3975",
+      "rust_version": "1.82",
+      "has_lib": true,
+      "bin_names": [],
+      "edition": "2021",
+      "description": "serde_yaml maintained by The YAML Organization",
+      "homepage": null,
+      "documentation": "https://docs.rs/yaml_serde/",
+      "repository": "https://github.com/yaml/yaml-serde",
+      "trustpub_data": null,
+      "linecounts": {
+        "languages": {
+          "Rust": {
+            "code_lines": 8719,
+            "comment_lines": 59,
+            "files": 24
+          }
+        },
+        "total_code_lines": 8719,
+        "total_comment_lines": 59
+      }
+    },
+    {
+      "id": 1970934,
+      "crate": "yaml_serde",
+      "num": "0.10.3",
+      "dl_path": "/api/v1/crates/yaml_serde/0.10.3/download",
+      "readme_path": "/api/v1/crates/yaml_serde/0.10.3/readme",
+      "updated_at": "2026-01-25T04:46:59.351880Z",
+      "created_at": "2026-01-25T04:46:59.351880Z",
+      "downloads": 60997,
+      "features": {},
+      "yanked": false,
+      "yank_message": null,
+      "lib_links": null,
+      "license": "MIT OR Apache-2.0",
+      "links": {
+        "dependencies": "/api/v1/crates/yaml_serde/0.10.3/dependencies",
+        "version_downloads": "/api/v1/crates/yaml_serde/0.10.3/downloads",
+        "authors": "/api/v1/crates/yaml_serde/0.10.3/authors"
+      },
+      "crate_size": 68775,
+      "published_by": {
+        "id": 165876,
+        "login": "ingydotnet",
+        "name": "Ingy d\u00f6t Net",
+        "avatar": "https://avatars.githubusercontent.com/u/21826?v=4",
+        "url": "https://github.com/ingydotnet",
+        "github_username_matches": true,
+        "created_at": "2008-08-25T07:13:26Z"
+      },
+      "audit_actions": [
+        {
+          "action": "publish",
+          "user": {
+            "id": 165876,
+            "login": "ingydotnet",
+            "name": "Ingy d\u00f6t Net",
+            "avatar": "https://avatars.githubusercontent.com/u/21826?v=4",
+            "url": "https://github.com/ingydotnet",
+            "github_username_matches": true,
+            "created_at": "2008-08-25T07:13:26Z"
+          },
+          "time": "2026-01-25T04:46:59.351880Z"
+        }
+      ],
+      "checksum": "4a7f5270edc6fab0529a772a772b3e505dfd883a8de5cc5b464e35fabe586411",
+      "rust_version": "1.82",
+      "has_lib": true,
+      "bin_names": [],
+      "edition": "2021",
+      "description": "serde_yaml maintained by The YAML Organization",
+      "homepage": null,
+      "documentation": "https://docs.rs/yaml_serde/",
+      "repository": "https://github.com/yaml/yaml-serde",
+      "trustpub_data": null,
+      "linecounts": {
+        "languages": {
+          "Rust": {
+            "code_lines": 8719,
+            "comment_lines": 59,
+            "files": 24
+          }
+        },
+        "total_code_lines": 8719,
+        "total_comment_lines": 59
+      }
+    },
+    {
+      "id": 1970432,
+      "crate": "yaml_serde",
+      "num": "0.10.2",
+      "dl_path": "/api/v1/crates/yaml_serde/0.10.2/download",
+      "readme_path": "/api/v1/crates/yaml_serde/0.10.2/readme",
+      "updated_at": "2026-01-24T22:35:09.961382Z",
+      "created_at": "2026-01-24T22:35:09.961382Z",
+      "downloads": 3562,
+      "features": {},
+      "yanked": false,
+      "yank_message": null,
+      "lib_links": null,
+      "license": "MIT OR Apache-2.0",
+      "links": {
+        "dependencies": "/api/v1/crates/yaml_serde/0.10.2/dependencies",
+        "version_downloads": "/api/v1/crates/yaml_serde/0.10.2/downloads",
+        "authors": "/api/v1/crates/yaml_serde/0.10.2/authors"
+      },
+      "crate_size": 68806,
+      "published_by": {
+        "id": 165876,
+        "login": "ingydotnet",
+        "name": "Ingy d\u00f6t Net",
+        "avatar": "https://avatars.githubusercontent.com/u/21826?v=4",
+        "url": "https://github.com/ingydotnet",
+        "github_username_matches": true,
+        "created_at": "2008-08-25T07:13:26Z"
+      },
+      "audit_actions": [
+        {
+          "action": "publish",
+          "user": {
+            "id": 165876,
+            "login": "ingydotnet",
+            "name": "Ingy d\u00f6t Net",
+            "avatar": "https://avatars.githubusercontent.com/u/21826?v=4",
+            "url": "https://github.com/ingydotnet",
+            "github_username_matches": true,
+            "created_at": "2008-08-25T07:13:26Z"
+          },
+          "time": "2026-01-24T22:35:09.961382Z"
+        }
+      ],
+      "checksum": "1c83c227bba98b12fba1277d076bef559772171242f62eb63ac2c43636053ef3",
+      "rust_version": "1.64",
+      "has_lib": true,
+      "bin_names": [],
+      "edition": "2021",
+      "description": "serde_yaml maintained by The YAML Organization",
+      "homepage": null,
+      "documentation": "https://docs.rs/yaml_serde/",
+      "repository": "https://github.com/yaml/yaml-serde",
+      "trustpub_data": null,
+      "linecounts": {
+        "languages": {
+          "Rust": {
+            "code_lines": 8728,
+            "comment_lines": 59,
+            "files": 24
+          }
+        },
+        "total_code_lines": 8728,
+        "total_comment_lines": 59
+      }
+    },
+    {
+      "id": 1970315,
+      "crate": "yaml_serde",
+      "num": "0.10.1",
+      "dl_path": "/api/v1/crates/yaml_serde/0.10.1/download",
+      "readme_path": "/api/v1/crates/yaml_serde/0.10.1/readme",
+      "updated_at": "2026-01-24T21:25:28.543340Z",
+      "created_at": "2026-01-24T21:25:28.543340Z",
+      "downloads": 225,
+      "features": {},
+      "yanked": false,
+      "yank_message": null,
+      "lib_links": null,
+      "license": "MIT OR Apache-2.0",
+      "links": {
+        "dependencies": "/api/v1/crates/yaml_serde/0.10.1/dependencies",
+        "version_downloads": "/api/v1/crates/yaml_serde/0.10.1/downloads",
+        "authors": "/api/v1/crates/yaml_serde/0.10.1/authors"
+      },
+      "crate_size": 68825,
+      "published_by": {
+        "id": 165876,
+        "login": "ingydotnet",
+        "name": "Ingy d\u00f6t Net",
+        "avatar": "https://avatars.githubusercontent.com/u/21826?v=4",
+        "url": "https://github.com/ingydotnet",
+        "github_username_matches": true,
+        "created_at": "2008-08-25T07:13:26Z"
+      },
+      "audit_actions": [
+        {
+          "action": "publish",
+          "user": {
+            "id": 165876,
+            "login": "ingydotnet",
+            "name": "Ingy d\u00f6t Net",
+            "avatar": "https://avatars.githubusercontent.com/u/21826?v=4",
+            "url": "https://github.com/ingydotnet",
+            "github_username_matches": true,
+            "created_at": "2008-08-25T07:13:26Z"
+          },
+          "time": "2026-01-24T21:25:28.543340Z"
+        }
+      ],
+      "checksum": "86481ac94efb91ca92f2e1d1adec4b98af3ee06ccf5d29093fd6693f71ad7d1f",
+      "rust_version": "1.64",
+      "has_lib": true,
+      "bin_names": [],
+      "edition": "2021",
+      "description": "YAML data format for Serde",
+      "homepage": null,
+      "documentation": "https://docs.rs/yaml_serde/",
+      "repository": "https://github.com/yaml/yaml-serde",
+      "trustpub_data": null,
+      "linecounts": {
+        "languages": {
+          "Rust": {
+            "code_lines": 8728,
+            "comment_lines": 59,
+            "files": 24
+          }
+        },
+        "total_code_lines": 8728,
+        "total_comment_lines": 59
+      }
+    }
+  ],
+  "keywords": [
+    {
+      "id": "serialization",
+      "keyword": "serialization",
+      "created_at": "2014-11-20T20:14:31.726180Z",
+      "crates_cnt": 1635
+    },
+    {
+      "id": "yaml",
+      "keyword": "yaml",
+      "created_at": "2014-12-02T21:40:55.859764Z",
+      "crates_cnt": 539
+    },
+    {
+      "id": "data",
+      "keyword": "data",
+      "created_at": "2015-06-20T04:34:42.759266Z",
+      "crates_cnt": 1008
+    },
+    {
+      "id": "serde",
+      "keyword": "serde",
+      "created_at": "2015-08-10T17:10:09.021436Z",
+      "crates_cnt": 1618
+    }
+  ],
+  "categories": [
+    {
+      "id": "encoding",
+      "category": "Encoding",
+      "slug": "encoding",
+      "description": "Encoding and/or decoding data from one data format to another.",
+      "created_at": "2017-01-17T19:13:05.112025Z",
+      "crates_cnt": 7554
+    },
+    {
+      "id": "parser-implementations",
+      "category": "Parser implementations",
+      "slug": "parser-implementations",
+      "description": "Parsers implemented for particular formats or languages.",
+      "created_at": "2017-02-05T21:31:23.444608Z",
+      "crates_cnt": 7878
+    }
+  ]
+}

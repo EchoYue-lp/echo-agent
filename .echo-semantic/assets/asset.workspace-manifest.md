@@ -6,16 +6,51 @@ title: Workspace 与 Feature 编译权威
 asset_type: state_authority
 status: active
 risk: high
-observed_at: 44b2ed68772c7c016d09af6c2e1adac9fe4fea70
-boundary_refs: [boundary.workspace-architecture]
-code_refs: [Cargo.toml, echo-core/Cargo.toml, echo-execution/Cargo.toml, echo-integration/Cargo.toml, echo-macros/Cargo.toml, echo-orchestration/Cargo.toml, echo-state/Cargo.toml, echo-tools/Cargo.toml, echo-agent-learning/Cargo.toml]
-consumer_refs: [.github/workflows/rust-ci.yml, scripts/verify.sh, README.md, README.zh.md, echo-agent-learning/tests/documentation_contract.rs]
-behavior_refs: [behavior.workspace-composition]
-rule_refs: [rule.framework-layer-ownership]
-evidence_refs: [evidence.workspace-structure, evidence.workspace-topology-doc-repair, evidence.workspace-topology-doc-verification, evidence.feature-table-doc-repair, evidence.feature-table-doc-verification, evidence.readme-example-target-repair, evidence.readme-example-target-verification, evidence.framework-concept-navigation]
-finding_refs: []
+observed_at: source:1c515c09873968a279e6076cf6abf659923f1fa96137144423970bfcd0e1881c
+boundary_refs:
+- boundary.workspace-architecture
+code_refs:
+- Cargo.toml
+- echo-core/Cargo.toml
+- echo-execution/Cargo.toml
+- echo-integration/Cargo.toml
+- echo-macros/Cargo.toml
+- echo-orchestration/Cargo.toml
+- echo-state/Cargo.toml
+- echo-tools/Cargo.toml
+- echo-agent-learning/Cargo.toml
+- Cargo.lock
+- docs/dependencyrepair.md
+- docs/evidence/dependency-repair-20261013/receipt.json
+consumer_refs:
+- .github/workflows/rust-ci.yml
+- scripts/verify.sh
+- README.md
+- README.zh.md
+- echo-agent-learning/tests/documentation_contract.rs
+behavior_refs:
+- behavior.workspace-composition
+rule_refs:
+- rule.framework-layer-ownership
+evidence_refs:
+- evidence.workspace-structure
+- evidence.workspace-topology-doc-repair
+- evidence.workspace-topology-doc-verification
+- evidence.feature-table-doc-repair
+- evidence.feature-table-doc-verification
+- evidence.readme-example-target-repair
+- evidence.readme-example-target-verification
+- evidence.framework-concept-navigation
+- evidence.framework-dependency-policy-repair
+- evidence.framework-dependency-policy-focused-verification
+- evidence.framework-dependency-final-full-verification
+- evidence.framework-dependency-final-gate-archive
+finding_refs:
+- finding.framework-dependency-policy-ci
 candidate_refs: []
 ---
+
+
 
 # Workspace 与 Feature 编译权威
 
@@ -39,3 +74,9 @@ Manifest 变化在编译和 contract generation 时生效。
 ## 未知与限制
 
 运行时配置不由本资产决定。
+
+
+本轮依赖边界：六Cargo文件的maintained YAML alias与quinn锁替换属于框架编译实现，复用原公共API与调用路径，原audit/deny门禁权威保持；focused/policyredgreen不代新全量与交付验收。旧已verified分层规则未改为其它risk/依赖全部通过。
+
+
+依赖本地修复收口：新23完整工程最终通过及独立源码review PASS/action0见 evidence.framework-dependency-final-full-verification / audit.framework-dependency-policy-rereview，原分层/状态不扩展为remote/consumer/全risk已验。

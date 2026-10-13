@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.framework-final-34d5-semantic-verification
 kind: evidence
-observed_at: source:34d5f5574c9cf5a645970cd8b58367c39bce268630488b68d3ea54e996728e17
+observed_at: 4eb005c15b9c0036b73e409026c668c02f0a9575
 source_refs:
 - echo-core/src/guard/content.rs
 - echo-tools/src/data.rs
@@ -22,6 +22,7 @@ limitations:
 - Only installed0.5 deterministic semantic contract; does not substitute engineering gates, independent implementation
   review or consumer/main acceptance.
 ---
+
 
 # 当前34d5严格语义门禁收据
 
@@ -53,3 +54,6 @@ installed echo-semantic0.5唯一verify_semantic.py，在最终Audit与完整工�
   }
 ]
 ```
+
+
+历史定位补充：上述34d5完整工程/独立审查绑定真实提交 4eb005c15b9c0036b73e409026c668c02f0a9575（唯一source摘要重算一致），后续依赖策略修复使当前source变化，不借此证明新版依赖通过。原命令、路径、时间、原结论与限制保持。

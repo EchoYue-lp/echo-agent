@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.data-pivot-value-fidelity-verification
 kind: evidence
-observed_at: source:34d5f5574c9cf5a645970cd8b58367c39bce268630488b68d3ea54e996728e17
+observed_at: 4eb005c15b9c0036b73e409026c668c02f0a9575
 source_refs:
 - echo-tools/src/data.rs
 - docs/en/21-common-tools.md
@@ -16,6 +16,7 @@ limitations:
 - Independent incremental source review pass has zero actionable items; it does not certify every framework
   lens.
 ---
+
 
 # Data Pivot 原生值与null组合及错误语义失真：验证
 
@@ -32,3 +33,6 @@ pivot-red.log和pivot-adjacent-review-red.log分别保留真实3+3失败；pivot
 ## 已知缺口
 
 新版完整工程门禁尚待执行；公开依赖、真实SDK各语言消费与精确main独立验收。Plan lifecycle保持ready，只有最终交付验收可推进。
+
+
+历史定位补充：上述34d5完整工程/独立审查绑定真实提交 4eb005c15b9c0036b73e409026c668c02f0a9575（唯一source摘要重算一致），后续依赖策略修复使当前source变化，不借此证明新版依赖通过。原命令、路径、时间、原结论与限制保持。

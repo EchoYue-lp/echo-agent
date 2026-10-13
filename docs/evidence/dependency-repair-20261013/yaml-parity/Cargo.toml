@@ -1,0 +1,9 @@
+[workspace]
+[package]
+name = "echo-yaml-dependency-parity"
+version = "0.0.0"
+edition = "2021"
+[dependencies]
+legacy = { package = "serde_yaml_ng", version = "=0.10.0" }
+replacement = { package = "yaml_serde", version = "=0.10.7" }
+serde = { version = "1", features = ["derive"] }

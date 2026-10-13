@@ -1,0 +1,21 @@
+   Compiling yaml_serde v0.10.7
+   Compiling echo_core v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/task-runtime-store-control/echo-core)
+   Compiling echo_state v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/task-runtime-store-control/echo-state)
+   Compiling echo_integration v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/task-runtime-store-control/echo-integration)
+   Compiling echo_orchestration v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/task-runtime-store-control/echo-orchestration)
+   Compiling echo_tools v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/task-runtime-store-control/echo-tools)
+   Compiling echo_execution v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/task-runtime-store-control/echo-execution)
+   Compiling echo_agent v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/task-runtime-store-control)
+    Finished `test` profile [unoptimized] target(s) in 1m 11s
+     Running unittests src/lib.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/deps/echo_agent-3b2a2609707a3079)
+
+running 6 tests
+test workflow::loader::tests::test_parse_yaml_definition ... ok
+test workflow::loader::tests::test_parse_json_definition ... ok
+test workflow::loader::tests::test_build_graph_from_yaml ... ok
+test workflow::loader::tests::test_conditional_edge_definition ... ok
+test workflow::loader::tests::test_parallel_edge_definition ... ok
+test workflow::loader::tests::test_interrupt_definition ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 1196 filtered out; finished in 0.04s
+

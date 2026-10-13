@@ -1,0 +1,27 @@
+    Finished `test` profile [unoptimized] target(s) in 0.94s
+     Running unittests src/lib.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/deps/echo_agent-3b2a2609707a3079)
+
+running 20 tests
+test plugin::prepared::tests::cache_is_shared_bounded_and_reload_advances_generation ... ok
+test plugin::prepared::tests::concurrent_shared_integrators_publish_one_arc_per_revision ... ok
+test plugin::prepared::tests::equivalent_installations_have_the_same_content_identity ... ok
+test plugin::prepared::tests::dependency_order_and_every_frozen_component_drive_identity ... ok
+test plugin::prepared::tests::invalid_hook_action_excludes_hook_component_with_structured_diagnostic ... ok
+test plugin::prepared::tests::invalid_mcp_excludes_mcp_component_without_poisoning_generation ... ok
+test plugin::prepared::tests::invalid_dependency_generation_is_refused ... ok
+test plugin::prepared::tests::component_parse_error_is_isolated_and_healthy_siblings_apply ... ok
+test plugin::prepared::tests::invalid_skill_is_excluded_without_dropping_healthy_plugin_components ... ok
+test plugin::prepared::tests::plugin_mcp_hook_server_is_qualified_by_prepared_owner ... ok
+test plugin::prepared::tests::failed_active_withdraw_keeps_publication_fenced_until_retry ... ok
+test plugin::prepared::tests::independent_integrators_share_preparation_order_on_one_agent ... ok
+test plugin::prepared::tests::partial_apply_rollback_failure_returns_retryable_receipt ... ok
+test plugin::prepared::tests::cancelled_second_mcp_server_keeps_first_in_cleanup_receipt ... ok
+test plugin::prepared::tests::plugin_level_failure_rejects_generation_with_dependent_plugin ... ok
+test plugin::prepared::tests::publication_rejects_stale_prepared_and_receipt_before_mutation ... ok
+test plugin::prepared::tests::publication_target_is_canonical_per_agent_and_rejects_receipt_forgery ... ok
+test plugin::prepared::tests::wire_and_rollback_read_no_component_files ... ok
+test plugin::prepared::tests::cancelled_apply_retains_cleanup_owner_and_blocks_replacement ... ok
+test plugin::prepared::tests::cancelled_withdraw_retains_current_receipt_and_blocks_replacement ... ok
+
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 1182 filtered out; finished in 0.26s
+

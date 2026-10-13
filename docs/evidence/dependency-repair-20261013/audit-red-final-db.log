@@ -1,0 +1,54 @@
+      Loaded 1310 security advisories (from /Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/admin/framework-dependency-repair/advisory-source)
+    Scanning /Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/admin/framework-dependency-repair/before/Cargo.lock for vulnerabilities (681 crate dependencies)
+Crate:     quinn-proto
+Version:   0.11.16
+Title:     Zero-length DATAGRAM frames bypass the receive buffer limit in quinn-proto
+Date:      2026-08-17
+ID:        RUSTSEC-2026-0342
+URL:       https://rustsec.org/advisories/RUSTSEC-2026-0342
+Solution:  Upgrade to >=0.11.17
+
+Crate:     quinn-proto
+Version:   0.11.16
+Title:     Unbounded growth of pending connection ID retirements in quinn-proto
+Date:      2026-08-17
+ID:        RUSTSEC-2026-0339
+URL:       https://rustsec.org/advisories/RUSTSEC-2026-0339
+Solution:  Upgrade to >=0.11.17
+
+Crate:     quinn-proto
+Version:   0.11.16
+Title:     Remote peer can panic quinn-proto with zero-length STREAM frames during unordered reads
+Date:      2026-09-14
+ID:        RUSTSEC-2026-0338
+URL:       https://rustsec.org/advisories/RUSTSEC-2026-0338
+Solution:  Upgrade to >=0.11.18
+
+Crate:     quinn-proto
+Version:   0.11.16
+Title:     Peer minimum ACK delay can panic quinn-proto when ACK_FREQUENCY transmission is enabled
+Date:      2026-09-14
+ID:        RUSTSEC-2026-0340
+URL:       https://rustsec.org/advisories/RUSTSEC-2026-0340
+Severity:  7.5 (high)
+Solution:  Upgrade to >=0.11.18
+
+Crate:     quinn-proto
+Version:   0.11.16
+Title:     Stream reassembly memory-exhaustion guard in quinn-proto can be bypassed
+Date:      2026-08-17
+ID:        RUSTSEC-2026-0341
+URL:       https://rustsec.org/advisories/RUSTSEC-2026-0341
+Severity:  7.5 (high)
+Solution:  Upgrade to >=0.11.17
+
+Crate:     unsafe-libyaml
+Version:   0.2.11
+Warning:   unmaintained
+Title:     unsafe-libyaml is unmaintained
+Date:      2024-03-25
+ID:        RUSTSEC-2024-0449
+URL:       https://rustsec.org/advisories/RUSTSEC-2024-0449
+
+error: 5 vulnerabilities found!
+error: 1 denied warning found!

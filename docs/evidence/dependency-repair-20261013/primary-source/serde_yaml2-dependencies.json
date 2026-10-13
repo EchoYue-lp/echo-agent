@@ -1,0 +1,42 @@
+{
+  "dependencies": [
+    {
+      "id": 15290578,
+      "version_id": 1560468,
+      "crate_id": "serde",
+      "req": "^1.0.197",
+      "optional": false,
+      "default_features": true,
+      "features": [
+        "serde_derive"
+      ],
+      "target": null,
+      "kind": "normal",
+      "downloads": 0
+    },
+    {
+      "id": 15290579,
+      "version_id": 1560468,
+      "crate_id": "thiserror",
+      "req": "^1.0.58",
+      "optional": false,
+      "default_features": true,
+      "features": [],
+      "target": null,
+      "kind": "normal",
+      "downloads": 0
+    },
+    {
+      "id": 15290580,
+      "version_id": 1560468,
+      "crate_id": "yaml-rust2",
+      "req": "^0.8.0",
+      "optional": false,
+      "default_features": true,
+      "features": [],
+      "target": null,
+      "kind": "normal",
+      "downloads": 0
+    }
+  ]
+}

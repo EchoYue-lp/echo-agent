@@ -5,12 +5,12 @@ kind: audit
 boundary_ref: boundary.tool-permission-sandbox
 lens: contract_evidence
 freshness: examined
-revision: source:34d5f5574c9cf5a645970cd8b58367c39bce268630488b68d3ea54e996728e17
+revision: 4eb005c15b9c0036b73e409026c668c02f0a9575
 finding_refs:
 - finding.data-pivot-value-fidelity
 challenges:
   owned-slice-and-counterexamples:
-    revision: source:34d5f5574c9cf5a645970cd8b58367c39bce268630488b68d3ea54e996728e17
+    revision: 4eb005c15b9c0036b73e409026c668c02f0a9575
     source_refs:
     - echo-tools/src/data.rs
     - docs/en/21-common-tools.md
@@ -20,6 +20,7 @@ challenges:
     - evidence.data-pivot-value-fidelity-verification
     - evidence.framework-guard-pivot-channel-focused-archive
 ---
+
 
 # Data Pivot 原生值与null组合及错误语义失真：独立局部复审
 
@@ -48,3 +49,6 @@ pivot-red.log和pivot-adjacent-review-red.log分别保留真实3+3失败；pivot
 ## 未检查项
 
 不扩大为框架全部风险视角已verified；独立后续完整验收只补工程receipt，不把源码局部复审重写成全量结论。
+
+
+历史定位补充：上述34d5完整工程/独立审查绑定真实提交 4eb005c15b9c0036b73e409026c668c02f0a9575（唯一source摘要重算一致），后续依赖策略修复使当前source变化，不借此证明新版依赖通过。原命令、路径、时间、原结论与限制保持。

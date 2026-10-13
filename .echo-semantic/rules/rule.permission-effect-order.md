@@ -11,7 +11,7 @@ focus:
 - state_authority
 - failure_concurrency
 - time_lifecycle
-observed_at: source:34d5f5574c9cf5a645970cd8b58367c39bce268630488b68d3ea54e996728e17
+observed_at: source:1c515c09873968a279e6076cf6abf659923f1fa96137144423970bfcd0e1881c
 behavior_refs:
 - behavior.effect-permission-execution
 code_refs:
@@ -61,6 +61,7 @@ finding_refs:
 - finding.guard-overlap-redaction
 - finding.data-pivot-value-fidelity
 ---
+
 
 
 

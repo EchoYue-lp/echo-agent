@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.guard-overlap-redaction-verification
 kind: evidence
-observed_at: source:34d5f5574c9cf5a645970cd8b58367c39bce268630488b68d3ea54e996728e17
+observed_at: 4eb005c15b9c0036b73e409026c668c02f0a9575
 source_refs:
 - echo-core/src/guard/content.rs
 - docs/en/18-guard-system.md
@@ -16,6 +16,7 @@ limitations:
 - Independent incremental source review pass has zero actionable items; it does not certify every framework
   lens.
 ---
+
 
 # ContentGuard 重叠敏感区间重复替换损坏输出：验证
 
@@ -32,3 +33,6 @@ guard-red.log保留3项实际输出失败；guard-green.log覆盖完整content�
 ## 已知缺口
 
 新版完整工程门禁尚待执行；公开依赖、真实SDK各语言消费与精确main独立验收。Plan lifecycle保持ready，只有最终交付验收可推进。
+
+
+历史定位补充：上述34d5完整工程/独立审查绑定真实提交 4eb005c15b9c0036b73e409026c668c02f0a9575（唯一source摘要重算一致），后续依赖策略修复使当前source变化，不借此证明新版依赖通过。原命令、路径、时间、原结论与限制保持。

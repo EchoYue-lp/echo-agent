@@ -5,7 +5,7 @@ kind: audit
 boundary_ref: boundary.task-subagent-workflow
 lens: contract_evidence
 freshness: examined
-revision: source:34d5f5574c9cf5a645970cd8b58367c39bce268630488b68d3ea54e996728e17
+revision: 4eb005c15b9c0036b73e409026c668c02f0a9575
 finding_refs:
 - finding.task-runtime-store-control
 - finding.task-dispatch-parent-drop-owner
@@ -17,7 +17,7 @@ finding_refs:
 - finding.channel-manager-borrowed-await
 challenges:
   task-run-claim-cas-drop-and-acp-terminal:
-    revision: source:34d5f5574c9cf5a645970cd8b58367c39bce268630488b68d3ea54e996728e17
+    revision: 4eb005c15b9c0036b73e409026c668c02f0a9575
     source_refs:
     - docs/adr/0060-task-execution-store-cas-and-local-interruption.md
     - docs/adr/0061-acp-recovered-turn-identity.md
@@ -39,7 +39,7 @@ challenges:
     - evidence.framework-final-34d5-full-verification
     - evidence.framework-final-34d5-gate-archive
   lsp-response-and-diagnostic-fidelity:
-    revision: source:34d5f5574c9cf5a645970cd8b58367c39bce268630488b68d3ea54e996728e17
+    revision: 4eb005c15b9c0036b73e409026c668c02f0a9575
     source_refs:
     - docs/adr/0082-lsp-response-value-fidelity.md
     - docs/en/31-lsp-integration.md
@@ -53,7 +53,7 @@ challenges:
     - evidence.framework-final-34d5-full-verification
     - evidence.framework-final-34d5-gate-archive
   shared-tool-validator-original-authority:
-    revision: source:34d5f5574c9cf5a645970cd8b58367c39bce268630488b68d3ea54e996728e17
+    revision: 4eb005c15b9c0036b73e409026c668c02f0a9575
     source_refs:
     - docs/adr/0083-shared-tool-input-validation.md
     - docs/en/02-tools.md
@@ -63,7 +63,7 @@ challenges:
     - evidence.framework-final-34d5-full-verification
     - evidence.framework-final-34d5-gate-archive
   guard-overlap-and-native-pivot:
-    revision: source:34d5f5574c9cf5a645970cd8b58367c39bce268630488b68d3ea54e996728e17
+    revision: 4eb005c15b9c0036b73e409026c668c02f0a9575
     source_refs:
     - docs/en/18-guard-system.md
     - docs/en/21-common-tools.md
@@ -75,7 +75,7 @@ challenges:
     - evidence.framework-final-34d5-full-verification
     - evidence.framework-final-34d5-gate-archive
   channel-original-entry-lifecycle-and-metadata:
-    revision: source:34d5f5574c9cf5a645970cd8b58367c39bce268630488b68d3ea54e996728e17
+    revision: 4eb005c15b9c0036b73e409026c668c02f0a9575
     source_refs:
     - docs/adr/0084-channel-owned-operations.md
     - docs/en/15-im-channels.md
@@ -87,6 +87,7 @@ challenges:
     - evidence.framework-final-34d5-full-verification
     - evidence.framework-final-34d5-gate-archive
 ---
+
 
 # 框架当前34d5候选：最终独立实现复审与工程证据
 
@@ -113,3 +114,6 @@ challenges:
 ## 未检查项
 
 Plan生命周期仍ready：它包含跨SDK/交付验收，不能在本框架里程碑通过时提前completed。后续业务/公共API/协议或正式doc修改将使source变化，必须新证据；历史34d5证据可用真实de2effeb恢复，不盲改其验证时间或结论。
+
+
+历史定位补充：上述34d5完整工程/独立审查绑定真实提交 4eb005c15b9c0036b73e409026c668c02f0a9575（唯一source摘要重算一致），后续依赖策略修复使当前source变化，不借此证明新版依赖通过。原命令、路径、时间、原结论与限制保持。

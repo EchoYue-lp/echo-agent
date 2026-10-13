@@ -33,7 +33,7 @@ dashmap = "6"
 tracing = "0.1"
 uuid = { version = "1", features = ["v4"] }
 # From echo-skills
-serde_yaml_ng = "0.10"
+serde_yaml_ng = { package = "yaml_serde", version = "0.10.7" }
 regex = "1"
 dirs = "6"
 shlex = "1"

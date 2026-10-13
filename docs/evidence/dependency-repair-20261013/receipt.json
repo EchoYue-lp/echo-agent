@@ -1,0 +1,138 @@
+{
+  "classification": "dependency CI repair candidate, not new main/remote acceptance",
+  "base": "4eb005c15b9c0036b73e409026c668c02f0a9575",
+  "ci_failure": {
+    "pr": 181,
+    "run": 38417628760,
+    "job": 115366181706
+  },
+  "new_packages": {
+    "quinn-proto": "0.11.18",
+    "yaml_serde": "0.10.7",
+    "libyaml-rs": "0.3.0"
+  },
+  "audit": {
+    "db_commit": "29d1a60c3361576d366b1740bba2254dc6173434",
+    "advisories": 1310,
+    "official_blob_count": 1329,
+    "before_exit": 1,
+    "before_vulnerabilities": 5,
+    "before_denied_warning": 1,
+    "after_exit": 0,
+    "deny_warnings_unchanged": true,
+    "config_exceptions": 4,
+    "new_exceptions": 0
+  },
+  "deny": {
+    "exit": 0,
+    "checks": [
+      "advisories",
+      "bans",
+      "licenses",
+      "sources"
+    ],
+    "existing_duplicate_graph_warnings": 50,
+    "temporary_config_change": "db-path only; immutable verified snapshot fetched through GitHub blob API",
+    "policy_change": false
+  },
+  "focused": {
+    "execution-skills": {
+      "passed": 197,
+      "failed": 0,
+      "ignored": 0
+    },
+    "integration-lsp-yaml": {
+      "passed": 3,
+      "failed": 0,
+      "ignored": 0
+    },
+    "root-workflow-yaml": {
+      "passed": 6,
+      "failed": 0,
+      "ignored": 0
+    },
+    "root-evolution-yaml": {
+      "passed": 230,
+      "failed": 0,
+      "ignored": 0
+    },
+    "learning-yaml-contract": {
+      "passed": 3,
+      "failed": 0,
+      "ignored": 0
+    },
+    "root-plugin-yaml": {
+      "passed": 20,
+      "failed": 0,
+      "ignored": 0
+    }
+  },
+  "yaml_parity": {
+    "generic_value_documents": 7,
+    "typed_tagged_variants": 4,
+    "exact_error_messages_and_locations": 4,
+    "serialization_bytes_and_roundtrips_equal": true
+  },
+  "lock_delta": {
+    "removed": [
+      [
+        "quinn-proto",
+        "0.11.16"
+      ],
+      [
+        "serde_yaml_ng",
+        "0.10.0"
+      ],
+      [
+        "unsafe-libyaml",
+        "0.2.11"
+      ]
+    ],
+    "added": [
+      [
+        "libyaml-rs",
+        "0.3.0"
+      ],
+      [
+        "quinn-proto",
+        "0.11.18"
+      ],
+      [
+        "yaml_serde",
+        "0.10.7"
+      ]
+    ],
+    "changed_workspace_dependencies": [
+      [
+        "echo-agent-learning",
+        "0.1.0"
+      ],
+      [
+        "echo_agent",
+        "0.2.0"
+      ],
+      [
+        "echo_core",
+        "0.2.0"
+      ],
+      [
+        "echo_execution",
+        "0.2.0"
+      ],
+      [
+        "echo_integration",
+        "0.2.0"
+      ]
+    ],
+    "all_other_registry_entries_byte_identical": true
+  },
+  "source_hashes": {
+    "Cargo.lock": "7995a2ebdf82573dcf87bbd251e03338ac4c997e2ce6281479b9d28e34236202",
+    "Cargo.toml": "90426e1bdd3754908dec10c54e3c44b4decc993945d0a408f1ab0c0332c13045",
+    "echo-core/Cargo.toml": "d94be3d0e758d26b1319d4a52a2c6ea0973e0137d3b125cfdcf116d86aa29583",
+    "echo-execution/Cargo.toml": "c561e5772fbb78397e2fc872a3c087f96db1c3759e4f8a707e6b3467900299eb",
+    "echo-integration/Cargo.toml": "2b533c75dac48d55590c29d30155d90a799dd989288542f4151ec22f5f09c67b",
+    "echo-agent-learning/Cargo.toml": "c36104550d113ffb92a61c6ff12b765771cbd9d4ea9815031cae7e067b619b32"
+  },
+  "review": "independent review and final full gates owned coordinator; pending at evidence capture"
+}

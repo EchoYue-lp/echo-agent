@@ -1,0 +1,10 @@
+{
+  "official_commit": "29d1a60c3361576d366b1740bba2254dc6173434",
+  "date": "2026-10-13T13:53:07Z",
+  "official_crate_blob_count": 1290,
+  "all_git_blob_sha1_match": true,
+  "fetch": "GitHub Git tree and authenticated blob API; git transport timed out; no synthetic Git revision",
+  "tree_api_url": "https://api.github.com/repos/RustSec/advisory-db/git/trees/29d1a60c3361576d366b1740bba2254dc6173434?recursive=1",
+  "official_all_blob_count": 1329,
+  "complete_rust_and_crates": true
+}

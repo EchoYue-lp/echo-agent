@@ -1,7 +1,7 @@
 ---
 schema_version: 1
 kind: evidence
-observed_at: source:34d5f5574c9cf5a645970cd8b58367c39bce268630488b68d3ea54e996728e17
+observed_at: 4eb005c15b9c0036b73e409026c668c02f0a9575
 source_refs:
 - echo-core/src/guard/content.rs
 - echo-execution/src/tools.rs
@@ -643,6 +643,7 @@ index_unchanged: true
 ---
 
 
+
 # 当前34d5框架候选：完整工程门禁
 
 ## 支持的结论
@@ -663,3 +664,6 @@ index_unchanged: true
 ## 当前独立最终结论
 
 audit.framework-final-34d5-gate-rereview：独立framework_final_review完成新23receipt/850源码/47archive及此前完整源码审查组合核验，implementation review PASS/action0。可进入授权framework里程碑交付；SDK/ACK/消费者/remote/main以及用户排除Registry不由此扩大完成。
+
+
+历史定位补充：上述34d5完整工程/独立审查绑定真实提交 4eb005c15b9c0036b73e409026c668c02f0a9575（唯一source摘要重算一致），后续依赖策略修复使当前source变化，不借此证明新版依赖通过。原命令、路径、时间、原结论与限制保持。

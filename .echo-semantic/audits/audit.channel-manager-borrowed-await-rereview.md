@@ -5,12 +5,12 @@ kind: audit
 boundary_ref: boundary.extension-lifecycle
 lens: failure_concurrency
 freshness: examined
-revision: source:34d5f5574c9cf5a645970cd8b58367c39bce268630488b68d3ea54e996728e17
+revision: 4eb005c15b9c0036b73e409026c668c02f0a9575
 finding_refs:
 - finding.channel-manager-borrowed-await
 challenges:
   owned-slice-and-counterexamples:
-    revision: source:34d5f5574c9cf5a645970cd8b58367c39bce268630488b68d3ea54e996728e17
+    revision: 4eb005c15b9c0036b73e409026c668c02f0a9575
     source_refs:
     - echo-integration/src/channels/manager.rs
     - echo-integration/src/channels/mod.rs
@@ -24,6 +24,7 @@ challenges:
     - evidence.channel-manager-borrowed-await-verification
     - evidence.framework-guard-pivot-channel-focused-archive
 ---
+
 
 # ChannelManager 借用注册表跨await阻止原插件重入：独立局部复审
 
@@ -52,3 +53,6 @@ test-manager-repaired.log为11 passed/0 failed/0 ignored；初次AtomicU64警告
 ## 未检查项
 
 不扩大为框架全部风险视角已verified；独立后续完整验收只补工程receipt，不把源码局部复审重写成全量结论。
+
+
+历史定位补充：上述34d5完整工程/独立审查绑定真实提交 4eb005c15b9c0036b73e409026c668c02f0a9575（唯一source摘要重算一致），后续依赖策略修复使当前source变化，不借此证明新版依赖通过。原命令、路径、时间、原结论与限制保持。
