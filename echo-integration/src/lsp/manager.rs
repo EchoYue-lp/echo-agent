@@ -340,9 +340,105 @@ while True:
     method = message.get('method')
     close_stdin_after_write = False
     if method == 'initialize':
+        related_information = message.get('params', {}).get('capabilities', {}).get('textDocument', {}).get('publishDiagnostics', {}).get('relatedInformation')
         body = json.dumps({'jsonrpc':'2.0','id':message['id'],'result':{'capabilities':{}}}).encode()
     elif method == 'shutdown':
         body = json.dumps({'jsonrpc':'2.0','id':message['id'],'result':{}}).encode()
+    elif mode == 'diagnostic_fidelity' and method == 'textDocument/hover':
+        case = message['params']['textDocument']['uri'].rsplit('/', 1)[-1]
+        if case == 'advertisement':
+            reply = json.dumps({'jsonrpc':'2.0','id':message['id'],'result':{'contents':str(related_information).lower()}}).encode()
+            sys.stdout.buffer.write(b'Content-Length: %d\r\n\r\n' % len(reply) + reply)
+            sys.stdout.buffer.flush()
+            continue
+        span = {'start': {'line': 0, 'character': 1}, 'end': {'line': 0, 'character': 3}}
+        base = {'range': span, 'message': '中文😀 diagnostic', 'source': 'fixture'}
+        values = {
+            'valid': [{**base, 'severity': n, 'code': n} for n in [1,2,3,4]] + [{**base, 'code': '7'}, {**base, 'severity': None, 'code': None, 'source': None}],
+            'integer-bounds': [{**base, 'code': -2147483648}, {**base, 'code': 2147483647}],
+            'clear': [],
+            'bad-severity': [{**base, 'severity': 0}],
+            'bad-code-bool': [{**base, 'code': True}],
+            'bad-code-float': [{**base, 'code': 1.5}],
+            'bad-code-overflow': [{**base, 'code': 2147483648}],
+            'bad-range-tuple': [{**base, 'range': [[0,1],[0,3]]}],
+            'bad-position-tuple': [{**base, 'range': {'start': [0,1], 'end': span['end']}}],
+            'bad-message': [{**base, 'message': 42}],
+            'mixed': [base, {**base, 'code': False}],
+            'other': [base],
+        }
+        uri = 'file:///other.test' if case == 'other' else 'file:///中文😀.test'
+        if case == 'missing-uri':
+            params = {'diagnostics': []}
+        elif case == 'wrong-uri':
+            params = {'uri': 42, 'diagnostics': []}
+        elif case == 'missing-params':
+            params = None
+        elif case == 'missing-list':
+            params = {'uri': uri}
+        else:
+            params = {'uri': uri, 'diagnostics': values[case]}
+        notice = {'jsonrpc':'2.0','method':'textDocument/publishDiagnostics','params':params}
+        payload = json.dumps(notice, ensure_ascii=False).encode()
+        sys.stdout.buffer.write(b'Content-Length: %d\r\n\r\n' % len(payload) + payload)
+        sys.stdout.buffer.flush()
+        # This response is an ordering barrier after the notification. The Rust
+        # client reader must commit diagnostics state before settling the request.
+        body = json.dumps({'jsonrpc':'2.0','id':message['id'],'result':{'contents':'barrier'}}).encode()
+    elif mode == 'response_fidelity' and method.startswith('textDocument/'):
+        case = message['params']['textDocument']['uri'].rsplit('/', 1)[-1]
+        if message['params'].get('position') != {'line': 0, 'character': 3}:
+            response = {'error': {'code': -32602, 'message': 'UTF-16 position changed'}}
+        else:
+            span = {'start': {'line': 0, 'character': 1}, 'end': {'line': 0, 'character': 3}}
+            location = {'uri': 'file:///中文😀.test', 'range': span}
+            responses = {
+                'null': None,
+                'empty': [],
+                'hover-markup': {'contents': {'kind': 'markdown', 'value': '中文😀'}, 'range': span},
+                'hover-array': {'contents': ['中文😀', {'language': 'rust', 'value': 'let 中文 = "😀";'}], 'range': span},
+                'hover-string': {'contents': '中文😀'},
+                'hover-missing': {'range': span},
+                'hover-bad-range': {'contents': '中文😀', 'range': {'start': {'line': 0, 'character': -1}, 'end': span['end']}},
+                'hover-null-range': {'contents': '中文😀', 'range': None},
+                'hover-tuple-range': {'contents': '中文😀', 'range': [[0,1],[0,3]]},
+                'hover-tuple-position': {'contents': '中文😀', 'range': {'start': [0,1], 'end': span['end']}},
+                'tuple-location': ['file:///中文😀.test', span],
+                'tuple-locations': [['file:///中文😀.test', span]],
+                'mixed-tuple-locations': [location, ['file:///中文😀.test', span]],
+                'hover-overflow-range': {'contents': '中文😀', 'range': {'start': {'line': 0, 'character': 2147483648}, 'end': {'line': 0, 'character': 2147483648}}},
+                'hover-reversed-range': {'contents': '中文😀', 'range': {'start': span['end'], 'end': span['start']}},
+                'hover-bad-content': {'contents': {'kind': 'markdown', 'value': 42}},
+                'location': location,
+                'locations': [location],
+                'bad-location': {'uri': 'file:///bad.test'},
+                'bad-locations': [location, {'uri': 'file:///bad.test'}],
+                'completion': [{'label': '中文😀', 'kind': 3, 'insertText': '中文😀()', 'detail': 'fn 中文()', 'documentation': {'kind': 'markdown', 'value': '说明😀'}}],
+                'completion-no-kind': [{'label': '中文😀'}],
+                'completion-null-kind': [{'label': '中文😀', 'kind': None}],
+                'completion-list': {'isIncomplete': False, 'items': [{'label': '中文😀', 'kind': 3, 'insertText': '中文😀()'}]},
+                'bad-completion-mixed': [{'label': 'valid', 'kind': 1}, {'label': 'invalid', 'kind': 26}],
+                'bad-completion-detail': [{'label': 'valid', 'kind': 1, 'detail': 42}],
+                'bad-completion-doc': [{'label': 'valid', 'kind': 1, 'documentation': {'kind': 'html', 'value': '<p>bad</p>'}}],
+                'bad-completion-iscomplete': {'isIncomplete': 'false', 'items': []},
+                'bad-completion': [{'label': '中文😀', 'kind': 0}],
+                'bad-completion-list': {'isIncomplete': False, 'items': {}},
+            }
+            if case == 'invalid-version':
+                response = {'result': {'contents': 'wrong version'}}
+            elif case == 'null-error':
+                response = {'result': {'contents': 'ambiguous'}, 'error': None}
+            elif case == 'tuple-error':
+                response = {'error': [-32603, 'tuple error', None]}
+            elif case == 'malformed-error-code':
+                response = {'error': {'code': 'bad', 'message': 'invalid code'}}
+            elif case == 'malformed-error-message':
+                response = {'error': {'code': -32603}}
+            elif case == 'result-and-error':
+                response = {'result': {'contents': 'ambiguous'}, 'error': {'code': -32603, 'message': 'ambiguous'}}
+            else:
+                response = {} if case == 'missing-result' else {'result': responses[case]}
+        body = json.dumps({'jsonrpc': '1.0' if case == 'invalid-version' else '2.0','id':message['id'], **response}, ensure_ascii=False).encode()
     elif mode == 'eof' and method == 'initialized':
         break
     elif mode == 'request_eof' and method == 'textDocument/definition':
@@ -385,6 +481,479 @@ while True:
             initialization_options: None,
             max_restarts,
         }
+    }
+
+    async fn response_fidelity_client() -> Result<StdioLspClient, String> {
+        let mut client = StdioLspClient::new(mock_config("test", "response_fidelity", 0));
+        client
+            .initialize("file:///response-fixture")
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(client)
+    }
+
+    fn unicode_position() -> echo_core::lsp::Position {
+        // In "中😀x", x starts at UTF-16 offset 3, not a UTF-8 byte offset.
+        echo_core::lsp::Position {
+            line: 0,
+            character: 3,
+        }
+    }
+
+    #[tokio::test]
+    async fn response_fidelity_hover_retains_range_and_unicode() -> Result<(), String> {
+        let mut client = response_fidelity_client().await?;
+        for case in ["hover-markup", "hover-array"] {
+            let hover = client
+                .hover(&format!("file:///{case}"), unicode_position())
+                .await
+                .map_err(|e| e.to_string())?
+                .ok_or("missing hover")?;
+            assert!(hover.contents.contains("中文😀"));
+            let range = hover.range.ok_or("server hover range was discarded")?;
+            assert_eq!(range.start.character, 1);
+            assert_eq!(range.end.character, 3);
+        }
+        let hover = client
+            .hover("file:///hover-string", unicode_position())
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or("missing hover")?;
+        assert_eq!(hover.contents, "中文😀");
+        assert!(hover.range.is_none());
+        client.shutdown().await.map_err(|e| e.to_string())
+    }
+
+    #[tokio::test]
+    async fn response_fidelity_nullable_results_are_valid_empty_results() -> Result<(), String> {
+        let mut client = response_fidelity_client().await?;
+        assert!(
+            client
+                .hover("file:///null", unicode_position())
+                .await
+                .map_err(|e| e.to_string())?
+                .is_none()
+        );
+        assert!(
+            client
+                .goto_definition("file:///null", unicode_position())
+                .await
+                .map_err(|e| e.to_string())?
+                .is_empty()
+        );
+        assert!(
+            client
+                .find_references("file:///null", unicode_position())
+                .await
+                .map_err(|e| e.to_string())?
+                .is_empty()
+        );
+        assert!(
+            client
+                .completion("file:///null", unicode_position())
+                .await
+                .map_err(|e| e.to_string())?
+                .is_empty()
+        );
+        assert!(
+            client
+                .goto_definition("file:///empty", unicode_position())
+                .await
+                .map_err(|e| e.to_string())?
+                .is_empty()
+        );
+        assert!(
+            client
+                .find_references("file:///empty", unicode_position())
+                .await
+                .map_err(|e| e.to_string())?
+                .is_empty()
+        );
+        assert!(
+            client
+                .completion("file:///empty", unicode_position())
+                .await
+                .map_err(|e| e.to_string())?
+                .is_empty()
+        );
+        client.shutdown().await.map_err(|e| e.to_string())
+    }
+
+    #[tokio::test]
+    async fn response_fidelity_malformed_results_are_explicit_server_errors() -> Result<(), String>
+    {
+        let mut client = response_fidelity_client().await?;
+        for case in [
+            "hover-missing",
+            "hover-bad-range",
+            "hover-null-range",
+            "hover-reversed-range",
+            "hover-overflow-range",
+            "invalid-version",
+            "result-and-error",
+            "hover-bad-content",
+            "missing-result",
+        ] {
+            assert!(matches!(
+                client
+                    .hover(&format!("file:///{case}"), unicode_position())
+                    .await,
+                Err(echo_core::lsp::LspError::ServerError(_))
+            ));
+        }
+        for case in ["bad-location", "bad-locations"] {
+            assert!(matches!(
+                client
+                    .goto_definition(&format!("file:///{case}"), unicode_position())
+                    .await,
+                Err(echo_core::lsp::LspError::ServerError(_))
+            ));
+            assert!(matches!(
+                client
+                    .find_references(&format!("file:///{case}"), unicode_position())
+                    .await,
+                Err(echo_core::lsp::LspError::ServerError(_))
+            ));
+        }
+        for case in [
+            "bad-completion",
+            "bad-completion-list",
+            "bad-completion-mixed",
+            "bad-completion-detail",
+            "bad-completion-doc",
+            "bad-completion-iscomplete",
+        ] {
+            assert!(matches!(
+                client
+                    .completion(&format!("file:///{case}"), unicode_position())
+                    .await,
+                Err(echo_core::lsp::LspError::ServerError(_))
+            ));
+        }
+        // A malformed result is request-local; it must not invent process death.
+        assert!(client.is_initialized());
+        client.shutdown().await.map_err(|e| e.to_string())
+    }
+
+    #[tokio::test]
+    async fn response_fidelity_locations_preserve_server_utf16_coordinates() -> Result<(), String> {
+        let mut client = response_fidelity_client().await?;
+        for case in ["location", "locations"] {
+            let locations = client
+                .goto_definition(&format!("file:///{case}"), unicode_position())
+                .await
+                .map_err(|e| e.to_string())?;
+            assert_eq!(locations.len(), 1);
+            let location = locations.first().ok_or("missing definition")?;
+            assert_eq!(location.uri, "file:///中文😀.test");
+            assert_eq!(location.range.start.character, 1);
+            assert_eq!(location.range.end.character, 3);
+        }
+        let locations = client
+            .find_references("file:///locations", unicode_position())
+            .await
+            .map_err(|e| e.to_string())?;
+        assert_eq!(locations.len(), 1);
+        client.shutdown().await.map_err(|e| e.to_string())
+    }
+
+    #[tokio::test]
+    async fn response_fidelity_completion_decodes_lsp_fields() -> Result<(), String> {
+        let mut client = response_fidelity_client().await?;
+        for case in ["completion", "completion-list"] {
+            let items = client
+                .completion(&format!("file:///{case}"), unicode_position())
+                .await
+                .map_err(|e| e.to_string())?;
+            let item = items.first().ok_or("valid LSP completion was discarded")?;
+            assert_eq!(items.len(), 1);
+            assert_eq!(
+                serde_json::to_value(item.kind).map_err(|e| e.to_string())?,
+                serde_json::json!("Function")
+            );
+            assert_eq!(item.label, "中文😀");
+            assert_eq!(item.insert_text.as_deref(), Some("中文😀()"));
+            if case == "completion" {
+                assert_eq!(item.documentation.as_deref(), Some("说明😀"));
+            }
+        }
+        for case in ["completion-no-kind", "completion-null-kind"] {
+            let items = client
+                .completion(&format!("file:///{case}"), unicode_position())
+                .await
+                .map_err(|e| e.to_string())?;
+            let item = items
+                .first()
+                .ok_or("valid optional-kind completion was discarded")?;
+            assert!(
+                serde_json::to_value(item.kind)
+                    .map_err(|e| e.to_string())?
+                    .is_null()
+            );
+        }
+        client.shutdown().await.map_err(|e| e.to_string())
+    }
+
+    #[tokio::test]
+    async fn response_fidelity_rejects_tuple_shapes_at_each_native_boundary() -> Result<(), String>
+    {
+        let mut client = response_fidelity_client().await?;
+        for case in ["hover-tuple-range", "hover-tuple-position"] {
+            let result = client
+                .hover(&format!("file:///{case}"), unicode_position())
+                .await;
+            assert!(
+                matches!(result, Err(echo_core::lsp::LspError::ServerError(_))),
+                "{case}: {result:?}"
+            );
+        }
+        for case in ["tuple-location", "tuple-locations", "mixed-tuple-locations"] {
+            let result = client
+                .goto_definition(&format!("file:///{case}"), unicode_position())
+                .await;
+            assert!(
+                matches!(result, Err(echo_core::lsp::LspError::ServerError(_))),
+                "{case}: {result:?}"
+            );
+        }
+        for case in ["tuple-locations", "mixed-tuple-locations"] {
+            let result = client
+                .find_references(&format!("file:///{case}"), unicode_position())
+                .await;
+            assert!(
+                matches!(result, Err(echo_core::lsp::LspError::ServerError(_))),
+                "{case}: {result:?}"
+            );
+        }
+        assert!(client.is_initialized());
+        assert!(
+            client
+                .hover("file:///hover-string", unicode_position())
+                .await
+                .map_err(|e| e.to_string())?
+                .is_some()
+        );
+        client.shutdown().await.map_err(|e| e.to_string())
+    }
+
+    #[tokio::test]
+    async fn response_fidelity_malformed_error_settles_request_without_killing_connection()
+    -> Result<(), String> {
+        let mut client = response_fidelity_client().await?;
+        let mut failures = Vec::new();
+        for case in [
+            "null-error",
+            "malformed-error-code",
+            "malformed-error-message",
+            "tuple-error",
+        ] {
+            let uri = format!("file:///{case}");
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                client.hover(&uri, unicode_position()),
+            )
+            .await;
+            if !matches!(result, Ok(Err(echo_core::lsp::LspError::ServerError(_)))) {
+                failures.push(format!(
+                    "{case}: expected explicit ServerError, got {result:?}"
+                ));
+            }
+            assert!(client.is_initialized());
+            assert!(
+                client
+                    .hover("file:///hover-string", unicode_position())
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .is_some()
+            );
+        }
+        client.shutdown().await.map_err(|e| e.to_string())?;
+        assert!(failures.is_empty(), "{}", failures.join("; "));
+        Ok(())
+    }
+
+    async fn diagnostic_fidelity_client() -> Result<StdioLspClient, String> {
+        let mut client = StdioLspClient::new(mock_config("test", "diagnostic_fidelity", 0));
+        client
+            .initialize("file:///diagnostic-fixture")
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(client)
+    }
+
+    async fn publish_diagnostics_barrier(
+        client: &StdioLspClient,
+        case: &str,
+    ) -> Result<(), String> {
+        client
+            .hover(&format!("file:///{case}"), unicode_position())
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn diagnostic_fidelity_optional_severity_and_typed_codes_are_lossless()
+    -> Result<(), String> {
+        let mut client = diagnostic_fidelity_client().await?;
+        publish_diagnostics_barrier(&client, "valid").await?;
+        let values = client
+            .diagnostics("file:///中文😀.test")
+            .await
+            .map_err(|e| e.to_string())?;
+        let values = serde_json::to_value(values).map_err(|e| e.to_string())?;
+        let items = values.as_array().ok_or("diagnostic list shape")?;
+        assert_eq!(items.len(), 6);
+        for (index, severity) in ["Error", "Warning", "Information", "Hint"]
+            .into_iter()
+            .enumerate()
+        {
+            let item = items.get(index).ok_or("missing diagnostic")?;
+            assert_eq!(item.get("severity"), Some(&serde_json::json!(severity)));
+            assert_eq!(
+                item.get("code"),
+                Some(&serde_json::json!({"kind":"integer", "value": index.saturating_add(1)}))
+            );
+            assert_eq!(
+                item.get("message"),
+                Some(&serde_json::json!("中文😀 diagnostic"))
+            );
+        }
+        let absent = items.get(4).ok_or("missing absent severity")?;
+        assert_eq!(absent.get("severity"), Some(&serde_json::Value::Null));
+        assert_eq!(
+            absent.get("code"),
+            Some(&serde_json::json!({"kind":"string", "value":"7"}))
+        );
+        let null = items.get(5).ok_or("missing null severity")?;
+        assert_eq!(null.get("severity"), Some(&serde_json::Value::Null));
+        assert_eq!(null.get("code"), Some(&serde_json::Value::Null));
+        assert_eq!(null.get("source"), Some(&serde_json::Value::Null));
+        publish_diagnostics_barrier(&client, "integer-bounds").await?;
+        let bounds = serde_json::to_value(
+            client
+                .diagnostics("file:///中文😀.test")
+                .await
+                .map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+        let bounds = bounds.as_array().ok_or("missing bound array")?;
+        assert_eq!(
+            bounds.first().and_then(|v| v.get("code")),
+            Some(&serde_json::json!({"kind":"integer", "value":-2147483648_i64}))
+        );
+        assert_eq!(
+            bounds.get(1).and_then(|v| v.get("code")),
+            Some(&serde_json::json!({"kind":"integer", "value":2147483647_i64}))
+        );
+        client.shutdown().await.map_err(|e| e.to_string())
+    }
+
+    #[tokio::test]
+    async fn diagnostic_fidelity_errors_replace_old_good_then_recover_or_clear()
+    -> Result<(), String> {
+        let mut client = diagnostic_fidelity_client().await?;
+        publish_diagnostics_barrier(&client, "other").await?;
+        for case in [
+            "bad-severity",
+            "bad-code-bool",
+            "bad-code-float",
+            "bad-code-overflow",
+            "bad-range-tuple",
+            "bad-position-tuple",
+            "bad-message",
+            "mixed",
+            "missing-list",
+        ] {
+            publish_diagnostics_barrier(&client, "valid").await?;
+            publish_diagnostics_barrier(&client, case).await?;
+            let result = client.diagnostics("file:///中文😀.test").await;
+            assert!(
+                matches!(result, Err(echo_core::lsp::LspError::ServerError(_))),
+                "{case} fabricated success: {result:?}"
+            );
+            assert_eq!(
+                client
+                    .diagnostics("file:///other.test")
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .len(),
+                1
+            );
+            publish_diagnostics_barrier(&client, "valid").await?;
+            assert_eq!(
+                client
+                    .diagnostics("file:///中文😀.test")
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .len(),
+                6
+            );
+            publish_diagnostics_barrier(&client, "clear").await?;
+            assert!(
+                client
+                    .diagnostics("file:///中文😀.test")
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .is_empty()
+            );
+        }
+        assert!(client.is_initialized());
+        client.shutdown().await.map_err(|e| e.to_string())
+    }
+
+    #[tokio::test]
+    async fn diagnostic_fidelity_unaddressable_notification_settles_existing_runtime()
+    -> Result<(), String> {
+        for case in ["missing-uri", "wrong-uri", "missing-params"] {
+            let mut client = diagnostic_fidelity_client().await?;
+            let uri = format!("file:///{case}");
+            let pending = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                client.hover(&uri, unicode_position()),
+            )
+            .await
+            .map_err(|_| "bad notification left pending request".to_string())?;
+            assert!(
+                pending.is_err(),
+                "unaddressable malformed notification silently succeeded"
+            );
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                while client.is_running() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .map_err(|_| "runtime did not settle malformed notification".to_string())?;
+            let status = client.status();
+            assert!(!status.initialized && status.pid.is_none());
+            assert!(
+                status
+                    .last_error
+                    .as_deref()
+                    .is_some_and(|error| error.contains("publishDiagnostics"))
+            );
+            assert!(client.process_has_exited().await);
+            assert!(matches!(
+                client.diagnostics("file:///中文😀.test").await,
+                Err(echo_core::lsp::LspError::ServerError(_))
+            ));
+            client.shutdown().await.map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn diagnostic_fidelity_does_not_advertise_unrepresented_related_information()
+    -> Result<(), String> {
+        let mut client = diagnostic_fidelity_client().await?;
+        let hover = client
+            .hover("file:///advertisement", unicode_position())
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or("missing capability observation")?;
+        assert_eq!(hover.contents, "false");
+        client.shutdown().await.map_err(|e| e.to_string())
     }
 
     async fn wait_for_exit(

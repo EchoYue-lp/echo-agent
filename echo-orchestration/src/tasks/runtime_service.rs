@@ -159,22 +159,28 @@ impl From<RuntimeTaskAttemptInterruptError> for echo_core::error::ReactError {
 }
 
 /// Typed compare-and-set result for one exact physical claim settlement.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeTaskSettlementOutcome {
-    /// The exact claim was current and its state transition was committed.
-    Settled,
+    /// The exact claim was current. This status is the fact committed in the
+    /// same transaction, including a stronger durable interruption request.
+    Settled { status: TaskStatus },
     /// The claim identity, attempt, specification, or lifecycle was replaced.
     Superseded,
 }
 
 /// Result of atomically resolving one requested retry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeTaskRequeueOutcome {
     /// The exact claim was returned to Pending and consumed one retry.
     Requeued,
     /// The retry budget was already exhausted; the exact claim reached the
     /// requested typed failure state.
     Exhausted,
+    /// A durable interruption request settled this exact attempt instead of
+    /// retrying it. The current task is paused or cancelled as requested.
+    Interrupted {
+        disposition: RuntimeInterruptionDisposition,
+    },
     /// The physical claim is no longer current, so no state changed.
     Superseded,
 }
@@ -596,9 +602,54 @@ pub fn claim_runtime_task(
             .stable_hash()
             .map_err(|message| RuntimeTaskMutationError::InvalidTaskSpec { message })?,
     );
+    task.execution.result = None;
+    task.execution.interruption_requested = None;
     task.execution.status = TaskStatus::Running;
     task.execution.claim = Some(claim.clone());
     Ok(RuntimeTaskClaimOutcome::Claimed(claim))
+}
+
+/// Persist a stop request for an exact current claim. This CAS fact orders
+/// interruption against successful result publication, including after restart.
+/// A late request cannot overwrite an already-settled successful result.
+pub fn request_runtime_task_interruption(
+    snapshot: &mut RuntimePlanSnapshot,
+    task_id: &str,
+    claim: &TaskClaim,
+    disposition: RuntimeInterruptionDisposition,
+) -> std::result::Result<bool, RuntimeTaskMutationError> {
+    let Some(task) = claimed_task_mut(snapshot, task_id, claim)? else {
+        return Ok(false);
+    };
+    task.execution.interruption_requested = Some(prioritize_exact_interruption(
+        task.execution.interruption_requested.as_ref(),
+        &disposition,
+    ));
+    Ok(true)
+}
+
+// Terminal cancellation wins over any resumable pause. If both requests are
+// pauses, preserve the already accepted exact-claim reason. Both explicit task
+// requests and run-level recovery settlement apply this same priority rule.
+fn prioritize_exact_interruption(
+    existing: Option<&RuntimeInterruptionDisposition>,
+    incoming: &RuntimeInterruptionDisposition,
+) -> RuntimeInterruptionDisposition {
+    match (existing, incoming) {
+        (Some(RuntimeInterruptionDisposition::Cancelled), _)
+        | (_, RuntimeInterruptionDisposition::Cancelled) => {
+            RuntimeInterruptionDisposition::Cancelled
+        }
+        (Some(previous), _) => previous.clone(),
+        (None, incoming) => incoming.clone(),
+    }
+}
+
+fn interruption_status(disposition: &RuntimeInterruptionDisposition) -> TaskStatus {
+    match disposition {
+        RuntimeInterruptionDisposition::Cancelled => TaskStatus::Cancelled,
+        RuntimeInterruptionDisposition::Paused { reason } => TaskStatus::Paused(reason.clone()),
+    }
 }
 
 /// Settle one exact physical claim and clear claim ownership.
@@ -617,13 +668,22 @@ pub fn settle_runtime_claim(
     let Some(task) = claimed_task_mut(snapshot, task_id, claim)? else {
         return Ok(RuntimeTaskSettlementOutcome::Superseded);
     };
+    let status = task
+        .execution
+        .interruption_requested
+        .as_ref()
+        .map(interruption_status)
+        .unwrap_or(status);
     task.execution.status = task
         .execution
         .status
         .transition_to(status)
         .map_err(|message| RuntimeTaskMutationError::InvalidTransition { message })?;
     task.execution.claim = None;
-    Ok(RuntimeTaskSettlementOutcome::Settled)
+    task.execution.interruption_requested = None;
+    Ok(RuntimeTaskSettlementOutcome::Settled {
+        status: task.execution.status.clone(),
+    })
 }
 
 /// Requeue an exact failed attempt without exposing an unclaimed intermediate
@@ -640,6 +700,16 @@ pub fn requeue_runtime_claim(
     let Some(task) = claimed_task_mut(snapshot, task_id, claim)? else {
         return Ok(RuntimeTaskRequeueOutcome::Superseded);
     };
+    if let Some(disposition) = task.execution.interruption_requested.take() {
+        task.execution.status = task
+            .execution
+            .status
+            .transition_to(interruption_status(&disposition))
+            .map_err(|message| RuntimeTaskMutationError::InvalidTransition { message })?;
+        task.execution.claim = None;
+        return Ok(RuntimeTaskRequeueOutcome::Interrupted { disposition });
+    }
+    task.execution.result = None;
     if task.execution.retry_count >= task.spec.max_retries {
         task.execution.status = task
             .execution
@@ -682,7 +752,40 @@ pub fn settle_runtime_resolution(
     claim: &TaskClaim,
     request: RuntimeTaskResolutionRequest,
 ) -> std::result::Result<RuntimeTaskResolution, RuntimeTaskMutationError> {
+    if let Some(disposition) = claimed_task_mut(snapshot, task_id, claim)?
+        .and_then(|task| task.execution.interruption_requested.clone())
+    {
+        return settle_requested_status(
+            snapshot,
+            task_id,
+            claim,
+            interruption_status(&disposition),
+            RuntimeTaskResolution::Interrupted { disposition },
+        );
+    }
     match request {
+        RuntimeTaskResolutionRequest::CompletedWithResult { result } => {
+            let outcome = settle_requested_status(
+                snapshot,
+                task_id,
+                claim,
+                TaskStatus::Completed,
+                RuntimeTaskResolution::Completed,
+            )?;
+            if outcome == RuntimeTaskResolution::Completed {
+                let task = snapshot
+                    .tasks
+                    .iter_mut()
+                    .find(|task| task.spec.id == task_id)
+                    .ok_or_else(|| RuntimeTaskMutationError::InvalidTransition {
+                        message: format!(
+                            "completed task '{task_id}' disappeared before result commit"
+                        ),
+                    })?;
+                task.execution.result = Some(result);
+            }
+            Ok(outcome)
+        }
         RuntimeTaskResolutionRequest::Completed => settle_requested_status(
             snapshot,
             task_id,
@@ -707,6 +810,9 @@ pub fn settle_runtime_resolution(
                 Ok(retry_exhaustion_resolution(exhaustion, error))
             }
             RuntimeTaskRequeueOutcome::Superseded => Ok(RuntimeTaskResolution::Superseded),
+            RuntimeTaskRequeueOutcome::Interrupted { disposition } => {
+                Ok(RuntimeTaskResolution::Interrupted { disposition })
+            }
         },
         RuntimeTaskResolutionRequest::Skipped => settle_requested_status(
             snapshot,
@@ -773,7 +879,7 @@ fn settle_requested_status(
     resolution: RuntimeTaskResolution,
 ) -> std::result::Result<RuntimeTaskResolution, RuntimeTaskMutationError> {
     match settle_runtime_claim(snapshot, task_id, claim, status)? {
-        RuntimeTaskSettlementOutcome::Settled => Ok(resolution),
+        RuntimeTaskSettlementOutcome::Settled { .. } => Ok(resolution),
         RuntimeTaskSettlementOutcome::Superseded => Ok(RuntimeTaskResolution::Superseded),
     }
 }
@@ -833,6 +939,8 @@ pub fn retry_runtime_task(
         }
     })?;
     task.execution.status = TaskStatus::Pending;
+    task.execution.result = None;
+    task.execution.interruption_requested = None;
     task.execution.retry_count = retry_count;
     Ok(RuntimeTaskRetryOutcome::Retried { retry_count })
 }
@@ -879,7 +987,9 @@ pub fn resume_runtime_task(
 /// Settle a run-level pause or cancellation against one exact graph revision.
 ///
 /// Cancellation marks every unfinished task Cancelled. Pause converts only
-/// active claimed tasks to Paused and leaves unstarted tasks Pending. Every
+/// active claimed tasks to Paused and leaves unstarted tasks Pending, while
+/// preserving an already accepted exact-claim Cancelled request as Cancelled.
+/// An explicit run cancellation is stronger than every task pause. Every
 /// claim is validated before mutation, so a stale revision, attempt, spec hash,
 /// or physical claim identity fails closed without a partial settlement.
 pub fn settle_runtime_interruption(
@@ -908,6 +1018,7 @@ pub fn settle_runtime_interruption(
                     .transition_to(TaskStatus::Cancelled)
                     .map_err(|message| RuntimeTaskMutationError::InvalidTransition { message })?;
                 task.execution.claim = None;
+                task.execution.interruption_requested = None;
                 interrupted_task_ids.push(task.spec.id.clone());
             }
             RuntimeInterruptionDisposition::Paused { reason } => {
@@ -915,14 +1026,21 @@ pub fn settle_runtime_interruption(
                     task.execution.status,
                     TaskStatus::Running | TaskStatus::Retrying { .. }
                 ) {
+                    let requested = prioritize_exact_interruption(
+                        task.execution.interruption_requested.as_ref(),
+                        &RuntimeInterruptionDisposition::Paused {
+                            reason: reason.clone(),
+                        },
+                    );
                     task.execution.status = task
                         .execution
                         .status
-                        .transition_to(TaskStatus::Paused(reason.clone()))
+                        .transition_to(interruption_status(&requested))
                         .map_err(|message| RuntimeTaskMutationError::InvalidTransition {
                             message,
                         })?;
                     task.execution.claim = None;
+                    task.execution.interruption_requested = None;
                     interrupted_task_ids.push(task.spec.id.clone());
                 } else if task.execution.status == TaskStatus::Pending {
                     pending_task_ids.push(task.spec.id.clone());
@@ -1023,6 +1141,12 @@ pub fn validate_runtime_snapshot_claims(
     snapshot: &RuntimePlanSnapshot,
 ) -> std::result::Result<(), RuntimeTaskMutationError> {
     for task in &snapshot.tasks {
+        if task.execution.interruption_requested.is_some() && task.execution.claim.is_none() {
+            return Err(RuntimeTaskMutationError::InvalidClaim {
+                task_id: task.spec.id.clone(),
+                message: "interruption request has no current physical claim".to_string(),
+            });
+        }
         if let Some(claim) = task.execution.claim.as_ref()
             && !claim_matches_task(snapshot.revision, task, claim)?
         {
@@ -1128,7 +1252,9 @@ mod tests {
         );
         assert_eq!(
             settle_runtime_claim(&mut snapshot, "a", &claim, TaskStatus::Completed)?,
-            RuntimeTaskSettlementOutcome::Settled
+            RuntimeTaskSettlementOutcome::Settled {
+                status: TaskStatus::Completed
+            }
         );
         let settled =
             snapshot
@@ -1765,7 +1891,9 @@ mod tests {
         assert!(runtime_claim_is_current(&snapshot, "claimed", &claim)?);
         assert_eq!(
             settle_runtime_claim(&mut snapshot, "claimed", &claim, TaskStatus::Completed)?,
-            RuntimeTaskSettlementOutcome::Settled
+            RuntimeTaskSettlementOutcome::Settled {
+                status: TaskStatus::Completed
+            }
         );
 
         let expected = task("corrupt");

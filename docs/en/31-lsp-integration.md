@@ -500,6 +500,46 @@ Key implementation details:
 
 ## Error Handling
 
+**Diagnostic notification values and failure ownership**
+
+Diagnostics replace the complete result for their document URI. Severity is
+optional; its absence remains None and tools render UNSPECIFIED. DiagnosticCode
+is a closed tagged value: `{kind: "integer", value: i32}` or
+`{kind: "string", value: String}`, preserving numeric/text codes. Valid [] clears
+the prior result. A malformed update for a valid URI replaces prior success with
+an explicit ServerError, without publishing partial diagnostics or false clean
+success. A later valid update recovers the same URI; other URI entries remain
+independent. One existing per-URI cache owns both results and schema failures.
+
+A malformed notification without a nonempty string URI ends the current reader
+through its established connection/process owner. Pending calls fail, runtime
+last_error records the cause, the actual child exits, and subsequent diagnostics
+fail explicitly. The client advertises relatedInformation=false because the
+simplified accepted Diagnostic model does not expose that optional metadata.
+
+
+**LSP response values**
+
+The framework decodes server results before any SDK projection. Hover preserves
+its optional range and the server's zero-based UTF-16 coordinates; text is not
+sliced by UTF-8 byte offsets. Plain/markup/marked-string content retains Unicode
+and ordered marked-string entries. Legal null results mean no hover or an empty
+location/completion list; a missing result member, malformed required field or
+invalid coordinates returns LspError::ServerError, never fabricated empty success.
+
+CompletionItem.kind is optional: absent/null remains None, numeric LSP kinds
+1–25 map to the existing enum, and invalid kinds fail explicitly. Standard
+insertText and textual/markup documentation map into the existing fields. The
+simplified completion API projects CompletionList.items and does not expose
+isIncomplete, item defaults, resolve/edit metadata or incremental results.
+LocationLink is not advertised via linkSupport and is rejected explicitly.
+SDK consumers must preserve these values/errors without a second protocol parser.
+Native positions, ranges and locations must be JSON objects; tuple shapes fail.
+A malformed result/error with a matching request ID settles that request as
+ServerError immediately while the initialized connection remains usable.
+
+
+
 LSP operations can fail in several ways:
 
 | Error | Description | Handling |
