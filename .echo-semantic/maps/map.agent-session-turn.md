@@ -4,15 +4,22 @@ id: map.agent-session-turn
 kind: capability_map
 title: Agent、Session、Invocation 与 Turn
 risk: high
-observed_at: 733d352fc719f922b21bab1cd46206139564367f
+observed_at: source:d0568a66d7ccb8955e15a0d6f7aaaf0799ae25c287264ded14a9f167a4e01fbe
 boundary_refs: [boundary.agent-session-turn]
-behavior_refs: [behavior.agent-turn-lifecycle]
+behavior_refs: [behavior.channel-handler-invocation, behavior.agent-turn-lifecycle]
 rule_refs: [rule.turn-terminal-authority, rule.context-persistence-separation]
 evidence_refs: [evidence.agent-context-execution, evidence.high-risk-audit-frontier, evidence.eval-timeout-turn-settlement-repair, evidence.eval-timeout-turn-settlement-verification, evidence.eval-trace-correlation-repair, evidence.eval-trace-correlation-verification, evidence.agent-adapter-close-settlement-repair, evidence.agent-adapter-close-settlement-verification, evidence.framework-concept-navigation]
 finding_refs: [finding.turn-driver-entry-coverage, finding.agent-adapter-close-settlement, finding.eval-timeout-settlement, finding.eval-trace-identity]
-audit_refs: [audit.agent-session-turn.state-authority, audit.agent-adapter-close-settlement-rereview]
+audit_refs: [audit.channel-handler-invocation-rereview, audit.agent-session-turn.state-authority, audit.agent-adapter-close-settlement-rereview]
 related_map_refs: [map.context-memory, map.task-subagent-workflow, map.observation-persistence-delivery, map.protocol-surfaces]
 scenarios:
+  channel-handler-forward-invocation:
+    status: mapped
+    source_refs: [echo-core/src/error.rs, echo-integration/src/channels/manager.rs, echo-integration/src/channels/types.rs, echo-integration/src/channels/session.rs, src/channels.rs, docs/adr/0085-channel-handler-invocation-ownership.md]
+    behavior_refs: [behavior.channel-handler-invocation]
+    rule_refs: [rule.channel-invocation-generation]
+    finding_refs: [finding.channel-handler-invocation-settlement]
+    evidence_refs: [evidence.channel-handler-forward-repair, evidence.channel-handler-forward-focused]
   agent-definition-and-instance:
     status: mapped
     source_refs: [echo-core/src/agent/mod.rs, src/agent/react/mod.rs, src/agent/handle.rs]
@@ -92,3 +99,11 @@ Channel/direct route、AgentRevision与factory同名保持needs_review。
 ## 未展开项
 
 Context persistence、Task/Subagent 与 protocol adapter 由 related maps 展开。
+
+
+本轮channel-handler-forward归原entry及原Session/Turn边界；新场景mapped表示owner、
+生命周期、开放Finding和验证缺口有明确去向。23/80的新mutex修复与full23/exactmain
+尚待，不能由历史22/79或本轮mapping代替。其它开放场景不在此关闭。
+
+
+Channel forward当前本地三链闭合见audit.channel-handler-invocation-rereview；仅此场景具精确源码/工程收据复核，原其它needs_review不变。

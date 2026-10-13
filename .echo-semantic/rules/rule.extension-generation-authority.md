@@ -11,10 +11,19 @@ focus:
 - time_lifecycle
 - data_durability
 - permission_external
-observed_at: source:1c515c09873968a279e6076cf6abf659923f1fa96137144423970bfcd0e1881c
+observed_at: source:d0568a66d7ccb8955e15a0d6f7aaaf0799ae25c287264ded14a9f167a4e01fbe
 behavior_refs:
 - behavior.extension-publication
 code_refs:
+- echo-core/src/error.rs
+- echo-integration/src/channels/manager.rs
+- echo-integration/src/channels/types.rs
+- echo-integration/src/channels/session.rs
+- echo-integration/src/channels/mod.rs
+- src/channels.rs
+- docs/adr/0085-channel-handler-invocation-ownership.md
+- docs/en/15-im-channels.md
+- docs/zh/15-im-channels.md
 - echo-integration/src/mcp/mod.rs
 - echo-execution/src/skills/hooks.rs
 - echo-execution/src/skills/registry.rs
@@ -102,3 +111,9 @@ receipt 显式保持 ActualPending；其
 
 
 本轮限定规则（channel-manager-borrowed-await）：复用ChannelManager唯一map/entry；ChannelHandle直接持原plugin、handler清理责任与transport-stop epoch。get_owned和owned批量future不借用manager，SDK须短锁取owned后释放再await。entry独立read/write锁；start先登记handler，stop先记录transport成功再await close，失败/取消保留责任；get_mut使epoch失效防旧stop覆盖。旧get/get_mut保留，registration metadata固定声明的兼容取舍见ADR0084，不是第二registry/生命周期。 失败/错误合同：registry guard不得跨owned await；原plugin/handler/stop责任只能存在于同entry，取消失败不能抹去close责任，批量操作不得吞兄弟结果，metadata不会等待entry锁。 test-manager-repaired.log为11 passed/0 failed/0 ignored；初次AtomicU64警告尝试保留、修复后同11测试及双lint零警告退出0。clippy-alltargets、clippy-production、doc-channels(2 passed/0 failed)、example-demo38均真实receipt exitCode0，所有log/source SHA核对。覆盖五类callback、lazy batch快照、独立entry、rollback/取消/close retry/get_mut epoch/metadata声明。 只关闭这一故障；其余needs_review与历史证据保持各自范围。
+
+
+Channel forward增量由behavior.channel-handler-invocation及rule.channel-invocation-generation
+限定：唯一原entry generation、callchildcancel、realreceipt/close retry和sameadmission
+streamtoken；具体开放Finding与新修复待验见evidence.channel-handler-forward-focused。
+不扩大本对象其它场景的needs_review或关闭状态。

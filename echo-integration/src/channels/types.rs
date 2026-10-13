@@ -399,6 +399,27 @@ pub trait MessageHandler: Send + Sync {
     /// Send an outbound message back to the IM platform (implemented by the Channel itself)
     async fn reply(&self, msg: OutboundMessage) -> Result<()>;
 
+    /// Run a single invocation with its exact cancellation child token.
+    /// Handlers that declare `settles_on_cancel` must override this to pass the
+    /// token into their real driver and return only after its actual receipt.
+    async fn handle_with_cancel(
+        &self,
+        msg: InboundMessage,
+        _cancel: CancellationToken,
+    ) -> Result<OutboundMessage> {
+        self.handle(msg).await
+    }
+
+    /// Reply with the caller's cancellation scope. The legacy default preserves
+    /// reply semantics; driven implementations retain their own actual receipt.
+    async fn reply_with_cancel(
+        &self,
+        msg: OutboundMessage,
+        _cancel: CancellationToken,
+    ) -> Result<()> {
+        self.reply(msg).await
+    }
+
     /// Release handler-owned Agent and session resources after the transport
     /// stops accepting messages and its in-flight deliveries settle.
     /// Stateless handlers have no resources to release.

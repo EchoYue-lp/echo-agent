@@ -1,0 +1,10 @@
+--- previous/session.rs
++++ final/session.rs
+@@ -958,6 +958,7 @@
+                 Ok(stream) => stream,
+                 Err(error) => {
+                     drop(stream_receipt.take());
++                    if cancellation.is_cancelled() { return; }
+                     yield Err(error);
+                     return;
+                 }

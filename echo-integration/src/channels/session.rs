@@ -675,10 +675,21 @@ impl SessionHandler {
     async fn lock_current_session(
         &self,
         key: &SessionKey,
+        caller: &CancellationToken,
     ) -> echo_core::error::Result<OwnedMutexGuard<Session>> {
         loop {
+            if caller.is_cancelled() {
+                return Err(ReactError::Other("channel invocation cancelled".into()));
+            }
             let session = self.get_or_create(key)?;
-            let guard = Arc::clone(&session).lock_owned().await;
+            let guard = tokio::select! {
+                biased;
+                () = caller.cancelled() => return Err(ReactError::Other("channel invocation cancelled".into())),
+                guard = Arc::clone(&session).lock_owned() => guard,
+            };
+            if caller.is_cancelled() {
+                return Err(ReactError::Other("channel invocation cancelled".into()));
+            }
             if !self.admission_open.load(Ordering::Acquire) {
                 return Err(ReactError::Other(
                     "channel session handler is closed".to_string(),
@@ -719,6 +730,7 @@ impl SessionHandler {
     async fn prune_expired_except(
         &self,
         requested_key: &SessionKey,
+        caller: &CancellationToken,
     ) -> echo_core::error::Result<()> {
         let sessions = self
             .sessions
@@ -726,6 +738,9 @@ impl SessionHandler {
             .map(|entry| (entry.key().clone(), entry.value().clone()))
             .collect::<Vec<_>>();
         for (key, session) in sessions {
+            if caller.is_cancelled() {
+                return Err(ReactError::Other("channel invocation cancelled".into()));
+            }
             // The requested key must be replaced under its own session mutex so
             // the new factory call receives the exact previous incarnation.
             if &key == requested_key {
@@ -761,9 +776,31 @@ impl SessionHandler {
 #[async_trait]
 impl MessageHandler for SessionHandler {
     async fn handle(&self, msg: InboundMessage) -> echo_core::error::Result<OutboundMessage> {
+        self.handle_with_cancel(msg, CancellationToken::new()).await
+    }
+
+    // The wrapper performs legacy-drop or driven-drain itself for each original
+    // inner handler. An outer Channel driver must not prematurely drop it.
+    fn settles_on_cancel(&self) -> bool {
+        true
+    }
+
+    async fn handle_with_cancel(
+        &self,
+        msg: InboundMessage,
+        caller: CancellationToken,
+    ) -> echo_core::error::Result<OutboundMessage> {
+        if caller.is_cancelled() {
+            return Err(ReactError::Other("channel invocation cancelled".into()));
+        }
         let key = SessionKey::from_message(&msg)?;
-        self.prune_expired_except(&key).await?;
-        let mut guard = self.lock_current_session(&key).await?;
+        self.prune_expired_except(&key, &caller).await?;
+        let mut guard = self.lock_current_session(&key, &caller).await?;
+        // A queued reset/expiry request can be cancelled while another call owns
+        // this sender lock. Recheck before mutating its canonical incarnation.
+        if caller.is_cancelled() {
+            return Err(ReactError::Other("channel invocation cancelled".into()));
+        }
         if self.config.is_reset(&msg.text) {
             let ended_instance = guard.instance.clone();
             let ended_generation = Arc::clone(&guard.generation);
@@ -803,7 +840,14 @@ impl MessageHandler for SessionHandler {
             );
         }
         guard.generation.touch();
-        let result = guard.handler.handle(msg).await;
+        let cancellation = guard.generation.cancellation.child_token();
+        let result = super::manager::drive_call(
+            guard.handler.handle_with_cancel(msg, cancellation.clone()),
+            &cancellation,
+            &caller,
+            guard.handler.settles_on_cancel(),
+        )
+        .await;
         guard.generation.touch();
         result.map(|message| message.with_delivery_fence(guard.instance.current_delivery_fence()))
     }
@@ -814,10 +858,27 @@ impl MessageHandler for SessionHandler {
     ) -> echo_core::error::Result<
         futures::stream::BoxStream<'a, echo_core::error::Result<OutboundMessage>>,
     > {
+        self.handle_stream_with_cancel(msg, CancellationToken::new())
+            .await
+    }
+
+    async fn handle_stream_with_cancel<'a>(
+        &'a self,
+        msg: InboundMessage,
+        caller: CancellationToken,
+    ) -> echo_core::error::Result<
+        futures::stream::BoxStream<'a, echo_core::error::Result<OutboundMessage>>,
+    > {
+        if caller.is_cancelled() {
+            return Err(ReactError::Other("channel invocation cancelled".into()));
+        }
         use futures::stream::StreamExt;
         let key = SessionKey::from_message(&msg)?;
-        self.prune_expired_except(&key).await?;
-        let mut guard = self.lock_current_session(&key).await?;
+        self.prune_expired_except(&key, &caller).await?;
+        let mut guard = self.lock_current_session(&key, &caller).await?;
+        if caller.is_cancelled() {
+            return Err(ReactError::Other("channel invocation cancelled".into()));
+        }
         if self.config.is_reset(&msg.text) {
             let ended_instance = guard.instance.clone();
             let ended_generation = Arc::clone(&guard.generation);
@@ -867,7 +928,8 @@ impl MessageHandler for SessionHandler {
         let settles_on_cancel = handler.settles_on_cancel();
         let generation = Arc::clone(&guard.generation);
         let delivery_fence = guard.instance.current_delivery_fence();
-        let cancellation = generation.cancellation.clone();
+        // Cancelling this child must not retire a sibling's SessionGeneration.
+        let cancellation = generation.cancellation.child_token();
         let Some(stream_receipt) = generation.begin() else {
             return Err(echo_core::error::ReactError::Other(
                 "session active stream capacity exhausted".to_string(),
@@ -888,37 +950,31 @@ impl MessageHandler for SessionHandler {
                 drop(stream_receipt.take());
                 return;
             }
-            let setup = if settles_on_cancel {
-                handler.handle_stream_with_cancel(msg, cancellation.clone()).await
-            } else {
-                tokio::select! {
-                    biased;
-                    _ = cancellation.cancelled() => {
-                        drop(stream_receipt.take());
-                        return;
-                    }
-                    setup = handler.handle_stream(msg) => setup,
-                }
-            };
+            let setup = super::manager::drive_call(
+                handler.handle_stream_with_cancel(msg, cancellation.clone()),
+                &cancellation, &caller, settles_on_cancel,
+            ).await;
             let mut inner = match setup {
                 Ok(stream) => stream,
                 Err(error) => {
                     drop(stream_receipt.take());
+                    if cancellation.is_cancelled() { return; }
                     yield Err(error);
                     return;
                 }
             };
             loop {
-                let item = tokio::select! {
-                    biased;
-                    _ = cancellation.cancelled() => None,
-                    item = inner.next() => item,
-                };
+                let item = super::manager::drive_call(
+                    async { Ok(inner.next().await) }, &cancellation, &caller, settles_on_cancel,
+                ).await.unwrap_or(None);
                 let Some(item) = item else {
                     break;
                 };
                 match item {
                     Ok(message) => {
+                        // The inner driven consumer must finish its real receipt,
+                        // while cancelled output can no longer be delivered.
+                        if cancellation.is_cancelled() { continue; }
                         yield Ok(message.with_delivery_fence(delivery_fence.clone()));
                     }
                     Err(error) => {

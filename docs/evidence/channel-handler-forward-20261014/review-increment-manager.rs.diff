@@ -1,0 +1,46 @@
+--- previous/manager.rs
++++ final/manager.rs
+@@ -542,10 +542,13 @@
+         state.handler = Some(Arc::clone(&handler));
+         self.entry.unsettled_handler.store(true, Ordering::Release);
+         match state.plugin.start(Arc::clone(&handler)).await {
+-            Ok(()) if generation.open() => Ok(()),
+-            Ok(()) => Err(channel_error(
+-                "channel start was interrupted by shutdown".into(),
+-            )),
++            Ok(()) => {
++                // Transport start succeeded even if a concurrent stop already
++                // retired admission. The queued stop retains cleanup ownership;
++                // preserve the original start result without reopening the gate.
++                generation.open();
++                Ok(())
++            }
+             Err(start_error) => {
+                 generation.retire();
+                 // Publish responsibility before the first plugin await. Future
+@@ -968,10 +971,9 @@
+                 if message.text == "park" {
+                     cancel.cancelled().await;
+                     self.facts.cancelled.notify_one();
+-                    if self.driven {
+-                        if let Err(error) = self.release.acquire().await.map(|permit| permit.forget()) {
+-                            yield Err(channel_error(error.to_string()));
+-                        }
++                    if self.driven
++                        && let Err(error) = self.release.acquire().await.map(|permit| permit.forget()) {
++                        yield Err(channel_error(error.to_string()));
+                     }
+                 } else {
+                     for text in ["第一段😀", "second", "third"] {
+@@ -1466,8 +1468,9 @@
+         #[async_trait]
+         impl MessageHandler for MetadataHandler {
+             async fn handle(&self, message: InboundMessage) -> Result<OutboundMessage> {
+-                let ids = self.0.lock().await.channel_ids();
+-                if !ids.iter().any(|id| id == "forward") {
++                let guard = self.0.lock().await;
++                let ids = guard.channel_ids();
++                if !ids.contains(&"forward") {
+                     return Err(channel_error("lost entry".into()));
+                 }
+                 Ok(OutboundMessage::new(

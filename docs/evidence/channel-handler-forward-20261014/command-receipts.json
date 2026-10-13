@@ -1,0 +1,378 @@
+[
+  {
+    "id": "exec-c33b1f32-fe68-4ab7-9c4b-b04eca389127",
+    "command": [
+      "/bin/zsh",
+      "-lc",
+      "python3 - <<'PY'\nimport pathlib,subprocess,json\nr='/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward';d=json.loads((pathlib.Path(r)/'.echo-semantic/preflight.json').read_text())\na=['python3','/Users/ls/.codex/plugins/cache/echo-semantic/echo-semantic/0.5.0/skills/semantic-preflight/scripts/preflight.py','record','--root',r,'--task-id',d['taskId'],'--kind','feature','--risk','high','--reuse-decision','extend','--reuse',d['reuse'][0],'--verify','Focused invocation22, original Session suite, native root channel cancellation; full workspace/public-API gates after actual-main merge.','--basis','Parent authorized exclusive focused Cargo lease and fast-forward reviewed dependency candidate80353501; prior feature edits preserved, candidate not main proof.','--public-api','--architecture-change','--reuse-existing-boundary','Original Channel and Session authorities.','--adr','docs/adr/0085-channel-handler-invocation-ownership.md','--semantic-ref','map.agent-session-turn']\nfor c in d['reuseCheck']['candidates']:a+=['--candidate',json.dumps({k:c[k] for k in ['path','symbol','selected','reason']})]\nfor f in d['allowedPaths']:a+=['--allow',f,'--mutable-evidence',f]\nfor f in ['echo-integration/src/channels','src/channels.rs','echo-core/src/error.rs']:a+=['--search',f]\ns=subprocess.run(a);raise SystemExit(s.returncode)\nPY\ncargo test -p echo_integration --features channels channels::manager::invocation_tests --locked"
+    ],
+    "cwd": "file:///Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward",
+    "source": "unified_exec_startup",
+    "status": "failed",
+    "exit_code": 101,
+    "duration": {
+      "secs": 21,
+      "nanos": 981781875
+    },
+    "started_at_ms": null,
+    "completed_at_ms": null,
+    "captured_at": "2026-10-13T15:43:32.082Z",
+    "record_ordinal": 738,
+    "log": "compile-red-comparison.log",
+    "log_sha256": "d841be1cbf9df616f88498080bb0269d3d3b0c8e85a1687229fcdc6c4c08a9b0",
+    "provenance": "Original local CommandExecution aggregated_output, copied byte-for-byte; no encrypted or unrelated chat data.",
+    "source_binding": {
+      "scope": "original executed candidate; source varied across recorded repair attempts",
+      "final_candidate_manifest": "source-freeze.json",
+      "current_verification": "historical_after_retirement_race_fix; rerun required for bab117d7"
+    }
+  },
+  {
+    "id": "exec-d5bc9001-7e5c-4550-90b6-d9b9370656fc",
+    "command": [
+      "/bin/zsh",
+      "-lc",
+      "cargo test -p echo_integration --features channels channels::manager::invocation_tests --locked"
+    ],
+    "cwd": "file:///Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward",
+    "source": "unified_exec_startup",
+    "status": "failed",
+    "exit_code": 101,
+    "duration": {
+      "secs": 5,
+      "nanos": 364715916
+    },
+    "started_at_ms": null,
+    "completed_at_ms": null,
+    "captured_at": "2026-10-13T15:43:51.442Z",
+    "record_ordinal": 748,
+    "log": "compile-red-guard.log",
+    "log_sha256": "d816a352dd917d6ec609ed815f5d4eefb9cee19192cbc41b09074e7c2ce722d0",
+    "provenance": "Original local CommandExecution aggregated_output, copied byte-for-byte; no encrypted or unrelated chat data.",
+    "source_binding": {
+      "scope": "original executed candidate; source varied across recorded repair attempts",
+      "final_candidate_manifest": "source-freeze.json",
+      "current_verification": "historical_after_retirement_race_fix; rerun required for bab117d7"
+    }
+  },
+  {
+    "id": "exec-c7bb8aac-7dbc-49e8-84d2-44aea3644457",
+    "command": [
+      "/bin/zsh",
+      "-lc",
+      "CARGO_TARGET_DIR=/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 cargo test -p echo_integration --features channels channels::manager::invocation_tests --locked"
+    ],
+    "cwd": "file:///Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward",
+    "source": "unified_exec_startup",
+    "status": "completed",
+    "exit_code": 0,
+    "duration": {
+      "secs": 12,
+      "nanos": 926017834
+    },
+    "started_at_ms": null,
+    "completed_at_ms": null,
+    "captured_at": "2026-10-13T15:44:21.852Z",
+    "record_ordinal": 765,
+    "log": "invocation22-green.log",
+    "log_sha256": "0c87e044c9d96b023a4481c45eb3a30aaede45ceac5c7ab0ad44b4161a717ca2",
+    "provenance": "Original local CommandExecution aggregated_output, copied byte-for-byte; no encrypted or unrelated chat data.",
+    "source_binding": {
+      "scope": "original executed candidate; source varied across recorded repair attempts",
+      "final_candidate_manifest": "source-freeze.json",
+      "current_verification": "historical_after_retirement_race_fix; rerun required for bab117d7"
+    }
+  },
+  {
+    "id": "exec-c6fd08e9-6fb7-4d16-b4b2-e803808d079a",
+    "command": [
+      "/bin/zsh",
+      "-lc",
+      "CARGO_TARGET_DIR=/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 cargo test -p echo_integration --features channels channels:: --locked"
+    ],
+    "cwd": "file:///Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward",
+    "source": "unified_exec_startup",
+    "status": "failed",
+    "exit_code": 101,
+    "duration": {
+      "secs": 0,
+      "nanos": 421723500
+    },
+    "started_at_ms": null,
+    "completed_at_ms": null,
+    "captured_at": "2026-10-13T15:44:39.578Z",
+    "record_ordinal": 772,
+    "log": "channels79-red.log",
+    "log_sha256": "65b5304757daa5114daa05a6f7ee8b2a1857298a76e0bf9f87545261283b51be",
+    "provenance": "Original local CommandExecution aggregated_output, copied byte-for-byte; no encrypted or unrelated chat data.",
+    "source_binding": {
+      "scope": "original executed candidate; source varied across recorded repair attempts",
+      "final_candidate_manifest": "source-freeze.json",
+      "current_verification": "historical_after_retirement_race_fix; rerun required for bab117d7"
+    }
+  },
+  {
+    "id": "exec-bc29fc26-7105-4df6-9f03-4d08260041d7",
+    "command": [
+      "/bin/zsh",
+      "-lc",
+      "CARGO_TARGET_DIR=/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 cargo test -p echo_integration --features channels channels:: --locked"
+    ],
+    "cwd": "file:///Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward",
+    "source": "unified_exec_startup",
+    "status": "completed",
+    "exit_code": 0,
+    "duration": {
+      "secs": 6,
+      "nanos": 914067708
+    },
+    "started_at_ms": null,
+    "completed_at_ms": null,
+    "captured_at": "2026-10-13T15:45:12.822Z",
+    "record_ordinal": 783,
+    "log": "channels79-green-pre-lint.log",
+    "log_sha256": "29546a2cd911f9d9d3e51e41a3e34369e281d06cd6c23a12be132aa1ca2b25a4",
+    "provenance": "Original local CommandExecution aggregated_output, copied byte-for-byte; no encrypted or unrelated chat data.",
+    "source_binding": {
+      "scope": "original executed candidate; source varied across recorded repair attempts",
+      "final_candidate_manifest": "source-freeze.json",
+      "current_verification": "historical_after_retirement_race_fix; rerun required for bab117d7"
+    }
+  },
+  {
+    "id": "exec-28f0264c-c614-4ea4-a7cf-8b46bbf5fe70",
+    "command": [
+      "/bin/zsh",
+      "-lc",
+      "CARGO_TARGET_DIR=/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 cargo test -p echo_agent --all-features channels::tests --locked"
+    ],
+    "cwd": "file:///Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward",
+    "source": "unified_exec_startup",
+    "status": "completed",
+    "exit_code": 0,
+    "duration": {
+      "secs": 89,
+      "nanos": 499511667
+    },
+    "started_at_ms": null,
+    "completed_at_ms": null,
+    "captured_at": "2026-10-13T15:47:02.950Z",
+    "record_ordinal": 826,
+    "log": "root-channels12-green.log",
+    "log_sha256": "f22d787d88ce71dc027edce38db62ee6559122588310dd9681a0ffa71976092a",
+    "provenance": "Original local CommandExecution aggregated_output, copied byte-for-byte; no encrypted or unrelated chat data.",
+    "source_binding": {
+      "scope": "original executed candidate; source varied across recorded repair attempts",
+      "final_candidate_manifest": "source-freeze.json",
+      "current_verification": "historical_after_retirement_race_fix; rerun required for bab117d7"
+    }
+  },
+  {
+    "id": "exec-8b7a9c85-884c-4afd-8a46-08aa8284c636",
+    "command": [
+      "/bin/zsh",
+      "-lc",
+      "cargo fmt --all\ncargo fmt --all -- --check\nCARGO_TARGET_DIR=/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 cargo clippy -p echo_integration -p echo_core -p echo_agent --all-targets --all-features --locked -- -D warnings"
+    ],
+    "cwd": "file:///Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward",
+    "source": "unified_exec_startup",
+    "status": "failed",
+    "exit_code": 101,
+    "duration": {
+      "secs": 32,
+      "nanos": 198683334
+    },
+    "started_at_ms": null,
+    "completed_at_ms": null,
+    "captured_at": "2026-10-13T15:47:43.699Z",
+    "record_ordinal": 842,
+    "log": "clippy-red.log",
+    "log_sha256": "d4caef428719601bb7ba26db3807ac42ac77106468d4bd334a2e059ce39c5067",
+    "provenance": "Original local CommandExecution aggregated_output, copied byte-for-byte; no encrypted or unrelated chat data.",
+    "source_binding": {
+      "scope": "original executed candidate; source varied across recorded repair attempts",
+      "final_candidate_manifest": "source-freeze.json",
+      "current_verification": "historical_after_retirement_race_fix; rerun required for bab117d7"
+    }
+  },
+  {
+    "id": "exec-42a3ea01-b06c-460b-8436-89b3fc6d95cf",
+    "command": [
+      "/bin/zsh",
+      "-lc",
+      "cargo fmt --all\nCARGO_TARGET_DIR=/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 cargo clippy -p echo_integration -p echo_core -p echo_agent --all-targets --all-features --locked -- -D warnings"
+    ],
+    "cwd": "file:///Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward",
+    "source": "unified_exec_startup",
+    "status": "completed",
+    "exit_code": 0,
+    "duration": {
+      "secs": 29,
+      "nanos": 400372083
+    },
+    "started_at_ms": null,
+    "completed_at_ms": null,
+    "captured_at": "2026-10-13T15:48:19.382Z",
+    "record_ordinal": 852,
+    "log": "clippy-warnings-green.log",
+    "log_sha256": "3c94e3631a817cac3706f648187ec9544cf5903389c9d574ed7ac3c7065738bf",
+    "provenance": "Original local CommandExecution aggregated_output, copied byte-for-byte; no encrypted or unrelated chat data.",
+    "source_binding": {
+      "scope": "original executed candidate; source varied across recorded repair attempts",
+      "final_candidate_manifest": "source-freeze.json",
+      "current_verification": "historical_after_retirement_race_fix; rerun required for bab117d7",
+      "manager_sha256": "5e0c866a2d87aa8c0ea1c3d27877b6f98a3bbf4313a3908d9bcc462ce501d44b",
+      "session_sha256": "7155998daebff3c7d1368553ee5aa633263a08222b4aca71cbc24fcedd4317db"
+    }
+  },
+  {
+    "id": "exec-ef71f73a-2274-44db-8179-344ff705f6fb",
+    "command": [
+      "/bin/zsh",
+      "-lc",
+      "CARGO_TARGET_DIR=/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 cargo clippy -p echo_integration -p echo_core -p echo_agent --lib --all-features --locked -- -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic -D clippy::unreachable"
+    ],
+    "cwd": "file:///Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward",
+    "source": "unified_exec_startup",
+    "status": "completed",
+    "exit_code": 0,
+    "duration": {
+      "secs": 24,
+      "nanos": 905129417
+    },
+    "started_at_ms": null,
+    "completed_at_ms": null,
+    "captured_at": "2026-10-13T15:48:57.568Z",
+    "record_ordinal": 872,
+    "log": "clippy-panic-green.log",
+    "log_sha256": "7295e5442f9e60aa696a3aeb6e5f980f37031199e2787054f1f8d669cc1b0a07",
+    "provenance": "Original local CommandExecution aggregated_output, copied byte-for-byte; no encrypted or unrelated chat data.",
+    "source_binding": {
+      "scope": "original executed candidate; source varied across recorded repair attempts",
+      "final_candidate_manifest": "source-freeze.json",
+      "current_verification": "historical_after_retirement_race_fix; rerun required for bab117d7",
+      "manager_sha256": "5e0c866a2d87aa8c0ea1c3d27877b6f98a3bbf4313a3908d9bcc462ce501d44b",
+      "session_sha256": "7155998daebff3c7d1368553ee5aa633263a08222b4aca71cbc24fcedd4317db"
+    }
+  },
+  {
+    "id": "exec-0c2293d4-3145-42f6-b3a6-516ec6e906ba",
+    "command": [
+      "/bin/zsh",
+      "-lc",
+      "CARGO_TARGET_DIR=/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 cargo test -p echo_integration --features channels --doc channels:: --locked"
+    ],
+    "cwd": "file:///Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward",
+    "source": "unified_exec_startup",
+    "status": "completed",
+    "exit_code": 0,
+    "duration": {
+      "secs": 5,
+      "nanos": 996438708
+    },
+    "started_at_ms": null,
+    "completed_at_ms": null,
+    "captured_at": "2026-10-13T15:49:28.240Z",
+    "record_ordinal": 883,
+    "log": "doc-filtered-green.log",
+    "log_sha256": "447ee1fd612e0b5c091c0ecc0676907a16bce208eba2f06c2fd966d700e4f5ab",
+    "provenance": "Original local CommandExecution aggregated_output, copied byte-for-byte; no encrypted or unrelated chat data.",
+    "source_binding": {
+      "scope": "original executed candidate; source varied across recorded repair attempts",
+      "final_candidate_manifest": "source-freeze.json",
+      "current_verification": "historical_after_retirement_race_fix; rerun required for bab117d7",
+      "manager_sha256": "5e0c866a2d87aa8c0ea1c3d27877b6f98a3bbf4313a3908d9bcc462ce501d44b",
+      "session_sha256": "7155998daebff3c7d1368553ee5aa633263a08222b4aca71cbc24fcedd4317db"
+    }
+  },
+  {
+    "id": "exec-f2f3998d-25fc-4de9-9bef-ecab59e42637",
+    "command": [
+      "/bin/zsh",
+      "-lc",
+      "CARGO_TARGET_DIR=/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 cargo test -p echo_integration --features channels --doc --locked"
+    ],
+    "cwd": "file:///Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward",
+    "source": "unified_exec_startup",
+    "status": "completed",
+    "exit_code": 0,
+    "duration": {
+      "secs": 0,
+      "nanos": 880425833
+    },
+    "started_at_ms": null,
+    "completed_at_ms": null,
+    "captured_at": "2026-10-13T15:50:06.331Z",
+    "record_ordinal": 894,
+    "log": "doc2-green.log",
+    "log_sha256": "58fe67bbcc67823dfb8ec213d5d2cbc390ff79ee026cfa992a490d9386d29d97",
+    "provenance": "Original local CommandExecution aggregated_output, copied byte-for-byte; no encrypted or unrelated chat data.",
+    "source_binding": {
+      "scope": "original executed candidate; source varied across recorded repair attempts",
+      "final_candidate_manifest": "source-freeze.json",
+      "current_verification": "historical_after_retirement_race_fix; rerun required for bab117d7",
+      "manager_sha256": "5e0c866a2d87aa8c0ea1c3d27877b6f98a3bbf4313a3908d9bcc462ce501d44b",
+      "session_sha256": "7155998daebff3c7d1368553ee5aa633263a08222b4aca71cbc24fcedd4317db"
+    }
+  },
+  {
+    "id": "exec-6dfa5899-116c-4024-978e-e225ac500477",
+    "command": [
+      "/bin/zsh",
+      "-lc",
+      "CARGO_TARGET_DIR=/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 cargo test -p echo_integration --features channels channels:: --locked"
+    ],
+    "cwd": "file:///Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward",
+    "source": "unified_exec_startup",
+    "status": "completed",
+    "exit_code": 0,
+    "duration": {
+      "secs": 6,
+      "nanos": 936187208
+    },
+    "started_at_ms": null,
+    "completed_at_ms": null,
+    "captured_at": "2026-10-13T15:50:20.222Z",
+    "record_ordinal": 901,
+    "log": "channels79-final-green.log",
+    "log_sha256": "5c2ca5aaa0cf8dcfcf80d18054dcc7bedd2929a6a91b1b46413863c3a00a4210",
+    "provenance": "Original local CommandExecution aggregated_output, copied byte-for-byte; no encrypted or unrelated chat data.",
+    "source_binding": {
+      "scope": "original executed candidate; source varied across recorded repair attempts",
+      "final_candidate_manifest": "source-freeze.json",
+      "current_verification": "historical_after_retirement_race_fix; rerun required for bab117d7",
+      "manager_sha256": "5e0c866a2d87aa8c0ea1c3d27877b6f98a3bbf4313a3908d9bcc462ce501d44b",
+      "session_sha256": "7155998daebff3c7d1368553ee5aa633263a08222b4aca71cbc24fcedd4317db"
+    }
+  },
+  {
+    "id": "exec-d53c5552-5654-44a8-9081-30a9492220cd",
+    "command": [
+      "/bin/zsh",
+      "-lc",
+      "cargo fmt --all -- --check\ngit diff --check\npython3 - <<'PY'\nimport pathlib,hashlib\nfor p in ['echo-core/src/error.rs','echo-integration/src/channels/manager.rs','echo-integration/src/channels/session.rs','echo-integration/src/channels/types.rs','echo-integration/src/channels/mod.rs','src/channels.rs','docs/adr/0085-channel-handler-invocation-ownership.md','docs/en/15-im-channels.md','docs/zh/15-im-channels.md']:print(p,hashlib.sha256(pathlib.Path(p).read_bytes()).hexdigest())\nPY\ngit status --short"
+    ],
+    "cwd": "file:///Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward",
+    "source": "unified_exec_startup",
+    "status": "completed",
+    "exit_code": 0,
+    "duration": {
+      "secs": 2,
+      "nanos": 506210333
+    },
+    "started_at_ms": null,
+    "completed_at_ms": null,
+    "captured_at": "2026-10-13T15:50:47.617Z",
+    "record_ordinal": 910,
+    "log": "fmt-final-green.log",
+    "log_sha256": "794ee7fa28ef67cc35e00f9b09bdb3b91d1465b9d1296fd2b38f8cc6591f76d5",
+    "provenance": "Original local CommandExecution aggregated_output, copied byte-for-byte; no encrypted or unrelated chat data.",
+    "source_binding": {
+      "scope": "original executed candidate; source varied across recorded repair attempts",
+      "final_candidate_manifest": "source-freeze.json",
+      "current_verification": "historical_after_retirement_race_fix; rerun required for bab117d7",
+      "manager_sha256": "5e0c866a2d87aa8c0ea1c3d27877b6f98a3bbf4313a3908d9bcc462ce501d44b",
+      "session_sha256": "7155998daebff3c7d1368553ee5aa633263a08222b4aca71cbc24fcedd4317db"
+    }
+  }
+]

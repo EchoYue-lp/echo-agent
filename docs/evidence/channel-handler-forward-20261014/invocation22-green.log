@@ -1,0 +1,31 @@
+   Compiling echo_core v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward/echo-core)
+   Compiling echo_integration v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward/echo-integration)
+    Finished `test` profile [unoptimized] target(s) in 12.78s
+     Running unittests src/lib.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/deps/echo_integration-b91b424741c358e1)
+
+running 22 tests
+test channels::manager::invocation_tests::forward_failed_start_cleanup_debt_never_admits ... ok
+test channels::manager::invocation_tests::forward_handler_close_failure_keeps_admission_closed_for_retry ... ok
+test channels::manager::invocation_tests::forward_cancelled_start_retains_only_cleanup_owner ... ok
+test channels::manager::invocation_tests::forward_captured_generation_does_not_rebind_after_restart ... ok
+test channels::manager::invocation_tests::forward_metadata_reentry_does_not_hold_registry_or_entry_guard ... ok
+test channels::manager::invocation_tests::forward_caller_child_cancellation_does_not_cancel_sibling ... ok
+test channels::manager::invocation_tests::forward_full_unpolled_stream_stop_cancels_bounded_sender ... ok
+test channels::manager::invocation_tests::forward_owned_stream_keeps_original_handler_and_order ... ok
+test channels::manager::invocation_tests::forward_original_handler_single_and_reply_are_distinct ... ok
+test channels::manager::invocation_tests::forward_setup_failure_releases_real_invocation_receipt ... ok
+test channels::manager::invocation_tests::forward_setup_cancellation_releases_legacy_future ... ok
+test channels::manager::invocation_tests::forward_slow_legacy_stream_stop_drops_inner_before_close ... ok
+test channels::manager::invocation_tests::forward_cancelled_queued_single_reset_preserves_sender_incarnation ... ok
+test channels::manager::invocation_tests::forward_unstarted_entry_rejects_before_handler ... ok
+test channels::manager::invocation_tests::forward_session_legacy_setup_cancel_does_not_retire_sender_generation ... ok
+test channels::manager::invocation_tests::forward_starting_entry_rejects_without_waiting_write_lock ... ok
+test channels::manager::invocation_tests::forward_session_stream_child_cancel_keeps_same_sender_sibling_alive ... ok
+test channels::manager::invocation_tests::forward_wrong_channel_rejects_before_side_effect ... ok
+test channels::manager::invocation_tests::forward_without_tokio_runtime_returns_error_without_admission_or_panic ... ok
+test channels::manager::invocation_tests::forward_cancelled_queued_stream_reset_preserves_sender_incarnation ... ok
+test channels::manager::invocation_tests::forward_dropped_single_waiter_preserves_driven_actual_settlement ... ok
+test channels::manager::invocation_tests::forward_session_single_drains_inner_real_receipt_after_waiter_drop ... ok
+
+test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 153 filtered out; finished in 0.03s
+

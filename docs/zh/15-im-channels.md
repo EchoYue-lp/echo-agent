@@ -33,6 +33,31 @@ echo-agent 支持将 Agent 接入主流 IM 平台（QQ Bot、飞书等），通�
 
 ## 快速开始
 
+### 通过 owned Channel 前向调用
+
+成功 start 后，`ChannelHandle::handle_message(message, cancel)` 调用原 entry
+绑定的 handler 并返回 outbound；`reply_message(outbound, cancel)` await 同一
+handler 的 reply，与既有 plugin.send 独立。`handle_message_stream(message,
+cancel)` 返回 `ChannelMessageStream`，包含 owned
+`BoxStream<'static, Result<OutboundMessage>>` 与同一次准入的 child cancellation
+token，实现 Stream 并提供 into_parts。adapter 有自己的有界 send 缓冲时也监听该
+精确 token，stop 才能解除满缓冲并阻止旧 item；调用方真实消费 items，框架不隐式
+执行 reply。
+
+每个 token 只属于当前 invocation。取消该调用或 drop waiter 不取消兄弟调用、也不
+关闭整个 Session。stop 先关闭原 generation 准入并发取消，再停止 transport，等待
+真实 invocation receipt 后关闭 handler；close 失败或被取消保留原 owner 供 retry。
+未成功 start 的 handler 仅是 cleanup debt，不能接受消息；restart 后旧 captured
+future 不能转向新 generation。
+
+驱动器持有原 handler 和调用租约，因此流可以移出 manager borrow，而无需泄漏 guard
+或做不安全生命周期转换。legacy 本地 future 可以在取消时 drop；声明
+`settles_on_cancel` 的实现必须通过 `handle_with_cancel`、`reply_with_cancel`、
+`handle_stream_with_cancel` 把 token 传给实际驱动并保留真实结算。取消通知不是外部
+Run terminal 或 OS 进程清理证明。callback 可在释放外部 registry guard 后读 manager
+metadata，同步等待自身 mutation/close 不属于支持目标。SDK wire 与语言合同在独立
+SDK 仓库维护和验证，不由这些新 Rust API 自动扩大。
+
 ### 1. 添加依赖
 
 ```toml

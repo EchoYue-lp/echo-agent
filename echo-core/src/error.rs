@@ -663,6 +663,13 @@ pub enum ChannelError {
         /// Opaque incarnation that no longer owns channel delivery.
         incarnation_id: String,
     },
+    /// A captured handler invocation no longer owns this entry's generation.
+    /// This is admission, distinct from a session output delivery fence.
+    #[error("Stale channel handler invocation generation: {channel_id}")]
+    StaleInvocation {
+        /// Original registered channel whose handler generation was replaced.
+        channel_id: String,
+    },
     /// Invalid config
     #[error("Invalid config: {0}")]
     InvalidConfig(String),

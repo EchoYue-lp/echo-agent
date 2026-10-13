@@ -1,13 +1,20 @@
 //! ChannelManager — one lifecycle authority per original IM channel plugin.
 
-use super::types::{ChannelCapabilities, ChannelPlugin, MessageHandler, OutboundMessage};
+use super::types::{
+    ChannelCapabilities, ChannelPlugin, InboundMessage, MessageHandler, OutboundMessage,
+};
 use async_trait::async_trait;
+use echo_core::agent::CancellationToken;
 use echo_core::error::{ChannelError, ReactError, Result};
 use futures::future::BoxFuture;
+use futures::stream::{BoxStream, Stream, StreamExt};
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use tokio::sync::RwLock;
+use std::sync::{Arc, Mutex as StdMutex};
+use std::task::{Context, Poll};
+use tokio::sync::{Notify, RwLock, mpsc, oneshot};
 use tracing::{info, warn};
 
 /// Identity-bearing lifecycle result for one channel.
@@ -16,8 +23,208 @@ pub struct ChannelLifecycleResult {
     pub result: Result<()>,
 }
 
+/// An owned stream and the exact admitted invocation's cancellation signal.
+///
+/// Adapters with their own bounded output buffer must also watch this token
+/// while sending, so entry stop cannot leave them blocked on an old item.
+/// It is a generation child: cancelling it never cancels a sibling invocation.
+pub struct ChannelMessageStream {
+    pub stream: BoxStream<'static, Result<OutboundMessage>>,
+    pub cancellation: CancellationToken,
+}
+
+impl ChannelMessageStream {
+    pub fn into_parts(
+        self,
+    ) -> (
+        BoxStream<'static, Result<OutboundMessage>>,
+        CancellationToken,
+    ) {
+        (self.stream, self.cancellation)
+    }
+}
+
+impl Stream for ChannelMessageStream {
+    type Item = Result<OutboundMessage>;
+
+    fn poll_next(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.stream.as_mut().poll_next(context)
+    }
+}
+
 fn channel_error(message: String) -> ReactError {
     ReactError::Channel(Box::new(ChannelError::Other(message)))
+}
+
+fn invocation_cancelled() -> ReactError {
+    channel_error("channel handler invocation cancelled".into())
+}
+
+fn invocation_inactive(message: &str) -> ReactError {
+    ReactError::Channel(Box::new(ChannelError::InvalidConfig(message.to_string())))
+}
+
+// These receipts extend the original entry, following SessionStreamReceipt's
+// short synchronous admission/drop accounting. They never own another handler.
+struct InvocationGeneration {
+    admission: StdMutex<InvocationAdmission>,
+    cancellation: CancellationToken,
+    settled: Notify,
+}
+
+struct InvocationAdmission {
+    ready: bool,
+    active: usize,
+}
+
+impl InvocationGeneration {
+    fn new() -> Self {
+        Self {
+            admission: StdMutex::new(InvocationAdmission {
+                ready: false,
+                active: 0,
+            }),
+            cancellation: CancellationToken::new(),
+            settled: Notify::new(),
+        }
+    }
+
+    fn open(&self) -> bool {
+        let mut admission = self
+            .admission
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if self.cancellation.is_cancelled() {
+            return false;
+        }
+        admission.ready = true;
+        true
+    }
+
+    fn retire(&self) {
+        self.retire_and_signal(|| self.cancellation.cancel());
+    }
+
+    fn retire_and_signal(&self, signal: impl FnOnce()) {
+        // Keep both changes under the same admission lock. Otherwise a
+        // concurrent successful start can reopen ready before token.cancel.
+        let mut admission = self
+            .admission
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        admission.ready = false;
+        signal();
+    }
+
+    fn begin(self: &Arc<Self>, entry: Arc<ChannelEntry>) -> Result<InvocationReceipt> {
+        let mut admission = self
+            .admission
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if !admission.ready || self.cancellation.is_cancelled() {
+            return Err(invocation_inactive(
+                "channel handler generation is not active",
+            ));
+        }
+        admission.active = admission
+            .active
+            .checked_add(1)
+            .ok_or_else(|| channel_error("channel invocation capacity exhausted".into()))?;
+        Ok(InvocationReceipt {
+            generation: Arc::clone(self),
+            _entry: entry,
+        })
+    }
+
+    async fn wait(&self) {
+        loop {
+            let settled = self.settled.notified();
+            tokio::pin!(settled);
+            settled.as_mut().enable();
+            if self
+                .admission
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .active
+                == 0
+            {
+                return;
+            }
+            settled.await;
+        }
+    }
+}
+
+struct InvocationReceipt {
+    generation: Arc<InvocationGeneration>,
+    _entry: Arc<ChannelEntry>,
+}
+
+impl Drop for InvocationReceipt {
+    fn drop(&mut self) {
+        let mut admission = self
+            .generation
+            .admission
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        admission.active = admission.active.saturating_sub(1);
+        if admission.active == 0 {
+            self.generation.settled.notify_waiters();
+        }
+    }
+}
+
+struct CancelInvocationOnDrop {
+    cancellation: CancellationToken,
+    armed: bool,
+}
+
+impl CancelInvocationOnDrop {
+    fn new(cancellation: CancellationToken) -> Self {
+        Self {
+            cancellation,
+            armed: true,
+        }
+    }
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for CancelInvocationOnDrop {
+    fn drop(&mut self) {
+        // A cancelled waiter signals its exact child; the driver's receipt is
+        // retained until local legacy drop or the driven operation truly ends.
+        if self.armed {
+            self.cancellation.cancel();
+        }
+    }
+}
+
+pub(super) async fn drive_call<T>(
+    operation: impl Future<Output = Result<T>>,
+    cancellation: &CancellationToken,
+    caller: &CancellationToken,
+    driven: bool,
+) -> Result<T> {
+    tokio::pin!(operation);
+    if driven {
+        tokio::select! {
+            biased;
+            () = caller.cancelled() => {
+                cancellation.cancel();
+                operation.await
+            }
+            result = &mut operation => result,
+        }
+    } else {
+        tokio::select! {
+            biased;
+            () = caller.cancelled() => { cancellation.cancel(); Err(invocation_cancelled()) }
+            () = cancellation.cancelled() => Err(invocation_cancelled()),
+            result = &mut operation => result,
+        }
+    }
 }
 
 struct ChannelState {
@@ -31,6 +238,8 @@ struct ChannelEntry {
     label: String,
     capabilities: ChannelCapabilities,
     state: RwLock<ChannelState>,
+    // The original entry's current generation. No handler is stored here.
+    generation: StdMutex<Option<Arc<InvocationGeneration>>>,
     mutation_epoch: AtomicU64,
     // Diagnostic projection only. All cleanup decisions use state.handler.
     unsettled_handler: AtomicBool,
@@ -58,6 +267,247 @@ impl ChannelHandle {
 
     pub fn capabilities(&self) -> &ChannelCapabilities {
         &self.entry.capabilities
+    }
+
+    fn generation(&self) -> Option<Arc<InvocationGeneration>> {
+        self.entry
+            .generation
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+
+    async fn admit(
+        &self,
+        captured: Option<Arc<InvocationGeneration>>,
+        message_channel: &str,
+    ) -> Result<(
+        Arc<dyn MessageHandler>,
+        InvocationReceipt,
+        CancellationToken,
+    )> {
+        if message_channel != self.id() {
+            return Err(invocation_inactive(
+                "message channel_id does not match the registered entry",
+            ));
+        }
+        let generation =
+            captured.ok_or_else(|| invocation_inactive("channel handler has not started"))?;
+        if !self
+            .generation()
+            .is_some_and(|current| Arc::ptr_eq(&current, &generation))
+        {
+            return Err(ReactError::Channel(Box::new(
+                ChannelError::StaleInvocation {
+                    channel_id: self.id().to_string(),
+                },
+            )));
+        }
+        // Fail before awaiting the lifecycle lock during start/rollback/stop.
+        let ready = generation
+            .admission
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .ready;
+        if !ready || generation.cancellation.is_cancelled() {
+            return Err(invocation_inactive(
+                "channel handler generation is not active",
+            ));
+        }
+        let state = self.entry.state.read().await;
+        if !self
+            .generation()
+            .is_some_and(|current| Arc::ptr_eq(&current, &generation))
+        {
+            return Err(ReactError::Channel(Box::new(
+                ChannelError::StaleInvocation {
+                    channel_id: self.id().to_string(),
+                },
+            )));
+        }
+        let handler = state
+            .handler
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| invocation_inactive("channel handler is unavailable"))?;
+        let receipt = generation.begin(Arc::clone(&self.entry))?;
+        let cancel = generation.cancellation.child_token();
+        Ok((handler, receipt, cancel))
+    }
+
+    /// Invoke the original successfully started handler with a caller-local token.
+    /// Dropping the waiter signals cancellation; shutdown still waits its driver.
+    pub fn handle_message(
+        &self,
+        message: InboundMessage,
+        caller: CancellationToken,
+    ) -> BoxFuture<'static, Result<OutboundMessage>> {
+        let channel = self.clone();
+        let generation = self.generation();
+        Box::pin(async move {
+            let runtime = tokio::runtime::Handle::try_current().map_err(|error| {
+                channel_error(format!("channel invocation requires a runtime: {error}"))
+            })?;
+            if caller.is_cancelled() {
+                return Err(invocation_cancelled());
+            }
+            let (handler, receipt, cancellation) =
+                channel.admit(generation, &message.channel_id).await?;
+            let mut cancel_on_drop = CancelInvocationOnDrop::new(cancellation.clone());
+            let (sender, receiver) = oneshot::channel();
+            let driver = runtime.spawn(async move {
+                let _receipt = receipt;
+                let result = drive_call(
+                    handler.handle_with_cancel(message, cancellation.clone()),
+                    &cancellation,
+                    &caller,
+                    handler.settles_on_cancel(),
+                )
+                .await;
+                let _ = sender.send(result);
+            });
+            let result = receiver.await;
+            driver.await.map_err(|error| {
+                channel_error(format!("channel handler driver failed: {error}"))
+            })?;
+            cancel_on_drop.disarm();
+            result
+                .map_err(|error| channel_error(format!("channel handler driver ended: {error}")))?
+        })
+    }
+
+    /// Invoke reply on the same original handler; it is distinct from plugin.send.
+    pub fn reply_message(
+        &self,
+        message: OutboundMessage,
+        caller: CancellationToken,
+    ) -> BoxFuture<'static, Result<()>> {
+        let channel = self.clone();
+        let generation = self.generation();
+        Box::pin(async move {
+            let runtime = tokio::runtime::Handle::try_current().map_err(|error| {
+                channel_error(format!("channel invocation requires a runtime: {error}"))
+            })?;
+            if caller.is_cancelled() {
+                return Err(invocation_cancelled());
+            }
+            let (handler, receipt, cancellation) =
+                channel.admit(generation, &message.channel_id).await?;
+            let mut cancel_on_drop = CancelInvocationOnDrop::new(cancellation.clone());
+            let (sender, receiver) = oneshot::channel();
+            let driver = runtime.spawn(async move {
+                let _receipt = receipt;
+                let result = drive_call(
+                    handler.reply_with_cancel(message, cancellation.clone()),
+                    &cancellation,
+                    &caller,
+                    handler.settles_on_cancel(),
+                )
+                .await;
+                let _ = sender.send(result);
+            });
+            let result = receiver.await;
+            driver
+                .await
+                .map_err(|error| channel_error(format!("channel reply driver failed: {error}")))?;
+            cancel_on_drop.disarm();
+            result.map_err(|error| channel_error(format!("channel reply driver ended: {error}")))?
+        })
+    }
+
+    /// Return an owned stream tied to the captured original handler generation.
+    /// Its bounded driver owns the trait's borrowed inner stream and receipt.
+    pub fn handle_message_stream(
+        &self,
+        message: InboundMessage,
+        caller: CancellationToken,
+    ) -> BoxFuture<'static, Result<ChannelMessageStream>> {
+        let channel = self.clone();
+        let generation = self.generation();
+        Box::pin(async move {
+            let runtime = tokio::runtime::Handle::try_current().map_err(|error| {
+                channel_error(format!("channel invocation requires a runtime: {error}"))
+            })?;
+            if caller.is_cancelled() {
+                return Err(invocation_cancelled());
+            }
+            let (handler, receipt, cancellation) =
+                channel.admit(generation, &message.channel_id).await?;
+            let invocation_cancellation = cancellation.clone();
+            let cancel_on_drop = CancelInvocationOnDrop::new(cancellation.clone());
+            let (setup_sender, setup_receiver) = oneshot::channel();
+            let (sender, mut receiver) = mpsc::channel(1);
+            let driver = runtime.spawn(async move {
+                let _receipt = receipt;
+                let driven = handler.settles_on_cancel();
+                let setup = drive_call(
+                    handler.handle_stream_with_cancel(message, cancellation.clone()),
+                    &cancellation,
+                    &caller,
+                    driven,
+                )
+                .await;
+                let mut inner = match setup {
+                    Ok(inner) => inner,
+                    Err(error) => {
+                        let _ = setup_sender.send(Err(error));
+                        return;
+                    }
+                };
+                if setup_sender.send(Ok(())).is_err() {
+                    cancellation.cancel();
+                }
+                loop {
+                    let item = drive_call(
+                        async { Ok(inner.next().await) },
+                        &cancellation,
+                        &caller,
+                        driven,
+                    )
+                    .await;
+                    let item = match item {
+                        Ok(Some(item)) => item,
+                        Ok(None) | Err(_) => break,
+                    };
+                    // Driven cancellation continues polling to actual completion;
+                    // it never blocks on an abandoned/full consumer buffer.
+                    if cancellation.is_cancelled() {
+                        continue;
+                    }
+                    tokio::select! {
+                        biased;
+                        () = caller.cancelled() => { cancellation.cancel(); }
+                        () = cancellation.cancelled() => {},
+                        sent = sender.send(item) => { if sent.is_err() { cancellation.cancel(); } }
+                    }
+                }
+                drop(inner);
+            });
+            setup_receiver.await.map_err(|error| {
+                channel_error(format!("channel stream driver ended during setup: {error}"))
+            })??;
+            let stream = async_stream::stream! {
+                let mut cancel_on_drop = cancel_on_drop;
+                loop {
+                    let item = tokio::select! {
+                        biased;
+                        () = cancel_on_drop.cancellation.cancelled() => break,
+                        item = receiver.recv() => item,
+                    };
+                    let Some(item) = item else { break };
+                    yield item;
+                }
+                let exit = driver.await;
+                cancel_on_drop.disarm();
+                if let Err(error) = exit {
+                    yield Err(channel_error(format!("channel stream driver failed: {error}")));
+                }
+            };
+            Ok(ChannelMessageStream {
+                stream: Box::pin(stream),
+                cancellation: invocation_cancellation,
+            })
+        })
     }
 
     fn invalidate_stopped(&self) {
@@ -89,12 +539,25 @@ impl ChannelHandle {
             )));
         }
         state.stopped_at_epoch = None;
+        let generation = Arc::new(InvocationGeneration::new());
+        *self
+            .entry
+            .generation
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(Arc::clone(&generation));
         let handler = handler_factory();
         state.handler = Some(Arc::clone(&handler));
         self.entry.unsettled_handler.store(true, Ordering::Release);
         match state.plugin.start(Arc::clone(&handler)).await {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                // Transport start succeeded even if a concurrent stop already
+                // retired admission. The queued stop retains cleanup ownership;
+                // preserve the original start result without reopening the gate.
+                generation.open();
+                Ok(())
+            }
             Err(start_error) => {
+                generation.retire();
                 // Publish responsibility before the first plugin await. Future
                 // cancellation leaves that same handler available to stop.
                 let epoch = self.entry.mutation_epoch.load(Ordering::Acquire);
@@ -132,13 +595,23 @@ impl ChannelHandle {
     pub fn stop(&self) -> BoxFuture<'static, Result<()>> {
         let channel = self.clone();
         Box::pin(async move {
+            if let Some(generation) = channel.generation() {
+                generation.retire();
+            }
             let mut state = channel.entry.state.write().await;
+            let generation = channel.generation();
+            if let Some(generation) = &generation {
+                generation.retire();
+            }
             let epoch = channel.entry.mutation_epoch.load(Ordering::Acquire);
             if epoch == u64::MAX || state.stopped_at_epoch != Some(epoch) {
                 state.plugin.stop().await?;
                 state.stopped_at_epoch = Some(epoch);
             }
             if let Some(handler) = &state.handler {
+                if let Some(generation) = &generation {
+                    generation.wait().await;
+                }
                 handler.close().await?;
                 state.handler = None;
                 channel
@@ -233,6 +706,7 @@ impl ChannelManager {
                 handler: None,
                 stopped_at_epoch: None,
             }),
+            generation: StdMutex::new(None),
             mutation_epoch: AtomicU64::new(0),
             unsettled_handler: AtomicBool::new(false),
         });
@@ -378,6 +852,847 @@ impl Drop for ChannelEntry {
                 self.id
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod invocation_tests {
+    use super::super::types::ChatType;
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+    use std::time::Duration;
+    use tokio::sync::Semaphore;
+    use tokio::time::timeout;
+
+    const LIMIT: Duration = Duration::from_secs(2);
+    type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
+
+    #[derive(Default)]
+    struct Facts {
+        calls: AtomicUsize,
+        replies: AtomicUsize,
+        closes: AtomicUsize,
+        drops: AtomicUsize,
+        entered: Notify,
+        cancelled: Notify,
+    }
+
+    struct DropFact(Arc<Facts>);
+    impl Drop for DropFact {
+        fn drop(&mut self) {
+            self.0.drops.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    struct ForwardHandler {
+        facts: Arc<Facts>,
+        driven: bool,
+        setup_error: bool,
+        close_error_once: bool,
+        release: Arc<Semaphore>,
+    }
+
+    impl ForwardHandler {
+        fn plain(facts: Arc<Facts>) -> Self {
+            Self {
+                facts,
+                driven: false,
+                setup_error: false,
+                close_error_once: false,
+                release: Arc::new(Semaphore::new(0)),
+            }
+        }
+
+        async fn run(
+            &self,
+            message: InboundMessage,
+            cancel: CancellationToken,
+        ) -> Result<OutboundMessage> {
+            self.facts.calls.fetch_add(1, Ordering::AcqRel);
+            let _drop = DropFact(Arc::clone(&self.facts));
+            if message.text == "park" {
+                self.facts.entered.notify_one();
+                cancel.cancelled().await;
+                self.facts.cancelled.notify_one();
+                if self.driven {
+                    self.release
+                        .acquire()
+                        .await
+                        .map_err(|error| channel_error(error.to_string()))?
+                        .forget();
+                }
+                return Err(invocation_cancelled());
+            }
+            Ok(OutboundMessage::new(
+                message.channel_id,
+                message.chat_id,
+                message.chat_type,
+                message.text,
+            ))
+        }
+    }
+
+    #[async_trait]
+    impl MessageHandler for ForwardHandler {
+        async fn handle(&self, message: InboundMessage) -> Result<OutboundMessage> {
+            self.run(message, CancellationToken::new()).await
+        }
+        async fn handle_with_cancel(
+            &self,
+            message: InboundMessage,
+            cancel: CancellationToken,
+        ) -> Result<OutboundMessage> {
+            self.run(message, cancel).await
+        }
+        async fn reply(&self, _message: OutboundMessage) -> Result<()> {
+            self.facts.replies.fetch_add(1, Ordering::AcqRel);
+            Ok(())
+        }
+        fn settles_on_cancel(&self) -> bool {
+            self.driven
+        }
+        async fn close(&self) -> Result<()> {
+            let n = self.facts.closes.fetch_add(1, Ordering::AcqRel);
+            if self.close_error_once && n == 0 {
+                return Err(channel_error("retry close".into()));
+            }
+            Ok(())
+        }
+        async fn handle_stream_with_cancel<'a>(
+            &'a self,
+            message: InboundMessage,
+            cancel: CancellationToken,
+        ) -> Result<BoxStream<'a, Result<OutboundMessage>>> {
+            if self.setup_error {
+                return Err(channel_error("setup failed".into()));
+            }
+            if message.text == "setup-park" {
+                let _drop = DropFact(Arc::clone(&self.facts));
+                self.facts.entered.notify_one();
+                cancel.cancelled().await;
+                return Err(invocation_cancelled());
+            }
+            let stream = async_stream::stream! {
+                let _drop = DropFact(Arc::clone(&self.facts));
+                self.facts.entered.notify_one();
+                if message.text == "park" {
+                    cancel.cancelled().await;
+                    self.facts.cancelled.notify_one();
+                    if self.driven
+                        && let Err(error) = self.release.acquire().await.map(|permit| permit.forget()) {
+                        yield Err(channel_error(error.to_string()));
+                    }
+                } else {
+                    for text in ["第一段😀", "second", "third"] {
+                        yield Ok(OutboundMessage::new(&message.channel_id, &message.chat_id, message.chat_type, text));
+                    }
+                }
+            };
+            Ok(Box::pin(stream))
+        }
+    }
+
+    struct ForwardPlugin {
+        fail_start: bool,
+        fail_stop: bool,
+        start_gate: Option<(Arc<Notify>, Arc<Semaphore>)>,
+    }
+
+    #[async_trait]
+    impl ChannelPlugin for ForwardPlugin {
+        fn id(&self) -> &str {
+            "forward"
+        }
+        fn capabilities(&self) -> &ChannelCapabilities {
+            static CAPS: ChannelCapabilities = ChannelCapabilities {
+                chat_types: &[ChatType::Direct],
+                supports_media: true,
+                supports_threads: false,
+            };
+            &CAPS
+        }
+        async fn start(&mut self, _handler: Arc<dyn MessageHandler>) -> Result<()> {
+            if let Some((entered, gate)) = &self.start_gate {
+                entered.notify_one();
+                gate.acquire()
+                    .await
+                    .map_err(|error| channel_error(error.to_string()))?
+                    .forget();
+            }
+            if self.fail_start {
+                return Err(channel_error("start failed".into()));
+            }
+            Ok(())
+        }
+        async fn stop(&mut self) -> Result<()> {
+            if self.fail_stop {
+                self.fail_stop = false;
+                return Err(channel_error("stop failed".into()));
+            }
+            Ok(())
+        }
+        async fn send(&self, _message: OutboundMessage) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    fn registered(plugin: ForwardPlugin) -> Result<ChannelHandle> {
+        let mut manager = ChannelManager::new();
+        manager.register(Box::new(plugin))?;
+        manager
+            .get_owned("forward")
+            .ok_or_else(|| channel_error("missing entry".into()))
+    }
+
+    async fn started(handler: Arc<dyn MessageHandler>) -> Result<ChannelHandle> {
+        let channel = registered(ForwardPlugin {
+            fail_start: false,
+            fail_stop: false,
+            start_gate: None,
+        })?;
+        channel.start(handler).await?;
+        Ok(channel)
+    }
+
+    fn message(text: &str) -> InboundMessage {
+        InboundMessage::new("forward", "sender", "chat", ChatType::Direct, text, "id")
+    }
+
+    #[tokio::test]
+    async fn forward_original_handler_single_and_reply_are_distinct() -> TestResult {
+        let facts = Arc::new(Facts::default());
+        let channel = started(Arc::new(ForwardHandler::plain(Arc::clone(&facts)))).await?;
+        let output = channel
+            .handle_message(message("中文😀"), CancellationToken::new())
+            .await?;
+        assert_eq!(output.text, "中文😀");
+        assert_eq!(facts.calls.load(Ordering::Acquire), 1);
+        assert_eq!(facts.replies.load(Ordering::Acquire), 0);
+        channel
+            .reply_message(output, CancellationToken::new())
+            .await?;
+        assert_eq!(facts.replies.load(Ordering::Acquire), 1);
+        channel.stop().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn forward_owned_stream_keeps_original_handler_and_order() -> TestResult {
+        let facts = Arc::new(Facts::default());
+        let channel = started(Arc::new(ForwardHandler::plain(Arc::clone(&facts)))).await?;
+        let mut stream = channel
+            .handle_message_stream(message("stream"), CancellationToken::new())
+            .await?;
+        let invocation_cancel = stream.cancellation.clone();
+        for expected in ["第一段😀", "second", "third"] {
+            let output = timeout(LIMIT, stream.next())
+                .await?
+                .ok_or("missing stream item")??;
+            assert_eq!(output.text, expected);
+        }
+        assert!(stream.next().await.is_none());
+        assert!(!invocation_cancel.is_cancelled());
+        assert_eq!(facts.drops.load(Ordering::Acquire), 1);
+        assert_eq!(facts.replies.load(Ordering::Acquire), 0);
+        channel.stop().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn forward_unstarted_entry_rejects_before_handler() -> TestResult {
+        let channel = registered(ForwardPlugin {
+            fail_start: false,
+            fail_stop: false,
+            start_gate: None,
+        })?;
+        assert!(
+            channel
+                .handle_message(message("hello"), CancellationToken::new())
+                .await
+                .is_err()
+        );
+        assert!(
+            channel
+                .handle_message_stream(message("hello"), CancellationToken::new())
+                .await
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn forward_wrong_channel_rejects_before_side_effect() -> TestResult {
+        let facts = Arc::new(Facts::default());
+        let channel = started(Arc::new(ForwardHandler::plain(Arc::clone(&facts)))).await?;
+        let mut wrong = message("hello");
+        wrong.channel_id = "other".into();
+        assert!(
+            channel
+                .handle_message(wrong, CancellationToken::new())
+                .await
+                .is_err()
+        );
+        assert_eq!(facts.calls.load(Ordering::Acquire), 0);
+        channel.stop().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn forward_starting_entry_rejects_without_waiting_write_lock() -> TestResult {
+        let entered = Arc::new(Notify::new());
+        let gate = Arc::new(Semaphore::new(0));
+        let channel = registered(ForwardPlugin {
+            fail_start: false,
+            fail_stop: false,
+            start_gate: Some((Arc::clone(&entered), Arc::clone(&gate))),
+        })?;
+        let start = tokio::spawn(
+            channel.start(Arc::new(ForwardHandler::plain(Arc::new(Facts::default())))),
+        );
+        timeout(LIMIT, entered.notified()).await?;
+        assert!(
+            timeout(
+                LIMIT,
+                channel.handle_message(message("hello"), CancellationToken::new())
+            )
+            .await?
+            .is_err()
+        );
+        gate.add_permits(1);
+        start.await??;
+        channel.stop().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn forward_failed_start_cleanup_debt_never_admits() -> TestResult {
+        let facts = Arc::new(Facts::default());
+        let channel = registered(ForwardPlugin {
+            fail_start: true,
+            fail_stop: true,
+            start_gate: None,
+        })?;
+        assert!(
+            channel
+                .start(Arc::new(ForwardHandler::plain(Arc::clone(&facts))))
+                .await
+                .is_err()
+        );
+        assert!(
+            channel
+                .handle_message(message("hello"), CancellationToken::new())
+                .await
+                .is_err()
+        );
+        assert_eq!(facts.calls.load(Ordering::Acquire), 0);
+        channel.stop().await?;
+        assert_eq!(facts.closes.load(Ordering::Acquire), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn forward_cancelled_start_retains_only_cleanup_owner() -> TestResult {
+        let entered = Arc::new(Notify::new());
+        let channel = registered(ForwardPlugin {
+            fail_start: false,
+            fail_stop: false,
+            start_gate: Some((Arc::clone(&entered), Arc::new(Semaphore::new(0)))),
+        })?;
+        let start = tokio::spawn(
+            channel.start(Arc::new(ForwardHandler::plain(Arc::new(Facts::default())))),
+        );
+        timeout(LIMIT, entered.notified()).await?;
+        start.abort();
+        let _ = start.await;
+        assert!(
+            channel
+                .handle_message(message("hello"), CancellationToken::new())
+                .await
+                .is_err()
+        );
+        channel.stop().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn forward_captured_generation_does_not_rebind_after_restart() -> TestResult {
+        let first = Arc::new(Facts::default());
+        let second = Arc::new(Facts::default());
+        let channel = started(Arc::new(ForwardHandler::plain(Arc::clone(&first)))).await?;
+        let old = channel.handle_message(message("old"), CancellationToken::new());
+        channel.stop().await?;
+        channel
+            .start(Arc::new(ForwardHandler::plain(Arc::clone(&second))))
+            .await?;
+        assert!(
+            matches!(old.await, Err(ReactError::Channel(error)) if matches!(error.as_ref(), ChannelError::StaleInvocation { channel_id } if channel_id == "forward"))
+        );
+        assert_eq!(second.calls.load(Ordering::Acquire), 0);
+        assert_eq!(
+            channel
+                .handle_message(message("new"), CancellationToken::new())
+                .await?
+                .text,
+            "new"
+        );
+        channel.stop().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn forward_caller_child_cancellation_does_not_cancel_sibling() -> TestResult {
+        let facts = Arc::new(Facts::default());
+        let channel = started(Arc::new(ForwardHandler::plain(Arc::clone(&facts)))).await?;
+        let cancel = CancellationToken::new();
+        let first = tokio::spawn(channel.handle_message(message("park"), cancel.clone()));
+        timeout(LIMIT, facts.entered.notified()).await?;
+        cancel.cancel();
+        assert!(timeout(LIMIT, first).await??.is_err());
+        assert_eq!(
+            channel
+                .handle_message(message("sibling"), CancellationToken::new())
+                .await?
+                .text,
+            "sibling"
+        );
+        channel.stop().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn forward_setup_failure_releases_real_invocation_receipt() -> TestResult {
+        let facts = Arc::new(Facts::default());
+        let mut handler = ForwardHandler::plain(Arc::clone(&facts));
+        handler.setup_error = true;
+        let channel = started(Arc::new(handler)).await?;
+        assert!(
+            channel
+                .handle_message_stream(message("hello"), CancellationToken::new())
+                .await
+                .is_err()
+        );
+        timeout(LIMIT, channel.stop()).await??;
+        assert_eq!(facts.closes.load(Ordering::Acquire), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn forward_slow_legacy_stream_stop_drops_inner_before_close() -> TestResult {
+        let facts = Arc::new(Facts::default());
+        let channel = started(Arc::new(ForwardHandler::plain(Arc::clone(&facts)))).await?;
+        let mut stream = channel
+            .handle_message_stream(message("park"), CancellationToken::new())
+            .await?;
+        let invocation_cancel = stream.cancellation.clone();
+        timeout(LIMIT, facts.entered.notified()).await?;
+        timeout(LIMIT, channel.stop()).await??;
+        assert!(invocation_cancel.is_cancelled());
+        assert_eq!(facts.drops.load(Ordering::Acquire), 1);
+        assert!(timeout(LIMIT, stream.next()).await?.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn forward_full_unpolled_stream_stop_cancels_bounded_sender() -> TestResult {
+        let facts = Arc::new(Facts::default());
+        let channel = started(Arc::new(ForwardHandler::plain(Arc::clone(&facts)))).await?;
+        let stream = channel
+            .handle_message_stream(message("stream"), CancellationToken::new())
+            .await?;
+        timeout(LIMIT, facts.entered.notified()).await?;
+        timeout(LIMIT, channel.stop()).await??;
+        assert_eq!(facts.drops.load(Ordering::Acquire), 1);
+        assert_eq!(facts.closes.load(Ordering::Acquire), 1);
+        drop(stream);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn forward_dropped_single_waiter_preserves_driven_actual_settlement() -> TestResult {
+        let facts = Arc::new(Facts::default());
+        let mut handler = ForwardHandler::plain(Arc::clone(&facts));
+        handler.driven = true;
+        let release = Arc::clone(&handler.release);
+        let channel = started(Arc::new(handler)).await?;
+        let call = tokio::spawn(channel.handle_message(message("park"), CancellationToken::new()));
+        timeout(LIMIT, facts.entered.notified()).await?;
+        call.abort();
+        let _ = call.await;
+        timeout(LIMIT, facts.cancelled.notified()).await?;
+        assert!(
+            timeout(Duration::from_millis(20), channel.stop())
+                .await
+                .is_err()
+        );
+        assert_eq!(facts.closes.load(Ordering::Acquire), 0);
+        assert_eq!(facts.drops.load(Ordering::Acquire), 0);
+        release.add_permits(1);
+        timeout(LIMIT, channel.stop()).await??;
+        assert_eq!(facts.drops.load(Ordering::Acquire), 1);
+        assert_eq!(facts.closes.load(Ordering::Acquire), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn forward_handler_close_failure_keeps_admission_closed_for_retry() -> TestResult {
+        let facts = Arc::new(Facts::default());
+        let mut handler = ForwardHandler::plain(Arc::clone(&facts));
+        handler.close_error_once = true;
+        let channel = started(Arc::new(handler)).await?;
+        assert!(channel.stop().await.is_err());
+        assert!(
+            channel
+                .handle_message(message("late"), CancellationToken::new())
+                .await
+                .is_err()
+        );
+        channel.stop().await?;
+        assert_eq!(facts.closes.load(Ordering::Acquire), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn forward_setup_cancellation_releases_legacy_future() -> TestResult {
+        let facts = Arc::new(Facts::default());
+        let channel = started(Arc::new(ForwardHandler::plain(Arc::clone(&facts)))).await?;
+        let caller = CancellationToken::new();
+        let setup =
+            tokio::spawn(channel.handle_message_stream(message("setup-park"), caller.clone()));
+        timeout(LIMIT, facts.entered.notified()).await?;
+        caller.cancel();
+        assert!(timeout(LIMIT, setup).await??.is_err());
+        timeout(LIMIT, channel.stop()).await??;
+        assert_eq!(facts.drops.load(Ordering::Acquire), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn forward_session_single_drains_inner_real_receipt_after_waiter_drop() -> TestResult {
+        use super::super::session::{SessionConfig, SessionHandler};
+        let facts = Arc::new(Facts::default());
+        let release = Arc::new(Semaphore::new(0));
+        let session = Arc::new(SessionHandler::new(SessionConfig::default(), {
+            let facts = Arc::clone(&facts);
+            let release = Arc::clone(&release);
+            move |_instance: &super::super::session::ChannelSessionInstance| -> Box<dyn MessageHandler> {
+                let mut handler = ForwardHandler::plain(Arc::clone(&facts));
+                handler.driven = true; handler.release = Arc::clone(&release);
+                Box::new(handler)
+            }
+        }));
+        let channel = started(session.clone()).await?;
+        let call = tokio::spawn(channel.handle_message(message("park"), CancellationToken::new()));
+        timeout(LIMIT, facts.entered.notified()).await?;
+        call.abort();
+        let _ = call.await;
+        timeout(LIMIT, facts.cancelled.notified()).await?;
+        assert!(
+            timeout(Duration::from_millis(20), channel.stop())
+                .await
+                .is_err()
+        );
+        assert_eq!(facts.drops.load(Ordering::Acquire), 0);
+        assert_eq!(facts.closes.load(Ordering::Acquire), 0);
+        release.add_permits(1);
+        timeout(LIMIT, channel.stop()).await??;
+        assert_eq!(facts.drops.load(Ordering::Acquire), 1);
+        assert_eq!(session.active_sessions(), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn forward_session_stream_child_cancel_keeps_same_sender_sibling_alive() -> TestResult {
+        use super::super::session::{SessionConfig, SessionHandler};
+        let facts = Arc::new(Facts::default());
+        let release = Arc::new(Semaphore::new(0));
+        let session = Arc::new(SessionHandler::new(SessionConfig::default(), {
+            let facts = Arc::clone(&facts);
+            let release = Arc::clone(&release);
+            move |_instance: &super::super::session::ChannelSessionInstance| -> Box<dyn MessageHandler> {
+                let mut handler = ForwardHandler::plain(Arc::clone(&facts));
+                handler.driven = true; handler.release = Arc::clone(&release); Box::new(handler)
+            }
+        }));
+        let channel = started(session.clone()).await?;
+        let cancel = CancellationToken::new();
+        let mut first = channel
+            .handle_message_stream(message("park"), cancel.clone())
+            .await?;
+        timeout(LIMIT, facts.entered.notified()).await?;
+        cancel.cancel();
+        timeout(LIMIT, facts.cancelled.notified()).await?;
+        assert_eq!(
+            channel
+                .handle_message(message("sibling"), CancellationToken::new())
+                .await?
+                .text,
+            "sibling"
+        );
+        assert_eq!(session.active_sessions(), 1);
+        assert_eq!(facts.closes.load(Ordering::Acquire), 0);
+        release.add_permits(1);
+        assert!(timeout(LIMIT, first.next()).await?.is_none());
+        timeout(LIMIT, channel.stop()).await??;
+        assert_eq!(facts.closes.load(Ordering::Acquire), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn forward_session_legacy_setup_cancel_does_not_retire_sender_generation() -> TestResult {
+        use super::super::session::{SessionConfig, SessionHandler};
+        let facts = Arc::new(Facts::default());
+        let session = Arc::new(SessionHandler::new(SessionConfig::default(), {
+            let facts = Arc::clone(&facts);
+            move |_instance: &super::super::session::ChannelSessionInstance| -> Box<dyn MessageHandler> {
+                Box::new(ForwardHandler::plain(Arc::clone(&facts)))
+            }
+        }));
+        let channel = started(session.clone()).await?;
+        let cancel = CancellationToken::new();
+        let mut stream = channel
+            .handle_message_stream(message("setup-park"), cancel.clone())
+            .await?;
+        timeout(LIMIT, facts.entered.notified()).await?;
+        cancel.cancel();
+        // The wrapper's lazy inner setup publishes the legacy cancellation as an
+        // item error, while keeping the same session available for another call.
+        assert!(timeout(LIMIT, stream.next()).await?.is_none());
+        assert_eq!(
+            channel
+                .handle_message(message("after"), CancellationToken::new())
+                .await?
+                .text,
+            "after"
+        );
+        assert_eq!(session.active_sessions(), 1);
+        timeout(LIMIT, channel.stop()).await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn forward_metadata_reentry_does_not_hold_registry_or_entry_guard() -> TestResult {
+        struct MetadataHandler(Arc<tokio::sync::Mutex<ChannelManager>>);
+        #[async_trait]
+        impl MessageHandler for MetadataHandler {
+            async fn handle(&self, message: InboundMessage) -> Result<OutboundMessage> {
+                let guard = self.0.lock().await;
+                let ids = guard.channel_ids();
+                if !ids.contains(&"forward") {
+                    return Err(channel_error("lost entry".into()));
+                }
+                Ok(OutboundMessage::new(
+                    message.channel_id,
+                    message.chat_id,
+                    message.chat_type,
+                    "metadata",
+                ))
+            }
+            async fn reply(&self, _message: OutboundMessage) -> Result<()> {
+                Ok(())
+            }
+        }
+        let manager = Arc::new(tokio::sync::Mutex::new(ChannelManager::new()));
+        manager.lock().await.register(Box::new(ForwardPlugin {
+            fail_start: false,
+            fail_stop: false,
+            start_gate: None,
+        }))?;
+        let channel = manager
+            .lock()
+            .await
+            .get_owned("forward")
+            .ok_or("missing entry")?;
+        channel
+            .start(Arc::new(MetadataHandler(Arc::clone(&manager))))
+            .await?;
+        assert_eq!(
+            timeout(
+                LIMIT,
+                channel.handle_message(message("read"), CancellationToken::new())
+            )
+            .await??
+            .text,
+            "metadata"
+        );
+        channel.stop().await?;
+        Ok(())
+    }
+
+    async fn queued_reset_preserves_incarnation(stream_reset: bool) -> TestResult {
+        use super::super::session::{ChannelSessionInstance, SessionConfig, SessionHandler};
+        let facts = Arc::new(Facts::default());
+        let release = Arc::new(Semaphore::new(0));
+        let instances = Arc::new(StdMutex::new(Vec::<String>::new()));
+        let session = Arc::new(SessionHandler::new(SessionConfig::default(), {
+            let facts = Arc::clone(&facts);
+            let release = Arc::clone(&release);
+            let instances = Arc::clone(&instances);
+            move |instance: &ChannelSessionInstance| -> Box<dyn MessageHandler> {
+                instances
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .push(instance.incarnation_id());
+                let mut handler = ForwardHandler::plain(Arc::clone(&facts));
+                handler.driven = true;
+                handler.release = Arc::clone(&release);
+                Box::new(handler)
+            }
+        }));
+        let channel = started(session.clone()).await?;
+        let first_cancel = CancellationToken::new();
+        let first = tokio::spawn(channel.handle_message(message("park"), first_cancel.clone()));
+        timeout(LIMIT, facts.entered.notified()).await?;
+        let old = instances
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .first()
+            .cloned()
+            .ok_or("missing instance")?;
+        let reset_cancel = CancellationToken::new();
+        let reset_token = reset_cancel.clone();
+        let reset_session = session.clone();
+        let mut reset = Box::pin(async move {
+            if stream_reset {
+                reset_session
+                    .handle_stream_with_cancel(message("/reset"), reset_token)
+                    .await
+                    .map(|_| ())
+            } else {
+                reset_session
+                    .handle_with_cancel(message("/reset"), reset_token)
+                    .await
+                    .map(|_| ())
+            }
+        });
+        // Poll B into A's held sender lock deterministically before cancelling;
+        // no scheduler sleep is used as evidence that the reset was queued.
+        assert!(futures::poll!(reset.as_mut()).is_pending());
+        reset_cancel.cancel();
+        first_cancel.cancel();
+        timeout(LIMIT, facts.cancelled.notified()).await?;
+        release.add_permits(1);
+        assert!(timeout(LIMIT, first).await??.is_err());
+        assert!(timeout(LIMIT, reset).await?.is_err());
+        assert_eq!(
+            instances
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .as_slice(),
+            &[old]
+        );
+        assert_eq!(facts.closes.load(Ordering::Acquire), 0);
+        assert_eq!(session.active_sessions(), 1);
+        assert_eq!(
+            channel
+                .handle_message(message("same incarnation"), CancellationToken::new())
+                .await?
+                .text,
+            "same incarnation"
+        );
+        channel.stop().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn forward_cancelled_queued_single_reset_preserves_sender_incarnation() -> TestResult {
+        queued_reset_preserves_incarnation(false).await
+    }
+
+    #[tokio::test]
+    async fn forward_cancelled_queued_stream_reset_preserves_sender_incarnation() -> TestResult {
+        queued_reset_preserves_incarnation(true).await
+    }
+
+    #[test]
+    fn forward_without_tokio_runtime_returns_error_without_admission_or_panic() -> TestResult {
+        let facts = Arc::new(Facts::default());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        let channel =
+            runtime.block_on(started(Arc::new(ForwardHandler::plain(Arc::clone(&facts)))))?;
+        // The entry is genuinely active; these calls would reach spawn without
+        // the runtime precondition, rather than fail early for an absent handler.
+        let result = futures::executor::block_on(
+            channel.handle_message(message("hello"), CancellationToken::new()),
+        );
+        assert!(result.is_err());
+        assert!(
+            futures::executor::block_on(channel.reply_message(
+                OutboundMessage::new("forward", "chat", ChatType::Direct, "reply"),
+                CancellationToken::new(),
+            ))
+            .is_err()
+        );
+        assert!(
+            futures::executor::block_on(
+                channel.handle_message_stream(message("stream"), CancellationToken::new())
+            )
+            .is_err()
+        );
+        assert_eq!(facts.calls.load(Ordering::Acquire), 0);
+        assert_eq!(facts.replies.load(Ordering::Acquire), 0);
+        let generation = channel.generation().ok_or("missing active generation")?;
+        assert_eq!(
+            generation
+                .admission
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .active,
+            0
+        );
+        assert!(
+            generation
+                .admission
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .ready
+        );
+        runtime.block_on(channel.stop())?;
+        Ok(())
+    }
+
+    #[test]
+    fn forward_retirement_and_open_linearize_under_one_admission_guard() -> TestResult {
+        use std::sync::Barrier;
+        let generation = Arc::new(InvocationGeneration::new());
+        assert!(generation.open());
+        let retirement_entered = Arc::new(Barrier::new(2));
+        let allow_cancel = Arc::new(Barrier::new(2));
+        let retiring = Arc::clone(&generation);
+        let entered = Arc::clone(&retirement_entered);
+        let release = Arc::clone(&allow_cancel);
+        let retire = std::thread::spawn(move || {
+            // Park at the exact signal boundary after ready=false. This uses
+            // the same private critical section as production retirement.
+            retiring.retire_and_signal(|| {
+                entered.wait();
+                release.wait();
+                retiring.cancellation.cancel();
+            });
+        });
+        retirement_entered.wait();
+        assert!(generation.admission.try_lock().is_err());
+        let opening = Arc::clone(&generation);
+        let open_entered = Arc::new(Barrier::new(2));
+        let entered = Arc::clone(&open_entered);
+        let open = std::thread::spawn(move || {
+            entered.wait();
+            opening.open()
+        });
+        open_entered.wait();
+        allow_cancel.wait();
+        retire.join().map_err(|_| "retirement thread failed")?;
+        assert!(!open.join().map_err(|_| "start thread failed")?);
+        assert!(generation.cancellation.is_cancelled());
+        assert!(
+            !generation
+                .admission
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .ready
+        );
+        Ok(())
     }
 }
 

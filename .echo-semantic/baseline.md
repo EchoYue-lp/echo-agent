@@ -4,7 +4,7 @@ id: baseline.repository
 kind: baseline
 source_snapshot:
   base_revision: 95ec66c6083a8feb17a1c28de0d01e1a24ca8a28
-  content_digest: 1c515c09873968a279e6076cf6abf659923f1fa96137144423970bfcd0e1881c
+  content_digest: d0568a66d7ccb8955e15a0d6f7aaaf0799ae25c287264ded14a9f167a4e01fbe
 inventory_closure: closed
 behavior_model_closure: closed
 map_refs:
@@ -483,7 +483,13 @@ learning 和 repository metadata 是 supporting consumers。已迁出的 SDK 产
 当前候选最终独立实现复审 audit.framework-final-34d5-gate-rereview 已PASS/action0，完整源码+新23receipt归档闭合，允许进入用户授权的framework里程碑交付；交付尚须实际PR/CI/main证据。Planready与其它开放义务仍保持。
 
 
-本次依赖策略增量：旧34d5门禁/复审已保留为真实4eb Git历史；新源码含6个Cargo文件和依赖修复原始证据，绑定source:1c515c09873968a279e6076cf6abf659923f1fa96137144423970bfcd0e1881c。依赖Finding与新增场景归原workspace map，focused459及审计red/green不替代新完整门禁/独立审查/远端dependency-policy CI。
+本次依赖策略增量：旧34d5门禁/复审已保留为真实4eb Git历史；新源码含6个Cargo文件和依赖修复原始证据，绑定77de6ca90ad842eb4b7b2921a4baa954f41cccfe。依赖Finding与新增场景归原workspace map，focused459及审计red/green不替代新完整门禁/独立审查/远端dependency-policy CI。
 
 
 本轮完整工程结果：依赖修复新23最终全部通过，第一次baselineancestor错误导致的真实test101及修复同命令attempt2通过均保留 evidence.framework-dependency-final-gate-archive。semantic写完后需针对baseline3再验；旧34d5 Gate/Audit只历史定位，新依赖源码局部review/工程绿不替代远端main或SDK消费者。
+
+
+Channel handler forward当前模型已归原extension/session边界与开放Finding；源码摘要包含本轮正式docs和原始evidencearchive，新retire/open23/80及full23/SDK/官网/main仍待，不借前23或历史79声明closed。
+
+
+Channel invocation本地三链现已闭合：same source d056完整23/current23/80回归及独立源码/receipt审查通过。仅新有限Behavior/Rule verified、具体Finding resolved，SDK/官网/目标main仍独立待交付，旧宽对象不由此verified。

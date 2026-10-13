@@ -1,0 +1,602 @@
+//! IM channel unified message types and trait definitions
+
+use async_trait::async_trait;
+use echo_core::agent::CancellationToken;
+pub use echo_core::error::ChannelError;
+pub use echo_core::error::ReactError;
+use echo_core::error::Result;
+use futures::stream::{BoxStream, StreamExt};
+use std::sync::{Arc, Mutex, MutexGuard};
+use tokio::sync::Notify;
+
+// ── Chat Type ────────────────────────────────────────────────────────────────
+
+/// Chat type: direct message / group
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChatType {
+    /// Direct message
+    Direct,
+    /// Group
+    Group,
+}
+
+impl std::fmt::Display for ChatType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ChatType::Direct => write!(f, "direct"),
+            ChatType::Group => write!(f, "group"),
+        }
+    }
+}
+
+// ── Multimedia Attachments ───────────────────────────────────────────────────
+
+/// Attachment type
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttachmentKind {
+    /// Image (PNG, JPEG, GIF, WebP, etc.)
+    Image,
+    /// File (PDF, DOC, TXT, etc.)
+    File,
+    /// Audio (MP3, WAV, OGG, etc.)
+    Audio,
+    /// Video (MP4, AVI, etc.)
+    Video,
+}
+
+/// Message attachment
+#[derive(Debug, Clone)]
+pub struct MessageAttachment {
+    /// Attachment type
+    pub kind: AttachmentKind,
+    /// Attachment binary data
+    pub data: Vec<u8>,
+    /// Filename (optional)
+    pub filename: Option<String>,
+}
+
+impl MessageAttachment {
+    pub fn new(kind: AttachmentKind, data: Vec<u8>) -> Self {
+        Self {
+            kind,
+            data,
+            filename: None,
+        }
+    }
+
+    pub fn with_filename(mut self, filename: impl Into<String>) -> Self {
+        self.filename = Some(filename.into());
+        self
+    }
+}
+
+// ── Inbound Message ──────────────────────────────────────────────────────────
+
+/// Message received from an IM platform
+#[derive(Debug, Clone)]
+pub struct InboundMessage {
+    /// Channel ID: "qqbot" | "feishu"
+    pub channel_id: String,
+    /// Canonical transport-scoped sender identity.
+    ///
+    /// QQ uses its raw openid. Feishu uses `open_id:{value}` or
+    /// `user_id:{value}` so distinct provider identity namespaces cannot
+    /// collide in session keys or callbacks.
+    pub sender_id: String,
+    /// Chat identifier (group_id for group chats, sender_id for direct messages)
+    pub chat_id: String,
+    /// Chat type
+    pub chat_type: ChatType,
+    /// Message text
+    pub text: String,
+    /// Platform original message ID (used for replies)
+    pub message_id: String,
+    /// Timestamp (Unix seconds)
+    pub timestamp: u64,
+    /// Message attachments (images, files, audio, video, etc.)
+    pub attachments: Vec<MessageAttachment>,
+}
+
+fn require_identity<'a>(
+    value: Option<&'a str>,
+    field: &str,
+) -> std::result::Result<&'a str, ChannelError> {
+    let value = value
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| ChannelError::Other(format!("missing channel message {field}")))?;
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(ChannelError::Other(format!(
+            "missing channel message {field}"
+        )));
+    }
+    if trimmed != value {
+        return Err(ChannelError::Other(format!(
+            "invalid channel message {field}: surrounding whitespace"
+        )));
+    }
+    Ok(value)
+}
+
+pub(crate) fn require_channel_id(value: Option<&str>) -> std::result::Result<&str, ChannelError> {
+    require_identity(value, "channel_id")
+}
+
+pub(crate) fn require_conversation_id(
+    value: Option<&str>,
+) -> std::result::Result<&str, ChannelError> {
+    require_identity(value, "conversation_id")
+}
+
+pub(crate) fn require_sender_id(value: Option<&str>) -> std::result::Result<&str, ChannelError> {
+    let sender_id = require_identity(value, "sender_id")?;
+    if sender_id.eq_ignore_ascii_case("unknown") {
+        return Err(ChannelError::Other(
+            "invalid channel message sender_id: unknown".to_string(),
+        ));
+    }
+    Ok(sender_id)
+}
+
+impl InboundMessage {
+    pub fn new(
+        channel_id: impl Into<String>,
+        sender_id: impl Into<String>,
+        chat_id: impl Into<String>,
+        chat_type: ChatType,
+        text: impl Into<String>,
+        message_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            channel_id: channel_id.into(),
+            sender_id: sender_id.into(),
+            chat_id: chat_id.into(),
+            chat_type,
+            text: text.into(),
+            message_id: message_id.into(),
+            timestamp: chrono::Utc::now().timestamp() as u64,
+            attachments: Vec::new(),
+        }
+    }
+
+    /// Add attachments
+    pub fn with_attachments(mut self, attachments: Vec<MessageAttachment>) -> Self {
+        self.attachments = attachments;
+        self
+    }
+
+    /// Stable conversation identity used for session/cache isolation.
+    pub fn conversation_id(&self) -> &str {
+        &self.chat_id
+    }
+
+    /// Transport target for replies to this conversation.
+    pub fn reply_target(&self) -> &str {
+        &self.chat_id
+    }
+}
+
+// ── Outbound Message ─────────────────────────────────────────────────────────
+
+struct ChannelDeliveryFenceState {
+    lifecycle: Mutex<ChannelDeliveryFenceLifecycle>,
+    settled: Notify,
+}
+
+struct ChannelDeliveryFenceLifecycle {
+    current_incarnation_id: Arc<str>,
+    retired: bool,
+    active_deliveries: usize,
+}
+
+/// Opaque process-local authority that fences one channel-session incarnation.
+///
+/// `SessionHandler` attaches this authority to its output. Built-in transports
+/// acquire a lease before queue or network admission, allowing reset to reject
+/// stale output and wait only for delivery that was already admitted.
+#[doc(hidden)]
+#[derive(Clone)]
+pub(super) struct ChannelDeliveryFence {
+    incarnation_id: Arc<str>,
+    state: Arc<ChannelDeliveryFenceState>,
+}
+
+impl std::fmt::Debug for ChannelDeliveryFence {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ChannelDeliveryFence")
+            .field("incarnation_id", &self.incarnation_id)
+            .field("retired", &self.is_retired())
+            .finish_non_exhaustive()
+    }
+}
+
+impl ChannelDeliveryFence {
+    pub(super) fn new(incarnation_id: String) -> Self {
+        let incarnation_id = Arc::from(incarnation_id);
+        Self {
+            incarnation_id: Arc::clone(&incarnation_id),
+            state: Arc::new(ChannelDeliveryFenceState {
+                lifecycle: Mutex::new(ChannelDeliveryFenceLifecycle {
+                    current_incarnation_id: incarnation_id,
+                    retired: false,
+                    active_deliveries: 0,
+                }),
+                settled: Notify::new(),
+            }),
+        }
+    }
+
+    fn lock_lifecycle(&self) -> MutexGuard<'_, ChannelDeliveryFenceLifecycle> {
+        match self.state.lifecycle.lock() {
+            Ok(lifecycle) => lifecycle,
+            Err(poisoned) => {
+                tracing::error!(
+                    incarnation_id = %self.incarnation_id,
+                    "channel delivery fence mutex was poisoned"
+                );
+                poisoned.into_inner()
+            }
+        }
+    }
+
+    /// Opaque incarnation identity owned by this fence.
+    pub(super) fn incarnation_id(&self) -> &str {
+        &self.incarnation_id
+    }
+
+    /// Whether this generation has stopped accepting new delivery.
+    pub(super) fn is_retired(&self) -> bool {
+        let lifecycle = self.lock_lifecycle();
+        lifecycle.retired || lifecycle.current_incarnation_id != self.incarnation_id
+    }
+
+    pub(super) fn rotate(&self, incarnation_id: String) -> Self {
+        let incarnation_id = Arc::from(incarnation_id);
+        self.lock_lifecycle().current_incarnation_id = Arc::clone(&incarnation_id);
+        Self {
+            incarnation_id,
+            state: Arc::clone(&self.state),
+        }
+    }
+
+    pub(super) fn has_active_deliveries(&self) -> bool {
+        self.lock_lifecycle().active_deliveries > 0
+    }
+
+    pub(super) fn begin_delivery(&self) -> Result<ChannelDeliveryPermit> {
+        let mut lifecycle = self.lock_lifecycle();
+        if lifecycle.retired || lifecycle.current_incarnation_id != self.incarnation_id {
+            return Err(ReactError::Channel(Box::new(ChannelError::StaleDelivery {
+                incarnation_id: self.incarnation_id().to_string(),
+            })));
+        }
+        lifecycle.active_deliveries =
+            lifecycle.active_deliveries.checked_add(1).ok_or_else(|| {
+                ReactError::Channel(Box::new(ChannelError::Other(
+                    "channel delivery lease capacity exhausted".to_string(),
+                )))
+            })?;
+        Ok(ChannelDeliveryPermit {
+            fence: self.clone(),
+        })
+    }
+
+    pub(super) fn retire(&self) {
+        self.lock_lifecycle().retired = true;
+    }
+
+    pub(super) async fn retire_and_wait(&self) {
+        self.retire();
+        loop {
+            let settled = self.state.settled.notified();
+            if !self.has_active_deliveries() {
+                return;
+            }
+            settled.await;
+        }
+    }
+}
+
+pub(crate) struct ChannelDeliveryPermit {
+    fence: ChannelDeliveryFence,
+}
+
+impl Drop for ChannelDeliveryPermit {
+    fn drop(&mut self) {
+        let settled = {
+            let mut lifecycle = self.fence.lock_lifecycle();
+            match lifecycle.active_deliveries.checked_sub(1) {
+                Some(active_deliveries) => {
+                    lifecycle.active_deliveries = active_deliveries;
+                    active_deliveries == 0
+                }
+                None => {
+                    tracing::error!(
+                        incarnation_id = %self.fence.incarnation_id(),
+                        "channel delivery lease counter underflow"
+                    );
+                    false
+                }
+            }
+        };
+        if settled {
+            self.fence.state.settled.notify_one();
+        }
+    }
+}
+
+/// Message to be sent to an IM platform
+#[derive(Debug, Clone)]
+pub struct OutboundMessage {
+    /// Target channel
+    pub channel_id: String,
+    /// Target identifier (user openid / group id)
+    pub to: String,
+    /// Chat type
+    pub chat_type: ChatType,
+    /// Reply text
+    pub text: String,
+    /// Message ID being replied to (at_reply)
+    pub reply_to: Option<String>,
+    /// Message attachments
+    pub attachments: Vec<MessageAttachment>,
+    /// Process-local generation authority used by framework channel delivery.
+    #[doc(hidden)]
+    pub(super) delivery_fence: Option<ChannelDeliveryFence>,
+}
+
+impl OutboundMessage {
+    pub fn new(
+        channel_id: impl Into<String>,
+        to: impl Into<String>,
+        chat_type: ChatType,
+        text: impl Into<String>,
+    ) -> Self {
+        Self {
+            channel_id: channel_id.into(),
+            to: to.into(),
+            chat_type,
+            text: text.into(),
+            reply_to: None,
+            attachments: Vec::new(),
+            delivery_fence: None,
+        }
+    }
+
+    pub fn with_reply_to(mut self, reply_to: impl Into<String>) -> Self {
+        self.reply_to = Some(reply_to.into());
+        self
+    }
+
+    /// Add attachments
+    pub fn with_attachments(mut self, attachments: Vec<MessageAttachment>) -> Self {
+        self.attachments = attachments;
+        self
+    }
+
+    pub(super) fn with_delivery_fence(mut self, fence: ChannelDeliveryFence) -> Self {
+        self.delivery_fence = Some(fence);
+        self
+    }
+
+    pub(super) fn begin_delivery(&self) -> Result<Option<ChannelDeliveryPermit>> {
+        self.delivery_fence
+            .as_ref()
+            .map(ChannelDeliveryFence::begin_delivery)
+            .transpose()
+    }
+}
+
+// ── ChannelPlugin Trait ─────────────────────────────────────────────────────
+
+/// Message handler — forwards IM messages to the Agent for processing
+#[async_trait]
+pub trait MessageHandler: Send + Sync {
+    /// Handle an inbound message, returning an outbound message
+    async fn handle(&self, msg: InboundMessage) -> Result<OutboundMessage>;
+
+    /// Send an outbound message back to the IM platform (implemented by the Channel itself)
+    async fn reply(&self, msg: OutboundMessage) -> Result<()>;
+
+    /// Run a single invocation with its exact cancellation child token.
+    /// Handlers that declare `settles_on_cancel` must override this to pass the
+    /// token into their real driver and return only after its actual receipt.
+    async fn handle_with_cancel(
+        &self,
+        msg: InboundMessage,
+        _cancel: CancellationToken,
+    ) -> Result<OutboundMessage> {
+        self.handle(msg).await
+    }
+
+    /// Reply with the caller's cancellation scope. The legacy default preserves
+    /// reply semantics; driven implementations retain their own actual receipt.
+    async fn reply_with_cancel(
+        &self,
+        msg: OutboundMessage,
+        _cancel: CancellationToken,
+    ) -> Result<()> {
+        self.reply(msg).await
+    }
+
+    /// Release handler-owned Agent and session resources after the transport
+    /// stops accepting messages and its in-flight deliveries settle.
+    /// Stateless handlers have no resources to release.
+    async fn close(&self) -> Result<()> {
+        Ok(())
+    }
+
+    /// 流式 handle:产出逐段 `OutboundMessage`。
+    ///
+    /// 默认实现:只 yield 一次 `handle` 的返回值(向后兼容,所有现有 impl 无需 override)。
+    /// 需要真流式(分段投递)的 handler override 此方法。
+    async fn handle_stream<'a>(
+        &'a self,
+        msg: InboundMessage,
+    ) -> Result<BoxStream<'a, Result<OutboundMessage>>> {
+        let out = self.handle(msg).await?;
+        Ok(futures::stream::once(async move { Ok(out) }).boxed())
+    }
+
+    /// Whether this handler settles a driven Turn after session cancellation.
+    ///
+    /// Session reset waits for opted-in handlers to finish their existing
+    /// invocation. Legacy/custom handlers retain their previous stream-drop
+    /// behavior unless they also implement `handle_stream_with_cancel`.
+    fn settles_on_cancel(&self) -> bool {
+        false
+    }
+
+    /// Run one stream with the owning session's cancellation lifetime.
+    async fn handle_stream_with_cancel<'a>(
+        &'a self,
+        msg: InboundMessage,
+        _cancel: CancellationToken,
+    ) -> Result<BoxStream<'a, Result<OutboundMessage>>> {
+        self.handle_stream(msg).await
+    }
+}
+
+/// Channel capability description
+#[derive(Debug)]
+pub struct ChannelCapabilities {
+    /// Supported chat types
+    pub chat_types: &'static [ChatType],
+    /// Whether media is supported (images/files)
+    pub supports_media: bool,
+    /// Whether topics/threads are supported
+    pub supports_threads: bool,
+}
+
+/// Unified interface for IM channel plugins
+#[async_trait]
+pub trait ChannelPlugin: Send + Sync {
+    /// Unique channel ID: "qqbot" | "feishu"
+    fn id(&self) -> &str;
+
+    /// Human-readable name
+    fn label(&self) -> &str {
+        self.id()
+    }
+
+    /// Capability description
+    fn capabilities(&self) -> &ChannelCapabilities;
+
+    /// Start the channel (establish connection / start server)
+    async fn start(&mut self, handler: Arc<dyn MessageHandler>) -> Result<()>;
+
+    /// Stop the channel
+    async fn stop(&mut self) -> Result<()>;
+
+    /// Send a message
+    async fn send(&self, msg: OutboundMessage) -> Result<()>;
+
+    /// Health check — verifies whether the channel is in normal working state.
+    ///
+    /// Returns Ok(()) by default; subclasses may override to perform more
+    /// complex checks (e.g. token validity, connection status, etc.).
+    async fn health_check(&self) -> Result<()> {
+        Ok(())
+    }
+}
+
+/// Channel context
+pub struct ChannelContext {
+    pub handler: Arc<dyn MessageHandler>,
+}
+
+impl ChannelContext {
+    pub fn new(handler: Arc<dyn MessageHandler>) -> Self {
+        Self { handler }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::StreamExt;
+
+    /// 只 impl `handle` 的 dummy handler —— 验证默认 `handle_stream` 行为。
+    struct OnceHandler {
+        reply_text: String,
+    }
+
+    #[async_trait]
+    impl MessageHandler for OnceHandler {
+        async fn handle(&self, msg: InboundMessage) -> Result<OutboundMessage> {
+            Ok(OutboundMessage::new(
+                &msg.channel_id,
+                msg.reply_target(),
+                msg.chat_type,
+                &self.reply_text,
+            ))
+        }
+        async fn reply(&self, _msg: OutboundMessage) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn default_handle_stream_yields_exactly_one_outbound() -> Result<()> {
+        let handler = OnceHandler {
+            reply_text: "hello".into(),
+        };
+        let msg = InboundMessage::new("qq", "u1", "c1", ChatType::Direct, "hi", "m1");
+        let mut stream = handler.handle_stream(msg).await?;
+
+        // 第一条 = handle 的返回值
+        let first = stream
+            .next()
+            .await
+            .ok_or_else(|| ReactError::Other("stream yielded no item".to_string()))??;
+        assert_eq!(first.text, "hello");
+        assert_eq!(first.channel_id, "qq");
+        assert_eq!(first.to, "c1");
+
+        // 之后不再有(恰好 1 条)
+        assert!(stream.next().await.is_none(), "default yields exactly one");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn retired_delivery_fence_waits_for_lease_and_rejects_new_admission() -> Result<()> {
+        let fence = ChannelDeliveryFence::new("incarnation-a".to_string());
+        let permit = fence.begin_delivery()?;
+        let retiring_fence = fence.clone();
+        let retirement = tokio::spawn(async move {
+            retiring_fence.retire_and_wait().await;
+        });
+        tokio::task::yield_now().await;
+        if retirement.is_finished() {
+            return Err(ReactError::Other(
+                "delivery fence retired before its active lease settled".to_string(),
+            ));
+        }
+
+        drop(permit);
+        retirement.await.map_err(|error| {
+            ReactError::Other(format!("delivery fence retirement task failed: {error}"))
+        })?;
+        if !fence.is_retired() {
+            return Err(ReactError::Other(
+                "delivery fence did not retain its retired state".to_string(),
+            ));
+        }
+        if !matches!(
+            fence.begin_delivery(),
+            Err(ReactError::Channel(ref error))
+                if matches!(
+                    error.as_ref(),
+                    ChannelError::StaleDelivery { incarnation_id }
+                        if incarnation_id == "incarnation-a"
+                )
+        ) {
+            return Err(ReactError::Other(
+                "retired delivery fence did not return the typed stale-generation error"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+}

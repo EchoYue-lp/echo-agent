@@ -55,6 +55,11 @@
 //! // Owned access ends the registry borrow before awaiting the original plugin.
 //! if let Some(channel) = manager.get_owned("qqbot") {
 //!     channel.health_check().await?;
+//!     // Forward input uses the original started handler, with one local token.
+//!     let cancel = echo_core::agent::CancellationToken::new();
+//!     let message = InboundMessage::new("qqbot", "sender", "chat", ChatType::Direct, "hello", "message-id");
+//!     let reply = channel.handle_message(message, cancel.clone()).await?;
+//!     channel.reply_message(reply, cancel).await?;
 //! }
 //! let shutdown = manager.stop_all_owned();
 //! shutdown.await?;
@@ -70,7 +75,7 @@ pub mod types;
 
 pub use channels::feishu::channel::{FeishuChannel, FeishuConfig};
 pub use channels::qq::channel::{QqChannel, QqConfig};
-pub use manager::{ChannelHandle, ChannelLifecycleResult, ChannelManager};
+pub use manager::{ChannelHandle, ChannelLifecycleResult, ChannelManager, ChannelMessageStream};
 pub use session::{
     ChannelSessionInstance, ChannelSessionRotation, SessionConfig, SessionEndInfo,
     SessionEndReason, SessionFactory, SessionHandler,
@@ -81,7 +86,9 @@ pub mod prelude {
     pub use super::ChannelPlugin;
     pub use super::channels::feishu::channel::{FeishuChannel, FeishuConfig};
     pub use super::channels::qq::channel::{QqChannel, QqConfig};
-    pub use super::manager::{ChannelHandle, ChannelLifecycleResult, ChannelManager};
+    pub use super::manager::{
+        ChannelHandle, ChannelLifecycleResult, ChannelManager, ChannelMessageStream,
+    };
     pub use super::session::{
         ChannelSessionInstance, ChannelSessionRotation, SessionConfig, SessionEndInfo,
         SessionEndReason, SessionFactory, SessionHandler,

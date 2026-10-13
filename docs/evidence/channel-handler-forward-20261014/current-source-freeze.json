@@ -1,0 +1,16 @@
+{
+  "head": "0f6926683d1ebde449857a4358797f2483ceaa74",
+  "main_predecessor": "77de6ca90ad842eb4b7b2921a4baa954f41cccfe",
+  "files": {
+    "echo-core/src/error.rs": "8fcfbac20224fcd0f17399e6ba2b4d71ac4ee845f79bb8b9f1f78eea8a4c97cf",
+    "echo-integration/src/channels/manager.rs": "bab117d7d2284cd7632051a76bcae1109dc0d16a5199ac7b32126eff27db5e3d",
+    "echo-integration/src/channels/session.rs": "7155998daebff3c7d1368553ee5aa633263a08222b4aca71cbc24fcedd4317db",
+    "echo-integration/src/channels/types.rs": "c594307402547b7bfd142a8acc3e413f1b4b0d1d1dc1a865bce866b078190970",
+    "echo-integration/src/channels/mod.rs": "54cd776fc6896a3c4378c6d888b8bba27073144c4e5d8cb9c9af1e3d6e6fe295",
+    "src/channels.rs": "9762743979515f79748899b8e0c91b07f3d783dea0d21a9f3eb8bf25521d58ce",
+    "docs/adr/0085-channel-handler-invocation-ownership.md": "9640f8c2aad0754c5ff2da1ac1b7b278f4fb6e0181db3458c7451393155cf1ba",
+    "docs/en/15-im-channels.md": "88c805180d91b50889d3c17210e6283bb12416b3b85527b210e6737dc12c0732",
+    "docs/zh/15-im-channels.md": "65ba5df9a2bc9076a3d518b26076b3ddaa9f50d8fed477352bbf3d0e3952f0bb"
+  },
+  "status": "retirement mutex fix needs new23/80/lint; prior logs historical"
+}
