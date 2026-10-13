@@ -1,0 +1,60 @@
+   Compiling echo_tools v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/database-describe-fidelity/echo-tools)
+    Finished `test` profile [unoptimized] target(s) in 17.52s
+     Running unittests src/lib.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/deps/echo_tools-8bb5dd48772585e3)
+
+running 6 tests
+test database::tests::writable_sql_never_qualifies_as_read_only ... ok
+PRAGMA column=cid declared=NULL actual=BIGINT is_null=false
+PRAGMA column=name declared=NULL actual=TEXT is_null=false
+PRAGMA column=type declared=NULL actual=TEXT is_null=false
+PRAGMA column=notnull declared=NULL actual=BIGINT is_null=false
+PRAGMA column=dflt_value declared=NULL actual=NULL is_null=true
+PRAGMA column=pk declared=NULL actual=BIGINT is_null=false
+PRAGMA column=cid declared=NULL actual=BIGINT is_null=false
+PRAGMA column=name declared=NULL actual=TEXT is_null=false
+PRAGMA column=type declared=NULL actual=TEXT is_null=false
+PRAGMA column=notnull declared=NULL actual=BIGINT is_null=false
+PRAGMA column=dflt_value declared=NULL actual=NULL is_null=true
+PRAGMA column=pk declared=NULL actual=BIGINT is_null=false
+PRAGMA column=cid declared=NULL actual=BIGINT is_null=false
+PRAGMA column=name declared=NULL actual=TEXT is_null=false
+PRAGMA column=type declared=NULL actual=TEXT is_null=false
+PRAGMA column=notnull declared=NULL actual=BIGINT is_null=false
+PRAGMA column=dflt_value declared=NULL actual=TEXT is_null=false
+PRAGMA column=pk declared=NULL actual=BIGINT is_null=false
+PRAGMA column=cid declared=NULL actual=BIGINT is_null=false
+PRAGMA column=name declared=NULL actual=TEXT is_null=false
+PRAGMA column=type declared=NULL actual=TEXT is_null=false
+PRAGMA column=notnull declared=NULL actual=BIGINT is_null=false
+PRAGMA column=dflt_value declared=NULL actual=NULL is_null=true
+PRAGMA column=pk declared=NULL actual=BIGINT is_null=false
+Error: 
+thread 'database::tests::sqlite_expression_cells_use_each_rows_runtime_type' (129406000) panicked at echo-tools/src/database.rs:900:9:
+assertion `left == right` failed
+  left: [[Null], [Null], [Null], [Null], [Null], [Null]]
+ right: [[Null], [Number(9223372036854775807)], [Number(-9223372036854775808)], [Number(1.25)], [String("中文🙂")], [Object {"data": String("AP8="), "encoding": String("base64"), "type": String("binary")}]]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+Other("infinite number must not become JSON null")
+Error: Other("missing SQLx cell must fail decoding")
+test database::tests::sqlite_non_finite_number_is_an_explicit_decode_error ... FAILED
+test database::tests::database_json_reports_missing_cells_instead_of_default_null ... FAILED
+
+thread 'database::tests::sqlite_describe_preserves_pragma_values_and_database_bytes' (129405999) panicked at echo-tools/src/database.rs:876:9:
+assertion `left == right` failed
+  left: Object {"columns": Array [String("cid"), String("name"), String("type"), String("notnull"), String("dflt_value"), String("pk")], "rows": Array [Array [Null, Null, Null, Null, Null, Null], Array [Null, Null, Null, Null, Null, Null], Array [Null, Null, Null, Null, Null, Null], Array [Null, Null, Null, Null, Null, Null]], "total_rows": Number(4)}
+ right: Object {"columns": Array [String("cid"), String("name"), String("type"), String("notnull"), String("dflt_value"), String("pk")], "rows": Array [Array [Number(0), String("id"), String("INTEGER"), Number(0), Null, Number(1)], Array [Number(1), String("label"), String("TEXT"), Number(1), Null, Number(0)], Array [Number(2), String("quantity"), String("INTEGER"), Number(0), String("7"), Number(0)], Array [Number(3), String("note"), String("TEXT"), Number(0), Null, Number(0)]], "total_rows": Number(4)}
+test database::tests::sqlite_page_is_bounded_and_preserves_typed_cells ... ok
+test database::tests::sqlite_describe_preserves_pragma_values_and_database_bytes ... FAILED
+test database::tests::sqlite_expression_cells_use_each_rows_runtime_type ... FAILED
+
+failures:
+
+failures:
+    database::tests::database_json_reports_missing_cells_instead_of_default_null
+    database::tests::sqlite_describe_preserves_pragma_values_and_database_bytes
+    database::tests::sqlite_expression_cells_use_each_rows_runtime_type
+    database::tests::sqlite_non_finite_number_is_an_explicit_decode_error
+
+test result: FAILED. 2 passed; 4 failed; 0 ignored; 0 measured; 212 filtered out; finished in 0.15s
+
+error: test failed, to rerun pass `-p echo_tools --lib`

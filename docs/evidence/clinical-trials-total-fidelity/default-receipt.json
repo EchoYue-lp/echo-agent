@@ -1,0 +1,11 @@
+{
+  "url": "https://clinicaltrials.gov/api/v2/studies?query.term=agent+artificial+intelligence&pageSize=1&format=json",
+  "status": 200,
+  "totalCount_present": false,
+  "totalCount": null,
+  "study_count": 1,
+  "response_fields": [
+    "studies",
+    "nextPageToken"
+  ]
+}

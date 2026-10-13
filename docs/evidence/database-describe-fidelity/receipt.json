@@ -1,0 +1,190 @@
+{
+  "schemaVersion": 1,
+  "baseRevision": "77de6ca90ad842eb4b7b2921a4baa954f41cccfe",
+  "worktree": "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/database-describe-fidelity",
+  "branch": "fix/Echoyue/database-describe-fidelity",
+  "scope": [
+    "database runtime value conversion",
+    "RAG Unicode scalar preview metadata"
+  ],
+  "globalClosure": "not_checked",
+  "publication": "not_delivered",
+  "sourceSha256": {
+    "echo-tools/src/database.rs": "a53610a7f1f3250a749eff3306aebe577157b4984bc572e9589da66bffdf3a0a",
+    "echo-tools/src/rag.rs": "d7dacc2133e935b982237807cbb13b7b3de7d11cbdb85d4662793f357bd77f6f",
+    "docs/en/02-tools.md": "e94d1775317637ff2d55e05eb2612d453af27682f5c546772b3d3660f77ca774",
+    "docs/zh/02-tools.md": "b4abf1e3db0d7eacbd5dfac4f7d81a70e4cacabd65b5785dd9c06c3b0256ecad",
+    "docs/en/42-database-tools.md": "f25bcfc8d4cd7673d1602ad54685369e6d2a977db409527102089c7730889bab",
+    "docs/zh/42-database-tools.md": "7e5b1db81de60942e612de899d7e8eb436622641b6ca98b654099eeeca8a9506"
+  },
+  "before": {
+    "database": {
+      "log": "before.log",
+      "exitCode": 101,
+      "passed": 2,
+      "failed": 4,
+      "ignored": 0
+    },
+    "rag": {
+      "log": "rag-before.log",
+      "exitCode": 101,
+      "passed": 0,
+      "failed": 2,
+      "ignored": 0
+    }
+  },
+  "after": {
+    "database": {
+      "log": "after.log",
+      "exitCode": 0,
+      "passed": 6,
+      "failed": 0,
+      "ignored": 0
+    },
+    "rag": {
+      "log": "rag-after.log",
+      "exitCode": 0,
+      "passed": 2,
+      "failed": 0,
+      "ignored": 0
+    }
+  },
+  "gates": [
+    {
+      "log": "format.log",
+      "exitCode": 0
+    },
+    {
+      "log": "format-check.log",
+      "exitCode": 0
+    },
+    {
+      "log": "clippy.log",
+      "exitCode": 0
+    },
+    {
+      "log": "panic-lints.log",
+      "exitCode": 0
+    }
+  ],
+  "unsuccessfulFixtureAttempts": [
+    {
+      "log": "before-fixture-compilation-error.log",
+      "classification": "fixture_compilation_error",
+      "cause": "sqlx outer crate does not re-export AnyValueKind; no new dependency introduced; fixture replaced"
+    },
+    {
+      "log": "before-three-behavior-failures-one-url-fixture-error.log",
+      "classification": "three_behavior_failures_one_fixture_url_error",
+      "cause": "AnyPool rejected sqlite://:memory: empty host; corrected to local temporary SQLite file before final four-behavior-failure proof"
+    }
+  ],
+  "limitations": [
+    "No PostgreSQL/MySQL runtime server evidence; original native Bool/SmallInt/Integer decoder paths remain fallible and unchanged",
+    "No actual SDK Host or three-language consumer after-fix evidence in this lane",
+    "Full latest-main workspace gates, independent review, CI and precise published-main acceptance remain required"
+  ],
+  "commands": [
+    [
+      "cargo",
+      "test",
+      "-p",
+      "echo_tools",
+      "--all-features",
+      "database::tests",
+      "--locked",
+      "--",
+      "--nocapture"
+    ],
+    [
+      "cargo",
+      "test",
+      "-p",
+      "echo_tools",
+      "--all-features",
+      "rag::tests",
+      "--locked",
+      "--",
+      "--nocapture"
+    ],
+    [
+      "cargo",
+      "fmt",
+      "--all"
+    ],
+    [
+      "cargo",
+      "fmt",
+      "--all",
+      "--",
+      "--check"
+    ],
+    [
+      "cargo",
+      "clippy",
+      "-p",
+      "echo_tools",
+      "--all-targets",
+      "--all-features",
+      "--locked",
+      "--",
+      "-D",
+      "warnings"
+    ],
+    [
+      "cargo",
+      "clippy",
+      "-p",
+      "echo_tools",
+      "--lib",
+      "--bins",
+      "--all-features",
+      "--locked",
+      "--",
+      "-D",
+      "clippy::unwrap_used",
+      "-D",
+      "clippy::expect_used",
+      "-D",
+      "clippy::panic",
+      "-D",
+      "clippy::unreachable"
+    ]
+  ],
+  "archivedSources": {
+    "after-database.source-base64.txt": {
+      "decodedSha256": "a53610a7f1f3250a749eff3306aebe577157b4984bc572e9589da66bffdf3a0a",
+      "encoding": "base64",
+      "decodedFileName": "after-database.rs"
+    },
+    "after-rag.source-base64.txt": {
+      "decodedSha256": "d7dacc2133e935b982237807cbb13b7b3de7d11cbdb85d4662793f357bd77f6f",
+      "encoding": "base64",
+      "decodedFileName": "after-rag.rs"
+    },
+    "before-database.source-base64.txt": {
+      "decodedSha256": "ca2e5412057fd3f0ecee879e15c23bc17f544a2d726efb6e85181cdbae16b4af",
+      "encoding": "base64",
+      "decodedFileName": "before-database.rs"
+    },
+    "before-fixture-compilation-error.source-base64.txt": {
+      "decodedSha256": "a24fff5b86e3c73036b94ab07fccdb2c41087a3ad748bfb7ed2609b860a1599e",
+      "encoding": "base64",
+      "decodedFileName": "before-fixture-compilation-error.rs"
+    },
+    "before-rag.source-base64.txt": {
+      "decodedSha256": "9287acf8a22c11285c3760bba41f1bee612ff4a16c2edd9a3b14c31817bc2a90",
+      "encoding": "base64",
+      "decodedFileName": "before-rag.rs"
+    },
+    "before-three-behavior-failures-one-url-fixture-error.source-base64.txt": {
+      "decodedSha256": "c35c3f1145e55b83fbc18bc6ed7f02e1771014923921f3b99e0fda08cea38cb8",
+      "encoding": "base64",
+      "decodedFileName": "before-three-behavior-failures-one-url-fixture-error.rs"
+    }
+  },
+  "unsuccessfulSemanticAttempt": {
+    "log": "semantic-archive-classification-error.log",
+    "classification": "whole-source evidence archives were misclassified as newly added production Rust APIs and RagStore authority; reversible base64 archives now retain exact bytes without becoming duplicate compilable source files"
+  }
+}

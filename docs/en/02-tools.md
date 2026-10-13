@@ -568,12 +568,20 @@ agent.add_tools(vec![
 | `bibtex_generate` | research | Generate BibTeX from paper metadata (requires `research` feature) |
 | `rag_index` | rag | Chunk and vector-index documents (requires `rag` feature) |
 | `rag_search` | rag | Semantic search over indexed documents (requires `rag` feature) |
+| `rag_chunk_document` | rag | Preview document chunks without indexing (requires `rag` feature) |
 | `excel_read` / `excel_write` / ... | media | Excel read/write/profile (6 tools, requires `media` feature) |
 | `data_read` / `data_filter` / ... | data | Polars data analysis (13 tools, requires `data` feature) |
 | `generate_chart` | chart | Chart generation (requires `chart` feature) |
 | `db_query` / `db_schema` | database | SQL database tools (requires `database` feature) |
 
 See: `echo-agent-learning/examples/demo01_tools.rs`, `echo-agent-learning/examples/demo09_file_shell.rs`, `echo-agent-learning/examples/demo13_tool_execution.rs`, `echo-agent-learning/tests/example_contracts/demo64_tool_pipeline.rs`
+
+`rag_chunk_document` uses Unicode scalar values for `chunk_size`, `overlap`, and
+each chunk's `char_count`. Its `preview` contains up to 200 scalars and
+`truncated` is true only when that preview omits scalars. For example,
+`中文😀甲` has `char_count: 4`, and 70 Chinese characters are not truncated even
+though their UTF-8 encoding occupies 210 bytes. This preview operation does not
+modify the RAG index.
 
 ---
 

@@ -80,22 +80,33 @@ postgresql://user:password@host:port/database
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `connection` | string | ✅ | 数据库连接字符串 |
-| `table` | string | ✅ | 表名 |
+| `connection_url` | string | ✅ | 数据库连接字符串 |
+| `table_name` | string | ✅ | 表名 |
 
 ### 输出格式
 
+输出保留各数据库 schema 查询的原始列名，每一行是按列顺序排列的数组。例如 SQLite
+对 `records(id INTEGER PRIMARY KEY, label TEXT NOT NULL, quantity INTEGER DEFAULT 7, note TEXT)`
+执行 `PRAGMA table_info` 后返回：
+
 ```json
 {
-  "columns": ["column_name", "data_type", "nullable"],
+  "columns": ["cid", "name", "type", "notnull", "dflt_value", "pk"],
   "rows": [
-    {"column_name": "id", "data_type": "INTEGER", "nullable": false},
-    {"column_name": "name", "data_type": "VARCHAR(255)", "nullable": false},
-    {"column_name": "email", "data_type": "VARCHAR(255)", "nullable": true}
+    [0, "id", "INTEGER", 0, null, 1],
+    [1, "label", "TEXT", 1, null, 0],
+    [2, "quantity", "INTEGER", 0, "7", 0],
+    [3, "note", "TEXT", 0, null, 0]
   ],
-  "total_rows": 3
+  "total_rows": 4
 }
 ```
+
+数据库工具按单元格实际的 SQLx 类型和空值状态解码，包括列声明类型未知的 SQLite
+表达式和 PRAGMA 结果。SQL NULL 转为 JSON `null`，整数、有限浮点数和 UTF-8 文本保留
+原值，BLOB 使用 `{"type":"binary","encoding":"base64","data":"..."}`。
+解码失败或非有限浮点数返回明确错误，不填充 `null`。表结构查询与 SQL 查询共用框架
+已有转换器，SDK 客户端调用该转换器，不另设解码权威。
 
 ---
 

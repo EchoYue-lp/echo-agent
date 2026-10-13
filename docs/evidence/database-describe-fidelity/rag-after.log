@@ -1,0 +1,15 @@
+    Finished `test` profile [unoptimized] target(s) in 0.69s
+     Running unittests src/lib.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/deps/echo_tools-8bb5dd48772585e3)
+
+running 2 tests
+test rag::tests::rag_preview_counts_unicode_scalars ... ok
+test rag::tests::rag_preview_truncation_matches_the_scalar_preview_boundary ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 216 filtered out; finished in 0.00s
+
+     Running tests/macro_core_path.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/deps/macro_core_path-abcc61becdfba799)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
