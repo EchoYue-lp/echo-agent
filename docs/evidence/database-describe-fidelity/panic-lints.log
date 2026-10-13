@@ -1,0 +1,4 @@
+    Checking echo_core v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/database-describe-fidelity/echo-core)
+   Compiling echo_macros v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/database-describe-fidelity/echo-macros)
+    Checking echo_tools v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/database-describe-fidelity/echo-tools)
+    Finished `dev` profile [unoptimized] target(s) in 6.63s

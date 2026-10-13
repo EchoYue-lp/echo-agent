@@ -472,12 +472,15 @@ impl Tool for RagChunkDocumentTool {
                 .iter()
                 .enumerate()
                 .map(|(i, chunk)| {
+                    // Chunk sizes and preview limits use Unicode scalars; byte
+                    // lengths would misreport both Chinese text and emoji.
+                    let char_count = chunk.chars().count();
                     let preview: String = chunk.chars().take(200).collect();
                     serde_json::json!({
                         "index": i + 1,
-                        "char_count": chunk.len(),
+                        "char_count": char_count,
                         "preview": preview,
-                        "truncated": chunk.len() > 200,
+                        "truncated": char_count > 200,
                     })
                 })
                 .collect();
@@ -490,5 +493,76 @@ impl Tool for RagChunkDocumentTool {
             });
             Ok(ToolResult::success_json(result))
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use echo_core::error::ReactError;
+
+    async fn preview(content: &str) -> Result<Value> {
+        let result = RagChunkDocumentTool
+            .execute(ToolParameters::from([
+                ("content".to_string(), serde_json::json!(content)),
+                ("chunk_size".to_string(), serde_json::json!(1000)),
+                ("overlap".to_string(), serde_json::json!(0)),
+            ]))
+            .await?;
+        assert!(result.success, "{}", result.output);
+        serde_json::from_str(&result.output).map_err(|error| ReactError::Other(error.to_string()))
+    }
+
+    #[tokio::test]
+    async fn rag_preview_counts_unicode_scalars() -> Result<()> {
+        for (text, count) in [("中文😀甲", 4), ("plain ASCII", 11)] {
+            let data = preview(text).await?;
+            let chunk = data
+                .get("chunks")
+                .and_then(Value::as_array)
+                .and_then(|chunks| chunks.first());
+            assert_eq!(
+                chunk.and_then(|chunk| chunk.get("char_count")),
+                Some(&serde_json::json!(count))
+            );
+            assert_eq!(
+                chunk.and_then(|chunk| chunk.get("preview")),
+                Some(&serde_json::json!(text))
+            );
+            assert_eq!(
+                chunk.and_then(|chunk| chunk.get("truncated")),
+                Some(&serde_json::json!(false))
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rag_preview_truncation_matches_the_scalar_preview_boundary() -> Result<()> {
+        for (text, expected_preview, count, truncated) in [
+            ("中".repeat(70), "中".repeat(70), 70, false),
+            ("中".repeat(200), "中".repeat(200), 200, false),
+            ("中".repeat(201), "中".repeat(200), 201, true),
+            ("a".repeat(201), "a".repeat(200), 201, true),
+        ] {
+            let data = preview(&text).await?;
+            let chunk = data
+                .get("chunks")
+                .and_then(Value::as_array)
+                .and_then(|chunks| chunks.first());
+            assert_eq!(
+                chunk.and_then(|chunk| chunk.get("truncated")),
+                Some(&serde_json::json!(truncated))
+            );
+            assert_eq!(
+                chunk.and_then(|chunk| chunk.get("char_count")),
+                Some(&serde_json::json!(count))
+            );
+            assert_eq!(
+                chunk.and_then(|chunk| chunk.get("preview")),
+                Some(&serde_json::json!(expected_preview))
+            );
+        }
+        Ok(())
     }
 }

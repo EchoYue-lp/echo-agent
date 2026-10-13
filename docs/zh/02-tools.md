@@ -555,12 +555,18 @@ agent.add_tools(vec![
 | `bibtex_generate` | research | 从论文元数据生成 BibTeX（需 `research` feature） |
 | `rag_index` | rag | 文档分块和向量索引（需 `rag` feature） |
 | `rag_search` | rag | 索引文档的语义搜索（需 `rag` feature） |
+| `rag_chunk_document` | rag | 预览文档分块，不写入索引（需 `rag` feature） |
 | `excel_read` / `excel_write` / ... | media | Excel 读写/分析（6 个工具，需 `media` feature） |
 | `data_read` / `data_filter` / ... | data | Polars 数据分析（13 个工具，需 `data` feature） |
 | `generate_chart` | chart | 图表生成（需 `chart` feature） |
 | `db_query` / `db_schema` | database | SQL 数据库工具（需 `database` feature） |
 
 对应示例：`echo-agent-learning/examples/demo01_tools.rs`、`echo-agent-learning/examples/demo09_file_shell.rs`、`echo-agent-learning/examples/demo13_tool_execution.rs`、`echo-agent-learning/tests/example_contracts/demo64_tool_pipeline.rs`
+
+`rag_chunk_document` 的 `chunk_size`、`overlap` 和每个块的 `char_count` 均以 Unicode
+标量值计数。`preview` 最多包含 200 个标量值，仅在省略了字符时 `truncated` 才为 true。
+例如 `中文😀甲` 的 `char_count` 为 4；70 个中文字符虽然占 210 个 UTF-8 字节，预览仍
+完整，`truncated` 为 false。该预览操作不修改 RAG 索引。
 
 ---
 

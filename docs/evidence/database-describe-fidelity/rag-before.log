@@ -1,0 +1,27 @@
+    Finished `test` profile [unoptimized] target(s) in 0.64s
+     Running unittests src/lib.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/deps/echo_tools-8bb5dd48772585e3)
+
+running 2 tests
+
+thread 'rag::tests::rag_preview_counts_unicode_scalars' (129406073) panicked at echo-tools/src/rag.rs:519:13:
+assertion `left == right` failed
+  left: Some(Number(13))
+ right: Some(Number(4))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'rag::tests::rag_preview_truncation_matches_the_scalar_preview_boundary' (129406074) panicked at echo-tools/src/rag.rs:536:13:
+assertion `left == right` failed
+  left: Some(Bool(true))
+ right: Some(Bool(false))
+test rag::tests::rag_preview_truncation_matches_the_scalar_preview_boundary ... FAILED
+test rag::tests::rag_preview_counts_unicode_scalars ... FAILED
+
+failures:
+
+failures:
+    rag::tests::rag_preview_counts_unicode_scalars
+    rag::tests::rag_preview_truncation_matches_the_scalar_preview_boundary
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 216 filtered out; finished in 0.03s
+
+error: test failed, to rerun pass `-p echo_tools --lib`

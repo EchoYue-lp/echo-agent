@@ -80,22 +80,35 @@ postgresql://user:password@host:port/database
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `connection` | string | ✅ | Database connection string |
-| `table` | string | ✅ | Table name |
+| `connection_url` | string | ✅ | Database connection string |
+| `table_name` | string | ✅ | Table name |
 
 ### Output Format
 
+The output preserves each backend's schema query column names and returns rows
+as arrays in that column order. For SQLite, `PRAGMA table_info` on
+`records(id INTEGER PRIMARY KEY, label TEXT NOT NULL, quantity INTEGER DEFAULT 7, note TEXT)` returns:
+
 ```json
 {
-  "columns": ["column_name", "data_type", "nullable"],
+  "columns": ["cid", "name", "type", "notnull", "dflt_value", "pk"],
   "rows": [
-    {"column_name": "id", "data_type": "INTEGER", "nullable": false},
-    {"column_name": "name", "data_type": "VARCHAR(255)", "nullable": false},
-    {"column_name": "email", "data_type": "VARCHAR(255)", "nullable": true}
+    [0, "id", "INTEGER", 0, null, 1],
+    [1, "label", "TEXT", 1, null, 0],
+    [2, "quantity", "INTEGER", 0, "7", 0],
+    [3, "note", "TEXT", 0, null, 0]
   ],
-  "total_rows": 3
+  "total_rows": 4
 }
 ```
+
+Database Tools use each cell's runtime SQLx type and nullability, including
+SQLite expressions and PRAGMA results whose column declarations may be unknown.
+SQL NULL becomes JSON `null`; integers, finite numbers and UTF-8 strings retain
+their values. BLOBs use `{"type":"binary","encoding":"base64","data":"..."}`.
+A failed cell decode or non-finite number is an explicit error, never a
+replacement `null`. The existing framework converter is shared by schema
+inspection and SQL query results; SDK clients delegate to it.
 
 ---
 
