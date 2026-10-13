@@ -116,12 +116,15 @@ let agent = ReactAgentBuilder::new()
 2. 根据已提交依赖和状态计算 ready frontier。
 3. 使用版本、attempt、规格 hash 和唯一 claim id 原子领取任务。
 4. 分派有界、无冲突的 Subagent wave。
-5. 以 compare-and-set 语义完成或放弃每个 claim。
+5. 每个 attempt join 后立即通过 compare-and-set 结算，不等待同 wave 的其它活跃 sibling。
 6. 在 wave 边界结算 typed 取消或可恢复暂停 receipt。
 7. 在下一 safe point 重新加载，使新版本生效。
 
 controller 是持久化、Subagent 调度、review 和产品资源策略的薄应用适配器，
-不得重新实现 ready-frontier 主循环或第二套依赖状态机。
+不得重新实现 ready-frontier 主循环或第二套依赖状态机。已 join attempt 的 review、
+CAS 与 cleanup future 与 dispatch join、root cancellation grace 并行受监督，慢 review
+或 Store 不得阻塞其它精确控制；未知提交结果的 CAS 保留 owner，不为取消期限直接丢弃。
+下一 wave 仍等待所有 settlement receipt。
 
 服务统一处理传递失败阻塞、跳过与暂停、有界重试、取消结算、过时 claim 和
 停滞检测。dispatch resolution 保留 `Failed` 与 `TimedOut` 两种不同终态；requeue
@@ -133,6 +136,29 @@ review、缺少输入等显式产品策略。暂停会清除 claim，恢复到 P
 Skipped 依赖以 typed waiver 传给 Subagent，不会伪造依赖输出。attempt 级 claim
 identity 可防止旧 dispatch 覆盖重新领取后的结果。
 
+### 同一 Store 的执行与结果恢复
+
+CRUD 与运行时均进入同一个 `TaskRevisionService` 注册的 Store。可执行 backend
+实现 `RevisionedTaskStore::compare_and_commit_execution`：原子比较 relation revision
+和完整 execution map，保持任务规格、顺序及 context 不变，在相同关系版本提交执行
+事实。backend 通过无副作用的 `supports_runtime_execution()` 声明执行支持，默认 false；
+可执行 backend 显式 opt in。仅支持 CRUD 的 backend 在 runtime load/mutation 前明确
+返回 `Unsupported`，不会旁路到另一张内存图。
+
+有输出合同的任务使用 `RuntimeTaskResolutionRequest::CompletedWithResult`；
+`TaskExecution.result` 与 Completed 在同一事务提交，图恢复时依赖结果也随之恢复。
+缺失的 `None` 与显式提供的 JSON null 不同。adapter 必须做 typed decode，对缺失或
+不合法结果返回明确错误，不能制造成功数据；Team 结果读取直接使用这张图。
+
+单 claim 控制先通过 `TaskRevisionService::request_runtime_task_interruption` 持久化
+Cancelled/Paused 请求，再调用 `RuntimeTaskService::request_attempt_interrupt` 投影
+到运行中的精确 attempt。过时请求返回 false，不能控制新 attempt；请求与迟到结果
+由同一 execution CAS 排序。局部任务停止只约束本节点和后代，其它 ready root 与
+后续 wave 继续运行；明确的 run cancellation token 才触发全 run 结算。Cancelled 的优先级高于 Paused：
+run 暂停结算必须保留已接受的单任务取消终态，checkpoint 恢复和 resume 不得复活它。
+
+取舍与 backend 合同见 [ADR 0060](../adr/0060-task-execution-store-cas-and-local-interruption.md)。
+
 ## 投影与进度
 
 `TaskEvent` 和 `TaskProgress` 是面向消费者的投影。应用可从已提交 extension
@@ -141,3 +167,9 @@ identity 可防止旧 dispatch 覆盖重新领取后的结果。
 
 公开 service 构造见 `tests/facade_smoke.rs`，确定性 controller 行为见私有
 `runtime_executor` 测试。
+
+`RuntimeTaskService::execute` 的调用方 future 被 drop 后，同一个 framework driver
+仍持有 claim/reservation、物理 dispatch join 和 CAS 结算。调用方退出只取消传入 token
+的 child scope；结果必须来自规范结算或明确的未知权威。后端已提交 claim 却在返回
+identity 前 unwind 时保留 Running，等待后端 owner/fencing 或权威收据恢复，不猜测
+重试或终态。见 [ADR 0060](../adr/0060-task-execution-store-cas-and-local-interruption.md)。

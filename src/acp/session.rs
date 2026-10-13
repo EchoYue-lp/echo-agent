@@ -228,6 +228,66 @@ impl AcpSession {
         })
     }
 
+    /// Reserve this Session's native Turn identities before admitting a Run
+    /// after recovery. The framework owns the `<session>:turn:<n>` namespace;
+    /// adapters pass persisted identities without interpreting or replacing them.
+    ///
+    /// All identities must belong to this Session and contain a positive,
+    /// canonical decimal `u64`. A restored `u64::MAX` frontier keeps history
+    /// available while subsequent Turn admission reports exhaustion. Validation is
+    /// atomic with allocation: an invalid batch, active Turn, or closed Session
+    /// leaves the allocation frontier unchanged. Repeated reservations are
+    /// idempotent and never lower an existing frontier. This operation neither
+    /// resumes historical execution nor changes its receipt or journal.
+    ///
+    /// ```
+    /// # #[cfg(feature = "acp")]
+    /// # fn restore(session: &echo_agent::acp::AcpSession, persisted_ids: &[String])
+    /// #     -> echo_agent::error::Result<()> {
+    /// session.reserve_recovered_turn_ids(persisted_ids)?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn reserve_recovered_turn_ids(&self, run_ids: &[String]) -> Result<()> {
+        let mut slot = self.turn.lock().unwrap_or_else(|error| error.into_inner());
+        if self.closed.load(Ordering::Acquire) {
+            return Err(ReactError::Other("ACP Session is closed".to_string()));
+        }
+        if slot.active.is_some() {
+            return Err(ReactError::Other(
+                "ACP Session cannot reserve recovered Turn identities while a Turn is active"
+                    .to_string(),
+            ));
+        }
+        let prefix = format!("{}:turn:", self.context.session_id);
+        let mut recovered_sequence = slot.next_sequence;
+        for run_id in run_ids {
+            let sequence_text = run_id.strip_prefix(&prefix).ok_or_else(|| {
+                ReactError::Other(
+                    "Recovered ACP Turn identity does not belong to this Session namespace"
+                        .to_string(),
+                )
+            })?;
+            let sequence = sequence_text.parse::<u64>().map_err(|_| {
+                ReactError::Other(
+                    "Recovered ACP Turn identity must contain a canonical positive u64 sequence"
+                        .to_string(),
+                )
+            })?;
+            if sequence == 0 || sequence_text != sequence.to_string() {
+                return Err(ReactError::Other(
+                    "Recovered ACP Turn identity must contain a canonical positive u64 sequence"
+                        .to_string(),
+                ));
+            }
+            recovered_sequence = recovered_sequence.max(sequence);
+        }
+        // Commit only after every identity validates. A partial recovery must
+        // not change future allocation when its caller rolls back publication.
+        slot.next_sequence = recovered_sequence;
+        Ok(())
+    }
+
     pub fn cancel_active(&self) -> bool {
         let cancel = self
             .turn
@@ -858,6 +918,164 @@ mod tests {
             client_capabilities: ClientCapabilities::default(),
             meta: None,
         }
+    }
+
+    fn recovery_session(id: &str) -> Arc<AcpSession> {
+        Arc::new(AcpSession::new(
+            context(id),
+            Box::new(CloseProbeAgent {
+                hang: false,
+                close_started: Arc::new(AtomicBool::new(false)),
+            }),
+        ))
+    }
+
+    #[test]
+    fn recovered_turn_reservation_continues_after_persisted_identity() -> Result<()> {
+        let session = recovery_session("恢复:🧭");
+        session.reserve_recovered_turn_ids(&["恢复:🧭:turn:1".to_string()])?;
+        let turn = session.begin_turn()?;
+        assert_eq!(turn.turn.id(), "恢复:🧭:turn:2");
+        assert_eq!(turn.turn.message_id, "恢复:🧭:message:2");
+        Ok(())
+    }
+
+    #[test]
+    fn recovered_turn_reservation_is_idempotent_and_never_lowers_frontier() -> Result<()> {
+        let session = recovery_session("resume");
+        let persisted = vec!["resume:turn:9".to_string(), "resume:turn:3".to_string()];
+        session.reserve_recovered_turn_ids(&persisted)?;
+        session.reserve_recovered_turn_ids(&persisted)?;
+        let turn = session.begin_turn()?;
+        assert_eq!(turn.turn.id(), "resume:turn:10");
+        drop(turn);
+        session.reserve_recovered_turn_ids(&["resume:turn:1".to_string()])?;
+        session.reserve_recovered_turn_ids(&[])?;
+        assert_eq!(session.begin_turn()?.turn.id(), "resume:turn:11");
+        Ok(())
+    }
+
+    #[test]
+    fn recovered_turn_reservation_rejects_invalid_batch_without_partial_commit() -> Result<()> {
+        for invalid in [
+            "other:turn:2",
+            "resume:task:2",
+            "resume:turn:0",
+            "resume:turn:01",
+            "resume:turn:+1",
+            "resume:turn:1:extra",
+            "resume:turn:🧭",
+            "resume:turn:18446744073709551616",
+        ] {
+            let session = recovery_session("resume");
+            assert!(
+                session
+                    .reserve_recovered_turn_ids(&[
+                        "resume:turn:17".to_string(),
+                        invalid.to_string(),
+                    ])
+                    .is_err(),
+                "invalid recovered identity was accepted: {invalid}"
+            );
+            assert_eq!(session.begin_turn()?.turn.id(), "resume:turn:1");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn recovered_turn_reservation_preserves_checked_last_allocation() -> Result<()> {
+        let session = recovery_session("boundary");
+        let before_last = u64::MAX.saturating_sub(1);
+        session.reserve_recovered_turn_ids(&[format!("boundary:turn:{before_last}")])?;
+        let turn = session.begin_turn()?;
+        assert_eq!(turn.turn.id(), format!("boundary:turn:{}", u64::MAX));
+        drop(turn);
+        assert!(session.begin_turn().is_err());
+        session.reserve_recovered_turn_ids(&["boundary:turn:1".to_string()])?;
+        assert!(session.begin_turn().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn recovered_turn_reservation_restores_last_native_identity_without_admission() -> Result<()> {
+        let original = recovery_session("exhausted");
+        original.reserve_recovered_turn_ids(&[format!(
+            "exhausted:turn:{}",
+            u64::MAX.saturating_sub(1)
+        )])?;
+        let last_turn = original.begin_turn()?;
+        let persisted_identity = last_turn.turn.id().to_string();
+        assert_eq!(persisted_identity, format!("exhausted:turn:{}", u64::MAX));
+        drop(last_turn);
+
+        let restored = recovery_session("exhausted");
+        restored.reserve_recovered_turn_ids(std::slice::from_ref(&persisted_identity))?;
+        restored.reserve_recovered_turn_ids(std::slice::from_ref(&persisted_identity))?;
+        assert!(restored.begin_turn().is_err());
+        let slot = restored
+            .turn
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        assert_eq!(slot.next_sequence, u64::MAX);
+        assert!(slot.active.is_none());
+        assert!(!restored.closed.load(Ordering::Acquire));
+        assert_eq!(persisted_identity, format!("exhausted:turn:{}", u64::MAX));
+        Ok(())
+    }
+
+    #[test]
+    fn recovered_turn_reservation_rejects_active_and_closed_sessions() -> Result<()> {
+        let session = recovery_session("fenced");
+        let turn = session.begin_turn()?;
+        assert!(
+            session
+                .reserve_recovered_turn_ids(&["fenced:turn:20".to_string()])
+                .is_err()
+        );
+        drop(turn);
+        assert_eq!(session.begin_turn()?.turn.id(), "fenced:turn:2");
+        session.mark_closed();
+        assert!(
+            session
+                .reserve_recovered_turn_ids(&["fenced:turn:20".to_string()])
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn recovered_turn_reservation_and_admission_share_one_linearization_point() -> Result<()> {
+        let session = recovery_session("race");
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let admission = std::thread::spawn({
+            let session = Arc::clone(&session);
+            let barrier = Arc::clone(&barrier);
+            move || {
+                barrier.wait();
+                session.begin_turn()
+            }
+        });
+        let reservation = std::thread::spawn({
+            let session = Arc::clone(&session);
+            move || {
+                barrier.wait();
+                session.reserve_recovered_turn_ids(&["race:turn:9".to_string()])
+            }
+        });
+        // Keep the returned lease alive until both racers have finished. If
+        // admission wins, reservation must observe that occupied turn slot.
+        let turn = admission
+            .join()
+            .map_err(|_| ReactError::Other("Turn admission thread failed".to_string()))??;
+        let reserved = reservation
+            .join()
+            .map_err(|_| ReactError::Other("Turn reservation thread failed".to_string()))?;
+        if reserved.is_ok() {
+            assert_eq!(turn.turn.id(), "race:turn:10");
+        } else {
+            assert_eq!(turn.turn.id(), "race:turn:1");
+        }
+        Ok(())
     }
 
     async fn wait_for(predicate: impl Fn() -> bool) -> Result<()> {

@@ -23,6 +23,11 @@ The tool system provides a standardized bridge, enabling the LLM to drive any ex
 
 ## Architecture
 
+Direct adapters can call `tools::execution::validate_tool_input` before invoking
+a tool. It shares ToolManager's JSON Schema and custom input validation without
+adding registry, retry, timeout, or cancellation behavior. Tool definitions stay
+the sole input authority; malformed arguments fail before side effects.
+
 ```
 Tool trait                        ← unified interface all tools implement
     │

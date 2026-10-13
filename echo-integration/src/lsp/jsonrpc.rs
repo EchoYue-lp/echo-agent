@@ -48,10 +48,33 @@ impl JsonRpcNotification {
 pub struct JsonRpcResponse {
     pub jsonrpc: String,
     pub id: Option<u64>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_present_result")]
     pub result: Option<Value>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_present_error")]
     pub error: Option<JsonRpcError>,
+}
+
+// A present JSON null is a successful nullable LSP result. Only an absent
+// member means that the response did not provide a result.
+fn deserialize_present_result<'de, D>(deserializer: D) -> Result<Option<Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Value::deserialize(deserializer).map(Some)
+}
+
+// A present error member must be an object; null does not mean "no error".
+fn deserialize_present_error<'de, D>(deserializer: D) -> Result<Option<JsonRpcError>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    if !value.is_object() {
+        return Err(serde::de::Error::custom("JSON-RPC error must be an object"));
+    }
+    serde_json::from_value(value)
+        .map(Some)
+        .map_err(serde::de::Error::custom)
 }
 
 /// JSON-RPC error object.
@@ -126,6 +149,18 @@ mod tests {
         assert_eq!(resp.id, Some(1));
         assert!(resp.result.is_some());
         assert!(resp.error.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn response_fidelity_null_result_is_present_but_missing_result_is_not() -> Result<(), String> {
+        let present: JsonRpcResponse =
+            serde_json::from_str(r#"{"jsonrpc":"2.0","id":1,"result":null}"#)
+                .map_err(|e| e.to_string())?;
+        let absent: JsonRpcResponse =
+            serde_json::from_str(r#"{"jsonrpc":"2.0","id":2}"#).map_err(|e| e.to_string())?;
+        assert_eq!(present.result, Some(Value::Null));
+        assert_eq!(absent.result, None);
         Ok(())
     }
 

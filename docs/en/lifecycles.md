@@ -70,6 +70,21 @@ through connection return and any failed close; dropping it after admission
 forfeits retry ownership and violates the contract. Dropping it before the
 connection starts rejects setup without creating an Agent.
 
+An adapter restoring an ACP Session with durable native Run identities calls
+`session.reserve_recovered_turn_ids(&persisted_run_ids)` before publishing the
+restored Session or admitting another Turn. The Session's existing `TurnSlot`
+owns both reservation and allocation under the same lock. It verifies its own
+Session namespace and canonical positive sequence, validates the complete batch
+before advancing the frontier, and rejects active/closed Sessions or invalid
+recovered identities. A valid last `u64::MAX` identity can restore history;
+only subsequent Turn admission fails with exhaustion. Repeated or older
+reservations cannot lower the frontier.
+The adapter treats IDs as opaque: it neither parses them nor allocates a
+replacement ID. This preserves historical receipts and makes the next Turn a
+new execution, without replaying historical Effects. Non-ACP Task/Subagent IDs
+remain outside this recovery primitive. See
+[ADR 0061](../adr/0061-acp-recovered-turn-identity.md).
+
 See [ReAct Agent](./01-react-agent.md), [Streaming](./10-streaming.md), and
 [Headless](./33-headless-mode.md). Adapter-specific guarantees stay in their
 own protocol chapters; this page does not claim that every adapter already uses
@@ -272,3 +287,13 @@ client lifecycle implementations.
 - [Persistence Concepts](./41-persistence-concepts.md)
 - [Framework and Application Boundary](./39-framework-application-boundary.md)
 - [ADR 0040](../adr/0040-framework-concept-documentation-authority.md)
+
+**ACP extension invocation cancellation.**
+
+`ExtensionInvocationAuthority` gives each reverse invocation its own child of
+the passed framework/run/connection token. Parent cancellation reaches every
+child; cancelling, timing out or releasing one invocation cannot cancel its
+parent or siblings. Connection close refuses new calls and cancels fallback
+children; `cancel_all` also cancels custom-run children without cancelling their
+parents. Invocation settlement and bounded drain remain separate from Agent or
+Task terminal authority. See [ADR 0060](../adr/0060-task-execution-store-cas-and-local-interruption.md).

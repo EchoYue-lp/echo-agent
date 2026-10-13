@@ -236,6 +236,8 @@ mod tests {
                 retry_count: 0,
                 failure_fingerprint: None,
                 claim: None,
+                result: None,
+                interruption_requested: None,
             },
         };
         assert!(
