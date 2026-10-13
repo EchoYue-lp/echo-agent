@@ -7,6 +7,7 @@ Research tools enable academic paper discovery, retrieval, and bibliography mana
 Available tools:
 - `arxiv_search` — Search ArXiv for preprints
 - `semantic_scholar_search` — Search Semantic Scholar for published papers
+- `clinical_trials_search` — Search ClinicalTrials.gov study metadata
 - `pdf_fetch` — Download and parse PDF documents
 - `bibtex_generate` — Generate BibTeX citations from paper metadata
 
@@ -114,6 +115,28 @@ Search Semantic Scholar for published academic papers. Returns rich metadata inc
   ]
 }
 ```
+
+---
+
+## clinical_trials_search
+
+Search ClinicalTrials.gov API v2 study metadata. `query` is required;
+`max_results` defaults to 10 and is capped at 100. Optional `status`, `phase` and
+`country` filters retain the existing request behavior.
+
+The Tool explicitly requests `countTotal=true` from the same API endpoint.
+`total_results` is the server's non-negative integer `totalCount`, while
+`returned` is the number of studies on this response page. The two values can
+legitimately differ: the recorded one-study response has `total_results: 386`
+and `returned: 1`. This is a captured example, not a current fixed search count.
+A server-reported zero remains zero; absent, null, negative, fractional or
+wrongly typed `totalCount` is an explicit Tool execution error. The Tool does
+not invent a zero total when the server omits the field.
+
+Study identity, title, status, phase, conditions, interventions, outcomes,
+enrollment, dates and URL keep their existing normalization. No new SDK option
+or response field is needed; the same framework Tool owns HTTP parsing for all
+consumers.
 
 ---
 

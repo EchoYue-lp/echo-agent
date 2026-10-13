@@ -1,0 +1,18 @@
+{
+  "README.md": "e111022c4261bbee22556b9d617489a964f0129bedd0559db85dabb95288bfc9",
+  "after-source-base64.txt": "474f3859ad7f728bd2a894cec0ec30918a5d9a40bc30ba7bae9a19a918e1d93e",
+  "after.log": "b1d8bb87d956b29d1ed08876d72d58879bd64123798e76b0a2c1c6cf8751f1d9",
+  "before-source-manifest.json": "69548587b9c21c158f1497cbd24410d7b3deef28d8f10517c6d3e0a9a675fb83",
+  "before.log": "75b289301f089bc93ceb5d385bf936e05fdffbf8610bb197a683ebc68f654869",
+  "clippy.log": "bbad1623bdc16bcfc1b437126506ea62c5385b5f0848d5e648d757ca9d26c0d5",
+  "default-receipt.json": "5b1edd8331bbb1dbbff9ae2c1ec6f963d56a4f5eee6631dcc2a594b42a0e5445",
+  "default.json": "86d34643e66abc0c1528faef1bfd804c75e35c5a370a206e4ea6d447a1b0571a",
+  "format-check.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "format.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "old-behavior-regression-source-base64.txt": "9b93942876dcfedfa694f57c66b23fec00134986adef00ab2b7bacc3380e86da",
+  "original-source-base64.txt": "7bc3b70712dce618332cddad0d79bce9a8eb9f5eb6b0102e95b6a86d8d0ed0bd",
+  "panic-lints.log": "eb92fd3477f0088fc1e46da77c7502a7f7abcde4bd3ff3b31aa098efcde82fcd",
+  "receipt.json": "ac73b9b1441b26f2a412df41e87a83d92caec5f158a022e5139c048d5752d8d3",
+  "requested-receipt.json": "d63beaa2eb6ca4cccef19c4093e87281f4d481dc103851e67711f222271776e2",
+  "requested.json": "f71dbad9151502899033b3c619877cdb10c7ddd35ea5c1580969d3f4ea32005c"
+}

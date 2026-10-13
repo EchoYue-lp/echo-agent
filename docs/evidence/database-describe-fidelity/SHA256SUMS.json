@@ -1,0 +1,22 @@
+{
+  "README.md": "eb794a1ce804e201deec923a9623c5e6c68a7acac735ff5bbb027744cd270f60",
+  "after-database.source-base64.txt": "4ed1a593a6283cc3360f164c9b984242ab4da6d5aceb55521a3515c5f7f3605d",
+  "after-rag.source-base64.txt": "1f92de6d49f78ec2d1b72e3a595ce65a3873963e834f897cf0ecd31b93ae8024",
+  "after.log": "6a58ed64373adea410fd59445cb826f1c113e6764a59c46367cbbdb124fcf8c5",
+  "before-database.source-base64.txt": "a7760473c1ab64a2775c3b266272f2b636e013f2a79863501f4ae08d440c128b",
+  "before-fixture-compilation-error.log": "a28a75c64e5868998eb66168562b4f4acfaa87049f030c0c48a9ea025b72730d",
+  "before-fixture-compilation-error.source-base64.txt": "7a2f468ec82cca8f37f3bd4d57325394056a991f96cb07e9a84a3b991d8f4f8d",
+  "before-rag.source-base64.txt": "6068d1d3de7f3dc6598224684e55f82d9c564195470d7cd5ed0f324fc128936e",
+  "before-three-behavior-failures-one-url-fixture-error.log": "bc71cd1dcdaa20effd31a07bf629677930347723ca3f9ad4be83660656536153",
+  "before-three-behavior-failures-one-url-fixture-error.source-base64.txt": "d3f742b87827f5f9d87f3c977326c9fd53dd32e0bdfab44c376c9700dda0c5aa",
+  "before.log": "4d51d7fcc69e195d1423dd48ebc2bddee02641e727047040b28f01d7bd39d0bc",
+  "clippy.log": "31a35f9a367ddccb8c5149addaa20686b289b444ddc2b79854ec45845d3f49af",
+  "format-check.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "format.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "panic-lints.log": "2af8a9b697c95ae33fda0829fd6142903cbe1393aaf5b06c33340d045b1ee44f",
+  "rag-after.log": "1267762aeac1a870a304944e9bf79fe3423016c05ce18d49963e5e43e1e24ec7",
+  "rag-before.log": "2b1e328a2f594b146f58edf1ff21fb34e585200faee9c5e646dd825550f55c29",
+  "receipt.json": "a64cadf69ec37b652b3d81151652b887b19342c0fd8a5ade57a869721c7b5a73",
+  "semantic-archive-classification-error.log": "55e90a39ec1268592cd3c18448289367650febd5093ac5ece6f1c6968aec844e",
+  "semantic-task-scope.log": "bb477528d4ba22688117f3931faea191f2a39797297f1e97e8b911e8f54331fc"
+}

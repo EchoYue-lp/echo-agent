@@ -10,7 +10,7 @@ use futures::{StreamExt, future::BoxFuture};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use sqlx::any::{AnyPoolOptions, AnyTypeInfoKind};
-use sqlx::{Column, Row};
+use sqlx::{Column, Row, ValueRef};
 
 use echo_core::error::{Result, ToolError};
 use echo_core::tools::artifact::{
@@ -631,12 +631,7 @@ fn format_db_rows(rows: &[sqlx::any::AnyRow]) -> Result<DbRows> {
     for row in rows {
         let mut values: Vec<serde_json::Value> = Vec::with_capacity(col_count);
         for (index, column) in row.columns().iter().enumerate() {
-            values.push(decode_db_cell(
-                row,
-                index,
-                column.name(),
-                column.type_info().kind(),
-            )?);
+            values.push(decode_db_cell(row, index, column.name())?);
         }
         row_values.push(values);
     }
@@ -651,8 +646,19 @@ fn decode_db_cell(
     row: &sqlx::any::AnyRow,
     index: usize,
     column_name: &str,
-    kind: AnyTypeInfoKind,
 ) -> Result<serde_json::Value> {
+    // SQLite PRAGMA/expressions may declare a NULL column while individual
+    // cells contain typed values. SQLx's runtime value is the decoding authority.
+    let raw = row
+        .try_get_raw(index)
+        .map_err(|error| ToolError::ExecutionFailed {
+            tool: "database".to_string(),
+            message: format!("Failed to inspect column '{column_name}': {error}"),
+        })?;
+    if raw.is_null() {
+        return Ok(serde_json::Value::Null);
+    }
+    let kind = raw.type_info().kind();
     let decode_error = |error: sqlx::Error| ToolError::ExecutionFailed {
         tool: "database".to_string(),
         message: format!(
@@ -660,8 +666,30 @@ fn decode_db_cell(
             column_name, kind
         ),
     };
+    let finite_number = |value: Option<f64>| -> Result<serde_json::Value> {
+        match value {
+            Some(value) => serde_json::Number::from_f64(value)
+                .map(serde_json::Value::Number)
+                .ok_or_else(|| {
+                    ToolError::ExecutionFailed {
+                        tool: "database".to_string(),
+                        message: format!(
+                            "Failed to decode column '{column_name}': non-finite number cannot be represented in JSON"
+                        ),
+                    }
+                    .into()
+                }),
+            None => Ok(serde_json::Value::Null),
+        }
+    };
     let value = match kind {
-        AnyTypeInfoKind::Null => serde_json::Value::Null,
+        AnyTypeInfoKind::Null => {
+            return Err(ToolError::ExecutionFailed {
+                tool: "database".to_string(),
+                message: format!("Non-null column '{column_name}' has no runtime SQL type"),
+            }
+            .into());
+        }
         AnyTypeInfoKind::Bool => match row
             .try_get::<Option<bool>, _>(index)
             .map_err(decode_error)?
@@ -678,11 +706,13 @@ fn decode_db_cell(
         AnyTypeInfoKind::BigInt => {
             serde_json::json!(row.try_get::<Option<i64>, _>(index).map_err(decode_error)?)
         }
-        AnyTypeInfoKind::Real => {
-            serde_json::json!(row.try_get::<Option<f32>, _>(index).map_err(decode_error)?)
-        }
+        AnyTypeInfoKind::Real => finite_number(
+            row.try_get::<Option<f32>, _>(index)
+                .map_err(decode_error)?
+                .map(f64::from),
+        )?,
         AnyTypeInfoKind::Double => {
-            serde_json::json!(row.try_get::<Option<f64>, _>(index).map_err(decode_error)?)
+            finite_number(row.try_get::<Option<f64>, _>(index).map_err(decode_error)?)?
         }
         AnyTypeInfoKind::Text => match row
             .try_get::<Option<String>, _>(index)
@@ -828,6 +858,149 @@ fn apply_sql_artifact(
 mod tests {
     use super::*;
     use echo_core::error::ReactError;
+
+    #[tokio::test]
+    async fn sqlite_describe_preserves_pragma_values_and_database_bytes() -> Result<()> {
+        let directory = tempfile::tempdir().map_err(ReactError::from)?;
+        let database = directory.path().join("schema.sqlite");
+        let url = format!("sqlite://{}?mode=rwc", database.display());
+        ensure_drivers_installed();
+        let pool = AnyPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .map_err(database_test_error)?;
+        sqlx::query(
+            "CREATE TABLE records (id INTEGER PRIMARY KEY, label TEXT NOT NULL, quantity INTEGER DEFAULT 7, note TEXT)",
+        )
+        .execute(&pool)
+        .await
+        .map_err(database_test_error)?;
+        let raw_rows = sqlx::query("PRAGMA table_info('records')")
+            .fetch_all(&pool)
+            .await
+            .map_err(database_test_error)?;
+        for row in &raw_rows {
+            for (index, column) in row.columns().iter().enumerate() {
+                use sqlx::{TypeInfo, ValueRef};
+                let value = row.try_get_raw(index).map_err(database_test_error)?;
+                eprintln!(
+                    "PRAGMA column={} declared={} actual={} is_null={}",
+                    column.name(),
+                    column.type_info().name(),
+                    value.type_info().name(),
+                    value.is_null()
+                );
+            }
+        }
+        pool.close().await;
+        let before = std::fs::read(&database).map_err(ReactError::from)?;
+        let parameters = ToolParameters::from([
+            ("connection_url".to_string(), serde_json::json!(url)),
+            ("table_name".to_string(), serde_json::json!("records")),
+        ]);
+        let result = DescribeTableTool.execute(parameters).await?;
+        assert!(result.success, "{}", result.output);
+        let data: Value = serde_json::from_str(&result.output)
+            .map_err(|error| ReactError::Other(error.to_string()))?;
+        assert_eq!(
+            data,
+            serde_json::json!({
+                "columns": ["cid", "name", "type", "notnull", "dflt_value", "pk"],
+                "rows": [
+                    [0, "id", "INTEGER", 0, null, 1],
+                    [1, "label", "TEXT", 1, null, 0],
+                    [2, "quantity", "INTEGER", 0, "7", 0],
+                    [3, "note", "TEXT", 0, null, 0],
+                ],
+                "total_rows": 4,
+            })
+        );
+        assert_eq!(before, std::fs::read(&database).map_err(ReactError::from)?);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sqlite_expression_cells_use_each_rows_runtime_type() -> Result<()> {
+        let directory = tempfile::tempdir().map_err(ReactError::from)?;
+        let url = format!(
+            "sqlite://{}?mode=rwc",
+            directory.path().join("dynamic.sqlite").display()
+        );
+        let query = "SELECT NULL AS changing UNION ALL SELECT 9223372036854775807 UNION ALL SELECT -9223372036854775808 UNION ALL SELECT 1.25 UNION ALL SELECT '中文🙂' UNION ALL SELECT X'00FF'";
+        let data = execute_readonly_query(&url, query).await?;
+        assert_eq!(data.columns, vec!["changing"]);
+        assert_eq!(
+            data.rows,
+            vec![
+                vec![Value::Null],
+                vec![serde_json::json!(i64::MAX)],
+                vec![serde_json::json!(i64::MIN)],
+                vec![serde_json::json!(1.25)],
+                vec![serde_json::json!("中文🙂")],
+                vec![serde_json::json!({"type":"binary", "encoding":"base64", "data":"AP8="})],
+            ]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn database_json_reports_missing_cells_instead_of_default_null() -> Result<()> {
+        let directory = tempfile::tempdir().map_err(ReactError::from)?;
+        let url = format!(
+            "sqlite://{}?mode=rwc",
+            directory.path().join("missing.sqlite").display()
+        );
+        ensure_drivers_installed();
+        let pool = AnyPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .map_err(database_test_error)?;
+        let mut row = sqlx::query("SELECT NULL AS cell")
+            .fetch_one(&pool)
+            .await
+            .map_err(database_test_error)?;
+        pool.close().await;
+        // Keep real column metadata but simulate a malformed driver row. A
+        // missing cell must be a decode error, not an invented SQL NULL.
+        row.values.clear();
+        let error = format_db_rows(&[row])
+            .err()
+            .ok_or_else(|| ReactError::Other("missing SQLx cell must fail decoding".to_string()))?;
+        assert!(
+            matches!(&error, ReactError::Tool(inner) if matches!(inner.as_ref(), ToolError::ExecutionFailed { .. }))
+        );
+        assert!(error.to_string().contains("cell"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sqlite_non_finite_number_is_an_explicit_decode_error() -> Result<()> {
+        let directory = tempfile::tempdir().map_err(ReactError::from)?;
+        let url = format!(
+            "sqlite://{}?mode=rwc",
+            directory.path().join("infinity.sqlite").display()
+        );
+        let error = execute_readonly_query(&url, "SELECT 1e999 AS overflowing")
+            .await
+            .err()
+            .ok_or_else(|| {
+                ReactError::Other("infinite number must not become JSON null".to_string())
+            })?;
+        assert!(
+            matches!(&error, ReactError::Tool(inner) if matches!(inner.as_ref(), ToolError::ExecutionFailed { .. }))
+        );
+        assert!(error.to_string().contains("overflowing"));
+        Ok(())
+    }
+
+    fn database_test_error(error: sqlx::Error) -> ToolError {
+        ToolError::ExecutionFailed {
+            tool: "database-test".to_string(),
+            message: error.to_string(),
+        }
+    }
 
     #[tokio::test]
     async fn sqlite_page_is_bounded_and_preserves_typed_cells() -> Result<()> {

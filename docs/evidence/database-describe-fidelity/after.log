@@ -1,0 +1,44 @@
+   Compiling echo_tools v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/database-describe-fidelity/echo-tools)
+    Finished `test` profile [unoptimized] target(s) in 18.07s
+     Running unittests src/lib.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/deps/echo_tools-8bb5dd48772585e3)
+
+running 6 tests
+test database::tests::writable_sql_never_qualifies_as_read_only ... ok
+PRAGMA column=cid declared=NULL actual=BIGINT is_null=false
+PRAGMA column=name declared=NULL actual=TEXT is_null=false
+PRAGMA column=type declared=NULL actual=TEXT is_null=false
+PRAGMA column=notnull declared=NULL actual=BIGINT is_null=false
+PRAGMA column=dflt_value declared=NULL actual=NULL is_null=true
+PRAGMA column=pk declared=NULL actual=BIGINT is_null=false
+PRAGMA column=cid declared=NULL actual=BIGINT is_null=false
+PRAGMA column=name declared=NULL actual=TEXT is_null=false
+PRAGMA column=type declared=NULL actual=TEXT is_null=false
+PRAGMA column=notnull declared=NULL actual=BIGINT is_null=false
+PRAGMA column=dflt_value declared=NULL actual=NULL is_null=true
+PRAGMA column=pk declared=NULL actual=BIGINT is_null=false
+PRAGMA column=cid declared=NULL actual=BIGINT is_null=false
+PRAGMA column=name declared=NULL actual=TEXT is_null=false
+PRAGMA column=type declared=NULL actual=TEXT is_null=false
+PRAGMA column=notnull declared=NULL actual=BIGINT is_null=false
+PRAGMA column=dflt_value declared=NULL actual=TEXT is_null=false
+PRAGMA column=pk declared=NULL actual=BIGINT is_null=false
+PRAGMA column=cid declared=NULL actual=BIGINT is_null=false
+PRAGMA column=name declared=NULL actual=TEXT is_null=false
+PRAGMA column=type declared=NULL actual=TEXT is_null=false
+PRAGMA column=notnull declared=NULL actual=BIGINT is_null=false
+PRAGMA column=dflt_value declared=NULL actual=NULL is_null=true
+PRAGMA column=pk declared=NULL actual=BIGINT is_null=false
+test database::tests::database_json_reports_missing_cells_instead_of_default_null ... ok
+test database::tests::sqlite_non_finite_number_is_an_explicit_decode_error ... ok
+test database::tests::sqlite_expression_cells_use_each_rows_runtime_type ... ok
+test database::tests::sqlite_page_is_bounded_and_preserves_typed_cells ... ok
+test database::tests::sqlite_describe_preserves_pragma_values_and_database_bytes ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 212 filtered out; finished in 0.05s
+
+     Running tests/macro_core_path.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/deps/macro_core_path-abcc61becdfba799)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+

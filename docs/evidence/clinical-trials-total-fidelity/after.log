@@ -1,0 +1,18 @@
+   Compiling echo_tools v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/database-describe-fidelity/echo-tools)
+    Finished `test` profile [unoptimized] target(s) in 16.60s
+     Running unittests src/lib.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/deps/echo_tools-8bb5dd48772585e3)
+
+running 4 tests
+test research::clinical_trials::tests::clinical_trials_missing_total_is_an_explicit_error ... ok
+test research::clinical_trials::tests::clinical_trials_malformed_total_is_an_explicit_error ... ok
+test research::clinical_trials::tests::clinical_trials_preserves_authoritative_totals_and_page_size ... ok
+test research::clinical_trials::tests::clinical_trials_requests_server_total_count ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 218 filtered out; finished in 0.01s
+
+     Running tests/macro_core_path.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/deps/macro_core_path-abcc61becdfba799)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+

@@ -11,7 +11,7 @@ focus:
 - time_lifecycle
 - data_durability
 - permission_external
-observed_at: source:d0568a66d7ccb8955e15a0d6f7aaaf0799ae25c287264ded14a9f167a4e01fbe
+observed_at: 554f2f50d3705d219519f306055a3d26d6a5211c
 behavior_refs:
 - behavior.extension-publication
 code_refs:
@@ -117,3 +117,8 @@ Channel forward增量由behavior.channel-handler-invocation及rule.channel-invoc
 限定：唯一原entry generation、callchildcancel、realreceipt/close retry和sameadmission
 streamtoken；具体开放Finding与新修复待验见evidence.channel-handler-forward-focused。
 不扩大本对象其它场景的needs_review或关闭状态。
+
+
+## 已发布历史快照定位
+
+本对象原 source:d0568a66d7ccb8955e15a0d6f7aaaf0799ae25c287264ded14a9f167a4e01fbe 的完整非语义源码与已发布 Git 554f2f50d3705d219519f306055a3d26d6a5211c 唯一摘要相同。全部本对象code/source引用逐blob核对当前仍相同，现只重绑定可恢复Git定位；原N审查范围、运行时间、状态与结论保持。此历史事实不覆盖D新增Database/RAG/Clinical三源码、其测试或消费者，更不冒作本轮门禁通过。

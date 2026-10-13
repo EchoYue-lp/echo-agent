@@ -1,0 +1,94 @@
+   Compiling tokio v1.53.1
+   Compiling serde_json v1.0.151
+   Compiling idna v1.1.0
+   Compiling url v2.5.8
+   Compiling rustls v0.23.45
+   Compiling tokio-util v0.7.19
+   Compiling h2 v0.4.16
+   Compiling tower v0.5.3
+   Compiling tokio-native-tls v0.3.1
+   Compiling tokio-rustls v0.26.4
+   Compiling tower-http v0.6.11
+   Compiling ahash v0.8.12
+   Compiling hyper v1.11.0
+   Compiling hyper-util v0.1.20
+   Compiling simd-json v0.17.3
+   Compiling hyper-rustls v0.27.9
+   Compiling hyper-tls v0.6.0
+   Compiling reqwest v0.12.28
+   Compiling fs4 v1.1.0
+   Compiling either v1.17.0
+   Compiling sqlx-core v0.8.6
+   Compiling object_store v0.13.2
+   Compiling zopfli v0.8.3
+   Compiling rand v0.8.7
+   Compiling tokio-stream v0.1.19
+   Compiling num-integer v0.1.47
+   Compiling num-iter v0.1.46
+   Compiling polars-error v0.55.2
+   Compiling polars-config v0.55.2
+   Compiling concurrent-queue v2.5.0
+   Compiling polars-utils v0.55.2
+   Compiling async-channel v2.5.0
+   Compiling sqlx-sqlite v0.8.6
+   Compiling polars-buffer v0.55.2
+   Compiling polars-schema v0.55.2
+   Compiling polars-arrow v0.55.2
+   Compiling polars-async v0.55.2
+   Compiling sqlx-mysql v0.8.6
+   Compiling num-bigint-dig v0.8.6
+   Compiling polars-compute v0.55.2
+   Compiling polars-dtype v0.55.2
+   Compiling sqlx-postgres v0.8.6
+   Compiling polars-row v0.55.2
+   Compiling polars-core v0.55.2
+   Compiling polars-json v0.55.2
+   Compiling polars-parquet v0.55.2
+   Compiling zip v8.6.0
+   Compiling derive_more v2.1.1
+   Compiling markup5ever v0.39.0
+   Compiling sqlx-macros-core v0.8.6
+   Compiling rsa v0.9.10
+   Compiling markup5ever v0.16.2
+   Compiling selectors v0.38.0
+   Compiling html5ever v0.31.0
+   Compiling sqlx-macros v0.8.6
+   Compiling polars-ops v0.55.2
+   Compiling polars-time v0.55.2
+   Compiling polars-io v0.55.2
+   Compiling polars-plan v0.55.2
+   Compiling polars-ooc v0.55.2
+   Compiling html5ever v0.39.0
+   Compiling schemars v0.8.22
+   Compiling polars-expr v0.55.2
+   Compiling zip v2.4.2
+   Compiling polars-mem-engine v0.55.2
+   Compiling polars-stream v0.55.2
+   Compiling lopdf v0.44.0
+   Compiling polars-lazy v0.55.2
+   Compiling polars v0.55.2
+   Compiling scraper v0.27.0
+   Compiling echo_core v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/database-describe-fidelity/echo-core)
+   Compiling calamine v0.36.1
+   Compiling sqlx v0.8.6
+   Compiling echo_macros v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/database-describe-fidelity/echo-macros)
+   Compiling rust_xlsxwriter v0.82.0
+   Compiling tree-sitter v0.26.12
+   Compiling html2text v0.14.4
+   Compiling docx-rs v0.4.22
+   Compiling echo_tools v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/database-describe-fidelity/echo-tools)
+error[E0432]: unresolved import `sqlx::any::AnyValueKind`
+   --> echo-tools/src/database.rs:916:35
+    |
+916 |         use sqlx::any::{AnyValue, AnyValueKind};
+    |                                   ^^^^^^^^^^^^ no `AnyValueKind` in `any`
+    |
+help: a similar name exists in the module
+    |
+916 -         use sqlx::any::{AnyValue, AnyValueKind};
+916 +         use sqlx::any::{AnyValue, AnyValue};
+    |
+
+For more information about this error, try `rustc --explain E0432`.
+error: could not compile `echo_tools` (lib test) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...

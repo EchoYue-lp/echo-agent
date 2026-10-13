@@ -1,0 +1,34 @@
+   Compiling echo_core v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/database-describe-fidelity/echo-core)
+   Compiling echo_tools v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/database-describe-fidelity/echo-tools)
+    Finished `test` profile [unoptimized] target(s) in 22.06s
+     Running unittests src/lib.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/deps/echo_tools-8bb5dd48772585e3)
+
+running 4 tests
+
+thread 'research::clinical_trials::tests::clinical_trials_malformed_total_is_an_explicit_error' (129612789) panicked at echo-tools/src/research/clinical_trials.rs:365:13:
+assertion failed: matches!(error, Some(ReactError::Tool(inner)) if
+    matches!(inner.as_ref(), ToolError::ExecutionFailed { .. }))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'research::clinical_trials::tests::clinical_trials_missing_total_is_an_explicit_error' (129612790) panicked at echo-tools/src/research/clinical_trials.rs:356:9:
+assertion failed: parse_clinical_trials_result("agent artificial intelligence", &json).is_err()
+test research::clinical_trials::tests::clinical_trials_preserves_authoritative_totals_and_page_size ... ok
+
+thread 'research::clinical_trials::tests::clinical_trials_requests_server_total_count' (129612792) panicked at echo-tools/src/research/clinical_trials.rs:344:9:
+assertion `left == right` failed
+  left: None
+ right: Some("true")
+test research::clinical_trials::tests::clinical_trials_requests_server_total_count ... FAILED
+test research::clinical_trials::tests::clinical_trials_missing_total_is_an_explicit_error ... FAILED
+test research::clinical_trials::tests::clinical_trials_malformed_total_is_an_explicit_error ... FAILED
+
+failures:
+
+failures:
+    research::clinical_trials::tests::clinical_trials_malformed_total_is_an_explicit_error
+    research::clinical_trials::tests::clinical_trials_missing_total_is_an_explicit_error
+    research::clinical_trials::tests::clinical_trials_requests_server_total_count
+
+test result: FAILED. 1 passed; 3 failed; 0 ignored; 0 measured; 218 filtered out; finished in 0.06s
+
+error: test failed, to rerun pass `-p echo_tools --lib`
