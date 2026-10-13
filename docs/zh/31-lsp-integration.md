@@ -496,6 +496,36 @@ Agent 会迭代调用 LSP 工具来构建完整的视图——定义位置、所
 
 ## 错误处理
 
+**诊断通知返回值与失败权威**
+
+新通知原子替换其 URI 的完整诊断结果。severity 为可选字段，缺失保留 None，工具显示
+UNSPECIFIED。DiagnosticCode 是带标记的闭合值：`{kind: "integer", value: i32}` 或
+`{kind: "string", value: String}`，保留数字与文字代码的区别。合法 [] 清空旧结果。
+含有效 URI 的非法更新用 ServerError 替换旧成功结果，不发布部分结果或伪造“文档无错”。
+后续合法更新恢复同一 URI；其它 URI 独立。现有单一 cache 同时拥有结果与 schema 错误。
+
+无法提供非空字符串 URI 的非法通知通过现有连接/进程 owner 终止 reader：pending 请求失败，
+runtime.last_error 记录原因，真实子进程退出，后续 diagnostics 明确失败。简化的已接受
+Diagnostic 模型没有 relatedInformation 元数据，因此客户端如实广告该能力为 false。
+
+
+**LSP 返回值合同**
+
+框架在 SDK 投影前解析服务端结果。Hover 保留可选 range 和服务端从零开始的
+UTF-16 位置；文本不会按 UTF-8 字节索引截断。普通文本、markup 和按顺序排列的
+marked string 保留 Unicode 内容。合法 null 表示没有 hover 或空的位置/补全列表；
+缺少 result 成员、必填字段错误或非法位置返回 LspError::ServerError，不伪造空结果。
+
+CompletionItem.kind 为可选字段：缺失/null 保留为 None，LSP 数字 1–25 转换为现有
+枚举，非法值明确失败。标准 insertText 与文本/markup documentation 转换为现有字段。
+简化补全 API 投影 CompletionList.items，不暴露 isIncomplete、item defaults、resolve/
+edit 元数据或增量结果。客户端未广告 linkSupport，因此 LocationLink 明确拒绝。
+SDK 调用方应保留框架值与错误，不能再建立第二套协议解析器。
+位置、range 和 location 必须是 JSON 对象，tuple 数组格式明确失败。含匹配请求 ID
+的非法 result/error 立即结算为 ServerError，现有已初始化连接仍可继续请求。
+
+
+
 LSP 操作可能以多种方式失败：
 
 | 错误 | 说明 | 处理建议 |

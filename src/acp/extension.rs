@@ -118,6 +118,7 @@ impl ExtensionInvocationLease {
 
     /// Cancellation token of this invocation. Signalled by the authority on
     /// teardown, or proactively by the holder's framework cancellation.
+    /// Cancelling this token affects only this invocation, never its parent.
     pub fn cancellation(&self) -> CancellationToken {
         self.entry.cancellation.clone()
     }
@@ -245,7 +246,8 @@ impl ExtensionInvocationAuthority {
     /// fails with [`ExtensionLeaseError::ExclusiveConflict`] instead of
     /// queueing (design §12.3). `framework_cancellation` links the lease to
     /// the owning run/tool cancellation so framework cancels reach the
-    /// callback without waiting for the deadline.
+    /// callback without waiting for the deadline. Each lease owns a child
+    /// token: cancelling the lease cannot cancel that parent or its siblings.
     pub fn lease(
         self: &Arc<Self>,
         exclusive_key: Option<&str>,
@@ -276,7 +278,10 @@ impl ExtensionInvocationAuthority {
         let serial = self.serial.fetch_add(1, Ordering::AcqRel);
         let identity = format!("{}-{}", self.identity_prefix, serial);
         let entry = Arc::new(InvocationEntry {
-            cancellation: framework_cancellation,
+            // Parent cancellation reaches the callback, but stream drop,
+            // timeout or exact invocation cancellation must not propagate back
+            // into the owning run/connection or sibling invocations.
+            cancellation: framework_cancellation.child_token(),
             state: StdMutex::new(None),
             settled: Notify::new(),
         });
@@ -440,6 +445,73 @@ mod tests {
         );
         drop(exclusive);
         assert!(authority.lease(Some(key), CancellationToken::new()).is_ok());
+    }
+
+    #[test]
+    fn invocation_child_cancellation_does_not_cancel_parent_or_sibling()
+    -> Result<(), ExtensionLeaseError> {
+        let authority = ExtensionInvocationAuthority::new(2)?;
+        let parent = CancellationToken::new();
+        let mut a = authority.lease(None, parent.clone())?;
+        let b = authority.lease(None, parent.clone())?;
+        a.cancellation().cancel();
+        assert!(!parent.is_cancelled());
+        assert!(!b.cancellation().is_cancelled());
+        assert!(authority.admission_open());
+        assert!(a.settle(ExtensionSettlement::Cancelled));
+        drop(a);
+        assert!(!b.cancellation().is_cancelled());
+        parent.cancel();
+        assert!(b.cancellation().is_cancelled());
+        Ok(())
+    }
+
+    #[test]
+    fn invocation_parent_cancellation_reaches_every_child() -> Result<(), ExtensionLeaseError> {
+        let authority = ExtensionInvocationAuthority::new(2)?;
+        let parent = CancellationToken::new();
+        let a = authority.lease(None, parent.clone())?;
+        let b = authority.lease(None, parent.clone())?;
+        parent.cancel();
+        assert!(a.cancellation().is_cancelled());
+        assert!(b.cancellation().is_cancelled());
+        Ok(())
+    }
+
+    #[test]
+    fn invocation_timeout_and_drop_keep_parent_connection_open() -> Result<(), ExtensionLeaseError>
+    {
+        let authority = ExtensionInvocationAuthority::new(2)?;
+        let parent = authority.connection_cancellation();
+        let mut timed = authority.lease(None, parent.clone())?;
+        let sibling = authority.lease(None, parent.clone())?;
+        timed.cancellation().cancel();
+        assert!(timed.settle_timeout());
+        drop(timed);
+        assert!(!parent.is_cancelled());
+        assert!(!sibling.cancellation().is_cancelled());
+        assert!(authority.admission_open());
+        authority.close_admission();
+        assert!(sibling.cancellation().is_cancelled());
+        assert!(parent.is_cancelled());
+        Ok(())
+    }
+
+    #[test]
+    fn invocation_cancel_all_cancels_children_without_cancelling_custom_parent()
+    -> Result<(), ExtensionLeaseError> {
+        let authority = ExtensionInvocationAuthority::new(2)?;
+        let parent = CancellationToken::new();
+        let a = authority.lease(None, parent.clone())?;
+        let b = authority.lease(None, parent.clone())?;
+        authority.close_admission();
+        assert_eq!(authority.cancel_all(), 2);
+        assert!(a.cancellation().is_cancelled());
+        assert!(b.cancellation().is_cancelled());
+        assert!(!parent.is_cancelled());
+        assert_eq!(a.settlement(), Some(ExtensionSettlement::Cancelled));
+        assert_eq!(b.settlement(), Some(ExtensionSettlement::Cancelled));
+        Ok(())
     }
 
     #[tokio::test]

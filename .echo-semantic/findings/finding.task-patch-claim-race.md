@@ -10,7 +10,7 @@ focus: [state_authority, data_durability, time_lifecycle]
 boundary_ref: boundary.task-subagent-workflow
 behavior_refs: [behavior.task-subagent-execution]
 rule_refs: [rule.task-subagent-authority]
-evidence_refs: [evidence.task-subagent-workflow, evidence.task-patch-claim-cas-repair, evidence.task-patch-claim-cas-verification]
+evidence_refs: [evidence.task-subagent-workflow, evidence.task-patch-claim-cas-repair, evidence.task-patch-claim-cas-verification, evidence.task-runtime-store-control-repair, evidence.task-runtime-store-control-verification]
 audit_refs: [audit.task-subagent-workflow.state-authority, audit.task-patch-claim-cas-rereview]
 decision_refs: []
 repair_evidence_refs: [evidence.task-patch-claim-cas-repair]

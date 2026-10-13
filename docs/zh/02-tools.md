@@ -24,6 +24,10 @@ LLM 本身是纯文本模型，不能直接：
 
 ## 架构
 
+直接适配器可在执行 Tool 前调用 `tools::execution::validate_tool_input`，复用
+ToolManager 的 JSON Schema 与自定义输入校验。该入口不增加注册表、重试、超时或
+取消行为；工具定义仍是唯一输入权威，畸形参数在副作用之前明确失败。
+
 ```
 Tool trait                       ← 所有工具实现的统一接口
     │

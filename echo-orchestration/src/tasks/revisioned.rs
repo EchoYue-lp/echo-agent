@@ -219,6 +219,8 @@ pub enum RevisionedTaskStoreError {
         expected: Option<u64>,
         current: Option<u64>,
     },
+    #[error("task store does not support {operation}")]
+    Unsupported { operation: String },
     #[error("{message}")]
     Rejected { message: String },
     #[error("{message}")]
@@ -252,6 +254,8 @@ pub enum TaskRevisionError {
     InvalidPatch { message: String },
     #[error("{message}")]
     PolicyRejected { message: String },
+    #[error("task store does not support {operation}")]
+    StoreUnsupported { operation: String },
     #[error("{message}")]
     StoreRejected { message: String },
     #[error("{message}")]
@@ -264,6 +268,9 @@ impl From<RevisionedTaskStoreError> for TaskRevisionError {
             RevisionedTaskStoreError::NotFound { scope_id } => Self::GraphNotFound { scope_id },
             RevisionedTaskStoreError::Conflict { expected, current } => {
                 Self::RevisionConflict { expected, current }
+            }
+            RevisionedTaskStoreError::Unsupported { operation } => {
+                Self::StoreUnsupported { operation }
             }
             RevisionedTaskStoreError::Rejected { message } => Self::StoreRejected { message },
             RevisionedTaskStoreError::Backend { message } => Self::Backend { message },
@@ -281,9 +288,29 @@ impl From<TaskPolicyError> for TaskRevisionError {
     }
 }
 
+/// Execution-only transaction at an unchanged relation revision.
+///
+/// Backends atomically compare the relation revision and the complete execution
+/// map before publishing `next`. Context, task specifications, order and graph
+/// revision must remain unchanged. Results and terminal state therefore share
+/// the same persistence transaction as claim, retry and interruption facts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskExecutionCommit {
+    pub expected_revision: u64,
+    pub expected_executions: BTreeMap<TaskId, TaskExecution>,
+    pub next: RevisionedTaskGraph,
+}
+
 /// Persistence boundary for revisioned task graphs.
 #[async_trait]
 pub trait RevisionedTaskStore: Send + Sync {
+    /// Side-effect-free capability declaration. CRUD-only backends remain
+    /// valid but cannot accept runtime execution. Executable adapters opt in
+    /// only when their atomic execution CAS contract is available.
+    fn supports_runtime_execution(&self) -> bool {
+        false
+    }
+
     async fn load(
         &self,
         scope_id: &str,
@@ -294,6 +321,19 @@ pub trait RevisionedTaskStore: Send + Sync {
         scope_id: &str,
         commit: TaskGraphCommit,
     ) -> Result<RevisionedTaskGraph, RevisionedTaskStoreError>;
+
+    /// Optional backend primitive for executable graphs. CRUD-only backends
+    /// reject execution explicitly; the framework never creates a second
+    /// in-memory graph when the registered store lacks this transaction.
+    async fn compare_and_commit_execution(
+        &self,
+        _scope_id: &str,
+        _commit: TaskExecutionCommit,
+    ) -> Result<RevisionedTaskGraph, RevisionedTaskStoreError> {
+        Err(RevisionedTaskStoreError::Unsupported {
+            operation: "task execution CAS".to_string(),
+        })
+    }
 }
 
 /// Product defaults produced without allowing policy to rewrite generic task
@@ -481,6 +521,25 @@ impl InMemoryRevisionedTaskStore {
         Self::default()
     }
 
+    /// Persist an exact-claim stop request before projecting live cancellation.
+    pub async fn request_runtime_task_interruption(
+        &self,
+        scope_id: &str,
+        task_id: &str,
+        claim: &TaskClaim,
+        disposition: super::RuntimeInterruptionDisposition,
+    ) -> Result<bool, RevisionedTaskStoreError> {
+        mutate_task_execution(self, scope_id, |snapshot| {
+            super::runtime_service::request_runtime_task_interruption(
+                snapshot,
+                task_id,
+                claim,
+                disposition.clone(),
+            )
+        })
+        .await
+    }
+
     /// Atomically claim a pending runtime task without changing the immutable
     /// graph revision. Intended for [`RuntimeDagController`](super::RuntimeDagController)
     /// adapters backed by this store.
@@ -490,16 +549,10 @@ impl InMemoryRevisionedTaskStore {
         task: &Task,
         expected_revision: u64,
     ) -> Result<RuntimeTaskClaimOutcome, RevisionedTaskStoreError> {
-        let mut graphs = self.graphs.write().await;
-        let Some(graph) = graphs.get_mut(scope_id) else {
-            return Err(RevisionedTaskStoreError::NotFound {
-                scope_id: scope_id.to_string(),
-            });
-        };
-        super::runtime_service::claim_runtime_task(&mut graph.snapshot, task, expected_revision)
-            .map_err(|error| RevisionedTaskStoreError::Rejected {
-                message: error.to_string(),
-            })
+        mutate_task_execution(self, scope_id, |snapshot| {
+            super::runtime_service::claim_runtime_task(snapshot, task, expected_revision)
+        })
+        .await
     }
 
     /// Atomically settle the exact physical claim.
@@ -510,16 +563,10 @@ impl InMemoryRevisionedTaskStore {
         claim: &TaskClaim,
         status: TaskStatus,
     ) -> Result<super::RuntimeTaskSettlementOutcome, RevisionedTaskStoreError> {
-        let mut graphs = self.graphs.write().await;
-        let Some(graph) = graphs.get_mut(scope_id) else {
-            return Err(RevisionedTaskStoreError::NotFound {
-                scope_id: scope_id.to_string(),
-            });
-        };
-        super::runtime_service::settle_runtime_claim(&mut graph.snapshot, task_id, claim, status)
-            .map_err(|error| RevisionedTaskStoreError::Rejected {
-                message: error.to_string(),
-            })
+        mutate_task_execution(self, scope_id, |snapshot| {
+            super::runtime_service::settle_runtime_claim(snapshot, task_id, claim, status.clone())
+        })
+        .await
     }
 
     /// Atomically requeue one exact claim using the canonical runtime mutation.
@@ -532,23 +579,17 @@ impl InMemoryRevisionedTaskStore {
         error: String,
         exhaustion: super::RuntimeRetryExhaustion,
     ) -> Result<super::RuntimeTaskRequeueOutcome, RevisionedTaskStoreError> {
-        let mut graphs = self.graphs.write().await;
-        let Some(graph) = graphs.get_mut(scope_id) else {
-            return Err(RevisionedTaskStoreError::NotFound {
-                scope_id: scope_id.to_string(),
-            });
-        };
-        super::runtime_service::requeue_runtime_claim(
-            &mut graph.snapshot,
-            task_id,
-            claim,
-            failure_fingerprint,
-            error,
-            exhaustion,
-        )
-        .map_err(|error| RevisionedTaskStoreError::Rejected {
-            message: error.to_string(),
+        mutate_task_execution(self, scope_id, |snapshot| {
+            super::runtime_service::requeue_runtime_claim(
+                snapshot,
+                task_id,
+                claim,
+                failure_fingerprint.clone(),
+                error.clone(),
+                exhaustion,
+            )
         })
+        .await
     }
 
     /// Atomically apply one framework-owned dispatch resolution request.
@@ -559,21 +600,15 @@ impl InMemoryRevisionedTaskStore {
         claim: &TaskClaim,
         request: super::RuntimeTaskResolutionRequest,
     ) -> Result<super::RuntimeTaskResolution, RevisionedTaskStoreError> {
-        let mut graphs = self.graphs.write().await;
-        let Some(graph) = graphs.get_mut(scope_id) else {
-            return Err(RevisionedTaskStoreError::NotFound {
-                scope_id: scope_id.to_string(),
-            });
-        };
-        super::runtime_service::settle_runtime_resolution(
-            &mut graph.snapshot,
-            task_id,
-            claim,
-            request,
-        )
-        .map_err(|error| RevisionedTaskStoreError::Rejected {
-            message: error.to_string(),
+        mutate_task_execution(self, scope_id, |snapshot| {
+            super::runtime_service::settle_runtime_resolution(
+                snapshot,
+                task_id,
+                claim,
+                request.clone(),
+            )
         })
+        .await
     }
 
     /// Atomically restart one exact unclaimed task using the canonical runtime
@@ -584,20 +619,10 @@ impl InMemoryRevisionedTaskStore {
         expected_task: &Task,
         expected_revision: u64,
     ) -> Result<super::RuntimeTaskRetryOutcome, RevisionedTaskStoreError> {
-        let mut graphs = self.graphs.write().await;
-        let Some(graph) = graphs.get_mut(scope_id) else {
-            return Err(RevisionedTaskStoreError::NotFound {
-                scope_id: scope_id.to_string(),
-            });
-        };
-        super::runtime_service::retry_runtime_task(
-            &mut graph.snapshot,
-            expected_task,
-            expected_revision,
-        )
-        .map_err(|error| RevisionedTaskStoreError::Rejected {
-            message: error.to_string(),
+        mutate_task_execution(self, scope_id, |snapshot| {
+            super::runtime_service::retry_runtime_task(snapshot, expected_task, expected_revision)
         })
+        .await
     }
 
     /// Atomically resume one paused task without consuming retry budget.
@@ -607,20 +632,10 @@ impl InMemoryRevisionedTaskStore {
         expected_task: &Task,
         expected_revision: u64,
     ) -> Result<super::RuntimeTaskResumeOutcome, RevisionedTaskStoreError> {
-        let mut graphs = self.graphs.write().await;
-        let Some(graph) = graphs.get_mut(scope_id) else {
-            return Err(RevisionedTaskStoreError::NotFound {
-                scope_id: scope_id.to_string(),
-            });
-        };
-        super::runtime_service::resume_runtime_task(
-            &mut graph.snapshot,
-            expected_task,
-            expected_revision,
-        )
-        .map_err(|error| RevisionedTaskStoreError::Rejected {
-            message: error.to_string(),
+        mutate_task_execution(self, scope_id, |snapshot| {
+            super::runtime_service::resume_runtime_task(snapshot, expected_task, expected_revision)
         })
+        .await
     }
 
     /// Atomically settle one run-level interruption at an exact graph revision.
@@ -630,20 +645,14 @@ impl InMemoryRevisionedTaskStore {
         expected_revision: u64,
         disposition: super::RuntimeInterruptionDisposition,
     ) -> Result<super::RuntimeInterruptionSettlementOutcome, RevisionedTaskStoreError> {
-        let mut graphs = self.graphs.write().await;
-        let Some(graph) = graphs.get_mut(scope_id) else {
-            return Err(RevisionedTaskStoreError::NotFound {
-                scope_id: scope_id.to_string(),
-            });
-        };
-        super::runtime_service::settle_runtime_interruption(
-            &mut graph.snapshot,
-            expected_revision,
-            disposition,
-        )
-        .map_err(|error| RevisionedTaskStoreError::Rejected {
-            message: error.to_string(),
+        mutate_task_execution(self, scope_id, |snapshot| {
+            super::runtime_service::settle_runtime_interruption(
+                snapshot,
+                expected_revision,
+                disposition.clone(),
+            )
         })
+        .await
     }
 
     pub async fn runtime_claim_is_current(
@@ -652,12 +661,7 @@ impl InMemoryRevisionedTaskStore {
         task_id: &str,
         claim: &TaskClaim,
     ) -> Result<bool, RevisionedTaskStoreError> {
-        let graphs = self.graphs.read().await;
-        let Some(graph) = graphs.get(scope_id) else {
-            return Err(RevisionedTaskStoreError::NotFound {
-                scope_id: scope_id.to_string(),
-            });
-        };
+        let graph = load_runtime_graph(self, scope_id).await?;
         super::runtime_service::runtime_claim_is_current(&graph.snapshot, task_id, claim).map_err(
             |error| RevisionedTaskStoreError::Rejected {
                 message: error.to_string(),
@@ -666,8 +670,84 @@ impl InMemoryRevisionedTaskStore {
     }
 }
 
+async fn load_runtime_graph(
+    store: &dyn RevisionedTaskStore,
+    scope_id: &str,
+) -> Result<RevisionedTaskGraph, RevisionedTaskStoreError> {
+    store
+        .load(scope_id)
+        .await?
+        .ok_or_else(|| RevisionedTaskStoreError::NotFound {
+            scope_id: scope_id.to_string(),
+        })
+}
+
+fn execution_map(graph: &RevisionedTaskGraph) -> BTreeMap<TaskId, TaskExecution> {
+    graph
+        .snapshot
+        .tasks
+        .iter()
+        .map(|task| (task.spec.id.clone(), task.execution.clone()))
+        .collect()
+}
+
+async fn mutate_task_execution<T>(
+    store: &dyn RevisionedTaskStore,
+    scope_id: &str,
+    mut mutate: impl FnMut(&mut RuntimePlanSnapshot) -> Result<T, super::RuntimeTaskMutationError>,
+) -> Result<T, RevisionedTaskStoreError> {
+    if !store.supports_runtime_execution() {
+        return Err(RevisionedTaskStoreError::Unsupported {
+            operation: "task execution CAS".to_string(),
+        });
+    }
+    const MAX_EXECUTION_CAS_ATTEMPTS: usize = 32;
+    for attempt in 1..=MAX_EXECUTION_CAS_ATTEMPTS {
+        let mut graph = load_runtime_graph(store, scope_id).await?;
+        let expected_executions = execution_map(&graph);
+        let expected_revision = graph.snapshot.revision;
+        let outcome =
+            mutate(&mut graph.snapshot).map_err(|error| RevisionedTaskStoreError::Rejected {
+                message: error.to_string(),
+            })?;
+        if expected_executions == execution_map(&graph) {
+            return Ok(outcome);
+        }
+        match store
+            .compare_and_commit_execution(
+                scope_id,
+                TaskExecutionCommit {
+                    expected_revision,
+                    expected_executions,
+                    next: graph,
+                },
+            )
+            .await
+        {
+            Ok(_) => return Ok(outcome),
+            Err(error @ RevisionedTaskStoreError::Conflict { .. }) => {
+                if attempt == MAX_EXECUTION_CAS_ATTEMPTS {
+                    // A permanently conflicting backend must not keep Host
+                    // lifecycle operations alive indefinitely. The caller
+                    // receives the last typed conflict and may retry later.
+                    return Err(error);
+                }
+                tokio::task::yield_now().await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(RevisionedTaskStoreError::Backend {
+        message: "execution CAS attempt budget was empty".to_string(),
+    })
+}
+
 #[async_trait]
 impl RevisionedTaskStore for InMemoryRevisionedTaskStore {
+    fn supports_runtime_execution(&self) -> bool {
+        true
+    }
+
     async fn load(
         &self,
         scope_id: &str,
@@ -740,6 +820,54 @@ impl RevisionedTaskStore for InMemoryRevisionedTaskStore {
                 ),
             });
         }
+        super::validate_runtime_snapshot_claims(&commit.next.snapshot).map_err(|error| {
+            RevisionedTaskStoreError::Rejected {
+                message: error.to_string(),
+            }
+        })?;
+        graphs.insert(scope_id.to_string(), commit.next.clone());
+        Ok(commit.next)
+    }
+
+    async fn compare_and_commit_execution(
+        &self,
+        scope_id: &str,
+        commit: TaskExecutionCommit,
+    ) -> Result<RevisionedTaskGraph, RevisionedTaskStoreError> {
+        let mut graphs = self.graphs.write().await;
+        let current = graphs
+            .get(scope_id)
+            .ok_or_else(|| RevisionedTaskStoreError::NotFound {
+                scope_id: scope_id.to_string(),
+            })?;
+        if current.snapshot.revision != commit.expected_revision
+            || execution_map(current) != commit.expected_executions
+        {
+            return Err(RevisionedTaskStoreError::Conflict {
+                expected: Some(commit.expected_revision),
+                current: Some(current.snapshot.revision),
+            });
+        }
+        if commit.next.snapshot.revision != current.snapshot.revision
+            || commit.next.context != current.context
+            || commit
+                .next
+                .snapshot
+                .tasks
+                .iter()
+                .map(|task| &task.spec)
+                .ne(current.snapshot.tasks.iter().map(|task| &task.spec))
+        {
+            return Err(RevisionedTaskStoreError::Rejected {
+                message: "execution CAS cannot change task relations, context or revision"
+                    .to_string(),
+            });
+        }
+        super::validate_runtime_snapshot_claims(&commit.next.snapshot).map_err(|error| {
+            RevisionedTaskStoreError::Rejected {
+                message: error.to_string(),
+            }
+        })?;
         graphs.insert(scope_id.to_string(), commit.next.clone());
         Ok(commit.next)
     }
@@ -824,6 +952,7 @@ impl TaskPatchEngine {
                     }
                     apply_spec_patch(&mut task.spec, patch);
                     task.execution.claim = None;
+                    task.execution.interruption_requested = None;
                     effects.updated_task_ids.push(task_id);
                 }
                 TaskPlanPatchOp::Skip { task_id } => {
@@ -846,6 +975,7 @@ impl TaskPatchEngine {
                     }
                     task.execution.status = TaskStatus::Skipped;
                     task.execution.claim = None;
+                    task.execution.interruption_requested = None;
                     effects.skipped_task_ids.push(task_id);
                 }
                 TaskPlanPatchOp::Reorder { task_ids } => {
@@ -900,6 +1030,7 @@ impl TaskPatchEngine {
                             .transition_to(status)
                             .map_err(|message| TaskRevisionError::InvalidPatch { message })?;
                         task.execution.claim = None;
+                        task.execution.interruption_requested = None;
                         effects.progressed_task_ids.push(task_id);
                     }
                 }
@@ -957,12 +1088,166 @@ pub struct TaskRevisionService {
 }
 
 impl TaskRevisionService {
+    /// Report the capability of the same registered graph backend without
+    /// loading, writing or dispatching a task.
+    pub fn supports_runtime_execution(&self) -> bool {
+        self.store.supports_runtime_execution()
+    }
+
     pub fn new(store: Arc<dyn RevisionedTaskStore>, policy: Arc<dyn TaskToolPolicy>) -> Self {
         Self {
             store,
             policy,
             validator: PlanValidator::default(),
         }
+    }
+
+    /// Persist an exact-claim stop request before projecting live cancellation.
+    pub async fn request_runtime_task_interruption(
+        &self,
+        scope_id: &str,
+        task_id: &str,
+        claim: &TaskClaim,
+        disposition: super::RuntimeInterruptionDisposition,
+    ) -> Result<bool, RevisionedTaskStoreError> {
+        mutate_task_execution(self.store.as_ref(), scope_id, |snapshot| {
+            super::runtime_service::request_runtime_task_interruption(
+                snapshot,
+                task_id,
+                claim,
+                disposition.clone(),
+            )
+        })
+        .await
+    }
+
+    /// Atomically claim a pending runtime task without changing the immutable
+    /// graph revision. Intended for [`RuntimeDagController`](super::RuntimeDagController)
+    /// adapters backed by this store.
+    pub async fn claim_runtime_task(
+        &self,
+        scope_id: &str,
+        task: &Task,
+        expected_revision: u64,
+    ) -> Result<RuntimeTaskClaimOutcome, RevisionedTaskStoreError> {
+        mutate_task_execution(self.store.as_ref(), scope_id, |snapshot| {
+            super::runtime_service::claim_runtime_task(snapshot, task, expected_revision)
+        })
+        .await
+    }
+
+    /// Atomically settle the exact physical claim.
+    pub async fn settle_runtime_claim(
+        &self,
+        scope_id: &str,
+        task_id: &str,
+        claim: &TaskClaim,
+        status: TaskStatus,
+    ) -> Result<super::RuntimeTaskSettlementOutcome, RevisionedTaskStoreError> {
+        mutate_task_execution(self.store.as_ref(), scope_id, |snapshot| {
+            super::runtime_service::settle_runtime_claim(snapshot, task_id, claim, status.clone())
+        })
+        .await
+    }
+
+    /// Atomically requeue one exact claim using the canonical runtime mutation.
+    pub async fn requeue_runtime_claim(
+        &self,
+        scope_id: &str,
+        task_id: &str,
+        claim: &TaskClaim,
+        failure_fingerprint: Option<String>,
+        error: String,
+        exhaustion: super::RuntimeRetryExhaustion,
+    ) -> Result<super::RuntimeTaskRequeueOutcome, RevisionedTaskStoreError> {
+        mutate_task_execution(self.store.as_ref(), scope_id, |snapshot| {
+            super::runtime_service::requeue_runtime_claim(
+                snapshot,
+                task_id,
+                claim,
+                failure_fingerprint.clone(),
+                error.clone(),
+                exhaustion,
+            )
+        })
+        .await
+    }
+
+    /// Atomically apply one framework-owned dispatch resolution request.
+    pub async fn settle_runtime_resolution(
+        &self,
+        scope_id: &str,
+        task_id: &str,
+        claim: &TaskClaim,
+        request: super::RuntimeTaskResolutionRequest,
+    ) -> Result<super::RuntimeTaskResolution, RevisionedTaskStoreError> {
+        mutate_task_execution(self.store.as_ref(), scope_id, |snapshot| {
+            super::runtime_service::settle_runtime_resolution(
+                snapshot,
+                task_id,
+                claim,
+                request.clone(),
+            )
+        })
+        .await
+    }
+
+    /// Atomically restart one exact unclaimed task using the canonical runtime
+    /// mutation. Product run/descendant policy remains outside this store.
+    pub async fn retry_runtime_task(
+        &self,
+        scope_id: &str,
+        expected_task: &Task,
+        expected_revision: u64,
+    ) -> Result<super::RuntimeTaskRetryOutcome, RevisionedTaskStoreError> {
+        mutate_task_execution(self.store.as_ref(), scope_id, |snapshot| {
+            super::runtime_service::retry_runtime_task(snapshot, expected_task, expected_revision)
+        })
+        .await
+    }
+
+    /// Atomically resume one paused task without consuming retry budget.
+    pub async fn resume_runtime_task(
+        &self,
+        scope_id: &str,
+        expected_task: &Task,
+        expected_revision: u64,
+    ) -> Result<super::RuntimeTaskResumeOutcome, RevisionedTaskStoreError> {
+        mutate_task_execution(self.store.as_ref(), scope_id, |snapshot| {
+            super::runtime_service::resume_runtime_task(snapshot, expected_task, expected_revision)
+        })
+        .await
+    }
+
+    /// Atomically settle one run-level interruption at an exact graph revision.
+    pub async fn settle_runtime_interruption(
+        &self,
+        scope_id: &str,
+        expected_revision: u64,
+        disposition: super::RuntimeInterruptionDisposition,
+    ) -> Result<super::RuntimeInterruptionSettlementOutcome, RevisionedTaskStoreError> {
+        mutate_task_execution(self.store.as_ref(), scope_id, |snapshot| {
+            super::runtime_service::settle_runtime_interruption(
+                snapshot,
+                expected_revision,
+                disposition.clone(),
+            )
+        })
+        .await
+    }
+
+    pub async fn runtime_claim_is_current(
+        &self,
+        scope_id: &str,
+        task_id: &str,
+        claim: &TaskClaim,
+    ) -> Result<bool, RevisionedTaskStoreError> {
+        let graph = load_runtime_graph(self.store.as_ref(), scope_id).await?;
+        super::runtime_service::runtime_claim_is_current(&graph.snapshot, task_id, claim).map_err(
+            |error| RevisionedTaskStoreError::Rejected {
+                message: error.to_string(),
+            },
+        )
     }
 
     pub fn with_validator(mut self, validator: PlanValidator) -> Self {
@@ -1185,7 +1470,7 @@ impl TaskRevisionService {
         tasks: Vec<Task>,
         reason: String,
     ) -> Result<RevisionedTaskGraph, TaskRevisionError> {
-        let tasks = self.finalize_and_validate(scope_id, tasks).await?;
+        let tasks = self.finalize_and_validate(scope_id, tasks, 1).await?;
         let graph = RevisionedTaskGraph {
             snapshot: RuntimePlanSnapshot { revision: 1, tasks },
             context,
@@ -1252,14 +1537,14 @@ impl TaskRevisionService {
             .iter()
             .map(|task| (task.spec.id.clone(), task.execution.clone()))
             .collect();
-        let tasks = self
-            .finalize_and_validate(scope_id, application.tasks)
-            .await?;
         let next_revision = current.snapshot.revision.checked_add(1).ok_or_else(|| {
             TaskRevisionError::InvalidPatch {
                 message: "task graph revision overflow".to_string(),
             }
         })?;
+        let tasks = self
+            .finalize_and_validate(scope_id, application.tasks, next_revision)
+            .await?;
         let next = RevisionedTaskGraph {
             snapshot: RuntimePlanSnapshot {
                 revision: next_revision,
@@ -1286,6 +1571,7 @@ impl TaskRevisionService {
         &self,
         scope_id: &str,
         mut tasks: Vec<Task>,
+        revision: u64,
     ) -> Result<Vec<Task>, TaskRevisionError> {
         for (position, task) in tasks.iter_mut().enumerate() {
             let extension = std::mem::take(&mut task.spec.extension);
@@ -1304,6 +1590,13 @@ impl TaskRevisionService {
             .map_err(|errors| TaskRevisionError::InvalidPatch {
                 message: errors.join("; "),
             })?;
+        super::validate_runtime_snapshot_claims(&RuntimePlanSnapshot {
+            revision,
+            tasks: tasks.clone(),
+        })
+        .map_err(|error| TaskRevisionError::InvalidPatch {
+            message: error.to_string(),
+        })?;
         Ok(tasks)
     }
 }
@@ -1339,6 +1632,585 @@ mod tests {
             Arc::new(InMemoryRevisionedTaskStore::new()),
             Arc::new(DefaultTaskToolPolicy::new("test-scope")),
         )
+    }
+
+    #[test]
+    fn review_explicit_null_result_survives_graph_checkpoint_roundtrip() -> Result<(), String> {
+        let mut task = Task {
+            spec: TaskSpec {
+                id: "null-result".to_string(),
+                title: "Null is an explicit result".to_string(),
+                description: "checkpoint".to_string(),
+                depends_on: Vec::new(),
+                max_retries: 0,
+                extension: serde_json::Value::Null,
+            },
+            execution: TaskExecution::pending("null-result"),
+        };
+        task.execution.status = TaskStatus::Completed;
+        task.execution.result = Some(serde_json::Value::Null);
+        let graph = RevisionedTaskGraph {
+            snapshot: RuntimePlanSnapshot {
+                revision: 7,
+                tasks: vec![task.clone()],
+            },
+            context: TaskGraphContext {
+                goal: "restore null".to_string(),
+                assumptions: Vec::new(),
+                risks: Vec::new(),
+                execution_mode: TaskGraphExecutionMode::Parallel,
+                metadata: serde_json::Value::Null,
+            },
+        };
+        let encoded = serde_json::to_string(&graph).map_err(|error| error.to_string())?;
+        let restored: RevisionedTaskGraph =
+            serde_json::from_str(&encoded).map_err(|error| error.to_string())?;
+        assert_eq!(
+            restored
+                .snapshot
+                .tasks
+                .first()
+                .map(|task| &task.execution.result),
+            Some(&Some(serde_json::Value::Null))
+        );
+        task.execution.result = None;
+        let encoded = serde_json::to_value(&task).map_err(|error| error.to_string())?;
+        assert!(encoded.pointer("/execution/result").is_none());
+        let absent: Task = serde_json::from_value(encoded).map_err(|error| error.to_string())?;
+        assert_eq!(absent.execution.result, None);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn review_relation_terminal_patch_clears_exact_interrupt_and_rejects_stale_execution()
+    -> Result<(), String> {
+        let (service, store) = proxy_service(true);
+        service
+            .create_from_tool(create_input(vec![draft("a", &[])]), &ToolContext::default())
+            .await
+            .map_err(|error| error.to_string())?;
+        let graph = service
+            .load("proxy-scope")
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "missing graph".to_string())?;
+        let task = graph
+            .snapshot
+            .tasks
+            .first()
+            .ok_or_else(|| "missing task".to_string())?;
+        let RuntimeTaskClaimOutcome::Claimed(claim) = service
+            .claim_runtime_task("proxy-scope", task, 1)
+            .await
+            .map_err(|error| error.to_string())?
+        else {
+            return Err("claim rejected".to_string());
+        };
+        service
+            .request_runtime_task_interruption(
+                "proxy-scope",
+                "a",
+                &claim,
+                super::super::RuntimeInterruptionDisposition::Paused {
+                    reason: "pause".to_string(),
+                },
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        let current = store
+            .load("proxy-scope")
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "missing requested graph".to_string())?;
+        let stale_execution = TaskExecutionCommit {
+            expected_revision: 1,
+            expected_executions: execution_map(&current),
+            next: current,
+        };
+        let patched = service
+            .apply_patch(
+                "proxy-scope",
+                TaskPlanPatch {
+                    base_revision: 1,
+                    reason: "explicit terminal progress".to_string(),
+                    operations: vec![TaskPlanPatchOp::SetStatus {
+                        task_id: "a".to_string(),
+                        status: TaskStatus::Cancelled,
+                    }],
+                },
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        super::super::validate_runtime_snapshot_claims(&patched.snapshot)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(
+            patched
+                .snapshot
+                .tasks
+                .first()
+                .and_then(|task| task.execution.interruption_requested.as_ref()),
+            None
+        );
+        assert!(matches!(
+            store
+                .compare_and_commit_execution("proxy-scope", stale_execution)
+                .await,
+            Err(RevisionedTaskStoreError::Conflict { .. })
+        ));
+        Ok(())
+    }
+
+    /// A callback/proxy-shaped backend. Runtime callers can only use the
+    /// public trait, so tests detect accidental reliance on concrete methods.
+    struct ProxyExecutionStore {
+        inner: InMemoryRevisionedTaskStore,
+        commits: std::sync::atomic::AtomicUsize,
+        enabled: bool,
+    }
+
+    #[async_trait]
+    impl RevisionedTaskStore for ProxyExecutionStore {
+        fn supports_runtime_execution(&self) -> bool {
+            self.enabled
+        }
+
+        async fn load(
+            &self,
+            scope_id: &str,
+        ) -> Result<Option<RevisionedTaskGraph>, RevisionedTaskStoreError> {
+            self.inner.load(scope_id).await
+        }
+        async fn compare_and_commit(
+            &self,
+            scope_id: &str,
+            commit: TaskGraphCommit,
+        ) -> Result<RevisionedTaskGraph, RevisionedTaskStoreError> {
+            self.inner.compare_and_commit(scope_id, commit).await
+        }
+        async fn compare_and_commit_execution(
+            &self,
+            scope_id: &str,
+            commit: TaskExecutionCommit,
+        ) -> Result<RevisionedTaskGraph, RevisionedTaskStoreError> {
+            if !self.enabled {
+                return Err(RevisionedTaskStoreError::Unsupported {
+                    operation: "proxy execution".to_string(),
+                });
+            }
+            self.commits
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner
+                .compare_and_commit_execution(scope_id, commit)
+                .await
+        }
+    }
+
+    struct AlwaysConflictStore {
+        inner: InMemoryRevisionedTaskStore,
+        attempts: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl RevisionedTaskStore for AlwaysConflictStore {
+        fn supports_runtime_execution(&self) -> bool {
+            true
+        }
+
+        async fn load(
+            &self,
+            scope_id: &str,
+        ) -> Result<Option<RevisionedTaskGraph>, RevisionedTaskStoreError> {
+            self.inner.load(scope_id).await
+        }
+        async fn compare_and_commit(
+            &self,
+            scope_id: &str,
+            commit: TaskGraphCommit,
+        ) -> Result<RevisionedTaskGraph, RevisionedTaskStoreError> {
+            self.inner.compare_and_commit(scope_id, commit).await
+        }
+        async fn compare_and_commit_execution(
+            &self,
+            _scope_id: &str,
+            commit: TaskExecutionCommit,
+        ) -> Result<RevisionedTaskGraph, RevisionedTaskStoreError> {
+            self.attempts
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(RevisionedTaskStoreError::Conflict {
+                expected: Some(commit.expected_revision),
+                current: Some(commit.expected_revision),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn persistent_backend_conflict_returns_a_bounded_typed_error() -> Result<(), String> {
+        let store = Arc::new(AlwaysConflictStore {
+            inner: InMemoryRevisionedTaskStore::new(),
+            attempts: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let service = TaskRevisionService::new(
+            store.clone(),
+            Arc::new(DefaultTaskToolPolicy::new("bounded-cas")),
+        );
+        service
+            .create_from_tool(create_input(vec![draft("a", &[])]), &ToolContext::default())
+            .await
+            .map_err(|error| error.to_string())?;
+        let graph = service
+            .load("bounded-cas")
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "missing graph".to_string())?;
+        let task = graph
+            .snapshot
+            .tasks
+            .first()
+            .ok_or_else(|| "missing task".to_string())?;
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            service.claim_runtime_task("bounded-cas", task, 1),
+        )
+        .await
+        .map_err(|_| "execution CAS retried forever".to_string())?;
+        assert!(matches!(
+            error,
+            Err(RevisionedTaskStoreError::Conflict {
+                expected: Some(1),
+                current: Some(1)
+            })
+        ));
+        assert_eq!(store.attempts.load(std::sync::atomic::Ordering::SeqCst), 32);
+        assert_eq!(
+            service
+                .load("bounded-cas")
+                .await
+                .map_err(|error| error.to_string())?
+                .and_then(|graph| graph
+                    .snapshot
+                    .tasks
+                    .first()
+                    .map(|task| task.execution.status.clone())),
+            Some(TaskStatus::Pending)
+        );
+        Ok(())
+    }
+
+    struct CrudOnlyPreflightStore;
+    #[async_trait]
+    impl RevisionedTaskStore for CrudOnlyPreflightStore {
+        async fn load(
+            &self,
+            _scope_id: &str,
+        ) -> Result<Option<RevisionedTaskGraph>, RevisionedTaskStoreError> {
+            Err(RevisionedTaskStoreError::Backend {
+                message: "runtime preflight touched backend load".to_string(),
+            })
+        }
+        async fn compare_and_commit(
+            &self,
+            _scope_id: &str,
+            _commit: TaskGraphCommit,
+        ) -> Result<RevisionedTaskGraph, RevisionedTaskStoreError> {
+            Err(RevisionedTaskStoreError::Backend {
+                message: "runtime preflight mutated backend".to_string(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn runtime_capability_preflight_rejects_crud_only_before_loading_or_mutating()
+    -> Result<(), String> {
+        let service = TaskRevisionService::new(
+            Arc::new(CrudOnlyPreflightStore),
+            Arc::new(DefaultTaskToolPolicy::new("preflight")),
+        );
+        assert!(!service.supports_runtime_execution());
+        let task = Task {
+            spec: TaskSpec {
+                id: "a".to_string(),
+                title: "preflight".to_string(),
+                description: "preflight".to_string(),
+                depends_on: Vec::new(),
+                max_retries: 0,
+                extension: serde_json::Value::Null,
+            },
+            execution: TaskExecution::pending("a"),
+        };
+        assert!(matches!(
+            service.claim_runtime_task("preflight", &task, 1).await,
+            Err(RevisionedTaskStoreError::Unsupported { .. })
+        ));
+        Ok(())
+    }
+
+    fn proxy_service(enabled: bool) -> (TaskRevisionService, Arc<ProxyExecutionStore>) {
+        let store = Arc::new(ProxyExecutionStore {
+            inner: InMemoryRevisionedTaskStore::new(),
+            commits: std::sync::atomic::AtomicUsize::new(0),
+            enabled,
+        });
+        (
+            TaskRevisionService::new(
+                store.clone(),
+                Arc::new(DefaultTaskToolPolicy::new("proxy-scope")),
+            ),
+            store,
+        )
+    }
+
+    #[tokio::test]
+    async fn arbitrary_backend_runtime_and_crud_share_one_canonical_graph_and_result()
+    -> Result<(), String> {
+        let (service, store) = proxy_service(true);
+        service
+            .create_from_tool(create_input(vec![draft("a", &[])]), &ToolContext::default())
+            .await
+            .map_err(|error| error.to_string())?;
+        let loaded = service
+            .load("proxy-scope")
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "missing graph".to_string())?;
+        let task = loaded
+            .snapshot
+            .tasks
+            .first()
+            .ok_or_else(|| "missing task".to_string())?;
+        let RuntimeTaskClaimOutcome::Claimed(claim) = service
+            .claim_runtime_task("proxy-scope", task, 1)
+            .await
+            .map_err(|error| error.to_string())?
+        else {
+            return Err("claim rejected".to_string());
+        };
+        assert_eq!(
+            service
+                .settle_runtime_resolution(
+                    "proxy-scope",
+                    "a",
+                    &claim,
+                    super::super::RuntimeTaskResolutionRequest::CompletedWithResult {
+                        result: serde_json::json!({"output":"完成🚀", "nullable": null})
+                    }
+                )
+                .await
+                .map_err(|error| error.to_string())?,
+            super::super::RuntimeTaskResolution::Completed
+        );
+        // Reconstructing the service must preserve output without a local cache.
+        let restored = TaskRevisionService::new(
+            store.clone(),
+            Arc::new(DefaultTaskToolPolicy::new("proxy-scope")),
+        );
+        let graph = restored
+            .load("proxy-scope")
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "missing restored graph".to_string())?;
+        let task = graph
+            .snapshot
+            .tasks
+            .first()
+            .ok_or_else(|| "missing restored task".to_string())?;
+        assert_eq!(graph.snapshot.revision, 1);
+        assert_eq!(task.execution.status, TaskStatus::Completed);
+        assert_eq!(
+            task.execution.result,
+            Some(serde_json::json!({"output":"完成🚀", "nullable":null}))
+        );
+        assert!(
+            !restored
+                .request_runtime_task_interruption(
+                    "proxy-scope",
+                    "a",
+                    &claim,
+                    super::super::RuntimeInterruptionDisposition::Cancelled
+                )
+                .await
+                .map_err(|error| error.to_string())?
+        );
+        assert_eq!(store.commits.load(std::sync::atomic::Ordering::SeqCst), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unsupported_runtime_backend_does_not_fallback_to_a_local_graph() -> Result<(), String>
+    {
+        let (service, store) = proxy_service(false);
+        service
+            .create_from_tool(create_input(vec![draft("a", &[])]), &ToolContext::default())
+            .await
+            .map_err(|error| error.to_string())?;
+        let graph = service
+            .load("proxy-scope")
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "missing graph".to_string())?;
+        assert!(!service.supports_runtime_execution());
+        assert_eq!(store.commits.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let task = graph
+            .snapshot
+            .tasks
+            .first()
+            .ok_or_else(|| "missing task".to_string())?;
+        assert!(matches!(
+            service.claim_runtime_task("proxy-scope", task, 1).await,
+            Err(RevisionedTaskStoreError::Unsupported { .. })
+        ));
+        let actual = store
+            .inner
+            .load("proxy-scope")
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "missing authoritative graph".to_string())?;
+        assert_eq!(
+            actual
+                .snapshot
+                .tasks
+                .first()
+                .map(|task| &task.execution.status),
+            Some(&TaskStatus::Pending)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn execution_cas_rejects_a_lost_relation_revision_and_runtime_state() -> Result<(), String>
+    {
+        let (service, store) = proxy_service(true);
+        service
+            .create_from_tool(create_input(vec![draft("a", &[])]), &ToolContext::default())
+            .await
+            .map_err(|error| error.to_string())?;
+        let graph = store
+            .load("proxy-scope")
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "missing graph".to_string())?;
+        let task = graph
+            .snapshot
+            .tasks
+            .first()
+            .ok_or_else(|| "missing task".to_string())?;
+        let stale_execution = TaskExecutionCommit {
+            expected_revision: 1,
+            expected_executions: execution_map(&graph),
+            next: graph.clone(),
+        };
+        service
+            .claim_runtime_task("proxy-scope", task, 1)
+            .await
+            .map_err(|error| error.to_string())?;
+        assert!(matches!(
+            store
+                .compare_and_commit_execution("proxy-scope", stale_execution.clone())
+                .await,
+            Err(RevisionedTaskStoreError::Conflict { .. })
+        ));
+        let current = store
+            .load("proxy-scope")
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "missing claimed graph".to_string())?;
+        let mut next = current.clone();
+        next.snapshot.revision = 2;
+        store
+            .compare_and_commit(
+                "proxy-scope",
+                TaskGraphCommit {
+                    expected_revision: Some(1),
+                    expected_executions: Some(execution_map(&current)),
+                    next,
+                    reason: "interleaved relation patch".to_string(),
+                    effects: TaskPatchEffects::default(),
+                },
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        assert!(matches!(
+            store
+                .compare_and_commit_execution("proxy-scope", stale_execution)
+                .await,
+            Err(RevisionedTaskStoreError::Conflict { .. })
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn durable_exact_pause_wins_over_late_result_and_survives_service_reconstruction()
+    -> Result<(), String> {
+        let (service, store) = proxy_service(true);
+        service
+            .create_from_tool(create_input(vec![draft("a", &[])]), &ToolContext::default())
+            .await
+            .map_err(|error| error.to_string())?;
+        let graph = service
+            .load("proxy-scope")
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "missing graph".to_string())?;
+        let task = graph
+            .snapshot
+            .tasks
+            .first()
+            .ok_or_else(|| "missing task".to_string())?;
+        let RuntimeTaskClaimOutcome::Claimed(claim) = service
+            .claim_runtime_task("proxy-scope", task, 1)
+            .await
+            .map_err(|error| error.to_string())?
+        else {
+            return Err("claim rejected".to_string());
+        };
+        let disposition = super::super::RuntimeInterruptionDisposition::Paused {
+            reason: "requested pause".to_string(),
+        };
+        assert!(
+            service
+                .request_runtime_task_interruption("proxy-scope", "a", &claim, disposition.clone())
+                .await
+                .map_err(|error| error.to_string())?
+        );
+        let restored =
+            TaskRevisionService::new(store, Arc::new(DefaultTaskToolPolicy::new("proxy-scope")));
+        assert_eq!(
+            restored
+                .settle_runtime_resolution(
+                    "proxy-scope",
+                    "a",
+                    &claim,
+                    super::super::RuntimeTaskResolutionRequest::CompletedWithResult {
+                        result: serde_json::json!("late result")
+                    }
+                )
+                .await
+                .map_err(|error| error.to_string())?,
+            super::super::RuntimeTaskResolution::Interrupted { disposition }
+        );
+        let graph = restored
+            .load("proxy-scope")
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "missing settled graph".to_string())?;
+        let paused = graph
+            .snapshot
+            .tasks
+            .first()
+            .ok_or_else(|| "missing paused task".to_string())?;
+        assert_eq!(
+            paused.execution.status,
+            TaskStatus::Paused("requested pause".to_string())
+        );
+        assert_eq!(paused.execution.result, None);
+        assert_eq!(paused.execution.claim, None);
+        assert_eq!(
+            restored
+                .resume_runtime_task("proxy-scope", paused, 1)
+                .await
+                .map_err(|error| error.to_string())?,
+            super::super::RuntimeTaskResumeOutcome::Resumed
+        );
+        Ok(())
     }
 
     struct ClaimBeforePatchCommitStore {
@@ -1481,7 +2353,9 @@ mod tests {
                 .settle_runtime_claim(scope_id, "a", &claim, TaskStatus::Completed)
                 .await
                 .map_err(|error| error.to_string())?,
-            crate::tasks::RuntimeTaskSettlementOutcome::Settled
+            crate::tasks::RuntimeTaskSettlementOutcome::Settled {
+                status: TaskStatus::Completed
+            }
         );
         Ok(())
     }
@@ -1870,7 +2744,9 @@ mod tests {
                 )
                 .await
                 .map_err(|error| error.to_string())?,
-            crate::tasks::RuntimeTaskSettlementOutcome::Settled
+            crate::tasks::RuntimeTaskSettlementOutcome::Settled {
+                status: TaskStatus::Blocked("acceptance pending".to_string())
+            }
         );
         let blocked = store
             .load("retry-scope")
@@ -1972,7 +2848,9 @@ mod tests {
                 .settle_runtime_claim("claim-preservation", "a", &claim, TaskStatus::Completed,)
                 .await
                 .map_err(|error| error.to_string())?,
-            crate::tasks::RuntimeTaskSettlementOutcome::Settled
+            crate::tasks::RuntimeTaskSettlementOutcome::Settled {
+                status: TaskStatus::Completed
+            }
         );
         Ok(())
     }
@@ -2177,7 +3055,9 @@ mod tests {
                 .settle_runtime_claim("settlement-patch-cas", "a", &claim, TaskStatus::Completed,)
                 .await
                 .map_err(|error| error.to_string())?,
-            crate::tasks::RuntimeTaskSettlementOutcome::Settled
+            crate::tasks::RuntimeTaskSettlementOutcome::Settled {
+                status: TaskStatus::Completed
+            }
         );
         let settlement_error = store
             .compare_and_commit("settlement-patch-cas", stale_skip)
@@ -2370,7 +3250,9 @@ mod tests {
                 .settle_runtime_claim("runtime-scope", "a", &claim_a, TaskStatus::Completed,)
                 .await
                 .map_err(|error| error.to_string())?,
-            crate::tasks::RuntimeTaskSettlementOutcome::Settled
+            crate::tasks::RuntimeTaskSettlementOutcome::Settled {
+                status: TaskStatus::Completed
+            }
         );
         assert_eq!(
             store

@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 pub struct Position {
     /// Line number (0-indexed).
     pub line: u32,
-    /// Character offset within the line (0-indexed).
+    /// UTF-16 code-unit offset within the line (0-indexed).
     pub character: u32,
 }
 
@@ -42,19 +42,29 @@ pub enum DiagnosticSeverity {
     Hint,
 }
 
+/// A diagnostic code retaining the protocol's integer-versus-string distinction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum DiagnosticCode {
+    /// Signed LSP integer, including negative codes.
+    Integer(i32),
+    /// Textual code, even when its characters spell a number.
+    String(String),
+}
+
 /// A diagnostic (error, warning, etc.) reported by the language server.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Diagnostic {
     /// The range in the document where the diagnostic applies.
     pub range: Range,
-    /// Severity level.
-    pub severity: DiagnosticSeverity,
+    /// Optional severity reported by the server; no implicit classification.
+    pub severity: Option<DiagnosticSeverity>,
     /// Human-readable message describing the issue.
     pub message: String,
     /// Source of the diagnostic (e.g., "rust-analyzer", "pyright").
     pub source: Option<String>,
     /// Optional diagnostic code (e.g., "E0308" for Rust type mismatch).
-    pub code: Option<String>,
+    pub code: Option<DiagnosticCode>,
 }
 
 /// Hover information returned by the language server.
@@ -101,8 +111,8 @@ pub enum CompletionItemKind {
 pub struct CompletionItem {
     /// Label displayed in the completion list.
     pub label: String,
-    /// Kind of completion item.
-    pub kind: CompletionItemKind,
+    /// Optional kind reported by the server; absence is not a Text classification.
+    pub kind: Option<CompletionItemKind>,
     /// Additional detail (e.g., function signature).
     pub detail: Option<String>,
     /// Text to insert (if different from label).

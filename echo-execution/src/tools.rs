@@ -220,7 +220,11 @@ fn validate_parameters_against_schema(tool: &dyn Tool, parameters: &ToolParamete
     Ok(())
 }
 
-async fn validate_tool_input(tool: &dyn Tool, parameters: &ToolParameters) -> Result<()> {
+/// Validate a tool's own schema and custom input rules before invoking it.
+///
+/// Direct adapters share the same validation as [`ToolManager`] without
+/// installing another registry or changing execution, retries, or cancellation.
+pub async fn validate_tool_input(tool: &dyn Tool, parameters: &ToolParameters) -> Result<()> {
     validate_parameters_against_schema(tool, parameters)?;
     tool.validate_parameters(parameters).await
 }

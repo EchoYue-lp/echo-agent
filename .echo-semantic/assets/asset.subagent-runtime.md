@@ -6,16 +6,42 @@ title: Subagent Registry、Executor 与 Control
 asset_type: state_authority
 status: active
 risk: high
-observed_at: 733d352fc719f922b21bab1cd46206139564367f
-boundary_refs: [boundary.task-subagent-workflow]
-code_refs: [src/agent/subagent/registry.rs, src/agent/subagent/executor.rs, src/agent/subagent/control.rs, src/agent/subagent/events.rs, docs/adr/0033-subagent-factory-singleflight-publication.md]
-consumer_refs: [src/tools/builtin/agent_dispatch.rs, src/agent/subagent/team/mod.rs]
-behavior_refs: [behavior.task-subagent-execution]
-rule_refs: [rule.task-subagent-authority]
-evidence_refs: [evidence.task-subagent-workflow, evidence.subagent-factory-singleflight-repair, evidence.subagent-factory-singleflight-verification, evidence.task-subagent-attempt-link-repair, evidence.task-subagent-attempt-link-verification, evidence.task-subagent-external-control-handle-repair, evidence.task-subagent-external-control-handle-verification, evidence.framework-only-finding-closure-verification]
-finding_refs: [finding.task-subagent-attempt-link, finding.subagent-factory-cancellation, finding.subagent-factory-publication-race, finding.subagent-definition-catalog]
+observed_at: source:34d5f5574c9cf5a645970cd8b58367c39bce268630488b68d3ea54e996728e17
+boundary_refs:
+- boundary.task-subagent-workflow
+code_refs:
+- src/agent/subagent/registry.rs
+- src/agent/subagent/executor.rs
+- src/agent/subagent/control.rs
+- src/agent/subagent/events.rs
+- docs/adr/0033-subagent-factory-singleflight-publication.md
+consumer_refs:
+- src/tools/builtin/agent_dispatch.rs
+- src/agent/subagent/team/mod.rs
+behavior_refs:
+- behavior.task-subagent-execution
+rule_refs:
+- rule.task-subagent-authority
+evidence_refs:
+- evidence.task-subagent-workflow
+- evidence.subagent-factory-singleflight-repair
+- evidence.subagent-factory-singleflight-verification
+- evidence.task-subagent-attempt-link-repair
+- evidence.task-subagent-attempt-link-verification
+- evidence.task-subagent-external-control-handle-repair
+- evidence.task-subagent-external-control-handle-verification
+- evidence.framework-only-finding-closure-verification
+- evidence.task-runtime-store-control-repair
+- evidence.task-runtime-store-control-verification
+finding_refs:
+- finding.task-subagent-attempt-link
+- finding.subagent-factory-cancellation
+- finding.subagent-factory-publication-race
+- finding.subagent-definition-catalog
+- finding.task-runtime-store-control
 candidate_refs: []
 ---
+
 
 # Subagent Registry、Executor 与 Control
 

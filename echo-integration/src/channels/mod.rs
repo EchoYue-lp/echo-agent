@@ -52,6 +52,12 @@
 //! for result in manager.start_all(handler_factory).await {
 //!     result.result?;
 //! }
+//! // Owned access ends the registry borrow before awaiting the original plugin.
+//! if let Some(channel) = manager.get_owned("qqbot") {
+//!     channel.health_check().await?;
+//! }
+//! let shutdown = manager.stop_all_owned();
+//! shutdown.await?;
 //! # Ok(())
 //! # }
 //! ```
@@ -64,7 +70,7 @@ pub mod types;
 
 pub use channels::feishu::channel::{FeishuChannel, FeishuConfig};
 pub use channels::qq::channel::{QqChannel, QqConfig};
-pub use manager::ChannelManager;
+pub use manager::{ChannelHandle, ChannelLifecycleResult, ChannelManager};
 pub use session::{
     ChannelSessionInstance, ChannelSessionRotation, SessionConfig, SessionEndInfo,
     SessionEndReason, SessionFactory, SessionHandler,
@@ -75,7 +81,7 @@ pub mod prelude {
     pub use super::ChannelPlugin;
     pub use super::channels::feishu::channel::{FeishuChannel, FeishuConfig};
     pub use super::channels::qq::channel::{QqChannel, QqConfig};
-    pub use super::manager::ChannelManager;
+    pub use super::manager::{ChannelHandle, ChannelLifecycleResult, ChannelManager};
     pub use super::session::{
         ChannelSessionInstance, ChannelSessionRotation, SessionConfig, SessionEndInfo,
         SessionEndReason, SessionFactory, SessionHandler,

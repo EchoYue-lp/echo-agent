@@ -133,6 +133,14 @@ Common tools:
 - `aggregate_data` — grouped or global aggregations
 - `transform_data` — sort / select operations
 - `export_data` — export processed results
+- `pivot_data` — reshape grouped values into columns, retaining the native pivot
+  value when filtering. String labels retain their actual text, numeric labels
+  compare as numbers, and a null pivot has a `null` bucket; absent combinations
+  remain null. Null index groups keep their aggregated cells. Repeated
+  index/pivot pairs use the requested aggregation; only an omitted aggregation
+  defaults to sum. Invalid names/types and distinct pivot values whose output
+  labels collide (such as null and the string `null`) return explicit errors.
+
 
 Typical use cases:
 

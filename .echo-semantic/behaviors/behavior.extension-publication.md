@@ -6,14 +6,69 @@ status: needs_review
 expectation: inferred
 risk: high
 primary_focus: failure_concurrency
-focus: [state_authority, time_lifecycle, result_side_effect, permission_external, data_durability]
+focus:
+- state_authority
+- time_lifecycle
+- result_side_effect
+- permission_external
+- data_durability
 boundary: boundary.extension-lifecycle
-observed_at: 733d352fc719f922b21bab1cd46206139564367f
-code_refs: [echo-integration/src/mcp/mod.rs, echo-execution/src/skills/hooks.rs, echo-execution/src/skills/registry.rs, echo-core/src/plugin/registry.rs, echo-core/src/plugin/lifecycle.rs, src/plugin/coordinator.rs, src/plugin/prepared.rs, src/agent/react/mod.rs, echo-integration/src/lsp/manager.rs]
-rule_refs: [rule.extension-generation-authority]
-evidence_refs: [evidence.effects-extensions, evidence.skill-activation-authority-repair, evidence.skill-activation-authority-verification, evidence.mcp-tool-local-classification-repair, evidence.mcp-tool-local-classification-verification, evidence.mcp-client-capability-advertisement-repair, evidence.mcp-client-capability-advertisement-verification, evidence.lsp-derived-handle-lifecycle-repair, evidence.lsp-derived-handle-lifecycle-verification, evidence.plugin-component-preparation-repair, evidence.plugin-component-preparation-verification, evidence.plugin-generation-publication-authority-repair, evidence.plugin-generation-publication-authority-verification, evidence.plugin-mcp-owner-isolation-repair, evidence.plugin-mcp-owner-isolation-verification, evidence.plugin-lifecycle-coordinator-repair, evidence.plugin-lifecycle-coordinator-verification]
-finding_refs: [finding.skill-activation-authority, finding.hook-permission-precedence, finding.mcp-client-capability-advertisement, finding.mcp-tool-permission-classification, finding.plugin-mcp-owner-isolation, finding.plugin-failure-isolation-contract, finding.plugin-lifecycle-coordination, finding.lsp-runtime-state, finding.lsp-manager-derived-handle-resurrection, finding.extension-cleanup-settlement, finding.extension-credential-debug-redaction, finding.mcp-version-doc-drift]
+observed_at: source:34d5f5574c9cf5a645970cd8b58367c39bce268630488b68d3ea54e996728e17
+code_refs:
+- echo-integration/src/mcp/mod.rs
+- echo-execution/src/skills/hooks.rs
+- echo-execution/src/skills/registry.rs
+- echo-core/src/plugin/registry.rs
+- echo-core/src/plugin/lifecycle.rs
+- src/plugin/coordinator.rs
+- src/plugin/prepared.rs
+- src/agent/react/mod.rs
+- echo-integration/src/lsp/manager.rs
+- echo-integration/src/channels/manager.rs
+- echo-integration/src/channels/mod.rs
+- docs/adr/0084-channel-owned-operations.md
+- docs/en/15-im-channels.md
+- docs/zh/15-im-channels.md
+- docs/supreme/specs/2026-10-13T1430-channel-owned-operations/design.md
+- docs/supreme/specs/2026-10-13T1430-channel-owned-operations/plans/plan_01_闭合ChannelOwned操作.md
+rule_refs:
+- rule.extension-generation-authority
+evidence_refs:
+- evidence.effects-extensions
+- evidence.skill-activation-authority-repair
+- evidence.skill-activation-authority-verification
+- evidence.mcp-tool-local-classification-repair
+- evidence.mcp-tool-local-classification-verification
+- evidence.mcp-client-capability-advertisement-repair
+- evidence.mcp-client-capability-advertisement-verification
+- evidence.lsp-derived-handle-lifecycle-repair
+- evidence.lsp-derived-handle-lifecycle-verification
+- evidence.plugin-component-preparation-repair
+- evidence.plugin-component-preparation-verification
+- evidence.plugin-generation-publication-authority-repair
+- evidence.plugin-generation-publication-authority-verification
+- evidence.plugin-mcp-owner-isolation-repair
+- evidence.plugin-mcp-owner-isolation-verification
+- evidence.plugin-lifecycle-coordinator-repair
+- evidence.plugin-lifecycle-coordinator-verification
+- evidence.channel-manager-borrowed-await-repair
+- evidence.channel-manager-borrowed-await-verification
+finding_refs:
+- finding.skill-activation-authority
+- finding.hook-permission-precedence
+- finding.mcp-client-capability-advertisement
+- finding.mcp-tool-permission-classification
+- finding.plugin-mcp-owner-isolation
+- finding.plugin-failure-isolation-contract
+- finding.plugin-lifecycle-coordination
+- finding.lsp-runtime-state
+- finding.lsp-manager-derived-handle-resurrection
+- finding.extension-cleanup-settlement
+- finding.extension-credential-debug-redaction
+- finding.mcp-version-doc-drift
+- finding.channel-manager-borrowed-await
 ---
+
 
 # MCP、Hook、Skill、Plugin 与 LSP 发布
 
@@ -53,3 +108,6 @@ late-registration、invalid-preparation-before-withdrawal 及两类取消恢复 
 最终独立复审和远端交付；Registry refresh 保留 last successful scope policy，不扩大 Host
 discovery authority；#58 durable Hook
 producer acknowledgement 与其它开放 Finding 继续独立验收，因此本 Behavior 保持 needs_review。
+
+
+本轮限定规则（channel-manager-borrowed-await）：复用ChannelManager唯一map/entry；ChannelHandle直接持原plugin、handler清理责任与transport-stop epoch。get_owned和owned批量future不借用manager，SDK须短锁取owned后释放再await。entry独立read/write锁；start先登记handler，stop先记录transport成功再await close，失败/取消保留责任；get_mut使epoch失效防旧stop覆盖。旧get/get_mut保留，registration metadata固定声明的兼容取舍见ADR0084，不是第二registry/生命周期。 失败/错误合同：registry guard不得跨owned await；原plugin/handler/stop责任只能存在于同entry，取消失败不能抹去close责任，批量操作不得吞兄弟结果，metadata不会等待entry锁。 test-manager-repaired.log为11 passed/0 failed/0 ignored；初次AtomicU64警告尝试保留、修复后同11测试及双lint零警告退出0。clippy-alltargets、clippy-production、doc-channels(2 passed/0 failed)、example-demo38均真实receipt exitCode0，所有log/source SHA核对。覆盖五类callback、lazy batch快照、独立entry、rollback/取消/close retry/get_mut epoch/metadata声明。 只关闭这一故障；其余needs_review与历史证据保持各自范围。

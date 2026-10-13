@@ -127,13 +127,17 @@ through its thin `RuntimeDagController` adapter:
 2. Compute the ready frontier from committed dependencies and statuses.
 3. Atomically claim tasks with revision, attempt, spec hash, and unique claim id.
 4. Dispatch a bounded, conflict-free Subagent wave.
-5. Resolve or abandon every claim with compare-and-set semantics.
+5. Resolve each joined attempt immediately with compare-and-set semantics, even while siblings remain active.
 6. Settle typed cancellation or resumable pause receipts at the wave boundary.
 7. Reload at the next safe point so a newer revision can take effect.
 
 The controller is a thin application adapter for persistence, Subagent
 dispatch, review, and product-specific resource policy. It must not implement
-a second ready-frontier loop or dependency state machine.
+a second ready-frontier loop or dependency state machine. Joined attempt
+resolution/CAS/cleanup is supervised concurrently with dispatch joins and root
+cancellation grace: slow review or storage cannot block unrelated exact control.
+An in-flight CAS retains its owner and is never dropped merely to meet a cancel
+deadline. The next wave still waits for all settlement receipts.
 
 The service handles transitive failure blocking, skip and pause states, bounded
 retries, cancellation settlement, superseded claims, and stall detection.
@@ -149,6 +153,37 @@ Pending without consuming retry budget. A Skipped dependency is carried to the
 Subagent as a typed waiver rather than a fabricated output. Attempt-scoped
 claim identity prevents an old dispatch from overwriting a reclaimed attempt.
 
+### Store execution and recoverable output
+
+The same `TaskRevisionService` that owns CRUD exposes `claim_runtime_task`,
+`settle_runtime_resolution`, retry/resume and interruption methods through its
+registered Store. Executable backends implement
+`RevisionedTaskStore::compare_and_commit_execution`: atomically compare the
+relation revision and complete execution map, preserve specifications/context,
+and publish the new execution facts at the unchanged relation revision.
+Backends declare `supports_runtime_execution()` without a load or mutation;
+its default is false, and executable backends opt in. CRUD-only backends return
+`Unsupported` before runtime load/mutation; there is no private in-memory fallback.
+
+Result-bearing tasks use `RuntimeTaskResolutionRequest::CompletedWithResult`.
+Their `TaskExecution.result` and Completed status share the same transaction;
+restoring the graph restores dependency results. Missing `None` differs from
+an explicitly supplied JSON null. Adapters decode typed outputs and report
+missing/malformed results rather than manufacturing success data. Team result
+accessors use this graph state, with no second result cache.
+
+For a current claim, first persist
+`TaskRevisionService::request_runtime_task_interruption` with Cancelled or Paused,
+then project it using `RuntimeTaskService::request_attempt_interrupt`. A stale
+request returns false and cannot control another attempt. The durable request
+wins against a late dispatch result through execution CAS. A local task stop
+only constrains that node and its descendants; independent roots and next waves
+continue. Explicit run-token cancellation remains the run-wide authority. Cancelled is
+stronger than Paused: a run pause preserves an already accepted exact task
+cancellation as terminal Cancelled, so recovery/resume cannot revive it.
+
+See [ADR 0060](../adr/0060-task-execution-store-cas-and-local-interruption.md).
+
 ## Projection and Progress
 
 `TaskEvent` and `TaskProgress` are consumer-facing projections. Applications
@@ -158,3 +193,11 @@ through the canonical service/controller boundary.
 
 See `tests/facade_smoke.rs` for public service construction and the private
 `runtime_executor` tests for deterministic controller behavior.
+
+`RuntimeTaskService::execute` retains the same framework driver after its caller
+future is dropped. Caller exit cancels only the supplied token's child scope;
+claim/reservation futures and physical dispatch join owners stay alive until the
+canonical settlement or an explicit unknown-authority result. A backend claim
+that commits and unwinds before returning its identity remains Running for
+authoritative owner/fencing recovery; no retry or terminal is guessed. See
+[ADR 0060](../adr/0060-task-execution-store-cas-and-local-interruption.md).

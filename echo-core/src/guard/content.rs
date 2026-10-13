@@ -100,19 +100,49 @@ impl ContentGuard {
 
     /// 脱敏：将所有 PII 替换为 `[REDACTED]`
     pub fn redact(&self, content: &str) -> String {
-        let mut result = content.to_string();
-        let matches = self.detect(content);
-        // 从后往前替换以保持位置正确
-        for m in matches.iter().rev() {
-            let replacement = match m.pii_type {
+        let mut merged: Vec<(usize, usize, PiiType, usize)> = Vec::new();
+        for item in self.detect(content) {
+            let width = item.end.saturating_sub(item.start);
+            if let Some((_, end, kind, widest)) = merged.last_mut()
+                && item.start < *end
+            {
+                // Overlapping recognizers refer to the original input. Merge
+                // their coverage before rendering, so a nested phone cannot
+                // rewrite a card marker and leak the card's remaining suffix.
+                *end = (*end).max(item.end);
+                if width > *widest {
+                    *kind = item.pii_type;
+                    *widest = width;
+                }
+            } else {
+                merged.push((item.start, item.end, item.pii_type, width));
+            }
+        }
+        let mut result = String::new();
+        let mut characters = content.char_indices().peekable();
+        for (start, end, kind, _) in merged {
+            while let Some(&(position, character)) = characters.peek() {
+                if position >= start {
+                    break;
+                }
+                result.push(character);
+                characters.next();
+            }
+            result.push_str(match kind {
                 PiiType::ApiKey => "[REDACTED:API_KEY]",
                 PiiType::PhoneCn => "[REDACTED:PHONE]",
                 PiiType::Email => "[REDACTED:EMAIL]",
                 PiiType::IdCardCn => "[REDACTED:ID_CARD]",
                 PiiType::CreditCard => "[REDACTED:CARD]",
-            };
-            result.replace_range(m.start..m.end, replacement);
+            });
+            while characters
+                .peek()
+                .is_some_and(|(position, _)| *position < end)
+            {
+                characters.next();
+            }
         }
+        result.extend(characters.map(|(_, character)| character));
         result
     }
 
@@ -278,5 +308,50 @@ mod tests {
         let guard = ContentGuard::new(ContentGuardMode::Reject);
         let result = guard.check("这是一段正常的内容没有敏感信息").unwrap();
         assert!(!result.is_rejected());
+    }
+    #[test]
+    fn redaction_covers_nested_card_phone_overlap_without_leaking_suffix() {
+        let guard = ContentGuard::new(ContentGuardMode::Redact);
+        let content = "中😀 4513812345678111 尾";
+        let matches = guard.detect(content);
+        assert!(
+            matches
+                .iter()
+                .any(|item| item.pii_type == PiiType::CreditCard)
+        );
+        assert!(matches.iter().any(|item| item.pii_type == PiiType::PhoneCn));
+        assert_eq!(guard.redact(content), "中😀 [REDACTED:CARD] 尾");
+    }
+
+    #[test]
+    fn redaction_merges_crossing_spans_and_keeps_adjacent_matches_distinct()
+    -> std::result::Result<(), regex::Error> {
+        let guard = ContentGuard {
+            patterns: vec![
+                (PiiType::Email, Regex::new("abcd")?),
+                (PiiType::PhoneCn, Regex::new("cdef")?),
+                (PiiType::ApiKey, Regex::new("XYZ")?),
+            ],
+            mode: ContentGuardMode::Redact,
+        };
+        assert_eq!(
+            guard.redact("中😀 abcdefXYZ 尾"),
+            "中😀 [REDACTED:EMAIL][REDACTED:API_KEY] 尾"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn redaction_same_start_prefers_longest_match_and_preserves_unicode()
+    -> std::result::Result<(), regex::Error> {
+        let guard = ContentGuard {
+            patterns: vec![
+                (PiiType::Email, Regex::new("😀中")?),
+                (PiiType::ApiKey, Regex::new("😀中文尾")?),
+            ],
+            mode: ContentGuardMode::Redact,
+        };
+        assert_eq!(guard.redact("前😀中文尾后"), "前[REDACTED:API_KEY]后");
+        Ok(())
     }
 }

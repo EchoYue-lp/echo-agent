@@ -4,63 +4,164 @@ id: map.protocol-surfaces
 kind: capability_map
 title: ACP、A2A、Channels、Headless 与 SDK Surfaces
 risk: high
-observed_at: 733d352fc719f922b21bab1cd46206139564367f
-boundary_refs: [boundary.protocol-surfaces]
-behavior_refs: [behavior.protocol-projection]
-rule_refs: [rule.protocol-role-separation, rule.sdk-rust-authority]
-evidence_refs: [evidence.provider-protocol-quality, evidence.sdk-contracts, evidence.high-risk-audit-frontier, evidence.framework-concept-navigation, evidence.agent-adapter-close-settlement-repair, evidence.agent-adapter-close-settlement-verification, evidence.sdk-deferred-backlog-count-repair, evidence.sdk-deferred-backlog-count-verification]
-finding_refs: [finding.a2a-terminal-authority, finding.a2a-stream-cleanup, finding.a2a-task-id-admission-authority, finding.a2a-advertised-capability-binding, finding.channel-attachment-projection, finding.channel-reset-stale-generation-delivery, finding.turn-driver-entry-coverage, finding.agent-adapter-close-settlement, finding.turn-terminal-commit-projection-order, finding.sdk-gap-generation-validation-parity, finding.sdk-gap-ack-replay-watermark, finding.sdk-deferred-backlog-count-drift]
-audit_refs: [audit.protocol-surfaces.state-authority, audit.protocol-surfaces.time-lifecycle, audit.protocol-surfaces.contract-evidence, audit.semantic-governance-final-rereview, audit.agent-adapter-close-settlement-rereview]
-related_map_refs: [map.agent-session-turn, map.observation-persistence-delivery, map.extension-lifecycle, map.sdk-facade-parity]
+observed_at: source:34d5f5574c9cf5a645970cd8b58367c39bce268630488b68d3ea54e996728e17
+boundary_refs:
+- boundary.protocol-surfaces
+behavior_refs:
+- behavior.protocol-projection
+rule_refs:
+- rule.protocol-role-separation
+- rule.sdk-rust-authority
+evidence_refs:
+- evidence.provider-protocol-quality
+- evidence.sdk-contracts
+- evidence.high-risk-audit-frontier
+- evidence.framework-concept-navigation
+- evidence.agent-adapter-close-settlement-repair
+- evidence.agent-adapter-close-settlement-verification
+- evidence.sdk-deferred-backlog-count-repair
+- evidence.sdk-deferred-backlog-count-verification
+- evidence.task-runtime-store-control-repair
+- evidence.task-runtime-store-control-verification
+- evidence.lsp-response-value-fidelity-investigation
+- evidence.lsp-diagnostic-notification-repair-verification
+- evidence.framework-parent-drop-final-verification
+- evidence.framework-final-34d5-full-verification
+- evidence.framework-final-34d5-gate-archive
+finding_refs:
+- finding.a2a-terminal-authority
+- finding.a2a-stream-cleanup
+- finding.a2a-task-id-admission-authority
+- finding.a2a-advertised-capability-binding
+- finding.channel-attachment-projection
+- finding.channel-reset-stale-generation-delivery
+- finding.turn-driver-entry-coverage
+- finding.agent-adapter-close-settlement
+- finding.turn-terminal-commit-projection-order
+- finding.sdk-gap-generation-validation-parity
+- finding.sdk-gap-ack-replay-watermark
+- finding.sdk-deferred-backlog-count-drift
+- finding.extension-invocation-cancellation-scope
+- finding.lsp-response-value-fidelity
+- finding.lsp-diagnostic-notification-fidelity
+audit_refs:
+- audit.protocol-surfaces.state-authority
+- audit.protocol-surfaces.time-lifecycle
+- audit.protocol-surfaces.contract-evidence
+- audit.semantic-governance-final-rereview
+- audit.agent-adapter-close-settlement-rereview
+- audit.framework-final-34d5-gate-rereview
+related_map_refs:
+- map.agent-session-turn
+- map.observation-persistence-delivery
+- map.extension-lifecycle
+- map.sdk-facade-parity
 scenarios:
   acp-session-run-projection:
     status: mapped
-    source_refs: [src/acp/session.rs, src/acp/runtime.rs, src/acp/projection.rs]
-    behavior_refs: [behavior.protocol-projection]
-    rule_refs: [rule.turn-terminal-authority, rule.protocol-role-separation]
+    source_refs:
+    - src/acp/session.rs
+    - src/acp/runtime.rs
+    - src/acp/projection.rs
+    behavior_refs:
+    - behavior.protocol-projection
+    rule_refs:
+    - rule.turn-terminal-authority
+    - rule.protocol-role-separation
   a2a-task-and-stream:
     status: needs_review
-    source_refs: [src/a2a/server.rs, src/a2a/types.rs]
-    finding_refs: [finding.a2a-terminal-authority, finding.a2a-stream-cleanup, finding.a2a-task-id-admission-authority, finding.a2a-advertised-capability-binding]
+    source_refs:
+    - src/a2a/server.rs
+    - src/a2a/types.rs
+    finding_refs:
+    - finding.a2a-terminal-authority
+    - finding.a2a-stream-cleanup
+    - finding.a2a-task-id-admission-authority
+    - finding.a2a-advertised-capability-binding
     unknown: A2A 自持 terminal、重复 ID 无 generation、stream cleanup 与宣告 capability 均未闭合
     next_step: 分别 repair admission/cleanup/terminal，并 semantic-decide text+SSE 或 file/push 合同
   channel-session-and-message:
     status: needs_review
-    source_refs: [echo-integration/src/channels/session.rs, echo-integration/src/channels/types.rs, src/channels.rs]
-    finding_refs: [finding.channel-attachment-projection, finding.channel-reset-stale-generation-delivery, finding.turn-driver-entry-coverage]
-    evidence_refs: [evidence.provider-protocol-quality, evidence.channel-generation-delivery-fence-repair, evidence.channel-generation-delivery-fence-verification, evidence.agent-adapter-close-settlement-repair, evidence.agent-adapter-close-settlement-verification]
+    source_refs:
+    - echo-integration/src/channels/session.rs
+    - echo-integration/src/channels/types.rs
+    - src/channels.rs
+    finding_refs:
+    - finding.channel-attachment-projection
+    - finding.channel-reset-stale-generation-delivery
+    - finding.turn-driver-entry-coverage
+    evidence_refs:
+    - evidence.provider-protocol-quality
+    - evidence.channel-generation-delivery-fence-repair
+    - evidence.channel-generation-delivery-fence-verification
+    - evidence.agent-adapter-close-settlement-repair
+    - evidence.agent-adapter-close-settlement-verification
     unknown: Channel session/incarnation、reset delivery fence与Agent close已映射，但handler仍丢弃attachments并直接raw chat
     next_step: 分别repair attachment投影与driven Turn入口；不重建close owner
   headless-turn:
     status: mapped
-    source_refs: [src/headless.rs, echo-orchestration/src/runtime/turn_driver.rs]
-    behavior_refs: [behavior.protocol-projection]
-    rule_refs: [rule.turn-terminal-authority]
-    evidence_refs: [evidence.agent-adapter-close-settlement-repair, evidence.agent-adapter-close-settlement-verification]
+    source_refs:
+    - src/headless.rs
+    - echo-orchestration/src/runtime/turn_driver.rs
+    behavior_refs:
+    - behavior.protocol-projection
+    rule_refs:
+    - rule.turn-terminal-authority
+    evidence_refs:
+    - evidence.agent-adapter-close-settlement-repair
+    - evidence.agent-adapter-close-settlement-verification
   sdk-host-and-language-clients:
     status: needs_review
-    source_refs: [.echo-semantic/assets/asset.external-sdk-repository.md, docs/adr/0031-sdk-identity-governance-scope.md]
-    behavior_refs: [behavior.sdk-facade-routing]
-    rule_refs: [rule.sdk-rust-authority]
-    evidence_refs: [evidence.sdk-contracts]
-    finding_refs: [finding.sdk-gap-generation-validation-parity, finding.sdk-gap-ack-replay-watermark]
+    source_refs:
+    - .echo-semantic/assets/asset.external-sdk-repository.md
+    - docs/adr/0031-sdk-identity-governance-scope.md
+    behavior_refs:
+    - behavior.sdk-facade-routing
+    rule_refs:
+    - rule.sdk-rust-authority
+    evidence_refs:
+    - evidence.sdk-contracts
+    finding_refs:
+    - finding.sdk-gap-generation-validation-parity
+    - finding.sdk-gap-ack-replay-watermark
     unknown: Gap generation校验已统一，但Client确认snapshot watermark后，Host resume watermark仍可能回退并重发旧事件
     next_step: Repair gap ACK后的单调resume watermark，不扩大到intrinsic identity门禁
   sdk-deferred-backlog:
     status: needs_review
-    source_refs: [.echo-semantic/assets/asset.external-sdk-repository.md, docs/adr/0031-sdk-identity-governance-scope.md, docs/adr/0032-sdk-contract-scope-classification.md]
-    evidence_refs: [evidence.sdk-deferred-backlog-count-repair, evidence.sdk-deferred-backlog-count-verification]
-    finding_refs: [finding.sdk-deferred-backlog-count-drift]
-    audit_refs: [audit.semantic-governance-final-rereview]
+    source_refs:
+    - .echo-semantic/assets/asset.external-sdk-repository.md
+    - docs/adr/0031-sdk-identity-governance-scope.md
+    - docs/adr/0032-sdk-contract-scope-classification.md
+    evidence_refs:
+    - evidence.sdk-deferred-backlog-count-repair
+    - evidence.sdk-deferred-backlog-count-verification
+    finding_refs:
+    - finding.sdk-deferred-backlog-count-drift
+    audit_refs:
+    - audit.semantic-governance-final-rereview
     unknown: 1448个deferred identity的capability分组、外部用户价值与逐组产品合同决策尚未闭合
-    next_step: 按externally useful capability审查deferred；Host/Rust-only、language intrinsic与internal helper不是语言parity backlog
+    next_step: 按externally useful capability审查deferred；Host/Rust-only、language intrinsic与internal helper不是语言parity
+      backlog
   product-backend-desktop-device:
     status: excluded
-    source_refs: [docs/en/39-framework-application-boundary.md]
+    source_refs:
+    - docs/en/39-framework-application-boundary.md
     reason: Product Backend、Frontend/Desktop、Canvas、Electron/Tauri 与 Device sync 不属于 echo-agent framework 当前源码
     risk: high
     recheck_when: 出现 product-neutral protocol primitive 且不依赖应用 state/UI 时
+  extension-invocation-cancellation-isolation:
+    status: mapped
+    source_refs:
+    - src/acp/extension.rs
+    evidence_refs:
+    - evidence.task-runtime-store-control-repair
+    - evidence.task-runtime-store-control-verification
+    finding_refs:
+    - finding.extension-invocation-cancellation-scope
 ---
+
+
+
 
 # ACP、A2A、Channels、Headless 与 SDK Surfaces
 
@@ -104,3 +205,11 @@ ACP permission 与 Agent policy 只在协商后调用；channel/provider credent
 ## 未展开项
 
 现有 `map.sdk-facade-parity` 保留完整 SDK 子边界，不在本 map 重复 identity。
+
+组合候选补充范围：ACP 恢复身份预留仍由 Session TurnSlot 唯一分配；LSP response/diagnostic 由 framework 解析，URI 单缓存区分有效结果与明确错误，fatal admission 后不返回假空。当前只有指定切片的局部复审和反例证据，组合 23 项门禁运行中；SDK 已发布 pin、其它协议缺口和 main 仍各自验收。
+
+
+当前工程补充：同source34d5的新23门禁真实全通过，3471 passed/0 failed/3外部optin ignored、86targets/59examples；见 evidence.framework-final-34d5-full-verification 与原始 evidence.framework-final-34d5-gate-archive。原历史门禁和局部Audit不改写，mapped不表示所有lens/消费者/main已验收。
+
+
+当前候选最终复审：audit.framework-final-34d5-gate-rereview 绑定新23真实工程收据与完整已审源码，implementation review PASS/action0；不替代独立SDK/main验收，不升级原broad状态。

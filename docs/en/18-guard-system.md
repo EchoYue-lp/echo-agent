@@ -87,6 +87,13 @@ Guards act as security checkpoints in the Agent pipeline.
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
+ContentGuard reports match positions as UTF-8 byte offsets into the original
+text. Redaction merges overlapping match ranges before rendering, choosing the
+widest match's marker (existing detection order breaks equal-width ties). A phone
+inside a card is therefore covered once, while adjacent distinct matches keep
+their own markers. Rendering iterates Unicode characters and preserves surrounding
+Chinese text and emoji without reusing offsets against already-modified text.
+
 ---
 
 ## Guard Trait

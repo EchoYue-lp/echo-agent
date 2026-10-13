@@ -401,6 +401,38 @@ for started in manager.start_all(|_channel_id| {
 manager.stop_all().await?;
 ```
 
+ChannelManager fixes each plugin's ID, label and capabilities at registration.
+Managed `get` / `get_mut` return that declaration even if a third-party plugin
+changes its internal metadata later; changing a declaration requires a new
+registration lifecycle. Their asynchronous methods still invoke the original
+plugin. `get_mut` remains available with owned handles and invalidates a previous
+transport-stop fact.
+
+For a manager protected by an external async mutex, obtain an owned operation
+under a short guard, release the guard, then await:
+
+```rust
+let channel = {
+    let guard = shared_manager.lock().await;
+    guard.get_owned("qqbot")
+};
+if let Some(channel) = channel {
+    channel.health_check().await?;
+}
+let shutdown = { shared_manager.lock().await.stop_all_owned() };
+shutdown.await?;
+```
+
+`ChannelHandle` retains the same plugin instance and cleanup responsibility.
+`start_all_owned` / `stop_all_owned` snapshot registrations when called; later
+registrations belong to the next batch. An unpolled future has no plugin or
+handler-factory side effects. Start publishes handler ownership before awaiting
+the plugin. Failed or cancelled cleanup remains retryable; after successful
+transport stop only handler close is retried. Success does not unregister a
+channel, and dropping the manager is not awaited shutdown. Same-channel callback
+recursion that awaits its own lifecycle lock is unsupported. See
+[ADR 0084](../adr/0084-channel-owned-operations.md).
+
 ## Running the Full Example
 
 ```bash

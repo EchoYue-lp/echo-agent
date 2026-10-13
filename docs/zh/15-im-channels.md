@@ -376,6 +376,32 @@ for started in manager.start_all(|_channel_id| {
 manager.stop_all().await?;
 ```
 
+ChannelManager 在注册时固定插件的 ID、label 和 capabilities 声明。
+即使第三方插件在 start/stop 中修改内部元数据，托管的 `get` / `get_mut` 仍返回
+注册声明；修改声明需要新的注册生命周期。异步方法仍调用原插件实例。
+持有 owned handle 不会使 `get_mut` 消失；可变借用会使先前 transport-stop 事实失效。
+
+外部 async mutex 保护 manager 时，先用短 guard 取 owned 操作，释放 guard 后再 await：
+
+```rust
+let channel = {
+    let guard = shared_manager.lock().await;
+    guard.get_owned("qqbot")
+};
+if let Some(channel) = channel {
+    channel.health_check().await?;
+}
+let shutdown = { shared_manager.lock().await.stop_all_owned() };
+shutdown.await?;
+```
+
+`ChannelHandle` 保留同一原插件实例及清理责任。`start_all_owned` / `stop_all_owned`
+在构造时捕获注册快照，之后注册的插件进入下一批；未轮询的 future 不调用插件或
+handler factory。Start 在等待插件前保存 handler 责任；失败或取消后可重试。
+Transport 成功停止后，重试只关闭未结算 handler；成功关闭不等于撤销注册。
+Drop manager 不能代替 awaited shutdown。同一插件回调递归等待自身生命周期锁
+不在保证范围内。详见 [ADR 0084](../adr/0084-channel-owned-operations.md)。
+
 ## 运行完整示例
 
 ```bash
