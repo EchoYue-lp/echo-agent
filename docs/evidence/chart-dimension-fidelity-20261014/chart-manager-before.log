@@ -1,0 +1,87 @@
+   Compiling serde_json v1.0.151
+   Compiling tokio-util v0.7.19
+   Compiling h2 v0.4.16
+   Compiling tower v0.5.3
+   Compiling tokio-native-tls v0.3.1
+   Compiling tower-http v0.6.11
+   Compiling schemars v0.8.22
+   Compiling hyper v1.11.0
+   Compiling jsonschema-value v0.49.9
+   Compiling referencing v0.49.9
+   Compiling hyper-util v0.1.20
+   Compiling half v2.7.1
+   Compiling ciborium-ll v0.2.2
+   Compiling hyper-tls v0.6.0
+   Compiling jsonschema v0.49.9
+   Compiling reqwest v0.12.28
+   Compiling echo_core v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward/echo-core)
+   Compiling itertools v0.10.5
+   Compiling criterion-plot v0.5.0
+   Compiling rusty-fork v0.3.1
+   Compiling echo_state v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward/echo-state)
+   Compiling echo_integration v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward/echo-integration)
+   Compiling echo_orchestration v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward/echo-orchestration)
+   Compiling echo_tools v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward/echo-tools)
+   Compiling echo_execution v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward/echo-execution)
+   Compiling rayon v1.12.0
+   Compiling plotters v0.3.7
+   Compiling ciborium v0.2.2
+   Compiling tinytemplate v1.2.1
+   Compiling proptest v1.11.0
+   Compiling criterion v0.5.1
+   Compiling echo_agent v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward)
+warning: unused import: `Tool`
+ --> tests/chart_dimension_contract.rs:4:25
+  |
+4 | use echo_agent::tools::{Tool, ToolManager, ToolParameters};
+  |                         ^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+  --> tests/chart_dimension_contract.rs:19:9
+   |
+19 |     let mut manager = ToolManager::new();
+   |         ----^^^^^^^
+   |         |
+   |         help: remove this `mut`
+   |
+   = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+  --> tests/chart_dimension_contract.rs:50:9
+   |
+50 |     let mut manager = ToolManager::new();
+   |         ----^^^^^^^
+   |         |
+   |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+  --> tests/chart_dimension_contract.rs:81:9
+   |
+81 |     let mut manager = ToolManager::new();
+   |         ----^^^^^^^
+   |         |
+   |         help: remove this `mut`
+
+warning: `echo_agent` (test "chart_dimension_contract") generated 4 warnings (run `cargo fix --test "chart_dimension_contract" -p echo_agent` to apply 4 suggestions)
+    Finished `test` profile [unoptimized] target(s) in 33.69s
+     Running tests/chart_dimension_contract.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/deps/chart_dimension_contract-463206e43c80c0fe)
+
+running 3 tests
+test chart_dimension_validator_and_manager_preserve_defaults_and_boundaries ... ok
+test chart_dimension_schema_and_manager_reject_out_of_range_integer ... FAILED
+test chart_dimension_schema_manager_reject_supplied_noninteger_values ... ok
+
+failures:
+
+---- chart_dimension_schema_and_manager_reject_out_of_range_integer stdout ----
+Error: Other("schema admitted width=-1; manager admitted/lost invalid width=-1: Ok(ToolResult { kind: Text, success: true, output: \"{\\n  \\\"$schema\\\": \\\"https://vega.github.io/schema/vega-lite/v5.json\\\",\\n  \\\"data\\\": {\\n    \\\"values\\\": [\\n      {\\n        \\\"x\\\": \\\"中文😀\\\",\\n        \\\"y\\\": 1\\n      }\\n    ]\\n  },\\n  \\\"encoding\\\": {\\n    \\\"x\\\": {\\n      \\\"field\\\": \\\"x\\\",\\n      \\\"type\\\": \\\"nominal\\\"\\n    },\\n    \\\"y\\\": {\\n      \\\"field\\\": \\\"y\\\",\\n      \\\"type\\\": \\\"quantitative\\\"\\n    }\\n  },\\n  \\\"height\\\": 400,\\n  \\\"mark\\\": \\\"line\\\",\\n  \\\"width\\\": 600\\n}\", error: None, failure: None, data: None, truncated: false, mime_type: None, artifact: None, metadata: {}, effects: [], model_content: [] }); schema admitted width=4294967296; manager admitted/lost invalid width=4294967296: Ok(ToolResult { kind: Text, success: true, output: \"{\\n  \\\"$schema\\\": \\\"https://vega.github.io/schema/vega-lite/v5.json\\\",\\n  \\\"data\\\": {\\n    \\\"values\\\": [\\n      {\\n        \\\"x\\\": \\\"中文😀\\\",\\n        \\\"y\\\": 1\\n      }\\n    ]\\n  },\\n  \\\"encoding\\\": {\\n    \\\"x\\\": {\\n      \\\"field\\\": \\\"x\\\",\\n      \\\"type\\\": \\\"nominal\\\"\\n    },\\n    \\\"y\\\": {\\n      \\\"field\\\": \\\"y\\\",\\n      \\\"type\\\": \\\"quantitative\\\"\\n    }\\n  },\\n  \\\"height\\\": 400,\\n  \\\"mark\\\": \\\"line\\\",\\n  \\\"width\\\": 0\\n}\", error: None, failure: None, data: None, truncated: false, mime_type: None, artifact: None, metadata: {}, effects: [], model_content: [] }); schema admitted width=18446744073709551615; manager admitted/lost invalid width=18446744073709551615: Ok(ToolResult { kind: Text, success: true, output: \"{\\n  \\\"$schema\\\": \\\"https://vega.github.io/schema/vega-lite/v5.json\\\",\\n  \\\"data\\\": {\\n    \\\"values\\\": [\\n      {\\n        \\\"x\\\": \\\"中文😀\\\",\\n        \\\"y\\\": 1\\n      }\\n    ]\\n  },\\n  \\\"encoding\\\": {\\n    \\\"x\\\": {\\n      \\\"field\\\": \\\"x\\\",\\n      \\\"type\\\": \\\"nominal\\\"\\n    },\\n    \\\"y\\\": {\\n      \\\"field\\\": \\\"y\\\",\\n      \\\"type\\\": \\\"quantitative\\\"\\n    }\\n  },\\n  \\\"height\\\": 400,\\n  \\\"mark\\\": \\\"line\\\",\\n  \\\"width\\\": 4294967295\\n}\", error: None, failure: None, data: None, truncated: false, mime_type: None, artifact: None, metadata: {}, effects: [], model_content: [] }); schema admitted height=-1; manager admitted/lost invalid height=-1: Ok(ToolResult { kind: Text, success: true, output: \"{\\n  \\\"$schema\\\": \\\"https://vega.github.io/schema/vega-lite/v5.json\\\",\\n  \\\"data\\\": {\\n    \\\"values\\\": [\\n      {\\n        \\\"x\\\": \\\"中文😀\\\",\\n        \\\"y\\\": 1\\n      }\\n    ]\\n  },\\n  \\\"encoding\\\": {\\n    \\\"x\\\": {\\n      \\\"field\\\": \\\"x\\\",\\n      \\\"type\\\": \\\"nominal\\\"\\n    },\\n    \\\"y\\\": {\\n      \\\"field\\\": \\\"y\\\",\\n      \\\"type\\\": \\\"quantitative\\\"\\n    }\\n  },\\n  \\\"height\\\": 400,\\n  \\\"mark\\\": \\\"line\\\",\\n  \\\"width\\\": 600\\n}\", error: None, failure: None, data: None, truncated: false, mime_type: None, artifact: None, metadata: {}, effects: [], model_content: [] }); schema admitted height=4294967296; manager admitted/lost invalid height=4294967296: Ok(ToolResult { kind: Text, success: true, output: \"{\\n  \\\"$schema\\\": \\\"https://vega.github.io/schema/vega-lite/v5.json\\\",\\n  \\\"data\\\": {\\n    \\\"values\\\": [\\n      {\\n        \\\"x\\\": \\\"中文😀\\\",\\n        \\\"y\\\": 1\\n      }\\n    ]\\n  },\\n  \\\"encoding\\\": {\\n    \\\"x\\\": {\\n      \\\"field\\\": \\\"x\\\",\\n      \\\"type\\\": \\\"nominal\\\"\\n    },\\n    \\\"y\\\": {\\n      \\\"field\\\": \\\"y\\\",\\n      \\\"type\\\": \\\"quantitative\\\"\\n    }\\n  },\\n  \\\"height\\\": 0,\\n  \\\"mark\\\": \\\"line\\\",\\n  \\\"width\\\": 600\\n}\", error: None, failure: None, data: None, truncated: false, mime_type: None, artifact: None, metadata: {}, effects: [], model_content: [] }); schema admitted height=18446744073709551615; manager admitted/lost invalid height=18446744073709551615: Ok(ToolResult { kind: Text, success: true, output: \"{\\n  \\\"$schema\\\": \\\"https://vega.github.io/schema/vega-lite/v5.json\\\",\\n  \\\"data\\\": {\\n    \\\"values\\\": [\\n      {\\n        \\\"x\\\": \\\"中文😀\\\",\\n        \\\"y\\\": 1\\n      }\\n    ]\\n  },\\n  \\\"encoding\\\": {\\n    \\\"x\\\": {\\n      \\\"field\\\": \\\"x\\\",\\n      \\\"type\\\": \\\"nominal\\\"\\n    },\\n    \\\"y\\\": {\\n      \\\"field\\\": \\\"y\\\",\\n      \\\"type\\\": \\\"quantitative\\\"\\n    }\\n  },\\n  \\\"height\\\": 4294967295,\\n  \\\"mark\\\": \\\"line\\\",\\n  \\\"width\\\": 600\\n}\", error: None, failure: None, data: None, truncated: false, mime_type: None, artifact: None, metadata: {}, effects: [], model_content: [] })")
+
+
+failures:
+    chart_dimension_schema_and_manager_reject_out_of_range_integer
+
+test result: FAILED. 2 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `-p echo_agent --test chart_dimension_contract`

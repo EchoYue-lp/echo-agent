@@ -1,0 +1,276 @@
+{
+  "base": "b9099558620f5f9693c736c85c214db14f62a8cb",
+  "branch": "fix/Echoyue/chart-dimension-fidelity",
+  "sourceFiles": [
+    {
+      "path": "echo-tools/src/chart.rs",
+      "sha256": "22afe7f63d9d66349f7d9419d06bb6cc2994903243b16735c34695992f3e5288",
+      "bytes": 14549
+    },
+    {
+      "path": "echo-tools/src/registry.rs",
+      "sha256": "352cfb110111cebd0d9792cf708d74220d93269fbd8972926fd4ce8e5fae1d79",
+      "bytes": 11727
+    },
+    {
+      "path": "tests/chart_dimension_contract.rs",
+      "sha256": "956d7bbf10d857c74b323e48c99b17075595db6b90fb954afecf2e41715694c3",
+      "bytes": 3750
+    },
+    {
+      "path": "docs/en/02-tools.md",
+      "sha256": "ed637765249ae367aa24aadb0cf6c96b4cebb42593844fe0e426bc959b2f716a",
+      "bytes": 24667
+    },
+    {
+      "path": "docs/zh/02-tools.md",
+      "sha256": "191cc8f92fdb915abe9fc1ae8cf4c51da213681e61d5a3f92eb94640ae695235",
+      "bytes": 23675
+    },
+    {
+      "path": "docs/adr/0083-shared-tool-input-validation.md",
+      "sha256": "d8f124ae77fbd37d653e35a9de67ef0df2ad3dd9c87e13d1651f86df9f7d9a1b",
+      "bytes": 2950
+    }
+  ],
+  "before": {
+    "commit": "e7c252217b49dd7c297814f8efed1e877bcc10ba",
+    "ref": "refs/echo-semantic/diagnostics/chart-dimension-before",
+    "tree": "65b183926a31380290d3c4d488be0227ecbabe65"
+  },
+  "after": {
+    "commit": "d8a94fa29291a37073c75e429aa8df7f858b113c",
+    "ref": "refs/echo-semantic/diagnostics/chart-dimension-after",
+    "tree": "dc16c99642d07254117f37589a810f710d9e4c90"
+  },
+  "snapshotScope": "Private replayable source snapshots only; before reconstructs original b909 implementation plus the executed pre-fix regression fixtures. Actual original executions are independent immutable logs, not new test runs on these commit IDs.",
+  "realIndexAndHeadUnchanged": true,
+  "commands": [
+    {
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "echo_tools",
+        "--features",
+        "chart",
+        "--locked",
+        "chart_dimensions"
+      ],
+      "exitCode": 101,
+      "startedAt": "2026-10-13T23:38:25.640Z",
+      "finishedAt": "2026-10-13T23:38:35.749Z",
+      "log": "chart-dimension-before.log",
+      "sha256": "114da3faf31ec95e0918b0f1c839683ba58c59c6060c8f43961bb519b7900392",
+      "warnings": 0
+    },
+    {
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "echo_agent",
+        "--features",
+        "chart",
+        "--locked",
+        "--test",
+        "chart_dimension_contract"
+      ],
+      "exitCode": 101,
+      "startedAt": "2026-10-13T23:40:25.720Z",
+      "finishedAt": "2026-10-13T23:40:59.510Z",
+      "log": "chart-manager-before.log",
+      "sha256": "f5af7acfc3006c723864ae0711495d54a4782a3e7fd78ea8e496c67b2389a23f",
+      "warnings": 5
+    },
+    {
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "echo_tools",
+        "--features",
+        "chart",
+        "--locked",
+        "chart_dimensions"
+      ],
+      "exitCode": 0,
+      "startedAt": "2026-10-13T23:41:34.767Z",
+      "finishedAt": "2026-10-13T23:41:37.002Z",
+      "log": "chart-dimension-after.log",
+      "sha256": "484a6e1fbfcedc5465ade350227e54518c7f889d51ad8ee2461727f3b0e4b870",
+      "warnings": 0
+    },
+    {
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "echo_agent",
+        "--features",
+        "chart",
+        "--locked",
+        "--test",
+        "chart_dimension_contract"
+      ],
+      "exitCode": 0,
+      "startedAt": "2026-10-13T23:42:09.893Z",
+      "finishedAt": "2026-10-13T23:42:24.808Z",
+      "log": "chart-manager-after.log",
+      "sha256": "327070de703598a053c2241d5533fb96f6990b26fd06d681db0fac5f53bd7990",
+      "warnings": 5
+    },
+    {
+      "command": [
+        "cargo",
+        "clippy",
+        "-p",
+        "echo_tools",
+        "--lib",
+        "--features",
+        "chart",
+        "--locked",
+        "--",
+        "-D",
+        "warnings",
+        "-D",
+        "clippy::unwrap_used",
+        "-D",
+        "clippy::expect_used",
+        "-D",
+        "clippy::panic",
+        "-D",
+        "clippy::unreachable"
+      ],
+      "exitCode": 101,
+      "startedAt": "2026-10-13T23:42:38.550Z",
+      "finishedAt": "2026-10-13T23:42:48.161Z",
+      "log": "chart-dimension-production-clippy.log",
+      "sha256": "290ae1ae1a95abe3df3545da0b6cbf0a7dd090650365baf58d893e65537bac18",
+      "warnings": 0
+    },
+    {
+      "command": [
+        "cargo",
+        "clippy",
+        "-p",
+        "echo_tools",
+        "--lib",
+        "--features",
+        "chart",
+        "--locked",
+        "--",
+        "-D",
+        "warnings",
+        "-D",
+        "clippy::unwrap_used",
+        "-D",
+        "clippy::expect_used",
+        "-D",
+        "clippy::panic",
+        "-D",
+        "clippy::unreachable"
+      ],
+      "exitCode": 0,
+      "startedAt": "2026-10-13T23:45:21.314Z",
+      "finishedAt": "2026-10-13T23:45:22.644Z",
+      "log": "chart-dimension-production-clippy-green.log",
+      "sha256": "1dcdbb09f0be0320bca79e614d5aab369f4f29032abfbe8f2276a24b959827d6",
+      "warnings": 0
+    },
+    {
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "echo_tools",
+        "--features",
+        "chart",
+        "--locked",
+        "chart_dimensions"
+      ],
+      "exitCode": 0,
+      "startedAt": "2026-10-13T23:45:33.078Z",
+      "finishedAt": "2026-10-13T23:45:35.018Z",
+      "log": "chart-dimension-final-module-tests.log",
+      "sha256": "1f3fc503ca9184f8111e569327958521fab093f73a0ba8cb7713ede8ffe16ae0",
+      "warnings": 0
+    },
+    {
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "echo_agent",
+        "--features",
+        "chart",
+        "--locked",
+        "--test",
+        "chart_dimension_contract"
+      ],
+      "exitCode": 0,
+      "startedAt": "2026-10-13T23:45:44.269Z",
+      "finishedAt": "2026-10-13T23:45:58.319Z",
+      "log": "chart-manager-final-tests.log",
+      "sha256": "a467edca9584aa3ce573e54d1d4d292b4e06a2f924f439f36017c4a00a47f610",
+      "warnings": 5
+    },
+    {
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "echo_agent",
+        "--features",
+        "chart",
+        "--locked",
+        "--test",
+        "chart_dimension_contract"
+      ],
+      "exitCode": 0,
+      "startedAt": "2026-10-13T23:46:15.108Z",
+      "finishedAt": "2026-10-13T23:46:17.334Z",
+      "log": "chart-manager-final-zero-warnings.log",
+      "sha256": "e12bfd44398e8b3e3fc085109ae7c7e93b459761e5f886dfe9f99911140eb63b",
+      "warnings": 0
+    }
+  ],
+  "actualRed": {
+    "directPassed": 1,
+    "directFailed": 2,
+    "managerPassed": 2,
+    "managerFailed": 1,
+    "overflowWidthReturned": 0,
+    "invalidNegativeWidthUsedDefault": 600,
+    "managerRangeInputsAdmitted": [
+      "-1",
+      "4294967296",
+      "18446744073709551615"
+    ]
+  },
+  "actualFinalGreen": {
+    "directPassed": 3,
+    "directFailed": 0,
+    "managerPassed": 3,
+    "managerFailed": 0,
+    "strictClippyExitCode": 0,
+    "compileWarnings": 0,
+    "fmtCheckExitCode": 0,
+    "diffCheckExitCode": 0
+  },
+  "firstPreflightFailure": "Inherited sameGoal higher signals were not retained; tests were prematurely written following failed record; no production repair before successful record/check. Second missing semantic-ref record failure and subsequent fixture write also disclosed, corrected record succeeds.",
+  "schema": {
+    "widthHeightMinimum": 0,
+    "widthHeightMaximum": 4294967295,
+    "defaultWidth": 600,
+    "defaultHeight": 400,
+    "defaultsOnlyWhenMissing": true,
+    "zeroRetained": true,
+    "newResourceLimits": false
+  },
+  "limitations": [
+    "Independent final review/full framework merge gates and exact-main acceptance pending",
+    "No SDK/client/source-generator edits or new accepted API membership",
+    "D stream candidate and proposed5secondpolicy not changed"
+  ]
+}

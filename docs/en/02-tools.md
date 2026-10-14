@@ -583,6 +583,14 @@ each chunk's `char_count`. Its `preview` contains up to 200 scalars and
 though their UTF-8 encoding occupies 210 bytes. This preview operation does not
 modify the RAG index.
 
+`generate_chart` uses width/height unsigned integers in `0..=4294967295`, preserving
+the original `u32` representation without wrapping or clamping. Only omitted
+width/height use defaults 600/400. Supplied null, negative, fractional, string,
+boolean or out-of-range values return explicit errors; zero remains supported.
+The tool schema constrains the numeric range; direct execution additionally
+requires a serde_json integer representation. Floating representations such as
+`1.0` return an explicit error and never use a default.
+
 ---
 
 ## ToolChoice Enum (v0.2.1)

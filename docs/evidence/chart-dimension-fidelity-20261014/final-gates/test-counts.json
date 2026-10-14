@@ -1,0 +1,894 @@
+{
+  "primaryPassed": 3508,
+  "primaryFailed": 0,
+  "primaryIgnored": 3,
+  "targets": 87,
+  "exampleTargets": 59,
+  "nestedSummariesExcluded": [
+    {
+      "target": "Running unittests src/lib.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/deps/echo_state-85d8d5232b7cab19)",
+      "excludedSummaries": [
+        {
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    }
+  ],
+  "allSuites": [
+    {
+      "target": "Running unittests src/lib.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/deps/echo_agent_learning-c6544d398a90f5a1)",
+      "summaries": [
+        {
+          "passed": 28,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running unittests src/bin/facade_consumer.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/deps/facade_consumer-345c00b018d13983)",
+      "summaries": [
+        {
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running tests/documentation_contract.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/deps/documentation_contract-ae21bda42b75975f)",
+      "summaries": [
+        {
+          "passed": 15,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running tests/example_contracts.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/deps/example_contracts-482f9c408c2c8110)",
+      "summaries": [
+        {
+          "passed": 28,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running tests/learning_contract.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/deps/learning_contract-7b7784dfdf678528)",
+      "summaries": [
+        {
+          "passed": 3,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running tests/semantic_baseline_contract.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/deps/semantic_baseline_contract-96f19969a1a4c14d)",
+      "summaries": [
+        {
+          "passed": 3,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running unittests examples/chapter_01_basics.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/examples/chapter_01_basics-11faf00c156239cb)",
+      "summaries": [
+        {
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running unittests examples/chapter_03_domain_modeling.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/examples/chapter_03_domain_modeling-6738c91c97b76dd9)",
+      "summaries": [
+        {
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running unittests examples/chapter_04_ownership.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/examples/chapter_04_ownership-8463418d477425e3)",
+      "summaries": [
+        {
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running unittests examples/chapter_05_collections_iterators.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/examples/chapter_05_collections_iterators-4af31bac5a283345)",
+      "summaries": [
+        {
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running unittests examples/chapter_06_errors.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/examples/chapter_06_errors-58aecb0c7c7cb7c5)",
+      "summaries": [
+        {
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running unittests examples/chapter_07_traits_generics.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/examples/chapter_07_traits_generics-af19467ec7bbf23f)",
+      "summaries": [
+        {
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running unittests examples/chapter_08_box.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/examples/chapter_08_box-a92b311f048743a5)",
+      "summaries": [
+        {
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running unittests examples/chapter_09_arc_weak.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/examples/chapter_09_arc_weak-31e921ba032ed899)",
+      "summaries": [
+        {
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running unittests examples/chapter_10_rc_refcell.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/examples/chapter_10_rc_refcell-9a48ec28f98359ad)",
+      "summaries": [
+        {
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running unittests examples/chapter_11_pin_future.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/examples/chapter_11_pin_future-72a8b1f33cf5cbd2)",
+      "summaries": [
+        {
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running unittests examples/chapter_12_async_concurrency.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/examples/chapter_12_async_concurrency-574a7f21c2bca281)",
+      "summaries": [
+        {
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running unittests examples/chapter_13_serde.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/examples/chapter_13_serde-61eb6002179f1a99)",
+      "summaries": [
+        {
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running unittests examples/chapter_15_echo_agent_tool.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/examples/chapter_15_echo_agent_tool-6c8b4c5c406b7384)",
+      "summaries": [
+        {
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running unittests examples/comprehensive_agent.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/examples/comprehensive_agent-41b6565de1f69d53)",
+      "summaries": [
+        {
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running unittests examples/demo00_quickstart.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/examples/demo00_quickstart-72462d800e9f0b3c)",
+      "summaries": [
+        {
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running unittests examples/demo01_tools.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/examples/demo01_tools-4a73686ebde13a7a)",
+      "summaries": [
+        {
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running unittests examples/demo02_tasks.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/examples/demo02_tasks-70d806a9980cccab)",
+      "summaries": [
+        {
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running unittests examples/demo03_approval.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/examples/demo03_approval-e8efce7e7353f20a)",
+      "summaries": [
+        {
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running unittests examples/demo05_compressor.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/examples/demo05_compressor-c2c3136800b7c91c)",
+      "summaries": [
+        {
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running unittests examples/demo06_mcp.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/examples/demo06_mcp-811e3fa7917c40be)",
+      "summaries": [
+        {
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running unittests examples/demo07_skills.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/examples/demo07_skills-c3fdd3387391da59)",
+      "summaries": [
+        {
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running unittests examples/demo08_external_skills.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/examples/demo08_external_skills-c24607a33bba646d)",
+      "summaries": [
+        {
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running unittests examples/demo09_file_shell.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/examples/demo09_file_shell-912128033f9966d8)",
+      "summaries": [
+        {
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running unittests examples/demo10_streaming.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/examples/demo10_streaming-cb9a5b3226018c98)",
+      "summaries": [
+        {
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running unittests examples/demo11_callbacks.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/examples/demo11_callbacks-196b68535507f869)",
+      "summaries": [
+        {
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running unittests examples/demo13_tool_execution.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/examples/demo13_tool_execution-a9a2bd2012ec5f1e)",
+      "summaries": [
+        {
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running unittests examples/demo15_structured_output.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/examples/demo15_structured_output-b62e628eb6ebcce2)",
+      "summaries": [
+        {
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running unittests examples/demo17_chat.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/examples/demo17_chat-6c695dff6a4fb84f)",
+      "summaries": [
+        {
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running unittests examples/demo18_semantic_memory.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/examples/demo18_semantic_memory-37992cf88741c9eb)",
+      "summaries": [
+        {
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running unittests examples/demo19_guard.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/examples/demo19_guard-91ed3804e63804b7)",
+      "summaries": [
+        {
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running unittests examples/demo20_audit.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/examples/demo20_audit-9f0831e1108b079c)",
+      "summaries": [
+        {
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running unittests examples/demo23_a2a.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/examples/demo23_a2a-d23774605bc7fa59)",
+      "summaries": [
+        {
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running unittests examples/demo25_macros.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/examples/demo25_macros-009827af966370b3)",
+      "summaries": [
+        {
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running unittests examples/demo26_provider_factory.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/examples/demo26_provider_factory-1c873b02c69b4649)",
+      "summaries": [
+        {
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running unittests examples/demo27_sqlite_memory.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/examples/demo27_sqlite_memory-6799ddf92319dbdf)",
+      "summaries": [
+        {
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running unittests examples/demo28_workflow.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/examples/demo28_workflow-e91148947cc1c253)",
+      "summaries": [
+        {
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running unittests examples/demo29_sandbox.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/examples/demo29_sandbox-de105b76eace9e7a)",
+      "summaries": [
+        {
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running unittests examples/demo32_token_budget.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/examples/demo32_token_budget-32cdf58dbce702eb)",
+      "summaries": [
+        {
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running unittests examples/demo33_retry_policy.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/examples/demo33_retry_policy-53799e2a9dca9159)",
+      "summaries": [
+        {
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running unittests examples/demo35_dynamic_tools.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/examples/demo35_dynamic_tools-7888ad243a13c21e)",
+      "summaries": [
+        {
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running unittests examples/demo36_multimodal.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/examples/demo36_multimodal-e472216967095136)",
+      "summaries": [
+        {
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running unittests examples/demo38_im_channels.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/examples/demo38_im_channels-632781f52f6189db)",
+      "summaries": [
+        {
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running unittests examples/demo40_snapshot.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/examples/demo40_snapshot-0cf760a01b71d39c)",
+      "summaries": [
+        {
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running unittests examples/demo41_web_tools.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/examples/demo41_web_tools-31ceaf71d6708dad)",
+      "summaries": [
+        {
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running unittests examples/demo42_playwright_mcp.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/examples/demo42_playwright_mcp-2ce5676ee69197d3)",
+      "summaries": [
+        {
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running unittests examples/demo44_code_laboratory.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/examples/demo44_code_laboratory-b30c875e6ea96a48)",
+      "summaries": [
+        {
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running unittests examples/demo45_customer_service.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/examples/demo45_customer_service-f4e92f6b67bdabee)",
+      "summaries": [
+        {
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running unittests examples/demo46_data_analyst.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/examples/demo46_data_analyst-97e489e36d5c4956)",
+      "summaries": [
+        {
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running unittests examples/demo47_enterprise.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/examples/demo47_enterprise-6db5ca22ccd4de00)",
+      "summaries": [
+        {
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running unittests examples/demo48_personal_assistant.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/examples/demo48_personal_assistant-e9c44e257eb73374)",
+      "summaries": [
+        {
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running unittests examples/demo49_research_agent.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/examples/demo49_research_agent-776b5c91d9791707)",
+      "summaries": [
+        {
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running unittests examples/demo50_subagent_communication.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/examples/demo50_subagent_communication-d288f32e4371c1a1)",
+      "summaries": [
+        {
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running unittests examples/demo56_plugin_system.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/examples/demo56_plugin_system-32f06715316e9883)",
+      "summaries": [
+        {
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running unittests examples/demo58_git_worktree.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/examples/demo58_git_worktree-ca6653ef594f6ece)",
+      "summaries": [
+        {
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running unittests examples/demo59_code_search.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/examples/demo59_code_search-cacd17f7b8ebedde)",
+      "summaries": [
+        {
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running unittests examples/demo61_agent_factory.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/examples/demo61_agent_factory-bd8cb6397c18790a)",
+      "summaries": [
+        {
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running unittests examples/demo68_human_gate.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/examples/demo68_human_gate-8047f7a82f4b40b8)",
+      "summaries": [
+        {
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running unittests examples/demo70_scheduler.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/examples/demo70_scheduler-4d61a975d445b2ac)",
+      "summaries": [
+        {
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running unittests examples/demo72_acp_agent_adapter.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/examples/demo72_acp_agent_adapter-320b4ec693e8a224)",
+      "summaries": [
+        {
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running unittests src/lib.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/deps/echo_agent-cd26c9ac869d9128)",
+      "summaries": [
+        {
+          "passed": 1202,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running tests/acp_agent_adapter.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/deps/acp_agent_adapter-37666b989203bfe4)",
+      "summaries": [
+        {
+          "passed": 24,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running tests/acp_extension_runtime.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/deps/acp_extension_runtime-fdb57c55a33c3d6c)",
+      "summaries": [
+        {
+          "passed": 8,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running tests/agent_handle_turn_driver.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/deps/agent_handle_turn_driver-e8ce31c3d62803ce)",
+      "summaries": [
+        {
+          "passed": 2,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running tests/cache_user_id_test.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/deps/cache_user_id_test-f6d29ba43a9e2fef)",
+      "summaries": [
+        {
+          "passed": 8,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running tests/chart_dimension_contract.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/deps/chart_dimension_contract-2c9dccd9681ef92e)",
+      "summaries": [
+        {
+          "passed": 3,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running tests/facade_smoke.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/deps/facade_smoke-ecf936c58cbd5dbc)",
+      "summaries": [
+        {
+          "passed": 12,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running tests/hook_event_producer_contract.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/deps/hook_event_producer_contract-9cad7ce4585eff96)",
+      "summaries": [
+        {
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running tests/macro_facade.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/deps/macro_facade-80fdb01607f0d6e1)",
+      "summaries": [
+        {
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running tests/plugin_coordinator.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/deps/plugin_coordinator-661dc9235c89681a)",
+      "summaries": [
+        {
+          "passed": 14,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running tests/react_smoke.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/deps/react_smoke-417144b117790741)",
+      "summaries": [
+        {
+          "passed": 2,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running benches/agent_bench.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/deps/agent_bench-3f2f7951e6195922)",
+      "summaries": []
+    },
+    {
+      "target": "Running benches/journal_bench.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/deps/journal_bench-fa2167390571695d)",
+      "summaries": []
+    },
+    {
+      "target": "Running unittests src/lib.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/deps/echo_core-bd5330b6981c8acc)",
+      "summaries": [
+        {
+          "passed": 437,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running unittests src/lib.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/deps/echo_execution-7d348ebd01593da8)",
+      "summaries": [
+        {
+          "passed": 331,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running unittests src/lib.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/deps/echo_integration-d5ea21e4dd3721d8)",
+      "summaries": [
+        {
+          "passed": 320,
+          "failed": 0,
+          "ignored": 1
+        }
+      ]
+    },
+    {
+      "target": "Running unittests src/lib.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/deps/echo_macros-765f13ac9c0033e2)",
+      "summaries": [
+        {
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running tests/split_crates.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/deps/split_crates-d9b0d732d27e41e9)",
+      "summaries": [
+        {
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running unittests src/lib.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/deps/echo_orchestration-e38dc92f3b48edaf)",
+      "summaries": [
+        {
+          "passed": 461,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running unittests src/lib.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/deps/echo_state-85d8d5232b7cab19)",
+      "summaries": [
+        {
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "passed": 380,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "target": "Running unittests src/lib.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/deps/echo_tools-f2300f3283e418c4)",
+      "summaries": [
+        {
+          "passed": 223,
+          "failed": 0,
+          "ignored": 2
+        }
+      ]
+    },
+    {
+      "target": "Running tests/macro_core_path.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/deps/macro_core_path-d0e6a2664fa7f5f4)",
+      "summaries": [
+        {
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    }
+  ]
+}

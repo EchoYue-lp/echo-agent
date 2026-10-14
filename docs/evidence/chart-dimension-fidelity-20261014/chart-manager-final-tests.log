@@ -1,0 +1,47 @@
+   Compiling echo_tools v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward/echo-tools)
+   Compiling echo_agent v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward)
+warning: unused import: `Tool`
+ --> tests/chart_dimension_contract.rs:4:25
+  |
+4 | use echo_agent::tools::{Tool, ToolManager, ToolParameters};
+  |                         ^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+  --> tests/chart_dimension_contract.rs:19:9
+   |
+19 |     let mut manager = ToolManager::new();
+   |         ----^^^^^^^
+   |         |
+   |         help: remove this `mut`
+   |
+   = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+  --> tests/chart_dimension_contract.rs:50:9
+   |
+50 |     let mut manager = ToolManager::new();
+   |         ----^^^^^^^
+   |         |
+   |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+  --> tests/chart_dimension_contract.rs:81:9
+   |
+81 |     let mut manager = ToolManager::new();
+   |         ----^^^^^^^
+   |         |
+   |         help: remove this `mut`
+
+warning: `echo_agent` (test "chart_dimension_contract") generated 4 warnings (run `cargo fix --test "chart_dimension_contract" -p echo_agent` to apply 4 suggestions)
+    Finished `test` profile [unoptimized] target(s) in 13.97s
+     Running tests/chart_dimension_contract.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/deps/chart_dimension_contract-463206e43c80c0fe)
+
+running 3 tests
+test chart_dimension_validator_and_manager_preserve_defaults_and_boundaries ... ok
+test chart_dimension_schema_and_manager_reject_out_of_range_integer ... ok
+test chart_dimension_schema_manager_reject_supplied_noninteger_values ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
