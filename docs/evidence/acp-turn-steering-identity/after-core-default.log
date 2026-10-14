@@ -1,0 +1,12 @@
+   Compiling echo_core v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward/echo-core)
+    Finished `test` profile [unoptimized] target(s) in 9.18s
+     Running unittests src/lib.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/deps/echo_core-c4aee6da1047b46a)
+
+running 4 tests
+test agent::default_pure_text_chat_tests::default_pure_text_chat_invocation_keeps_existing_structured_override ... ok
+test agent::default_pure_text_chat_tests::default_pure_text_chat_rejects_every_nonlossless_message_without_legacy_call ... ok
+test agent::default_pure_text_chat_tests::default_pure_text_chat_setup_failure_remains_original_stream_error ... ok
+test agent::default_pure_text_chat_tests::default_pure_text_chat_owns_input_until_poll_and_retains_cancel_and_guard ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 418 filtered out; finished in 0.00s
+

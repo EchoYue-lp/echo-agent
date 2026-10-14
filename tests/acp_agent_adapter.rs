@@ -220,8 +220,31 @@ impl Agent for RecordingAgent {
     fn chat_stream_message_with_cancel<'a>(
         &'a self,
         message: Message,
-        _cancel: CancellationToken,
+        cancel: CancellationToken,
     ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+        // A structured override must preserve its own ordinary text behavior:
+        // cancellation, gate barriers, tools and scripted failures are shared.
+        // Real Parts/ResourceLink rendering stays on the branch below.
+        let message = match message {
+            Message {
+                role: echo_agent::llm::types::Role::User,
+                content: MessageContent::Text(text),
+                tool_calls: None,
+                name: None,
+                tool_call_id: None,
+                reasoning_content: None,
+                reasoning_blocks: None,
+            } => {
+                return Box::pin(async move {
+                    let events = async_stream::try_stream! {
+                        let mut legacy = self.chat_stream_with_cancel(&text, cancel).await?;
+                        while let Some(event) = legacy.next().await { yield event?; }
+                    };
+                    Ok(Box::pin(events) as BoxStream<'a, Result<AgentEvent>>)
+                });
+            }
+            message => message,
+        };
         let id = self.id;
         let turn = self.turns.fetch_add(1, Ordering::AcqRel).saturating_add(1);
         let rendered = match message.content {
@@ -1800,5 +1823,156 @@ async fn ledger_bounds_retain_a_floor_and_clamp_memory() -> Result<()> {
     let after = ledger.events_after(0);
     assert_eq!(after.len(), 2);
     assert_eq!(after[0].sequence, 3);
+    Ok(())
+}
+
+#[tokio::test]
+async fn text_only_agent_keeps_standard_plain_user_prompts_with_canonical_turn_context()
+-> agent_client_protocol::Result<()> {
+    let updates = Arc::new(Mutex::new(Vec::<v1::SessionNotification>::new()));
+    let captured = updates.clone();
+    let adapter = AcpAgentAdapter::new(|_context: AcpSessionContext| async {
+        Ok(Box::new(TextOnlyAgent) as Box<dyn Agent>)
+    });
+    let _close_owner = adapter.close_owner();
+    Client
+        .builder()
+        .on_receive_notification(
+            async move |notification: v1::SessionNotification,
+                        _connection: ConnectionTo<AcpRole>| {
+                captured
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(notification);
+                Ok(())
+            },
+            agent_client_protocol::on_receive_notification!(),
+        )
+        .connect_with(adapter, async move |connection| {
+            connection
+                .send_request(v1::InitializeRequest::new(ProtocolVersion::V1))
+                .block_task()
+                .await?;
+            let session = connection
+                .send_request(v1::NewSessionRequest::new(
+                    absolute_test_path("acp-legacy-text-identity")
+                        .map_err(Error::into_internal_error)?,
+                ))
+                .block_task()
+                .await?
+                .session_id;
+            for text in ["first original 中文", "second original 🌊"] {
+                let response = connection
+                    .send_request(v1::PromptRequest::new(
+                        session.clone(),
+                        vec![v1::ContentBlock::Text(v1::TextContent::new(text))],
+                    ))
+                    .block_task()
+                    .await?;
+                assert_eq!(response.stop_reason, v1::StopReason::EndTurn);
+            }
+            Ok(())
+        })
+        .await?;
+    let observed: Vec<String> = updates
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .filter_map(|notification| match &notification.update {
+            v1::SessionUpdate::AgentMessageChunk(chunk) => match &chunk.content {
+                v1::ContentBlock::Text(text) => Some(text.text.clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    assert_eq!(observed, vec!["first original 中文", "second original 🌊"]);
+    Ok(())
+}
+
+struct LegacySetupFailureAgent;
+impl Agent for LegacySetupFailureAgent {
+    fn name(&self) -> &str {
+        "legacy-setup-failure"
+    }
+    fn model_name(&self) -> &str {
+        "none"
+    }
+    fn system_prompt(&self) -> &str {
+        ""
+    }
+    fn execute<'a>(&'a self, _text: &'a str) -> BoxFuture<'a, Result<String>> {
+        Box::pin(async {
+            Err(ReactError::Other(
+                "original legacy setup failure".to_string(),
+            ))
+        })
+    }
+    fn execute_stream<'a>(
+        &'a self,
+        _text: &'a str,
+    ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+        Box::pin(async {
+            Err(ReactError::Other(
+                "original legacy setup failure".to_string(),
+            ))
+        })
+    }
+}
+
+#[derive(Default)]
+struct CanonicalFailureSink(Mutex<Vec<echo_agent::agent::EventEnvelope>>);
+#[async_trait::async_trait]
+impl echo_agent::runtime::EventSink for CanonicalFailureSink {
+    async fn on_event(
+        &self,
+        envelope: echo_agent::agent::EventEnvelope,
+    ) -> Result<echo_agent::runtime::SinkControl> {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(envelope);
+        Ok(echo_agent::runtime::SinkControl::Continue)
+    }
+}
+
+#[tokio::test]
+async fn text_only_agent_fallback_setup_error_keeps_original_canonical_failed_receipt() -> Result<()>
+{
+    let turn_id = "original-canonical-legacy-turn";
+    let identity = echo_agent::agent::EventIdentity::for_chat(
+        None,
+        turn_id.to_string(),
+        "original-message".to_string(),
+        None,
+    )?;
+    let request = echo_agent::runtime::TurnRequest::new(identity, "original text").invocation(
+        echo_agent::agent::AgentInvocationContext {
+            runtime: Some(echo_agent::tools::ExternalRunContext {
+                turn_id: Some(turn_id.to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    );
+    let sink = CanonicalFailureSink::default();
+    let receipt = echo_agent::runtime::AgentTurnDriver
+        .drive(&LegacySetupFailureAgent, request, &sink)
+        .await;
+    assert_eq!(receipt.turn_id.as_str(), turn_id);
+    assert!(
+        matches!(receipt.outcome, echo_agent::runtime::TurnOutcome::Failed(ref failure) if failure.message == "original legacy setup failure")
+    );
+    assert!(receipt.final_answer.is_none());
+    let events = sink.0.lock().unwrap_or_else(|e| e.into_inner());
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.payload.is_terminal())
+            .count(),
+        1
+    );
+    assert!(events.iter().all(|event| event.turn_id.as_str() == turn_id));
+    assert!(events.iter().any(|event| matches!(&event.payload, AgentEvent::Error { failure, .. } if failure.message == "original legacy setup failure")));
     Ok(())
 }

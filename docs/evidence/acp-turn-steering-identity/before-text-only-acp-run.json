@@ -1,0 +1,57 @@
+{
+  "schemaVersion": 1,
+  "sourceRoot": "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward",
+  "steps": [
+    {
+      "label": "before-text-only-acp",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "echo_agent",
+        "--features",
+        "acp",
+        "--test",
+        "acp_agent_adapter",
+        "text_only_agent",
+        "--locked"
+      ],
+      "cwd": "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward",
+      "logPath": "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward/docs/evidence/acp-turn-steering-identity/before-text-only-acp.log",
+      "exitCode": 101,
+      "signal": null,
+      "errorCode": null,
+      "truncated": false,
+      "bytesSeen": 9768,
+      "bytesWritten": 9768,
+      "startedAt": "2026-10-14T03:23:19.803Z",
+      "finishedAt": "2026-10-14T03:24:23.325Z"
+    },
+    {
+      "label": "before-text-only-acp-corrected-fixture",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "echo_agent",
+        "--features",
+        "acp",
+        "--test",
+        "acp_agent_adapter",
+        "text_only_agent",
+        "--locked"
+      ],
+      "cwd": "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward",
+      "logPath": "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward/docs/evidence/acp-turn-steering-identity/before-text-only-acp.log",
+      "exitCode": 101,
+      "signal": null,
+      "errorCode": null,
+      "truncated": false,
+      "bytesSeen": 1722,
+      "bytesWritten": 1722,
+      "startedAt": "2026-10-14T03:24:43.960Z",
+      "finishedAt": "2026-10-14T03:24:49.686Z"
+    }
+  ],
+  "updatedAt": "2026-10-14T03:24:49.686Z"
+}

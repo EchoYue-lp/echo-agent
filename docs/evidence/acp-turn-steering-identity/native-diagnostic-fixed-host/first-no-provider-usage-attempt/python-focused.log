@@ -1,0 +1,69 @@
+F
+=================================== FAILURES ===================================
+_____ test_accepted_steering_consumed_by_model_and_two_waits_share_receipt _____
+
+tmp_path = PosixPath('/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/admin/sdk-run-steer-native/python/pytest/test_accepted_steering_consume0')
+
+    @pytest.mark.asyncio
+    @pytest.mark.skipif(not HOST, reason="real Host required")
+    async def test_accepted_steering_consumed_by_model_and_two_waits_share_receipt(
+        tmp_path,
+    ):
+        model = await asyncio.create_subprocess_exec(
+            "python3", str(FIXTURE), "--work", str(tmp_path)
+        )
+        waits = []
+        sdk = None
+        try:
+            await barrier(tmp_path / "ready")
+            scenario = json.loads((tmp_path / "scenario.json").read_text())
+            sdk = await EchoAgentClient.spawn(
+                HOST,
+                "--config",
+                str(tmp_path / "host.json"),
+                env={
+                    **os.environ,
+                    "NO_PROXY": "127.0.0.1,localhost",
+                    "no_proxy": "127.0.0.1,localhost",
+                },
+            )
+            agent = await sdk.create_agent()
+            session = await agent.create_session(str(tmp_path))
+            run = await session.start_run(scenario["initial"])
+            identity = {"run": run.wire.to_dict(), "stream": run.stream.to_dict()}
+            await barrier(tmp_path / "parked-1")
+            waits = [asyncio.create_task(run.wait()), asyncio.create_task(run.wait())]
+            accepted = await run.steer(scenario["steer"])
+            (tmp_path / "accepted.json").write_text(
+                json.dumps(
+                    {
+                        "identity": identity,
+                        "accepted": accepted,
+                        "snapshot": await run.get(),
+                    }
+                )
+            )
+            assert accepted["accepted"] is True and accepted["steer_id"]
+            assert all(not task.done() for task in waits)
+            (tmp_path / "release-1").touch()
+            await barrier(tmp_path / "parked-2")
+            second = json.loads((tmp_path / "request-2.json").read_text())
+            contents = [message["content"] for message in second["messages"]]
+            assert all(scenario[key] in contents for key in ["initial", "draft", "steer"])
+            assert all(not task.done() for task in waits)
+            assert (await run.get())["status"] == "running"
+            (tmp_path / "release-2").touch()
+            one, two = await asyncio.gather(*waits)
+            assert one == two and one["settled"] is True
+            assert one["receipt"]["turn_id"] == run.wire.id
+            assert one["receipt"]["final_answer"] == scenario["answer"]
+>           assert one["receipt"]["llm_calls"] == "2"
+E           AssertionError: assert '0' == '2'
+E             
+E             - 2
+E             + 0
+
+tests/test_run_steer_host.py:79: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_run_steer_host.py::test_accepted_steering_consumed_by_model_and_two_waits_share_receipt
+1 failed in 1.06s

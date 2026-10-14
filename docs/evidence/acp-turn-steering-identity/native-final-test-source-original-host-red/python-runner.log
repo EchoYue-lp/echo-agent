@@ -1,0 +1,25 @@
+{
+  "label": "python-native-run-steer",
+  "command": [
+    "uv",
+    "run",
+    "python",
+    "-m",
+    "pytest",
+    "-q",
+    "-s",
+    "tests/test_run_steer_host.py",
+    "--basetemp",
+    "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/admin/sdk-run-steer-native/python/pytest"
+  ],
+  "cwd": "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-semantic-governance/sdks/python",
+  "logPath": "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-semantic-governance/docs/sdk/governance/evidence/run-steer-native/final-test-source-original-host-red/python-focused.log",
+  "exitCode": 1,
+  "signal": null,
+  "errorCode": null,
+  "truncated": false,
+  "bytesSeen": 2270,
+  "bytesWritten": 2270,
+  "startedAt": "2026-10-14T03:09:48.777Z",
+  "finishedAt": "2026-10-14T03:09:50.141Z"
+}

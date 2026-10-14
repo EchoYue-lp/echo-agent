@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="https://maven.apache.org/surefire/maven-surefire-plugin/xsd/surefire-test-report.xsd" version="3.0.2" name="com.echoagent.sdk.RunSteerHostTest" time="1.11" tests="1" errors="0" skipped="0" failures="0">
+  <properties>
+    <property name="java.specification.version" value="21"/>
+    <property name="maven.compiler.showWarnings" value="true"/>
+    <property name="sun.jnu.encoding" value="UTF-8"/>
+    <property name="java.class.path" value="/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-semantic-governance/sdks/java/target/test-classes:/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-semantic-governance/sdks/java/target/classes:/Users/ls/MyWork/mvn_pros/com/agentclientprotocol/acp-core/0.17.0/acp-core-0.17.0.jar:/Users/ls/MyWork/mvn_pros/com/agentclientprotocol/acp-annotations/0.17.0/acp-annotations-0.17.0.jar:/Users/ls/MyWork/mvn_pros/io/projectreactor/reactor-core/3.8.7/reactor-core-3.8.7.jar:/Users/ls/MyWork/mvn_pros/org/reactivestreams/reactive-streams/1.0.4/reactive-streams-1.0.4.jar:/Users/ls/MyWork/mvn_pros/org/jspecify/jspecify/1.0.0/jspecify-1.0.0.jar:/Users/ls/MyWork/mvn_pros/com/fasterxml/jackson/core/jackson-core/2.22.2/jackson-core-2.22.2.jar:/Users/ls/MyWork/mvn_pros/com/fasterxml/jackson/core/jackson-annotations/2.22/jackson-annotations-2.22.jar:/Users/ls/MyWork/mvn_pros/org/slf4j/slf4j-api/2.0.18/slf4j-api-2.0.18.jar:/Users/ls/MyWork/mvn_pros/com/fasterxml/jackson/core/jackson-databind/2.18.3/jackson-databind-2.18.3.jar:/Users/ls/MyWork/mvn_pros/org/junit/jupiter/junit-jupiter/5.11.4/junit-jupiter-5.11.4.jar:/Users/ls/MyWork/mvn_pros/org/junit/jupiter/junit-jupiter-api/5.11.4/junit-jupiter-api-5.11.4.jar:/Users/ls/MyWork/mvn_pros/org/opentest4j/opentest4j/1.3.0/opentest4j-1.3.0.jar:/Users/ls/MyWork/mvn_pros/org/junit/platform/junit-platform-commons/1.11.4/junit-platform-commons-1.11.4.jar:/Users/ls/MyWork/mvn_pros/org/apiguardian/apiguardian-api/1.1.2/apiguardian-api-1.1.2.jar:/Users/ls/MyWork/mvn_pros/org/junit/jupiter/junit-jupiter-params/5.11.4/junit-jupiter-params-5.11.4.jar:/Users/ls/MyWork/mvn_pros/org/junit/jupiter/junit-jupiter-engine/5.11.4/junit-jupiter-engine-5.11.4.jar:/Users/ls/MyWork/mvn_pros/org/junit/platform/junit-platform-engine/1.11.4/junit-platform-engine-1.11.4.jar:/Users/ls/MyWork/mvn_pros/org/slf4j/slf4j-nop/2.0.18/slf4j-nop-2.0.18.jar:"/>
+    <property name="java.vm.vendor" value="Oracle Corporation"/>
+    <property name="sun.arch.data.model" value="64"/>
+    <property name="java.vendor.url" value="https://java.oracle.com/"/>
+    <property name="user.timezone" value="Asia/Shanghai"/>
+    <property name="os.name" value="Mac OS X"/>
+    <property name="java.vm.specification.version" value="21"/>
+    <property name="sun.java.launcher" value="SUN_STANDARD"/>
+    <property name="user.country" value="CN"/>
+    <property name="sun.boot.library.path" value="/Library/Java/JavaVirtualMachines/jdk-21.jdk/Contents/Home/lib"/>
+    <property name="sun.java.command" value="/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-semantic-governance/sdks/java/target/surefire/surefirebooter-20261014111158543_3.jar /Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-semantic-governance/sdks/java/target/surefire 2026-10-14T11-11-58_485-jvmRun1 surefire-20261014111158543_1tmp surefire_0-20261014111158543_2tmp"/>
+    <property name="jdk.debug" value="release"/>
+    <property name="test" value="RunSteerHostTest"/>
+    <property name="surefire.test.class.path" value="/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-semantic-governance/sdks/java/target/test-classes:/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-semantic-governance/sdks/java/target/classes:/Users/ls/MyWork/mvn_pros/com/agentclientprotocol/acp-core/0.17.0/acp-core-0.17.0.jar:/Users/ls/MyWork/mvn_pros/com/agentclientprotocol/acp-annotations/0.17.0/acp-annotations-0.17.0.jar:/Users/ls/MyWork/mvn_pros/io/projectreactor/reactor-core/3.8.7/reactor-core-3.8.7.jar:/Users/ls/MyWork/mvn_pros/org/reactivestreams/reactive-streams/1.0.4/reactive-streams-1.0.4.jar:/Users/ls/MyWork/mvn_pros/org/jspecify/jspecify/1.0.0/jspecify-1.0.0.jar:/Users/ls/MyWork/mvn_pros/com/fasterxml/jackson/core/jackson-core/2.22.2/jackson-core-2.22.2.jar:/Users/ls/MyWork/mvn_pros/com/fasterxml/jackson/core/jackson-annotations/2.22/jackson-annotations-2.22.jar:/Users/ls/MyWork/mvn_pros/org/slf4j/slf4j-api/2.0.18/slf4j-api-2.0.18.jar:/Users/ls/MyWork/mvn_pros/com/fasterxml/jackson/core/jackson-databind/2.18.3/jackson-databind-2.18.3.jar:/Users/ls/MyWork/mvn_pros/org/junit/jupiter/junit-jupiter/5.11.4/junit-jupiter-5.11.4.jar:/Users/ls/MyWork/mvn_pros/org/junit/jupiter/junit-jupiter-api/5.11.4/junit-jupiter-api-5.11.4.jar:/Users/ls/MyWork/mvn_pros/org/opentest4j/opentest4j/1.3.0/opentest4j-1.3.0.jar:/Users/ls/MyWork/mvn_pros/org/junit/platform/junit-platform-commons/1.11.4/junit-platform-commons-1.11.4.jar:/Users/ls/MyWork/mvn_pros/org/apiguardian/apiguardian-api/1.1.2/apiguardian-api-1.1.2.jar:/Users/ls/MyWork/mvn_pros/org/junit/jupiter/junit-jupiter-params/5.11.4/junit-jupiter-params-5.11.4.jar:/Users/ls/MyWork/mvn_pros/org/junit/jupiter/junit-jupiter-engine/5.11.4/junit-jupiter-engine-5.11.4.jar:/Users/ls/MyWork/mvn_pros/org/junit/platform/junit-platform-engine/1.11.4/junit-platform-engine-1.11.4.jar:/Users/ls/MyWork/mvn_pros/org/slf4j/slf4j-nop/2.0.18/slf4j-nop-2.0.18.jar:"/>
+    <property name="sun.cpu.endian" value="little"/>
+    <property name="user.home" value="/Users/ls"/>
+    <property name="user.language" value="zh"/>
+    <property name="java.specification.vendor" value="Oracle Corporation"/>
+    <property name="java.version.date" value="2024-10-15"/>
+    <property name="java.home" value="/Library/Java/JavaVirtualMachines/jdk-21.jdk/Contents/Home"/>
+    <property name="file.separator" value="/"/>
+    <property name="basedir" value="/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-semantic-governance/sdks/java"/>
+    <property name="java.vm.compressedOopsMode" value="Zero based"/>
+    <property name="line.separator" value="&#10;"/>
+    <property name="java.vm.specification.vendor" value="Oracle Corporation"/>
+    <property name="java.specification.name" value="Java Platform API Specification"/>
+    <property name="apple.awt.application.name" value="ForkedBooter"/>
+    <property name="surefire.real.class.path" value="/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-semantic-governance/sdks/java/target/surefire/surefirebooter-20261014111158543_3.jar"/>
+    <property name="user.script" value="Hans"/>
+    <property name="sun.management.compiler" value="HotSpot 64-Bit Tiered Compilers"/>
+    <property name="java.runtime.version" value="21.0.5+9-LTS-239"/>
+    <property name="user.name" value="ls"/>
+    <property name="stdout.encoding" value="UTF-8"/>
+    <property name="path.separator" value=":"/>
+    <property name="os.version" value="26.6.2"/>
+    <property name="java.runtime.name" value="Java(TM) SE Runtime Environment"/>
+    <property name="file.encoding" value="UTF-8"/>
+    <property name="java.vm.name" value="Java HotSpot(TM) 64-Bit Server VM"/>
+    <property name="localRepository" value="/Users/ls/MyWork/mvn_pros"/>
+    <property name="java.vendor.url.bug" value="https://bugreport.java.com/bugreport/"/>
+    <property name="java.io.tmpdir" value="/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/admin/sdk-run-steer-native/java-diagnostic-fixed"/>
+    <property name="java.version" value="21.0.5"/>
+    <property name="user.dir" value="/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-semantic-governance/sdks/java"/>
+    <property name="os.arch" value="aarch64"/>
+    <property name="java.vm.specification.name" value="Java Virtual Machine Specification"/>
+    <property name="native.encoding" value="UTF-8"/>
+    <property name="java.library.path" value="/Users/ls/Library/Java/Extensions:/Library/Java/Extensions:/Network/Library/Java/Extensions:/System/Library/Java/Extensions:/usr/lib/java:."/>
+    <property name="java.vm.info" value="mixed mode, sharing"/>
+    <property name="stderr.encoding" value="UTF-8"/>
+    <property name="java.vendor" value="Oracle Corporation"/>
+    <property name="java.vm.version" value="21.0.5+9-LTS-239"/>
+    <property name="sun.io.unicode.encoding" value="UnicodeBig"/>
+    <property name="maven.compiler.failOnWarning" value="true"/>
+    <property name="java.class.version" value="65.0"/>
+  </properties>
+  <testcase name="acceptedSteeringReachesModelAndConcurrentWaitsShareOriginalReceipt" classname="com.echoagent.sdk.RunSteerHostTest" time="1.095">
+    <system-out><![CDATA[Run steer acceptance evidence /Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/admin/sdk-run-steer-native/java-diagnostic-fixed/sdk-run-steer-java-14976587752873345561
+Run steer native evidence /Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/admin/sdk-run-steer-native/java-diagnostic-fixed/sdk-run-steer-java-14976587752873345561
+]]></system-out>
+  </testcase>
+</testsuite>

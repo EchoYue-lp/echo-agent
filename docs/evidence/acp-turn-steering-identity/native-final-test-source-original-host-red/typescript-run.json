@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "sourceRoot": "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-semantic-governance/sdks/typescript",
+  "steps": [
+    {
+      "label": "typescript-native-run-steer",
+      "command": [
+        "node",
+        "--test",
+        "test/run-steer-host.test.js"
+      ],
+      "cwd": "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-semantic-governance/sdks/typescript",
+      "logPath": "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-semantic-governance/docs/sdk/governance/evidence/run-steer-native/final-test-source-original-host-red/typescript-focused.log",
+      "exitCode": 1,
+      "signal": null,
+      "errorCode": null,
+      "truncated": false,
+      "bytesSeen": 1249,
+      "bytesWritten": 1249,
+      "startedAt": "2026-10-14T03:09:48.777Z",
+      "finishedAt": "2026-10-14T03:09:54.776Z"
+    }
+  ],
+  "updatedAt": "2026-10-14T03:09:54.776Z"
+}

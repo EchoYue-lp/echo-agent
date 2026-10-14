@@ -1,0 +1,34 @@
+   Compiling echo_agent v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward)
+    Finished `test` profile [unoptimized] target(s) in 5.81s
+     Running tests/acp_agent_adapter.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/deps/acp_agent_adapter-fe656c400afd3d49)
+
+running 26 tests
+test adapter_config_rejects_zero_resource_bounds ... ok
+test acp_fixtures_use_official_typed_messages ... ok
+test cancel_run_routes_through_the_shared_cancellation_authority ... ok
+test ledger_bounds_retain_a_floor_and_clamp_memory ... ok
+test journal_failure_before_terminal_fails_execution_and_delivery ... ok
+test observer_failure_is_delivery_failure_without_rewriting_execution ... ok
+test one_active_run_slot_is_shared_across_entry_points ... ok
+test failed_agent_close_retries_on_connection_eof ... ok
+test aborting_connection_future_keeps_preissued_close_owner_after_a_run ... ok
+test closing_official_channel_cancels_active_prompt_and_closes_agent ... ok
+test cumulative_update_budget_stops_many_small_notifications ... ok
+test profile_flush_failure_still_awaits_agent_close_and_retries_on_eof ... ok
+test invalid_session_and_concurrent_prompt_are_typed_errors ... ok
+test oversized_projected_update_fails_the_prompt_without_closing_the_connection ... ok
+test resource_link_requires_structured_agent_support ... ok
+test both_cancellation_routes_settle_prompt_without_blocking_dispatch ... ok
+test standard_adapter_rejects_connection_without_retained_close_owner ... ok
+test shared_authority_settles_extension_runs_with_exactly_one_terminal ... ok
+test receipt_persistence_failure_never_returns_end_turn ... ok
+test text_only_agent_fallback_setup_error_keeps_original_canonical_failed_receipt ... ok
+test standard_close_owner_retries_after_transport_and_eof_failures ... ok
+test separate_sessions_drive_prompts_concurrently ... ok
+test terminal_projection_failure_never_returns_end_turn ... ok
+test official_client_observes_isolated_sessions_and_ordered_updates ... ok
+test text_only_agent_keeps_standard_plain_user_prompts_with_canonical_turn_context ... ok
+test resource_links_tools_and_framework_failures_keep_typed_boundaries ... ok
+
+test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+

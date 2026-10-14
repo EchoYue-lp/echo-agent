@@ -1,0 +1,27 @@
+{
+  "identity" : {
+    "run" : {
+      "id" : "sess_bb10929f-cdff-4071-b522-78a46bcde60b:turn:1",
+      "generation" : "1",
+      "kind" : "run"
+    },
+    "stream" : {
+      "id" : "9cd198d2-ccde-4507-821e-5823777eb362",
+      "generation" : "1",
+      "kind" : "stream"
+    }
+  },
+  "accepted" : {
+    "accepted" : true,
+    "steer_id" : "c9ff50fd-2d63-46a9-9ff9-8bd3f538203e"
+  },
+  "snapshot" : {
+    "status" : "running",
+    "last_sequence" : "0",
+    "stream" : {
+      "id" : "9cd198d2-ccde-4507-821e-5823777eb362",
+      "generation" : "1",
+      "kind" : "stream"
+    }
+  }
+}

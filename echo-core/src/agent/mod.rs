@@ -1112,14 +1112,36 @@ pub trait Agent: Send + Sync {
     ///
     /// Implementations must preserve the same conversational semantics as
     /// [`Self::chat_stream_with_cancel`]: append to the existing context rather
-    /// than resetting it. The default is unsupported because extracting a
-    /// borrowed text fallback from an owned message would not be lifetime-safe.
+    /// than resetting it. The default adapts only a metadata-free plain User
+    /// text message to the legacy text method. Other message forms remain
+    /// unsupported instead of losing role, multimodal content or metadata.
     fn chat_stream_message_with_cancel<'a>(
         &'a self,
-        _message: Message,
-        _cancel: CancellationToken,
+        message: Message,
+        cancel: CancellationToken,
     ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
         Box::pin(async move {
+            if let Message {
+                role: crate::llm::types::Role::User,
+                content: crate::llm::types::MessageContent::Text(text),
+                tool_calls: None,
+                name: None,
+                tool_call_id: None,
+                reasoning_content: None,
+                reasoning_blocks: None,
+            } = message
+            {
+                // The adapter owns text for as long as the legacy stream can
+                // borrow it. Legacy setup starts on first poll; its original
+                // setup error is emitted as a stream error, never a success.
+                let stream = async_stream::try_stream! {
+                    let mut legacy = self.chat_stream_with_cancel(&text, cancel).await?;
+                    while let Some(event) = legacy.next().await {
+                        yield event?;
+                    }
+                };
+                return Ok(Box::pin(stream) as BoxStream<'a, Result<AgentEvent>>);
+            }
             Err(crate::error::ReactError::Other(
                 "this agent does not implement multimodal streaming (chat_stream_message_with_cancel)"
                     .to_string(),
@@ -1750,5 +1772,228 @@ pub trait AgentCallback: Send + Sync {
     /// Called at the end of each outer control-loop iteration.
     fn on_iteration<'a>(&'a self, _agent: &'a str, _iteration: usize) -> BoxFuture<'a, ()> {
         Box::pin(async {})
+    }
+}
+
+#[cfg(test)]
+mod default_pure_text_chat_tests {
+    use super::*;
+    use crate::llm::types::{ContentPart, MessageContent, Role};
+    use crate::tools::InvocationResourceGuard;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    struct DropProof(Arc<AtomicUsize>);
+    impl Drop for DropProof {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[derive(Default)]
+    struct LegacyTextAgent {
+        calls: AtomicUsize,
+        fail_setup: bool,
+    }
+    impl Agent for LegacyTextAgent {
+        fn name(&self) -> &str {
+            "legacy-text"
+        }
+        fn model_name(&self) -> &str {
+            "none"
+        }
+        fn system_prompt(&self) -> &str {
+            ""
+        }
+        fn execute<'a>(&'a self, text: &'a str) -> BoxFuture<'a, Result<String>> {
+            Box::pin(async move { Ok(text.to_string()) })
+        }
+        fn execute_stream<'a>(
+            &'a self,
+            text: &'a str,
+        ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+            self.chat_stream(text)
+        }
+        fn chat_stream<'a>(
+            &'a self,
+            text: &'a str,
+        ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+            Box::pin(async move {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                if self.fail_setup {
+                    return Err(ReactError::Other(
+                        "original legacy setup failure".to_string(),
+                    ));
+                }
+                // Keep the borrowed original text across the caller's later poll.
+                Ok(
+                    futures::stream::once(async move { Ok(AgentEvent::Token(text.to_string())) })
+                        .chain(futures::stream::pending())
+                        .boxed(),
+                )
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn default_pure_text_chat_owns_input_until_poll_and_retains_cancel_and_guard()
+    -> Result<()> {
+        let agent = LegacyTextAgent::default();
+        let drops = Arc::new(AtomicUsize::new(0));
+        let cancel = CancellationToken::new();
+        let context = AgentInvocationContext {
+            resource_guards: vec![InvocationResourceGuard::new(DropProof(drops.clone()))],
+            ..Default::default()
+        };
+        let mut events = agent
+            .chat_stream_message_with_invocation_context(
+                Message::user("owned 中文🌊".to_string()),
+                cancel.clone(),
+                context,
+            )
+            .await?;
+        assert_eq!(agent.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        assert!(
+            matches!(events.next().await, Some(Ok(AgentEvent::Token(text))) if text == "owned 中文🌊")
+        );
+        assert_eq!(agent.calls.load(Ordering::SeqCst), 1);
+        cancel.cancel();
+        assert!(matches!(
+            events.next().await,
+            Some(Ok(AgentEvent::Cancelled))
+        ));
+        assert!(events.next().await.is_none());
+        drop(events);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn default_pure_text_chat_setup_failure_remains_original_stream_error() -> Result<()> {
+        let agent = LegacyTextAgent {
+            fail_setup: true,
+            ..Default::default()
+        };
+        let mut events = agent
+            .chat_stream_message_with_cancel(
+                Message::user("owned".to_string()),
+                CancellationToken::new(),
+            )
+            .await?;
+        assert!(
+            matches!(events.next().await, Some(Err(ReactError::Other(message))) if message == "original legacy setup failure")
+        );
+        assert!(events.next().await.is_none());
+        assert_eq!(agent.calls.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn default_pure_text_chat_rejects_every_nonlossless_message_without_legacy_call() {
+        let agent = LegacyTextAgent::default();
+        let mut messages = Vec::new();
+        for role in [
+            Role::System,
+            Role::Assistant,
+            Role::Tool,
+            Role::Custom("provider-role".to_string()),
+        ] {
+            messages.push(Message {
+                role,
+                ..Message::user("text".to_string())
+            });
+        }
+        messages.push(Message {
+            content: MessageContent::Empty,
+            ..Message::user("text".to_string())
+        });
+        messages.push(Message::user_multimodal(vec![ContentPart::Text {
+            text: "must not flatten".to_string(),
+        }]));
+        let mut value = Message::user("text".to_string());
+        value.name = Some(String::new());
+        messages.push(value);
+        let mut value = Message::user("text".to_string());
+        value.tool_call_id = Some(String::new());
+        messages.push(value);
+        let mut value = Message::user("text".to_string());
+        value.tool_calls = Some(Vec::new());
+        messages.push(value);
+        let mut value = Message::user("text".to_string());
+        value.reasoning_content = Some(String::new());
+        messages.push(value);
+        let mut value = Message::user("text".to_string());
+        value.reasoning_blocks = Some(Vec::new());
+        messages.push(value);
+        for message in messages {
+            let result = agent
+                .chat_stream_message_with_cancel(message, CancellationToken::new())
+                .await;
+            assert!(
+                matches!(result, Err(ReactError::Other(message)) if message.contains("does not implement multimodal streaming"))
+            );
+        }
+        assert_eq!(agent.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[derive(Default)]
+    struct StructuredOverrideAgent {
+        legacy: AtomicUsize,
+        structured: AtomicUsize,
+    }
+    impl Agent for StructuredOverrideAgent {
+        fn name(&self) -> &str {
+            "structured-wins"
+        }
+        fn model_name(&self) -> &str {
+            "none"
+        }
+        fn system_prompt(&self) -> &str {
+            ""
+        }
+        fn execute<'a>(&'a self, text: &'a str) -> BoxFuture<'a, Result<String>> {
+            Box::pin(async move { Ok(text.to_string()) })
+        }
+        fn execute_stream<'a>(
+            &'a self,
+            _text: &'a str,
+        ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+            self.legacy.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Err(ReactError::Other("legacy must not be selected".to_string())) })
+        }
+        fn chat_stream_message_with_cancel<'a>(
+            &'a self,
+            _message: Message,
+            _cancel: CancellationToken,
+        ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+            self.structured.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async {
+                Ok(futures::stream::iter([Ok(AgentEvent::FinalAnswer(
+                    "structured-original".to_string(),
+                ))])
+                .boxed())
+            })
+        }
+    }
+    #[tokio::test]
+    async fn default_pure_text_chat_invocation_keeps_existing_structured_override() -> Result<()> {
+        let agent = StructuredOverrideAgent::default();
+        let mut events = agent
+            .chat_stream_message_with_invocation_context(
+                Message::user("plain user".to_string()),
+                CancellationToken::new(),
+                AgentInvocationContext::default(),
+            )
+            .await?;
+        assert!(
+            matches!(events.next().await, Some(Ok(AgentEvent::FinalAnswer(answer))) if answer == "structured-original")
+        );
+        assert!(events.next().await.is_none());
+        assert_eq!(agent.structured.load(Ordering::SeqCst), 1);
+        assert_eq!(agent.legacy.load(Ordering::SeqCst), 0);
+        Ok(())
     }
 }

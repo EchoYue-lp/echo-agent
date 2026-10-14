@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "sourceRoot": "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward",
+  "steps": [
+    {
+      "label": "after-core-default",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "echo_core",
+        "--lib",
+        "default_pure_text_chat",
+        "--locked"
+      ],
+      "cwd": "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward",
+      "logPath": "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward/docs/evidence/acp-turn-steering-identity/after-core-default.log",
+      "exitCode": 101,
+      "signal": null,
+      "errorCode": null,
+      "truncated": false,
+      "bytesSeen": 1613,
+      "bytesWritten": 1613,
+      "startedAt": "2026-10-14T03:25:14.260Z",
+      "finishedAt": "2026-10-14T03:25:14.795Z"
+    },
+    {
+      "label": "after-core-default",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "echo_core",
+        "--lib",
+        "default_pure_text_chat",
+        "--locked"
+      ],
+      "cwd": "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward",
+      "logPath": "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward/docs/evidence/acp-turn-steering-identity/after-core-default.log",
+      "exitCode": 0,
+      "signal": null,
+      "errorCode": null,
+      "truncated": false,
+      "bytesSeen": 992,
+      "bytesWritten": 992,
+      "startedAt": "2026-10-14T03:25:50.709Z",
+      "finishedAt": "2026-10-14T03:25:59.981Z"
+    }
+  ],
+  "updatedAt": "2026-10-14T03:25:59.981Z"
+}

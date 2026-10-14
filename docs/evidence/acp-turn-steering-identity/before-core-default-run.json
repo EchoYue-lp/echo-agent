@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "sourceRoot": "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward",
+  "steps": [
+    {
+      "label": "before-core-default",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "echo_core",
+        "--lib",
+        "default_pure_text_chat",
+        "--locked"
+      ],
+      "cwd": "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward",
+      "logPath": "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward/docs/evidence/acp-turn-steering-identity/before-core-default.log",
+      "exitCode": 101,
+      "signal": null,
+      "errorCode": null,
+      "truncated": false,
+      "bytesSeen": 4027,
+      "bytesWritten": 4027,
+      "startedAt": "2026-10-14T03:22:56.408Z",
+      "finishedAt": "2026-10-14T03:23:19.767Z"
+    }
+  ],
+  "updatedAt": "2026-10-14T03:23:19.767Z"
+}

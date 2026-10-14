@@ -1,3 +1,4 @@
 docs/evidence/chart-dimension-fidelity-20261014/*.log -diff
 docs/evidence/chart-dimension-fidelity-20261014/final-gates/*.log -diff
 docs/evidence/chart-dimension-fidelity-20261014/candidate.diff -diff
+docs/evidence/acp-turn-steering-identity/**/*.log -diff

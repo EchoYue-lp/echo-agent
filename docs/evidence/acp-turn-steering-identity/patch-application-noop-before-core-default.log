@@ -1,0 +1,25 @@
+    Finished `test` profile [unoptimized] target(s) in 0.44s
+     Running unittests src/lib.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/deps/echo_core-c4aee6da1047b46a)
+
+running 4 tests
+test agent::default_pure_text_chat_tests::default_pure_text_chat_rejects_every_nonlossless_message_without_legacy_call ... ok
+test agent::default_pure_text_chat_tests::default_pure_text_chat_owns_input_until_poll_and_retains_cancel_and_guard ... FAILED
+test agent::default_pure_text_chat_tests::default_pure_text_chat_setup_failure_remains_original_stream_error ... FAILED
+test agent::default_pure_text_chat_tests::default_pure_text_chat_invocation_keeps_existing_structured_override ... ok
+
+failures:
+
+---- agent::default_pure_text_chat_tests::default_pure_text_chat_owns_input_until_poll_and_retains_cancel_and_guard stdout ----
+Error: Other("this agent does not implement multimodal streaming (chat_stream_message_with_cancel)")
+
+---- agent::default_pure_text_chat_tests::default_pure_text_chat_setup_failure_remains_original_stream_error stdout ----
+Error: Other("this agent does not implement multimodal streaming (chat_stream_message_with_cancel)")
+
+
+failures:
+    agent::default_pure_text_chat_tests::default_pure_text_chat_owns_input_until_poll_and_retains_cancel_and_guard
+    agent::default_pure_text_chat_tests::default_pure_text_chat_setup_failure_remains_original_stream_error
+
+test result: FAILED. 2 passed; 2 failed; 0 ignored; 0 measured; 418 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `-p echo_core --lib`
