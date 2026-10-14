@@ -12,3 +12,8 @@ docs/evidence/git-branch-switch/final-focused.log -diff
 
 # Exact complete workspace output retains its original final blank line.
 docs/evidence/git-branch-switch/full-gates/05-workspace-tests.log -diff
+
+# Preserve exact dependency audit, CI and patch evidence.
+docs/evidence/rustls-security-patch-20261015/Cargo.lock.patch -diff
+docs/evidence/rustls-security-patch-20261015/ci-original-failure.log -diff
+docs/evidence/rustls-security-patch-20261015/deny.log -diff

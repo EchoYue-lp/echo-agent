@@ -1,0 +1,26 @@
+{
+  "0346": {
+    "source": "official RustSec/advisory-db fetched by current cargo audit",
+    "revision": "caee11f41fab07d676c0a4655a2a5dd1f94da97c",
+    "sha256": "04933c9695fedb8b523c96723f0e193e2f8fd1c0f22945dc82904571967cb9bd",
+    "patched": ">=0.23.46"
+  },
+  "0347": {
+    "source": "official RustSec/advisory-db fetched by current cargo audit",
+    "revision": "caee11f41fab07d676c0a4655a2a5dd1f94da97c",
+    "sha256": "b1b31d99c76e17daae8211937a0c28197c68c2e573caeba5875e0fc769c548a8",
+    "patched": ">=0.23.46"
+  },
+  "0348": {
+    "source": "official RustSec/advisory-db fetched by current cargo audit",
+    "revision": "caee11f41fab07d676c0a4655a2a5dd1f94da97c",
+    "sha256": "99ec103400ea094e34211303d4b87ec52893cd60560e5b192b328f570fb23555",
+    "patched": ">=0.23.46"
+  },
+  "0349": {
+    "source": "official RustSec/advisory-db fetched by current cargo audit",
+    "revision": "caee11f41fab07d676c0a4655a2a5dd1f94da97c",
+    "sha256": "147d66906c11c601bdc4c47f26dc9e017340e310e86e177b34a8845453485876",
+    "patched": ">=0.23.46"
+  }
+}

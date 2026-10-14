@@ -1,0 +1,67 @@
+{
+  "headAtArchive": "569a644488373d3fd4f4ca668a678d262e25233d",
+  "sourceFixCommit": "a1939a2ec681257068475cf3cbf541eae38251a6",
+  "oldLockSHA256": "49f8e5605e329f7a05b617a7ec0ecb3b216a4f88665fd3e67a9e0c5de02cf6f1",
+  "newLockSHA256": "4d036d1cc54498512198dd7241fc13a10f13ede7497e5fe8483331b211cbc187",
+  "lockDelta": "only rustls version and registry checksum;680 other package entries identical;dependencies/source unchanged",
+  "officialCrateIndexCompatibility": {
+    "versions": [
+      "0.23.45",
+      "0.23.46"
+    ],
+    "depsAndFeaturesSame": true,
+    "msrv": "1.71",
+    "patchedYanked": false
+  },
+  "reverseLockedDependencies": [
+    {
+      "name": "hyper-rustls",
+      "version": "0.27.9"
+    },
+    {
+      "name": "quinn",
+      "version": "0.11.11"
+    },
+    {
+      "name": "quinn-proto",
+      "version": "0.11.18"
+    },
+    {
+      "name": "reqwest",
+      "version": "0.12.28"
+    },
+    {
+      "name": "tokio-rustls",
+      "version": "0.26.4"
+    }
+  ],
+  "constraints": "existing caret0.23 in hyper-rustls,>=0.23.4 in reqwest,>=0.23.27 in tokio-rustls,>=0.23.5 in quinn/quinn-proto all permit0.23.46; no Cargo.toml edit",
+  "freshRustSecRevision": "caee11f41fab07d676c0a4655a2a5dd1f94da97c",
+  "advisories": [
+    "RUSTSEC-2026-0346",
+    "RUSTSEC-2026-0347",
+    "RUSTSEC-2026-0348",
+    "RUSTSEC-2026-0349"
+  ],
+  "allPatchedMinimum": ">=0.23.46",
+  "focusedGates": {
+    "exactUpdateExit": 0,
+    "freshAuditDenyWarningsExit": 0,
+    "cargoDenyExit": 0,
+    "cargoDenyChecks": [
+      "advisories",
+      "bans",
+      "licenses",
+      "sources"
+    ],
+    "cargoDenyConfiguredDuplicateWarnings": 50,
+    "cargoDenyDuplicateExactGroupsSameAsTrackedFrameworkPR181": true,
+    "echoAgentAllFeaturesLockedCheckExit": 0,
+    "compilerWarnings": 0
+  },
+  "policy": "F original deny.toml multiple-versions=warn and CI cargo-deny action unchanged; audit uses --deny warnings; compiler six gates require0warnings. No SDK50 exception transferred, no ignore/source/license/feature threshold altered.",
+  "historicalReference": "docs/evidence/dependency-repair-20261013/deny-all-final.log and receipt.json retain original 50 configured group warning policy",
+  "remaining": "fresh lock-focused independent review, development commit and all six new-lock framework gates before PR186/main; old .45 six engineering packet remains historical",
+  "sourceChanges": "only Cargo.lock; generic Git fix cfd source already reviewed unchanged",
+  "lease": "no current Cargo subprocess; assigned unique lease retained until new-lock final6/Root coordination"
+}
