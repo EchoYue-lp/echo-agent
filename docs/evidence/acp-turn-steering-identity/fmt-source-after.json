@@ -1,0 +1,5 @@
+{
+  "src/acp/runtime.rs": "bee15cec31068a0dc384e81bd1690558853f2ccf6192b38f57f738f869ffda1f",
+  "echo-core/src/agent/mod.rs": "480c01934ca407a2d3d0577745ed97c1e8cff199af3452c4cc3aa964259ec2c6",
+  "tests/acp_agent_adapter.rs": "442a15bd80516985e4484baf23c71ac3aa85e0b85a6d80e2ccccd4a2fcd638d4"
+}

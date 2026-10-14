@@ -1,0 +1,486 @@
+{
+  "scope": "review-ready ACP canonical turn propagation and precise legacy text fallback",
+  "frameworkWorktree": "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward",
+  "branch": "fix/Echoyue/acp-turn-steering-identity",
+  "baseRevision": "be5f0a8405b593c4ef964cd6fd2df4beabf4956c",
+  "sourceFiles": [
+    {
+      "path": "src/acp/runtime.rs",
+      "baseRevision": "be5f0a8405b593c4ef964cd6fd2df4beabf4956c",
+      "baseSha256": "d8446e7728f6883e903aa2b243b19b9cb722da79c729e1c27f73f35d5a0ffefe",
+      "currentSha256": "bee15cec31068a0dc384e81bd1690558853f2ccf6192b38f57f738f869ffda1f"
+    },
+    {
+      "path": "echo-core/src/agent/mod.rs",
+      "baseRevision": "be5f0a8405b593c4ef964cd6fd2df4beabf4956c",
+      "baseSha256": "52918b6e318e54f3795670c340d9c52597f89ccbf45afa7993397b613da21afb",
+      "currentSha256": "480c01934ca407a2d3d0577745ed97c1e8cff199af3452c4cc3aa964259ec2c6"
+    },
+    {
+      "path": "tests/acp_agent_adapter.rs",
+      "baseRevision": "be5f0a8405b593c4ef964cd6fd2df4beabf4956c",
+      "baseSha256": "b278c326474f8e3afe244c7224b74bf7fdbfbded7a85126ed41cdca78029ee98",
+      "currentSha256": "442a15bd80516985e4484baf23c71ac3aa85e0b85a6d80e2ccccd4a2fcd638d4"
+    }
+  ],
+  "adr": {
+    "path": "docs/adr/0084-acp-turn-steering-identity.md",
+    "sha256": "8856c883b24eca61211a23d8713241c4cb44c036b108ed6f9808ebf9aed705e2"
+  },
+  "sourceDeltaSha256": "816c116f77074eeeac8ad7782adbd26c0dc7117195ff92a37599628a4a377857",
+  "recordingFixtureCorrection": {
+    "patch": "recording-fixture-only-correction.patch",
+    "sha256": "751c7e4e8907b34860f9256efdb452792688bb3aa4f07ada36061f16c2990eac",
+    "allSourceOutsideOneMethodByteIdentical": true,
+    "originalAssertionsTimeoutsUnchanged": true,
+    "interpretation": "Independent substantive review accepted this test script reuse. Same conversation means append/noreset, not equal dual-override outputs. Third-party dual overrides can observe the new preexisting structured path."
+  },
+  "receipts": [
+    {
+      "name": "old-runtime-capture-tests",
+      "rawLog": "old-runtime-capture-tests.log",
+      "rawLogSha256": "361efa64be5c70db28af0c8e1dd01b83ea74c5f8a469c019a1d78de84b0e2199",
+      "officialReceipt": "old-runtime-capture-tests-run.json",
+      "officialReceiptSha256": "beea4fe6d5c14b5caabfa470a5f867013dfc0da67e21724636250556a86d1e91",
+      "selectedStepIndex": 0,
+      "label": "old-runtime-context-identity-capture",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "echo_agent",
+        "--features",
+        "acp",
+        "--lib",
+        "acp::runtime::turn_identity_tests",
+        "--locked"
+      ],
+      "exitCode": 101,
+      "signal": null,
+      "bytesSeen": 5001,
+      "startedAt": "2026-10-14T03:01:38.169Z",
+      "finishedAt": "2026-10-14T03:02:21.555Z",
+      "testResults": [
+        "test result: FAILED. 0 passed; 5 failed; 0 ignored; 0 measured; 839 filtered out; finished in 0.01s"
+      ],
+      "warnings": []
+    },
+    {
+      "name": "fixed-runtime-capture-tests",
+      "rawLog": "fixed-runtime-capture-tests.log",
+      "rawLogSha256": "730942845a31e9b9c55b115c1fb21e168b229de3f4d16f218acab37583c8f735",
+      "officialReceipt": "fixed-runtime-capture-tests-run.json",
+      "officialReceiptSha256": "77875ee5c4160e1c7ade183cf1a265b86da4c3cb0ae2e2c3c0b5d2313e209f1b",
+      "selectedStepIndex": 0,
+      "label": "fixed-runtime-context-identity-capture",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "echo_agent",
+        "--features",
+        "acp",
+        "--lib",
+        "acp::runtime::turn_identity_tests",
+        "--locked"
+      ],
+      "exitCode": 0,
+      "signal": null,
+      "bytesSeen": 1418,
+      "startedAt": "2026-10-14T03:03:21.168Z",
+      "finishedAt": "2026-10-14T03:03:54.275Z",
+      "testResults": [
+        "test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 839 filtered out; finished in 0.01s"
+      ],
+      "warnings": []
+    },
+    {
+      "name": "before-core-default",
+      "rawLog": "before-core-default.log",
+      "rawLogSha256": "531227ceb1a574d9f45fb9c9fe2eddac324b99fe575c0bbb4e7b4a91ff75ba8d",
+      "officialReceipt": "before-core-default-run.json",
+      "officialReceiptSha256": "faf2d0c637629aee0bd478c6917a501ee2ddfca8eeeb265260b0da0d881eaf68",
+      "selectedStepIndex": 0,
+      "label": "before-core-default",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "echo_core",
+        "--lib",
+        "default_pure_text_chat",
+        "--locked"
+      ],
+      "exitCode": 101,
+      "signal": null,
+      "bytesSeen": 4027,
+      "startedAt": "2026-10-14T03:22:56.408Z",
+      "finishedAt": "2026-10-14T03:23:19.767Z",
+      "testResults": [
+        "test result: FAILED. 2 passed; 2 failed; 0 ignored; 0 measured; 418 filtered out; finished in 0.00s"
+      ],
+      "warnings": []
+    },
+    {
+      "name": "before-text-only-acp",
+      "rawLog": "before-text-only-acp.log",
+      "rawLogSha256": "f0118f4e78790a433a2edf65c63b89f7072806e8687de5ba9d4d0b7af6d6332d",
+      "officialReceipt": "before-text-only-acp-run.json",
+      "officialReceiptSha256": "2aa12f306464ba4e301079f74ae14697ceec9cbd8ed3b12aa47c18b9073945b2",
+      "selectedStepIndex": 1,
+      "label": "before-text-only-acp-corrected-fixture",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "echo_agent",
+        "--features",
+        "acp",
+        "--test",
+        "acp_agent_adapter",
+        "text_only_agent",
+        "--locked"
+      ],
+      "exitCode": 101,
+      "signal": null,
+      "bytesSeen": 1722,
+      "startedAt": "2026-10-14T03:24:43.960Z",
+      "finishedAt": "2026-10-14T03:24:49.686Z",
+      "testResults": [
+        "test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.01s"
+      ],
+      "warnings": []
+    },
+    {
+      "name": "after-core-default",
+      "rawLog": "after-core-default.log",
+      "rawLogSha256": "764bb9eb643e4887e547134923aa6e9f6c217f1447737ac2def5b293e23b26d3",
+      "officialReceipt": "after-core-default-run.json",
+      "officialReceiptSha256": "d173e409e509495c83922bc2007b633c0f0d0cf3c53565ab250ef7b2a8bd9957",
+      "selectedStepIndex": 1,
+      "label": "after-core-default",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "echo_core",
+        "--lib",
+        "default_pure_text_chat",
+        "--locked"
+      ],
+      "exitCode": 0,
+      "signal": null,
+      "bytesSeen": 992,
+      "startedAt": "2026-10-14T03:25:50.709Z",
+      "finishedAt": "2026-10-14T03:25:59.981Z",
+      "testResults": [
+        "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 418 filtered out; finished in 0.00s"
+      ],
+      "warnings": []
+    },
+    {
+      "name": "after-text-only-acp",
+      "rawLog": "after-text-only-acp.log",
+      "rawLogSha256": "f6310f275add4554c2dfa499980414426441d75e197bd189b570b1099b32d2b8",
+      "officialReceipt": "after-text-only-acp-run.json",
+      "officialReceiptSha256": "8348443d748250e3cbfb0795e1f309f6b378745751cb8217bd266ae6943afc3c",
+      "selectedStepIndex": 0,
+      "label": "after-text-only-acp",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "echo_agent",
+        "--features",
+        "acp",
+        "--test",
+        "acp_agent_adapter",
+        "text_only_agent",
+        "--locked"
+      ],
+      "exitCode": 0,
+      "signal": null,
+      "bytesSeen": 1609,
+      "startedAt": "2026-10-14T03:26:00.019Z",
+      "finishedAt": "2026-10-14T03:26:32.916Z",
+      "testResults": [
+        "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.01s"
+      ],
+      "warnings": []
+    },
+    {
+      "name": "final-core-lib",
+      "rawLog": "final-core-lib.log",
+      "rawLogSha256": "cf217e78c94719acb6221d05178bcda74e5672443e428025d87fb358f6f87327",
+      "officialReceipt": "final-core-lib-run.json",
+      "officialReceiptSha256": "2dab40f919009b1ec6939552d02aa0703c7ff7445886f7d6fefb48a524dc4aca",
+      "selectedStepIndex": 0,
+      "label": "final-core-lib",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "echo_core",
+        "--lib",
+        "--locked"
+      ],
+      "exitCode": 0,
+      "signal": null,
+      "bytesSeen": 33033,
+      "startedAt": "2026-10-14T03:27:16.115Z",
+      "finishedAt": "2026-10-14T03:27:16.965Z",
+      "testResults": [
+        "test result: ok. 422 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.24s"
+      ],
+      "warnings": []
+    },
+    {
+      "name": "final-existing-driver-structured-contract",
+      "rawLog": "final-existing-driver-structured-contract.log",
+      "rawLogSha256": "518994f162f54c11b46c67e9697e72ef4328b6216320768e2d4dfccd6c733abe",
+      "officialReceipt": "final-existing-driver-structured-contract-run.json",
+      "officialReceiptSha256": "c8bac721ceac493f48d1f2ade12a03c6a02a302fc2635556c6db95e85baffcbb",
+      "selectedStepIndex": 0,
+      "label": "final-existing-driver-structured-contract",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "echo_orchestration",
+        "--lib",
+        "text_chat_with_invocation_uses_structured_chat_contract",
+        "--locked"
+      ],
+      "exitCode": 0,
+      "signal": null,
+      "bytesSeen": 1637,
+      "startedAt": "2026-10-14T03:27:17.009Z",
+      "finishedAt": "2026-10-14T03:27:45.615Z",
+      "testResults": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 460 filtered out; finished in 0.00s"
+      ],
+      "warnings": []
+    },
+    {
+      "name": "final-all-acp-adapter",
+      "rawLog": "final-all-acp-adapter.log",
+      "rawLogSha256": "44c6b49f8ba963ec4a26595f19d8082a4a57e0ff5d35934bb944fb694406a004",
+      "officialReceipt": "final-all-acp-adapter-run.json",
+      "officialReceiptSha256": "998300aaaf5c13f591f670f8f15955edb0cdda1f8ab7967b92601171e7b3c346",
+      "selectedStepIndex": 0,
+      "label": "final-all-acp-adapter",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "echo_agent",
+        "--features",
+        "acp",
+        "--test",
+        "acp_agent_adapter",
+        "--locked"
+      ],
+      "exitCode": 101,
+      "signal": null,
+      "bytesSeen": 5569,
+      "startedAt": "2026-10-14T03:27:45.655Z",
+      "finishedAt": "2026-10-14T03:27:48.351Z",
+      "testResults": [
+        "test result: FAILED. 17 passed; 9 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.02s"
+      ],
+      "warnings": []
+    },
+    {
+      "name": "recording-fixture-corrected-all-acp-adapter",
+      "rawLog": "recording-fixture-corrected-all-acp-adapter.log",
+      "rawLogSha256": "7fa7c8af0198e3c5cfad8c9c790c2071aba2146ebfac6e7e218de349f621319f",
+      "officialReceipt": "recording-fixture-corrected-all-acp-adapter-run.json",
+      "officialReceiptSha256": "ceabe9215c519b84675bae2b1615702e469670b9638777a713e2bb1c8a580f88",
+      "selectedStepIndex": 0,
+      "label": "recording-fixture-same-pure-text-semantics",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "echo_agent",
+        "--features",
+        "acp",
+        "--test",
+        "acp_agent_adapter",
+        "--locked"
+      ],
+      "exitCode": 0,
+      "signal": null,
+      "bytesSeen": 2358,
+      "startedAt": "2026-10-14T03:29:30.234Z",
+      "finishedAt": "2026-10-14T03:29:36.147Z",
+      "testResults": [
+        "test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s"
+      ],
+      "warnings": []
+    },
+    {
+      "name": "final-acp-lib",
+      "rawLog": "final-acp-lib.log",
+      "rawLogSha256": "6417514926a4da9ee180d4fb9c68c8855982cebc40d3d4f12cf68553146430a8",
+      "officialReceipt": "final-acp-lib-run.json",
+      "officialReceiptSha256": "b54f1a6b220abffe309dc713bc31a2ea062883bc3936aa05c522fa25549394df",
+      "selectedStepIndex": 0,
+      "label": "final-acp-lib",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "echo_agent",
+        "--features",
+        "acp",
+        "--lib",
+        "acp::",
+        "--locked"
+      ],
+      "exitCode": 0,
+      "signal": null,
+      "bytesSeen": 4127,
+      "startedAt": "2026-10-14T03:30:05.458Z",
+      "finishedAt": "2026-10-14T03:30:34.282Z",
+      "testResults": [
+        "test result: ok. 38 passed; 0 failed; 0 ignored; 0 measured; 809 filtered out; finished in 0.06s"
+      ],
+      "warnings": []
+    },
+    {
+      "name": "final-affected-lib-clippy",
+      "rawLog": "final-affected-lib-clippy.log",
+      "rawLogSha256": "b49abfc72e764761f1dae0c333fefc34f7e2af209345ee9291739f4b4403e4d7",
+      "officialReceipt": "final-affected-lib-clippy-run.json",
+      "officialReceiptSha256": "15794ec0665437404ee06e44f475381e551534af01cb2211e1030769f8a2da3f",
+      "selectedStepIndex": 0,
+      "label": "final-affected-lib-clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "-p",
+        "echo_core",
+        "-p",
+        "echo_orchestration",
+        "-p",
+        "echo_agent",
+        "--lib",
+        "--features",
+        "echo_agent/acp",
+        "--locked",
+        "--",
+        "-D",
+        "warnings",
+        "-D",
+        "clippy::unwrap_used",
+        "-D",
+        "clippy::expect_used",
+        "-D",
+        "clippy::panic",
+        "-D",
+        "clippy::unreachable"
+      ],
+      "exitCode": 0,
+      "signal": null,
+      "bytesSeen": 2756,
+      "startedAt": "2026-10-14T03:30:34.322Z",
+      "finishedAt": "2026-10-14T03:31:01.389Z",
+      "testResults": [],
+      "warnings": []
+    }
+  ],
+  "compatibilityObligations": [
+    "Original reserved Session Turn is propagated; conflicting run/request/invocation identities reject before registry effects.",
+    "TaskRun run_id and caller lineage/policy/history/tool permissions remain original.",
+    "Only metadata-free RoleUser MessageContentText default adapts; Parts/ResourceLink/Empty/nonUser/Someempty metadata remain errors.",
+    "Existing structured overrides win; no trait method/Box/handle/driver change.",
+    "New fallback starts setup at first stream poll, propagates original error as stream item and canonical Failed receipt. Invalid structures still return immediate method error."
+  ],
+  "knownFailedAttemptClassification": [
+    "before-text-only-acp-fixture-compile-error.* contains a missing Error-variant .. pattern in a new test, repaired before actual 2behavior failures.",
+    "patch-application-noop-before-core-default.* is an unsuccessful text-edit script followed by rerunning old production; not an applied-fix failure or after pass.",
+    "Official before-text-only-acp-run.json and after-core-default-run.json preserve multiple historical steps; selectedStepIndex above binds the actual current raw log. Earlier original logs/receipts are separately preserved.",
+    "final-all-acp-adapter.log is the original genuine17pass9fail; never overwritten or reclassified as a whole pass."
+  ],
+  "nativeEvidenceEpoch": {
+    "originalPublishedHostSha256": "bcb0389ae8d8a946fab9bb123945100722711029bafa8d9d6cadf95a76c9c345",
+    "diagnosticRuntimeOnlyHostSha256": "eb00038a0be7977f936514c7df8e06e329928f6735d466f292f10201a38abbf5",
+    "actualThreeLanguages": "Original bcb acceptedfalse red; same per-language source on diagnostic eb000 accepts/consumes exactHTTPsteer and two waits share receipt; Java source/class/XML in independent SDK evidence.",
+    "restriction": "Diagnostic eb000 predates the final core fallback and RecordingAgent repair. It is not final-source native proof and is not a published Git pin. SDK source now also needs the separately owned telemetry helper; next Host build waits for framework integration/publication.",
+    "javaReceipts": {
+      "java-original": {
+        "path": "native-java-original/receipt.json",
+        "sha256": "8654ec5acd9d30f00275870be52bbfbf0481a1c2a02f7d16bfd75dd5c6774567",
+        "facts": {
+          "host": "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/admin/binaries/echo-sdk-be5-chart-dimension-host",
+          "hostSha256": "bcb0389ae8d8a946fab9bb123945100722711029bafa8d9d6cadf95a76c9c345",
+          "sourceSha256": "b88b3c64270d8e5f365bf5ae6c337925b50d73ed7e4915bf105e3851aabca352",
+          "classSha256": "fc45bad258383e49c804a15cb3d63add4e9a7c7de2b8171ae0bff09319b596de",
+          "exitCode": 1,
+          "XML": {
+            "tests": 1,
+            "failures": 1,
+            "errors": 0,
+            "skipped": 0
+          },
+          "work": "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/admin/sdk-run-steer-native/java-original/sdk-run-steer-java-8077720025075978866"
+        }
+      },
+      "java-diagnostic-fixed": {
+        "path": "native-java-diagnostic-fixed/receipt.json",
+        "sha256": "078e338b81c674e4e3bc272f594e8b4b2a9e65dcee899974e07b7d009d5cdf23",
+        "facts": {
+          "host": "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/admin/binaries/echo-sdk-diagnostic-acp-steer-fixed-host",
+          "hostSha256": "eb00038a0be7977f936514c7df8e06e329928f6735d466f292f10201a38abbf5",
+          "sourceSha256": "b88b3c64270d8e5f365bf5ae6c337925b50d73ed7e4915bf105e3851aabca352",
+          "classSha256": "fc45bad258383e49c804a15cb3d63add4e9a7c7de2b8171ae0bff09319b596de",
+          "exitCode": 0,
+          "XML": {
+            "tests": 1,
+            "failures": 0,
+            "errors": 0,
+            "skipped": 0
+          },
+          "work": "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/admin/sdk-run-steer-native/java-diagnostic-fixed/sdk-run-steer-java-14976587752873345561"
+        }
+      }
+    }
+  },
+  "validationBounds": [
+    "Core422, unchanged driverstructured1, ACPintegration26, ACPlib38 and affected3lib strict Clippy actual0.",
+    "Full workspace/framework feature gates, final combined Host native rerun and exact main/CI delivery remain root-owned and pending.",
+    "No Cargo/Maven run or production/test source edit occurred during this final documentation/freeze handoff."
+  ],
+  "unchangedDispatchAndBuildInputs": {
+    "echo-orchestration/src/runtime/turn_driver.rs": {
+      "baseSha256": "8625c2bf7236e3cc00ef32d4b24a9c53ba03357f425eb081d66d481fd36364f9",
+      "currentSha256": "8625c2bf7236e3cc00ef32d4b24a9c53ba03357f425eb081d66d481fd36364f9"
+    },
+    "src/agent/handle.rs": {
+      "baseSha256": "713c75a70ea69a1caa6bbd861c8d6ead44db6c35564e6e37d2b6f89452ba5c2f",
+      "currentSha256": "713c75a70ea69a1caa6bbd861c8d6ead44db6c35564e6e37d2b6f89452ba5c2f"
+    },
+    "src/agent/react/mod.rs": {
+      "baseSha256": "92b2f2a21b833acf2a2f5689a2de16eadae2909c714080b7c47cd16927b27bf1",
+      "currentSha256": "92b2f2a21b833acf2a2f5689a2de16eadae2909c714080b7c47cd16927b27bf1"
+    },
+    "echo-core/src/llm/types.rs": {
+      "baseSha256": "372027104aff0807abf5ab7f1a9b792c7beb832fef84b2be7c9c44be28b435f5",
+      "currentSha256": "372027104aff0807abf5ab7f1a9b792c7beb832fef84b2be7c9c44be28b435f5"
+    },
+    "Cargo.lock": {
+      "baseSha256": "7995a2ebdf82573dcf87bbd251e03338ac4c997e2ce6281479b9d28e34236202",
+      "currentSha256": "7995a2ebdf82573dcf87bbd251e03338ac4c997e2ce6281479b9d28e34236202"
+    },
+    "Cargo.toml": {
+      "baseSha256": "90426e1bdd3754908dec10c54e3c44b4decc993945d0a408f1ab0c0332c13045",
+      "currentSha256": "90426e1bdd3754908dec10c54e3c44b4decc993945d0a408f1ab0c0332c13045"
+    },
+    "echo-core/Cargo.toml": {
+      "baseSha256": "d94be3d0e758d26b1319d4a52a2c6ea0973e0137d3b125cfdcf116d86aa29583",
+      "currentSha256": "d94be3d0e758d26b1319d4a52a2c6ea0973e0137d3b125cfdcf116d86aa29583"
+    }
+  },
+  "finalDocumentationOnlyUpdate": "ADR0084 and packet README explicitly state ACP text can observe structured dispatch/output differences for third-party dual implementations; no production/test change after final successful runs."
+}

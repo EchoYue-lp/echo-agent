@@ -1,0 +1,21 @@
+[workspace]
+[package]
+name = "acp-turn-steering-diagnostic-host"
+version = "0.0.0"
+edition = "2024"
+[[bin]]
+name = "acp-turn-steering-diagnostic-host"
+path = "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-semantic-governance/echo-sdk-host/src/main.rs"
+[dependencies]
+echo-sdk-host = { path = "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-semantic-governance/echo-sdk-host", features = ["sdk-facade-all"] }
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros"] }
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+[patch."https://github.com/EchoYue-lp/echo-agent.git"]
+echo_agent = { path = "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward" }
+echo_core = { path = "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward/echo-core" }
+echo_macros = { path = "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward/echo-macros" }
+echo_execution = { path = "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward/echo-execution" }
+echo_integration = { path = "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward/echo-integration" }
+echo_tools = { path = "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward/echo-tools" }
+echo_state = { path = "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward/echo-state" }
+echo_orchestration = { path = "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward/echo-orchestration" }

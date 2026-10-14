@@ -1,0 +1,45 @@
+    Finished `test` profile [unoptimized] target(s) in 0.68s
+     Running unittests src/lib.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/deps/echo_agent-8d36cdc05f271c59)
+
+running 38 tests
+test acp::extension::tests::invocation_child_cancellation_does_not_cancel_parent_or_sibling ... ok
+test acp::extension::tests::framework_cancellation_propagates_to_the_lease_token ... ok
+test acp::extension::tests::exclusive_leases_conflict_instead_of_waiting ... ok
+test acp::extension::tests::invocation_parent_cancellation_reaches_every_child ... ok
+test acp::extension::tests::invocation_timeout_and_drop_keep_parent_connection_open ... ok
+test acp::extension::tests::settlement_is_exactly_once_and_late_settlements_are_rejected ... ok
+test acp::extension::tests::zero_concurrency_is_rejected ... ok
+test acp::extension::tests::dropping_an_unsettled_lease_fails_closed_as_cancelled ... ok
+test acp::extension::tests::concurrency_permits_are_enforced_and_fail_fast ... ok
+test acp::extension::tests::invocation_cancel_all_cancels_children_without_cancelling_custom_parent ... ok
+test acp::extension::tests::close_then_cancel_then_drain_releases_everything ... ok
+test acp::runtime::turn_identity_tests::explicit_conflicting_turn_rejects_before_publication_or_agent_invocation ... ok
+test acp::runtime::turn_identity_tests::conflicting_run_or_request_identity_cannot_replace_reserved_turn ... ok
+test acp::runtime::turn_identity_tests::text_chat_uses_reserved_turn_identity_in_actual_agent_context ... ok
+test acp::runtime::turn_identity_tests::structured_execute_uses_reserved_turn_identity_in_actual_agent_context ... ok
+test acp::runtime::turn_identity_tests::structured_chat_uses_reserved_turn_identity_in_actual_agent_context ... ok
+test acp::runtime::turn_identity_tests::explicit_matching_turn_is_preserved_without_reallocating_identity ... ok
+test acp::runtime::turn_identity_tests::original_task_lineage_and_invocation_permissions_survive_turn_binding ... ok
+test acp::runtime::turn_identity_tests::text_execute_uses_reserved_turn_identity_in_actual_agent_context ... ok
+test acp::session::tests::begin_close_cancels_before_external_drain_and_finish ... ok
+test acp::session::tests::concurrent_finish_joins_one_agent_close_attempt ... ok
+test acp::session::tests::close_all_cancels_every_turn_before_concurrent_agent_close ... ok
+test acp::session::tests::failed_finish_requires_new_begin_generation_for_retry ... ok
+test acp::session::tests::late_settled_lease_does_not_conflict_with_same_id_replacement ... ok
+test acp::session::tests::aborted_owned_close_task_publishes_failure_and_allows_retry ... ok
+test acp::session::tests::recovered_turn_reservation_and_admission_share_one_linearization_point ... ok
+test acp::session::tests::recovered_turn_reservation_rejects_active_and_closed_sessions ... ok
+test acp::session::tests::recovered_turn_reservation_continues_after_persisted_identity ... ok
+test acp::session::tests::recovered_turn_reservation_is_idempotent_and_never_lowers_frontier ... ok
+test acp::session::tests::recovered_turn_reservation_rejects_invalid_batch_without_partial_commit ... ok
+test acp::session::tests::running_waiter_uses_receipt_after_same_id_replacement_race ... ok
+test acp::session::tests::recovered_turn_reservation_preserves_checked_last_allocation ... ok
+test acp::session::tests::recovered_turn_reservation_restores_last_native_identity_without_admission ... ok
+test acp::session::tests::registry_close_permanently_fences_session_creation ... ok
+test acp::session::tests::close_all_retains_failed_sessions_for_retry ... ok
+test acp::extension::tests::wait_settled_observes_teardown_settlement ... ok
+test acp::runtime::close_tests::run_close_timeout_keeps_unsettled_framework_receipt_for_retry ... ok
+test acp::extension::tests::drain_reports_leases_that_never_release ... ok
+
+test result: ok. 38 passed; 0 failed; 0 ignored; 0 measured; 809 filtered out; finished in 0.05s
+

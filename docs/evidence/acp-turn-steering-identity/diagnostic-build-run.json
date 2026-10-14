@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "sourceRoot": "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/admin/acp-turn-steering-diagnostic-host",
+  "steps": [
+    {
+      "label": "diagnostic-shared-ACP-steer-fix-host",
+      "command": [
+        "cargo",
+        "build",
+        "--offline"
+      ],
+      "cwd": "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/admin/acp-turn-steering-diagnostic-host",
+      "logPath": "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/admin/acp-turn-steering-diagnostic-host/build.log",
+      "exitCode": null,
+      "signal": "SIGINT",
+      "errorCode": null,
+      "truncated": false,
+      "bytesSeen": 6698,
+      "bytesWritten": 6698,
+      "startedAt": "2026-10-14T03:04:34.958Z",
+      "finishedAt": "2026-10-14T03:05:16.107Z"
+    }
+  ],
+  "updatedAt": "2026-10-14T03:05:16.107Z"
+}

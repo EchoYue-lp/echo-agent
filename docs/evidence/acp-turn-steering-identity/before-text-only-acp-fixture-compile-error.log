@@ -1,0 +1,252 @@
+   Compiling smallvec v1.15.2
+   Compiling errno v0.3.14
+   Compiling serde_core v1.0.229
+   Compiling foldhash v0.2.0
+   Compiling futures-io v0.3.34
+   Compiling allocator-api2 v0.2.21
+   Compiling hashbrown v0.17.1
+   Compiling indexmap v2.14.0
+   Compiling bitflags v2.13.1
+   Compiling serde v1.0.229
+   Compiling zerofrom v0.1.8
+   Compiling stable_deref_trait v1.2.1
+   Compiling yoke v0.8.3
+   Compiling parking_lot_core v0.9.12
+   Compiling slab v0.4.12
+   Compiling fastrand v2.5.0
+   Compiling num-traits v0.2.19
+   Compiling signal-hook-registry v1.4.8
+   Compiling rustix v1.1.4
+   Compiling zerocopy v0.8.56
+   Compiling zerovec v0.11.6
+   Compiling parking_lot v0.12.5
+   Compiling zerocopy-derive v0.8.56
+   Compiling serde_json v1.0.151
+   Compiling futures-channel v0.3.34
+   Compiling futures-util v0.3.34
+   Compiling mio v1.2.2
+   Compiling socket2 v0.6.5
+   Compiling tokio v1.53.1
+   Compiling crossbeam-utils v0.8.22
+   Compiling tinystr v0.8.3
+   Compiling tracing-core v0.1.36
+   Compiling writeable v0.6.3
+   Compiling litemap v0.8.2
+   Compiling icu_locale_core v2.2.0
+   Compiling zerotrie v0.2.4
+   Compiling potential_utf v0.1.5
+   Compiling utf8_iter v1.0.4
+   Compiling percent-encoding v2.3.2
+   Compiling icu_collections v2.2.0
+   Compiling tracing v0.1.44
+   Compiling icu_provider v2.2.0
+   Compiling http v1.5.0
+   Compiling aho-corasick v1.1.5
+   Compiling atomic-waker v1.1.2
+   Compiling icu_normalizer_data v2.2.0
+   Compiling icu_properties_data v2.2.0
+   Compiling fnv v1.0.7
+   Compiling icu_properties v2.2.0
+   Compiling regex-automata v0.4.18
+   Compiling icu_normalizer v2.2.0
+   Compiling http-body v1.1.0
+   Compiling tempfile v3.27.0
+   Compiling idna_adapter v1.2.2
+   Compiling tokio-util v0.7.19
+   Compiling security-framework-sys v2.17.0
+   Compiling core-foundation v0.10.1
+   Compiling tower-service v0.3.3
+   Compiling try-lock v0.2.5
+   Compiling parking v2.2.1
+   Compiling want v0.3.1
+   Compiling security-framework v3.7.0
+   Compiling h2 v0.4.16
+   Compiling idna v1.1.0
+   Compiling httparse v1.10.1
+   Compiling system-configuration-sys v0.6.0
+   Compiling form_urlencoded v1.2.2
+   Compiling core-foundation v0.9.4
+   Compiling log v0.4.33
+   Compiling system-configuration v0.7.0
+   Compiling native-tls v0.2.18
+   Compiling ppv-lite86 v0.2.21
+   Compiling hyper v1.11.0
+   Compiling sync_wrapper v1.0.2
+   Compiling socket2 v0.5.10
+   Compiling subtle v2.6.1
+   Compiling tower-layer v0.3.3
+   Compiling ipnet v2.12.1
+   Compiling base64 v0.22.1
+   Compiling hyper-util v0.1.20
+   Compiling tower v0.5.3
+   Compiling digest v0.10.7
+   Compiling ref-cast v1.0.25
+   Compiling rand_chacha v0.9.0
+   Compiling tokio-native-tls v0.3.1
+   Compiling url v2.5.8
+   Compiling regex v1.13.1
+   Compiling http-body-util v0.1.4
+   Compiling futures-executor v0.3.34
+   Compiling num-integer v0.1.47
+   Compiling zeroize v1.9.0
+   Compiling rustls-pki-types v1.15.1
+   Compiling futures v0.3.34
+   Compiling chrono v0.4.45
+   Compiling hyper-tls v0.6.0
+   Compiling tower-http v0.6.11
+   Compiling rand v0.9.5
+   Compiling serde_urlencoded v0.7.1
+   Compiling bstr v1.13.1
+   Compiling encoding_rs v0.8.35
+   Compiling strsim v0.11.1
+   Compiling mime v0.3.17
+   Compiling ident_case v1.0.1
+   Compiling darling_core v0.23.0
+   Compiling reqwest v0.12.28
+   Compiling yaml_serde v0.10.7
+   Compiling sha2 v0.10.9
+   Compiling async-stream v0.3.6
+   Compiling globset v0.4.20
+   Compiling thiserror v2.0.20
+   Compiling schemars v0.8.22
+   Compiling num-bigint v0.4.8
+   Compiling futures-lite v2.6.1
+   Compiling event-listener v5.4.2
+   Compiling concurrent-queue v2.5.0
+   Compiling lazy_static v1.5.0
+   Compiling echo_core v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward/echo-core)
+   Compiling event-listener-strategy v0.5.4
+   Compiling num-rational v0.4.2
+   Compiling darling_macro v0.23.0
+   Compiling num-iter v0.1.46
+   Compiling num-complex v0.4.6
+   Compiling async-io v2.6.0
+   Compiling serde_derive_internals v0.30.0
+   Compiling unicode-segmentation v1.13.3
+   Compiling crossbeam-epoch v0.9.20
+   Compiling bit-vec v0.8.0
+   Compiling bit-set v0.8.0
+   Compiling convert_case v0.10.0
+   Compiling schemars_derive v1.2.2
+   Compiling num v0.4.3
+   Compiling darling v0.23.0
+   Compiling ahash v0.8.12
+   Compiling strum v0.28.0
+   Compiling polling v3.11.0
+   Compiling borrow-or-share v0.2.4
+   Compiling hashbrown v0.14.5
+   Compiling crossbeam-deque v0.8.7
+   Compiling unicode-xid v0.2.6
+   Compiling derive_more-impl v2.1.1
+   Compiling dashmap v6.2.1
+   Compiling fluent-uri v0.4.1
+   Compiling serde_with_macros v3.22.0
+   Compiling fraction v0.15.4
+   Compiling schemars v1.2.2
+   Compiling outref v0.5.2
+   Compiling rayon-core v1.13.0
+   Compiling minimal-lexical v0.2.1
+   Compiling micromap v0.3.0
+   Compiling num-cmp v0.1.0
+   Compiling bytecount v0.6.9
+   Compiling option-ext v0.2.0
+   Compiling vsimd v0.8.0
+   Compiling jsonschema-value v0.49.9
+   Compiling uuid-simd v0.8.0
+   Compiling dirs-sys v0.5.0
+   Compiling referencing v0.49.9
+   Compiling nom v7.1.3
+   Compiling serde_with v3.22.0
+   Compiling pin-project v1.1.13
+   Compiling async-signal v0.2.14
+   Compiling derive_more v2.1.1
+   Compiling unicode-general-category v1.1.0
+   Compiling fancy-regex v0.19.0
+   Compiling async-channel v2.5.0
+   Compiling async-lock v3.4.2
+   Compiling piper v0.2.5
+   Compiling jsonschema-regex v0.49.9
+   Compiling half v2.7.1
+   Compiling email_address v0.2.9
+   Compiling shlex v1.3.0
+   Compiling ciborium-io v0.2.2
+   Compiling data-encoding v2.11.1
+   Compiling plotters-backend v0.3.7
+   Compiling clap_lex v1.1.0
+   Compiling anstyle v1.0.14
+   Compiling fixedbitset v0.5.7
+   Compiling async-task v4.7.1
+   Compiling futures-concurrency v7.7.1
+   Compiling blocking v1.7.0
+   Compiling clap_builder v4.6.6
+   Compiling jsonschema v0.49.9
+   Compiling plotters-svg v0.3.7
+   Compiling ciborium-ll v0.2.2
+   Compiling async-process v2.5.0
+   Compiling agent-client-protocol-schema v1.7.0
+   Compiling prost v0.13.5
+   Compiling cron v0.12.1
+   Compiling dirs v6.0.0
+   Compiling echo_state v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward/echo-state)
+   Compiling sharded-slab v0.1.7
+   Compiling itertools v0.10.5
+   Compiling hmac v0.12.1
+   Compiling tracing-log v0.2.0
+   Compiling matchers v0.2.0
+   Compiling thread_local v1.1.10
+   Compiling agent-client-protocol-derive v2.1.0
+   Compiling wait-timeout v0.2.1
+   Compiling nu-ansi-term v0.50.3
+   Compiling same-file v1.0.6
+   Compiling urlencoding v2.1.3
+   Compiling shell-words v1.1.1
+   Compiling quick-error v1.2.3
+   Compiling dotenvy v0.15.7
+   Compiling similar v2.7.0
+   Compiling rustc-hash v2.1.3
+   Compiling cast v0.3.0
+   Compiling glob v0.3.4
+   Compiling echo_execution v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward/echo-execution)
+   Compiling criterion-plot v0.5.0
+   Compiling agent-client-protocol v2.1.0
+   Compiling echo_tools v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward/echo-tools)
+   Compiling echo_integration v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward/echo-integration)
+   Compiling rusty-fork v0.3.1
+   Compiling echo_orchestration v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward/echo-orchestration)
+   Compiling walkdir v2.5.0
+   Compiling tracing-subscriber v0.3.23
+   Compiling rayon v1.12.0
+   Compiling ciborium v0.2.2
+   Compiling plotters v0.3.7
+   Compiling clap v4.6.6
+   Compiling rand_xorshift v0.4.0
+   Compiling tokio-stream v0.1.19
+   Compiling tinytemplate v1.2.1
+   Compiling is-terminal v0.4.17
+   Compiling unarray v0.1.4
+   Compiling oorandom v11.1.5
+   Compiling anes v0.1.6
+   Compiling criterion v0.5.1
+   Compiling proptest v1.11.0
+   Compiling echo_agent v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward)
+error[E0027]: pattern does not mention fields `source`, `message`
+    --> tests/acp_agent_adapter.rs:1953:64
+     |
+1953 |     assert!(events.iter().any(|event| matches!(&event.payload, AgentEvent::Error { failure } if failure.message == "original legac...
+     |                                                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing fields `source`, `message`
+     |
+help: include the missing fields in the pattern
+     |
+1953 |     assert!(events.iter().any(|event| matches!(&event.payload, AgentEvent::Error { failure, source, message } if failure.message == "original legacy setup failure")));
+     |                                                                                           +++++++++++++++++
+help: if you don't care about these missing fields, you can explicitly ignore them
+     |
+1953 |     assert!(events.iter().any(|event| matches!(&event.payload, AgentEvent::Error { failure, source: _, message: _ } if failure.message == "original legacy setup failure")));
+     |                                                                                           +++++++++++++++++++++++
+help: or always ignore missing fields here
+     |
+1953 |     assert!(events.iter().any(|event| matches!(&event.payload, AgentEvent::Error { failure, .. } if failure.message == "original legacy setup failure")));
+     |                                                                                           ++++
+
+For more information about this error, try `rustc --explain E0027`.
+error: could not compile `echo_agent` (test "acp_agent_adapter") due to 1 previous error

@@ -1,0 +1,29 @@
+   Compiling echo_agent v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward)
+    Finished `test` profile [unoptimized] target(s) in 5.63s
+     Running tests/acp_agent_adapter.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/deps/acp_agent_adapter-fe656c400afd3d49)
+
+running 2 tests
+test text_only_agent_fallback_setup_error_keeps_original_canonical_failed_receipt ... FAILED
+test text_only_agent_keeps_standard_plain_user_prompts_with_canonical_turn_context ... FAILED
+
+failures:
+
+---- text_only_agent_fallback_setup_error_keeps_original_canonical_failed_receipt stdout ----
+
+thread 'text_only_agent_fallback_setup_error_keeps_original_canonical_failed_receipt' (131971592) panicked at tests/acp_agent_adapter.rs:1940:5:
+assertion failed: matches!(receipt.outcome,
+    echo_agent::runtime::TurnOutcome::Failed(ref failure) if failure.message
+    == "original legacy setup failure")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- text_only_agent_keeps_standard_plain_user_prompts_with_canonical_turn_context stdout ----
+Error: Error { code: -32603: Internal error, message: "Internal error", data: Some(String("this agent does not implement multimodal streaming (chat_stream_message_with_cancel)")) }
+
+
+failures:
+    text_only_agent_fallback_setup_error_keeps_original_canonical_failed_receipt
+    text_only_agent_keeps_standard_plain_user_prompts_with_canonical_turn_context
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `-p echo_agent --test acp_agent_adapter`

@@ -1,0 +1,18 @@
+{
+  "label": "typescript-native-run-steer",
+  "command": [
+    "node",
+    "--test",
+    "test/run-steer-host.test.js"
+  ],
+  "cwd": "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-semantic-governance/sdks/typescript",
+  "logPath": "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-semantic-governance/docs/sdk/governance/evidence/run-steer-native/diagnostic-fixed-host/typescript-focused.log",
+  "exitCode": 1,
+  "signal": null,
+  "errorCode": null,
+  "truncated": false,
+  "bytesSeen": 1457,
+  "bytesWritten": 1457,
+  "startedAt": "2026-10-14T03:08:32.603Z",
+  "finishedAt": "2026-10-14T03:08:38.691Z"
+}

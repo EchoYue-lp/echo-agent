@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "sourceRoot": "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/admin/acp-turn-steering-diagnostic-host",
+  "steps": [
+    {
+      "label": "diagnostic-shared-ACP-steer-fix-host-matched-flags",
+      "command": [
+        "cargo",
+        "build",
+        "--locked",
+        "--offline"
+      ],
+      "cwd": "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/admin/acp-turn-steering-diagnostic-host",
+      "logPath": "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/admin/acp-turn-steering-diagnostic-host/build-matched-macos-flags.log",
+      "exitCode": 0,
+      "signal": null,
+      "errorCode": null,
+      "truncated": false,
+      "bytesSeen": 820,
+      "bytesWritten": 820,
+      "startedAt": "2026-10-14T03:05:27.903Z",
+      "finishedAt": "2026-10-14T03:06:57.611Z"
+    }
+  ],
+  "updatedAt": "2026-10-14T03:06:57.611Z"
+}

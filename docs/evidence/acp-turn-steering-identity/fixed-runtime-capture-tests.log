@@ -1,0 +1,16 @@
+   Compiling echo_agent v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward)
+    Finished `test` profile [unoptimized] target(s) in 32.98s
+     Running unittests src/lib.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/deps/echo_agent-8d36cdc05f271c59)
+
+running 8 tests
+test acp::runtime::turn_identity_tests::explicit_conflicting_turn_rejects_before_publication_or_agent_invocation ... ok
+test acp::runtime::turn_identity_tests::conflicting_run_or_request_identity_cannot_replace_reserved_turn ... ok
+test acp::runtime::turn_identity_tests::structured_execute_uses_reserved_turn_identity_in_actual_agent_context ... ok
+test acp::runtime::turn_identity_tests::structured_chat_uses_reserved_turn_identity_in_actual_agent_context ... ok
+test acp::runtime::turn_identity_tests::text_execute_uses_reserved_turn_identity_in_actual_agent_context ... ok
+test acp::runtime::turn_identity_tests::explicit_matching_turn_is_preserved_without_reallocating_identity ... ok
+test acp::runtime::turn_identity_tests::text_chat_uses_reserved_turn_identity_in_actual_agent_context ... ok
+test acp::runtime::turn_identity_tests::original_task_lineage_and_invocation_permissions_survive_turn_binding ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 839 filtered out; finished in 0.01s
+

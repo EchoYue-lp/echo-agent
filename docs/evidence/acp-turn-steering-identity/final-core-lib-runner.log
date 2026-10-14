@@ -1,0 +1,21 @@
+{
+  "label": "final-core-lib",
+  "command": [
+    "cargo",
+    "test",
+    "-p",
+    "echo_core",
+    "--lib",
+    "--locked"
+  ],
+  "cwd": "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward",
+  "logPath": "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward/docs/evidence/acp-turn-steering-identity/final-core-lib.log",
+  "exitCode": 0,
+  "signal": null,
+  "errorCode": null,
+  "truncated": false,
+  "bytesSeen": 33033,
+  "bytesWritten": 33033,
+  "startedAt": "2026-10-14T03:27:16.115Z",
+  "finishedAt": "2026-10-14T03:27:16.965Z"
+}

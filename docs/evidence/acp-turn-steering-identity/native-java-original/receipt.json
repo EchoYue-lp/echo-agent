@@ -1,0 +1,14 @@
+{
+  "host": "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/admin/binaries/echo-sdk-be5-chart-dimension-host",
+  "hostSha256": "bcb0389ae8d8a946fab9bb123945100722711029bafa8d9d6cadf95a76c9c345",
+  "sourceSha256": "b88b3c64270d8e5f365bf5ae6c337925b50d73ed7e4915bf105e3851aabca352",
+  "classSha256": "fc45bad258383e49c804a15cb3d63add4e9a7c7de2b8171ae0bff09319b596de",
+  "exitCode": 1,
+  "XML": {
+    "tests": 1,
+    "failures": 1,
+    "errors": 0,
+    "skipped": 0
+  },
+  "work": "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/admin/sdk-run-steer-native/java-original/sdk-run-steer-java-8077720025075978866"
+}

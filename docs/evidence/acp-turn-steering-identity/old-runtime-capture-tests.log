@@ -1,0 +1,79 @@
+   Compiling tempfile v3.27.0
+   Compiling hyper-util v0.1.20
+   Compiling native-tls v0.2.18
+   Compiling tokio-native-tls v0.3.1
+   Compiling jsonschema-value v0.49.9
+   Compiling hyper-tls v0.6.0
+   Compiling referencing v0.49.9
+   Compiling reqwest v0.12.28
+   Compiling rusty-fork v0.3.1
+   Compiling echo_core v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward/echo-core)
+   Compiling jsonschema v0.49.9
+   Compiling echo_state v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward/echo-state)
+   Compiling tinytemplate v1.2.1
+   Compiling echo_integration v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward/echo-integration)
+   Compiling echo_tools v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward/echo-tools)
+   Compiling echo_execution v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward/echo-execution)
+   Compiling echo_orchestration v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward/echo-orchestration)
+   Compiling criterion v0.5.1
+   Compiling proptest v1.11.0
+   Compiling echo_agent v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward)
+    Finished `test` profile [unoptimized] target(s) in 43.28s
+     Running unittests src/lib.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/deps/echo_agent-8d36cdc05f271c59)
+
+running 5 tests
+test acp::runtime::turn_identity_tests::structured_chat_uses_reserved_turn_identity_in_actual_agent_context ... FAILED
+test acp::runtime::turn_identity_tests::text_chat_uses_reserved_turn_identity_in_actual_agent_context ... FAILED
+test acp::runtime::turn_identity_tests::original_task_lineage_and_invocation_permissions_survive_turn_binding ... FAILED
+test acp::runtime::turn_identity_tests::structured_execute_uses_reserved_turn_identity_in_actual_agent_context ... FAILED
+test acp::runtime::turn_identity_tests::text_execute_uses_reserved_turn_identity_in_actual_agent_context ... FAILED
+
+failures:
+
+---- acp::runtime::turn_identity_tests::structured_chat_uses_reserved_turn_identity_in_actual_agent_context stdout ----
+
+thread 'acp::runtime::turn_identity_tests::structured_chat_uses_reserved_turn_identity_in_actual_agent_context' (131864422) panicked at src/acp/runtime.rs:1047:9:
+assertion `left == right` failed
+  left: None
+ right: Some("original-Session-中文:turn:1")
+
+---- acp::runtime::turn_identity_tests::text_chat_uses_reserved_turn_identity_in_actual_agent_context stdout ----
+
+thread 'acp::runtime::turn_identity_tests::text_chat_uses_reserved_turn_identity_in_actual_agent_context' (131864424) panicked at src/acp/runtime.rs:1047:9:
+assertion `left == right` failed
+  left: None
+ right: Some("original-Session-中文:turn:1")
+
+---- acp::runtime::turn_identity_tests::original_task_lineage_and_invocation_permissions_survive_turn_binding stdout ----
+
+thread 'acp::runtime::turn_identity_tests::original_task_lineage_and_invocation_permissions_survive_turn_binding' (131864421) panicked at src/acp/runtime.rs:1126:9:
+assertion `left == right` failed
+  left: None
+ right: Some("original-Session-中文:turn:1")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- acp::runtime::turn_identity_tests::structured_execute_uses_reserved_turn_identity_in_actual_agent_context stdout ----
+
+thread 'acp::runtime::turn_identity_tests::structured_execute_uses_reserved_turn_identity_in_actual_agent_context' (131864423) panicked at src/acp/runtime.rs:1047:9:
+assertion `left == right` failed
+  left: None
+ right: Some("original-Session-中文:turn:1")
+
+---- acp::runtime::turn_identity_tests::text_execute_uses_reserved_turn_identity_in_actual_agent_context stdout ----
+
+thread 'acp::runtime::turn_identity_tests::text_execute_uses_reserved_turn_identity_in_actual_agent_context' (131864425) panicked at src/acp/runtime.rs:1047:9:
+assertion `left == right` failed
+  left: None
+ right: Some("original-Session-中文:turn:1")
+
+
+failures:
+    acp::runtime::turn_identity_tests::original_task_lineage_and_invocation_permissions_survive_turn_binding
+    acp::runtime::turn_identity_tests::structured_chat_uses_reserved_turn_identity_in_actual_agent_context
+    acp::runtime::turn_identity_tests::structured_execute_uses_reserved_turn_identity_in_actual_agent_context
+    acp::runtime::turn_identity_tests::text_chat_uses_reserved_turn_identity_in_actual_agent_context
+    acp::runtime::turn_identity_tests::text_execute_uses_reserved_turn_identity_in_actual_agent_context
+
+test result: FAILED. 0 passed; 5 failed; 0 ignored; 0 measured; 839 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `-p echo_agent --lib`

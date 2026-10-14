@@ -1,0 +1,35 @@
+   Compiling futures-util v0.3.34
+   Compiling tracing v0.1.44
+   Compiling rustix v1.1.4
+   Compiling tempfile v3.27.0
+   Compiling serde_json v1.0.151
+   Compiling tokio-util v0.7.19
+   Compiling h2 v0.4.16
+   Compiling idna v1.1.0
+   Compiling native-tls v0.2.18
+   Compiling tower v0.5.3
+   Compiling chrono v0.4.45
+   Compiling hyper v1.11.0
+   Compiling tokio-native-tls v0.3.1
+   Compiling url v2.5.8
+   Compiling futures-executor v0.3.34
+   Compiling hyper-util v0.1.20
+   Compiling yaml_serde v0.10.7
+   Compiling hyper-tls v0.6.0
+   Compiling schemars v0.8.22
+   Compiling futures v0.3.34
+   Compiling tower-http v0.6.11
+   Compiling log v0.4.33
+   Compiling reqwest v0.12.28
+   Compiling echo_core v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward/echo-core)
+   Compiling cron v0.12.1
+   Compiling echo_state v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward/echo-state)
+   Compiling echo_orchestration v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward/echo-orchestration)
+    Finished `test` profile [unoptimized] target(s) in 28.51s
+     Running unittests src/lib.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/deps/echo_orchestration-7413f2394c898199)
+
+running 1 test
+test runtime::turn_driver::tests::text_chat_with_invocation_uses_structured_chat_contract ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 460 filtered out; finished in 0.00s
+

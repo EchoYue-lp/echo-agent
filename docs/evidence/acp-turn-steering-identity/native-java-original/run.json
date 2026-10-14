@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "sourceRoot": "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-semantic-governance/sdks/java",
+  "steps": [
+    {
+      "label": "java-run-steer-original",
+      "command": [
+        "mvn",
+        "-q",
+        "-Dtest=RunSteerHostTest",
+        "-Dmaven.compiler.showWarnings=true",
+        "-Dmaven.compiler.failOnWarning=true",
+        "-Djava.io.tmpdir=/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/admin/sdk-run-steer-native/java-original",
+        "test"
+      ],
+      "cwd": "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-semantic-governance/sdks/java",
+      "logPath": "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-semantic-governance/docs/sdk/governance/evidence/run-steer-native/java-original/focused.log",
+      "exitCode": 1,
+      "signal": null,
+      "errorCode": null,
+      "truncated": false,
+      "bytesSeen": 2352,
+      "bytesWritten": 2352,
+      "startedAt": "2026-10-14T03:11:47.644Z",
+      "finishedAt": "2026-10-14T03:11:56.049Z"
+    }
+  ],
+  "updatedAt": "2026-10-14T03:11:56.049Z"
+}

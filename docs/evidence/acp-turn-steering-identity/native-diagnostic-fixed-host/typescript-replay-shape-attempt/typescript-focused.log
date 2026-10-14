@@ -1,0 +1,29 @@
+TAP version 13
+# steer acceptance evidence /Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/admin/sdk-run-steer-native/typescript/sdk-run-steer-ts-Dj8e6X
+# Subtest: accepted steering reaches original model and concurrent waits share one Run receipt
+not ok 1 - accepted steering reaches original model and concurrent waits share one Run receipt
+  ---
+  duration_ms: 5809.997084
+  type: 'test'
+  location: '/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-semantic-governance/sdks/typescript/test/run-steer-host.test.js:13:1'
+  failureType: 'testCodeFailure'
+  error: "Cannot read properties of undefined (reading 'event_type')"
+  code: 'ERR_TEST_FAILURE'
+  name: 'TypeError'
+  stack: |-
+    file:///Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-semantic-governance/sdks/typescript/test/run-steer-host.test.js:17:850
+    Array.filter (<anonymous>)
+    TestContext.<anonymous> (file:///Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-semantic-governance/sdks/typescript/test/run-steer-host.test.js:17:830)
+    process.processTicksAndRejections (node:internal/process/task_queues:105:5)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async startSubtestAfterBootstrap (node:internal/test_runner/harness:296:3)
+  ...
+1..1
+# tests 1
+# suites 0
+# pass 0
+# fail 1
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 6004.289292

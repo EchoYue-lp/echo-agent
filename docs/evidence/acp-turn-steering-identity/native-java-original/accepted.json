@@ -1,0 +1,26 @@
+{
+  "identity" : {
+    "run" : {
+      "id" : "sess_b24e5f30-1439-4031-9a22-e5bd5602d460:turn:1",
+      "generation" : "1",
+      "kind" : "run"
+    },
+    "stream" : {
+      "id" : "b4955e7b-e993-4217-b90a-d550e47c009b",
+      "generation" : "1",
+      "kind" : "stream"
+    }
+  },
+  "accepted" : {
+    "accepted" : false
+  },
+  "snapshot" : {
+    "status" : "running",
+    "last_sequence" : "0",
+    "stream" : {
+      "id" : "b4955e7b-e993-4217-b90a-d550e47c009b",
+      "generation" : "1",
+      "kind" : "stream"
+    }
+  }
+}
