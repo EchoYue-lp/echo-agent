@@ -17,3 +17,6 @@ docs/evidence/git-branch-switch/full-gates/05-workspace-tests.log -diff
 docs/evidence/rustls-security-patch-20261015/Cargo.lock.patch -diff
 docs/evidence/rustls-security-patch-20261015/ci-original-failure.log -diff
 docs/evidence/rustls-security-patch-20261015/deny.log -diff
+
+# Preserve the exact patched-lock workspace test output.
+docs/evidence/rustls-security-patch-20261015/final-six/05-workspace-tests.log -diff

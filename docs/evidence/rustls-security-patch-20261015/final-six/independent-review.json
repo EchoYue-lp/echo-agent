@@ -1,0 +1,12 @@
+{
+  "reviewer": "/root/framework_final_review",
+  "decision": "new rustls0.23.46 six engineering packet PASS",
+  "critical": 0,
+  "important": 0,
+  "minor": 0,
+  "sourceCommit": "141c04be344abf6d1b029b4e2efbb90cbd43248b",
+  "sourceSHA256": "cfd9565be083ea846651c476bc37e37788fd94a5589939b7b960b8203c7e00b5",
+  "lockSHA256": "4d036d1cc54498512198dd7241fc13a10f13ede7497e5fe8483331b211cbc187",
+  "examined": "570 before-after-current exact hashes; only Cargo.lock differs from old six; all six original commands and actual single-runner/rawbytes/noSignal/noTrunc/compilerwarnings0/exit0;primary3532/0fail/3optin plus2 child returns separated",
+  "limits": "dependency-focused qualified review in parent package is distinct; configured duplicate warnings are not compiler warnings; semantic current snapshot/CI/main/SDK publication remain separate"
+}

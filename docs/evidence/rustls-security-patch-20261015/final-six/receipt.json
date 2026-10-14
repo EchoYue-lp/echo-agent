@@ -1,0 +1,200 @@
+{
+  "head": "141c04be344abf6d1b029b4e2efbb90cbd43248b",
+  "steps": [
+    {
+      "label": "git-branch-final-01-fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--all"
+      ],
+      "cwd": "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/task-runtime-store-control",
+      "logPath": "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/admin/git-branch-switch/full-gates-rustls046/01-fmt.log",
+      "exitCode": 0,
+      "signal": null,
+      "errorCode": null,
+      "truncated": false,
+      "bytesSeen": 0,
+      "bytesWritten": 0,
+      "startedAt": "2026-10-14T17:23:31.230Z",
+      "finishedAt": "2026-10-14T17:23:33.693Z",
+      "archiveLog": "01-fmt.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "git-branch-final-02-fmt-check",
+      "command": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "cwd": "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/task-runtime-store-control",
+      "logPath": "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/admin/git-branch-switch/full-gates-rustls046/02-fmt-check.log",
+      "exitCode": 0,
+      "signal": null,
+      "errorCode": null,
+      "truncated": false,
+      "bytesSeen": 0,
+      "bytesWritten": 0,
+      "startedAt": "2026-10-14T17:23:33.788Z",
+      "finishedAt": "2026-10-14T17:23:36.063Z",
+      "archiveLog": "02-fmt-check.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "git-branch-final-03-workspace-clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--all-features",
+        "--locked",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "cwd": "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/task-runtime-store-control",
+      "logPath": "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/admin/git-branch-switch/full-gates-rustls046/03-workspace-clippy.log",
+      "exitCode": 0,
+      "signal": null,
+      "errorCode": null,
+      "truncated": false,
+      "bytesSeen": 1454,
+      "bytesWritten": 1454,
+      "startedAt": "2026-10-14T17:23:36.169Z",
+      "finishedAt": "2026-10-14T17:24:29.630Z",
+      "archiveLog": "03-workspace-clippy.log",
+      "sha256": "f3c79e945730b076679f8ec251896a555d33995daf35e05172c4b3c8c71352eb"
+    },
+    {
+      "label": "git-branch-final-04-production-clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--lib",
+        "--bins",
+        "--all-features",
+        "--locked",
+        "--",
+        "-D",
+        "clippy::unwrap_used",
+        "-D",
+        "clippy::expect_used",
+        "-D",
+        "clippy::panic",
+        "-D",
+        "clippy::unreachable"
+      ],
+      "cwd": "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/task-runtime-store-control",
+      "logPath": "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/admin/git-branch-switch/full-gates-rustls046/04-production-clippy.log",
+      "exitCode": 0,
+      "signal": null,
+      "errorCode": null,
+      "truncated": false,
+      "bytesSeen": 1454,
+      "bytesWritten": 1454,
+      "startedAt": "2026-10-14T17:24:29.820Z",
+      "finishedAt": "2026-10-14T17:24:53.941Z",
+      "archiveLog": "04-production-clippy.log",
+      "sha256": "bcbcc4556298ec9374aef5e8d4e1a4e152542f7189de0d5ef90bec08baf13bdf"
+    },
+    {
+      "label": "git-branch-final-05-workspace-tests",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace",
+        "--all-targets",
+        "--all-features",
+        "--locked"
+      ],
+      "cwd": "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/task-runtime-store-control",
+      "logPath": "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/admin/git-branch-switch/full-gates-rustls046/05-workspace-tests.log",
+      "exitCode": 0,
+      "signal": null,
+      "errorCode": null,
+      "truncated": false,
+      "bytesSeen": 360802,
+      "bytesWritten": 360802,
+      "startedAt": "2026-10-14T17:24:54.118Z",
+      "finishedAt": "2026-10-14T17:30:50.438Z",
+      "archiveLog": "05-workspace-tests.log",
+      "sha256": "0a3421e992cbdd96425643485ff1acc1ebd2cf9bb844b5cd324c46a6174fc0f1"
+    },
+    {
+      "label": "git-branch-final-06-featureless-check",
+      "command": [
+        "cargo",
+        "check",
+        "--workspace",
+        "--lib",
+        "--no-default-features",
+        "--locked"
+      ],
+      "cwd": "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/task-runtime-store-control",
+      "logPath": "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/admin/git-branch-switch/full-gates-rustls046/06-featureless-check.log",
+      "exitCode": 0,
+      "signal": null,
+      "errorCode": null,
+      "truncated": false,
+      "bytesSeen": 60,
+      "bytesWritten": 60,
+      "startedAt": "2026-10-14T17:30:51.316Z",
+      "finishedAt": "2026-10-14T17:30:51.867Z",
+      "archiveLog": "06-featureless-check.log",
+      "sha256": "c3ddc282413c3edde53c5023b0b217f1ea090c816945cb68e99838024bc781bc"
+    }
+  ],
+  "sourceInputs": 570,
+  "changedInputs": [],
+  "allComplete": true,
+  "exitCode": 0,
+  "tests": {
+    "primaryPass": 3532,
+    "primaryFail": 0,
+    "primaryIgnored": 3,
+    "embeddedChildPass": 2,
+    "embeddedChildFiltered": [
+      379,
+      379
+    ],
+    "ignoredNames": [
+      "lsp::manager::tests::live_installed_servers_initialize_on_real_project_fixture",
+      "research::clients::tests::live_open_scholarly_providers_return_results",
+      "research::clients::tests::live_zotero_credentials_can_list_items"
+    ]
+  },
+  "sourceSHA256": {
+    "echo-tools/src/git.rs": "cfd9565be083ea846651c476bc37e37788fd94a5589939b7b960b8203c7e00b5",
+    "Cargo.lock": "4d036d1cc54498512198dd7241fc13a10f13ede7497e5fe8483331b211cbc187"
+  },
+  "rustls": "0.23.46",
+  "allActualSourceStillMatches": true,
+  "compilerWarningMatches": {
+    "03-workspace-clippy.log": 0,
+    "05-workspace-tests.log": 0,
+    "01-fmt.log": 0,
+    "06-featureless-check.log": 0,
+    "04-production-clippy.log": 0,
+    "02-fmt-check.log": 0
+  },
+  "differencesAgainstOldLockSix": [
+    "Cargo.lock"
+  ],
+  "originMainAtAdmission": "a6346643bda47679a96760f56f45e41fd73b61b0",
+  "mainMerge": "fetched origin/main and already up to date",
+  "macosRustflags": "original repo .cargo/config.toml, no RUSTFLAGS override",
+  "environment": {
+    "CARGO_TARGET_DIR": "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target",
+    "CARGO_BUILD_JOBS": "2",
+    "CARGO_PROFILE_DEV_DEBUG": "0",
+    "CARGO_PROFILE_TEST_DEBUG": "0",
+    "CARGO_INCREMENTAL": "0"
+  },
+  "scopes": "six new-lock engineering gates; focused new-lock audit0 and configured deny50warnings qualification in parent package; semantic/currentmain/remoteCI remain distinct",
+  "leases": "Cargo released after all actual six subprocesses terminated"
+}
