@@ -1,0 +1,54 @@
+    Checking futures-util v0.3.34
+    Checking tokio v1.53.1
+    Checking tinystr v0.8.3
+    Checking icu_locale_core v2.2.0
+    Checking serde_core v1.0.229
+    Checking zerotrie v0.2.4
+    Checking icu_collections v2.2.0
+    Checking icu_provider v2.2.0
+    Checking tracing v0.1.44
+    Checking tokio-util v0.7.19
+    Checking serde v1.0.229
+    Checking icu_normalizer v2.2.0
+    Checking icu_properties v2.2.0
+    Checking h2 v0.4.16
+    Checking idna_adapter v1.2.2
+    Checking serde_json v1.0.151
+    Checking idna v1.1.0
+    Checking tower v0.5.3
+    Checking hyper v1.11.0
+    Checking digest v0.10.7
+    Checking url v2.5.8
+    Checking hyper-util v0.1.20
+    Checking num-traits v0.2.19
+    Checking tokio-native-tls v0.3.1
+    Checking futures-executor v0.3.34
+    Checking yaml_serde v0.10.7
+    Checking hyper-tls v0.6.0
+    Checking schemars v0.8.22
+    Checking thiserror v2.0.20
+    Checking sha2 v0.10.9
+    Checking chrono v0.4.45
+    Checking futures v0.3.34
+    Checking tower-http v0.6.11
+    Checking serde_urlencoded v0.7.1
+    Checking reqwest v0.12.28
+    Checking echo_core v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward/echo-core)
+    Checking echo_tools v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward/echo-tools)
+error: calls to `push` immediately after creation
+   --> echo-tools/src/registry.rs:35:9
+    |
+ 35 | /         let mut tools = Vec::new();
+ 36 | |
+ 37 | |         #[cfg(feature = "artifact")]
+ 38 | |         tools.push(ToolPackEntry::read_only(Box::new(
+...   |
+100 | |             crate::chart::GenerateChartTool,
+101 | |         )));
+    | |____________^ help: consider using the `vec![]` macro: `let tools = vec![..];`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#vec_init_then_push
+    = note: `-D clippy::vec-init-then-push` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::vec_init_then_push)]`
+
+error: could not compile `echo_tools` (lib) due to 1 previous error

@@ -96,9 +96,9 @@ impl ToolPack for StandardToolPack {
         )));
 
         #[cfg(feature = "chart")]
-        tools.push(ToolPackEntry::read_only(Box::new(
+        tools.extend([ToolPackEntry::read_only(Box::new(
             crate::chart::GenerateChartTool,
-        )));
+        ))]);
 
         #[cfg(feature = "database")]
         {

@@ -51,3 +51,14 @@ The SDK separately rejects excess positional arguments, including trailing nulls
 
 The helper's implementation is unchanged. Existing schema/custom-validation
 regressions and direct-adapter counterexamples must pass before delivery.
+
+## Chart dimension representation
+
+The original GenerateChartTool stores dimensions as u32. Its schema now states
+minimum0/maximum4294967295, and direct Tool execution uses checked conversion.
+JSON Schema constrains mathematical integer values and their range; direct
+execution additionally requires the serde_json integer representation, rejecting
+floating representations such as1.0 explicitly rather than using a default.
+Defaults apply only when an argument is absent. This removes wrapping/defaulting
+of supplied invalid values while retaining zero and the complete original u32
+range; it adds no resource limit, public operation or parallel adapter validator.
