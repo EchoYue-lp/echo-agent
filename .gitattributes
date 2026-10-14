@@ -9,3 +9,6 @@ docs/evidence/git-branch-switch/README.md.patch -diff
 docs/evidence/git-branch-switch/after-focused.log -diff
 docs/evidence/git-branch-switch/after-tools-lib.log -diff
 docs/evidence/git-branch-switch/final-focused.log -diff
+
+# Exact complete workspace output retains its original final blank line.
+docs/evidence/git-branch-switch/full-gates/05-workspace-tests.log -diff

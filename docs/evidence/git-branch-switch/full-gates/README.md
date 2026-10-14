@@ -1,0 +1,11 @@
+# Final six framework gates for Git branch switching
+
+This directory records one complete, ordered six-command merge gate on committed `a1939a2ec681257068475cf3cbf541eae38251a6`. Fetching origin/main yielded published a634, and merging it was already up to date. All commands exited zero, no signal/truncated output or compiler warning. The 570 actual Rust source, manifest, lock, Cargo configuration, verification-script and AGENTS inputs match before, after and current file hashes.
+
+The workspace all-target/all-feature test command passed 3532 primary tests, zero failed, three existing opt-in ignored (live installed LSP, scholarly provider, Zotero credentials). Its existing file-lease parent test additionally launches two one-test child processes; their two summary lines have 379 filtered tests each and are not added to the primary count. The raw 358931-byte test log is preserved. Previous focused gate receipts and original failures remain in the parent milestone package; none are overwritten as current full gate proof.
+
+The final code is `cfd9565b…`; tests retain compatible dirty bytes, reject conflicting/invalid branch targets and verify HEAD, refs, logical index, status and file hashes. The final test protection helper propagates ReadDir entry failures rather than silently dropping observations. No force, dependency, feature, production cfg or public API change occurs, so the conditional independent-feature matrix is not triggered. Native Git remains the only repository authority.
+
+These are local framework engineering gates, not semantic current-snapshot or remote/main acceptance. Root coordinates semantic source classification, exact snapshot verification, final independent review, commit/push/PR/CI/squash and the later explicit SDK pin/Host/native proof. Cargo was released after all actual subprocesses terminated; no SDK build was run concurrently.
+
+The lock used here contains rustls 0.23.45. PR186 subsequently failed the independent dependency-policy gate on four newly published RustSec advisories. This reviewed six-gate package does not claim an audit pass and must not be rebound to a future 0.23.46 lock. The dependency fix and new-lock validation require their own separately dated record.
