@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "sourceRoot": "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/task-runtime-store-control",
+  "steps": [
+    {
+      "label": "git-branch-switch-original-tool",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "echo_tools",
+        "--lib",
+        "--all-features",
+        "--locked",
+        "git_branch_switch",
+        "--",
+        "--nocapture"
+      ],
+      "cwd": "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/task-runtime-store-control",
+      "logPath": "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/admin/git-branch-switch/before-actual.log",
+      "exitCode": 101,
+      "signal": null,
+      "errorCode": null,
+      "truncated": false,
+      "bytesSeen": 3388,
+      "bytesWritten": 3388,
+      "startedAt": "2026-10-14T16:15:10.848Z",
+      "finishedAt": "2026-10-14T16:16:32.517Z"
+    }
+  ],
+  "updatedAt": "2026-10-14T16:16:32.517Z"
+}

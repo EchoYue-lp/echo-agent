@@ -1,0 +1,11 @@
+{
+  "sourceSHA256": "cfd9565be083ea846651c476bc37e37788fd94a5589939b7b960b8203c7e00b5",
+  "previousReviewedSourceSHA256": "15cb578dbc23af3913cfa6bf7f4f379a43abf3e7fd8e69e10f0e4f3f0af4851c",
+  "productionPrefixSame": true,
+  "testDelta": "ReadDir entries collect io::Result<Vec<_>> before file checks; no silently discarded iterator errors",
+  "focusedPassed": 4,
+  "focusedFailed": 0,
+  "formatterExit": 0,
+  "fmtCheckExit": 0,
+  "fullSixAfterDevelopmentCommit": "pending Root commit; original tools227/clippy remain historical previous-test-source proof"
+}

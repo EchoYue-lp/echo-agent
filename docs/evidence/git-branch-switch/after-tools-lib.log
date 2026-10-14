@@ -1,0 +1,254 @@
+   Compiling echo_tools v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/task-runtime-store-control/echo-tools)
+    Finished `test` profile [unoptimized] target(s) in 20.87s
+     Running unittests src/lib.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/deps/echo_tools-8bb5dd48772585e3)
+
+running 229 tests
+test chart::tests::chart_dimensions_reject_supplied_invalid_values_instead_of_defaulting ... ok
+test chart::tests::chart_dimensions_reject_u32_overflow_instead_of_wrapping ... ok
+test chart::tests::chart_dimensions_preserve_original_valid_range_and_missing_defaults ... ok
+test code::tests::run_code_rejects_process_only_executor ... ok
+test code::tests::run_code_rejects_mismatched_script_profile ... ok
+test code::tests::run_code_rejects_ambiguous_or_escaping_script_inputs ... ok
+test code::tests::run_code_preserves_timeout_and_cancellation_categories ... ok
+test code::tests::run_code_rejects_script_symlink_outside_working_dir ... ok
+test code::tests::supported_languages_includes_r ... ok
+test code::tests::validate_language_lowercases_and_accepts_known ... ok
+test code::tests::validate_language_rejects_unknown ... ok
+test code::tests::run_code_without_sandbox_fails_closed ... ok
+test code::tests::run_code_binds_working_dir_and_resource_limits ... ok
+test code::tests::run_code_applies_shared_utf8_output_limit ... ok
+test code::tests::run_code_reports_the_selected_isolation_not_a_composite_maximum ... ok
+test code::tests::run_code_executes_persisted_script_directly ... ok
+test code::tests::run_code_lazily_resolves_persisted_script_profile ... ok
+test code::tests::run_code_uses_caller_resolved_script_profile ... ok
+test data::tests::test_any_value_to_json_types ... ok
+test data::tests::pivot_rejects_invalid_aggregation_instead_of_default_sum ... ok
+test data::tests::test_data_tool_response_truncation ... ok
+test data::tests::test_data_tool_response_structure ... ok
+test data::tests::test_detect_format ... ok
+test data::tests::test_df_to_json_empty_dataframe ... ok
+test data::tests::test_data_tool_response_with_meta ... ok
+test data_quality::tests::iqr_handles_exactly_four_values ... ok
+test data::tests::test_df_to_json_with_data ... ok
+test data_quality::tests::test_missing_value_analysis ... ok
+test data_quality::tests::test_outlier_detection_iqr ... ok
+test data_quality::tests::test_consistency_check_range ... ok
+test database::tests::database_json_reports_missing_cells_instead_of_default_null ... ok
+test database::tests::sqlite_describe_preserves_pragma_values_and_database_bytes ... ok
+test database::tests::sqlite_non_finite_number_is_an_explicit_decode_error ... ok
+test database::tests::sqlite_expression_cells_use_each_rows_runtime_type ... ok
+test database::tests::writable_sql_never_qualifies_as_read_only ... ok
+test diff_pagination::tests::repeats_headers_for_each_hunk_and_keeps_binary_files ... ok
+test diff_pagination::tests::splits_header_only_unified_diff_hunks ... ok
+test database::tests::sqlite_page_is_bounded_and_preserves_typed_cells ... ok
+test files::apply_patch::tests::existing_paths_share_the_canonical_parser ... ok
+test files::apply_patch::tests::partial_rollback_effects_only_name_attempted_paths_still_changed ... ok
+test files::apply_patch::tests::preserves_crlf_and_supports_dry_run ... ok
+test data::tests::pivot_rejects_ambiguous_string_and_null_headers ... ok
+test files::apply_patch::tests::rejects_path_traversal_and_existing_add_target ... ok
+test files::apply_patch::tests::stale_context_leaves_every_file_unchanged ... ok
+test data::tests::pivot_rejects_wrong_aggregation_type_but_defaults_only_when_absent ... ok
+test data::tests::pivot_keeps_null_index_rows_when_joining_aggregates ... ok
+test data::tests::pivot_null_values_keep_null_bucket_and_missing_combinations_distinct ... ok
+test data::tests::pivot_numeric_columns_match_typed_values ... ok
+test data::tests::pivot_string_columns_keep_original_values_and_aggregate_cells ... ok
+test files::artifact::tests::canonical_reader_binds_cursor_to_artifact_identity ... ok
+test files::artifact::tests::canonical_reader_rejects_mutated_artifact ... ok
+test files::apply_patch::tests::applies_add_update_delete_move_with_unicode ... ok
+test files::artifact::tests::canonical_reader_rejects_symlink_escape ... ok
+test files::artifact::tests::q_flt_v02_unicode_pages_never_split_utf8_scalars ... ok
+test files::artifact::tests::canonical_reader_rejects_same_size_mutation_on_final_page ... ok
+test files::code_search::tests::searches_symbol_definitions_instead_of_text_mentions ... ok
+test files::diff::tests::test_diff_changed ... ok
+test files::diff::tests::test_diff_identical ... ok
+test files::artifact::tests::reports_deleted_artifact ... ok
+test files::artifact::tests::rejects_artifacts_outside_configured_root ... ok
+test files::artifact::tests::rejects_symlink_escape_from_artifact_root ... ok
+test files::artifact::tests::rejects_cursor_after_artifact_changes ... ok
+test files::artifact::tests::verifies_first_page_hash ... ok
+test files::files::worktree_cwd_tests::read_file_default_page_is_compact_and_bounded ... ok
+test files::files::worktree_cwd_tests::read_file_explicit_range_has_precise_continuation ... ok
+test files::files::mutation_effect_tests::successful_read_reports_resolved_path_and_failed_read_reports_none ... ok
+test files::files::worktree_cwd_tests::read_file_rejects_unknown_and_invalid_parameters ... ok
+test files::files::worktree_cwd_tests::test_list_dir_uses_context_working_dir ... ok
+test files::files::worktree_cwd_tests::test_create_file_lands_in_context_working_dir ... ok
+test files::glob::tests::test_glob_match_bracket ... ok
+test files::glob::tests::test_glob_match_exact ... ok
+test files::glob::tests::test_glob_match_multibyte_path ... ok
+test files::glob::tests::test_glob_match_question ... ok
+test files::files::worktree_cwd_tests::read_file_is_utf8_safe_and_rejects_oversized_single_lines ... ok
+test files::glob::tests::test_glob_match_star ... ok
+test files::files::worktree_cwd_tests::write_file_rejects_stale_content_hash ... ok
+test files::glob::tests::test_glob_match_brace ... ok
+test files::grep::tests::test_glob_matches_brace ... ok
+test files::grep::tests::test_glob_matches_exact ... ok
+test files::grep::tests::test_glob_matches_question_mark ... ok
+test files::grep::tests::test_glob_matches_star ... ok
+test files::grep::tests::grep_finds_relative_content_under_artifact_only_root ... ok
+test files::grep::tests::grep_relative_path_still_uses_working_dir ... ok
+test files::repo_map::tests::falls_back_without_byte_slicing ... ok
+test files::repo_map::tests::identifies_source_files_and_skipped_directories ... ok
+test files::grep::tests::grep_rejects_path_outside_all_roots ... ok
+test files::files::worktree_cwd_tests::read_file_default_token_limit_pages_but_explicit_overflow_fails ... ok
+test files::files::mutation_effect_tests::file_mutators_report_only_confirmed_affected_paths ... ok
+test files::repo_map::tests::extracts_rust_symbols_from_ast ... ok
+test files::repo_map::tests::extracts_typescript_arrow_functions_and_interfaces ... ok
+hint: Using 'master' as the name for the initial branch. This default branch name
+hint: is subject to change. To configure the initial branch name to use in all
+hint: of your new repositories, which will suppress this warning, call:
+hint:
+hint: 	git config --global init.defaultBranch <name>
+hint:
+hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
+hint: 'development'. The just-created branch can be renamed via this command:
+hint:
+hint: 	git branch -m <name>
+hint:
+hint: Disable this message with "git config set advice.defaultBranchName false"
+Initialized empty Git repository in /private/var/folders/mp/_hr1lbvx27b613b3jpp4jqj00000gn/T/.tmpI7vDPX/.git/
+test files::artifact::tests::canonical_reader_hashes_only_first_and_final_pages ... ok
+[master (root-commit) 69ee3cf] base
+ 2 files changed, 2 insertions(+)
+ create mode 100644 target.txt
+ create mode 100644 unrelated.txt
+test git_worktree::tests::definite_add_failure_releases_only_empty_reservation ... ok
+test git::branch_switch_regression_tests::git_branch_switch_existing_branch_without_same_named_file ... ok
+test git::branch_switch_regression_tests::git_branch_switch_preserves_dirty_same_named_tracked_file ... ok
+test git_checkpoint::tests::rollback_restores_only_target_worktree_and_index ... ok
+test git_worktree::tests::acknowledged_receipt_transfers_worktree_to_caller ... ok
+test git_worktree::tests::existing_worktree_path_is_never_adopted ... ok
+test git::branch_switch_regression_tests::git_branch_switch_conflicting_dirty_changes_fail_without_mutation ... ok
+test git::branch_switch_regression_tests::git_branch_switch_invalid_option_and_missing_targets_preserve_repo ... ok
+test git_worktree::tests::dropped_receipt_after_send_reclaims_clean_checkout ... ok
+test git_worktree::tests::marker_failure_cannot_compensate_replaced_same_branch_checkout ... ok
+test git_worktree::tests::test_find_git_root ... ok
+test git_worktree::tests::test_find_git_root_non_repo ... ok
+test image::tests::view_image_projects_pixels_without_serializing_them ... ok
+test image::tests::view_image_rejects_non_images ... ok
+test process::tests::cancellation_reaps_a_running_process_group ... ok
+test git_worktree::tests::dropped_receipt_does_not_remove_replaced_checkout ... ok
+test rag::tests::rag_preview_counts_unicode_scalars ... ok
+test rag::tests::rag_preview_truncation_matches_the_scalar_preview_boundary ... ok
+test process::tests::output_is_drained_but_retention_is_bounded ... ok
+test git_worktree::tests::marker_failure_compensates_only_clean_exact_checkout ... ok
+test registry::tests::standard_pack_uses_only_canonical_patch_mutation ... ok
+test research::clients::tests::live_open_scholarly_providers_return_results ... ignored, opt-in live smoke test; set ECHO_AGENT_PROVIDER_SMOKE=1
+test research::clients::tests::live_zotero_credentials_can_list_items ... ignored, requires ZOTERO_API_KEY and ZOTERO_LIBRARY_ID
+test registry::tests::read_only_projection_excludes_process_execution ... ok
+test registry::tests::read_only_projection_contains_only_read_only_sql ... ok
+test research::clients::tests::zotero_conversion_preserves_citation_fields ... ok
+test research::clients::tests::parses_provider_contracts ... ok
+test research::clinical_trials::tests::clinical_trials_malformed_total_is_an_explicit_error ... ok
+test research::clinical_trials::tests::clinical_trials_missing_total_is_an_explicit_error ... ok
+test research::clinical_trials::tests::clinical_trials_preserves_authoritative_totals_and_page_size ... ok
+test security::tests::test_byte_slice_safety_on_boundary_edge ... ok
+test research::clinical_trials::tests::clinical_trials_requests_server_total_count ... ok
+test security::tests::test_extract_host_ipv6_with_port ... ok
+test security::tests::test_extract_host_ipv6_port_regression ... ok
+test security::tests::test_extract_host_ipv6 ... ok
+test security::tests::test_extract_host_rejects_non_http ... ok
+test security::tests::test_extract_host_plain ... ok
+test security::tests::test_extract_host_unicode_idn ... ok
+test security::tests::test_extract_host_with_port ... ok
+test security::tests::test_extract_host_with_query ... ok
+test security::tests::test_extract_host_with_userinfo ... ok
+test security::tests::test_ipv6_ula_fc00_blocked ... ok
+test security::tests::test_is_private_ip_v4_cgnat ... ok
+test security::tests::test_is_private_ip_v4_link_local ... ok
+test security::tests::test_is_private_ip_v4_loopback ... ok
+test security::tests::test_is_private_ip_v4_special_ranges ... ok
+test security::tests::test_is_private_ip_v4_rfc1918 ... ok
+test security::tests::test_is_private_ip_v6_link_local ... ok
+test security::tests::test_is_private_ip_v6_loopback ... ok
+test security::tests::test_is_private_ip_v6_mapped_v4 ... ok
+test security::tests::test_path_validator_absolute_required ... ok
+test security::tests::test_is_private_ip_v6_ula_full_range ... ok
+test security::tests::test_path_validator_allowed_root ... ok
+test security::tests::test_public_ip_v4_allowed ... ok
+test security::tests::test_public_ip_v6_allowed ... ok
+test security::tests::test_resource_limits_default ... ok
+test security::tests::test_truncate_all_multibyte ... ok
+test security::tests::test_truncate_past_end ... ok
+test security::tests::test_truncate_emoji_boundary ... ok
+test security::tests::test_truncate_utf8_safe ... ok
+test security::tests::test_truncate_zero ... ok
+test security::tests::test_unicode_case_fold_security ... ok
+test security::tests::test_validate_output_file_absolute_required ... ok
+test security::tests::test_validate_output_file_normalizes_parent_segments ... ok
+test security::tests::test_validate_url_rejects_loopback ... ok
+test security::tests::test_validate_url_rejects_unicode_homoglyph ... ok
+test git_worktree::tests::marker_failure_retains_dirty_checkout_as_debt ... ok
+test shell::tests::background_and_streaming_paths_consume_the_same_exact_receipt ... ok
+test shell::tests::approval_receipt_is_required_and_bound_for_foreground_shell ... ok
+test shell::tests::cleanup_delimits_negative_process_group_target ... ok
+test shell::tests::background_launch_preserves_sandbox_requirement_instead_of_rejecting ... ok
+test git_worktree::tests::unmanaged_worktree_is_not_removable ... ok
+test security::tests::test_validate_url_allows_public ... ok
+test security::tests::test_validate_url_with_addrs_returns_ips ... ok
+test shell::tests::dropping_shell_stream_kills_and_reaps_child ... ok
+test shell::tests::shell_stream_failure_retains_stderr_and_exit_metadata ... ok
+test shell::tests::shell_tool_declares_live_streaming_support ... ok
+test shell::tests::test_cargo_commands ... ok
+test shell::tests::test_dangerous_command_corpus ... ok
+test shell::tests::test_dangerous_commands ... ok
+test shell::tests::test_git_commands ... ok
+test shell::tests::test_require_approval_commands ... ok
+test shell::tests::test_safe_commands ... ok
+test shell::tests::shell_stream_caps_retained_output_and_reports_total_bytes ... ok
+test shell::tests::test_shell_injection_rejected ... ok
+test shell::tests::test_shell_injection_rejected_in_execution ... ok
+test shell::tests::test_shell_timeout_cap_at_300 ... ok
+test shell::tests::test_shell_honors_context_working_dir ... ok
+test git_worktree::tests::merge_conflict_aborts_and_restores_original_branch ... ok
+test shell::tests::test_shell_tool_execution ... ok
+test shell::tests::test_timeout_configuration ... ok
+test shell::tests::test_unknown_command_in_strict_mode ... ok
+test statistics::tests::exploratory_statistics_never_claims_inference ... ok
+test statistics::tests::quantiles_use_linear_interpolation_without_index_panics ... ok
+test text::tests::test_text_export ... ok
+test text::tests::test_text_process_head_tail ... ok
+test text::tests::test_text_process_invalid_operation ... ok
+test text::tests::test_text_process_sort ... ok
+test text::tests::test_text_process_trim ... ok
+test text::tests::test_text_process_unique ... ok
+test text::tests::test_text_search_basic ... ok
+test text::tests::test_text_search_case_insensitive ... ok
+test text::tests::test_text_search_missing_params ... ok
+test text::tests::test_text_search_regex ... ok
+test text::tests::test_text_stats ... ok
+test git_worktree::tests::merge_rejects_forged_managed_flag_and_dirty_checkout ... ok
+test web::fetch::tests::test_html_to_text ... ok
+test web::fetch::tests::test_needs_html_conversion ... ok
+test web::fetch::tests::test_truncate_content_long_ascii ... ok
+test web::fetch::tests::test_truncate_content_mixed ... ok
+test web::fetch::tests::test_truncate_content_multibyte_safe ... ok
+test web::fetch::tests::test_truncate_content_short ... ok
+test web::providers::brave::tests::test_parse_brave_empty_response ... ok
+test web::providers::brave::tests::test_urlencode ... ok
+test web::providers::brave::tests::test_parse_brave_response ... ok
+test web::providers::duckduckgo::tests::test_detect_captcha ... ok
+test web::providers::duckduckgo::tests::test_extract_url_amp_uddg ... ok
+test web::providers::duckduckgo::tests::test_extract_url_no_false_positive ... ok
+test web::providers::duckduckgo::tests::test_extract_url_protocol_relative ... ok
+test web::providers::duckduckgo::tests::test_extract_url_redirect ... ok
+test web::providers::duckduckgo::tests::test_parse_ddg_html_empty ... ok
+test web::providers::duckduckgo::tests::test_parse_ddg_html_with_results ... ok
+test web::providers::tavily::tests::test_parse_tavily_empty_response ... ok
+test web::providers::tavily::tests::test_parse_tavily_response ... ok
+test web::providers::tavily::tests::test_tavily_request_serialization ... ok
+test web::providers::utils::tests::test_percent_decode ... ok
+test web::providers::utils::tests::test_truncate_chars ... ok
+test web::providers::utils::tests::test_urlencode ... ok
+test web::search::tests::provider_failure_is_classified_as_transient ... ok
+test web::search::tests::test_empty_results_json ... ok
+test web::search::tests::test_results_json_structure ... ok
+test web::search::tests::transient_failure_is_returned_to_the_central_retry_policy ... ok
+test shell::tests::shell_stream_preserves_unicode_split_across_pipe_reads ... ok
+test shell::tests::shell_stream_spills_complete_ten_megabyte_artifact ... ok
+test shell::tests::shell_stream_emits_first_chunk_before_process_exit ... ok
+test shell::tests::test_shell_timeout_triggers ... ok
+test shell::tests::test_shell_timeout_per_call_override ... ok
+test files::artifact::tests::q_flt_v10_paged_spilled_result_is_fully_recoverable ... ok
+
+test result: ok. 227 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 3.09s
+

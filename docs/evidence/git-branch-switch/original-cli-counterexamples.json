@@ -1,0 +1,70 @@
+[
+  {
+    "namedTrackedFile": false,
+    "repository": "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/admin/git-branch-switch/original-vwxu_0z6",
+    "command": [
+      "git",
+      "checkout",
+      "--",
+      "feature"
+    ],
+    "returncode": 1,
+    "stdout": "",
+    "stderr": "error: pathspec 'feature' did not match any file(s) known to git\n",
+    "before": {
+      "head": "1e2f38aeb20e2750334418d9d26b123586df53a1",
+      "branch": "refs/heads/main",
+      "refs": "1e2f38aeb20e2750334418d9d26b123586df53a1 refs/heads/feature\n1e2f38aeb20e2750334418d9d26b123586df53a1 refs/heads/main\n",
+      "index": "100644 57e3af5702ca0ed75f76e4be451e984c16b9a837 0\tsentinel.txt\n",
+      "files": {
+        "sentinel.txt": "aaa8d3c8d74ad3e8f6b1772aa9c7e0eaa528cb42fc93599ce2f125b00d4c424c"
+      },
+      "dirty": ""
+    },
+    "after": {
+      "head": "1e2f38aeb20e2750334418d9d26b123586df53a1",
+      "branch": "refs/heads/main",
+      "refs": "1e2f38aeb20e2750334418d9d26b123586df53a1 refs/heads/feature\n1e2f38aeb20e2750334418d9d26b123586df53a1 refs/heads/main\n",
+      "index": "100644 57e3af5702ca0ed75f76e4be451e984c16b9a837 0\tsentinel.txt\n",
+      "files": {
+        "sentinel.txt": "aaa8d3c8d74ad3e8f6b1772aa9c7e0eaa528cb42fc93599ce2f125b00d4c424c"
+      },
+      "dirty": ""
+    }
+  },
+  {
+    "namedTrackedFile": true,
+    "repository": "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/admin/git-branch-switch/original-aw5zohtk",
+    "command": [
+      "git",
+      "checkout",
+      "--",
+      "feature"
+    ],
+    "returncode": 0,
+    "stdout": "",
+    "stderr": "",
+    "before": {
+      "head": "856e613240024ff5b064776958a132ffcad514c8",
+      "branch": "refs/heads/main",
+      "refs": "856e613240024ff5b064776958a132ffcad514c8 refs/heads/feature\n856e613240024ff5b064776958a132ffcad514c8 refs/heads/main\n",
+      "index": "100644 bf206eb4254fd26aedddf1574d0ee3c4946a67b4 0\tfeature\n100644 57e3af5702ca0ed75f76e4be451e984c16b9a837 0\tsentinel.txt\n",
+      "files": {
+        "sentinel.txt": "aaa8d3c8d74ad3e8f6b1772aa9c7e0eaa528cb42fc93599ce2f125b00d4c424c",
+        "feature": "773b43219385cde4d62ecbcb233d6ce8d17edd4ea6ef2934671f29ac4e5a6875"
+      },
+      "dirty": " M feature\n"
+    },
+    "after": {
+      "head": "856e613240024ff5b064776958a132ffcad514c8",
+      "branch": "refs/heads/main",
+      "refs": "856e613240024ff5b064776958a132ffcad514c8 refs/heads/feature\n856e613240024ff5b064776958a132ffcad514c8 refs/heads/main\n",
+      "index": "100644 bf206eb4254fd26aedddf1574d0ee3c4946a67b4 0\tfeature\n100644 57e3af5702ca0ed75f76e4be451e984c16b9a837 0\tsentinel.txt\n",
+      "files": {
+        "sentinel.txt": "aaa8d3c8d74ad3e8f6b1772aa9c7e0eaa528cb42fc93599ce2f125b00d4c424c",
+        "feature": "db0d40b77fd77b6b9b3cea414392495bdf8b81637d48eb20352ff5459fc139dd"
+      },
+      "dirty": ""
+    }
+  }
+]

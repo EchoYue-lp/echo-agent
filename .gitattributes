@@ -3,3 +3,9 @@ docs/evidence/chart-dimension-fidelity-20261014/final-gates/*.log -diff
 docs/evidence/chart-dimension-fidelity-20261014/candidate.diff -diff
 docs/evidence/acp-turn-steering-identity/**/*.log -diff
 docs/evidence/telemetry-subscriber-composition/**/*.log -diff
+
+# Exact Git branch counterexamples and command output remain byte-identical.
+docs/evidence/git-branch-switch/README.md.patch -diff
+docs/evidence/git-branch-switch/after-focused.log -diff
+docs/evidence/git-branch-switch/after-tools-lib.log -diff
+docs/evidence/git-branch-switch/final-focused.log -diff

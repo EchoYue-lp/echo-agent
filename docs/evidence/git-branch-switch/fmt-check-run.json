@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "sourceRoot": "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/task-runtime-store-control",
+  "steps": [
+    {
+      "label": "git-branch-fmt-check",
+      "command": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "cwd": "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/task-runtime-store-control",
+      "logPath": "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/admin/git-branch-switch/fmt-check.log",
+      "exitCode": 0,
+      "signal": null,
+      "errorCode": null,
+      "truncated": false,
+      "bytesSeen": 0,
+      "bytesWritten": 0,
+      "startedAt": "2026-10-14T16:20:13.894Z",
+      "finishedAt": "2026-10-14T16:20:16.541Z"
+    }
+  ],
+  "updatedAt": "2026-10-14T16:20:16.541Z"
+}

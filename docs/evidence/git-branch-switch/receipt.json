@@ -1,0 +1,40 @@
+{
+  "head": "a6346643bda47679a96760f56f45e41fd73b61b0",
+  "branch": "fix/Echoyue/git-branch-switch",
+  "worktreeRoot": "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/task-runtime-store-control",
+  "hostWorkspaceRoot": "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent",
+  "worktreeMode": "existing root-authorized linked worktree; each command uses explicit cwd",
+  "layer": "generic framework Git tool; native Git sole HEAD/refs/index/worktree authority; no SDK/app mirror",
+  "sourceSHA256": {
+    "echo-tools/src/git.rs": "15cb578dbc23af3913cfa6bf7f4f379a43abf3e7fd8e69e10f0e4f3f0af4851c",
+    "echo-tools/README.md": "dcc0a3d9ff595033f872da3f7db5f7431b4e5790a338178fe1cc6cbcf7f283a4"
+  },
+  "originalProductionSHA256": "82cf6591ad8b55438db4ea07482c5bfe06a27dc6766d10d0203639bc37499098",
+  "originalRealToolBefore": {
+    "passed": 1,
+    "failed": 3,
+    "ignored": 0,
+    "run": "before-actual-run.json"
+  },
+  "fixedFocused": {
+    "passed": 4,
+    "failed": 0,
+    "ignored": 0,
+    "run": "after-focused-run.json"
+  },
+  "fixedToolsLib": {
+    "passed": 227,
+    "failed": 0,
+    "ignored": 2,
+    "run": "after-tools-lib-run.json"
+  },
+  "strictAllTargetsClippy": 0,
+  "formatter": 0,
+  "fmtCheck": 0,
+  "sameRegressionBodiesBeforeAfterWhenFormattedByRustfmt": true,
+  "nativeGitReference": "git switch -h and existing echo-tools/src/git_worktree.rs switch -- target pattern",
+  "rawBeforeExamples": "original-cli-counterexamples.json",
+  "scope": "branch switch only, no force/path restore; no dependencies/features/public shape changed",
+  "matrix": "focused tools checks and full framework six gates before main. Independent-feature23 checks are not triggered because no Cargo/features/production cfg/cross-crate API change.",
+  "examples": "no examples directory in framework checkout; no Git example needs API edits; tool README synchronized. SDK/website delivery follows framework publication separately."
+}

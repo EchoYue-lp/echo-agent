@@ -474,7 +474,14 @@ impl Tool for GitBranchTool {
                 args = vec!["branch".to_string(), "--".to_string(), name.to_string()];
                 action = format!("Create branch '{}'", name);
             } else if let Some(target) = parameters.get("switch").and_then(|v| v.as_str()) {
-                args = vec!["checkout".to_string(), "--".to_string(), target.to_string()];
+                if target.trim().is_empty() || target.starts_with('-') {
+                    return Ok(ToolResult::invalid_arguments(
+                        "switch target must be a non-empty branch name, not an option",
+                    ));
+                }
+                // checkout -- selects paths and can overwrite a same-named dirty file.
+                // Use the repository's existing branch-only switch pattern without force.
+                args = vec!["switch".to_string(), "--".to_string(), target.to_string()];
                 action = format!("Switch to branch '{}'", target);
             } else if let Some(target) = parameters.get("delete").and_then(|v| v.as_str()) {
                 args = vec![
@@ -655,5 +662,209 @@ async fn run_git(repo_path: &str, args: &[&str], context: &ToolContext) -> Resul
             message: stderr.trim().to_string(),
         }
         .into())
+    }
+}
+
+#[cfg(test)]
+mod branch_switch_regression_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+    use std::process::Command;
+
+    type TestResult<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
+
+    fn git(repo: &Path, args: &[&str]) -> TestResult<String> {
+        let output = Command::new("git").args(args).current_dir(repo).output()?;
+        if !output.status.success() {
+            return Err(std::io::Error::other(String::from_utf8_lossy(&output.stderr)).into());
+        }
+        Ok(String::from_utf8(output.stdout)?.trim().to_string())
+    }
+
+    fn repository(named_file: bool, changed_target: bool) -> TestResult<tempfile::TempDir> {
+        let root = std::env::var_os("ECHO_GIT_BRANCH_TEST_ROOT")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        std::fs::create_dir_all(&root)?;
+        let directory = tempfile::tempdir_in(root)?;
+        let repo = directory.path();
+        git(repo, &["init", "-b", "main"])?;
+        std::fs::create_dir(repo.join("no-hooks"))?;
+        git(repo, &["config", "core.hooksPath", "no-hooks"])?;
+        std::fs::write(repo.join("sentinel.txt"), "untouched 中文🙂\n")?;
+        if named_file {
+            std::fs::write(repo.join("feature"), "original tracked feature\n")?;
+        }
+        git(repo, &["add", "--", "sentinel.txt"])?;
+        if named_file {
+            git(repo, &["add", "--", "feature"])?;
+        }
+        git(
+            repo,
+            &[
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "commit",
+                "-m",
+                "initial",
+            ],
+        )?;
+        git(repo, &["branch", "feature"])?;
+        if changed_target {
+            git(repo, &["switch", "--", "feature"])?;
+            std::fs::write(repo.join("feature"), "different target commit\n")?;
+            git(repo, &["add", "--", "feature"])?;
+            git(
+                repo,
+                &[
+                    "-c",
+                    "commit.gpgsign=false",
+                    "-c",
+                    "user.name=Fixture",
+                    "-c",
+                    "user.email=fixture@example.invalid",
+                    "commit",
+                    "-m",
+                    "target",
+                ],
+            )?;
+            git(repo, &["switch", "--", "main"])?;
+        }
+        Ok(directory)
+    }
+
+    fn protection(repo: &Path) -> TestResult<serde_json::Value> {
+        let entries = std::fs::read_dir(repo)?.collect::<std::io::Result<Vec<_>>>()?;
+        let files: BTreeMap<String, String> = entries
+            .into_iter()
+            .filter(|entry| entry.path().is_file())
+            .map(|entry| -> TestResult<(String, String)> {
+                use sha2::Digest as _;
+                Ok((
+                    entry.file_name().to_string_lossy().to_string(),
+                    format!("{:x}", sha2::Sha256::digest(std::fs::read(entry.path())?)),
+                ))
+            })
+            .collect::<TestResult<_>>()?;
+        Ok(serde_json::json!({
+            "head": git(repo, &["rev-parse", "HEAD"])?,
+            "symbolic_head": git(repo, &["symbolic-ref", "HEAD"])?,
+            "refs": git(repo, &["show-ref", "--heads"])?,
+            "index": git(repo, &["ls-files", "--stage"])?,
+            "dirty": git(repo, &["status", "--porcelain=v1", "--untracked-files=all"])?,
+            "files": files,
+        }))
+    }
+
+    async fn switch(repo: &Path, target: &str) -> Result<ToolResult> {
+        GitBranchTool
+            .execute_with_context(
+                std::collections::HashMap::from([(
+                    "switch".to_string(),
+                    serde_json::json!(target),
+                )]),
+                &ToolContext {
+                    working_dir: Some(repo.to_path_buf()),
+                    ..Default::default()
+                },
+            )
+            .await
+    }
+
+    #[tokio::test]
+    async fn git_branch_switch_existing_branch_without_same_named_file() -> TestResult {
+        let repo = repository(false, false)?;
+        let before = protection(repo.path())?;
+        let result = switch(repo.path(), "feature").await;
+        assert!(
+            result.is_ok(),
+            "existing branch must switch without a same-named file: {result:?}"
+        );
+        let after = protection(repo.path())?;
+        assert_eq!(
+            after.get("symbolic_head"),
+            Some(&serde_json::json!("refs/heads/feature"))
+        );
+        for key in ["head", "refs", "index", "dirty", "files"] {
+            assert_eq!(before.get(key), after.get(key), "unrelated {key} changed");
+        }
+        println!(
+            "branch-no-file: {}",
+            serde_json::json!({"before":before,"after":after})
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn git_branch_switch_preserves_dirty_same_named_tracked_file() -> TestResult {
+        let repo = repository(true, false)?;
+        std::fs::write(repo.path().join("feature"), "user dirty bytes 中文🌊\n")?;
+        let before = protection(repo.path())?;
+        switch(repo.path(), "feature").await?;
+        let after = protection(repo.path())?;
+        assert_eq!(
+            after.get("symbolic_head"),
+            Some(&serde_json::json!("refs/heads/feature")),
+            "success must change branch, not restore a path"
+        );
+        for key in ["head", "refs", "index", "dirty", "files"] {
+            assert_eq!(
+                before.get(key),
+                after.get(key),
+                "branch switching destroyed {key}"
+            );
+        }
+        println!(
+            "branch-same-file: {}",
+            serde_json::json!({"before":before,"after":after})
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn git_branch_switch_conflicting_dirty_changes_fail_without_mutation() -> TestResult {
+        let repo = repository(true, true)?;
+        std::fs::write(
+            repo.path().join("feature"),
+            "must retain conflicting edit 中文🌊\n",
+        )?;
+        let before = protection(repo.path())?;
+        let result = switch(repo.path(), "feature").await;
+        assert!(
+            result.is_err(),
+            "conflicting dirty bytes must refuse switch"
+        );
+        assert_eq!(protection(repo.path())?, before);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn git_branch_switch_invalid_option_and_missing_targets_preserve_repo() -> TestResult {
+        let repo = repository(true, false)?;
+        std::fs::write(repo.path().join("feature"), "uncommitted retained bytes\n")?;
+        let before = protection(repo.path())?;
+        for target in [
+            "--discard-changes",
+            "-",
+            "",
+            "not..a-branch",
+            "no-such-branch",
+        ] {
+            let result = switch(repo.path(), target).await;
+            assert!(
+                result.is_err() || result.is_ok_and(|value| !value.success),
+                "invalid target {target:?} must explicitly fail"
+            );
+            assert_eq!(
+                protection(repo.path())?,
+                before,
+                "invalid target {target:?} modified repository"
+            );
+        }
+        Ok(())
     }
 }

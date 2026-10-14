@@ -1,0 +1,11 @@
+{
+  "reviewer": "/root/framework_final_review",
+  "critical": 0,
+  "important": 0,
+  "minor": 0,
+  "decision": "specific GitBranchTool switch repair and protection-oracle increment PASS",
+  "finalSourceSHA256": "cfd9565be083ea846651c476bc37e37788fd94a5589939b7b960b8203c7e00b5",
+  "initialReviewedSourceSHA256": "15cb578dbc23af3913cfa6bf7f4f379a43abf3e7fd8e69e10f0e4f3f0af4851c",
+  "examined": "real original Tool 3fail/1pass and CLI2 data-loss facts, same regression bodies after native switch repair, full previous-test Tools227 and strict lint, final ReadDir error collection delta and same4 tests/fmt0",
+  "limits": "six complete framework gates, current-main/remote CI/publication and published-pin SDK consumers remain separate"
+}
