@@ -1,0 +1,11 @@
+{
+  "reviewer": "/root/sdk_capability_acceptance_audit",
+  "decision": "qualified lock-focused independent PASS",
+  "critical": 0,
+  "important": 0,
+  "minor": 0,
+  "beforeLockSHA256": "49f8e5605e329f7a05b617a7ec0ecb3b216a4f88665fd3e67a9e0c5de02cf6f1",
+  "afterLockSHA256": "4d036d1cc54498512198dd7241fc13a10f13ede7497e5fe8483331b211cbc187",
+  "examined": "two scalar version/checksum change,680 other exact package records,official index deps/features/MSRV/constraints/checksum; official clean fresh RustSec caee four patched>=.46 advisory blobs; original CI failure and current update/audit/deny/check exit0 rawbytes;50 duplicate exact groups equal framework PR181 with policy unchanged",
+  "limits": "not all-tool-warning-free; not new-lock six complete engineering/current semantic/main/CI acceptance; no SDK policy transfer"
+}

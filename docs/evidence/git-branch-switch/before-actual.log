@@ -1,0 +1,63 @@
+   Compiling polars-core v0.55.2
+   Compiling rsa v0.9.10
+   Compiling markup5ever v0.16.2
+   Compiling selectors v0.38.0
+   Compiling html5ever v0.31.0
+   Compiling sqlx-sqlite v0.8.6
+   Compiling sqlx-mysql v0.8.6
+   Compiling sqlx-macros v0.8.6
+   Compiling html5ever v0.39.0
+   Compiling schemars v0.8.22
+   Compiling zip v2.4.2
+   Compiling sqlx-postgres v0.8.6
+   Compiling lopdf v0.44.0
+   Compiling scraper v0.27.0
+   Compiling polars-ops v0.55.2
+   Compiling polars-time v0.55.2
+   Compiling polars-io v0.55.2
+   Compiling polars-plan v0.55.2
+   Compiling polars-ooc v0.55.2
+   Compiling echo_core v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/task-runtime-store-control/echo-core)
+   Compiling polars-expr v0.55.2
+   Compiling calamine v0.36.1
+   Compiling sqlx v0.8.6
+   Compiling rust_xlsxwriter v0.82.0
+   Compiling tree-sitter v0.26.12
+   Compiling polars-mem-engine v0.55.2
+   Compiling polars-stream v0.55.2
+   Compiling html2text v0.14.4
+   Compiling docx-rs v0.4.22
+   Compiling polars-lazy v0.55.2
+   Compiling polars v0.55.2
+   Compiling echo_tools v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/task-runtime-store-control/echo-tools)
+    Finished `test` profile [unoptimized] target(s) in 1m 21s
+     Running unittests src/lib.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/deps/echo_tools-8bb5dd48772585e3)
+
+running 4 tests
+
+thread 'git::branch_switch_regression_tests::git_branch_switch_existing_branch_without_same_named_file' (133361781) panicked at echo-tools/src/git.rs:734:9:
+existing branch must switch without a same-named file: Err(Tool(ExecutionFailed { tool: "git", message: "error: pathspec 'feature' did not match any file(s) known to git" }))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'git::branch_switch_regression_tests::git_branch_switch_preserves_dirty_same_named_tracked_file' (133361783) panicked at echo-tools/src/git.rs:749:9:
+assertion `left == right` failed: success must change branch, not restore a path
+  left: Some(String("refs/heads/main"))
+ right: Some(String("refs/heads/feature"))
+
+thread 'git::branch_switch_regression_tests::git_branch_switch_conflicting_dirty_changes_fail_without_mutation' (133361780) panicked at echo-tools/src/git.rs:761:9:
+conflicting dirty bytes must refuse switch
+test git::branch_switch_regression_tests::git_branch_switch_existing_branch_without_same_named_file ... FAILED
+test git::branch_switch_regression_tests::git_branch_switch_preserves_dirty_same_named_tracked_file ... FAILED
+test git::branch_switch_regression_tests::git_branch_switch_conflicting_dirty_changes_fail_without_mutation ... FAILED
+test git::branch_switch_regression_tests::git_branch_switch_invalid_option_and_missing_targets_preserve_repo ... ok
+
+failures:
+
+failures:
+    git::branch_switch_regression_tests::git_branch_switch_conflicting_dirty_changes_fail_without_mutation
+    git::branch_switch_regression_tests::git_branch_switch_existing_branch_without_same_named_file
+    git::branch_switch_regression_tests::git_branch_switch_preserves_dirty_same_named_tracked_file
+
+test result: FAILED. 1 passed; 3 failed; 0 ignored; 0 measured; 225 filtered out; finished in 0.28s
+
+error: test failed, to rerun pass `-p echo_tools --lib`

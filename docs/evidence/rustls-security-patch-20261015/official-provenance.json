@@ -1,0 +1,36 @@
+{
+  "0346": {
+    "url": "https://raw.githubusercontent.com/RustSec/advisory-db/main/crates/rustls/RUSTSEC-2026-0346.md",
+    "status": "unavailable",
+    "error": "<urlopen error [Errno 54] Connection reset by peer>"
+  },
+  "0347": {
+    "url": "https://raw.githubusercontent.com/RustSec/advisory-db/main/crates/rustls/RUSTSEC-2026-0347.md",
+    "status": "unavailable",
+    "error": "<urlopen error [Errno 54] Connection reset by peer>"
+  },
+  "0348": {
+    "url": "https://raw.githubusercontent.com/RustSec/advisory-db/main/crates/rustls/RUSTSEC-2026-0348.md",
+    "status": "unavailable",
+    "error": "<urlopen error [Errno 54] Connection reset by peer>"
+  },
+  "0349": {
+    "url": "https://raw.githubusercontent.com/RustSec/advisory-db/main/crates/rustls/RUSTSEC-2026-0349.md",
+    "status": "unavailable",
+    "error": "<urlopen error [Errno 54] Connection reset by peer>"
+  },
+  "index": {
+    "url": "https://index.crates.io/ru/st/rustls",
+    "sha256": "1895c31fe2ba17cbfba065cdd209f00418274224555d371c481bb1f4e2983311",
+    "bytes": 298315,
+    "status": "read",
+    "path": "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/admin/git-branch-switch/rustls-patch-prep/index.raw"
+  },
+  "release": {
+    "url": "https://api.github.com/repos/rustls/rustls/releases/tags/v%2F0.23.46",
+    "sha256": "9f39e182a6c5e004fbab6c12fb60cf136fb06e1973fbb344084cd0dc0feefc4e",
+    "bytes": 4988,
+    "status": "read",
+    "path": "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/admin/git-branch-switch/rustls-patch-prep/release.raw"
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "reviewer": "/root/framework_final_review",
+  "decision": "local engineering six-gate PASS",
+  "critical": 0,
+  "important": 0,
+  "minor": 0,
+  "sourceCommit": "a1939a2ec681257068475cf3cbf541eae38251a6",
+  "sourceSHA256": "cfd9565be083ea846651c476bc37e37788fd94a5589939b7b960b8203c7e00b5",
+  "inputCount": 570,
+  "tests": {
+    "primaryPass": 3532,
+    "fail": 0,
+    "ignored": 3,
+    "embeddedChildPass": 2
+  },
+  "examined": "each actual command/runner/archived raw log byte count/hash, zero exit/signal/truncation/compiler warnings; all input maps before-after-current match; six engineering commands and four new tests",
+  "dependencyCut": "original Cargo.lock includes rustls 0.23.45; newly failed PR dependency-policy advisory gate is separate and unresolved by these engineering receipts",
+  "exclusions": "not security-audit pass, later rustls patch lock gates, semantic current snapshot, remote CI, main delivery or SDK publication"
+}

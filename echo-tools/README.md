@@ -33,3 +33,12 @@ echo_tools = "0.2"
 ## License
 
 MIT
+
+### Git branch switching
+
+`git_branch` with `switch` selects an existing branch using native `git switch`,
+with the same repository/working-directory context as the other Git tools. It
+preserves compatible uncommitted edits, including a tracked file with the same
+name as the branch. Conflicting edits, missing/invalid branches and option-like
+targets fail explicitly; it never forces a checkout or restores a path under
+the guise of switching branches. Create/delete/list behavior is unchanged.

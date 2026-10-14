@@ -1,0 +1,75 @@
+{
+  "entries": 17,
+  "files": {
+    "01-fmt-run.json": {
+      "sha256": "c896321e8c78ab7ebf0dac40c64a3527fc2131f558102afd4a4a44d245669d3d",
+      "bytes": 832
+    },
+    "01-fmt.log": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    "02-fmt-check-run.json": {
+      "sha256": "ea1060c51e883dd1f3e1a785993e5fd07097c11e36d62c280145b7cfca7c31ff",
+      "bytes": 877
+    },
+    "02-fmt-check.log": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    "03-workspace-clippy-run.json": {
+      "sha256": "6836c668f4e32318983bfe2b713dab416ca5b5da53b49cb018aadcb50001dd65",
+      "bytes": 992
+    },
+    "03-workspace-clippy.log": {
+      "sha256": "f3c79e945730b076679f8ec251896a555d33995daf35e05172c4b3c8c71352eb",
+      "bytes": 1454
+    },
+    "04-production-clippy-run.json": {
+      "sha256": "9d71028d7c593e4455fdaf1fdd05a3348038e0972f75a7eba7c290056608ec08",
+      "bytes": 1144
+    },
+    "04-production-clippy.log": {
+      "sha256": "bcbcc4556298ec9374aef5e8d4e1a4e152542f7189de0d5ef90bec08baf13bdf",
+      "bytes": 1454
+    },
+    "05-workspace-tests-run.json": {
+      "sha256": "f58142fdb8789a09480e54fe192f0254067d124e5eff67355df3a55830f3a92c",
+      "bytes": 944
+    },
+    "05-workspace-tests.log": {
+      "sha256": "0a3421e992cbdd96425643485ff1acc1ebd2cf9bb844b5cd324c46a6174fc0f1",
+      "bytes": 360802
+    },
+    "06-featureless-check-run.json": {
+      "sha256": "1ee69ecca5ec5eefdc15470c8ef2412a39769dea6f0d7197debaad7974bd4de1",
+      "bytes": 940
+    },
+    "06-featureless-check.log": {
+      "sha256": "c3ddc282413c3edde53c5023b0b217f1ea090c816945cb68e99838024bc781bc",
+      "bytes": 60
+    },
+    "README.md": {
+      "sha256": "1462178365ad3562a0f2eb203fab74feb07ae90b5d7e9d0fb88498f33c17d5b5",
+      "bytes": 1970
+    },
+    "independent-review.json": {
+      "sha256": "9aab2a79e0744a8d0e3597b24eda629df87fea97c888a7eb3cd073ef71a0dff2",
+      "bytes": 848
+    },
+    "inputs-after.json": {
+      "sha256": "ba25c1c69839b404bb42acc1c7b90c5e1a0fbae517166feefd024fb7d682f267",
+      "bytes": 62270
+    },
+    "inputs-before.json": {
+      "sha256": "ba25c1c69839b404bb42acc1c7b90c5e1a0fbae517166feefd024fb7d682f267",
+      "bytes": 62270
+    },
+    "receipt.json": {
+      "sha256": "593d7d60d6f0ac66261ea201eaba9092e2d1bf5363778376c15e50771519e964",
+      "bytes": 7150
+    }
+  },
+  "sourceCommit": "141c04be344abf6d1b029b4e2efbb90cbd43248b",
+  "lockEpoch": "rustls0.23.46-final-six"
+}

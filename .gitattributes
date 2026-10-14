@@ -3,3 +3,20 @@ docs/evidence/chart-dimension-fidelity-20261014/final-gates/*.log -diff
 docs/evidence/chart-dimension-fidelity-20261014/candidate.diff -diff
 docs/evidence/acp-turn-steering-identity/**/*.log -diff
 docs/evidence/telemetry-subscriber-composition/**/*.log -diff
+
+# Exact Git branch counterexamples and command output remain byte-identical.
+docs/evidence/git-branch-switch/README.md.patch -diff
+docs/evidence/git-branch-switch/after-focused.log -diff
+docs/evidence/git-branch-switch/after-tools-lib.log -diff
+docs/evidence/git-branch-switch/final-focused.log -diff
+
+# Exact complete workspace output retains its original final blank line.
+docs/evidence/git-branch-switch/full-gates/05-workspace-tests.log -diff
+
+# Preserve exact dependency audit, CI and patch evidence.
+docs/evidence/rustls-security-patch-20261015/Cargo.lock.patch -diff
+docs/evidence/rustls-security-patch-20261015/ci-original-failure.log -diff
+docs/evidence/rustls-security-patch-20261015/deny.log -diff
+
+# Preserve the exact patched-lock workspace test output.
+docs/evidence/rustls-security-patch-20261015/final-six/05-workspace-tests.log -diff

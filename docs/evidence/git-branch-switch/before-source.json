@@ -1,0 +1,10 @@
+{
+  "sourceSHA256": "f574af85ffe54546732de446f58a68a85a3f246b3926d7282460bf73b8c7c922",
+  "production": "published a634 original checkout -- target; new unchanged regression tests compiled and executed",
+  "tests": {
+    "passed": 1,
+    "failed": 3,
+    "ignored": 0
+  },
+  "run": "before-actual-run.json"
+}

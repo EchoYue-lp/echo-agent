@@ -1,0 +1,14 @@
+   Compiling echo_tools v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/task-runtime-store-control/echo-tools)
+    Finished `test` profile [unoptimized] target(s) in 16.23s
+     Running unittests src/lib.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/deps/echo_tools-8bb5dd48772585e3)
+
+running 4 tests
+branch-same-file: {"after":{"dirty":"M feature","files":{"feature":"8e47bf4f280bfbe3ff8daed3dce14f1cd2cebe2126090ac25d5bcafddabe820d","sentinel.txt":"5f612e96fe9393f5eefac051c1a3ee4ff1c0bd7bc9db4278ecf6b2a51e4323b8"},"head":"a9c90cbdc067504477514905d39b91927a3fcfca","index":"100644 b55cdb4c7f194cdd4c99fb060850777d8fda054b 0\tfeature\n100644 e3bc068372a3db30d1eb2696a214c929a7bbed24 0\tsentinel.txt","refs":"a9c90cbdc067504477514905d39b91927a3fcfca refs/heads/feature\na9c90cbdc067504477514905d39b91927a3fcfca refs/heads/main","symbolic_head":"refs/heads/feature"},"before":{"dirty":"M feature","files":{"feature":"8e47bf4f280bfbe3ff8daed3dce14f1cd2cebe2126090ac25d5bcafddabe820d","sentinel.txt":"5f612e96fe9393f5eefac051c1a3ee4ff1c0bd7bc9db4278ecf6b2a51e4323b8"},"head":"a9c90cbdc067504477514905d39b91927a3fcfca","index":"100644 b55cdb4c7f194cdd4c99fb060850777d8fda054b 0\tfeature\n100644 e3bc068372a3db30d1eb2696a214c929a7bbed24 0\tsentinel.txt","refs":"a9c90cbdc067504477514905d39b91927a3fcfca refs/heads/feature\na9c90cbdc067504477514905d39b91927a3fcfca refs/heads/main","symbolic_head":"refs/heads/main"}}
+branch-no-file: {"after":{"dirty":"","files":{"sentinel.txt":"5f612e96fe9393f5eefac051c1a3ee4ff1c0bd7bc9db4278ecf6b2a51e4323b8"},"head":"88cf38c77323b4b9fb0e5d43a1ecd3f081373e47","index":"100644 e3bc068372a3db30d1eb2696a214c929a7bbed24 0\tsentinel.txt","refs":"88cf38c77323b4b9fb0e5d43a1ecd3f081373e47 refs/heads/feature\n88cf38c77323b4b9fb0e5d43a1ecd3f081373e47 refs/heads/main","symbolic_head":"refs/heads/feature"},"before":{"dirty":"","files":{"sentinel.txt":"5f612e96fe9393f5eefac051c1a3ee4ff1c0bd7bc9db4278ecf6b2a51e4323b8"},"head":"88cf38c77323b4b9fb0e5d43a1ecd3f081373e47","index":"100644 e3bc068372a3db30d1eb2696a214c929a7bbed24 0\tsentinel.txt","refs":"88cf38c77323b4b9fb0e5d43a1ecd3f081373e47 refs/heads/feature\n88cf38c77323b4b9fb0e5d43a1ecd3f081373e47 refs/heads/main","symbolic_head":"refs/heads/main"}}
+test git::branch_switch_regression_tests::git_branch_switch_preserves_dirty_same_named_tracked_file ... ok
+test git::branch_switch_regression_tests::git_branch_switch_existing_branch_without_same_named_file ... ok
+test git::branch_switch_regression_tests::git_branch_switch_conflicting_dirty_changes_fail_without_mutation ... ok
+test git::branch_switch_regression_tests::git_branch_switch_invalid_option_and_missing_targets_preserve_repo ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 225 filtered out; finished in 0.26s
+

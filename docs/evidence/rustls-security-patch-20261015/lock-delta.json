@@ -1,0 +1,38 @@
+{
+  "removed": [
+    {
+      "name": "rustls",
+      "version": "0.23.45",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "checksum": "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634",
+      "dependencies": [
+        "once_cell",
+        "ring",
+        "rustls-pki-types",
+        "rustls-webpki",
+        "subtle",
+        "zeroize"
+      ]
+    }
+  ],
+  "added": [
+    {
+      "name": "rustls",
+      "version": "0.23.46",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "checksum": "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf",
+      "dependencies": [
+        "once_cell",
+        "ring",
+        "rustls-pki-types",
+        "rustls-webpki",
+        "subtle",
+        "zeroize"
+      ]
+    }
+  ],
+  "unchangedOtherPackages": 680,
+  "changedUnrelatedEntries": [],
+  "beforeSHA256": "49f8e5605e329f7a05b617a7ec0ecb3b216a4f88665fd3e67a9e0c5de02cf6f1",
+  "afterSHA256": "4d036d1cc54498512198dd7241fc13a10f13ede7497e5fe8483331b211cbc187"
+}

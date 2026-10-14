@@ -1,0 +1,9 @@
+# Final six gates on committed rustls0.23.46 lock
+
+This directory records one complete ordered merge-gate run on `141c04be344abf6d1b029b4e2efbb90cbd43248b`. All six original framework commands exited0, with no signal, truncation or compiler warnings. The 570 actual Rust/manifest/lock/Cargo-config/AGENTS/verification-script input hashes match before, after and current files. Comparing the prior six-gate input map yields only Cargo.lock as different; no source-code or build-profile changes are hidden.
+
+Workspace all-target/all-feature tests passed 3532 primary tests, zero failed and three existing opt-in ignored tests (live LSP, scholarly provider, Zotero credentials). The existing audit file-lease test separately launches two one-test subprocesses with379 filtered cases; these are preserved in the raw log and not double-counted in primary totals. The full360802-byte test log is unmodified. Existing macOS configuration and shared target/jobs2/debug0/incremental0 were used. Origin/main was fetched and remained a634; the branch merge was already up to date.
+
+The code SHA stays cfd9565b and new lock SHA4d036d1c. Fresh audit and cargo-deny qualification are in the parent focused lock package: audit--denywarnings exited0, and four deny checks passed with50 original configured duplicate warnings whose exact group versions were unchanged. This engineering directory does not relabel duplicate output as warning-free or alter any CI/deny policy.
+
+Prior old-lock six receipts remain in the separately committed Git-branch package and are not overwritten. Source classification/current strict snapshot, remote required CI, exact published-main tree reconciliation, SDK pin/Host consumer verification and registry publication are distinct steps owned by Root. Cargo was released after every actual subprocess terminated. This package is ready for a bounded final engineering receipt review; no source changes or extra conditional feature matrix are introduced.
