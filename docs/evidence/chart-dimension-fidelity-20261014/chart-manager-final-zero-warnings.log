@@ -1,0 +1,11 @@
+   Compiling echo_agent v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward)
+    Finished `test` profile [unoptimized] target(s) in 2.15s
+     Running tests/chart_dimension_contract.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/deps/chart_dimension_contract-463206e43c80c0fe)
+
+running 3 tests
+test chart_dimension_validator_and_manager_preserve_defaults_and_boundaries ... ok
+test chart_dimension_schema_and_manager_reject_out_of_range_integer ... ok
+test chart_dimension_schema_manager_reject_supplied_noninteger_values ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+

@@ -60,10 +60,14 @@ impl Tool for GenerateChartTool {
                 },
                 "width": {
                     "type": "integer",
+                    "minimum": 0,
+                    "maximum": u32::MAX,
                     "description": "Chart width in pixels (default 600)"
                 },
                 "height": {
                     "type": "integer",
+                    "minimum": 0,
+                    "maximum": u32::MAX,
                     "description": "Chart height in pixels (default 400)"
                 },
                 "output_format": {
@@ -104,15 +108,8 @@ impl Tool for GenerateChartTool {
                 .get("data")
                 .ok_or_else(|| ToolError::MissingParameter("data".to_string()))?;
 
-            let width = parameters
-                .get("width")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(600) as u32;
-
-            let height = parameters
-                .get("height")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(400) as u32;
+            let width = chart_dimension(&parameters, "width", 600)?;
+            let height = chart_dimension(&parameters, "height", 400)?;
 
             let output_format = parameters
                 .get("output_format")
@@ -139,6 +136,28 @@ impl Tool for GenerateChartTool {
             Ok(ToolResult::success(output))
         })
     }
+}
+
+// Defaults apply only to omitted arguments. Direct Tool callers also need the
+// same lossless u32 range as the canonical schema, without a narrowing cast.
+fn chart_dimension(parameters: &ToolParameters, name: &str, default: u32) -> Result<u32> {
+    let Some(value) = parameters.get(name) else {
+        return Ok(default);
+    };
+    let integer = value.as_u64().ok_or_else(|| ToolError::InvalidParameter {
+        name: name.to_string(),
+        message: "expected an unsigned integer in 0..=4294967295".to_string(),
+    })?;
+    u32::try_from(integer).map_err(|_| {
+        ToolError::InvalidParameter {
+            name: name.to_string(),
+            message: format!(
+                "value {integer} exceeds the maximum chart dimension {}",
+                u32::MAX
+            ),
+        }
+        .into()
+    })
 }
 
 // ── Vega-Lite Spec Builder ───────────────────────────────────────────────────
@@ -297,4 +316,104 @@ fn generate_html_page(spec: &Value, title: &str) -> String {
 </html>"#,
         display_title, display_title, "Interactive Chart", spec_json
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use echo_core::error::ReactError;
+
+    fn chart_parameters() -> ToolParameters {
+        ToolParameters::from([
+            ("chart_type".to_string(), serde_json::json!("bar")),
+            ("x_field".to_string(), serde_json::json!("类别😀")),
+            ("y_field".to_string(), serde_json::json!("值")),
+            (
+                "data".to_string(),
+                serde_json::json!([{ "类别😀": "甲", "值": 1 }]),
+            ),
+        ])
+    }
+
+    async fn assert_chart_dimension_rejected(field: &str, value: Value) -> Result<()> {
+        let mut parameters = chart_parameters();
+        parameters.insert(field.to_string(), value.clone());
+        let result = GenerateChartTool.execute(parameters).await;
+        match result {
+            Err(ReactError::Tool(error)) => match error.as_ref() {
+                ToolError::InvalidParameter { name, message }
+                    if name == field && !message.is_empty() =>
+                {
+                    Ok(())
+                }
+                other => Err(ReactError::Other(format!(
+                    "{field}={value} wrong error: {other}"
+                ))),
+            },
+            Err(error) => Err(ReactError::Other(format!(
+                "{field}={value} wrong error domain: {error}"
+            ))),
+            Ok(result) => Err(ReactError::Other(format!(
+                "{field}={value} silently produced chart: {}",
+                result.output
+            ))),
+        }
+    }
+
+    #[tokio::test]
+    async fn chart_dimensions_reject_u32_overflow_instead_of_wrapping() -> Result<()> {
+        assert_chart_dimension_rejected("width", serde_json::json!(4294967296_u64)).await?;
+        assert_chart_dimension_rejected("height", serde_json::json!(4294967297_u64)).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn chart_dimensions_reject_supplied_invalid_values_instead_of_defaulting() -> Result<()> {
+        for field in ["width", "height"] {
+            for value in [
+                serde_json::json!(-1),
+                serde_json::json!(1.5),
+                serde_json::json!(1.0),
+                serde_json::json!("600"),
+                serde_json::json!(true),
+                Value::Null,
+            ] {
+                assert_chart_dimension_rejected(field, value).await?;
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn chart_dimensions_preserve_original_valid_range_and_missing_defaults() -> Result<()> {
+        let result = GenerateChartTool.execute(chart_parameters()).await?;
+        let spec: Value = serde_json::from_str(&result.output)?;
+        if spec.get("width").and_then(Value::as_u64) != Some(600)
+            || spec.get("height").and_then(Value::as_u64) != Some(400)
+        {
+            return Err(ReactError::Other(
+                "missing dimensions lost original defaults".to_string(),
+            ));
+        }
+        for (width, height) in [
+            (321_u64, 123_u64),
+            (0, 0),
+            (1, 1),
+            (u64::from(u32::MAX), u64::from(u32::MAX)),
+        ] {
+            let mut parameters = chart_parameters();
+            parameters.insert("width".to_string(), serde_json::json!(width));
+            parameters.insert("height".to_string(), serde_json::json!(height));
+            let result = GenerateChartTool.execute(parameters).await?;
+            let spec: Value = serde_json::from_str(&result.output)?;
+            if spec.get("width").and_then(Value::as_u64) != Some(width)
+                || spec.get("height").and_then(Value::as_u64) != Some(height)
+            {
+                return Err(ReactError::Other(format!(
+                    "valid chart dimensions changed: {width}x{height}"
+                )));
+            }
+        }
+        Ok(())
+    }
 }

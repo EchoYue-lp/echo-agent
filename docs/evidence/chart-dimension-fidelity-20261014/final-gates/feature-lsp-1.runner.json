@@ -1,0 +1,29 @@
+{
+  "label": "framework-final-feature-lsp",
+  "command": [
+    "env",
+    "CARGO_TARGET_DIR=/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target",
+    "CARGO_BUILD_JOBS=2",
+    "CARGO_PROFILE_DEV_DEBUG=0",
+    "CARGO_PROFILE_TEST_DEBUG=0",
+    "CARGO_INCREMENTAL=0",
+    "cargo",
+    "check",
+    "-p",
+    "echo_agent",
+    "--no-default-features",
+    "--features",
+    "lsp",
+    "--locked"
+  ],
+  "cwd": "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward",
+  "logPath": "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/admin/framework-chart-final-gates/feature-lsp-1.log",
+  "exitCode": 0,
+  "signal": null,
+  "errorCode": null,
+  "truncated": false,
+  "bytesSeen": 343,
+  "bytesWritten": 343,
+  "startedAt": "2026-10-14T00:03:55.104Z",
+  "finishedAt": "2026-10-14T00:04:02.390Z"
+}

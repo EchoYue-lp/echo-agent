@@ -4,7 +4,7 @@ id: map.tool-permission-sandbox
 kind: capability_map
 title: Tool、Permission、Sandbox 与外部 Effect
 risk: high
-observed_at: source:1d52da61582a363ec3a3468772f2b789e76b4e043e7797e85f897411361a22fd
+observed_at: source:07caadeefd3db109af0778911e6c3fe16539c3eca9ca95baddc2ed1a59a489d8
 boundary_refs:
 - boundary.tool-permission-sandbox
 behavior_refs:
@@ -48,6 +48,7 @@ evidence_refs:
 - evidence.clinical-trials-total-repair
 - evidence.clinical-trials-total-verification
 - evidence.native-tool-value-full-gates
+- evidence.chart-dimension-fidelity
 finding_refs:
 - finding.tool-read-cache-scope
 - finding.tool-read-cache-inflight-invalidation-race
@@ -74,6 +75,7 @@ finding_refs:
 - finding.database-runtime-cell-fidelity
 - finding.rag-preview-unicode-count
 - finding.clinical-trials-total-fidelity
+- finding.chart-dimension-fidelity
 audit_refs:
 - audit.tool-permission-sandbox.permission-external
 - audit.tool-permission-sandbox.failure-concurrency
@@ -385,6 +387,20 @@ scenarios:
     - evidence.native-tool-value-full-gates
     audit_refs:
     - audit.native-tool-value-final-rereview
+  chart-dimension-lossless-range:
+    status: needs_review
+    source_refs:
+    - echo-tools/src/chart.rs
+    - echo-tools/src/registry.rs
+    - tests/chart_dimension_contract.rs
+    evidence_refs:
+    - evidence.chart-dimension-fidelity
+    finding_refs:
+    - finding.chart-dimension-fidelity
+    unknown: Objective dimension wrap/default defect locally repaired; exactfinal
+      independentreview/fullgates/publishedmain pending.
+    next_step: Read exactsource and originalcounterexamples/6green; root fullframework/finalsemantic/main
+      acceptance before closure.
 ---
 
 
@@ -459,3 +475,5 @@ ClinicalTrials总量增量已映射：官方原始响应与3真实反例及新4�
 
 
 当前本地收口：三个值保真场景均具原反例、修复、当前验证和独立复审。23完整门禁实际3504/0/3optin、978source不变；三个localFinding resolved。该增量不提升原broad Tool map风险状态，不代替远端main、新SDK三语言或官网。
+
+Chart范围的当前源码观察和局部候选只覆盖上述新场景；旧宽范围证据不冒本轮验证。

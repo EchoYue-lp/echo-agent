@@ -1,0 +1,15 @@
+{
+  "auditExitCode": 0,
+  "denyExitCode": 0,
+  "compilerWarningsAcross23Gates": 0,
+  "denyPolicyWarnings": {
+    "duplicate": 50
+  },
+  "denyWarningsFollowExistingPolicy": true,
+  "newExceptions": [],
+  "policySha256": {
+    "deny.toml": "d2847230cc85ea94f95f616d258ec212d8aa487397b91d0f65e393ee97e38db9",
+    ".cargo/audit.toml": "492c8acc68663b2252daafa1a44d4a977b43d1f8461851dd92229d83a50dbd70"
+  },
+  "statements": "Dependency multiple-version warnings are configured warn; not compiler warnings or waived failure. No exclusions were changed."
+}

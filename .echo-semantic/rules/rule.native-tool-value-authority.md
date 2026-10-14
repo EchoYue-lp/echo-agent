@@ -2,14 +2,14 @@
 schema_version: 1
 id: rule.native-tool-value-authority
 kind: rule
-status: verified
+status: needs_review
 expectation: human_confirmed
 risk: medium
 primary_focus: state_authority
 focus:
 - contract_evidence
 - result_side_effect
-observed_at: source:1d52da61582a363ec3a3468772f2b789e76b4e043e7797e85f897411361a22fd
+observed_at: source:07caadeefd3db109af0778911e6c3fe16539c3eca9ca95baddc2ed1a59a489d8
 behavior_refs:
 - behavior.native-tool-value-fidelity
 code_refs:
@@ -31,10 +31,12 @@ evidence_refs:
 - evidence.clinical-trials-total-repair
 - evidence.clinical-trials-total-verification
 - evidence.native-tool-value-full-gates
+- evidence.chart-dimension-fidelity
 finding_refs:
 - finding.database-runtime-cell-fidelity
 - finding.rag-preview-unicode-count
 - finding.clinical-trials-total-fidelity
+- finding.chart-dimension-fidelity
 ---
 
 # 原生 Tool 值的唯一权威
@@ -70,3 +72,5 @@ try_get_raw 失败明确报错，实际 SQL NULL 才允许 JSON null；actual ty
 ## 限定当前验证范围
 
 本对象只对数据库actualcell/null/error转换、RAGscalar metadata和Clinical既有total字段三个列出承诺verified；23完整门禁及独立最终源码/工程复审已通过。前文needs_review/open记载属于focused阶段，当前三个具体Finding已local三链resolved。未验证PG/MySQL真实服务、全部Tools或Research providers；公开main、新Host三语言及官网依旧独立待验。DB/RAG原52eb审阅保持历史，不刷新为三项。
+
+Chart范围的当前源码观察和局部候选只覆盖上述新场景；旧宽范围证据不冒本轮验证。
