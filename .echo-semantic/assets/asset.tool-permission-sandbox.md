@@ -6,16 +6,66 @@ title: Tool、Permission 与 Sandbox Effect Pipeline
 asset_type: state_authority
 status: needs_review
 risk: high
-observed_at: 07e4270380c40df3f412f99c0aecb6145410cb2a
-boundary_refs: [boundary.tool-permission-sandbox]
-code_refs: [echo-core/src/tools/mod.rs, echo-core/src/tools/permission.rs, echo-core/src/tools/artifact.rs, echo-execution/src/tools.rs, echo-execution/src/sandbox/resource_owner.rs, echo-execution/src/sandbox/manager.rs, echo-execution/src/sandbox/docker.rs, echo-execution/src/sandbox/k8s.rs, echo-orchestration/src/human_loop/service.rs, src/agent/react/run/pipeline.rs, src/agent/react/mod.rs, echo-execution/src/skills/hooks.rs, echo-execution/src/sandbox/local.rs, echo-tools/src/git_worktree.rs]
-consumer_refs: [src/agent/react/subsystems/tool_exec.rs, echo-tools/src/lib.rs]
-behavior_refs: [behavior.effect-permission-execution]
-rule_refs: [rule.permission-effect-order]
-evidence_refs: [evidence.effects-extensions, evidence.streaming-tool-validation-repair, evidence.streaming-tool-validation-verification, evidence.tool-read-cache-authority-repair, evidence.tool-read-cache-authority-verification, evidence.tool-registry-owned-handle-repair, evidence.tool-registry-owned-handle-verification, evidence.hook-protected-path-repair, evidence.hook-protected-path-verification, evidence.readonly-tool-capability-repair, evidence.readonly-tool-capability-verification, evidence.effect-cleanup-owner-repair, evidence.effect-cleanup-owner-verification]
-finding_refs: [finding.tool-read-cache-scope, finding.tool-registry-mutation-active-call-deadlock, finding.streaming-tool-validation, finding.plan-mode-write-surface, finding.approval-authority, finding.hook-protected-path, finding.sandbox-minimum-isolation, finding.guard-direction-contract, finding.trace-audit-secret-boundary, finding.effect-cleanup-owner]
+observed_at: 046674d4775d31ddc2daad7107a8425edb648c8f
+boundary_refs:
+- boundary.tool-permission-sandbox
+code_refs:
+- echo-core/src/tools/mod.rs
+- echo-core/src/tools/permission.rs
+- echo-core/src/tools/artifact.rs
+- echo-execution/src/tools.rs
+- echo-execution/src/sandbox/resource_owner.rs
+- echo-execution/src/sandbox/manager.rs
+- echo-execution/src/sandbox/docker.rs
+- echo-execution/src/sandbox/k8s.rs
+- echo-orchestration/src/human_loop/service.rs
+- src/agent/react/run/pipeline.rs
+- src/agent/react/mod.rs
+- echo-execution/src/skills/hooks.rs
+- echo-execution/src/sandbox/local.rs
+- echo-tools/src/git_worktree.rs
+- echo-tools/src/git.rs
+consumer_refs:
+- src/agent/react/subsystems/tool_exec.rs
+- echo-tools/src/lib.rs
+- echo-tools/src/registry.rs
+behavior_refs:
+- behavior.effect-permission-execution
+- behavior.git-branch-switch-fidelity
+rule_refs:
+- rule.permission-effect-order
+- rule.git-branch-switch-authority
+evidence_refs:
+- evidence.effects-extensions
+- evidence.streaming-tool-validation-repair
+- evidence.streaming-tool-validation-verification
+- evidence.tool-read-cache-authority-repair
+- evidence.tool-read-cache-authority-verification
+- evidence.tool-registry-owned-handle-repair
+- evidence.tool-registry-owned-handle-verification
+- evidence.hook-protected-path-repair
+- evidence.hook-protected-path-verification
+- evidence.readonly-tool-capability-repair
+- evidence.readonly-tool-capability-verification
+- evidence.effect-cleanup-owner-repair
+- evidence.effect-cleanup-owner-verification
+- evidence.git-branch-switch-fidelity
+finding_refs:
+- finding.tool-read-cache-scope
+- finding.tool-registry-mutation-active-call-deadlock
+- finding.streaming-tool-validation
+- finding.plan-mode-write-surface
+- finding.approval-authority
+- finding.hook-protected-path
+- finding.sandbox-minimum-isolation
+- finding.guard-direction-contract
+- finding.trace-audit-secret-boundary
+- finding.effect-cleanup-owner
+- finding.git-branch-switch-dirty-path
 candidate_refs: []
 ---
+
+
 
 # Tool、Permission 与 Sandbox Effect Pipeline
 
@@ -38,3 +88,7 @@ PermissionPolicy、PermissionService 与 Hook decision 是组合层，不应各�
 ## 未知与限制
 
 Hook Allow protected-path、readonly custom Tool 与 #47 精确资源 cleanup 反例已闭合；其它 Hook permission precedence 和部分工具 cleanup 仍等待专项审计。
+
+## 现有GitTool分支切换具体闭合
+
+只新增GitBranchTool switch原根缺陷的源码/四场景消费，nativeGit维持唯一repo事实。实际原CLI2/Tool3fail→same4pass与最后保护oracle/源码独审支持具体localresolved。此模型当前observed定位046674保存的a193原source文件/新场景，其他旧正文与对象状态全部保留；不把原DB/RAG verified平移为全部Git，也不扩大原permission/cleanup闭合。最终snapshot/remoteCI及SDKpublishedpin消费者独立。

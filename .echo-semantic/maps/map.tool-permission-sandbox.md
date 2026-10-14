@@ -4,15 +4,17 @@ id: map.tool-permission-sandbox
 kind: capability_map
 title: Tool、Permission、Sandbox 与外部 Effect
 risk: high
-observed_at: b48c6d653582223499f90ddb7a57161f530c6185
+observed_at: 046674d4775d31ddc2daad7107a8425edb648c8f
 boundary_refs:
 - boundary.tool-permission-sandbox
 behavior_refs:
 - behavior.effect-permission-execution
 - behavior.native-tool-value-fidelity
+- behavior.git-branch-switch-fidelity
 rule_refs:
 - rule.permission-effect-order
 - rule.native-tool-value-authority
+- rule.git-branch-switch-authority
 evidence_refs:
 - evidence.effects-extensions
 - evidence.high-risk-audit-frontier
@@ -49,6 +51,7 @@ evidence_refs:
 - evidence.clinical-trials-total-verification
 - evidence.native-tool-value-full-gates
 - evidence.chart-dimension-fidelity
+- evidence.git-branch-switch-fidelity
 finding_refs:
 - finding.tool-read-cache-scope
 - finding.tool-read-cache-inflight-invalidation-race
@@ -76,6 +79,7 @@ finding_refs:
 - finding.rag-preview-unicode-count
 - finding.clinical-trials-total-fidelity
 - finding.chart-dimension-fidelity
+- finding.git-branch-switch-dirty-path
 audit_refs:
 - audit.tool-permission-sandbox.permission-external
 - audit.tool-permission-sandbox.failure-concurrency
@@ -95,6 +99,7 @@ audit_refs:
 - audit.native-tool-value-final-rereview
 - audit.clinical-trials-total-rereview
 - audit.chart-dimension-fidelity-rereview
+- audit.git-branch-switch-rereview
 related_map_refs:
 - map.agent-session-turn
 - map.task-subagent-workflow
@@ -400,7 +405,30 @@ scenarios:
     - finding.chart-dimension-fidelity
     audit_refs:
     - audit.chart-dimension-fidelity-rereview
+  git-branch-switch-dirty-state:
+    status: mapped
+    source_refs:
+    - echo-tools/src/git.rs#GitBranchTool
+    - echo-tools/src/git.rs#git_branch_switch_existing_branch_without_same_named_file
+    - echo-tools/src/git.rs#git_branch_switch_preserves_dirty_same_named_tracked_file
+    - echo-tools/src/git.rs#git_branch_switch_conflicting_dirty_changes_fail_without_mutation
+    - echo-tools/src/git.rs#git_branch_switch_invalid_option_and_missing_targets_preserve_repo
+    - echo-tools/README.md
+    behavior_refs:
+    - behavior.git-branch-switch-fidelity
+    rule_refs:
+    - rule.git-branch-switch-authority
+    evidence_refs:
+    - evidence.git-branch-switch-fidelity
+    finding_refs:
+    - finding.git-branch-switch-dirty-path
+    audit_refs:
+    - audit.git-branch-switch-rereview
+    review_scope: specific fouractualbranchswitch cases only; original otherToolrisk/model
+      unchanged
 ---
+
+
 
 
 
@@ -476,3 +504,7 @@ ClinicalTrials总量增量已映射：官方原始响应与3真实反例及新4�
 当前本地收口：三个值保真场景均具原反例、修复、当前验证和独立复审。23完整门禁实际3504/0/3optin、978source不变；三个localFinding resolved。该增量不提升原broad Tool map风险状态，不代替远端main、新SDK三语言或官网。
 
 Chart范围的当前源码观察和局部候选只覆盖上述新场景；旧宽范围证据不冒本轮验证。
+
+## 现有GitTool分支切换具体闭合
+
+只新增GitBranchTool switch原根缺陷的源码/四场景消费，nativeGit维持唯一repo事实。实际原CLI2/Tool3fail→same4pass与最后保护oracle/源码独审支持具体localresolved。此模型当前observed定位046674保存的a193原source文件/新场景，其他旧正文与对象状态全部保留；不把原DB/RAG verified平移为全部Git，也不扩大原permission/cleanup闭合。最终snapshot/remoteCI及SDKpublishedpin消费者独立。
