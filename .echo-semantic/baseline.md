@@ -3,8 +3,8 @@ schema_version: 1
 id: baseline.repository
 kind: baseline
 source_snapshot:
-  base_revision: b9099558620f5f9693c736c85c214db14f62a8cb
-  content_digest: 436a5153c5b7a29a7ea6b81fe972ae5ed368d9dfb6a8f6a0e0687458b2b96d00
+  base_revision: 2c9f1e41fcf1350337157a8bd80c304b1b0242a4
+  content_digest: 399c6b119b30d0b29a8996c97bc074a8de36509adaa67fb3141e6eae1884fa28
 inventory_closure: closed
 behavior_model_closure: closed
 map_refs:
@@ -502,3 +502,9 @@ Channel invocation本地三链现已闭合：same source d056完整23/current23/
 当前D候选绑定source:1d52da61582a363ec3a3468772f2b789e76b4e043e7797e85f897411361a22fd，可恢复主线祖先仍95ec66c6083a8feb17a1c28de0d01e1a24ca8a28。DB/RAG原focused与独立复审保持真实52eb905fe03711151508d1f439f87a863edaa839（source782）历史，不扩大至Clinical。Clinical新增URL countTotal及响应totalCount错误合同有独立原始old/new证据，当前Finding仍open等新复审。新3场景归原Tool map及限定native value Behavior/Rule；原宽对象未提升状态，未新增公共API/状态权威或接受新语言identity。
 
 原N11对象原source:d056精确等已发布554f，全部引用逐blob同，已改为历史Git定位保留原审查范围/时间/状态。614项任务范围校验错误来自installed0.5对历史SDK引用直接读当前树的限制，原始命令及stderr见evidence.native-value-semantic-history-reader-limit；不删引用或恢复迁出的SDK。全项目strict snapshot/change-evidence按真实历史Git继续执行；该限制不代替新完整23、baseline native3、独立复审、SDK消费者或精确main验收。
+
+## 本次Git修复的精确源码快照维护
+
+原基线 source_snapshot {"base_revision": "b9099558620f5f9693c736c85c214db14f62a8cb", "content_digest": "436a5153c5b7a29a7ea6b81fe972ae5ed368d9dfb6a8f6a0e0687458b2b96d00"} 属原框架已发布阶段。此次只在本GitTool根缺陷及原依赖锁安全补丁/正式归档全部真实提交后计算官方源码摘要；当前观察Git 2c9f1e41fcf1350337157a8bd80c304b1b0242a4 的source_digest_at_revision与工作树source_digest严格相同 399c6b119b30d0b29a8996c97bc074a8de36509adaa67fb3141e6eae1884fa28。历史Evidence/Audit各自observed与原执行时间不批量换成当前；新Git具体对象/三链及原a193六门禁收据分别保原范围，后继security锁/门禁有自己的原始证据。
+
+本次没有新增公共API、第二Git权威、运行时模型或强force行为。原区域分类与两个closure值原样保持；GitBranch四场景specific verified不扩大原DB/RAG或全部平台/SDK消费者，remote/main交付仍由对应实际结果验收。机器任务基准按真实fresh preflight当前HEAD验证；a634起点的完整已提交差异另在有界semantic-diff及连续性报告保全，不把最终任务机器base伪说成原a634全检查通过。
