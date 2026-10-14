@@ -432,3 +432,33 @@ echo_agent = { version = "0.2", features = ["eval"] }  # + eval replay
 echo_agent = { version = "0.2", features = ["improve"] }  # + trajectory and lifecycle helpers
 echo_agent = { version = "0.2", features = ["improve", "eval"] }  # + eval-driven analysis
 ```
+
+### Embedding process telemetry
+
+The `telemetry` feature exports OTLP traces and metrics to a gRPC collector.
+`init_telemetry(TelemetryConfig)` and `shutdown_telemetry()` are synchronous
+provider lifecycle calls. Async applications must call them through
+`tokio::task::spawn_blocking` while the original Tokio runtime remains alive;
+provider construction and shutdown may wait for exporter tasks.
+
+An embedding application with an existing logger installs `telemetry_layer()`
+with its subscriber at startup. Keep that OpenTelemetry layer stable: wrapping
+the entire layer in a reload layer breaks span context downcasting. Formatting
+belongs to one application fmt layer. Its original diagnostic filter can be ORed
+with `telemetry_console_filter()`; the latter observes the original framework
+runtime's `enable_console` flag. An ACP Host writes that fmt layer to stderr.
+Apply diagnostic filters to formatting, not to the whole subscriber, so they do
+not suppress otherwise configured OpenTelemetry spans.
+
+The layer delegates IDs, sampling and export to the framework's original
+provider. Spans created before initialization are not exported retroactively;
+new spans after initialization retain normal parent/child context. An unrelated
+already-installed subscriber causes an explicit initialization error. Exporter
+construction failure does not install a standalone subscriber or publish metrics.
+
+Initialization is once per process. Shutdown flushes ended spans and recorded
+metrics and retains the original initialized-status fact; it does not permit
+reinitialization. Repeated shutdown reports the provider's error. Shutdown does
+not promise delivery of spans still active at that boundary or records created
+after shutdown. Collector acceptance is validated in
+`tests/telemetry_composition.rs`; the test collector is not a framework service.

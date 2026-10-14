@@ -143,6 +143,10 @@ jsonwebtoken = { version = "9", optional = true }
 rusqlite = { version = "0.32.1", features = ["bundled"], optional = true }
 
 [dev-dependencies]
+# Test-only local OTLP collector; these exact versions already exist in the lockfile.
+opentelemetry-proto = { version = "=0.27.0", default-features = false, features = ["gen-tonic", "trace", "metrics", "with-serde"] }
+tonic = { version = "=0.12.3", features = ["transport"] }
+tokio-stream = { version = "=0.1.19", features = ["net"] }
 proptest = "1"
 criterion = { version = "0.5", features = ["html_reports"] }
 

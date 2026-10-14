@@ -229,7 +229,7 @@ echo-agent ships with **67 registered tools** across 8 crates. The prelude expos
 | **Media Tools** | PDF, Excel, Word, multimodal image viewing | `ViewImageTool` |
 | **Data Tools** | Polars-powered filter, aggregate, transform, stats | `DataReadTool` |
 | **Sandbox** | Local / Docker / K8s code execution with limits | `LocalSandbox::new()` |
-| **OpenTelemetry** | Distributed tracing and metrics via OTLP | `init_telemetry(&config)` |
+| **OpenTelemetry** | Distributed tracing and metrics via OTLP | `init_telemetry(config)` |
 | **Snapshot/Rollback** | Capture & restore agent state at any point | `agent.snapshot()` / `agent.rollback(1)` |
 | **Circuit Breaker** | Auto-fail-fast when LLM is down | `agent.set_circuit_breaker(config)` |
 
