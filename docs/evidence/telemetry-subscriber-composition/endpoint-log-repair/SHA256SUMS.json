@@ -1,0 +1,14 @@
+{
+  "before-telemetry.rs.txt": "7b35416fc7f1eacaa6e5373bc8babd9e35552a74a71c4409ca3b35be17210ed9",
+  "endpoint-log-after.log": "fe7add8a77c46ed8c3bccd8d334cc49ec7354fc847c6bc052548efd030f02918",
+  "endpoint-log-before.log": "0268b2ba081a2acc641ed0c4c7a83d3af1b6b19a7bece1f0118a4170f88c8edc",
+  "no-endpoint-log-binaries.json": "66966959fa9f01396c69437977067389b2171c5258ed786bd67b620259dfe9e2",
+  "receipt.json": "d1976d39a22a8f4dfe0f6bffec3353bade748540d27ce00e89c6e9cb6ebc90ae",
+  "sdk-secret-host-build.log": "258f0c6d7c3e845ccc8f0fc8d428df140ddb305fbdd22c53e9b0e086f69b87e0",
+  "secret-final-tests.log": "21490ee9bcdc3974179eda7ed0daf398002971406436a3486719cf1789964386",
+  "secret-fmt-check.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "secret-fmt.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "secret-lint.log": "6a12171aaf72ea4f49fdfddbc9392cdbff21a90818e8cd3934ff6f8908bc01d9",
+  "telemetry.rs.txt": "52724271a9d0021cd850cf35dfe27c9e4f364e82908a581809cbf76c667ff269",
+  "telemetry_composition.rs.txt": "996048f7eba783d008fbd01731edca53d345619684e1e903bf6b9fdd42233feb"
+}

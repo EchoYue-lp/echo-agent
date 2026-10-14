@@ -1,0 +1,98 @@
+   Compiling syn v3.0.3
+   Compiling libc v0.2.189
+   Compiling memchr v2.8.3
+   Compiling cfg-if v1.0.4
+   Compiling syn v2.0.119
+   Compiling serde_core v1.0.229
+   Compiling pin-project-lite v0.2.17
+   Compiling futures-core v0.3.34
+   Compiling typenum v1.20.1
+   Compiling serde v1.0.229
+   Compiling futures-sink v0.3.34
+   Compiling futures-channel v0.3.34
+   Compiling generic-array v0.14.7
+   Compiling serde_derive v1.0.229
+   Compiling futures-macro v0.3.34
+   Compiling slab v0.4.12
+   Compiling futures-io v0.3.34
+   Compiling futures-task v0.3.34
+   Compiling futures-util v0.3.34
+   Compiling num-traits v0.2.19
+   Compiling getrandom v0.3.4
+   Compiling zerocopy v0.8.56
+   Compiling serde_json v1.0.151
+   Compiling itoa v1.0.18
+   Compiling rand_core v0.9.5
+   Compiling zmij v1.0.23
+   Compiling block-buffer v0.10.4
+   Compiling crypto-common v0.1.7
+   Compiling serde_derive_internals v0.29.1
+   Compiling tokio-macros v2.7.2
+   Compiling aho-corasick v1.1.5
+   Compiling ppv-lite86 v0.2.21
+   Compiling regex-syntax v0.8.11
+   Compiling core-foundation-sys v0.8.7
+   Compiling once_cell v1.21.4
+   Compiling smallvec v1.15.2
+   Compiling bytes v1.12.1
+   Compiling scopeguard v1.2.0
+   Compiling lock_api v0.4.14
+   Compiling regex-automata v0.4.18
+   Compiling tokio v1.53.1
+   Compiling parking_lot_core v0.9.12
+   Compiling tracing-core v0.1.36
+   Compiling indexmap v2.14.0
+   Compiling iana-time-zone v0.1.65
+   Compiling rand_chacha v0.9.0
+   Compiling schemars_derive v0.8.22
+   Compiling digest v0.10.7
+   Compiling getrandom v0.4.3
+   Compiling futures-executor v0.3.34
+   Compiling async-stream-impl v0.3.6
+   Compiling tracing-attributes v0.1.31
+   Compiling thiserror-impl v2.0.20
+   Compiling cpufeatures v0.2.17
+   Compiling dyn-clone v1.0.20
+   Compiling ryu v1.0.23
+   Compiling libyaml-rs v0.3.0
+   Compiling thiserror v2.0.20
+   Compiling schemars v0.8.22
+   Compiling yaml_serde v0.10.7
+   Compiling sha2 v0.10.9
+   Compiling tracing v0.1.44
+   Compiling async-stream v0.3.6
+   Compiling futures v0.3.34
+   Compiling uuid v1.24.0
+   Compiling chrono v0.4.45
+   Compiling rand v0.9.5
+   Compiling tokio-util v0.7.19
+   Compiling parking_lot v0.12.5
+   Compiling regex v1.13.1
+   Compiling fs2 v0.4.3
+   Compiling semver v1.0.28
+   Compiling echo_core v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward/echo-core)
+    Finished `test` profile [unoptimized] target(s) in 23.26s
+     Running unittests src/lib.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/deps/echo_core-c4aee6da1047b46a)
+
+running 4 tests
+test agent::default_pure_text_chat_tests::default_pure_text_chat_setup_failure_remains_original_stream_error ... FAILED
+test agent::default_pure_text_chat_tests::default_pure_text_chat_owns_input_until_poll_and_retains_cancel_and_guard ... FAILED
+test agent::default_pure_text_chat_tests::default_pure_text_chat_rejects_every_nonlossless_message_without_legacy_call ... ok
+test agent::default_pure_text_chat_tests::default_pure_text_chat_invocation_keeps_existing_structured_override ... ok
+
+failures:
+
+---- agent::default_pure_text_chat_tests::default_pure_text_chat_setup_failure_remains_original_stream_error stdout ----
+Error: Other("this agent does not implement multimodal streaming (chat_stream_message_with_cancel)")
+
+---- agent::default_pure_text_chat_tests::default_pure_text_chat_owns_input_until_poll_and_retains_cancel_and_guard stdout ----
+Error: Other("this agent does not implement multimodal streaming (chat_stream_message_with_cancel)")
+
+
+failures:
+    agent::default_pure_text_chat_tests::default_pure_text_chat_owns_input_until_poll_and_retains_cancel_and_guard
+    agent::default_pure_text_chat_tests::default_pure_text_chat_setup_failure_remains_original_stream_error
+
+test result: FAILED. 2 passed; 2 failed; 0 ignored; 0 measured; 418 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p echo_core --lib`

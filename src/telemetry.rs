@@ -30,6 +30,7 @@ use opentelemetry_sdk::trace::TracerProvider;
 use std::sync::{Mutex, OnceLock};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::{Layer, filter::FilterExt as _};
 
 // ── Config ───────────────────────────────────────────────────────────────────
 
@@ -54,6 +55,116 @@ impl Default for TelemetryConfig {
     }
 }
 
+/// A stable OpenTelemetry layer for an embedding subscriber.
+///
+/// Install once before calling [`init_telemetry`]. The original process runtime
+/// remains the sole provider/exporter owner. Compose formatting separately with
+/// [`telemetry_console_filter`] so a Host needs only one stderr writer.
+/// These Rust helpers do not add cross-language SDK operations.
+pub fn telemetry_layer<S>() -> Box<dyn Layer<S> + Send + Sync>
+where
+    S: tracing::Subscriber
+        + for<'a> tracing_subscriber::registry::LookupSpan<'a>
+        + Send
+        + Sync
+        + 'static,
+{
+    let active =
+        tracing_subscriber::filter::dynamic_filter_fn(|_, _| TELEMETRY_RUNTIME.get().is_some());
+    tracing_opentelemetry::layer()
+        .with_tracer(RuntimeTracer)
+        // The marker proves composition, but must not enable callsites that
+        // both telemetry and the embedding diagnostic layer filter out.
+        .and_then(TelemetryLayerMarker)
+        .with_filter(telemetry_filter().and(active))
+        .boxed()
+}
+
+/// Optional console visibility controlled by the original telemetry runtime.
+///
+/// An embedding Host may OR this filter with its existing diagnostic filter on
+/// one fmt layer, retaining startup diagnostics without double-formatting events.
+pub fn telemetry_console_filter<S>() -> impl tracing_subscriber::layer::Filter<S> + Send + Sync
+where
+    S: tracing::Subscriber
+        + for<'a> tracing_subscriber::registry::LookupSpan<'a>
+        + Send
+        + Sync
+        + 'static,
+{
+    telemetry_filter().and(tracing_subscriber::filter::dynamic_filter_fn(|_, _| {
+        TELEMETRY_RUNTIME
+            .get()
+            .is_some_and(|runtime| runtime.enable_console)
+    }))
+}
+
+fn telemetry_filter() -> tracing_subscriber::EnvFilter {
+    tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
+}
+
+struct TelemetryLayerMarker;
+impl<S: tracing::Subscriber> Layer<S> for TelemetryLayerMarker {}
+
+struct RuntimeTracer;
+impl opentelemetry::trace::Tracer for RuntimeTracer {
+    type Span = opentelemetry::global::BoxedSpan;
+    fn build_with_context(
+        &self,
+        builder: opentelemetry::trace::SpanBuilder,
+        parent: &opentelemetry::Context,
+    ) -> Self::Span {
+        match TELEMETRY_RUNTIME.get() {
+            Some(runtime) => opentelemetry::global::BoxedTracer::new(Box::new(
+                runtime.tracer_provider.tracer("echo-agent"),
+            ))
+            .build_with_context(builder, parent),
+            None => opentelemetry::global::BoxedTracer::new(Box::new(
+                opentelemetry::trace::noop::NoopTracer::new(),
+            ))
+            .build_with_context(builder, parent),
+        }
+    }
+}
+impl tracing_opentelemetry::PreSampledTracer for RuntimeTracer {
+    fn sampled_context(
+        &self,
+        data: &mut tracing_opentelemetry::OtelData,
+    ) -> opentelemetry::Context {
+        match TELEMETRY_RUNTIME.get() {
+            Some(runtime) => tracing_opentelemetry::PreSampledTracer::sampled_context(
+                &runtime.tracer_provider.tracer("echo-agent"),
+                data,
+            ),
+            None => tracing_opentelemetry::PreSampledTracer::sampled_context(
+                &opentelemetry::trace::noop::NoopTracer::new(),
+                data,
+            ),
+        }
+    }
+    fn new_trace_id(&self) -> opentelemetry::trace::TraceId {
+        match TELEMETRY_RUNTIME.get() {
+            Some(runtime) => tracing_opentelemetry::PreSampledTracer::new_trace_id(
+                &runtime.tracer_provider.tracer("echo-agent"),
+            ),
+            None => tracing_opentelemetry::PreSampledTracer::new_trace_id(
+                &opentelemetry::trace::noop::NoopTracer::new(),
+            ),
+        }
+    }
+    fn new_span_id(&self) -> opentelemetry::trace::SpanId {
+        match TELEMETRY_RUNTIME.get() {
+            Some(runtime) => tracing_opentelemetry::PreSampledTracer::new_span_id(
+                &runtime.tracer_provider.tracer("echo-agent"),
+            ),
+            None => tracing_opentelemetry::PreSampledTracer::new_span_id(
+                &opentelemetry::trace::noop::NoopTracer::new(),
+            ),
+        }
+    }
+}
+
 // ── Metrics ──────────────────────────────────────────────────────────────────
 
 /// Global Metrics instance (lazy initialized)
@@ -64,6 +175,7 @@ static TELEMETRY_INIT_LOCK: Mutex<()> = Mutex::new(());
 struct TelemetryRuntime {
     tracer_provider: TracerProvider,
     meter_provider: SdkMeterProvider,
+    enable_console: bool,
 }
 
 /// Agent runtime metrics
@@ -170,6 +282,19 @@ pub fn init_telemetry(config: TelemetryConfig) -> Result<()> {
             "Telemetry is already initialized".to_string(),
         ));
     }
+    let composed = tracing::dispatcher::get_default(|dispatch| {
+        dispatch.downcast_ref::<TelemetryLayerMarker>().is_some()
+    });
+    if !composed
+        && !tracing::dispatcher::get_default(|dispatch| {
+            dispatch.is::<tracing::subscriber::NoSubscriber>()
+        })
+    {
+        return Err(ReactError::Other(
+            "tracing subscriber init failed: an incompatible subscriber is already installed"
+                .to_string(),
+        ));
+    }
     // ── Tracing ──
     let exporter = opentelemetry_otlp::SpanExporter::builder()
         .with_tonic()
@@ -185,33 +310,28 @@ pub fn init_telemetry(config: TelemetryConfig) -> Result<()> {
         )]))
         .build();
 
-    let tracer = provider.tracer("echo-agent");
-    let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
     let (metrics, meter_provider) = build_metrics(&config)?;
 
-    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-
-    if config.enable_console {
-        let fmt_layer = tracing_subscriber::fmt::layer()
-            .without_time()
-            .with_target(false);
-        tracing_subscriber::registry()
-            .with(env_filter)
-            .with(otel_layer)
-            .with(fmt_layer)
-            .try_init()
-            .map_err(|error| {
-                ReactError::Other(format!("tracing subscriber init failed: {error}"))
-            })?;
-    } else {
-        tracing_subscriber::registry()
-            .with(env_filter)
-            .with(otel_layer)
-            .try_init()
-            .map_err(|error| {
-                ReactError::Other(format!("tracing subscriber init failed: {error}"))
-            })?;
+    if !composed {
+        let installed = tracing_subscriber::registry()
+            .with(telemetry_layer())
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .without_time()
+                    .with_target(false)
+                    .with_filter(telemetry_console_filter()),
+            )
+            .try_init();
+        if let Err(error) = installed {
+            // An external subscriber may win the global-install race after
+            // the initial check. Keep globals unpublished and complete actual
+            // rollback before returning the original installation failure.
+            let _ = meter_provider.shutdown();
+            let _ = provider.shutdown();
+            return Err(ReactError::Other(format!(
+                "tracing subscriber init failed: {error}"
+            )));
+        }
     }
 
     // Publish globals only after exporters and the subscriber are all ready.
@@ -222,9 +342,11 @@ pub fn init_telemetry(config: TelemetryConfig) -> Result<()> {
         .set(TelemetryRuntime {
             tracer_provider: provider,
             meter_provider,
+            enable_console: config.enable_console,
         })
         .map_err(|_| ReactError::Other("Telemetry is already initialized".to_string()))?;
-    tracing::info!(endpoint = %config.otlp_endpoint, "Metrics initialized");
+    // Endpoint URIs may contain credentials in their query or user info.
+    tracing::info!("Metrics initialized");
 
     Ok(())
 }

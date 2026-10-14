@@ -1,0 +1,27 @@
+{
+  "baseRevision": "be5f0a8405b593c4ef964cd6fd2df4beabf4956c",
+  "frameworkRuntimeSource": "src/acp/runtime.rs",
+  "runtimeSha256": "bee15cec31068a0dc384e81bd1690558853f2ccf6192b38f57f738f869ffda1f",
+  "beforeRuntimeSha256": "d8446e7728f6883e903aa2b243b19b9cb722da79c729e1c27f73f35d5a0ffefe",
+  "oldProductionCaptureTests": {
+    "tests": 5,
+    "failures": 5,
+    "errors": 0
+  },
+  "fixedCaptureTests": {
+    "tests": 8,
+    "failures": 0,
+    "ignored": 0
+  },
+  "allAcpLib": {
+    "tests": 38,
+    "failures": 0,
+    "ignored": 0
+  },
+  "nativeOriginalHost": "bcb0389ae8d8a946fab9bb123945100722711029bafa8d9d6cadf95a76c9c345",
+  "nativeDiagnosticHost": "eb00038a0be7977f936514c7df8e06e329928f6735d466f292f10201a38abbf5",
+  "nativeThreeLanguages": "Each same source fails accepted=false on original Host and passes complete original-model steering/concurrent-wait/terminal proof on diagnostic Host; Java exact XML archived in SDK run-steer-native/java-original and java-diagnostic-fixed",
+  "candidateKnownCompatibilityGap": "Adding invocation to a legacy text chat selects existing structured method. A text-only third-party Agent default structured method rejects. Fix design/ownership extension pending root decision, not final PASS.",
+  "publishedProof": false,
+  "publicApiChanges": false
+}

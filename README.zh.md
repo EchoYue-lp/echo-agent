@@ -182,7 +182,7 @@ echo-agent 提供跨越 8 个 crate 的 **67 个注册工具**。Prelude 只导�
 | **媒体工具** | PDF、Excel、Word、多模态图片查看 | `ViewImageTool` |
 | **数据工具** | Polars 驱动的过滤、聚合、统计 | `DataReadTool` |
 | **沙箱** | Local / Docker / K8s 代码执行 | `LocalSandbox::new()` |
-| **OpenTelemetry** | 分布式追踪与指标 | `init_telemetry(&config)` |
+| **OpenTelemetry** | 分布式追踪与指标 | `init_telemetry(config)` |
 | **快照/回滚** | 任意时刻捕获和恢复 Agent 状态 | `agent.snapshot()` / `agent.rollback(1)` |
 | **熔断器** | LLM 不可用时自动快速失败 | `agent.set_circuit_breaker(config)` |
 

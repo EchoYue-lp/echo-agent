@@ -1,0 +1,14 @@
+   Compiling echo_agent v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/task-runtime-store-control)
+    Finished `test` profile [unoptimized] target(s) in 16.75s
+     Running tests/telemetry_composition.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/deps/telemetry_composition-cbc07894d36a66c0)
+
+running 6 tests
+test native_sdk_collector_fixture ... ok
+test incompatible_subscriber_rejection_leaves_metrics_unpublished ... ok
+test failed_exporter_build_does_not_install_standalone_subscriber ... ok
+test standalone_initialization_keeps_original_lifecycle ... ok
+test concurrent_initialization_has_one_winner ... ok
+test composed_layer_preserves_context_and_shutdown_flush ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+

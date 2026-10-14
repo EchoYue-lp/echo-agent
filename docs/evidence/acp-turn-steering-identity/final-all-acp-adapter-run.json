@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "sourceRoot": "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward",
+  "steps": [
+    {
+      "label": "final-all-acp-adapter",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "echo_agent",
+        "--features",
+        "acp",
+        "--test",
+        "acp_agent_adapter",
+        "--locked"
+      ],
+      "cwd": "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward",
+      "logPath": "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward/docs/evidence/acp-turn-steering-identity/final-all-acp-adapter.log",
+      "exitCode": 101,
+      "signal": null,
+      "errorCode": null,
+      "truncated": false,
+      "bytesSeen": 5569,
+      "bytesWritten": 5569,
+      "startedAt": "2026-10-14T03:27:45.655Z",
+      "finishedAt": "2026-10-14T03:27:48.351Z"
+    }
+  ],
+  "updatedAt": "2026-10-14T03:27:48.351Z"
+}

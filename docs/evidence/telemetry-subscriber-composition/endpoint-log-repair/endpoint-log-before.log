@@ -1,0 +1,16 @@
+   Compiling echo_agent v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/task-runtime-store-control)
+    Finished `test` profile [unoptimized] target(s) in 16.47s
+     Running tests/telemetry_composition.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/deps/telemetry_composition-cbc07894d36a66c0)
+
+running 1 test
+Error: Custom { kind: Other, error: "isolated telemetry case failed: \nrunning 1 test\ntest composed_layer_preserves_context_and_shutdown_flush ... FAILED\n\nfailures:\n\nfailures:\n    composed_layer_preserves_context_and_shutdown_flush\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.01s\n\n\n\nthread 'composed_layer_preserves_context_and_shutdown_flush' (132140390) panicked at tests/telemetry_composition.rs:388:13:\nendpoint credential must not enter configured diagnostics\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n" }
+test composed_layer_preserves_context_and_shutdown_flush ... FAILED
+
+failures:
+
+failures:
+    composed_layer_preserves_context_and_shutdown_flush
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `-p echo_agent --test telemetry_composition`

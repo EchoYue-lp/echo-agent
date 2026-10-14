@@ -1,0 +1,55 @@
+    Checking futures-io v0.3.34
+    Checking rustix v1.1.4
+    Checking futures-util v0.3.34
+    Checking serde_json v1.0.151
+    Checking tokio-util v0.7.19
+    Checking parking v2.2.1
+    Checking tempfile v3.27.0
+    Checking h2 v0.4.16
+    Checking native-tls v0.2.18
+    Checking tower v0.5.3
+    Checking tokio-native-tls v0.3.1
+    Checking futures-executor v0.3.34
+    Checking futures v0.3.34
+    Checking tower-http v0.6.11
+    Checking schemars v0.8.22
+    Checking futures-lite v2.6.1
+    Checking hyper v1.11.0
+    Checking event-listener v5.4.2
+    Checking concurrent-queue v2.5.0
+    Checking hyper-util v0.1.20
+    Checking event-listener-strategy v0.5.4
+    Checking polling v3.11.0
+    Checking async-io v2.6.0
+    Checking schemars v1.2.2
+    Checking hyper-tls v0.6.0
+    Checking reqwest v0.12.28
+    Checking jsonschema-value v0.49.9
+    Checking referencing v0.49.9
+    Checking echo_core v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward/echo-core)
+    Checking serde_with v3.22.0
+    Checking async-signal v0.2.14
+    Checking derive_more v2.1.1
+    Checking async-channel v2.5.0
+    Checking async-lock v3.4.2
+    Checking anyhow v1.0.104
+    Checking piper v0.2.5
+    Checking async-task v4.7.1
+    Checking fixedbitset v0.5.7
+    Checking jsonschema v0.49.9
+    Checking echo_state v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward/echo-state)
+    Checking futures-concurrency v7.7.1
+    Checking blocking v1.7.0
+    Checking agent-client-protocol-schema v1.7.0
+    Checking async-process v2.5.0
+   Compiling echo_macros v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward/echo-macros)
+    Checking shell-words v1.1.1
+    Checking rustc-hash v2.1.3
+    Checking echo_integration v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward/echo-integration)
+    Checking echo_tools v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward/echo-tools)
+    Checking echo_execution v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward/echo-execution)
+    Checking echo_orchestration v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward/echo-orchestration)
+    Checking agent-client-protocol v2.1.0
+    Checking tokio-stream v0.1.19
+    Checking echo_agent v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward)
+    Finished `dev` profile [unoptimized] target(s) in 26.93s

@@ -1,0 +1,35 @@
+--- before-reviewed-fixture/acp_agent_adapter.rs
++++ candidate/acp_agent_adapter.rs
+@@ -220,8 +220,31 @@
+     fn chat_stream_message_with_cancel<'a>(
+         &'a self,
+         message: Message,
+-        _cancel: CancellationToken,
++        cancel: CancellationToken,
+     ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
++        // A structured override must preserve its own ordinary text behavior:
++        // cancellation, gate barriers, tools and scripted failures are shared.
++        // Real Parts/ResourceLink rendering stays on the branch below.
++        let message = match message {
++            Message {
++                role: echo_agent::llm::types::Role::User,
++                content: MessageContent::Text(text),
++                tool_calls: None,
++                name: None,
++                tool_call_id: None,
++                reasoning_content: None,
++                reasoning_blocks: None,
++            } => {
++                return Box::pin(async move {
++                    let events = async_stream::try_stream! {
++                        let mut legacy = self.chat_stream_with_cancel(&text, cancel).await?;
++                        while let Some(event) = legacy.next().await { yield event?; }
++                    };
++                    Ok(Box::pin(events) as BoxStream<'a, Result<AgentEvent>>)
++                });
++            }
++            message => message,
++        };
+         let id = self.id;
+         let turn = self.turns.fetch_add(1, Ordering::AcqRel).saturating_add(1);
+         let rendered = match message.content {

@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "sourceRoot": "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward",
+  "steps": [
+    {
+      "label": "old-runtime-context-identity-capture",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "echo_agent",
+        "--features",
+        "acp",
+        "--lib",
+        "acp::runtime::turn_identity_tests",
+        "--locked"
+      ],
+      "cwd": "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward",
+      "logPath": "/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward/docs/evidence/acp-turn-steering-identity/old-runtime-capture-tests.log",
+      "exitCode": 101,
+      "signal": null,
+      "errorCode": null,
+      "truncated": false,
+      "bytesSeen": 5001,
+      "bytesWritten": 5001,
+      "startedAt": "2026-10-14T03:01:38.169Z",
+      "finishedAt": "2026-10-14T03:02:21.555Z"
+    }
+  ],
+  "updatedAt": "2026-10-14T03:02:21.555Z"
+}

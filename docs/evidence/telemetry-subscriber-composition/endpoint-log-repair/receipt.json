@@ -1,0 +1,41 @@
+{
+  "scope": "remove only raw endpoint field from original initialization event; no general URL redaction promise",
+  "beforeSourceSHA256": "7b35416fc7f1eacaa6e5373bc8babd9e35552a74a71c4409ca3b35be17210ed9",
+  "afterSourceSHA256": "52724271a9d0021cd850cf35dfe27c9e4f364e82908a581809cbf76c667ff269",
+  "testSourceSHA256": "996048f7eba783d008fbd01731edca53d345619684e1e903bf6b9fdd42233feb",
+  "before": {
+    "session": 93286,
+    "exitCode": 101,
+    "tests": 1,
+    "failed": 1,
+    "reason": "literal secret from a valid endpoint query occurs in formatted diagnostics"
+  },
+  "after": {
+    "session": 53518,
+    "exitCode": 0,
+    "realIsolatedCases": 5,
+    "passed": 6,
+    "utilityEmptyDiscovery": 1
+  },
+  "finalFormattedTests": {
+    "session": 74635,
+    "exitCode": 0,
+    "passed": 6,
+    "failed": 0,
+    "realIsolatedCases": 5
+  },
+  "clippy": {
+    "session": 12601,
+    "exitCode": 0
+  },
+  "fmt": {
+    "exitCode": 0
+  },
+  "fmtCheck": {
+    "exitCode": 0
+  },
+  "newDiagnosticHostSHA256": "4967dd4352d49b79fdc46bee8e3fa7f1c3e3e35660abb272bb348ee5adbbad6a",
+  "nativePipelinePriorProof": "../after/receipt.json",
+  "newPublicCloseProof": "../publicclose-approved/receipt.json",
+  "remaining": "independent increment review and combined framework/published pin/final gates"
+}

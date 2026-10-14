@@ -1,0 +1,421 @@
+--- before/src/acp/runtime.rs
++++ candidate/src/acp/runtime.rs
+@@ -600,6 +600,29 @@
+         BoxFuture<'static, agent_client_protocol::Result<()>>,
+     )> {
+         self.ensure_admission()?;
++        // The Session lease already allocated this ACP Turn. Pass that same
++        // identity into the Agent, rather than letting its stream entry mint
++        // an unrelated turn that tracked steering cannot address. Application
++        // TaskRun identity, lineage and invocation policy remain caller-owned.
++        let canonical_turn = spec.active.turn.id();
++        if spec.run_id != canonical_turn || spec.turn.identity.turn_id.as_str() != canonical_turn {
++            return Err(ReactError::Other(
++                "ACP Run identity must match the reserved Session Turn".to_string(),
++            ));
++        }
++        let mut turn = spec.turn;
++        let invocation = turn.invocation.get_or_insert_with(Default::default);
++        let runtime = invocation.runtime.get_or_insert_with(Default::default);
++        if runtime
++            .turn_id
++            .as_deref()
++            .is_some_and(|turn_id| turn_id != canonical_turn)
++        {
++            return Err(ReactError::Other(
++                "ACP invocation Turn identity conflicts with the reserved Session Turn".to_string(),
++            ));
++        }
++        runtime.turn_id = Some(canonical_turn.to_string());
+         let ledger = Arc::new(EventLedger::new(self.ledger_limits, spec.journal));
+         let entry = Arc::new(RunEntry::new(
+             spec.run_id.clone(),
+@@ -621,7 +644,6 @@
+             observers: spec.observers,
+         });
+         let agent = spec.session.agent.clone();
+-        let turn = spec.turn;
+         let drive_entry = entry.clone();
+         let lease = spec.active;
+         let task: BoxFuture<'static, agent_client_protocol::Result<()>> = Box::pin(async move {
+@@ -874,3 +896,380 @@
+         Ok(())
+     }
+ }
++
++#[cfg(test)]
++mod turn_identity_tests {
++    use super::*;
++    use crate::agent::{
++        Agent, AgentEvent, AgentInvocationContext, CancellationToken, EventIdentity,
++    };
++    use crate::llm::types::Message;
++    use crate::runtime::{TurnMode, TurnOutcome};
++    use crate::tools::{ExternalRunContext, NestedDelegationPolicy, SubagentLineage};
++    use futures::{StreamExt, stream::BoxStream};
++
++    #[derive(Clone, Default)]
++    struct CapturingAgent {
++        calls: Arc<StdMutex<Vec<(String, AgentInvocationContext)>>>,
++    }
++
++    impl CapturingAgent {
++        fn record<'a>(
++            &'a self,
++            text: String,
++            invocation: AgentInvocationContext,
++        ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
++            Box::pin(async move {
++                self.calls
++                    .lock()
++                    .unwrap_or_else(|e| e.into_inner())
++                    .push((text, invocation));
++                Ok(
++                    futures::stream::iter([Ok(AgentEvent::FinalAnswer("captured".to_string()))])
++                        .boxed(),
++                )
++            })
++        }
++    }
++
++    impl Agent for CapturingAgent {
++        fn name(&self) -> &str {
++            "original-context-consumer"
++        }
++        fn model_name(&self) -> &str {
++            "none"
++        }
++        fn system_prompt(&self) -> &str {
++            ""
++        }
++        fn tool_names(&self) -> Vec<String> {
++            Vec::new()
++        }
++        fn execute<'a>(&'a self, task: &'a str) -> BoxFuture<'a, Result<String>> {
++            Box::pin(async move { Ok(task.to_string()) })
++        }
++        fn execute_stream<'a>(
++            &'a self,
++            text: &'a str,
++        ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
++            self.record(text.to_string(), AgentInvocationContext::default())
++        }
++        fn chat_stream_with_cancel<'a>(
++            &'a self,
++            text: &'a str,
++            _cancel: CancellationToken,
++        ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
++            self.record(text.to_string(), AgentInvocationContext::default())
++        }
++        fn execute_stream_with_invocation_context<'a>(
++            &'a self,
++            text: &'a str,
++            _cancel: CancellationToken,
++            invocation: AgentInvocationContext,
++        ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
++            self.record(text.to_string(), invocation)
++        }
++        fn chat_stream_message_with_invocation_context<'a>(
++            &'a self,
++            message: Message,
++            _cancel: CancellationToken,
++            invocation: AgentInvocationContext,
++        ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
++            self.record(message.content.as_text().unwrap_or_default(), invocation)
++        }
++        fn execute_stream_message_with_invocation_context<'a>(
++            &'a self,
++            message: Message,
++            _cancel: CancellationToken,
++            invocation: AgentInvocationContext,
++        ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
++            self.record(message.content.as_text().unwrap_or_default(), invocation)
++        }
++    }
++
++    async fn prepared_session(
++        agent: CapturingAgent,
++    ) -> Result<(Arc<AcpConnectionServices>, Arc<AcpSession>)> {
++        let factory: Arc<dyn super::super::session::AcpSessionFactory> =
++            Arc::new(move |_context| {
++                let agent = agent.clone();
++                async move { Ok(Box::new(agent) as Box<dyn Agent>) }
++            });
++        let registry = Arc::new(SessionRegistry::new(factory, 4));
++        let services = Arc::new(AcpConnectionServices::new(
++            registry.clone(),
++            Arc::new(super::super::adapter::AcpAdapterConfig::default()),
++        ));
++        let context = super::super::session::AcpSessionContext {
++            session_id: SessionId::new("original-Session-中文"),
++            cwd: std::env::current_dir()?,
++            additional_directories: Vec::new(),
++            mcp_servers: Vec::new(),
++            client_capabilities: Default::default(),
++            meta: None,
++        };
++        let session_id = services.insert_session(context).await?;
++        let session = registry
++            .get(&session_id)
++            .await
++            .ok_or_else(|| ReactError::Other("original Session missing".to_string()))?;
++        Ok((services, session))
++    }
++
++    fn spec(
++        session: Arc<AcpSession>,
++        mode: TurnMode,
++        structured: bool,
++        invocation: Option<AgentInvocationContext>,
++    ) -> Result<RunStartSpec> {
++        let active = session.begin_turn()?;
++        let run_id = active.turn.id().to_string();
++        let identity = EventIdentity::for_chat(
++            Some(session.context.session_id.to_string()),
++            run_id.clone(),
++            active.turn.message_id.clone(),
++            Some(run_id.clone()),
++        )?;
++        let stream_id = identity.stream_id.to_string();
++        let mut turn = if structured {
++            TurnRequest::from_message(identity, Message::user("original input 中文🌊".to_string()))
++        } else {
++            TurnRequest::new(identity, "original input 中文🌊")
++        }
++        .mode(mode)
++        .cancel(active.turn.cancellation());
++        if let Some(invocation) = invocation {
++            turn = turn.invocation(invocation);
++        }
++        Ok(RunStartSpec {
++            session,
++            active,
++            run_id,
++            stream_id,
++            turn,
++            projector: None,
++            journal: None,
++            observers: Vec::new(),
++        })
++    }
++
++    async fn assert_identity(mode: TurnMode, structured: bool) -> Result<()> {
++        let agent = CapturingAgent::default();
++        let (services, session) = prepared_session(agent.clone()).await?;
++        let original = spec(session, mode, structured, None)?;
++        let expected = original.active.turn.id().to_string();
++        let (entry, task) = services.prepare_run(original).await?;
++        task.await.map_err(|e| ReactError::Other(e.to_string()))?;
++        let calls = agent.calls.lock().unwrap_or_else(|e| e.into_inner());
++        assert_eq!(calls.len(), 1);
++        let (text, context) = calls
++            .first()
++            .ok_or_else(|| ReactError::Other("Agent was not invoked".to_string()))?;
++        assert_eq!(text, "original input 中文🌊");
++        assert_eq!(
++            context.runtime.as_ref().and_then(|r| r.turn_id.as_deref()),
++            Some(expected.as_str())
++        );
++        assert!(
++            context
++                .runtime
++                .as_ref()
++                .and_then(|r| r.run_id.as_ref())
++                .is_none(),
++            "a chat Turn must not invent a TaskRun identity"
++        );
++        let receipt = entry
++            .receipt()
++            .ok_or_else(|| ReactError::Other("original receipt missing".to_string()))?;
++        assert_eq!(receipt.turn_id.as_str(), expected);
++        assert_eq!(receipt.outcome, TurnOutcome::Completed);
++        Ok(())
++    }
++
++    #[tokio::test]
++    async fn text_chat_uses_reserved_turn_identity_in_actual_agent_context() -> Result<()> {
++        assert_identity(TurnMode::Chat, false).await
++    }
++    #[tokio::test]
++    async fn structured_chat_uses_reserved_turn_identity_in_actual_agent_context() -> Result<()> {
++        assert_identity(TurnMode::Chat, true).await
++    }
++    #[tokio::test]
++    async fn text_execute_uses_reserved_turn_identity_in_actual_agent_context() -> Result<()> {
++        assert_identity(TurnMode::Execute, false).await
++    }
++    #[tokio::test]
++    async fn structured_execute_uses_reserved_turn_identity_in_actual_agent_context() -> Result<()>
++    {
++        assert_identity(TurnMode::Execute, true).await
++    }
++
++    #[tokio::test]
++    async fn original_task_lineage_and_invocation_permissions_survive_turn_binding() -> Result<()> {
++        let agent = CapturingAgent::default();
++        let (services, session) = prepared_session(agent.clone()).await?;
++        let policy = NestedDelegationPolicy {
++            can_spawn_subagents: true,
++            delegate_depth: 1,
++            max_delegate_depth: 3,
++        };
++        let lineage = SubagentLineage {
++            run_id: Some("TaskRun-original".to_string()),
++            task_id: Some("PlanTask-original".to_string()),
++            execution_id: Some("attempt-original".to_string()),
++            ..Default::default()
++        };
++        let invocation = AgentInvocationContext {
++            runtime: Some(ExternalRunContext {
++                run_id: Some("TaskRun-original".to_string()),
++                conversation_id: Some("conversation-original".to_string()),
++                delegation_policy: Some(policy),
++                subagent_lineage: Some(lineage.clone()),
++                ..Default::default()
++            }),
++            working_dir: Some(std::env::current_dir()?),
++            disabled_tools: Some(["blocked".to_string()].into()),
++            visible_tools: Some(["allowed".to_string()].into()),
++            history: Some(vec![Message::user("prior history".to_string())]),
++            ..Default::default()
++        };
++        let original = spec(session, TurnMode::Execute, false, Some(invocation))?;
++        let expected = original.run_id.clone();
++        let (entry, task) = services.prepare_run(original).await?;
++        task.await.map_err(|e| ReactError::Other(e.to_string()))?;
++        let calls = agent.calls.lock().unwrap_or_else(|e| e.into_inner());
++        let (_, context) = calls
++            .first()
++            .ok_or_else(|| ReactError::Other("Agent not invoked".to_string()))?;
++        let runtime = context
++            .runtime
++            .as_ref()
++            .ok_or_else(|| ReactError::Other("context runtime missing".to_string()))?;
++        assert_eq!(runtime.turn_id.as_deref(), Some(expected.as_str()));
++        assert_eq!(runtime.run_id.as_deref(), Some("TaskRun-original"));
++        assert_eq!(
++            runtime.conversation_id.as_deref(),
++            Some("conversation-original")
++        );
++        assert_eq!(runtime.delegation_policy, Some(policy));
++        assert_eq!(runtime.subagent_lineage, Some(lineage));
++        assert_eq!(context.working_dir, Some(std::env::current_dir()?));
++        assert_eq!(context.disabled_tools, Some(["blocked".to_string()].into()));
++        assert_eq!(context.visible_tools, Some(["allowed".to_string()].into()));
++        assert_eq!(
++            context
++                .history
++                .as_ref()
++                .and_then(|h| h.first())
++                .and_then(|m| m.content.as_text())
++                .as_deref(),
++            Some("prior history")
++        );
++        assert_eq!(
++            entry.receipt().map(|r| r.outcome.clone()),
++            Some(TurnOutcome::Completed)
++        );
++        Ok(())
++    }
++    #[tokio::test]
++    async fn explicit_conflicting_turn_rejects_before_publication_or_agent_invocation() -> Result<()>
++    {
++        let agent = CapturingAgent::default();
++        let (services, session) = prepared_session(agent.clone()).await?;
++        let original = spec(
++            session.clone(),
++            TurnMode::Chat,
++            false,
++            Some(AgentInvocationContext {
++                runtime: Some(ExternalRunContext {
++                    turn_id: Some("other-turn".to_string()),
++                    run_id: Some("TaskRun-original".to_string()),
++                    ..Default::default()
++                }),
++                ..Default::default()
++            }),
++        )?;
++        let run_id = original.run_id.clone();
++        let result = services.prepare_run(original).await;
++        assert!(
++            matches!(result, Err(ReactError::Other(message)) if message.contains("invocation Turn identity conflicts"))
++        );
++        assert!(services.run(&run_id).await.is_none());
++        assert!(
++            agent
++                .calls
++                .lock()
++                .unwrap_or_else(|e| e.into_inner())
++                .is_empty()
++        );
++        let replacement = session.begin_turn()?;
++        assert_ne!(replacement.turn.id(), run_id);
++        Ok(())
++    }
++
++    #[tokio::test]
++    async fn conflicting_run_or_request_identity_cannot_replace_reserved_turn() -> Result<()> {
++        for replace_request in [false, true] {
++            let agent = CapturingAgent::default();
++            let (services, session) = prepared_session(agent.clone()).await?;
++            let mut original = spec(session.clone(), TurnMode::Chat, false, None)?;
++            let run_id = original.run_id.clone();
++            if replace_request {
++                original.turn = TurnRequest::new(
++                    EventIdentity::for_chat(
++                        Some(session.context.session_id.to_string()),
++                        "forged-turn".to_string(),
++                        "forged-message".to_string(),
++                        None,
++                    )?,
++                    "same input",
++                );
++            } else {
++                original.run_id = "forged-run".to_string();
++            }
++            let result = services.prepare_run(original).await;
++            assert!(
++                matches!(result, Err(ReactError::Other(message)) if message.contains("Run identity must match"))
++            );
++            assert!(services.run(&run_id).await.is_none());
++            assert!(services.run("forged-run").await.is_none());
++            assert!(
++                agent
++                    .calls
++                    .lock()
++                    .unwrap_or_else(|e| e.into_inner())
++                    .is_empty()
++            );
++            let replacement = session.begin_turn()?;
++            assert_ne!(replacement.turn.id(), run_id);
++        }
++        Ok(())
++    }
++
++    #[tokio::test]
++    async fn explicit_matching_turn_is_preserved_without_reallocating_identity() -> Result<()> {
++        let agent = CapturingAgent::default();
++        let (services, session) = prepared_session(agent.clone()).await?;
++        let mut original = spec(session, TurnMode::Chat, false, None)?;
++        let run_id = original.run_id.clone();
++        original.turn.invocation = Some(AgentInvocationContext {
++            runtime: Some(ExternalRunContext {
++                turn_id: Some(run_id.clone()),
++                run_id: Some("TaskRun-retained".to_string()),
++                ..Default::default()
++            }),
++            ..Default::default()
++        });
++        let (entry, task) = services.prepare_run(original).await?;
++        task.await.map_err(|e| ReactError::Other(e.to_string()))?;
++        let calls = agent.calls.lock().unwrap_or_else(|e| e.into_inner());
++        let runtime = calls
++            .first()
++            .and_then(|(_, context)| context.runtime.as_ref())
++            .ok_or_else(|| ReactError::Other("Agent runtime missing".to_string()))?;
++        assert_eq!(runtime.turn_id.as_deref(), Some(run_id.as_str()));
++        assert_eq!(runtime.run_id.as_deref(), Some("TaskRun-retained"));
++        assert_eq!(entry.receipt().map(|r| r.turn_id.to_string()), Some(run_id));
++        Ok(())
++    }
++}

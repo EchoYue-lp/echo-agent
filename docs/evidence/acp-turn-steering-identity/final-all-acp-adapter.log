@@ -1,0 +1,102 @@
+    Finished `test` profile [unoptimized] target(s) in 0.58s
+     Running tests/acp_agent_adapter.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/deps/acp_agent_adapter-fe656c400afd3d49)
+
+running 26 tests
+test adapter_config_rejects_zero_resource_bounds ... ok
+test acp_fixtures_use_official_typed_messages ... ok
+test aborting_connection_future_keeps_preissued_close_owner_after_a_run ... ok
+test failed_agent_close_retries_on_connection_eof ... ok
+test journal_failure_before_terminal_fails_execution_and_delivery ... FAILED
+test cancel_run_routes_through_the_shared_cancellation_authority ... FAILED
+test ledger_bounds_retain_a_floor_and_clamp_memory ... ok
+test observer_failure_is_delivery_failure_without_rewriting_execution ... ok
+test cumulative_update_budget_stops_many_small_notifications ... FAILED
+test both_cancellation_routes_settle_prompt_without_blocking_dispatch ... FAILED
+test one_active_run_slot_is_shared_across_entry_points ... ok
+test invalid_session_and_concurrent_prompt_are_typed_errors ... FAILED
+test profile_flush_failure_still_awaits_agent_close_and_retries_on_eof ... ok
+test oversized_projected_update_fails_the_prompt_without_closing_the_connection ... ok
+test standard_adapter_rejects_connection_without_retained_close_owner ... ok
+test shared_authority_settles_extension_runs_with_exactly_one_terminal ... ok
+test resource_link_requires_structured_agent_support ... ok
+test text_only_agent_fallback_setup_error_keeps_original_canonical_failed_receipt ... ok
+test receipt_persistence_failure_never_returns_end_turn ... ok
+test standard_close_owner_retries_after_transport_and_eof_failures ... ok
+test terminal_projection_failure_never_returns_end_turn ... ok
+test official_client_observes_isolated_sessions_and_ordered_updates ... FAILED
+test text_only_agent_keeps_standard_plain_user_prompts_with_canonical_turn_context ... ok
+test resource_links_tools_and_framework_failures_keep_typed_boundaries ... FAILED
+test closing_official_channel_cancels_active_prompt_and_closes_agent ... FAILED
+test separate_sessions_drive_prompts_concurrently ... FAILED
+
+failures:
+
+---- journal_failure_before_terminal_fails_execution_and_delivery stdout ----
+
+thread 'journal_failure_before_terminal_fails_execution_and_delivery' (131981567) panicked at tests/acp_agent_adapter.rs:1703:5:
+assertion failed: matches!(receipt.outcome, TurnOutcome::Failed(_))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- cancel_run_routes_through_the_shared_cancellation_authority stdout ----
+
+thread 'cancel_run_routes_through_the_shared_cancellation_authority' (131981562) panicked at tests/acp_agent_adapter.rs:1763:9:
+assertion `left == right` failed
+  left: Completed
+ right: Cancelled
+
+---- cumulative_update_budget_stops_many_small_notifications stdout ----
+
+thread 'cumulative_update_budget_stops_many_small_notifications' (131981564) panicked at tests/acp_agent_adapter.rs:679:13:
+assertion `left == right` failed
+  left: None
+ right: Some(-32603: Internal error)
+
+---- both_cancellation_routes_settle_prompt_without_blocking_dispatch stdout ----
+
+thread 'both_cancellation_routes_settle_prompt_without_blocking_dispatch' (131981561) panicked at tests/acp_agent_adapter.rs:891:13:
+assertion `left == right` failed
+  left: EndTurn
+ right: Cancelled
+
+---- invalid_session_and_concurrent_prompt_are_typed_errors stdout ----
+
+thread 'invalid_session_and_concurrent_prompt_are_typed_errors' (131981566) panicked at tests/acp_agent_adapter.rs:1307:13:
+assertion `left == right` failed
+  left: EndTurn
+ right: Cancelled
+
+---- official_client_observes_isolated_sessions_and_ordered_updates stdout ----
+
+thread 'official_client_observes_isolated_sessions_and_ordered_updates' (131981570) panicked at tests/acp_agent_adapter.rs:831:5:
+assertion `left == right` failed
+  left: ["agent-0-turn-1-structured:hello", "agent-0-turn-2-structured:again", "agent-1-turn-1-structured:separate"]
+ right: ["agent-0-turn-1:hello", "agent-0-turn-2:again", "agent-1-turn-1:separate"]
+
+---- resource_links_tools_and_framework_failures_keep_typed_boundaries stdout ----
+
+thread 'resource_links_tools_and_framework_failures_keep_typed_boundaries' (131981576) panicked at tests/acp_agent_adapter.rs:1420:13:
+assertion `left == right` failed
+  left: None
+ right: Some(-32603: Internal error)
+
+---- closing_official_channel_cancels_active_prompt_and_closes_agent stdout ----
+Error: Error { code: -32603: Internal error, message: "Internal error", data: Some(String("timed out waiting for concurrent ACP Prompts")) }
+
+---- separate_sessions_drive_prompts_concurrently stdout ----
+Error: Error { code: -32603: Internal error, message: "Internal error", data: Some(String("timed out waiting for concurrent ACP Prompts")) }
+
+
+failures:
+    both_cancellation_routes_settle_prompt_without_blocking_dispatch
+    cancel_run_routes_through_the_shared_cancellation_authority
+    closing_official_channel_cancels_active_prompt_and_closes_agent
+    cumulative_update_budget_stops_many_small_notifications
+    invalid_session_and_concurrent_prompt_are_typed_errors
+    journal_failure_before_terminal_fails_execution_and_delivery
+    official_client_observes_isolated_sessions_and_ordered_updates
+    resource_links_tools_and_framework_failures_keep_typed_boundaries
+    separate_sessions_drive_prompts_concurrently
+
+test result: FAILED. 17 passed; 9 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.02s
+
+error: test failed, to rerun pass `-p echo_agent --test acp_agent_adapter`
