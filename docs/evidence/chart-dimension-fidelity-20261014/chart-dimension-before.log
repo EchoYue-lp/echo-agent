@@ -1,0 +1,38 @@
+   Compiling serde_json v1.0.151
+   Compiling h2 v0.4.16
+   Compiling idna v1.1.0
+   Compiling hyper v1.11.0
+   Compiling url v2.5.8
+   Compiling yaml_serde v0.10.7
+   Compiling hyper-util v0.1.20
+   Compiling schemars v0.8.22
+   Compiling hyper-tls v0.6.0
+   Compiling chrono v0.4.45
+   Compiling tower-http v0.6.11
+   Compiling reqwest v0.12.28
+   Compiling echo_core v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward/echo-core)
+   Compiling echo_tools v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward/echo-tools)
+    Finished `test` profile [unoptimized] target(s) in 10.02s
+     Running unittests src/lib.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/deps/echo_tools-80e8bc9156be4bb9)
+
+running 3 tests
+test chart::tests::chart_dimensions_reject_supplied_invalid_values_instead_of_defaulting ... FAILED
+test chart::tests::chart_dimensions_reject_u32_overflow_instead_of_wrapping ... FAILED
+test chart::tests::chart_dimensions_preserve_original_valid_range_and_missing_defaults ... ok
+
+failures:
+
+---- chart::tests::chart_dimensions_reject_supplied_invalid_values_instead_of_defaulting stdout ----
+Error: Other("width=-1 silently produced chart: {\n  \"$schema\": \"https://vega.github.io/schema/vega-lite/v5.json\",\n  \"data\": {\n    \"values\": [\n      {\n        \"值\": 1,\n        \"类别😀\": \"甲\"\n      }\n    ]\n  },\n  \"encoding\": {\n    \"x\": {\n      \"field\": \"类别😀\",\n      \"type\": \"nominal\"\n    },\n    \"y\": {\n      \"field\": \"值\",\n      \"type\": \"quantitative\"\n    }\n  },\n  \"height\": 400,\n  \"mark\": \"bar\",\n  \"width\": 600\n}")
+
+---- chart::tests::chart_dimensions_reject_u32_overflow_instead_of_wrapping stdout ----
+Error: Other("width=4294967296 silently produced chart: {\n  \"$schema\": \"https://vega.github.io/schema/vega-lite/v5.json\",\n  \"data\": {\n    \"values\": [\n      {\n        \"值\": 1,\n        \"类别😀\": \"甲\"\n      }\n    ]\n  },\n  \"encoding\": {\n    \"x\": {\n      \"field\": \"类别😀\",\n      \"type\": \"nominal\"\n    },\n    \"y\": {\n      \"field\": \"值\",\n      \"type\": \"quantitative\"\n    }\n  },\n  \"height\": 400,\n  \"mark\": \"bar\",\n  \"width\": 0\n}")
+
+
+failures:
+    chart::tests::chart_dimensions_reject_supplied_invalid_values_instead_of_defaulting
+    chart::tests::chart_dimensions_reject_u32_overflow_instead_of_wrapping
+
+test result: FAILED. 1 passed; 2 failed; 0 ignored; 0 measured; 38 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p echo_tools --lib`

@@ -11,7 +11,7 @@ focus:
 - result_side_effect
 - state_authority
 boundary: boundary.tool-permission-sandbox
-observed_at: source:1d52da61582a363ec3a3468772f2b789e76b4e043e7797e85f897411361a22fd
+observed_at: 848fa138e1edc077e017b399d891918ca1d3f949
 code_refs:
 - echo-tools/src/database.rs
 - echo-tools/src/rag.rs

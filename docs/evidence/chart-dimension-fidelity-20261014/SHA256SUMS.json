@@ -1,0 +1,107 @@
+[
+  {
+    "path": "README.md",
+    "bytes": 1865,
+    "sha256": "377b18265109360fbc9b4636ecd9a4ecdb0caf8d65bcc6957fe0c968d1bcd92a"
+  },
+  {
+    "path": "before-chart-source.rs.txt",
+    "bytes": 13732,
+    "sha256": "8448ae43b9fed5bc1c480c9374c1a5accc94d9433de7aa37405d5ddcc85be45d"
+  },
+  {
+    "path": "before-root-consumer-test.rs.txt",
+    "bytes": 3768,
+    "sha256": "1097f296f59e3d808ee0ce08223e10ade8d35d735119affbf23da9cbc870b6d3"
+  },
+  {
+    "path": "candidate.diff",
+    "bytes": 9702,
+    "sha256": "b9994f20fbf1fc01e8a5141eee66e5e9cb45bd8bb9d19f6905fa8dfa39ef7a82"
+  },
+  {
+    "path": "chart-dimension-after.log",
+    "bytes": 1095,
+    "sha256": "484a6e1fbfcedc5465ade350227e54518c7f889d51ad8ee2461727f3b0e4b870"
+  },
+  {
+    "path": "chart-dimension-before.log",
+    "bytes": 2718,
+    "sha256": "114da3faf31ec95e0918b0f1c839683ba58c59c6060c8f43961bb519b7900392"
+  },
+  {
+    "path": "chart-dimension-final-module-tests.log",
+    "bytes": 1095,
+    "sha256": "1f3fc503ca9184f8111e569327958521fab093f73a0ba8cb7713ede8ffe16ae0"
+  },
+  {
+    "path": "chart-dimension-production-clippy-green.log",
+    "bytes": 207,
+    "sha256": "1dcdbb09f0be0320bca79e614d5aab369f4f29032abfbe8f2276a24b959827d6"
+  },
+  {
+    "path": "chart-dimension-production-clippy.log",
+    "bytes": 2142,
+    "sha256": "290ae1ae1a95abe3df3545da0b6cbf0a7dd090650365baf58d893e65537bac18"
+  },
+  {
+    "path": "chart-manager-after.log",
+    "bytes": 2077,
+    "sha256": "327070de703598a053c2241d5533fb96f6990b26fd06d681db0fac5f53bd7990"
+  },
+  {
+    "path": "chart-manager-before.log",
+    "bytes": 8834,
+    "sha256": "f5af7acfc3006c723864ae0711495d54a4782a3e7fd78ea8e496c67b2389a23f"
+  },
+  {
+    "path": "chart-manager-final-tests.log",
+    "bytes": 2077,
+    "sha256": "a467edca9584aa3ce573e54d1d4d292b4e06a2f924f439f36017c4a00a47f610"
+  },
+  {
+    "path": "chart-manager-final-zero-warnings.log",
+    "bytes": 761,
+    "sha256": "e12bfd44398e8b3e3fc085109ae7c7e93b459761e5f886dfe9f99911140eb63b"
+  },
+  {
+    "path": "final-source/docs/adr/0083-shared-tool-input-validation.md",
+    "bytes": 2950,
+    "sha256": "d8f124ae77fbd37d653e35a9de67ef0df2ad3dd9c87e13d1651f86df9f7d9a1b"
+  },
+  {
+    "path": "final-source/docs/en/02-tools.md",
+    "bytes": 24667,
+    "sha256": "ed637765249ae367aa24aadb0cf6c96b4cebb42593844fe0e426bc959b2f716a"
+  },
+  {
+    "path": "final-source/docs/zh/02-tools.md",
+    "bytes": 23675,
+    "sha256": "191cc8f92fdb915abe9fc1ae8cf4c51da213681e61d5a3f92eb94640ae695235"
+  },
+  {
+    "path": "final-source/echo-tools/src/chart.rs.txt",
+    "bytes": 14549,
+    "sha256": "22afe7f63d9d66349f7d9419d06bb6cc2994903243b16735c34695992f3e5288"
+  },
+  {
+    "path": "final-source/echo-tools/src/registry.rs.txt",
+    "bytes": 11727,
+    "sha256": "352cfb110111cebd0d9792cf708d74220d93269fbd8972926fd4ce8e5fae1d79"
+  },
+  {
+    "path": "final-source/tests/chart_dimension_contract.rs.txt",
+    "bytes": 3750,
+    "sha256": "956d7bbf10d857c74b323e48c99b17075595db6b90fb954afecf2e41715694c3"
+  },
+  {
+    "path": "receipt.json",
+    "bytes": 7861,
+    "sha256": "d6e35906abf8041ca60c3807bb078420e722f65edf5ce75b58c5c985a3c237ff"
+  },
+  {
+    "path": "run.json",
+    "bytes": 7024,
+    "sha256": "80e108adf004125ab58fea66dad7fc788d766d86c59d4f18a4975d47827cf1f7"
+  }
+]

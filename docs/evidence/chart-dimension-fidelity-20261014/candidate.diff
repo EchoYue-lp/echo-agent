@@ -1,0 +1,235 @@
+diff --git a/docs/adr/0083-shared-tool-input-validation.md b/docs/adr/0083-shared-tool-input-validation.md
+index 4186f29a..baacd25f 100644
+--- a/docs/adr/0083-shared-tool-input-validation.md
++++ b/docs/adr/0083-shared-tool-input-validation.md
+@@ -51,3 +51,11 @@ The SDK separately rejects excess positional arguments, including trailing nulls
+ 
+ The helper's implementation is unchanged. Existing schema/custom-validation
+ regressions and direct-adapter counterexamples must pass before delivery.
++
++## Chart dimension representation
++
++The original GenerateChartTool stores dimensions as u32. Its schema now states
++minimum0/maximum4294967295, and direct Tool execution uses checked conversion.
++Defaults apply only when an argument is absent. This removes wrapping/defaulting
++of supplied invalid values while retaining zero and the complete original u32
++range; it adds no resource limit, public operation or parallel adapter validator.
+diff --git a/docs/en/02-tools.md b/docs/en/02-tools.md
+index 49e82846..6aaf2c08 100644
+--- a/docs/en/02-tools.md
++++ b/docs/en/02-tools.md
+@@ -583,6 +583,12 @@ each chunk's `char_count`. Its `preview` contains up to 200 scalars and
+ though their UTF-8 encoding occupies 210 bytes. This preview operation does not
+ modify the RAG index.
+ 
++`generate_chart` uses width/height unsigned integers in `0..=4294967295`, preserving
++the original `u32` representation without wrapping or clamping. Only omitted
++width/height use defaults 600/400. Supplied null, negative, fractional, string,
++boolean or out-of-range values return explicit errors; zero remains supported.
++The tool schema and direct execution enforce the same representation boundary.
++
+ ---
+ 
+ ## ToolChoice Enum (v0.2.1)
+diff --git a/docs/zh/02-tools.md b/docs/zh/02-tools.md
+index 6dadb5a3..68f4c4d6 100644
+--- a/docs/zh/02-tools.md
++++ b/docs/zh/02-tools.md
+@@ -568,6 +568,11 @@ agent.add_tools(vec![
+ 例如 `中文😀甲` 的 `char_count` 为 4；70 个中文字符虽然占 210 个 UTF-8 字节，预览仍
+ 完整，`truncated` 为 false。该预览操作不修改 RAG 索引。
+ 
++`generate_chart` 的 width/height 使用 `0..=4294967295` 范围的无符号整数，保持原
++`u32` 表示，不回绕、不截断。只有缺省才使用 600/400；显式 null、负数、非整数、
++字符串、布尔值和超范围整数返回明确错误，零尺寸仍被支持。原工具 schema 与直接
++执行使用相同的表示边界，不新增资源限额。
++
+ ---
+ 
+ ## ToolChoice 枚举（v0.2.1 新增）
+diff --git a/echo-tools/src/chart.rs b/echo-tools/src/chart.rs
+index a34bd05d..80d6409e 100644
+--- a/echo-tools/src/chart.rs
++++ b/echo-tools/src/chart.rs
+@@ -60,10 +60,14 @@ impl Tool for GenerateChartTool {
+                 },
+                 "width": {
+                     "type": "integer",
++                    "minimum": 0,
++                    "maximum": u32::MAX,
+                     "description": "Chart width in pixels (default 600)"
+                 },
+                 "height": {
+                     "type": "integer",
++                    "minimum": 0,
++                    "maximum": u32::MAX,
+                     "description": "Chart height in pixels (default 400)"
+                 },
+                 "output_format": {
+@@ -104,15 +108,8 @@ impl Tool for GenerateChartTool {
+                 .get("data")
+                 .ok_or_else(|| ToolError::MissingParameter("data".to_string()))?;
+ 
+-            let width = parameters
+-                .get("width")
+-                .and_then(|v| v.as_u64())
+-                .unwrap_or(600) as u32;
+-
+-            let height = parameters
+-                .get("height")
+-                .and_then(|v| v.as_u64())
+-                .unwrap_or(400) as u32;
++            let width = chart_dimension(&parameters, "width", 600)?;
++            let height = chart_dimension(&parameters, "height", 400)?;
+ 
+             let output_format = parameters
+                 .get("output_format")
+@@ -141,6 +138,28 @@ impl Tool for GenerateChartTool {
+     }
+ }
+ 
++// Defaults apply only to omitted arguments. Direct Tool callers also need the
++// same lossless u32 range as the canonical schema, without a narrowing cast.
++fn chart_dimension(parameters: &ToolParameters, name: &str, default: u32) -> Result<u32> {
++    let Some(value) = parameters.get(name) else {
++        return Ok(default);
++    };
++    let integer = value.as_u64().ok_or_else(|| ToolError::InvalidParameter {
++        name: name.to_string(),
++        message: "expected an unsigned integer in 0..=4294967295".to_string(),
++    })?;
++    u32::try_from(integer).map_err(|_| {
++        ToolError::InvalidParameter {
++            name: name.to_string(),
++            message: format!(
++                "value {integer} exceeds the maximum chart dimension {}",
++                u32::MAX
++            ),
++        }
++        .into()
++    })
++}
++
+ // ── Vega-Lite Spec Builder ───────────────────────────────────────────────────
+ 
+ #[allow(clippy::too_many_arguments)]
+@@ -298,3 +317,103 @@ fn generate_html_page(spec: &Value, title: &str) -> String {
+         display_title, display_title, "Interactive Chart", spec_json
+     )
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use echo_core::error::ReactError;
++
++    fn chart_parameters() -> ToolParameters {
++        ToolParameters::from([
++            ("chart_type".to_string(), serde_json::json!("bar")),
++            ("x_field".to_string(), serde_json::json!("类别😀")),
++            ("y_field".to_string(), serde_json::json!("值")),
++            (
++                "data".to_string(),
++                serde_json::json!([{ "类别😀": "甲", "值": 1 }]),
++            ),
++        ])
++    }
++
++    async fn assert_chart_dimension_rejected(field: &str, value: Value) -> Result<()> {
++        let mut parameters = chart_parameters();
++        parameters.insert(field.to_string(), value.clone());
++        let result = GenerateChartTool.execute(parameters).await;
++        match result {
++            Err(ReactError::Tool(error)) => match error.as_ref() {
++                ToolError::InvalidParameter { name, message }
++                    if name == field && !message.is_empty() =>
++                {
++                    Ok(())
++                }
++                other => Err(ReactError::Other(format!(
++                    "{field}={value} wrong error: {other}"
++                ))),
++            },
++            Err(error) => Err(ReactError::Other(format!(
++                "{field}={value} wrong error domain: {error}"
++            ))),
++            Ok(result) => Err(ReactError::Other(format!(
++                "{field}={value} silently produced chart: {}",
++                result.output
++            ))),
++        }
++    }
++
++    #[tokio::test]
++    async fn chart_dimensions_reject_u32_overflow_instead_of_wrapping() -> Result<()> {
++        assert_chart_dimension_rejected("width", serde_json::json!(4294967296_u64)).await?;
++        assert_chart_dimension_rejected("height", serde_json::json!(4294967297_u64)).await?;
++        Ok(())
++    }
++
++    #[tokio::test]
++    async fn chart_dimensions_reject_supplied_invalid_values_instead_of_defaulting() -> Result<()> {
++        for field in ["width", "height"] {
++            for value in [
++                serde_json::json!(-1),
++                serde_json::json!(1.5),
++                serde_json::json!(1.0),
++                serde_json::json!("600"),
++                serde_json::json!(true),
++                Value::Null,
++            ] {
++                assert_chart_dimension_rejected(field, value).await?;
++            }
++        }
++        Ok(())
++    }
++
++    #[tokio::test]
++    async fn chart_dimensions_preserve_original_valid_range_and_missing_defaults() -> Result<()> {
++        let result = GenerateChartTool.execute(chart_parameters()).await?;
++        let spec: Value = serde_json::from_str(&result.output)?;
++        if spec.get("width").and_then(Value::as_u64) != Some(600)
++            || spec.get("height").and_then(Value::as_u64) != Some(400)
++        {
++            return Err(ReactError::Other(
++                "missing dimensions lost original defaults".to_string(),
++            ));
++        }
++        for (width, height) in [
++            (321_u64, 123_u64),
++            (0, 0),
++            (1, 1),
++            (u64::from(u32::MAX), u64::from(u32::MAX)),
++        ] {
++            let mut parameters = chart_parameters();
++            parameters.insert("width".to_string(), serde_json::json!(width));
++            parameters.insert("height".to_string(), serde_json::json!(height));
++            let result = GenerateChartTool.execute(parameters).await?;
++            let spec: Value = serde_json::from_str(&result.output)?;
++            if spec.get("width").and_then(Value::as_u64) != Some(width)
++                || spec.get("height").and_then(Value::as_u64) != Some(height)
++            {
++                return Err(ReactError::Other(format!(
++                    "valid chart dimensions changed: {width}x{height}"
++                )));
++            }
++        }
++        Ok(())
++    }
++}
+diff --git a/echo-tools/src/registry.rs b/echo-tools/src/registry.rs
+index ca97ed6b..f1947453 100644
+--- a/echo-tools/src/registry.rs
++++ b/echo-tools/src/registry.rs
+@@ -96,9 +96,9 @@ impl ToolPack for StandardToolPack {
+         )));
+ 
+         #[cfg(feature = "chart")]
+-        tools.push(ToolPackEntry::read_only(Box::new(
++        tools.extend([ToolPackEntry::read_only(Box::new(
+             crate::chart::GenerateChartTool,
+-        )));
++        ))]);
+ 
+         #[cfg(feature = "database")]
+         {

@@ -1,0 +1,9 @@
+# Chart dimension fidelity evidence
+
+Original GenerateChartTool width/height casts silently wrap u64 into u32 and use defaults for supplied invalid values. Direct real red tests observe width4294967296→0 and -1→600; actual canonical validate_tool_input and ToolManager path admits out-of-range integers and returns wrapped dimensions. Original red counts direct1passed/2failed and manager2passed/1failed are preserved with their compiler warnings distinguished from behavior.
+
+Candidate defaults only absent fields and uses checkedu32 conversion, returning InvalidParameter with exact field and cause; schema minimum0/maximum4294967295 matches original representation, not a new resource limit. Valid600/400 defaults, zero/one,321x123 and u32MAX retain exact values. Registry single chart entry uses existing feature batch extend preserving order/readonly/membership.
+
+Final same direct3 and canonical manager3 tests pass, zero failures/warnings. Original chart-only Clippy failed existing vec-init-then-push atregistry35; minimal chart-entry change fixes the same strict command without suppression. Earlier fixture4warnings were removed and same manager test rerun zero-warning; all attempts retained. Private before/after Git refs reconstruct replayable source snapshots while actual executed epochs are the immutable logs; branch HEAD/index unchanged.
+
+Formal en/zh tool documentation and ADR0083 updated. No public operation/state/resource limit added. No chart example implementation exists in current example tree; final workspace all-target examples remain required before merge. Website/SDKconsumer use delegated framework dimensions; source projections and final published pin are root delivery work, not evidence from these local focused tests. Independent review, full framework gates and exactmain still pending; no stage/commit/push/PR performed.

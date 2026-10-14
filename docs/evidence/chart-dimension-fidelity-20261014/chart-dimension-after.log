@@ -1,0 +1,17 @@
+   Compiling echo_tools v0.2.0 (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-worktrees/channel-handler-forward/echo-tools)
+    Finished `test` profile [unoptimized] target(s) in 2.14s
+     Running unittests src/lib.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/deps/echo_tools-80e8bc9156be4bb9)
+
+running 3 tests
+test chart::tests::chart_dimensions_reject_u32_overflow_instead_of_wrapping ... ok
+test chart::tests::chart_dimensions_reject_supplied_invalid_values_instead_of_defaulting ... ok
+test chart::tests::chart_dimensions_preserve_original_valid_range_and_missing_defaults ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 38 filtered out; finished in 0.00s
+
+     Running tests/macro_core_path.rs (/Users/ls/MyWork/code/ylp_agent_learn/lp-agent/.worktrees/echo-agent-sdk-worktrees/sdk-final-framework-pin/target/debug/deps/macro_core_path-25bf096a361f587e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
