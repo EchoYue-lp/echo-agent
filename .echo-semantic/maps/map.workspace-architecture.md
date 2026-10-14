@@ -4,15 +4,17 @@ id: map.workspace-architecture
 kind: capability_map
 title: Workspace 架构与公共组合
 risk: high
-observed_at: 77de6ca90ad842eb4b7b2921a4baa954f41cccfe
+observed_at: 39e78a93c90b3bb61640cb4b78ce58dd700da5c1
 boundary_refs:
 - boundary.workspace-architecture
 behavior_refs:
 - behavior.workspace-composition
+- behavior.telemetry-subscriber-composition
 rule_refs:
 - rule.framework-layer-ownership
 evidence_refs:
 - evidence.workspace-structure
+- evidence.telemetry-subscriber-composition-repair
 - evidence.high-risk-audit-frontier
 - evidence.workspace-topology-doc-repair
 - evidence.workspace-topology-doc-verification
@@ -53,6 +55,20 @@ related_map_refs:
 - map.protocol-surfaces
 - map.eval-evolution
 scenarios:
+  telemetry-subscriber-composition:
+    status: needs_review
+    source_refs:
+    - src/telemetry.rs
+    - tests/telemetry_composition.rs
+    - docs/adr/0087-telemetry-subscriber-composition.md
+    behavior_refs:
+    - behavior.telemetry-subscriber-composition
+    rule_refs:
+    - rule.framework-layer-ownership
+    evidence_refs:
+    - evidence.telemetry-subscriber-composition-repair
+    unknown: Focused source and secret-log scopes passed; combined gates, publication and exact SDK pin/native acceptance remain separate.
+    next_step: Bind the real combined gate receipts and published source; do not relabel earlier SDK native results.
   framework-concept-navigation:
     status: mapped
     source_refs:

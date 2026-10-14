@@ -24,6 +24,12 @@ source_refs:
 - docs/evidence/acp-turn-steering-identity/final-affected-lib-clippy-run.json
 - docs/evidence/acp-turn-steering-identity/final-workspace-fmt-run.json
 - docs/evidence/acp-turn-steering-identity/final-workspace-fmt-check-run.json
+- docs/evidence/acp-turn-steering-identity/before-chat-fallback-core-agent.rs
+- docs/evidence/acp-turn-steering-identity/before-fix-runtime-with-capture-tests.rs
+- docs/evidence/acp-turn-steering-identity/before-lower-fallback-with-tests.rs
+- docs/evidence/acp-turn-steering-identity/before-recording-fixture-pure-text-delegation.rs
+- docs/evidence/acp-turn-steering-identity/before-runtime.rs
+- docs/evidence/acp-turn-steering-identity/before-text-only-regression-acp-tests.rs
 supports:
 - behavior.protocol-projection
 - behavior.agent-turn-lifecycle
@@ -70,6 +76,8 @@ limitations:
 | workspace fmt 与 fmt --check | 两条原命令各 exit 0、零输出，三份已审源 hash 不变 |
 
 RecordingAgent 的原取消、barrier、tool、failure 脚本原先只在 legacy 方法，structured override 有不同结果。审查接受的 fixture 修正仅让其精确纯 User Text 复用原脚本，原断言与 timeout 未改；这不是许诺任意第三方两个 override 输出相同。ADR 0084 已明确这项可观察 dispatch 变化和失败进入 stream 的时点。提交前父任务派发的独立源复审为 PASS、零 Critical/Important/Minor；该结论只覆盖清单中的实际源与精确兼容义务，不是全项目无缺陷声明。
+
+六份 before-*.rs 原件是同一128项取证包里的受控源码/测试快照：before-chat-fallback-core-agent.rs、before-fix-runtime-with-capture-tests.rs、before-lower-fallback-with-tests.rs、before-recording-fixture-pure-text-delegation.rs、before-runtime.rs、before-text-only-regression-acp-tests.rs。它们各自保留原反例/夹具切点，不是新增运行入口、第二业务权威或完整旧仓重建；source_refs 逐文件列出用于原始证据可追溯，不能把其 public 声明推成新接受接口。
 
 ## 三语言诊断证据的旧 epoch
 
