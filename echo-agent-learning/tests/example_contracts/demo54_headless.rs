@@ -103,13 +103,13 @@ fn demo_config_custom() {
 fn demo_text_output() {
     section!(3, "Text Output Mode");
 
-    let result = HeadlessResult {
-        output: "Found 42 Rust files:\n  src/main.rs\n  src/lib.rs\n  ...".into(),
-        success: true,
-        model: "deepseek-v4-flash".into(),
-        format: "text".into(),
-        exit_on_error: true,
-    };
+    let result = HeadlessResult::new(
+        "Found 42 Rust files:\n  src/main.rs\n  src/lib.rs\n  ...".into(),
+        true,
+        "deepseek-v4-flash".into(),
+        "text".into(),
+        true,
+    );
 
     let formatted = result.format_output();
     println!("  format_output() result:");
@@ -125,13 +125,13 @@ fn demo_text_output() {
 fn demo_json_output() -> Result<(), serde_json::Error> {
     section!(4, "JSON Output Mode");
 
-    let result = HeadlessResult {
-        output: "Task completed successfully".into(),
-        success: true,
-        model: "qwen3-max".into(),
-        format: "json".into(),
-        exit_on_error: true,
-    };
+    let result = HeadlessResult::new(
+        "Task completed successfully".into(),
+        true,
+        "qwen3-max".into(),
+        "json".into(),
+        true,
+    );
 
     let formatted = result.format_output();
     println!("  format_output() result:");
@@ -162,25 +162,25 @@ fn demo_exit_codes() {
     section!(5, "Exit Codes for CI/CD");
 
     // Success → exit code 0
-    let ok_result = HeadlessResult {
-        output: "All tests passed".into(),
-        success: true,
-        model: "test-model".into(),
-        format: "text".into(),
-        exit_on_error: true,
-    };
+    let ok_result = HeadlessResult::new(
+        "All tests passed".into(),
+        true,
+        "test-model".into(),
+        "text".into(),
+        true,
+    );
     println!("  Success case:");
     println!("    exit_code() = {}", ok_result.exit_code());
     assert_eq!(ok_result.exit_code(), 0);
 
     // Failure → exit code 1
-    let fail_result = HeadlessResult {
-        output: "Error: compilation failed".into(),
-        success: false,
-        model: "test-model".into(),
-        format: "text".into(),
-        exit_on_error: true,
-    };
+    let fail_result = HeadlessResult::new(
+        "Error: compilation failed".into(),
+        false,
+        "test-model".into(),
+        "text".into(),
+        true,
+    );
     println!("  Failure case:");
     println!("    exit_code() = {}", fail_result.exit_code());
     assert_eq!(fail_result.exit_code(), 1);
@@ -194,13 +194,13 @@ fn demo_empty_prompt() {
 
     // When run_headless receives an empty prompt, it returns a failure result.
     // We simulate the expected result here:
-    let result = HeadlessResult {
-        output: "Error: empty prompt".into(),
-        success: false,
-        model: String::new(),
-        format: "text".into(),
-        exit_on_error: true,
-    };
+    let result = HeadlessResult::new(
+        "Error: empty prompt".into(),
+        false,
+        String::new(),
+        "text".into(),
+        true,
+    );
 
     println!("  Empty prompt → success=false");
     println!("  Output: {}", result.output);
@@ -234,13 +234,13 @@ fn demo_cicd_pattern() {
     println!("  ```\n");
 
     // Demonstrate what the JSON output would look like
-    let simulated = HeadlessResult {
-        output: "Found 2 potential XSS vulnerabilities in handlers.rs".into(),
-        success: true,
-        model: "deepseek-v4-flash".into(),
-        format: "json".into(),
-        exit_on_error: true,
-    };
+    let simulated = HeadlessResult::new(
+        "Found 2 potential XSS vulnerabilities in handlers.rs".into(),
+        true,
+        "deepseek-v4-flash".into(),
+        "json".into(),
+        true,
+    );
     println!("  Simulated CI output:");
     for line in simulated.format_output().lines() {
         println!("    {}", line);

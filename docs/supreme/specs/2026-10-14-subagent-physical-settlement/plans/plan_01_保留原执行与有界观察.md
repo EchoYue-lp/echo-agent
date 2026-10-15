@@ -19,7 +19,7 @@ design_sections:
   - ref: design.md § Observation and settlement
     digest: sha256:a814268a6ea99e90df16da929ed721fd66ff2c58fa26289fa7d6e69476f77b5d
   - ref: design.md § Stream ownership and cause ordering
-    digest: sha256:447ca3add152d8be62b1ac74f1b5e0a4a0c50c1982bda6f35e0d822362d7c2a4
+    digest: sha256:670473183c568ca8baa881e504c71483cc59575d1f93594cb9e428b2a3f93288
   - ref: design.md § Recovery and limits
     digest: sha256:6ceb3e3ddf365401b051fd40eaa6ade66ed97649d786c8f1ce2e423e3e2b40a1
   - ref: design.md § Acceptance
@@ -61,11 +61,15 @@ todos:
       - src/agent/react/run/pipeline.rs
       - src/agent/react/run/phases/tools.rs
       - src/acp/session.rs
+      - src/headless.rs
+      - echo-agent-learning/tests/example_contracts/demo54_headless.rs
     acceptance:
       - 所有实际terminal producers在观察错误分支不emit Failed、不retry
         mutation；源码引用和当前snapshot准确，原反例不被成功日志覆盖，独立复审行动0。
       - ACP close/close_all保原typedUnknown与同generation，repeat不重发；无身份owner
         loss保原Notify观察而不造identity/Failed，普通返回error重试与真成功关闭保持。
+      - Headless便利返回显式携同原handle，内部result无owner环；真实fileproducer
+        held时原guard/permit不释放，原5公开值/格式/普通close保，外部Rust literals迁移。
 artifact_id: plan:19bdc455-30ff-4251-96cb-05d6615792b9
 lifecycle: ready
 ---

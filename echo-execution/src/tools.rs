@@ -1407,40 +1407,42 @@ impl ToolManager {
                         }
                         event @ ToolStreamEvent::Output { .. } => {
                             output_forwarded = true;
-                            if let Some(tx) = event_tx.as_ref() {
-                                if delivery_failure.is_none() && tx.send(event).await.is_err() {
-                                    let error: ReactError = ToolError::ExecutionFailed {
-                                        tool: tool_name.to_string(),
-                                        message: "Tool stream receiver closed".into(),
-                                    }
-                                    .into();
-                                    if !drain_started {
-                                        return Err(error);
-                                    }
-                                    delivery_failure = Some(error);
-                                    completed.store(true, Ordering::Release);
-                                    if let Some(cancel) = attempt_context.cancel.as_ref() {
-                                        cancel.cancel();
-                                    }
+                            if let Some(tx) = event_tx.as_ref()
+                                && delivery_failure.is_none()
+                                && tx.send(event).await.is_err()
+                            {
+                                let error: ReactError = ToolError::ExecutionFailed {
+                                    tool: tool_name.to_string(),
+                                    message: "Tool stream receiver closed".into(),
+                                }
+                                .into();
+                                if !drain_started {
+                                    return Err(error);
+                                }
+                                delivery_failure = Some(error);
+                                completed.store(true, Ordering::Release);
+                                if let Some(cancel) = attempt_context.cancel.as_ref() {
+                                    cancel.cancel();
                                 }
                             }
                         }
                         event @ ToolStreamEvent::Progress { .. } => {
-                            if let Some(tx) = event_tx.as_ref() {
-                                if delivery_failure.is_none() && tx.send(event).await.is_err() {
-                                    let error: ReactError = ToolError::ExecutionFailed {
-                                        tool: tool_name.to_string(),
-                                        message: "Tool stream receiver closed".into(),
-                                    }
-                                    .into();
-                                    if !drain_started {
-                                        return Err(error);
-                                    }
-                                    delivery_failure = Some(error);
-                                    completed.store(true, Ordering::Release);
-                                    if let Some(cancel) = attempt_context.cancel.as_ref() {
-                                        cancel.cancel();
-                                    }
+                            if let Some(tx) = event_tx.as_ref()
+                                && delivery_failure.is_none()
+                                && tx.send(event).await.is_err()
+                            {
+                                let error: ReactError = ToolError::ExecutionFailed {
+                                    tool: tool_name.to_string(),
+                                    message: "Tool stream receiver closed".into(),
+                                }
+                                .into();
+                                if !drain_started {
+                                    return Err(error);
+                                }
+                                delivery_failure = Some(error);
+                                completed.store(true, Ordering::Release);
+                                if let Some(cancel) = attempt_context.cancel.as_ref() {
+                                    cancel.cancel();
                                 }
                             }
                         }

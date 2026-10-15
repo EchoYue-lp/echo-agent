@@ -80,7 +80,7 @@ impl Default for HeadlessConfig {
 }
 
 /// Result of a headless execution.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct HeadlessResult {
     /// The agent's final output text.
     pub output: String,
@@ -96,6 +96,23 @@ pub struct HeadlessResult {
 
     /// Whether a failed run should produce a non-zero process exit code.
     pub exit_on_error: bool,
+
+    // Outgoing views may own the original close authority. The state's stored
+    // observation is always owner-free, avoiding state -> result -> state.
+    retained_owner: Option<HeadlessRunHandle>,
+}
+
+impl std::fmt::Debug for HeadlessResult {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("HeadlessResult")
+            .field("output", &self.output)
+            .field("success", &self.success)
+            .field("model", &self.model)
+            .field("format", &self.format)
+            .field("exit_on_error", &self.exit_on_error)
+            .finish()
+    }
 }
 
 struct HeadlessRunState {
@@ -117,7 +134,10 @@ impl HeadlessRunState {
         }
     }
 
-    fn publish(&self, result: HeadlessResult) {
+    fn publish(&self, mut result: HeadlessResult) {
+        // Strip ownership before taking the result lock. Only an outward wait
+        // may attach a handle; storing one here would create a strong cycle.
+        result.retained_owner = None;
         let mut slot = self
             .result
             .lock()
@@ -187,7 +207,16 @@ impl HeadlessRunHandle {
     pub async fn wait(&self) -> HeadlessResult {
         loop {
             let notified = self.state.result_ready.notified();
-            if let Some(result) = self.state.result() {
+            if let Some(mut result) = self.state.result() {
+                if self
+                    .state
+                    .close_owner
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .is_some()
+                {
+                    result.retained_owner = Some(self.clone());
+                }
                 return result;
             }
             notified.await;
@@ -248,6 +277,37 @@ impl Drop for HeadlessWaitCancellationGuard {
 }
 
 impl HeadlessResult {
+    /// Construct a value-only result with the original five public values.
+    ///
+    /// Runtime observations attach their original close owner only when an
+    /// existing [`HeadlessRunHandle`] hands the result to its caller.
+    pub fn new(
+        output: String,
+        success: bool,
+        model: String,
+        format: String,
+        exit_on_error: bool,
+    ) -> Self {
+        Self {
+            output,
+            success,
+            model,
+            format,
+            exit_on_error,
+            retained_owner: None,
+        }
+    }
+
+    /// Borrow the same original owner after an incomplete Agent close.
+    ///
+    /// Retain this result or clone its handle while uncertainty is relevant.
+    /// This is not a physical receipt or permission to replay an execution.
+    /// If waiting itself may be cancelled, use [`start_headless`] and retain
+    /// its handle before waiting; no outgoing result exists before return.
+    pub fn retained_owner(&self) -> Option<&HeadlessRunHandle> {
+        self.retained_owner.as_ref()
+    }
+
     /// Compute the process exit code: 0 on success, 1 on failure.
     pub fn exit_code(&self) -> i32 {
         if self.success || !self.exit_on_error {
@@ -315,6 +375,7 @@ where
     let exit_on_error = config.exit_on_error;
     if config.prompt.is_empty() {
         return HeadlessRunHandle::completed(HeadlessResult {
+            retained_owner: None,
             output: "Error: empty prompt".into(),
             success: false,
             model: String::new(),
@@ -338,6 +399,7 @@ where
         Ok(a) => a,
         Err(e) => {
             return HeadlessRunHandle::completed(HeadlessResult {
+                retained_owner: None,
                 output: format!("Error building agent: {}", e),
                 success: false,
                 model: String::new(),
@@ -366,6 +428,7 @@ fn start_headless_agent(config: HeadlessConfig, agent: Arc<dyn Agent>) -> Headle
         Ok(runtime) => runtime,
         Err(error) => {
             state.publish(HeadlessResult {
+                retained_owner: None,
                 output: format!("Error starting headless run: {error}"),
                 success: false,
                 model: agent.model_name().to_string(),
@@ -380,6 +443,7 @@ fn start_headless_agent(config: HeadlessConfig, agent: Arc<dyn Agent>) -> Headle
     let task_owner = HeadlessTaskOwner {
         state: Arc::clone(&state),
         fallback: Some(HeadlessResult {
+            retained_owner: None,
             output: "Error: headless execution owner ended before settlement".to_string(),
             success: false,
             model: agent.model_name().to_string(),
@@ -437,6 +501,7 @@ async fn execute_headless_agent(
     };
     let (output, success) = execution;
     HeadlessResult {
+        retained_owner: None,
         output,
         success,
         model,
@@ -483,6 +548,7 @@ mod tests {
     use futures::StreamExt;
     use futures::future::BoxFuture;
     use futures::stream::BoxStream;
+    use std::future::Future;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::Duration;
@@ -536,6 +602,7 @@ mod tests {
 
     struct CancellableHeadlessAgent {
         started: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
         closes: Arc<AtomicUsize>,
         closed: Arc<tokio::sync::Notify>,
     }
@@ -563,11 +630,14 @@ mod tests {
         ) -> BoxFuture<'a, crate::error::Result<BoxStream<'a, crate::error::Result<AgentEvent>>>>
         {
             let started = Arc::clone(&self.started);
+            let release = Arc::clone(&self.release);
             Box::pin(async move {
                 Ok(futures::stream::once(async move {
                     started.notify_one();
-                    futures::future::pending::<crate::error::Result<AgentEvent>>().await
+                    release.notified().await;
+                    None::<crate::error::Result<AgentEvent>>
                 })
+                .filter_map(futures::future::ready)
                 .boxed())
             })
         }
@@ -594,6 +664,7 @@ mod tests {
     #[test]
     fn test_headless_result_exit_code() {
         let ok = HeadlessResult {
+            retained_owner: None,
             output: "done".into(),
             success: true,
             model: "test".into(),
@@ -603,6 +674,7 @@ mod tests {
         assert_eq!(ok.exit_code(), 0);
 
         let fail = HeadlessResult {
+            retained_owner: None,
             output: "error".into(),
             success: false,
             model: "test".into(),
@@ -612,6 +684,7 @@ mod tests {
         assert_eq!(fail.exit_code(), 1);
 
         let tolerated_failure = HeadlessResult {
+            retained_owner: None,
             output: "error".into(),
             success: false,
             model: "test".into(),
@@ -624,6 +697,7 @@ mod tests {
     #[test]
     fn test_headless_result_format_json() {
         let result = HeadlessResult {
+            retained_owner: None,
             output: "hello world".into(),
             success: true,
             model: "test-model".into(),
@@ -663,6 +737,7 @@ mod tests {
     #[test]
     fn test_headless_result_format_text() {
         let result = HeadlessResult {
+            retained_owner: None,
             output: "hello world".into(),
             success: true,
             model: "test-model".into(),
@@ -685,6 +760,7 @@ mod tests {
         .await;
 
         assert!(result.success);
+        assert!(result.retained_owner().is_none());
         assert_eq!(result.output, "driver result");
         assert_eq!(result.exit_code(), 0);
     }
@@ -717,6 +793,8 @@ mod tests {
     #[tokio::test]
     async fn cancelled_headless_waiter_keeps_owned_cleanup_running() -> crate::error::Result<()> {
         let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let waiter_pending = Arc::new(tokio::sync::Notify::new());
         let closes = Arc::new(AtomicUsize::new(0));
         let closed = Arc::new(tokio::sync::Notify::new());
         let parent_cancel = CancellationToken::new();
@@ -729,12 +807,31 @@ mod tests {
             },
             Arc::new(CancellableHeadlessAgent {
                 started: Arc::clone(&started),
+                release: Arc::clone(&release),
                 closes: Arc::clone(&closes),
                 closed: Arc::clone(&closed),
             }),
         );
         let waiter_handle = handle.clone();
-        let waiter = tokio::spawn(async move { wait_headless_handle(waiter_handle).await });
+        let first_pending = Arc::clone(&waiter_pending);
+        let waiter = tokio::spawn(async move {
+            let wait = wait_headless_handle(waiter_handle);
+            tokio::pin!(wait);
+            let mut first_pending = Some(first_pending);
+            futures::future::poll_fn(|cx| {
+                let result = wait.as_mut().poll(cx);
+                if result.is_pending()
+                    && let Some(signal) = first_pending.take()
+                {
+                    signal.notify_one();
+                }
+                result
+            })
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), waiter_pending.notified())
+            .await
+            .map_err(|_| ReactError::Other("Headless waiter was not polled".to_string()))?;
         tokio::time::timeout(Duration::from_secs(2), started.notified())
             .await
             .map_err(|_| ReactError::Other("Headless turn did not start".to_string()))?;
@@ -751,7 +848,15 @@ mod tests {
         tokio::pin!(closed_wait);
         closed_wait.as_mut().enable();
         waiter.abort();
-        let _ = waiter.await;
+        assert!(waiter.await.is_err_and(|error| error.is_cancelled()));
+        assert!(handle.state.cancel.is_cancelled());
+        assert!(handle.state.result().is_none());
+        assert_eq!(closes.load(Ordering::Acquire), 0);
+        assert!(!parent_cancel.is_cancelled());
+        assert!(!sibling_cancel.is_cancelled());
+        // Cancellation stops observation, not this source's physical cleanup.
+        // The retained owner may close the Agent only after the original EOF.
+        release.notify_one();
         tokio::time::timeout(Duration::from_secs(2), closed_wait)
             .await
             .map_err(|_| ReactError::Other("cancelled waiter abandoned Agent close".to_string()))?;
@@ -761,6 +866,207 @@ mod tests {
         let result = handle.wait().await;
         assert!(!result.success);
         assert!(result.output.contains("Cancelled"));
+        Ok(())
+    }
+
+    type HeadlessProducerJoin =
+        futures::future::Shared<BoxFuture<'static, std::result::Result<(), String>>>;
+
+    struct HeadlessResourceProof {
+        _permit: tokio::sync::OwnedSemaphorePermit,
+        drops: Arc<AtomicUsize>,
+    }
+
+    impl Drop for HeadlessResourceProof {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    struct HeadlessUnknownTool {
+        effect: std::path::PathBuf,
+        release: Arc<tokio::sync::Notify>,
+        producer: Arc<std::sync::Mutex<Option<HeadlessProducerJoin>>>,
+        _resource: echo_core::tools::InvocationResourceGuard,
+    }
+
+    impl crate::tools::Tool for HeadlessUnknownTool {
+        fn name(&self) -> &str {
+            "headless_unknown"
+        }
+
+        fn description(&self) -> &str {
+            "reports an admitted physical producer whose settlement is not yet known"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type":"object"})
+        }
+
+        fn execute<'a>(
+            &'a self,
+            _parameters: crate::tools::ToolParameters,
+        ) -> BoxFuture<'a, crate::error::Result<crate::tools::ToolResult>> {
+            use futures::FutureExt;
+            Box::pin(async move {
+                let effect = self.effect.clone();
+                let release = self.release.clone();
+                let (ready, entered) = tokio::sync::oneshot::channel();
+                let task = tokio::spawn(async move {
+                    tokio::fs::write(&effect, b"producer-entered")
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    let _ = ready.send(());
+                    release.notified().await;
+                    tokio::fs::write(&effect, b"producer-physically-closed")
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    Ok::<(), String>(())
+                });
+                let joined = async move { task.await.map_err(|error| error.to_string())? }
+                    .boxed()
+                    .shared();
+                *self
+                    .producer
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()) = Some(joined);
+                entered
+                    .await
+                    .map_err(|error| ReactError::Other(error.to_string()))?;
+                Err(ReactError::ExecutionNotSettled {
+                    run_id: "headless-original-run".to_string(),
+                    execution_id: Some("headless-original-execution".to_string()),
+                })
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn convenience_headless_retains_the_only_owner_of_an_unsettled_tool()
+    -> crate::error::Result<()> {
+        let directory =
+            tempfile::tempdir().map_err(|error| ReactError::Other(error.to_string()))?;
+        let effect = directory.path().join("physical-effect.txt");
+        let release = Arc::new(tokio::sync::Notify::new());
+        let producer = Arc::new(std::sync::Mutex::new(None::<HeadlessProducerJoin>));
+        let drops = Arc::new(AtomicUsize::new(0));
+        let capacity = Arc::new(tokio::sync::Semaphore::new(1));
+        let permit = capacity
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|error| ReactError::Other(error.to_string()))?;
+        let tool = HeadlessUnknownTool {
+            effect: effect.clone(),
+            release: release.clone(),
+            producer: producer.clone(),
+            _resource: echo_core::tools::InvocationResourceGuard::new(HeadlessResourceProof {
+                _permit: permit,
+                drops: drops.clone(),
+            }),
+        };
+        let llm = Arc::new(
+            MockLlmClient::new()
+                .then_tool_call("headless-original-call", "headless_unknown", "{}")
+                .with_response("must not continue"),
+        );
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            run_headless(
+                HeadlessConfig {
+                    prompt: "run the admitted tool".to_string(),
+                    ..HeadlessConfig::default()
+                },
+                |builder| {
+                    builder
+                        .llm_client(llm.clone())
+                        .system_prompt("test")
+                        .tool(Box::new(tool))
+                },
+            ),
+        )
+        .await;
+        let held_drops = drops.load(Ordering::Acquire);
+        let held_capacity = capacity.available_permits();
+        let held_effect = tokio::fs::read(&effect).await;
+        let original = producer
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        // Always release and join the same real producer before asserting the
+        // observed regression, including on the unfixed early-return path.
+        release.notify_one();
+        let original = original
+            .ok_or_else(|| ReactError::Other("original producer was not admitted".to_string()))?;
+        tokio::time::timeout(Duration::from_secs(2), original)
+            .await
+            .map_err(|_| {
+                ReactError::Other("original producer did not physically close".to_string())
+            })?
+            .map_err(ReactError::Other)?;
+        let result = result
+            .map_err(|_| ReactError::Other("Headless observation did not return".to_string()))?;
+        assert!(!result.success);
+        assert!(result.output.contains("headless-original-run"));
+        assert!(result.output.contains("Error closing agent"));
+        assert_eq!(llm.call_count(), 1);
+        assert_eq!(
+            held_effect.map_err(|error| ReactError::Other(error.to_string()))?,
+            b"producer-entered"
+        );
+        assert_eq!(
+            tokio::fs::read(&effect)
+                .await
+                .map_err(|error| ReactError::Other(error.to_string()))?,
+            b"producer-physically-closed"
+        );
+        assert_eq!(
+            held_drops, 0,
+            "observation return dropped the only resource owner while the original producer was still alive"
+        );
+        assert_eq!(
+            held_capacity, 0,
+            "observation return released the original live-producer capacity"
+        );
+        let clone = result.clone();
+        let original = result.retained_owner().cloned().ok_or_else(|| {
+            ReactError::Other("observation lost its original owner handle".to_string())
+        })?;
+        let cloned = clone.retained_owner().ok_or_else(|| {
+            ReactError::Other("cloning the view lost its original owner".to_string())
+        })?;
+        assert!(Arc::ptr_eq(&original.state, &cloned.state));
+        assert!(
+            original
+                .state
+                .result()
+                .is_some_and(|stored| stored.retained_owner().is_none())
+        );
+        let weak = Arc::downgrade(&original.state);
+        drop(result);
+        drop(clone);
+        assert_eq!(drops.load(Ordering::Acquire), 0);
+        assert_eq!(capacity.available_permits(), 0);
+        // The physical producer was already released and joined above. Drop
+        // the last explicit parent only now, without inventing a close proof.
+        drop(original);
+        // A reporter on a multi-thread runtime may still be returning from
+        // publish. Observe its actual release without interpreting that tail
+        // as an ownership cycle or changing the physical assertions above.
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while weak.strong_count() != 0
+                || drops.load(Ordering::Acquire) != 1
+                || capacity.available_permits() != 1
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .map_err(|_| ReactError::Other("stored observation retained an owner cycle".to_string()))?;
+        assert!(weak.upgrade().is_none());
+        assert_eq!(drops.load(Ordering::Acquire), 1);
+        assert_eq!(capacity.available_permits(), 1);
+        assert_eq!(llm.call_count(), 1);
         Ok(())
     }
 

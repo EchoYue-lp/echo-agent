@@ -895,18 +895,19 @@ impl PipelineStage for ExecuteStage {
                         event = event_rx.recv(), if stream_open => {
                             match event {
                                 Some(event) => {
-                                    if delivery_error.is_none() && !guarded_stream && !matches!(event, ToolStreamEvent::Complete(_)) {
-                                        if stream_tx
+                                    if delivery_error.is_none()
+                                        && !guarded_stream
+                                        && !matches!(event, ToolStreamEvent::Complete(_))
+                                        && stream_tx
                                             .send(ToolPipelineEvent::Stream {
                                                 call_id: ctx.call_id.clone(),
                                                 name: ctx.tool_name.clone(),
                                                 event,
                                             })
                                             .await.is_err()
-                                        {
-                                            delivery_error = Some(ReactError::Other("Tool stream receiver closed".into()));
-                                            stream_cancel.cancel();
-                                        }
+                                    {
+                                        delivery_error = Some(ReactError::Other("Tool stream receiver closed".into()));
+                                        stream_cancel.cancel();
                                     }
                                 }
                                 None => stream_open = false,
@@ -919,8 +920,7 @@ impl PipelineStage for ExecuteStage {
                     if delivery_error.is_none()
                         && !guarded_stream
                         && !matches!(event, ToolStreamEvent::Complete(_))
-                    {
-                        if stream_tx
+                        && stream_tx
                             .send(ToolPipelineEvent::Stream {
                                 call_id: ctx.call_id.clone(),
                                 name: ctx.tool_name.clone(),
@@ -928,11 +928,10 @@ impl PipelineStage for ExecuteStage {
                             })
                             .await
                             .is_err()
-                        {
-                            delivery_error =
-                                Some(ReactError::Other("Tool stream receiver closed".into()));
-                            stream_cancel.cancel();
-                        }
+                    {
+                        delivery_error =
+                            Some(ReactError::Other("Tool stream receiver closed".into()));
+                        stream_cancel.cancel();
                     }
                 }
                 // Only the original Manager's completed future/stream may

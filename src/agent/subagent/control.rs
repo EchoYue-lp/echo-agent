@@ -1804,7 +1804,7 @@ mod tests {
     }
 
     #[test]
-    fn reserved_interrupt_drops_as_cancelled_not_failed() -> Result<(), String> {
+    fn reserved_owner_loss_requires_an_explicit_settlement_receipt() -> Result<(), String> {
         let registry = Arc::new(SubagentControlRegistry::default());
         let identity = SubagentAttemptIdentity::new("task-reserved", "execution-cancelled", 1)
             .map_err(|error| error.to_string())?;
@@ -1825,6 +1825,22 @@ mod tests {
             .admit(identity.clone(), CancellationToken::new())
             .map_err(|error| error.to_string())?;
         drop(admission);
+        {
+            let state = registry.state.lock().map_err(|error| error.to_string())?;
+            let active = state
+                .active
+                .get(&identity.execution_id)
+                .ok_or("lost original attempt")?;
+            assert!(active.authority_unknown);
+            assert!(active.settled_tx.borrow().is_none());
+        }
+        assert!(matches!(
+            registry.admit(identity.clone(), CancellationToken::new()),
+            Err(SubagentControlError::DuplicateExecution { .. })
+        ));
+        // Only the original owner's explicit settlement callback is a receipt;
+        // dropping its local admission guard cannot manufacture Cancelled.
+        registry.settle(&identity, SubagentStatus::Cancelled);
         assert!(matches!(
             registry
                 .request_interrupt(identity)
@@ -1998,6 +2014,20 @@ mod tests {
             .map_err(|error| error.to_string())?;
         assert!(admission.cancel.is_cancelled());
         drop(admission);
+        {
+            let state = registry.state.lock().map_err(|error| error.to_string())?;
+            let original = state
+                .active
+                .get(&active.execution_id)
+                .ok_or("lost active attempt")?;
+            assert!(original.authority_unknown);
+            assert!(original.settled_tx.borrow().is_none());
+        }
+        assert!(matches!(
+            registry.admit(active.clone(), CancellationToken::new()),
+            Err(SubagentControlError::DuplicateExecution { .. })
+        ));
+        registry.settle(&active, SubagentStatus::Cancelled);
         assert!(matches!(
             registry
                 .request_interrupt(active)

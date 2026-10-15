@@ -42,6 +42,20 @@ Non-cooperative producers can keep existing capacity occupied indefinitely.
   physical settlement without an observer deadline. Do not call execute again
   to retrieve a timed-out owner's result.
 
+
+- `HeadlessResult` keeps its five public values and formatting/exit behavior.
+  Replace external struct literals with `HeadlessResult::new(output, success,
+  model, format, exit_on_error)`. A returned observation's `retained_owner()`
+  borrows the same original `HeadlessRunHandle`; retain the result or clone that
+  handle while its Agent close authority remains unknown. Internal stored
+  results are owner-free, so this projection has no state/result self-cycle.
+  Cancelling a waiter signals its child scope and does not abandon the original
+  running task. If waiting may be cancelled and subsequent unknown ownership
+  must remain observable, use `start_headless` and retain that handle; a cancelled
+  convenience call has not yet returned an owner. Explicitly dropping every
+  parent owner is not physical proof;
+  an observation does not authorize automatic retry or invent late closure.
+
 These are intentional Rust source compatibility changes. SDK Host/CLI consumers
 must adapt their existing owner and error boundaries and validate compilation;
 the new Rust variant/helper is not automatically an accepted language method or

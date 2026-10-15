@@ -116,3 +116,5 @@ Channel forward当前本地三链闭合见audit.channel-handler-invocation-rerev
 ## B取消观察与close结算增量
 
 原观察revision、needs_review与未闭路线不重标。本B增量由ADR0088及evidence.subagent-physical-settlement-repair的当前源码与独审承接：观察Unknown不是TurnReceipt/Task终态；原raw producer/Join、permit和资源不能由取消、logical terminal、socket或local task Drop代替。原Rule所述bounded reaper不能作为B当前强制释放策略。ACP close同receipt保Some原typed身份或无identity的None知识，同generation/repeat不重发；普通明确返回失败仍按原策略重试，真实close成功仍按原指针限定清理。完整gate/consumer/main与其它开放路线独立，不以本局部增量宣全域verified。
+
+Headless便利观察返回经私有owner投影保原HeadlessRunHandle，内部stored result无owner环；原5值/格式不变，不把Unknown文本视为物理关闭。可能取消等待且需后续保原authority者用start_headless持handle，销毁最后parent不是停止凭证；新增Rust构造器/getter不自动接受为语言API。

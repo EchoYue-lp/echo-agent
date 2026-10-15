@@ -65,8 +65,9 @@ Audit. Manager 335, React run 189, Subagent 69 and RunCode 16 passed; formatter 
 input guards had no drift. Three Task claim cases retain the original producer,
 complete claim and actual terminal outcome; they are not represented as separate
 original-source before executions. Final source review is PASS C0/I0/M0 and
-supports a focused development checkpoint. The Finding stays open for remaining
-acceptance, including six gates, applicable features and consumer/main delivery.
+supports the original focused development checkpoint. Six local gates have since
+passed as recorded below. The Finding stays open for the identified live-source observation-to-terminal
+gap and consumer/main delivery.
 
 ## 处理记录
 
@@ -79,3 +80,7 @@ ACP close increment is independently reviewed C0/I0/M0 after genuine held-backen
 identity/retry and unidentified owner-loss failures. All 18 original Session tests
 pass after the repair, including ordinary retry/success. Remaining full merge,
 feature and consumer/main acceptance keeps this Finding open.
+
+最终本地六门禁已全部通过（3580主通过/0失败/3既有live opt-in忽略），Headless便利返回丢唯一owner的真实反例已按同handle投影修复并独审C0/I0/M0；原3fixture错误保持失败记录并以更强原EOF/Unknown断言纠正。此更新不宣独feature或消费者/main通过。Plan验收明确精确merged-main CI，故当前ready与本Finding open保留交付缺口；后续只按真实结果收口。
+
+当前23适用本地门禁实际0（6原命令+17独feature），但已识别live source上的观察知识会在后续合法terminal+EOF后仍被无条件上送，原owner可能无法结算。后继尚未新增真实red/green或改源；无source Unknown规则不能覆盖有同owner/gen真实结算来源的场景。本checkpoint保留该明确缺口，未宣全B完成，未合main。

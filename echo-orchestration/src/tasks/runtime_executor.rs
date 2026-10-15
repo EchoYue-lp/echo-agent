@@ -897,17 +897,14 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
         }
         if let Ok(mut settlements) = self.attempt_settlements.lock()
             && let Some(projection) = settlements.remove(execution_id)
+            && projection.physical_closed
+            && projection.phase == AttemptSettlementPhase::Settled
+            && let Some(AttemptAdmissionLease::SharedUnknown { _fence }) = projection.admission
+            && let Some(admission) = &self.config.shared_admission
         {
-            if projection.physical_closed
-                && projection.phase == AttemptSettlementPhase::Settled
-                && let Some(AttemptAdmissionLease::SharedUnknown { _fence }) = projection.admission
-            {
-                // This retirement path follows original physical join and a
-                // canonical durable receipt, never a cancel/socket/missing key.
-                if let Some(admission) = &self.config.shared_admission {
-                    admission.keyed().confirm_uncertain_stopped(&_fence);
-                }
-            }
+            // This retirement path follows original physical join and a
+            // canonical durable receipt, never a cancel/socket/missing key.
+            admission.keyed().confirm_uncertain_stopped(&_fence);
         }
     }
 
@@ -1299,20 +1296,19 @@ impl<C: RuntimeDagController> RuntimeDagExecutor<C> {
                 if let Ok(mut task_ids) = self.attempt_task_ids.lock() {
                     task_ids.insert(abort_handle.id(), abort_execution_id.clone());
                 }
-                if supervisor_cancel.is_cancelled() {
-                    if let Some((task, claim)) =
+                if supervisor_cancel.is_cancelled()
+                    && let Some((task, claim)) =
                         outstanding_claims.values().find(|(task, claim)| {
                             claim.execution_id(run_id, &task.spec.id) == abort_execution_id
                         })
+                {
+                    let disposition = self.controller.interruption_disposition(run_id).await?;
+                    if self
+                        .controller
+                        .request_task_interruption(run_id, task, claim, disposition)
+                        .await?
                     {
-                        let disposition = self.controller.interruption_disposition(run_id).await?;
-                        if self
-                            .controller
-                            .request_task_interruption(run_id, task, claim, disposition)
-                            .await?
-                        {
-                            self.note_attempt_interruption(abort_execution_id.clone());
-                        }
+                        self.note_attempt_interruption(abort_execution_id.clone());
                     }
                 }
             }
