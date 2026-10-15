@@ -76,14 +76,13 @@ Option 4 is adopted.
   claim changed during the request. Its receipt and stale/capacity errors are
   typed; queued, reserved, first-active, repeated-active, and settled outcomes
   remain distinguishable.
-- Each wave retains an exact `AbortHandle`. After the cancellation grace period
-  only the target handle is aborted. The original `JoinSet` drains it and the
-  cancelled claim settles through the existing task CAS path. Root cancellation
-  retains the existing wave-wide grace and `abort_all` behavior.
-- A queued command does not spend its grace before an `AbortHandle` exists.
-  Handle registration observes an already-cancelled child and rearms a
-  generation-fenced timer. Joined attempts retain cancellation/run/control
-  projections until durable CAS is proven, closing the join-to-commit window.
+- Superseded by [ADR0088](0088-subagent-settlement-observation.md): cancellation
+  grace bounds observation only. The exact original dispatch retains its
+  stream, admission and permits through physical closure and the same claim CAS;
+  neither exact nor root cancellation aborts it when grace expires.
+- First admitted root/exact interruption starts its scoped observation deadline.
+  Queued/reserved requests retain that first timestamp; handle publication and
+  repeated requests do not reset it. Joined attempts retain control until CAS.
 - A successful durable settlement is the commit point. Live cleanup failures
   are diagnostic and cannot reverse terminal state. If the settlement response
   is lost, the executor reloads `claim_is_current`; a non-current claim proves
@@ -93,7 +92,7 @@ Option 4 is adopted.
   authority error instead of waiting forever. Recovery reads the durable
   snapshot first, publishes `superseded` to stale joined waiters, retires their
   local supervisor state, and only then awaits live-controller cleanup. Active
-  stale attempts remain bound until targeted abort and canonical JoinSet drain.
+  stale attempts remain bound until original physical cleanup and canonical JoinSet drain.
 - `TeamRuntimeHandle` binds a stable run ID, the Team task store, one
   `RuntimeTaskService`, and the same Subagent control registry. Execution,
   snapshot queries, and exact interrupts reuse this handle.

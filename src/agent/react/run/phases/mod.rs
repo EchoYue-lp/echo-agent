@@ -20,7 +20,6 @@
 
 use crate::agent::AgentEvent;
 use crate::agent::snapshot::AgentRunSnapshot;
-use crate::error::ReactError;
 use crate::llm::types::{Message, ResponseFormat};
 use std::collections::HashMap;
 
@@ -66,7 +65,11 @@ pub(crate) fn pre_model_block_terminal(
     reason: String,
 ) -> AgentEvent {
     if format.is_some_and(ResponseFormat::is_json) {
-        AgentEvent::from_error(source, &ReactError::Other(reason))
+        AgentEvent::Error {
+            source: source.to_string(),
+            message: reason.clone(),
+            failure: crate::error::AgentFailure::message("other", reason),
+        }
     } else {
         AgentEvent::FinalAnswer(reason)
     }

@@ -28,6 +28,7 @@ code_refs:
 - src/agent/subagent/team/mod.rs
 - docs/adr/0060-task-execution-store-cas-and-local-interruption.md
 evidence_refs:
+- evidence.subagent-physical-settlement-repair
 - evidence.task-subagent-workflow
 - evidence.subagent-factory-singleflight-repair
 - evidence.subagent-factory-singleflight-verification
@@ -45,6 +46,7 @@ evidence_refs:
 - evidence.task-dispatch-parent-drop-repair
 - evidence.framework-parent-drop-final-verification
 finding_refs:
+- finding.subagent-physical-settlement-observation
 - finding.task-patch-claim-race
 - finding.task-subagent-attempt-link
 - finding.subagent-factory-cancellation
@@ -94,3 +96,8 @@ TaskClaim-derived attempt link 已修复并复审。Definition catalog 与其它
 保持 needs_review。
 
 父execute退出增量：原driver持有claim、reservation、dispatch join与结算；callerDrop仅取消child。已返回claim的异常退出实际join后同backend CAS，unknown不假终态；修复与focused证据支持具体窗口，新23/main/消费者仍另验。
+
+
+## B 取消观察增量（验证中）
+
+用户已选择保留原 physical owner，仅首次 admitted root cancel/whole pause 的观察受 grace 限制。ExecutionNotSettled 不是 AgentFailure/Task 终态，不授权释放原资源或重执行；exact A 与 sibling B 分离。当前新 Finding 保持 open，强回归、资源收尾增量和完整交付门禁尚未全部结束；历史已审范围不因本段自动扩张。

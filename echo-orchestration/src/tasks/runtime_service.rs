@@ -107,6 +107,11 @@ pub enum RuntimeTaskAttemptInterruptError {
     DurableAuthority { message: String },
     #[error("runtime attempt live control unavailable: {message}")]
     LiveControl { message: String },
+    #[error("execution not settled: run {run_id}, execution {execution_id}")]
+    ExecutionNotSettled {
+        run_id: String,
+        execution_id: String,
+    },
 }
 
 /// Rejection produced while a controller projects a durable exact command
@@ -154,7 +159,16 @@ impl From<RuntimeTaskAttemptInterruptProjectionError> for RuntimeTaskAttemptInte
 
 impl From<RuntimeTaskAttemptInterruptError> for echo_core::error::ReactError {
     fn from(error: RuntimeTaskAttemptInterruptError) -> Self {
-        Self::Other(error.to_string())
+        match error {
+            RuntimeTaskAttemptInterruptError::ExecutionNotSettled {
+                run_id,
+                execution_id,
+            } => Self::ExecutionNotSettled {
+                run_id,
+                execution_id: Some(execution_id),
+            },
+            other => Self::Other(other.to_string()),
+        }
     }
 }
 
@@ -245,6 +259,29 @@ pub struct RuntimeTaskService<C: RuntimeDagController> {
     executor: RuntimeDagExecutor<C>,
 }
 
+struct CallerCancellationGuard(CancellationToken);
+impl Drop for CallerCancellationGuard {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
+
+fn join_execution_owner(
+    joined: std::result::Result<Result<RuntimeDagOutcome>, tokio::task::JoinError>,
+    run_id: &str,
+) -> Result<RuntimeDagOutcome> {
+    joined.map_err(|error| {
+        // Tokio reports only loss of this local join owner. A dispatch can
+        // own a detached/backend producer, so panic/cancel is not its receipt.
+        tracing::error!(run_id, panic=error.is_panic(), cancelled=error.is_cancelled(),
+            error=%error, "runtime execution owner lost; physical authority unknown");
+        echo_core::error::ReactError::ExecutionNotSettled {
+            run_id: run_id.to_string(),
+            execution_id: None,
+        }
+    })?
+}
+
 impl<C: RuntimeDagController> RuntimeTaskService<C> {
     pub fn new(controller: Arc<C>, config: RuntimeTaskServiceConfig) -> Self {
         Self {
@@ -257,43 +294,64 @@ impl<C: RuntimeDagController> RuntimeTaskService<C> {
         self
     }
 
-    /// The framework owns execution after admission. Dropping this observer
-    /// requests cancellation of its child scope but does not drop claim/CAS
-    /// futures or the dispatch join owner. The existing interruption policy
-    /// determines durable status only after physical dispatches have joined.
+    /// Observe the original execution. Normal execution has no timer; only
+    /// the first root cancellation starts the configured observation grace.
+    /// Expiry detaches this wait, not the physical execution/CAS owner.
     pub async fn execute(
         &self,
         run_id: &str,
         cancel: CancellationToken,
     ) -> Result<RuntimeDagOutcome> {
+        let child = cancel.child_token();
+        let _caller = CallerCancellationGuard(child.clone());
+        let mut owner = self.spawn_execution(run_id, child.clone())?;
+        tokio::select! {
+            biased;
+            joined = &mut owner => join_execution_owner(joined, run_id),
+            _ = child.cancelled() => {
+                let deadline = tokio::time::Instant::now() + self.executor.config.cancellation_grace_period;
+                tokio::select! {
+                    biased;
+                    joined = &mut owner => join_execution_owner(joined, run_id),
+                    _ = tokio::time::sleep_until(deadline) => Err(echo_core::error::ReactError::ExecutionNotSettled {
+                        run_id: run_id.to_string(), execution_id: None,
+                    }),
+                }
+            }
+        }
+    }
+
+    /// Compose an internal physical execution owner without an observation
+    /// deadline. This uses the same spawn/controller/CAS as `execute`; nested
+    /// Team dispatch must retain its guards until this original join completes.
+    pub async fn execute_to_settlement(
+        &self,
+        run_id: &str,
+        cancel: CancellationToken,
+    ) -> Result<RuntimeDagOutcome> {
+        let child = cancel.child_token();
+        let _caller = CallerCancellationGuard(child.clone());
+        join_execution_owner(self.spawn_execution(run_id, child)?.await, run_id)
+    }
+
+    fn spawn_execution(
+        &self,
+        run_id: &str,
+        cancel: CancellationToken,
+    ) -> Result<tokio::task::JoinHandle<Result<RuntimeDagOutcome>>> {
         let runtime = tokio::runtime::Handle::try_current().map_err(|error| {
             echo_core::error::ReactError::Other(format!(
                 "runtime task execution requires an active Tokio runtime: {error}"
             ))
         })?;
-        let cancel = cancel.child_token();
-        struct CallerCancellationGuard(CancellationToken);
-        impl Drop for CallerCancellationGuard {
-            fn drop(&mut self) {
-                self.0.cancel();
-            }
-        }
-        let _caller_cancellation = CallerCancellationGuard(cancel.clone());
         let owner = Self {
             executor: self.executor.clone(),
         };
         let run_id = run_id.to_string();
-        runtime
-            .spawn(async move {
-                owner.reconcile_attempt_control(&run_id).await?;
-                owner.executor.execute(&run_id, cancel).await
-            })
-            .await
-            .map_err(|error| {
-                echo_core::error::ReactError::Other(format!(
-                    "runtime execution owner failed to join: {error}"
-                ))
-            })?
+        Ok(runtime.spawn(async move {
+            owner.reconcile_attempt_control(&run_id).await?;
+            owner.executor.execute(&run_id, cancel).await
+        }))
     }
 
     /// Reconcile live attempt projections from the durable TaskClaim snapshot.
@@ -469,11 +527,14 @@ impl<C: RuntimeDagController> RuntimeTaskService<C> {
                 execution_id,
             });
         }
-        if requested
-            && disposition != RuntimeTaskAttemptInterruptDisposition::QueuedBeforeReservation
-        {
+        if !matches!(
+            disposition,
+            RuntimeTaskAttemptInterruptDisposition::AlreadySettled { .. }
+        ) {
+            // Only a successfully projected request whose exact claim passed
+            // the final durable recheck can start this bounded observer clock.
             self.executor
-                .schedule_attempt_abort(execution_id.clone(), false);
+                .note_attempt_interruption(execution_id.clone());
         }
         Ok(RuntimeTaskAttemptInterruptReceipt {
             run_id: run_id.to_string(),
@@ -484,6 +545,18 @@ impl<C: RuntimeDagController> RuntimeTaskService<C> {
             requested,
             disposition,
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn interruption_started_at(
+        &self,
+        execution_id: &str,
+    ) -> Option<tokio::time::Instant> {
+        self.executor
+            .attempt_interruption_started
+            .lock()
+            .ok()
+            .and_then(|started| started.get(execution_id).copied())
     }
 
     #[cfg(test)]
@@ -562,15 +635,24 @@ impl<C: RuntimeDagController> RuntimeTaskService<C> {
         mut settled_rx: tokio::sync::watch::Receiver<Option<AttemptSettlementObservation>>,
     ) -> std::result::Result<RuntimeTaskAttemptInterruptReceipt, RuntimeTaskAttemptInterruptError>
     {
+        let execution_id = claim.execution_id(run_id, task_id);
+        let started = self
+            .executor
+            .note_attempt_interruption(execution_id.clone());
+        let deadline = started + self.executor.config.cancellation_grace_period;
         let observation = loop {
             if let Some(observation) = settled_rx.borrow_and_update().clone() {
                 break observation;
             }
-            settled_rx.changed().await.map_err(|_| {
-                RuntimeTaskAttemptInterruptError::LiveControl {
+            tokio::select! {
+                biased;
+                changed = settled_rx.changed() => changed.map_err(|_| RuntimeTaskAttemptInterruptError::LiveControl {
                     message: "joined attempt settlement observation closed".to_string(),
-                }
-            })?;
+                })?,
+                _ = tokio::time::sleep_until(deadline) => return Err(RuntimeTaskAttemptInterruptError::ExecutionNotSettled {
+                    run_id: run_id.to_string(), execution_id,
+                }),
+            }
         };
         let status = match observation {
             AttemptSettlementObservation::Settled { status } => status,

@@ -7,7 +7,7 @@
 //! state or persistence.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 
@@ -54,6 +54,22 @@ struct AdmissionState {
     by_key: HashMap<String, usize>,
     process_permits: HashMap<String, OwnedSemaphorePermit>,
     retiring: HashSet<String>,
+    uncertain: HashMap<String, Vec<AdmissionUncertainty>>,
+}
+
+struct AdmissionUncertainty {
+    generation: Arc<()>,
+    _resources: Option<Box<dyn Send>>,
+}
+
+/// Identity of uncertain work in one original keyed admission authority.
+/// This is not proof of physical stop. Backend/process owners may reconcile
+/// it only after obtaining an authoritative receipt for that same work.
+#[derive(Clone)]
+pub struct UncertainExecutionFence {
+    admission: Weak<KeyedExecutionAdmission>,
+    key: String,
+    generation: Arc<()>,
 }
 
 impl AdmissionState {
@@ -198,6 +214,11 @@ impl KeyedExecutionAdmission {
         if !state.accepting {
             return Err(KeyedExecutionAdmissionError::Closed);
         }
+        if state.uncertain.contains_key(key) {
+            return Err(KeyedExecutionAdmissionError::Retiring {
+                key: key.to_string(),
+            });
+        }
         if state.retiring.contains(key) {
             return Err(KeyedExecutionAdmissionError::Retiring {
                 key: key.to_string(),
@@ -241,6 +262,61 @@ impl KeyedExecutionAdmission {
     /// Whether new leases for `key` are fenced by a retirement receipt.
     pub fn is_retiring(&self, key: &str) -> bool {
         self.lock_state().retiring.contains(key)
+    }
+
+    /// Query original-key uncertainty without minting a closure receipt.
+    pub fn uncertainty(self: &Arc<Self>, key: &str) -> Option<UncertainExecutionFence> {
+        self.lock_state()
+            .uncertain
+            .get(key)
+            .and_then(|entries| entries.first())
+            .map(|entry| UncertainExecutionFence {
+                admission: Arc::downgrade(self),
+                key: key.to_string(),
+                generation: entry.generation.clone(),
+            })
+    }
+
+    /// Reconcile only after this trusted Rust caller has established physical
+    /// closure/backend fencing for the original work. The opaque fence checks
+    /// authority/key/generation, not physical truth. Never call this merely for
+    /// cancel, socket close, missing local controls, or a disappeared claim.
+    pub fn confirm_uncertain_stopped(self: &Arc<Self>, fence: &UncertainExecutionFence) -> bool {
+        if !fence
+            .admission
+            .upgrade()
+            .is_some_and(|owner| Arc::ptr_eq(&owner, self))
+        {
+            return false;
+        }
+        let mut state = self.lock_state();
+        let Some(entries) = state.uncertain.get_mut(&fence.key) else {
+            return false;
+        };
+        let Some(index) = entries
+            .iter()
+            .position(|entry| Arc::ptr_eq(&entry.generation, &fence.generation))
+        else {
+            return false;
+        };
+        let released = entries.remove(index);
+        if entries.is_empty() {
+            state.uncertain.remove(&fence.key);
+        }
+        state.total = state.total.saturating_sub(1);
+        if let Some(count) = state.by_key.get_mut(&fence.key) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                state.by_key.remove(&fence.key);
+                state.process_permits.remove(&fence.key);
+            }
+        }
+        drop(state);
+        // Resource destruction may reenter this same admission (for example
+        // an owned lease). Never invoke user-owned Drop while holding its lock.
+        drop(released);
+        self.idle.notify_waiters();
+        true
     }
 
     /// Number of issued leases retained by all keys.
@@ -307,6 +383,39 @@ pub struct KeyedExecutionLease {
 }
 
 impl KeyedExecutionLease {
+    /// Transfer this lease's accounting and process permit to the same
+    /// admission authority's explicit uncertain-key fence. Dropping an observer
+    /// or service after this transfer cannot release unknown physical work.
+    pub fn retain_unknown(self) -> UncertainExecutionFence {
+        self.retain_unknown_with_resources(None)
+    }
+
+    /// Preserve resources owned by this same physical execution along with
+    /// its original lease. Reconciliation must first establish physical stop.
+    pub fn retain_unknown_with_resources(
+        mut self,
+        resources: Option<Box<dyn Send>>,
+    ) -> UncertainExecutionFence {
+        let mut state = self.admission.lock_state();
+        let generation = Arc::new(());
+        state
+            .uncertain
+            .entry(self.key.clone())
+            .or_default()
+            .push(AdmissionUncertainty {
+                generation: generation.clone(),
+                _resources: resources,
+            });
+        let fence = UncertainExecutionFence {
+            admission: Arc::downgrade(&self.admission),
+            key: self.key.clone(),
+            generation,
+        };
+        self.active = false;
+        drop(state);
+        fence
+    }
+
     /// Whether this lease belongs to the exact admission owner and key.
     pub fn owns(&self, admission: &Arc<KeyedExecutionAdmission>, key: &str) -> bool {
         self.active && Arc::ptr_eq(&self.admission, admission) && self.key == key
@@ -457,6 +566,106 @@ impl Drop for KeyedExecutionRetirement {
         self.active = false;
         self.admission.lock_state().retiring.remove(&self.key);
         self.admission.idle.notify_waiters();
+    }
+}
+
+#[cfg(test)]
+mod uncertain_owner_tests {
+    use super::*;
+
+    #[test]
+    fn confirming_uncertainty_drops_owned_resources_outside_the_admission_lock()
+    -> Result<(), String> {
+        let admission = Arc::new(KeyedExecutionAdmission::default());
+        let a = admission
+            .issue("original-owner")
+            .map_err(|error| error.to_string())?;
+        let b = admission
+            .issue("original-owner")
+            .map_err(|error| error.to_string())?;
+        let fence = a.retain_unknown_with_resources(Some(Box::new(b)));
+        assert_eq!(admission.active_count(), 2);
+        let (completed, received) = std::sync::mpsc::channel();
+        let reconciliation = std::thread::spawn({
+            let admission = admission.clone();
+            move || {
+                let cleared = admission.confirm_uncertain_stopped(&fence);
+                let _ = completed.send(cleared);
+            }
+        });
+        let cleared = received.recv_timeout(std::time::Duration::from_secs(2))
+            .map_err(|error| format!("original resource destructor could not reenter admission after physical reconciliation: {error}"))?;
+        assert!(cleared);
+        reconciliation
+            .join()
+            .map_err(|_| "reconciliation panicked".to_string())?;
+        assert_eq!(admission.active_count(), 0);
+        assert!(admission.uncertainty("original-owner").is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn one_unknown_owner_cannot_release_another_owner_of_the_same_key()
+    -> Result<(), KeyedExecutionAdmissionError> {
+        let admission = Arc::new(KeyedExecutionAdmission::default());
+        let semaphore = Arc::new(Semaphore::new(1));
+        let a = admission.issue_process_scoped("shared-key", &semaphore)?;
+        let b = admission.issue_process_scoped("shared-key", &semaphore)?;
+        let af = a.retain_unknown();
+        let bf = b.retain_unknown();
+        assert_eq!(admission.active_count(), 2);
+        assert!(admission.confirm_uncertain_stopped(&af));
+        assert_eq!(admission.active_count(), 1);
+        assert_eq!(semaphore.available_permits(), 0);
+        assert!(admission.issue("shared-key").is_err());
+        assert!(!admission.confirm_uncertain_stopped(&af));
+        assert!(admission.confirm_uncertain_stopped(&bf));
+        assert_eq!(admission.active_count(), 0);
+        assert_eq!(semaphore.available_permits(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unknown_capacity_survives_observer_drop_and_requires_original_owner_generation()
+    -> Result<(), KeyedExecutionAdmissionError> {
+        let admission = Arc::new(KeyedExecutionAdmission::default());
+        let process = Arc::new(Semaphore::new(1));
+        let lease = admission.issue_process_scoped("original", &process)?;
+        let fence = lease.retain_unknown();
+        let receipt = fence.clone();
+        drop(fence);
+        assert_eq!(admission.active_count(), 1);
+        assert_eq!(process.available_permits(), 0);
+        assert!(admission.issue("original").is_err());
+        assert!(admission.issue_process_scoped("another", &process).is_err());
+        let other = Arc::new(KeyedExecutionAdmission::default());
+        assert!(!other.confirm_uncertain_stopped(&receipt));
+        // A matching identity is not automatically consumed on cancel or
+        // lookup. Only after this owned producer actually exits do we reconcile.
+        let release = Arc::new(Notify::new());
+        let producer = tokio::spawn({
+            let release = release.clone();
+            async move {
+                release.notified().await;
+            }
+        });
+        assert!(!producer.is_finished());
+        assert!(admission.uncertainty("original").is_some());
+        assert_eq!(process.available_permits(), 0);
+        release.notify_one();
+        assert!(producer.await.is_ok());
+        assert!(admission.confirm_uncertain_stopped(&receipt));
+        assert_eq!(admission.active_count(), 0);
+        assert_eq!(process.available_permits(), 1);
+        let second = admission
+            .issue_process_scoped("original", &process)?
+            .retain_unknown();
+        assert!(!admission.confirm_uncertain_stopped(&receipt));
+        assert_eq!(admission.active_count(), 1);
+        assert!(admission.confirm_uncertain_stopped(&second));
+        assert_eq!(admission.active_count(), 0);
+        assert_eq!(process.available_permits(), 1);
+        Ok(())
     }
 }
 

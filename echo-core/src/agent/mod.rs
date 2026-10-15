@@ -709,13 +709,13 @@ pub enum AgentPhase {
 
 impl AgentEvent {
     /// Build a terminal event while preserving the typed framework failure.
-    pub fn from_error(source: impl Into<String>, error: &ReactError) -> Self {
-        let failure = crate::error::AgentFailure::from(error);
-        Self::Error {
+    pub fn from_error(source: impl Into<String>, error: &ReactError) -> crate::error::Result<Self> {
+        let failure = crate::error::AgentFailure::try_from(error)?;
+        Ok(Self::Error {
             source: source.into(),
             message: failure.message.clone(),
             failure,
-        }
+        })
     }
 
     /// Build an unclassified terminal failure for boundaries that have no typed error.
@@ -1490,26 +1490,38 @@ impl Agent for Box<dyn Agent> {
 
 /// Wrap an agent event stream with cooperative cancellation support.
 ///
-/// When `cancel` is triggered, the stream yields [`AgentEvent::Cancelled`]
-/// and terminates. Shared by both `execute_stream_with_cancel` and
-/// `chat_stream_with_cancel` default implementations.
+/// A cancellation event is a delivery cause, not the producer's closure
+/// receipt. Keep the original source until EOF after publishing that cause.
 fn cancel_aware_stream<'a>(
     mut stream: BoxStream<'a, Result<AgentEvent>>,
     cancel: CancellationToken,
 ) -> BoxStream<'a, Result<AgentEvent>> {
-    let wrapped = async_stream::try_stream! {
+    let wrapped = async_stream::stream! {
         loop {
-            tokio::select! {
+            let next = tokio::select! {
+                biased;
+                next = stream.next() => next,
                 _ = cancel.cancelled() => {
-                    yield AgentEvent::Cancelled;
+                    yield Ok(AgentEvent::Cancelled);
+                    while let Some(item) = stream.next().await {
+                        if matches!(&item, Err(ReactError::ExecutionNotSettled { .. })) { yield item; }
+                    }
                     break;
                 }
-                next = stream.next() => {
-                    match next {
-                        Some(event) => yield event?,
-                        None => break,
+            };
+            match next {
+                Some(event) => {
+                    let terminal_error = matches!(&event, Err(error)
+                        if !matches!(error, ReactError::ExecutionNotSettled { .. }));
+                    yield event;
+                    if terminal_error {
+                        while let Some(item) = stream.next().await {
+                        if matches!(&item, Err(ReactError::ExecutionNotSettled { .. })) { yield item; }
+                    }
+                        break;
                     }
                 }
+                None => break,
             }
         }
     };
@@ -1520,10 +1532,18 @@ fn invocation_retaining_stream<'a>(
     mut stream: BoxStream<'a, Result<AgentEvent>>,
     invocation: AgentInvocationContext,
 ) -> BoxStream<'a, Result<AgentEvent>> {
-    let wrapped = async_stream::try_stream! {
+    let wrapped = async_stream::stream! {
         let _invocation = invocation;
         while let Some(event) = stream.next().await {
-            yield event?;
+            let terminal_error = matches!(&event, Err(error)
+                if !matches!(error, ReactError::ExecutionNotSettled { .. }));
+            yield event;
+            if terminal_error {
+                while let Some(item) = stream.next().await {
+                        if matches!(&item, Err(ReactError::ExecutionNotSettled { .. })) { yield item; }
+                    }
+                break;
+            }
         }
     };
     Box::pin(wrapped)
@@ -1796,6 +1816,7 @@ mod default_pure_text_chat_tests {
     struct LegacyTextAgent {
         calls: AtomicUsize,
         fail_setup: bool,
+        release_cleanup: tokio::sync::Notify,
     }
     impl Agent for LegacyTextAgent {
         fn name(&self) -> &str {
@@ -1828,11 +1849,11 @@ mod default_pure_text_chat_tests {
                     ));
                 }
                 // Keep the borrowed original text across the caller's later poll.
-                Ok(
-                    futures::stream::once(async move { Ok(AgentEvent::Token(text.to_string())) })
-                        .chain(futures::stream::pending())
-                        .boxed(),
-                )
+                Ok(async_stream::stream! {
+                    yield Ok(AgentEvent::Token(text.to_string()));
+                    self.release_cleanup.notified().await;
+                }
+                .boxed())
             })
         }
     }
@@ -1865,6 +1886,18 @@ mod default_pure_text_chat_tests {
             events.next().await,
             Some(Ok(AgentEvent::Cancelled))
         ));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), events.next())
+                .await
+                .is_err(),
+            "cancel delivery is not the original producer's EOF"
+        );
+        assert_eq!(
+            drops.load(Ordering::SeqCst),
+            0,
+            "original invocation guard remains owned while cleanup is held"
+        );
+        agent.release_cleanup.notify_one();
         assert!(events.next().await.is_none());
         drop(events);
         assert_eq!(drops.load(Ordering::SeqCst), 1);

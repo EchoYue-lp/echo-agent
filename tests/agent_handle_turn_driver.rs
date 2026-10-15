@@ -140,7 +140,7 @@ async fn borrowed_handle_driver_preserves_chat_invocation_and_execute_semantics(
                     .await
             })
         })
-        .await;
+        .await?;
     assert_eq!(chat_receipt.outcome, TurnOutcome::Completed);
     assert_eq!(chat_receipt.delivery, TurnDeliveryOutcome::Delivered);
     assert_eq!(chat_receipt.final_answer.as_deref(), Some("chat-answer"));
@@ -187,7 +187,7 @@ async fn borrowed_handle_driver_preserves_chat_invocation_and_execute_semantics(
                     .await
             })
         })
-        .await;
+        .await?;
     assert_eq!(execute_receipt.outcome, TurnOutcome::Completed);
     assert_eq!(execute_receipt.delivery, TurnDeliveryOutcome::Delivered);
     assert_eq!(
@@ -232,7 +232,7 @@ async fn shared_agent_compatibility_forwards_structured_chat_and_execute() -> Re
     });
     let chat_receipt = AgentTurnDriver
         .drive(shared.as_ref(), chat_request, &DiscardSink)
-        .await;
+        .await?;
     assert_eq!(chat_receipt.outcome, TurnOutcome::Completed);
     assert_eq!(chat_receipt.delivery, TurnDeliveryOutcome::Delivered);
     assert_eq!(chat_receipt.final_answer.as_deref(), Some("shared-chat"));
@@ -248,7 +248,7 @@ async fn shared_agent_compatibility_forwards_structured_chat_and_execute() -> Re
     });
     let execute_receipt = AgentTurnDriver
         .drive(shared.as_ref(), execute_request, &DiscardSink)
-        .await;
+        .await?;
     assert_eq!(execute_receipt.outcome, TurnOutcome::Completed);
     assert_eq!(execute_receipt.delivery, TurnDeliveryOutcome::Delivered);
     assert_eq!(

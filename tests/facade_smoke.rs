@@ -275,6 +275,16 @@ impl RuntimeDagController for FacadeController {
         Ok(false)
     }
 
+    async fn request_task_interruption(
+        &self,
+        _run_id: &str,
+        _task: &Task,
+        _claim: &TaskClaim,
+        _disposition: RuntimeInterruptionDisposition,
+    ) -> echo_agent::error::Result<bool> {
+        Ok(false)
+    }
+
     async fn dispatch_task(
         &self,
         _context: echo_agent::tasks::TaskSubagentContext,

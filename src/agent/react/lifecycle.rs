@@ -9,6 +9,13 @@ struct CloseState {
     next_turn_id: u64,
     turns: HashMap<u64, CancellationToken>,
     unsettled_turns: usize,
+    uncertain: HashMap<u64, UncertainTurnResources>,
+}
+
+struct UncertainTurnResources {
+    run_id: String,
+    execution_id: Option<String>,
+    _resources: Box<dyn Send>,
 }
 
 impl Default for CloseState {
@@ -18,6 +25,7 @@ impl Default for CloseState {
             next_turn_id: 0,
             turns: HashMap::new(),
             unsettled_turns: 0,
+            uncertain: HashMap::new(),
         }
     }
 }
@@ -53,6 +61,18 @@ impl ReactAgentCloseAuthority {
         cancel: Option<CancellationToken>,
     ) -> Result<(ReactAgentTurnLease, CancellationToken)> {
         let mut state = self.lock_state();
+        if let Some(unknown) = state.uncertain.values().next() {
+            return Err(ReactError::ExecutionNotSettled {
+                run_id: unknown.run_id.clone(),
+                execution_id: unknown.execution_id.clone(),
+            });
+        }
+        if state.unsettled_turns > 0 {
+            return Err(ReactError::ExecutionNotSettled {
+                run_id: "react-agent-unsettled-turn".to_string(),
+                execution_id: None,
+            });
+        }
         if !state.accepting {
             return Err(ReactError::Agent(Box::new(AgentError::Cancelled(
                 "Agent is closed to new turns".to_string(),
@@ -96,6 +116,12 @@ impl ReactAgentCloseAuthority {
             let notified = self.idle.notified();
             let unsettled_turns = {
                 let state = self.lock_state();
+                if let Some(unknown) = state.uncertain.values().next() {
+                    return Err(ReactError::ExecutionNotSettled {
+                        run_id: unknown.run_id.clone(),
+                        execution_id: unknown.execution_id.clone(),
+                    });
+                }
                 state.turns.is_empty().then_some(state.unsettled_turns)
             };
             if let Some(unsettled_turns) = unsettled_turns {
@@ -128,6 +154,28 @@ impl ReactAgentTurnLease {
     /// Release the close lease only after canonical terminal settlement.
     pub(crate) fn settle(mut self) {
         self.release(false);
+    }
+
+    pub(crate) fn retain_unknown(
+        mut self,
+        run_id: String,
+        execution_id: Option<String>,
+        resources: Box<dyn Send>,
+    ) {
+        let mut state = self.authority.lock_state();
+        state.accepting = false;
+        state.uncertain.insert(
+            self.turn_id,
+            UncertainTurnResources {
+                run_id,
+                execution_id,
+                _resources: resources,
+            },
+        );
+        // The original turn/token remains in the same close authority. Remove
+        // only this RAII observer so Drop cannot fabricate a release or debt.
+        self.active = false;
+        self.authority.idle.notify_waiters();
     }
 
     fn release(&mut self, record_debt: bool) {

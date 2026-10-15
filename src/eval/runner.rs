@@ -210,6 +210,17 @@ impl EvalRunner {
             }
         };
         drop(drive);
+        let receipt = match receipt {
+            Some(Ok(receipt)) => Some(receipt),
+            Some(Err(error)) => {
+                // An observation is not a terminal receipt. Keep the workspace
+                // and skip settled-trace scoring while reporting its identity.
+                result.success = false;
+                result.violations.push(format!("Turn observation: {error}"));
+                None
+            }
+            None => None,
+        };
         let turn_settled = receipt.is_some();
 
         result.duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -323,10 +334,14 @@ impl EvalRunner {
             Self::record_workspace_cleanup(&mut result, generation.close());
         } else {
             if let Some(path) = generation.retain() {
-                result.violations.push(format!(
-                    "Workspace retained after timeout: {}",
-                    path.display()
-                ));
+                let reason = if timed_out {
+                    "Workspace retained after timeout"
+                } else {
+                    "Workspace retained without a settled turn receipt"
+                };
+                result
+                    .violations
+                    .push(format!("{reason}: {}", path.display()));
             }
         }
         result.recompute_score();
@@ -1062,9 +1077,9 @@ mod tests {
         let receipt = TurnReceipt {
             turn_id: echo_core::agent::TurnId::new("eval-delivery-failure")?,
             outcome: TurnOutcome::Completed,
-            delivery: TurnDeliveryOutcome::Failed(crate::error::AgentFailure::from(
+            delivery: TurnDeliveryOutcome::Failed(crate::error::AgentFailure::try_from(
                 &crate::error::ReactError::Other("projection failed".to_string()),
-            )),
+            )?),
             final_answer: Some("done".to_string()),
             final_message_id: None,
             prompt_tokens: 0,

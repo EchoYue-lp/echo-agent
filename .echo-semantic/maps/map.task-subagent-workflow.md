@@ -12,6 +12,7 @@ behavior_refs:
 rule_refs:
 - rule.task-subagent-authority
 evidence_refs:
+- evidence.subagent-physical-settlement-repair
 - evidence.task-subagent-workflow
 - evidence.high-risk-audit-frontier
 - evidence.task-patch-claim-cas-repair
@@ -43,6 +44,7 @@ evidence_refs:
 - evidence.framework-final-34d5-full-verification
 - evidence.framework-final-34d5-gate-archive
 finding_refs:
+- finding.subagent-physical-settlement-observation
 - finding.task-patch-claim-race
 - finding.task-subagent-attempt-link
 - finding.subagent-factory-cancellation
@@ -276,3 +278,8 @@ TaskEvent/progress、Subagent envelopes、Workflow events 和 command snapshots 
 
 
 当前候选最终复审：audit.framework-final-34d5-gate-rereview 绑定新23真实工程收据与完整已审源码，implementation review PASS/action0；不替代独立SDK/main验收，不升级原broad状态。
+
+
+## B 取消观察增量（验证中）
+
+用户已选择保留原 physical owner，仅首次 admitted root cancel/whole pause 的观察受 grace 限制。ExecutionNotSettled 不是 AgentFailure/Task 终态，不授权释放原资源或重执行；exact A 与 sibling B 分离。当前新 Finding 保持 open，强回归、资源收尾增量和完整交付门禁尚未全部结束；历史已审范围不因本段自动扩张。

@@ -14,7 +14,6 @@ use futures::StreamExt;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tokio::sync::Semaphore;
 use tracing::{info, warn};
 
 use super::context::SubagentContext;
@@ -150,15 +149,16 @@ fn effective_capabilities(
 }
 
 /// Map framework errors to the runtime-owned subagent terminal status.
-pub fn subagent_status_from_error(error: &ReactError) -> SubagentStatus {
-    match error {
+pub fn subagent_status_from_error(error: &ReactError) -> Result<SubagentStatus> {
+    echo_core::error::AgentFailure::try_from(error)?;
+    Ok(match error {
         ReactError::Agent(agent_error) => match agent_error.as_ref() {
             AgentError::Timeout(_) => SubagentStatus::TimedOut,
             AgentError::Interrupted | AgentError::Cancelled(_) => SubagentStatus::Cancelled,
             _ => SubagentStatus::Failed,
         },
         _ => SubagentStatus::Failed,
-    }
+    })
 }
 
 #[cfg(test)]
@@ -166,9 +166,10 @@ mod typed_error_mapping_tests {
     use super::*;
 
     #[test]
-    fn terminal_status_ignores_misleading_error_text() {
+    fn terminal_status_ignores_misleading_error_text() -> Result<()> {
         let error = ReactError::Other("cancelled timeout are ordinary words here".to_string());
-        assert_eq!(subagent_status_from_error(&error), SubagentStatus::Failed);
+        assert_eq!(subagent_status_from_error(&error)?, SubagentStatus::Failed);
+        Ok(())
     }
 
     #[test]
@@ -375,6 +376,8 @@ pub struct TeammateHandle {
     pub cancel: CancellationToken,
     /// Join handle for the spawned task.
     join_handle: tokio::task::JoinHandle<Result<SubagentResult>>,
+    observation_run_id: String,
+    observation_execution_id: Option<String>,
 }
 
 /// Handle returned immediately by [`SubagentExecutor::dispatch_background`].
@@ -391,6 +394,7 @@ pub struct BackgroundSubagentHandle {
     pub agent_name: String,
     cancel: CancellationToken,
     join_handle: Arc<Mutex<Option<tokio::task::JoinHandle<Result<SubagentResult>>>>>,
+    observation_run_id: String,
 }
 
 /// Scope-bound live control for TaskClaim-derived Subagent attempts.
@@ -449,7 +453,10 @@ impl BackgroundSubagentHandle {
             .ok_or_else(|| ReactError::Other("Background result already consumed".to_string()))?;
         handle
             .await
-            .map_err(|error| ReactError::Other(format!("Background join error: {error}")))?
+            .map_err(|error| {
+                tracing::error!(error=%error, panic=error.is_panic(), cancelled=error.is_cancelled(), "background join lost physical closure knowledge");
+                ReactError::ExecutionNotSettled { run_id: self.observation_run_id.clone(), execution_id: Some(self.execution_id.clone()) }
+            })?
     }
 }
 
@@ -460,10 +467,19 @@ impl TeammateHandle {
     }
 
     /// Await the teammate's result.
-    pub async fn join(self) -> Result<SubagentResult> {
-        self.join_handle
+    pub async fn join(mut self) -> Result<SubagentResult> {
+        (&mut self.join_handle)
             .await
-            .map_err(|e| ReactError::Other(format!("Teammate join error: {}", e)))?
+            .map_err(|error| {
+                tracing::error!(error=%error, panic=error.is_panic(), cancelled=error.is_cancelled(), "teammate join lost physical closure knowledge");
+                ReactError::ExecutionNotSettled { run_id: self.observation_run_id.clone(), execution_id: self.observation_execution_id.clone() }
+            })?
+    }
+}
+
+impl Drop for TeammateHandle {
+    fn drop(&mut self) {
+        self.cancel.cancel();
     }
 }
 
@@ -506,6 +522,27 @@ impl Default for SubagentExecutorConfig {
     }
 }
 
+struct SubagentPhysicalResources {
+    lease: Option<KeyedExecutionLease>,
+    isolation: Option<super::isolation::IsolationHandle>,
+    resource_guards: Vec<echo_core::tools::InvocationResourceGuard>,
+    uncertain: bool,
+}
+impl Drop for SubagentPhysicalResources {
+    fn drop(&mut self) {
+        if self.uncertain
+            && let Some(lease) = self.lease.take()
+        {
+            // Same original admission key owns both capacity and the isolation
+            // finalizer until authoritative closure. Never finalize on unknown.
+            lease.retain_unknown_with_resources(Some(Box::new((
+                self.isolation.take(),
+                std::mem::take(&mut self.resource_guards),
+            ))));
+        }
+    }
+}
+
 // ── Subagent Executor ─────────────────────────────────────────────────────────
 
 /// Unified dispatch engine for all subagent execution modes.
@@ -513,7 +550,7 @@ pub struct SubagentExecutor {
     registry: Arc<SubagentRegistry>,
     hooks: Arc<SubagentHookRegistry>,
     config: SubagentExecutorConfig,
-    semaphore: Arc<Semaphore>,
+    local_fork_admission: Arc<ExecutionAdmission>,
     control_registry: Arc<SubagentControlRegistry>,
     shared_admission: Arc<tokio::sync::RwLock<Option<Arc<ExecutionAdmission>>>>,
     team_runtimes: Arc<Mutex<TeamRuntimeIndex>>,
@@ -997,14 +1034,16 @@ fn runtime_interrupt_projection_error(
 impl SubagentExecutor {
     /// Create a new executor backed by the given registry.
     pub fn new(registry: Arc<SubagentRegistry>, config: SubagentExecutorConfig) -> Self {
-        let semaphore = Arc::new(Semaphore::new(config.max_concurrent_forks));
+        let local_fork_admission = Arc::new(ExecutionAdmission::with_capacity(
+            config.max_concurrent_forks,
+        ));
         let shared_admission = config.shared_admission.clone();
         Self {
             control_registry: Arc::clone(registry.control_registry()),
             registry,
             hooks: Arc::new(SubagentHookRegistry::new()),
             config,
-            semaphore,
+            local_fork_admission,
             shared_admission: Arc::new(tokio::sync::RwLock::new(shared_admission)),
             team_runtimes: Arc::new(Mutex::new(TeamRuntimeIndex::default())),
         }
@@ -1016,14 +1055,16 @@ impl SubagentExecutor {
         config: SubagentExecutorConfig,
         hooks: SubagentHookRegistry,
     ) -> Self {
-        let semaphore = Arc::new(Semaphore::new(config.max_concurrent_forks));
+        let local_fork_admission = Arc::new(ExecutionAdmission::with_capacity(
+            config.max_concurrent_forks,
+        ));
         let shared_admission = config.shared_admission.clone();
         Self {
             control_registry: Arc::clone(registry.control_registry()),
             registry,
             hooks: Arc::new(hooks),
             config,
-            semaphore,
+            local_fork_admission,
             shared_admission: Arc::new(tokio::sync::RwLock::new(shared_admission)),
             team_runtimes: Arc::new(Mutex::new(TeamRuntimeIndex::default())),
         }
@@ -1108,8 +1149,64 @@ impl SubagentExecutor {
     ///
     /// Routes to the appropriate mode based on the definition or override.
     /// Uses a loop for retry/delegation instead of recursion to prevent stack overflow.
-    pub async fn dispatch(&self, req: DispatchRequest) -> Result<SubagentResult> {
-        self.dispatch_inner(req, None).await
+    pub async fn dispatch(&self, mut req: DispatchRequest) -> Result<SubagentResult> {
+        req.cancel = req.cancel.child_token();
+        self.dispatch_owned(req, None).await
+    }
+
+    async fn dispatch_owned(
+        &self,
+        req: DispatchRequest,
+        admission: Option<super::control::SubagentAttemptAdmission>,
+    ) -> Result<SubagentResult> {
+        struct CancelObservation(CancellationToken);
+        impl Drop for CancelObservation {
+            fn drop(&mut self) {
+                self.0.cancel();
+            }
+        }
+        let _observer = CancelObservation(req.cancel.clone());
+        let owner = self.clone_for_spawn();
+        let observation_execution = admission
+            .as_ref()
+            .map(|admission| admission.binding.identity().execution_id.clone())
+            .or_else(|| {
+                req.runtime_context
+                    .as_ref()
+                    .and_then(|context| context.execution_id.clone())
+            });
+        let observation_run = req
+            .runtime_context
+            .as_ref()
+            .and_then(|context| context.run_id.clone())
+            .or_else(|| {
+                admission
+                    .as_ref()
+                    .and_then(|admission| admission.binding.identity().run_id.clone())
+            })
+            .unwrap_or_else(|| format!("subagent-owner:{}", uuid::Uuid::new_v4()));
+        // Admission, stream, permits and lifecycle publication are all inside
+        // this same original owner, independent of a dropped caller's wait.
+        tokio::spawn(async move {
+            let binding = admission
+                .as_ref()
+                .map(|admission| admission.binding.clone());
+            let result = owner.dispatch_inner(req, binding).await;
+            if let Some(admission) = admission {
+                let status = match &result {
+                    Ok(result) => result.outcome.status,
+                    Err(error) => subagent_status_from_error(error)?,
+                };
+                admission.settle(status);
+            }
+            result
+        })
+        .await
+        .map_err(|error| {
+            tracing::error!(run_id=%observation_run, panic=error.is_panic(), cancelled=error.is_cancelled(), error=%error,
+                "Subagent execution owner lost without physical receipt");
+            ReactError::ExecutionNotSettled { run_id: observation_run, execution_id: observation_execution }
+        })?
     }
 
     /// Dispatch one explicitly identified task attempt under live control.
@@ -1148,14 +1245,7 @@ impl SubagentExecutor {
         req: DispatchRequest,
         admission: super::control::SubagentAttemptAdmission,
     ) -> Result<SubagentResult> {
-        let binding = admission.binding.clone();
-        let result = self.dispatch_inner(req, Some(binding)).await;
-        let status = match &result {
-            Ok(result) => result.outcome.status,
-            Err(error) => subagent_status_from_error(error),
-        };
-        admission.settle(status);
-        result
+        self.dispatch_owned(req, Some(admission)).await
     }
 
     /// Deliver a live instruction to one exact active attempt.
@@ -1188,7 +1278,11 @@ impl SubagentExecutor {
         expected_attempt: u32,
     ) -> std::result::Result<SubagentInterruptOutcome, SubagentControlError> {
         self.control_registry
-            .interrupt(execution_id, expected_attempt)
+            .interrupt(
+                execution_id,
+                expected_attempt,
+                crate::tasks::RuntimeTaskServiceConfig::default().cancellation_grace_period,
+            )
             .await
     }
 
@@ -1314,7 +1408,7 @@ impl SubagentExecutor {
         req: &DispatchRequest,
         error: &ReactError,
     ) -> Result<()> {
-        let status = subagent_status_from_error(error);
+        let status = subagent_status_from_error(error)?;
         let detail = error.to_string();
         let outcome = SubagentOutcome::terminal(status, detail.clone(), vec![detail.clone()]);
         let runtime = req.runtime_context.as_ref();
@@ -1567,6 +1661,30 @@ impl SubagentExecutor {
                     executor(ctx).await;
                 }
 
+                // Reuse the original keyed admission authority for borrowed
+                // invocation resources, without consuming a Fork process slot.
+                // A typed observation (or unwind) cannot release those guards.
+                // Fork retains the same bundle in its existing physical slot.
+                let guards = req
+                    .runtime_context
+                    .as_ref()
+                    .map(|context| context.resource_guards.clone())
+                    .unwrap_or_default();
+                let mut resources = if !matches!(mode, ExecutionMode::Fork) && !guards.is_empty() {
+                    let lease = self
+                        .local_fork_admission
+                        .keyed()
+                        .issue(format!("subagent-resources:{}", uuid::Uuid::new_v4()))
+                        .map_err(|error| ReactError::Other(error.to_string()))?;
+                    Some(SubagentPhysicalResources {
+                        lease: Some(lease),
+                        isolation: None,
+                        resource_guards: guards,
+                        uncertain: true,
+                    })
+                } else {
+                    None
+                };
                 // Dispatch based on mode
                 let start = Instant::now();
                 let result = match mode {
@@ -1596,6 +1714,10 @@ impl SubagentExecutor {
                     ExecutionMode::Team => self.dispatch_team(&req, event_publisher.clone()).await,
                 };
 
+                if let Some(resources) = resources.as_mut() {
+                    resources.uncertain =
+                        matches!(&result, Err(ReactError::ExecutionNotSettled { .. }));
+                }
                 let duration = start.elapsed();
 
                 match result {
@@ -1649,7 +1771,7 @@ impl SubagentExecutor {
                     }
                     Err(e) => {
                         let error_str = e.to_string();
-                        let status = subagent_status_from_error(&e);
+                        let status = subagent_status_from_error(&e)?;
                         let terminal_result = SubagentOutcome::terminal(
                             status,
                             error_str.clone(),
@@ -1821,7 +1943,7 @@ impl SubagentExecutor {
                 prompt_compiler: self.config.prompt_compiler.clone(),
                 shared_admission: self.config.shared_admission.clone(),
             },
-            semaphore: self.semaphore.clone(),
+            local_fork_admission: self.local_fork_admission.clone(),
             control_registry: self.control_registry.clone(),
             shared_admission: self.shared_admission.clone(),
             team_runtimes: self.team_runtimes.clone(),
@@ -1887,7 +2009,16 @@ impl SubagentExecutor {
     }
 
     fn control_react_error(error: SubagentControlError) -> ReactError {
-        ReactError::Other(format!("Subagent control rejected: {error}"))
+        match error {
+            SubagentControlError::ExecutionNotSettled {
+                run_id,
+                execution_id,
+            } => ReactError::ExecutionNotSettled {
+                run_id,
+                execution_id: Some(execution_id),
+            },
+            other => ReactError::Other(format!("Subagent control rejected: {other}")),
+        }
     }
 
     /// Ensure `runtime_context.execution_id` is set (generate `agent_tool-{uuid}` if missing).
@@ -1941,6 +2072,11 @@ impl SubagentExecutor {
 
         let execution_id = Self::ensure_background_execution_id(&mut req);
         req.background = true;
+        let observation_run_id = req
+            .runtime_context
+            .as_ref()
+            .and_then(|context| context.run_id.clone())
+            .unwrap_or_else(|| execution_id.clone());
         let agent_name = req.agent_name.clone();
         let agent_name_for_handle = agent_name.clone();
         let cancel = req.cancel.clone();
@@ -1959,6 +2095,7 @@ impl SubagentExecutor {
             agent_name: agent_name_for_handle,
             cancel,
             join_handle: Arc::new(Mutex::new(Some(join_handle))),
+            observation_run_id,
         })
     }
 
@@ -1977,6 +2114,11 @@ impl SubagentExecutor {
         let (mut req, admission) = self.admit_attempt(req, identity)?;
         req.background = true;
         let execution_id = admission.binding.identity().execution_id.clone();
+        let observation_run_id = req
+            .runtime_context
+            .as_ref()
+            .and_then(|context| context.run_id.clone())
+            .unwrap_or_else(|| execution_id.clone());
         let agent_name = req.agent_name.clone();
         let agent_name_for_handle = agent_name.clone();
         let cancel = req.cancel.clone();
@@ -1995,6 +2137,7 @@ impl SubagentExecutor {
             agent_name: agent_name_for_handle,
             cancel,
             join_handle: Arc::new(Mutex::new(Some(join_handle))),
+            observation_run_id,
         })
     }
 
@@ -2073,62 +2216,42 @@ impl SubagentExecutor {
             ..AgentInvocationContext::default()
         };
 
+        let observation_run_id = event_run_id.clone().unwrap_or_else(|| handle_id.clone());
+        let observation_execution_id = event_execution_id.clone();
         let join_handle = tokio::spawn(async move {
             let _permit = child_token.clone();
             let start = Instant::now();
 
-            let mut result = if timeout_secs > 0 {
-                // Race between timeout, cancellation, and execution
-                tokio::select! {
-                    biased; // Check cancellation first
-                    _ = child_token.cancelled() => {
-                        Err(ReactError::Agent(Box::new(AgentError::Interrupted)))
-                    }
-                    _ = tokio::time::sleep(Duration::from_secs(timeout_secs)) => {
-                        child_token.cancel();
-                        Err(ReactError::Agent(Box::new(AgentError::Timeout(format!(
-                            "Teammate '{}' timed out after {}s",
-                            agent_name, timeout_secs
-                        )))))
-                    }
-                    r = Self::execute_agent_streaming(
-                        agent_arc.clone(),
-                        compiled.clone(),
-                        child_token.clone(),
-                        invocation.clone(),
-                        &parent_agent,
-                        &agent_name,
-                        ExecutionMode::Teammate,
-                        start,
-                        event_execution_id.clone(),
-                        event_run_id.clone(),
-                        control.clone(),
-                        event_publisher.clone(),
-                    ) => r,
-                }
-            } else {
-                // Race between cancellation and execution
-                tokio::select! {
-                    biased;
-                    _ = child_token.cancelled() => {
-                        Err(ReactError::Agent(Box::new(AgentError::Interrupted)))
-                    }
-                    r = Self::execute_agent_streaming(
-                        agent_arc.clone(),
-                        compiled.clone(),
-                        child_token.clone(),
-                        invocation.clone(),
-                        &parent_agent,
-                        &agent_name,
-                        ExecutionMode::Teammate,
-                        start,
-                        event_execution_id.clone(),
-                        event_run_id.clone(),
-                        control.clone(),
-                        event_publisher.clone(),
-                    ) => r,
-                }
-            };
+            let cause = Arc::new(Mutex::new(None));
+            let deadline = (timeout_secs > 0)
+                .then(|| tokio::time::Instant::now() + Duration::from_secs(timeout_secs));
+            let execution = Self::execute_agent_streaming(
+                agent_arc,
+                compiled,
+                child_token.clone(),
+                invocation,
+                &parent_agent,
+                &agent_name,
+                ExecutionMode::Teammate,
+                start,
+                event_execution_id.clone(),
+                event_run_id.clone(),
+                control,
+                event_publisher.clone(),
+                cause.clone(),
+            );
+            let mut result = Self::await_stream_settlement(
+                execution,
+                child_token,
+                deadline,
+                cause,
+                ReactError::Agent(Box::new(AgentError::Interrupted)),
+                ReactError::Agent(Box::new(AgentError::Timeout(format!(
+                    "Teammate '{}' timed out after {}s",
+                    agent_name, timeout_secs
+                )))),
+            )
+            .await;
             if settle_in_handle {
                 match &mut result {
                     Ok(value) => {
@@ -2141,7 +2264,7 @@ impl SubagentExecutor {
                         ))?;
                     }
                     Err(error) => {
-                        let status = subagent_status_from_error(error);
+                        let status = subagent_status_from_error(error)?;
                         let outcome = SubagentOutcome::terminal(
                             status,
                             error.to_string(),
@@ -2177,6 +2300,8 @@ impl SubagentExecutor {
             agent_name: req.agent_name.clone(),
             cancel: handle_cancel,
             join_handle,
+            observation_run_id,
+            observation_execution_id,
         })
     }
 
@@ -2446,6 +2571,7 @@ impl SubagentExecutor {
         run_id: Option<String>,
         control: Option<SubagentAttemptBinding>,
         event_publisher: SubagentEventPublisher,
+        first_cause: Arc<Mutex<Option<ReactError>>>,
     ) -> Result<SubagentResult> {
         let artifact_base_dir = invocation
             .working_dir
@@ -2469,34 +2595,57 @@ impl SubagentExecutor {
         // compatible); genuinely multimodal input requires the message
         // override. This mirrors the documented `DispatchRequest.message`
         // contract instead of assuming every agent implements both paths.
-        let raw_stream = match current_message.content.as_text_ref() {
+        let mut raw_stream = match current_message.content.as_text_ref() {
             Some(task) => {
                 agent
-                    .execute_stream_with_invocation_context(task, cancel, invocation)
+                    .execute_stream_with_invocation_context(task, cancel.clone(), invocation)
                     .await?
             }
             None => {
                 agent
                     .execute_stream_message_with_invocation_context(
                         current_message,
-                        cancel,
+                        cancel.clone(),
                         invocation,
                     )
                     .await?
             }
-        };
+        }
+        .fuse();
         let _steering_lease = if let Some(binding) = control {
-            let turn_id = control_turn_id
-                .ok_or_else(|| ReactError::Other("Subagent control turn id missing".to_string()))?;
-            Some(
-                binding
-                    .attach(agent.clone(), turn_id)
-                    .map_err(Self::control_react_error)?,
-            )
+            let attachment = control_turn_id
+                .ok_or_else(|| ReactError::Other("Subagent control turn id missing".to_string()))
+                .and_then(|turn_id| {
+                    binding
+                        .attach(agent.clone(), turn_id)
+                        .map_err(Self::control_react_error)
+                });
+            match attachment {
+                Ok(lease) => Some(lease),
+                Err(error) => {
+                    Self::record_first_cause(&first_cause, error);
+                    cancel.cancel();
+                    let mut uncertain = None;
+                    while let Some(item) = raw_stream.next().await {
+                        if let Err(error @ ReactError::ExecutionNotSettled { .. }) = item {
+                            uncertain.get_or_insert(error);
+                        }
+                    }
+                    if let Some(error) = uncertain {
+                        return Err(error);
+                    }
+                    return Err(Self::take_first_cause(&first_cause).ok_or_else(|| {
+                        ReactError::Other("stream attachment cause missing".to_string())
+                    })?);
+                }
+            }
         } else {
             None
         };
-        let mut stream = echo_core::agent::envelope_event_stream(raw_stream, event_identity);
+        // The envelope normalizer ends at its first terminal event. Borrow the
+        // original source so that its EOF/cleanup can still be awaited below.
+        let mut stream =
+            echo_core::agent::envelope_event_stream(raw_stream.by_ref().boxed(), event_identity);
         let mut output = String::new();
         let mut in_thinking = false;
         let mut prompt_tokens: usize = 0;
@@ -2505,172 +2654,215 @@ impl SubagentExecutor {
         let mut pending_tool_evidence = HashMap::<String, (String, serde_json::Value)>::new();
         let mut observed_evidence = Vec::new();
         let mut observed_artifacts = Vec::new();
+        let mut physical_uncertainty = None;
 
         while let Some(event_result) = stream.next().await {
-            let event = event_result?.payload;
-            match event {
-                AgentEvent::Token(content) => {
-                    if in_thinking {
-                        event_publisher.emit(SubagentEvent::DispatchThinkingDelta {
+            let event_result = match event_result {
+                Err(error @ ReactError::ExecutionNotSettled { .. }) => {
+                    physical_uncertainty.get_or_insert(error);
+                    continue;
+                }
+                other => other,
+            };
+            if first_cause
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .is_some()
+            {
+                // A terminal/error observation is not the producer cleanup receipt.
+                // Keep polling this original stream until its owned EOF settles.
+                continue;
+            }
+            let event = match event_result {
+                Ok(event) => event.payload,
+                Err(error) => {
+                    Self::record_first_cause(&first_cause, error);
+                    continue;
+                }
+            };
+            let processed = (|| -> Result<()> {
+                match event {
+                    AgentEvent::Token(content) => {
+                        if in_thinking {
+                            event_publisher.emit(SubagentEvent::DispatchThinkingDelta {
+                                parent: parent.to_string(),
+                                agent: subagent.to_string(),
+                                content,
+                                execution_id: execution_id.clone(),
+                                run_id: run_id.clone(),
+                            })?;
+                        } else {
+                            output.push_str(&content);
+                            event_publisher.emit(SubagentEvent::DispatchTokenDelta {
+                                parent: parent.to_string(),
+                                agent: subagent.to_string(),
+                                content,
+                                execution_id: execution_id.clone(),
+                                run_id: run_id.clone(),
+                            })?;
+                        }
+                    }
+                    AgentEvent::ThinkStart => {
+                        in_thinking = true;
+                        event_publisher.emit(SubagentEvent::DispatchThinkingStarted {
                             parent: parent.to_string(),
                             agent: subagent.to_string(),
-                            content,
-                            execution_id: execution_id.clone(),
-                            run_id: run_id.clone(),
-                        })?;
-                    } else {
-                        output.push_str(&content);
-                        event_publisher.emit(SubagentEvent::DispatchTokenDelta {
-                            parent: parent.to_string(),
-                            agent: subagent.to_string(),
-                            content,
                             execution_id: execution_id.clone(),
                             run_id: run_id.clone(),
                         })?;
                     }
-                }
-                AgentEvent::ThinkStart => {
-                    in_thinking = true;
-                    event_publisher.emit(SubagentEvent::DispatchThinkingStarted {
-                        parent: parent.to_string(),
-                        agent: subagent.to_string(),
-                        execution_id: execution_id.clone(),
-                        run_id: run_id.clone(),
-                    })?;
-                }
-                AgentEvent::ThinkEnd {
-                    prompt_tokens: pt,
-                    completion_tokens: ct,
-                } => {
-                    in_thinking = false;
-                    prompt_tokens = prompt_tokens.saturating_add(pt);
-                    completion_tokens = completion_tokens.saturating_add(ct);
-                    event_publisher.emit(SubagentEvent::DispatchThinkingEnded {
-                        parent: parent.to_string(),
-                        agent: subagent.to_string(),
+                    AgentEvent::ThinkEnd {
                         prompt_tokens: pt,
                         completion_tokens: ct,
-                        execution_id: execution_id.clone(),
-                        run_id: run_id.clone(),
-                    })?;
-                }
-                AgentEvent::LlmUsage {
-                    model,
-                    prompt_tokens: pt,
-                    completion_tokens: ct,
-                    total_tokens: tt,
-                    cached_prompt_tokens: cpt,
-                    cache_creation_prompt_tokens: ccpt,
-                    usage_reported,
-                } => {
-                    usage_stats.record(&model, pt, ct, tt, cpt, ccpt, usage_reported);
-                    event_publisher.emit(SubagentEvent::DispatchLlmUsage {
-                        parent: parent.to_string(),
-                        agent: subagent.to_string(),
-                        model: model.clone(),
+                    } => {
+                        in_thinking = false;
+                        prompt_tokens = prompt_tokens.saturating_add(pt);
+                        completion_tokens = completion_tokens.saturating_add(ct);
+                        event_publisher.emit(SubagentEvent::DispatchThinkingEnded {
+                            parent: parent.to_string(),
+                            agent: subagent.to_string(),
+                            prompt_tokens: pt,
+                            completion_tokens: ct,
+                            execution_id: execution_id.clone(),
+                            run_id: run_id.clone(),
+                        })?;
+                    }
+                    AgentEvent::LlmUsage {
+                        model,
                         prompt_tokens: pt,
                         completion_tokens: ct,
                         total_tokens: tt,
                         cached_prompt_tokens: cpt,
                         cache_creation_prompt_tokens: ccpt,
                         usage_reported,
-                        execution_id: execution_id.clone(),
-                        run_id: run_id.clone(),
-                    })?;
-                }
-                AgentEvent::ToolCall {
-                    call_id,
-                    invocation,
-                } => {
-                    pending_tool_evidence.insert(
-                        call_id.clone(),
-                        (invocation.name.clone(), invocation.args.clone()),
-                    );
-                    event_publisher.emit(SubagentEvent::DispatchToolStarted {
-                        parent: parent.to_string(),
-                        agent: subagent.to_string(),
+                    } => {
+                        usage_stats.record(&model, pt, ct, tt, cpt, ccpt, usage_reported);
+                        event_publisher.emit(SubagentEvent::DispatchLlmUsage {
+                            parent: parent.to_string(),
+                            agent: subagent.to_string(),
+                            model: model.clone(),
+                            prompt_tokens: pt,
+                            completion_tokens: ct,
+                            total_tokens: tt,
+                            cached_prompt_tokens: cpt,
+                            cache_creation_prompt_tokens: ccpt,
+                            usage_reported,
+                            execution_id: execution_id.clone(),
+                            run_id: run_id.clone(),
+                        })?;
+                    }
+                    AgentEvent::ToolCall {
                         call_id,
                         invocation,
-                        execution_id: execution_id.clone(),
-                        run_id: run_id.clone(),
-                    })?;
-                }
-                AgentEvent::ToolResult {
-                    call_id,
-                    name,
-                    result,
-                } => {
-                    let detail = result
-                        .error
-                        .as_deref()
-                        .filter(|value| !value.is_empty())
-                        .unwrap_or(&result.output);
-                    let (subject, args) = pending_tool_evidence
-                        .remove(&call_id)
-                        .unwrap_or_else(|| (name.clone(), serde_json::Value::Null));
-                    observed_evidence.push(SubagentEvidence {
-                        kind: "tool_result".to_string(),
-                        subject,
-                        outcome: Some(if result.success {
-                            "succeeded".to_string()
-                        } else {
-                            "failed".to_string()
-                        }),
-                        details: bounded_detail(detail),
-                        source: SubagentEvidenceSource::Observed,
-                        attributes: serde_json::json!({ "args": args }),
-                    });
-                    if let Some(artifact) = result.artifact.as_ref() {
-                        observed_artifacts.push(SubagentArtifact {
-                            path: artifact.path.to_string_lossy().to_string(),
-                            kind: "tool_log".to_string(),
-                            bytes: Some(artifact.artifact_bytes),
-                            sha256: Some(artifact.sha256.clone()),
-                            producer_execution_id: execution_id.clone(),
-                            available: true,
-                        });
+                    } => {
+                        pending_tool_evidence.insert(
+                            call_id.clone(),
+                            (invocation.name.clone(), invocation.args.clone()),
+                        );
+                        event_publisher.emit(SubagentEvent::DispatchToolStarted {
+                            parent: parent.to_string(),
+                            agent: subagent.to_string(),
+                            call_id,
+                            invocation,
+                            execution_id: execution_id.clone(),
+                            run_id: run_id.clone(),
+                        })?;
                     }
-                    event_publisher.emit(SubagentEvent::DispatchToolCompleted {
-                        parent: parent.to_string(),
-                        agent: subagent.to_string(),
+                    AgentEvent::ToolResult {
                         call_id,
                         name,
                         result,
-                        execution_id: execution_id.clone(),
-                        run_id: run_id.clone(),
-                    })?;
-                }
-                AgentEvent::FinalAnswer(answer) if !answer.is_empty() => {
-                    output = answer;
-                }
-                AgentEvent::FinalAnswer(_) => {}
-                AgentEvent::Cancelled => {
-                    return Err(ReactError::Agent(Box::new(AgentError::Cancelled(format!(
-                        "Subagent '{subagent}' cancelled"
-                    )))));
-                }
-                AgentEvent::Error {
-                    source,
-                    message,
-                    failure,
-                } => {
-                    return match failure.terminal_kind {
-                        AgentTerminalKind::Cancelled => {
-                            Err(ReactError::Agent(Box::new(AgentError::Cancelled(message))))
+                    } => {
+                        let detail = result
+                            .error
+                            .as_deref()
+                            .filter(|value| !value.is_empty())
+                            .unwrap_or(&result.output);
+                        let (subject, args) = pending_tool_evidence
+                            .remove(&call_id)
+                            .unwrap_or_else(|| (name.clone(), serde_json::Value::Null));
+                        observed_evidence.push(SubagentEvidence {
+                            kind: "tool_result".to_string(),
+                            subject,
+                            outcome: Some(if result.success {
+                                "succeeded".to_string()
+                            } else {
+                                "failed".to_string()
+                            }),
+                            details: bounded_detail(detail),
+                            source: SubagentEvidenceSource::Observed,
+                            attributes: serde_json::json!({ "args": args }),
+                        });
+                        if let Some(artifact) = result.artifact.as_ref() {
+                            observed_artifacts.push(SubagentArtifact {
+                                path: artifact.path.to_string_lossy().to_string(),
+                                kind: "tool_log".to_string(),
+                                bytes: Some(artifact.artifact_bytes),
+                                sha256: Some(artifact.sha256.clone()),
+                                producer_execution_id: execution_id.clone(),
+                                available: true,
+                            });
                         }
-                        AgentTerminalKind::TimedOut => {
-                            Err(ReactError::Agent(Box::new(AgentError::Timeout(message))))
-                        }
-                        AgentTerminalKind::PermissionDenied => Err(ReactError::Agent(Box::new(
-                            AgentError::PermissionDenied(message),
-                        ))),
-                        AgentTerminalKind::Failed => {
-                            Err(ReactError::Other(format!("{source}: {message}")))
-                        }
-                    };
+                        event_publisher.emit(SubagentEvent::DispatchToolCompleted {
+                            parent: parent.to_string(),
+                            agent: subagent.to_string(),
+                            call_id,
+                            name,
+                            result,
+                            execution_id: execution_id.clone(),
+                            run_id: run_id.clone(),
+                        })?;
+                    }
+                    AgentEvent::FinalAnswer(answer) if !answer.is_empty() => {
+                        output = answer;
+                    }
+                    AgentEvent::FinalAnswer(_) => {}
+                    AgentEvent::Cancelled => {
+                        return Err(ReactError::Agent(Box::new(AgentError::Cancelled(format!(
+                            "Subagent '{subagent}' cancelled"
+                        )))));
+                    }
+                    AgentEvent::Error {
+                        source,
+                        message,
+                        failure,
+                    } => {
+                        return match failure.terminal_kind {
+                            AgentTerminalKind::Cancelled => {
+                                Err(ReactError::Agent(Box::new(AgentError::Cancelled(message))))
+                            }
+                            AgentTerminalKind::TimedOut => {
+                                Err(ReactError::Agent(Box::new(AgentError::Timeout(message))))
+                            }
+                            AgentTerminalKind::PermissionDenied => Err(ReactError::Agent(
+                                Box::new(AgentError::PermissionDenied(message)),
+                            )),
+                            AgentTerminalKind::Failed => {
+                                Err(ReactError::Other(format!("{source}: {message}")))
+                            }
+                        };
+                    }
+                    _ => {}
                 }
-                _ => {}
+                Ok(())
+            })();
+            if let Err(error) = processed {
+                Self::record_first_cause(&first_cause, error);
             }
+        }
+        drop(stream);
+        // Envelope EOF only proves terminal projection. The original stream
+        // may still own a producer/finally; consume that source to its real EOF.
+        while let Some(item) = raw_stream.next().await {
+            if let Err(error @ ReactError::ExecutionNotSettled { .. }) = item {
+                physical_uncertainty.get_or_insert(error);
+            }
+        }
+        if let Some(error) = physical_uncertainty {
+            return Err(error);
+        }
+        if let Some(error) = Self::take_first_cause(&first_cause) {
+            return Err(error);
         }
 
         let tokens_used = Some(prompt_tokens.saturating_add(completion_tokens));
@@ -2713,6 +2905,60 @@ impl SubagentExecutor {
             })?,
         };
         Ok(agent)
+    }
+
+    fn record_first_cause(cause: &Arc<Mutex<Option<ReactError>>>, error: ReactError) {
+        let mut cause = cause.lock().unwrap_or_else(|p| p.into_inner());
+        if cause.is_none() {
+            *cause = Some(error);
+        }
+    }
+
+    fn take_first_cause(cause: &Arc<Mutex<Option<ReactError>>>) -> Option<ReactError> {
+        cause.lock().unwrap_or_else(|p| p.into_inner()).take()
+    }
+
+    async fn await_stream_settlement<F>(
+        execution: F,
+        cancel: CancellationToken,
+        deadline: Option<tokio::time::Instant>,
+        cause: Arc<Mutex<Option<ReactError>>>,
+        cancelled: ReactError,
+        timed_out: ReactError,
+    ) -> Result<SubagentResult>
+    where
+        F: std::future::Future<Output = Result<SubagentResult>>,
+    {
+        if cancel.is_cancelled() {
+            return Err(cancelled);
+        }
+        if deadline.is_some_and(|deadline| deadline <= tokio::time::Instant::now()) {
+            cancel.cancel();
+            return Err(timed_out);
+        }
+        tokio::pin!(execution);
+        let error = tokio::select! {
+            biased;
+            result = &mut execution => return result,
+            _ = cancel.cancelled() => cancelled,
+            _ = async {
+                match deadline {
+                    Some(deadline) => tokio::time::sleep_until(deadline).await,
+                    None => std::future::pending().await,
+                }
+            } => { cancel.cancel(); timed_out },
+        };
+        Self::record_first_cause(&cause, error);
+        // The same future owns physical stream cleanup, including an already
+        // observed error. Later cancellation cannot replace that first cause.
+        let result = execution.await;
+        if matches!(&result, Err(ReactError::ExecutionNotSettled { .. })) {
+            return result;
+        }
+        match Self::take_first_cause(&cause) {
+            Some(error) => Err(error),
+            None => result,
+        }
     }
 
     /// Sync mode: execute one isolated invocation and return its result.
@@ -2758,56 +3004,39 @@ impl SubagentExecutor {
             ..AgentInvocationContext::default()
         };
 
-        if timeout_secs > 0 {
-            tokio::select! {
-                biased;
-                _ = execution_cancel.cancelled() => Err(ReactError::Agent(Box::new(
-                    AgentError::Cancelled(format!("Sync subagent '{}' cancelled", req.agent_name))
-                ))),
-                r = tokio::time::timeout(
-                    Duration::from_secs(timeout_secs),
-                    Self::execute_agent_streaming(
-                        agent_arc.clone(),
-                        compiled.clone(),
-                        execution_cancel.clone(),
-                        invocation.clone(),
-                        &req.parent_agent,
-                        &req.agent_name,
-                        ExecutionMode::Sync,
-                        start,
-                        event_execution_id.clone(),
-                        event_run_id.clone(),
-                        control.clone(),
-                        event_publisher.clone(),
-                    )
-                ) => match r {
-                    Ok(r) => r,
-                    Err(_) => {
-                        execution_cancel.cancel();
-                        Err(ReactError::Agent(Box::new(AgentError::Timeout(format!(
-                            "Sync subagent '{}' timed out after {}s",
-                            req.agent_name, timeout_secs
-                        )))))
-                    }
-                },
-            }
-        } else {
-            Self::execute_agent_streaming(
-                agent_arc,
-                compiled,
-                execution_cancel,
-                invocation,
-                &req.parent_agent,
-                &req.agent_name,
-                ExecutionMode::Sync,
-                start,
-                event_execution_id,
-                event_run_id,
-                control,
-                event_publisher,
-            )
-            .await
-        }
+        let cause = Arc::new(Mutex::new(None));
+        let deadline = (timeout_secs > 0)
+            .then(|| tokio::time::Instant::now() + Duration::from_secs(timeout_secs));
+        let execution = Self::execute_agent_streaming(
+            agent_arc,
+            compiled,
+            execution_cancel.clone(),
+            invocation,
+            &req.parent_agent,
+            &req.agent_name,
+            ExecutionMode::Sync,
+            start,
+            event_execution_id,
+            event_run_id,
+            control,
+            event_publisher,
+            cause.clone(),
+        );
+        Self::await_stream_settlement(
+            execution,
+            execution_cancel,
+            deadline,
+            cause,
+            ReactError::Agent(Box::new(AgentError::Cancelled(format!(
+                "Sync subagent '{}' cancelled",
+                req.agent_name
+            )))),
+            ReactError::Agent(Box::new(AgentError::Timeout(format!(
+                "Sync subagent '{}' timed out after {}s",
+                req.agent_name, timeout_secs
+            )))),
+        )
+        .await
     }
 
     /// Fork mode: acquire semaphore, spawn task, await with timeout.
@@ -2828,65 +3057,25 @@ impl SubagentExecutor {
         };
         let deadline = (timeout_secs > 0)
             .then(|| tokio::time::Instant::now() + Duration::from_secs(timeout_secs));
-        enum ForkAdmission {
-            Local(tokio::sync::OwnedSemaphorePermit),
-            Shared(KeyedExecutionLease),
-        }
-        let shared_admission = self.shared_admission.read().await.clone();
-        let permit = if let Some(admission) = shared_admission {
-            let admission_key = req
-                .runtime_context
-                .as_ref()
-                .and_then(|context| context.execution_id.as_deref())
-                .map(str::to_string)
-                .unwrap_or_else(|| uuid::Uuid::new_v4().as_simple().to_string());
-            tokio::select! {
-                biased;
-                _ = req.cancel.cancelled() => {
-                    return Err(ReactError::Agent(Box::new(AgentError::Cancelled(format!(
-                        "Fork subagent '{}' cancelled while waiting for shared capacity",
-                        req.agent_name
-                    )))));
-                }
-                _ = async {
-                    match deadline {
-                        Some(deadline) => tokio::time::sleep_until(deadline).await,
-                        None => std::future::pending().await,
-                    }
-                } => {
-                    return Err(ReactError::Agent(Box::new(AgentError::Timeout(format!(
-                        "Fork subagent '{}' timed out after {}s while waiting for shared capacity",
-                        req.agent_name, timeout_secs
-                    )))));
-                }
-                permit = admission.issue_wait(format!("subagent:{admission_key}")) => permit
-                    .map(ForkAdmission::Shared)
-                    .map_err(|error| ReactError::Other(format!("shared execution admission rejected Fork: {error}")))?,
-            }
-        } else {
-            tokio::select! {
+        let admission = self
+            .shared_admission
+            .read()
+            .await
+            .clone()
+            .unwrap_or_else(|| self.local_fork_admission.clone());
+        let admission_key = req
+            .runtime_context
+            .as_ref()
+            .and_then(|context| context.execution_id.as_deref())
+            .map(str::to_string)
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let permit = tokio::select! {
             biased;
-            _ = req.cancel.cancelled() => {
-                return Err(ReactError::Agent(Box::new(AgentError::Cancelled(format!(
-                    "Fork subagent '{}' cancelled while waiting for capacity",
-                    req.agent_name
-                )))));
-            }
-            _ = async {
-                match deadline {
-                    Some(deadline) => tokio::time::sleep_until(deadline).await,
-                    None => std::future::pending().await,
-                }
-            } => {
-                return Err(ReactError::Agent(Box::new(AgentError::Timeout(format!(
-                    "Fork subagent '{}' timed out after {}s while waiting for capacity",
-                    req.agent_name, timeout_secs
-                )))));
-            }
-            permit = self.semaphore.clone().acquire_owned() => permit
-                .map(ForkAdmission::Local)
-                .map_err(|error| ReactError::Other(format!("Semaphore error: {error}")))?,
-            }
+            _ = req.cancel.cancelled() => return Err(ReactError::Agent(Box::new(AgentError::Cancelled(
+                format!("Fork subagent '{}' cancelled while waiting for capacity", req.agent_name))))),
+            _ = async { match deadline { Some(deadline) => tokio::time::sleep_until(deadline).await, None => std::future::pending().await } } =>
+                return Err(ReactError::Agent(Box::new(AgentError::Timeout(format!("Fork subagent '{}' timed out after {}s while waiting for capacity",req.agent_name,timeout_secs))))),
+            permit = admission.issue_wait(format!("subagent:{admission_key}")) => permit.map_err(|error|ReactError::Other(error.to_string()))?,
         };
 
         let agent_arc = tokio::select! {
@@ -2988,16 +3177,21 @@ impl SubagentExecutor {
             .and_then(|context| context.allowed_tools.clone())
             .filter(|allowed| !allowed.is_empty());
 
+        let observation_run_id = req
+            .runtime_context
+            .as_ref()
+            .and_then(|context| context.run_id.clone())
+            .unwrap_or_else(|| format!("fork-owner:{}", uuid::Uuid::new_v4()));
+        let observation_execution_id = req
+            .runtime_context
+            .as_ref()
+            .and_then(|context| context.execution_id.clone());
+        let resource_guards = runtime_context
+            .as_ref()
+            .map(|context| context.resource_guards.clone())
+            .unwrap_or_default();
         let result = tokio::spawn(async move {
-            let _permit = permit;
-            match &_permit {
-                ForkAdmission::Local(permit) => {
-                    let _ = permit;
-                }
-                ForkAdmission::Shared(lease) => {
-                    let _ = lease;
-                }
-            }
+            let mut physical_owner = SubagentPhysicalResources { lease: Some(permit), isolation: None, resource_guards, uncertain: false };
             let start = Instant::now();
 
             // Check cancellation
@@ -3101,68 +3295,46 @@ impl SubagentExecutor {
                 execution_id: event_execution_id.clone(),
                 run_id: event_run_id.clone(),
             })?;
-            let mut result = if let Some(deadline) = deadline {
-                tokio::select! {
-                    biased;
-                    _ = execution_cancel.cancelled() => Err(ReactError::Agent(Box::new(
-                        AgentError::Cancelled(format!("Fork subagent '{}' cancelled", agent_name))
-                    ))),
-                    r = tokio::time::timeout_at(
-                        deadline,
-                        Self::execute_agent_streaming(
-                            agent_arc.clone(),
-                            compiled.clone(),
-                            execution_cancel.clone(),
-                            invocation.clone(),
-                            &parent_agent,
-                            &agent_name,
-                            ExecutionMode::Fork,
-                            start,
-                            event_execution_id.clone(),
-                            event_run_id.clone(),
-                            control.clone(),
-                            event_publisher.clone(),
-                        )
-                    ) => {
-                        match r {
-                            Ok(r) => r,
-                            Err(_) => {
-                                execution_cancel.cancel();
-                                Err(ReactError::Agent(Box::new(AgentError::Timeout(format!(
-                                    "Fork subagent '{}' timed out after {}s",
-                                    agent_name, timeout_secs
-                                )))))
-                            }
-                        }
-                    }
-                }
-            } else {
-                tokio::select! {
-                    biased;
-                    _ = execution_cancel.cancelled() => Err(ReactError::Agent(Box::new(
-                        AgentError::Cancelled(format!("Fork subagent '{}' cancelled", agent_name))
-                    ))),
-                    r = Self::execute_agent_streaming(
-                        agent_arc.clone(),
-                        compiled.clone(),
-                        execution_cancel.clone(),
-                        invocation.clone(),
-                        &parent_agent,
-                        &agent_name,
-                        ExecutionMode::Fork,
-                        start,
-                        event_execution_id.clone(),
-                        event_run_id.clone(),
-                        control.clone(),
-                        event_publisher.clone(),
-                    ) => r,
-                }
-            };
+            physical_owner.isolation = isolation_handle;
+            physical_owner.uncertain = true;
+            let cause = Arc::new(Mutex::new(None));
+            let execution = Self::execute_agent_streaming(
+                agent_arc,
+                compiled,
+                execution_cancel.clone(),
+                invocation,
+                &parent_agent,
+                &agent_name,
+                ExecutionMode::Fork,
+                start,
+                event_execution_id.clone(),
+                event_run_id.clone(),
+                control,
+                event_publisher.clone(),
+                cause.clone(),
+            );
+            let mut result = Self::await_stream_settlement(
+                execution,
+                execution_cancel,
+                deadline,
+                cause,
+                ReactError::Agent(Box::new(AgentError::Cancelled(format!(
+                    "Fork subagent '{}' cancelled",
+                    agent_name
+                )))),
+                ReactError::Agent(Box::new(AgentError::Timeout(format!(
+                    "Fork subagent '{}' timed out after {}s",
+                    agent_name, timeout_secs
+                )))),
+            )
+            .await;
+            if matches!(&result, Err(ReactError::ExecutionNotSettled { .. })) { return result; }
+            physical_owner.uncertain = false;
             if let Ok(subagent_result) = &mut result {
                 subagent_result.isolation_observed = isolation_observed;
             }
 
-            if let Some(handle) = isolation_handle {
+            if let Some(handle) = physical_owner.isolation.take() {
                 match (handle.finalize)() {
                     Ok(finalized) => {
                         if let Ok(mut r) = result {
@@ -3193,7 +3365,10 @@ impl SubagentExecutor {
             result
         })
         .await
-        .map_err(|e| ReactError::Other(format!("Fork task join error: {}", e)))??;
+        .map_err(|error| {
+            tracing::error!(error=%error, panic=error.is_panic(), cancelled=error.is_cancelled(), "Fork owner lost without physical receipt");
+            ReactError::ExecutionNotSettled { run_id: observation_run_id, execution_id: observation_execution_id }
+        })??;
 
         Ok(result)
     }
@@ -3735,6 +3910,7 @@ mod tests {
 
     struct PendingDropStream {
         dropped: Arc<AtomicBool>,
+        physical_eof: futures::future::BoxFuture<'static, ()>,
     }
 
     impl futures::Stream for PendingDropStream {
@@ -3742,9 +3918,13 @@ mod tests {
 
         fn poll_next(
             self: std::pin::Pin<&mut Self>,
-            _context: &mut std::task::Context<'_>,
+            context: &mut std::task::Context<'_>,
         ) -> std::task::Poll<Option<Self::Item>> {
-            std::task::Poll::Pending
+            self.get_mut()
+                .physical_eof
+                .as_mut()
+                .poll(context)
+                .map(|()| None)
         }
     }
 
@@ -3756,6 +3936,8 @@ mod tests {
 
     struct NonCooperativeTeamAgent {
         dropped: Arc<AtomicBool>,
+        started: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
     }
 
     impl Agent for NonCooperativeTeamAgent {
@@ -3783,8 +3965,14 @@ mod tests {
             Result<futures::stream::BoxStream<'a, Result<AgentEvent>>>,
         > {
             let dropped = Arc::clone(&self.dropped);
+            let started = self.started.clone();
+            let release = self.release.clone();
             Box::pin(async move {
-                Ok(Box::pin(PendingDropStream { dropped })
+                started.notify_one();
+                Ok(Box::pin(PendingDropStream {
+                    dropped,
+                    physical_eof: Box::pin(async move { release.notified().await }),
+                })
                     as futures::stream::BoxStream<'a, Result<AgentEvent>>)
             })
         }
@@ -3800,6 +3988,967 @@ mod tests {
         > {
             self.execute_stream(task)
         }
+    }
+
+    struct UnknownCleanupAgent {
+        setup: bool,
+        panic_setup: bool,
+    }
+    impl Agent for UnknownCleanupAgent {
+        fn name(&self) -> &str {
+            "unknown-cleanup"
+        }
+        fn model_name(&self) -> &str {
+            "test"
+        }
+        fn system_prompt(&self) -> &str {
+            ""
+        }
+        fn execute<'a>(&'a self, _task: &'a str) -> futures::future::BoxFuture<'a, Result<String>> {
+            Box::pin(async { Err(ReactError::Other("stream only".to_string())) })
+        }
+        fn execute_stream<'a>(
+            &'a self,
+            _task: &'a str,
+        ) -> futures::future::BoxFuture<
+            'a,
+            Result<futures::stream::BoxStream<'a, Result<AgentEvent>>>,
+        > {
+            Box::pin(async move {
+                if self.panic_setup {
+                    std::panic::resume_unwind(Box::new("original foreign producer owner lost"));
+                }
+                let unknown = ReactError::ExecutionNotSettled {
+                    run_id: "unknown-original".to_string(),
+                    execution_id: Some("unknown-attempt".to_string()),
+                };
+                if self.setup {
+                    return Err(unknown);
+                }
+                Ok(futures::stream::iter(vec![Ok(AgentEvent::Cancelled), Err(unknown)]).boxed())
+            })
+        }
+    }
+
+    fn unknown_request(mode: ExecutionMode, cancel: CancellationToken) -> DispatchRequest {
+        DispatchRequest {
+            agent_name: "unknown-cleanup".to_string(),
+            task: "original unknown producer".to_string(),
+            mode_override: Some(mode),
+            cancel,
+            parent_agent: "parent".to_string(),
+            parent_context: None,
+            delegation_policy: DispatchRequest::policy_from_depth(0),
+            runtime_context: None,
+            message: None,
+            prompt_payload: None,
+            prompt_context: None,
+            constraints: Vec::new(),
+            background: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn cleanup_observation_cannot_be_replaced_by_earlier_cancel_terminal_in_any_mode()
+    -> Result<()> {
+        for mode in [
+            ExecutionMode::Sync,
+            ExecutionMode::Fork,
+            ExecutionMode::Teammate,
+        ] {
+            let (registry, executor) = make_executor().await;
+            registry
+                .register(
+                    SubagentDefinition::new("unknown-cleanup", "unknown tail"),
+                    Box::new(UnknownCleanupAgent {
+                        setup: false,
+                        panic_setup: false,
+                    }),
+                )
+                .await;
+            let result = executor
+                .dispatch(unknown_request(mode, CancellationToken::new()))
+                .await;
+            assert!(
+                matches!(result,Err(ReactError::ExecutionNotSettled{run_id,execution_id:Some(execution_id)})if run_id=="unknown-original"&&execution_id=="unknown-attempt")
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn standalone_fork_unknown_or_panic_retains_original_local_and_shared_capacity()
+    -> Result<()> {
+        for shared in [false, true] {
+            for panic_setup in [false, true] {
+                let registry = Arc::new(SubagentRegistry::new());
+                registry
+                    .register(
+                        SubagentDefinition::new("unknown-cleanup", "unknown setup"),
+                        Box::new(UnknownCleanupAgent {
+                            setup: true,
+                            panic_setup,
+                        }),
+                    )
+                    .await;
+                let admission = Arc::new(ExecutionAdmission::with_capacity(1));
+                let executor = SubagentExecutor::new(
+                    registry,
+                    SubagentExecutorConfig {
+                        max_concurrent_forks: 1,
+                        shared_admission: shared.then(|| admission.clone()),
+                        ..Default::default()
+                    },
+                );
+                let result = executor
+                    .dispatch(unknown_request(
+                        ExecutionMode::Fork,
+                        CancellationToken::new(),
+                    ))
+                    .await;
+                assert!(matches!(
+                    result,
+                    Err(ReactError::ExecutionNotSettled { .. })
+                ));
+                let owner = if shared {
+                    admission.clone()
+                } else {
+                    executor.local_fork_admission.clone()
+                };
+                assert_eq!(
+                    owner.active_count(),
+                    1,
+                    "unknown Fork must keep its original admission after its call returns"
+                );
+                assert!(owner.issue("new-physical-attempt").is_err());
+                let cancel = CancellationToken::new();
+                cancel.cancel();
+                let cancelled = executor
+                    .dispatch(unknown_request(ExecutionMode::Fork, cancel))
+                    .await?;
+                assert_eq!(cancelled.outcome.status, SubagentStatus::Cancelled);
+                assert_eq!(owner.active_count(), 1);
+                drop(executor);
+                assert_eq!(
+                    owner.active_count(),
+                    1,
+                    "dropping an observer executor must not clear uncertainty owned by its admission"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn foreign_observation_keeps_original_invocation_guards_in_each_mode() -> Result<()> {
+        for mode in [
+            ExecutionMode::Sync,
+            ExecutionMode::Fork,
+            ExecutionMode::Teammate,
+        ] {
+            let (registry, executor) = make_executor().await;
+            registry
+                .register(
+                    SubagentDefinition::new("unknown-cleanup", "unknown setup"),
+                    Box::new(UnknownCleanupAgent {
+                        setup: true,
+                        panic_setup: false,
+                    }),
+                )
+                .await;
+            let drops = Arc::new(AtomicUsize::new(0));
+            let mut request = unknown_request(mode, CancellationToken::new());
+            let runtime = request.runtime_context.get_or_insert_with(|| {
+                echo_core::tools::ExternalRunContext {
+                    run_id: Some("unknown-original".to_string()),
+                    execution_id: Some("unknown-attempt".to_string()),
+                    ..Default::default()
+                }
+            });
+            runtime
+                .resource_guards
+                .push(echo_core::tools::InvocationResourceGuard::new(
+                    DispatchGuardDrop(drops.clone()),
+                ));
+            let result = executor.dispatch(request).await;
+            assert!(matches!(
+                result,
+                Err(ReactError::ExecutionNotSettled { .. })
+            ));
+            assert_eq!(
+                drops.load(Ordering::SeqCst),
+                0,
+                "foreign physical authority remains unknown; its original invocation guard cannot be released"
+            );
+        }
+        Ok(())
+    }
+
+    #[derive(Clone, Copy)]
+    enum HeldStreamFailure {
+        Cancellation,
+        CancelledEvent,
+        RawError,
+        ErrorEvent,
+    }
+
+    #[derive(Default)]
+    struct StreamSettlementBarrier {
+        started: tokio::sync::Notify,
+        cleanup_entered: tokio::sync::Notify,
+        collector_waiting_eof: tokio::sync::Notify,
+        release_cleanup: tokio::sync::Notify,
+        physical_stopped: AtomicBool,
+    }
+
+    struct HeldCleanupStreamAgent {
+        barrier: Arc<StreamSettlementBarrier>,
+        failure: HeldStreamFailure,
+    }
+
+    impl Agent for HeldCleanupStreamAgent {
+        fn name(&self) -> &str {
+            "held-cleanup"
+        }
+        fn model_name(&self) -> &str {
+            "fixture"
+        }
+        fn system_prompt(&self) -> &str {
+            ""
+        }
+        fn execute<'a>(&'a self, _task: &'a str) -> futures::future::BoxFuture<'a, Result<String>> {
+            Box::pin(async { Err(ReactError::Other("fixture requires streaming".to_string())) })
+        }
+        fn execute_stream<'a>(
+            &'a self,
+            task: &'a str,
+        ) -> futures::future::BoxFuture<
+            'a,
+            Result<futures::stream::BoxStream<'a, Result<AgentEvent>>>,
+        > {
+            self.execute_stream_with_invocation_context(
+                task,
+                CancellationToken::new(),
+                AgentInvocationContext::default(),
+            )
+        }
+        fn execute_stream_with_invocation_context<'a>(
+            &'a self,
+            _task: &'a str,
+            cancel: CancellationToken,
+            _invocation: AgentInvocationContext,
+        ) -> futures::future::BoxFuture<
+            'a,
+            Result<futures::stream::BoxStream<'a, Result<AgentEvent>>>,
+        > {
+            let barrier = self.barrier.clone();
+            let failure = self.failure;
+            let self_barrier = barrier.clone();
+            Box::pin(async move {
+                let (sender, receiver) = tokio::sync::mpsc::channel(2);
+                tokio::spawn(async move {
+                    barrier.started.notify_one();
+                    let item = match failure {
+                        HeldStreamFailure::Cancellation => {
+                            cancel.cancelled().await;
+                            Ok(AgentEvent::Cancelled)
+                        }
+                        HeldStreamFailure::CancelledEvent => Ok(AgentEvent::Cancelled),
+                        HeldStreamFailure::RawError => {
+                            Err(ReactError::Other("original raw stream failure".to_string()))
+                        }
+                        HeldStreamFailure::ErrorEvent => {
+                            let error = ReactError::Other("original event failure".to_string());
+                            Ok(AgentEvent::Error {
+                                source: "fixture".to_string(),
+                                message: error.to_string(),
+                                failure: echo_core::error::AgentFailure::message(
+                                    "other",
+                                    error.to_string(),
+                                ),
+                            })
+                        }
+                    };
+                    let _ = sender.send(item).await;
+                    barrier.cleanup_entered.notify_one();
+                    barrier.release_cleanup.notified().await;
+                    barrier.physical_stopped.store(true, Ordering::SeqCst);
+                    drop(sender);
+                });
+                let observed = self_barrier;
+                Ok(
+                    futures::stream::unfold((receiver, false), move |(mut receiver, seen)| {
+                        let observed = observed.clone();
+                        async move {
+                            if seen {
+                                observed.collector_waiting_eof.notify_one();
+                            }
+                            receiver.recv().await.map(|item| (item, (receiver, true)))
+                        }
+                    })
+                    .boxed(),
+                )
+            })
+        }
+    }
+
+    async fn held_cleanup_dispatch(
+        mode: ExecutionMode,
+        timed_out: bool,
+        failure: HeldStreamFailure,
+    ) -> Result<(
+        Arc<StreamSettlementBarrier>,
+        CancellationToken,
+        tokio::task::JoinHandle<Result<SubagentResult>>,
+    )> {
+        let (registry, executor) = make_executor().await;
+        let barrier = Arc::new(StreamSettlementBarrier::default());
+        let mut definition = SubagentDefinition::new("held-cleanup", "Held cleanup fixture");
+        definition.execution_mode = mode.clone();
+        definition.timeout_secs = if timed_out { 1 } else { 30 };
+        registry
+            .register(
+                definition,
+                Box::new(HeldCleanupStreamAgent {
+                    barrier: barrier.clone(),
+                    failure,
+                }),
+            )
+            .await;
+        let cancel = CancellationToken::new();
+        let request = DispatchRequest {
+            agent_name: "held-cleanup".to_string(),
+            task: "wait for original producer cleanup".to_string(),
+            mode_override: Some(mode),
+            cancel: cancel.clone(),
+            parent_agent: "parent".to_string(),
+            parent_context: None,
+            delegation_policy: DispatchRequest::policy_from_depth(0),
+            runtime_context: None,
+            message: None,
+            prompt_payload: None,
+            prompt_context: None,
+            constraints: Vec::new(),
+            background: false,
+        };
+        let dispatch = tokio::spawn(async move { executor.dispatch(request).await });
+        tokio::time::timeout(Duration::from_secs(5), barrier.started.notified())
+            .await
+            .map_err(|_| ReactError::Other("held-cleanup fixture did not start".to_string()))?;
+        Ok((barrier, cancel, dispatch))
+    }
+
+    async fn assert_dispatch_waits_for_held_cleanup(
+        mode: ExecutionMode,
+        timed_out: bool,
+        failure: HeldStreamFailure,
+    ) -> Result<()> {
+        let expected = if timed_out {
+            SubagentStatus::TimedOut
+        } else {
+            match failure {
+                HeldStreamFailure::Cancellation | HeldStreamFailure::CancelledEvent => {
+                    SubagentStatus::Cancelled
+                }
+                HeldStreamFailure::RawError | HeldStreamFailure::ErrorEvent => {
+                    SubagentStatus::Failed
+                }
+            }
+        };
+        let (barrier, cancel, mut dispatch) =
+            held_cleanup_dispatch(mode.clone(), timed_out, failure).await?;
+        if !timed_out && matches!(failure, HeldStreamFailure::Cancellation) {
+            cancel.cancel();
+        }
+        tokio::time::timeout(Duration::from_secs(5), barrier.cleanup_entered.notified())
+            .await
+            .map_err(|_| {
+                ReactError::Other("original stream did not enter held cleanup".to_string())
+            })?;
+        let early = tokio::time::timeout(Duration::from_millis(50), &mut dispatch)
+            .await
+            .ok();
+        let stopped_early = barrier.physical_stopped.load(Ordering::SeqCst);
+        barrier.release_cleanup.notify_one();
+        let returned_early = early.is_some();
+        let result = match early {
+            Some(result) => result,
+            None => tokio::time::timeout(Duration::from_secs(5), dispatch)
+                .await
+                .map_err(|_| {
+                    ReactError::Other("dispatch did not settle after producer release".to_string())
+                })?,
+        }
+        .map_err(|error| {
+            ReactError::Other(format!("held cleanup dispatch join failed: {error}"))
+        })?;
+        if returned_early || stopped_early {
+            return Err(ReactError::Other(format!(
+                "{mode:?} returned before held stream cleanup completed"
+            )));
+        }
+        if !barrier.physical_stopped.load(Ordering::SeqCst) {
+            return Err(ReactError::Other(
+                "dispatch settled without original producer EOF".to_string(),
+            ));
+        }
+        let error = result.err().ok_or_else(|| {
+            ReactError::Other("held-failure dispatch fabricated success".to_string())
+        })?;
+        if subagent_status_from_error(&error)? != expected {
+            return Err(ReactError::Other(format!(
+                "original {expected:?} cause changed: {error}"
+            )));
+        }
+        if matches!(failure, HeldStreamFailure::RawError)
+            && !error.to_string().contains("original raw stream failure")
+        {
+            return Err(ReactError::Other("original raw cause lost".to_string()));
+        }
+        if matches!(failure, HeldStreamFailure::ErrorEvent)
+            && !error.to_string().contains("original event failure")
+        {
+            return Err(ReactError::Other("original event cause lost".to_string()));
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sync_cancel_waits_for_original_stream_cleanup() -> Result<()> {
+        assert_dispatch_waits_for_held_cleanup(
+            ExecutionMode::Sync,
+            false,
+            HeldStreamFailure::Cancellation,
+        )
+        .await
+    }
+    #[tokio::test]
+    async fn fork_cancel_waits_for_original_stream_cleanup() -> Result<()> {
+        assert_dispatch_waits_for_held_cleanup(
+            ExecutionMode::Fork,
+            false,
+            HeldStreamFailure::Cancellation,
+        )
+        .await
+    }
+    #[tokio::test]
+    async fn teammate_cancel_waits_for_original_stream_cleanup() -> Result<()> {
+        assert_dispatch_waits_for_held_cleanup(
+            ExecutionMode::Teammate,
+            false,
+            HeldStreamFailure::Cancellation,
+        )
+        .await
+    }
+    #[tokio::test]
+    async fn sync_timeout_waits_for_original_stream_cleanup() -> Result<()> {
+        assert_dispatch_waits_for_held_cleanup(
+            ExecutionMode::Sync,
+            true,
+            HeldStreamFailure::Cancellation,
+        )
+        .await
+    }
+    #[tokio::test]
+    async fn fork_timeout_waits_for_original_stream_cleanup() -> Result<()> {
+        assert_dispatch_waits_for_held_cleanup(
+            ExecutionMode::Fork,
+            true,
+            HeldStreamFailure::Cancellation,
+        )
+        .await
+    }
+    #[tokio::test]
+    async fn teammate_timeout_waits_for_original_stream_cleanup() -> Result<()> {
+        assert_dispatch_waits_for_held_cleanup(
+            ExecutionMode::Teammate,
+            true,
+            HeldStreamFailure::Cancellation,
+        )
+        .await
+    }
+    #[tokio::test]
+    async fn cancelled_event_waits_for_original_stream_cleanup() -> Result<()> {
+        assert_dispatch_waits_for_held_cleanup(
+            ExecutionMode::Sync,
+            false,
+            HeldStreamFailure::CancelledEvent,
+        )
+        .await
+    }
+    #[tokio::test]
+    async fn raw_error_waits_for_original_stream_cleanup() -> Result<()> {
+        assert_dispatch_waits_for_held_cleanup(
+            ExecutionMode::Sync,
+            false,
+            HeldStreamFailure::RawError,
+        )
+        .await
+    }
+    #[tokio::test]
+    async fn error_event_waits_for_original_stream_cleanup() -> Result<()> {
+        assert_dispatch_waits_for_held_cleanup(
+            ExecutionMode::Sync,
+            false,
+            HeldStreamFailure::ErrorEvent,
+        )
+        .await
+    }
+
+    async fn assert_failure_precedes_late_cancellation(failure: HeldStreamFailure) -> Result<()> {
+        let (barrier, cancel, dispatch) =
+            held_cleanup_dispatch(ExecutionMode::Sync, false, failure).await?;
+        tokio::time::timeout(Duration::from_secs(5), barrier.cleanup_entered.notified())
+            .await
+            .map_err(|_| ReactError::Other("failure producer did not reach cleanup".to_string()))?;
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            barrier.collector_waiting_eof.notified(),
+        )
+        .await
+        .map_err(|_| {
+            ReactError::Other(
+                "collector did not observe original failure before held EOF".to_string(),
+            )
+        })?;
+        cancel.cancel();
+        barrier.release_cleanup.notify_one();
+        let error = dispatch
+            .await
+            .map_err(|error| ReactError::Other(format!("failure dispatch join: {error}")))?
+            .err()
+            .ok_or_else(|| ReactError::Other("failure became success".to_string()))?;
+        if subagent_status_from_error(&error)? != SubagentStatus::Failed {
+            return Err(ReactError::Other(format!(
+                "late cancellation replaced original failure: {error}"
+            )));
+        }
+        let expected = match failure {
+            HeldStreamFailure::RawError => "original raw stream failure",
+            HeldStreamFailure::ErrorEvent => "original event failure",
+            _ => {
+                return Err(ReactError::Other(
+                    "invalid failure precedence fixture".to_string(),
+                ));
+            }
+        };
+        if !error.to_string().contains(expected) || !barrier.physical_stopped.load(Ordering::SeqCst)
+        {
+            return Err(ReactError::Other(format!(
+                "original cause or cleanup receipt lost: {error}"
+            )));
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn raw_failure_retains_first_cause_after_late_cancellation() -> Result<()> {
+        assert_failure_precedes_late_cancellation(HeldStreamFailure::RawError).await
+    }
+    #[tokio::test]
+    async fn event_failure_retains_first_cause_after_late_cancellation() -> Result<()> {
+        assert_failure_precedes_late_cancellation(HeldStreamFailure::ErrorEvent).await
+    }
+
+    type TeamToolPhysicalJoin = futures::future::Shared<
+        futures::future::BoxFuture<'static, std::result::Result<(), String>>,
+    >;
+
+    struct TeamPhysicalCleanupTool {
+        parallel: bool,
+        owns_timeout: bool,
+        barrier: Arc<StreamSettlementBarrier>,
+        effect: std::path::PathBuf,
+        producer: Arc<Mutex<Option<TeamToolPhysicalJoin>>>,
+    }
+
+    impl echo_core::tools::Tool for TeamPhysicalCleanupTool {
+        fn name(&self) -> &str {
+            "team_physical_cleanup"
+        }
+        fn description(&self) -> &str {
+            "retains original file producer through cleanup"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type":"object"})
+        }
+        fn allows_parallel_batch_execution(&self) -> bool {
+            self.parallel
+        }
+        // Isolate the real outer batch deadline from the per-tool deadline.
+        // The tool remains subject to the unchanged batch timeout budget.
+        fn manages_own_timeout(&self) -> bool {
+            self.owns_timeout
+        }
+        fn execute_with_context<'a>(
+            &'a self,
+            _params: echo_core::tools::ToolParameters,
+            ctx: &'a echo_core::tools::ToolContext,
+        ) -> futures::future::BoxFuture<'a, Result<ToolResult>> {
+            use futures::FutureExt;
+            Box::pin(async move {
+                let cancel = ctx.cancel.clone().ok_or_else(|| {
+                    ReactError::Other("physical Tool cancellation scope missing".to_string())
+                })?;
+                let barrier = self.barrier.clone();
+                let effect = self.effect.clone();
+                let resources = ctx.resource_guards.clone();
+                let producer = tokio::spawn(async move {
+                    let _resources = resources;
+                    tokio::fs::write(&effect, b"original-producer-entered")
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    barrier.started.notify_one();
+                    cancel.cancelled().await;
+                    barrier.cleanup_entered.notify_one();
+                    barrier.release_cleanup.notified().await;
+                    tokio::fs::write(&effect, b"original-producer-closed")
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    barrier.physical_stopped.store(true, Ordering::SeqCst);
+                    Ok::<(), String>(())
+                });
+                let joined = async move { producer.await.map_err(|error| error.to_string())? }
+                    .boxed()
+                    .shared();
+                *self
+                    .producer
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()) = Some(joined.clone());
+                joined.await.map_err(ReactError::Other)?;
+                Ok(ToolResult::success("original physical cleanup joined"))
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn default_exact_grace_retains_original_team_claim_until_physical_cleanup() -> Result<()>
+    {
+        assert_team_claim_waits_for_physical_cleanup(None, false).await
+    }
+
+    #[tokio::test]
+    async fn real_react_sequential_tool_exact_grace_retains_same_team_claim() -> Result<()> {
+        assert_team_claim_waits_for_physical_cleanup(Some(false), false).await
+    }
+
+    #[tokio::test]
+    async fn real_react_concurrent_tool_exact_grace_retains_same_team_claim() -> Result<()> {
+        assert_team_claim_waits_for_physical_cleanup(Some(true), false).await
+    }
+
+    #[tokio::test]
+    async fn real_react_batch_timeout_retains_same_team_claim_until_original_tool_join()
+    -> Result<()> {
+        assert_team_claim_waits_for_physical_cleanup(Some(true), true).await
+    }
+
+    async fn assert_team_claim_waits_for_physical_cleanup(
+        tool_parallel: Option<bool>,
+        batch_timeout: bool,
+    ) -> Result<()> {
+        let (registry, executor) = make_executor().await;
+        let executor = Arc::new(executor);
+        let barrier = Arc::new(StreamSettlementBarrier::default());
+        let producer = Arc::new(Mutex::new(None::<TeamToolPhysicalJoin>));
+        let effect_directory = if tool_parallel.is_some() {
+            Some(tempfile::tempdir()?)
+        } else {
+            None
+        };
+        let effect = effect_directory
+            .as_ref()
+            .map(|directory| directory.path().join("original-effect.txt"));
+        let tool_config = crate::tools::ToolExecutionConfig {
+            timeout_ms: if batch_timeout { 20 } else { 0 },
+            retry_on_fail: false,
+            max_retries: 0,
+            retry_delay_ms: 0,
+            max_concurrency: Some(1),
+            max_read_concurrency: None,
+        };
+        let batch_budget = crate::agent::react::run::retry::compute_concurrent_tool_batch_timeout(
+            &tool_config,
+            1,
+            Some(1),
+        );
+        let physical_llm = if let Some(parallel) = tool_parallel {
+            let llm = Arc::new(
+                crate::testing::MockLlmClient::new()
+                    .then_tool_call("physical-team-call", "team_physical_cleanup", "{}")
+                    .with_response("must not continue before physical cleanup"),
+            );
+            let physical_agent = crate::agent::ReactAgentBuilder::new()
+                .llm_client(llm.clone())
+                .system_prompt("Execute the requested tool.")
+                .tool_execution(tool_config)
+                .tool(Box::new(TeamPhysicalCleanupTool {
+                    parallel,
+                    owns_timeout: batch_timeout,
+                    barrier: barrier.clone(),
+                    effect: effect.clone().ok_or_else(|| {
+                        ReactError::Other("physical effect path missing".to_string())
+                    })?,
+                    producer: producer.clone(),
+                }))
+                .build()?;
+            registry
+                .register(
+                    SubagentDefinition::new("held-cleanup", "Actual React Tool producer"),
+                    Box::new(physical_agent),
+                )
+                .await;
+            Some(llm)
+        } else {
+            registry
+                .register(
+                    SubagentDefinition::new("held-cleanup", "Held producer"),
+                    Box::new(HeldCleanupStreamAgent {
+                        barrier: barrier.clone(),
+                        failure: HeldStreamFailure::Cancellation,
+                    }),
+                )
+                .await;
+            None
+        };
+        let definition = super::super::builder::SubagentBuilder::new("grace-team")
+            .team(super::super::team::TeamSpec {
+                strategy: super::super::team::TeamStrategy::Pipeline(vec![
+                    "held-cleanup".to_string(),
+                ]),
+                manager: String::new(),
+                subagents: Vec::new(),
+                config: super::super::team::TeamConfig::default(),
+            })
+            .build();
+        registry
+            .register(definition, Box::new(MockAgent::new("grace-team")))
+            .await;
+        let request = DispatchRequest {
+            agent_name: "grace-team".to_string(),
+            task: "held cleanup".to_string(),
+            mode_override: None,
+            cancel: CancellationToken::new(),
+            parent_agent: "parent".to_string(),
+            parent_context: None,
+            delegation_policy: DispatchRequest::policy_from_depth(0),
+            runtime_context: Some(echo_core::tools::ExternalRunContext {
+                run_id: Some("grace-probe-run".to_string()),
+                ..Default::default()
+            }),
+            message: None,
+            prompt_payload: None,
+            prompt_context: None,
+            constraints: Vec::new(),
+            background: false,
+        };
+        let runner = executor.clone();
+        let dispatch = tokio::spawn(async move { runner.dispatch(request).await });
+        tokio::time::timeout(Duration::from_secs(5), barrier.started.notified())
+            .await
+            .map_err(|_| ReactError::Other("grace probe producer did not start".to_string()))?;
+        let runtime = executor
+            .team_runtime_handles("grace-probe-run")
+            .first()
+            .cloned()
+            .ok_or_else(|| ReactError::Other("grace probe original runtime missing".to_string()))?;
+        let task = runtime
+            .snapshot()
+            .await?
+            .tasks
+            .into_iter()
+            .find(|task| task.execution.claim.is_some())
+            .ok_or_else(|| ReactError::Other("grace probe claim missing".to_string()))?;
+        let claim = task
+            .execution
+            .claim
+            .clone()
+            .ok_or_else(|| ReactError::Other("grace probe missing exact claim".to_string()))?;
+        if !batch_timeout {
+            runtime
+                .request_attempt_interrupt(&task.spec.id, &claim)
+                .await
+                .map_err(|error| ReactError::Other(error.to_string()))?;
+        } else {
+            // Original single-wave budget: configured 20ms + existing 250ms.
+            assert_eq!(batch_budget, Some(Duration::from_millis(270)));
+        }
+        tokio::time::timeout(Duration::from_secs(5), barrier.cleanup_entered.notified())
+            .await
+            .map_err(|_| {
+                ReactError::Other("grace producer did not receive cancellation".to_string())
+            })?;
+        let mut dispatch = dispatch;
+        let grace = crate::tasks::RuntimeTaskServiceConfig::default().cancellation_grace_period;
+        let observation_window = if batch_timeout {
+            batch_budget
+                .ok_or_else(|| ReactError::Other("original batch budget missing".to_string()))?
+        } else {
+            grace
+        };
+        let early = tokio::time::timeout(
+            observation_window + Duration::from_millis(100),
+            &mut dispatch,
+        )
+        .await;
+        let snapshot = runtime.snapshot().await?;
+        let after = snapshot
+            .tasks
+            .iter()
+            .find(|item| item.spec.id == task.spec.id)
+            .ok_or_else(|| ReactError::Other("grace probe task vanished".to_string()))?;
+        let actual_claim_retained = after.execution.claim.as_ref() == Some(&claim)
+            && after.execution.status == crate::tasks::TaskStatus::Running;
+        let active_while_held = runtime.is_active();
+        let effect_while_held = match effect.as_ref() {
+            Some(effect) => Some(tokio::fs::read(effect).await),
+            None => None,
+        };
+        let stopped = barrier.physical_stopped.load(Ordering::SeqCst);
+        let request_retained = after.execution.interruption_requested
+            == if batch_timeout {
+                None
+            } else {
+                Some(crate::tasks::RuntimeInterruptionDisposition::Cancelled)
+            };
+        // Release and observe the same original owner before asserting, so a
+        // red counterexample cannot leave its real producer behind.
+        barrier.release_cleanup.notify_one();
+        let original_join = producer
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        let physical_join = match original_join {
+            Some(joined) => Some(tokio::time::timeout(Duration::from_secs(2), joined).await),
+            None => None,
+        };
+        let closed_effect = match effect.as_ref() {
+            Some(effect) => Some(tokio::fs::read(effect).await),
+            None => None,
+        };
+        let returned_early = early.is_ok();
+        let result = match early {
+            Ok(joined) => joined,
+            Err(_) => tokio::time::timeout(Duration::from_secs(2), dispatch)
+                .await
+                .map_err(|_| {
+                    ReactError::Other("original Team owner did not settle after EOF".to_string())
+                })?,
+        }
+        .map_err(|error| ReactError::Other(error.to_string()))?;
+        if let Some(joined) = physical_join {
+            joined
+                .map_err(|_| {
+                    ReactError::Other("released original Tool producer did not join".to_string())
+                })?
+                .map_err(ReactError::Other)?;
+        }
+        assert!(
+            !returned_early,
+            "Team returned while original physical cleanup remained held"
+        );
+        assert!(
+            active_while_held,
+            "original Team execution guard must remain active"
+        );
+        if let Some(content) = effect_while_held {
+            assert_eq!(content?, b"original-producer-entered");
+        }
+        if let Some(content) = closed_effect {
+            assert_eq!(content?, b"original-producer-closed");
+        }
+        if let Some(llm) = physical_llm {
+            assert_eq!(llm.call_count(), 1);
+        }
+        assert!(
+            actual_claim_retained && request_retained,
+            "default grace cannot erase claim/interruption before physical EOF"
+        );
+        assert!(
+            !stopped,
+            "default grace cannot abort the original held producer"
+        );
+        assert!(barrier.physical_stopped.load(Ordering::SeqCst));
+        let error = result
+            .err()
+            .ok_or_else(|| ReactError::Other("interrupted Team fabricated success".to_string()))?;
+        assert_eq!(
+            subagent_status_from_error(&error)?,
+            if batch_timeout {
+                SubagentStatus::Failed
+            } else {
+                SubagentStatus::Cancelled
+            }
+        );
+        if batch_timeout {
+            assert!(error.to_string().contains("batch timeout"));
+        }
+        let final_snapshot = runtime.snapshot().await?;
+        let final_task = final_snapshot
+            .tasks
+            .iter()
+            .find(|item| item.spec.id == task.spec.id)
+            .ok_or_else(|| ReactError::Other("original Task missing".to_string()))?;
+        assert!(final_task.execution.claim.is_none());
+        if batch_timeout {
+            assert!(
+                matches!(&final_task.execution.status, crate::tasks::TaskStatus::Failed(error)
+                if error.contains("batch timeout"))
+            );
+        } else {
+            assert_eq!(
+                final_task.execution.status,
+                crate::tasks::TaskStatus::Cancelled
+            );
+        }
+        // Execution CAS keeps the relation revision unchanged. This is the
+        // original claim's terminal disposition, never a replacement attempt.
+        assert_eq!(snapshot.revision, final_snapshot.revision);
+        assert_eq!(final_task.execution.retry_count, task.execution.retry_count);
+        assert!(!runtime.is_active());
+        assert!(matches!(
+            runtime
+                .request_attempt_interrupt(&task.spec.id, &claim)
+                .await,
+            Err(crate::tasks::RuntimeTaskAttemptInterruptError::StaleOrSettledClaim { .. })
+        ));
+        let repeated_snapshot = runtime.snapshot().await?;
+        assert_eq!(repeated_snapshot.revision, final_snapshot.revision);
+        assert_eq!(repeated_snapshot.tasks, final_snapshot.tasks);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn caller_drop_retains_original_stream_cleanup_in_all_modes() -> Result<()> {
+        for mode in [
+            ExecutionMode::Sync,
+            ExecutionMode::Fork,
+            ExecutionMode::Teammate,
+        ] {
+            let (barrier, _cancel, dispatch) =
+                held_cleanup_dispatch(mode, false, HeldStreamFailure::Cancellation).await?;
+            dispatch.abort();
+            assert!(dispatch.await.is_err_and(|error| error.is_cancelled()));
+            tokio::time::timeout(Duration::from_secs(2), barrier.cleanup_entered.notified())
+                .await
+                .map_err(|_| {
+                    ReactError::Other(
+                        "detached original owner did not receive cancellation".to_string(),
+                    )
+                })?;
+            assert!(!barrier.physical_stopped.load(Ordering::SeqCst));
+            barrier.release_cleanup.notify_one();
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while !barrier.physical_stopped.load(Ordering::SeqCst) {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .map_err(|_| {
+                ReactError::Other("detached original producer did not close".to_string())
+            })?;
+        }
+        Ok(())
     }
 
     async fn assert_mode_retains_runtime_guards(
@@ -4169,9 +5318,9 @@ mod tests {
                 ..SubagentExecutorConfig::default()
             },
         ));
-        let permit = Arc::clone(&executor.semaphore)
-            .acquire_owned()
-            .await
+        let permit = executor
+            .local_fork_admission
+            .issue("queued-test-existing-owner")
             .map_err(|error| error.to_string())?;
         let cancel = CancellationToken::new();
         let request = DispatchRequest {
@@ -4806,7 +5955,10 @@ mod tests {
             .await
             .err()
             .ok_or_else(|| "failing subagent unexpectedly completed".to_string())?;
-        assert_eq!(subagent_status_from_error(&error), SubagentStatus::Failed);
+        assert_eq!(
+            subagent_status_from_error(&error).map_err(|error| error.to_string())?,
+            SubagentStatus::Failed
+        );
         let terminal_events = collect_terminal_events(&mut events);
         assert!(matches!(
             terminal_events.as_slice(),
@@ -4863,7 +6015,7 @@ mod tests {
             .err()
             .ok_or_else(|| "cancelled subagent unexpectedly completed".to_string())?;
         assert_eq!(
-            subagent_status_from_error(&error),
+            subagent_status_from_error(&error).map_err(|error| error.to_string())?,
             SubagentStatus::Cancelled
         );
         let terminal_events = collect_terminal_events(&mut events);
@@ -4913,7 +6065,10 @@ mod tests {
             .await
             .err()
             .ok_or_else(|| "timed-out subagent unexpectedly completed".to_string())?;
-        assert_eq!(subagent_status_from_error(&error), SubagentStatus::TimedOut);
+        assert_eq!(
+            subagent_status_from_error(&error).map_err(|error| error.to_string())?,
+            SubagentStatus::TimedOut
+        );
         let terminal_events = collect_terminal_events(&mut events);
         assert!(matches!(
             terminal_events.as_slice(),
@@ -5070,7 +6225,10 @@ mod tests {
             .err()
             .ok_or_else(|| ReactError::Other("slow Sync unexpectedly completed".to_string()))?;
 
-        assert_eq!(subagent_status_from_error(&error), SubagentStatus::TimedOut);
+        assert_eq!(
+            subagent_status_from_error(&error)?,
+            SubagentStatus::TimedOut
+        );
         tokio::time::timeout(Duration::from_secs(1), cancellation_seen.notified())
             .await
             .map_err(|_| {
@@ -5173,7 +6331,10 @@ mod tests {
             .err()
             .ok_or_else(|| ReactError::Other("slow Fork unexpectedly completed".to_string()))?;
 
-        assert_eq!(subagent_status_from_error(&error), SubagentStatus::TimedOut);
+        assert_eq!(
+            subagent_status_from_error(&error)?,
+            SubagentStatus::TimedOut
+        );
         tokio::time::timeout(Duration::from_secs(1), cancellation_seen.notified())
             .await
             .map_err(|_| {
@@ -5455,7 +6616,9 @@ mod tests {
                 .team_runtime_handle(last.handle_id())
                 .is_some_and(|retained| Arc::ptr_eq(&retained, last))
         );
-        drop(active);
+        for mut guard in active {
+            guard.settle();
+        }
         prune_team_runtime_index(&executor.team_runtimes);
         assert_eq!(
             executor.team_runtime_handles("shared-run").len(),
@@ -5465,15 +6628,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn react_team_targeted_abort_drops_non_cooperative_member_future() -> Result<()> {
+    async fn react_team_targeted_interrupt_retains_non_cooperative_member_until_physical_eof()
+    -> Result<()> {
         let (registry, executor) = make_executor().await;
         let executor = Arc::new(executor);
         let dropped = Arc::new(AtomicBool::new(false));
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
         registry
             .register(
                 SubagentDefinition::new("stuck-member", "Non-cooperative Team member"),
                 Box::new(NonCooperativeTeamAgent {
                     dropped: Arc::clone(&dropped),
+                    started: started.clone(),
+                    release: release.clone(),
                 }),
             )
             .await;
@@ -5552,12 +6720,23 @@ mod tests {
                 ));
             }
         };
+        started.notified().await;
         assert!(
             handle
                 .request_attempt_interrupt(&task_id, &claim)
                 .await?
                 .requested
         );
+        assert!(!execution.is_finished());
+        assert!(!dropped.load(Ordering::SeqCst));
+        let pending = handle.snapshot().await?;
+        assert!(
+            pending
+                .tasks
+                .iter()
+                .any(|task| task.execution.claim.as_ref() == Some(&claim))
+        );
+        release.notify_one();
         let error = tokio::time::timeout(Duration::from_secs(7), execution)
             .await
             .map_err(|_| ReactError::Other("React Team exact abort did not settle".to_string()))?
@@ -5668,7 +6847,10 @@ mod tests {
             .err()
             .ok_or_else(|| ReactError::Other("slow Teammate unexpectedly completed".to_string()))?;
 
-        assert_eq!(subagent_status_from_error(&error), SubagentStatus::TimedOut);
+        assert_eq!(
+            subagent_status_from_error(&error)?,
+            SubagentStatus::TimedOut
+        );
         tokio::time::timeout(Duration::from_secs(1), cancellation_seen.notified())
             .await
             .map_err(|_| {

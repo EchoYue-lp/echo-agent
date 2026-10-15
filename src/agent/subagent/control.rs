@@ -370,6 +370,10 @@ pub enum SubagentControlError {
     },
     EmptyInstruction,
     StateUnavailable,
+    ExecutionNotSettled {
+        run_id: String,
+        execution_id: String,
+    },
     DuplicateExecution {
         execution_id: String,
     },
@@ -423,6 +427,13 @@ impl fmt::Display for SubagentControlError {
                 write!(f, "invalid Subagent identity field: {field}")
             }
             Self::EmptyInstruction => f.write_str("Subagent instruction must not be empty"),
+            Self::ExecutionNotSettled {
+                run_id,
+                execution_id,
+            } => write!(
+                f,
+                "execution not settled: run {run_id}, execution {execution_id}"
+            ),
             Self::StateUnavailable => f.write_str("Subagent control state is unavailable"),
             Self::DuplicateExecution { execution_id } => {
                 write!(f, "Subagent execution already exists: {execution_id}")
@@ -535,12 +546,13 @@ impl SubagentAttemptAdmission {
 impl Drop for SubagentAttemptAdmission {
     fn drop(&mut self) {
         if !self.settled {
-            let status = if self.binding.registry.is_cancelled(&self.binding.identity) {
-                SubagentStatus::Cancelled
-            } else {
-                SubagentStatus::Failed
-            };
-            self.binding.registry.settle(&self.binding.identity, status);
+            // Owner loss is not a physical settlement receipt. Retain the
+            // exact active identity and pending watch; a replacement attempt
+            // must not enter merely because this local guard unwound.
+            self.cancel.cancel();
+            self.binding
+                .registry
+                .mark_authority_unknown(&self.binding.identity);
         }
     }
 }
@@ -564,6 +576,8 @@ struct ActiveAttempt {
     turn_id: Option<String>,
     ready_tx: watch::Sender<bool>,
     settled_tx: watch::Sender<Option<SubagentStatus>>,
+    interruption_started: Option<tokio::time::Instant>,
+    authority_unknown: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -669,6 +683,8 @@ impl SubagentControlRegistry {
                 cancel: cancel.clone(),
                 reserved: true,
                 phase: SubagentControlPhase::Starting,
+                interruption_started: None,
+                authority_unknown: false,
                 agent: None,
                 turn_id: None,
                 ready_tx,
@@ -758,6 +774,8 @@ impl SubagentControlRegistry {
                 cancel: cancel.clone(),
                 reserved: false,
                 phase: SubagentControlPhase::Starting,
+                interruption_started: None,
+                authority_unknown: false,
                 agent: None,
                 turn_id: None,
                 ready_tx,
@@ -1114,8 +1132,9 @@ impl SubagentControlRegistry {
         &self,
         execution_id: &str,
         expected_attempt: u32,
+        observation_grace: std::time::Duration,
     ) -> Result<SubagentInterruptOutcome, SubagentControlError> {
-        let (previous_status, requested, cancel, mut settled_rx) = {
+        let (previous_status, requested, cancel, mut settled_rx, started, run_id) = {
             let mut state = self
                 .state
                 .lock()
@@ -1137,14 +1156,25 @@ impl SubagentControlRegistry {
                 }
             })?;
             Self::validate_attempt(&active.identity, expected_attempt)?;
+            if active.authority_unknown {
+                return Err(SubagentControlError::ExecutionNotSettled {
+                    run_id: active.identity.run_id.clone().unwrap_or_default(),
+                    execution_id: execution_id.to_string(),
+                });
+            }
             let previous_status = active.phase;
             let requested = active.phase != SubagentControlPhase::InterruptRequested;
             active.phase = SubagentControlPhase::InterruptRequested;
+            let started = *active
+                .interruption_started
+                .get_or_insert_with(tokio::time::Instant::now);
             (
                 previous_status,
                 requested,
                 active.cancel.clone(),
                 active.settled_tx.subscribe(),
+                started,
+                active.identity.run_id.clone().unwrap_or_default(),
             )
         };
         cancel.cancel();
@@ -1153,10 +1183,13 @@ impl SubagentControlRegistry {
             if let Some(status) = *settled_rx.borrow_and_update() {
                 break status;
             }
-            settled_rx
-                .changed()
-                .await
-                .map_err(|_| SubagentControlError::StateUnavailable)?;
+            tokio::select! {
+                biased;
+                changed = settled_rx.changed() => changed.map_err(|_| SubagentControlError::StateUnavailable)?,
+                _ = tokio::time::sleep_until(started + observation_grace) => {
+                    return Err(SubagentControlError::ExecutionNotSettled { run_id, execution_id: execution_id.to_string() });
+                }
+            }
         };
         Ok(SubagentInterruptOutcome {
             execution_id: execution_id.to_string(),
@@ -1192,6 +1225,15 @@ impl SubagentControlRegistry {
             active.phase = SubagentControlPhase::Running;
         }
         Ok(())
+    }
+
+    fn mark_authority_unknown(&self, identity: &SubagentAttemptIdentity) {
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(active) = state.active.get_mut(&identity.execution_id)
+            && active.identity == *identity
+        {
+            active.authority_unknown = true;
+        }
     }
 
     fn detach(&self, identity: &SubagentAttemptIdentity) {
@@ -1248,15 +1290,6 @@ impl SubagentControlRegistry {
                     .remove(&old.identity.task_attempt());
             }
         }
-    }
-
-    fn is_cancelled(&self, identity: &SubagentAttemptIdentity) -> bool {
-        self.state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .active
-            .get(&identity.execution_id)
-            .is_some_and(|active| active.identity == *identity && active.cancel.is_cancelled())
     }
 
     fn validate_attempt(
@@ -1687,8 +1720,11 @@ mod tests {
             .admit(identity, cancel.clone())
             .map_err(|error| error.to_string())?;
         let interrupt_registry = registry.clone();
-        let interrupt =
-            tokio::spawn(async move { interrupt_registry.interrupt("execution-1", 1).await });
+        let interrupt = tokio::spawn(async move {
+            interrupt_registry
+                .interrupt("execution-1", 1, std::time::Duration::from_secs(5))
+                .await
+        });
 
         cancel.cancelled().await;
         admission.settle(SubagentStatus::Cancelled);
@@ -1702,7 +1738,7 @@ mod tests {
         assert_eq!(outcome.terminal_status, Some(SubagentStatus::Cancelled));
 
         let replay = registry
-            .interrupt("execution-1", 1)
+            .interrupt("execution-1", 1, std::time::Duration::from_secs(5))
             .await
             .map_err(|error| error.to_string())?;
         assert!(!replay.requested);

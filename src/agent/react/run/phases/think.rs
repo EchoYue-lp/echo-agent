@@ -102,6 +102,7 @@ pub(crate) async fn run_think(
     let request_estimate = match request_estimate {
         Ok(estimate) => estimate,
         Err(error) => {
+            let terminal = AgentEvent::from_error("react_loop", &error)?;
             super::finalize::settle_terminal_projection(snap, context, Some(error.to_string()), tx)
                 .await?;
             snap.finalize_run(
@@ -110,9 +111,7 @@ pub(crate) async fn run_think(
                 Some(&error.to_string()),
             )
             .await;
-            let _ = tx
-                .send(Ok(AgentEvent::from_error("react_loop", &error)))
-                .await;
+            let _ = tx.send(Ok(terminal)).await;
             return Ok(ThinkOutcome::TerminalSettled {
                 outcome: crate::agent::AgentSteerTurnOutcome::Failed,
             });
@@ -136,6 +135,7 @@ pub(crate) async fn run_think(
     let mut llm_stream = match create_llm_stream(snap, request).await {
         Ok(stream) => Box::pin(stream),
         Err(error) => {
+            let terminal = AgentEvent::from_error("react_loop", &error)?;
             if snap
                 .cancel_token
                 .as_ref()
@@ -164,9 +164,7 @@ pub(crate) async fn run_think(
                 Some(&error.to_string()),
             )
             .await;
-            let _ = tx
-                .send(Ok(AgentEvent::from_error("react_loop", &error)))
-                .await;
+            let _ = tx.send(Ok(terminal)).await;
             return Ok(ThinkOutcome::TerminalSettled {
                 outcome: crate::agent::AgentSteerTurnOutcome::Failed,
             });
@@ -213,6 +211,7 @@ pub(crate) async fn run_think(
         let chunk = match cr {
             Ok(chunk) => chunk,
             Err(error) => {
+                let terminal = AgentEvent::from_error("react_loop", &error)?;
                 if snap
                     .cancel_token
                     .as_ref()
@@ -250,9 +249,7 @@ pub(crate) async fn run_think(
                 )
                 .await;
                 emit_partial_content_before_failure(snap, tx, &content_buffer).await;
-                let _ = tx
-                    .send(Ok(AgentEvent::from_error("react_loop", &error)))
-                    .await;
+                let _ = tx.send(Ok(terminal)).await;
                 return Ok(ThinkOutcome::TerminalSettled {
                     outcome: crate::agent::AgentSteerTurnOutcome::Failed,
                 });

@@ -182,9 +182,9 @@ impl AgentChannelHandler {
         }
         .mode(TurnMode::Chat)
         .cancel(cancel);
-        Ok(AgentTurnDriver
+        AgentTurnDriver
             .drive(self.agent.as_ref(), request, sink)
-            .await)
+            .await
     }
 }
 
@@ -662,7 +662,7 @@ mod tests {
 
         let mut undelivered = TurnReceipt::failed(
             "undelivered-turn",
-            echo_core::error::AgentFailure::from(&ReactError::Other("delivery".to_string())),
+            echo_core::error::AgentFailure::try_from(&ReactError::Other("delivery".to_string()))?,
         )?;
         undelivered.outcome = TurnOutcome::Completed;
         undelivered.delivery = TurnDeliveryOutcome::Closed;

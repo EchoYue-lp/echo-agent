@@ -426,7 +426,12 @@ async fn execute_headless_agent(
             let receipt = AgentTurnDriver
                 .drive(agent, request, &HeadlessEventSink)
                 .await;
-            headless_result_from_receipt(receipt)
+            match receipt {
+                Ok(receipt) => headless_result_from_receipt(receipt),
+                // This output reports an observation; it does not manufacture
+                // a terminal receipt or settle the framework's retained owner.
+                Err(error) => (format!("Error: {error}"), false),
+            }
         }
         Err(error) => (format!("Error: {error}"), false),
     };
@@ -637,9 +642,9 @@ mod tests {
         let receipt = TurnReceipt {
             turn_id: TurnId::new("headless-delivery-failed")?,
             outcome: TurnOutcome::Completed,
-            delivery: TurnDeliveryOutcome::Failed(AgentFailure::from(&ReactError::Other(
+            delivery: TurnDeliveryOutcome::Failed(AgentFailure::try_from(&ReactError::Other(
                 "stdout unavailable".to_string(),
-            ))),
+            ))?),
             final_answer: Some("done".to_string()),
             final_message_id: None,
             prompt_tokens: 0,
