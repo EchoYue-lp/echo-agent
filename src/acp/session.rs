@@ -118,6 +118,9 @@ struct TurnSlot {
 enum SessionClosePhase {
     Prepared,
     Running,
+    // None means the original owner ended without a canonical observation
+    // identity. Retain this receipt/Agent; a waiter is not a replacement owner.
+    NotSettled(Option<(String, Option<String>)>),
     Failed(String),
     Settled,
 }
@@ -140,8 +143,9 @@ struct SessionCloseReceipt {
 /// Typed capability for the second phase of one ACP Session close attempt.
 ///
 /// The lease is cloneable so framework and facade waiters can join the same
-/// attempt. A failed attempt remains stable for this generation; callers must
-/// invoke [`SessionRegistry::begin_close_session`] again to obtain a retry.
+/// attempt. An ordinary returned failure remains stable for this generation;
+/// callers may begin again for its retry. A not-settled observation keeps this
+/// same generation and cannot authorize a repeated close mutation.
 #[derive(Clone)]
 pub struct SessionCloseLease {
     registry_id: String,
@@ -327,6 +331,7 @@ impl AcpSession {
             Some(
                 SessionClosePhase::Prepared
                 | SessionClosePhase::Running
+                | SessionClosePhase::NotSettled(_)
                 | SessionClosePhase::Settled,
             ) => attempt.current.as_ref().cloned().ok_or_else(|| {
                 ReactError::Other("ACP Session close receipt disappeared".to_string())
@@ -388,6 +393,10 @@ enum FinishCloseAction {
     Start,
     Wait,
     Settled,
+    Observation {
+        run_id: String,
+        execution_id: Option<String>,
+    },
     Failed(String),
 }
 
@@ -440,9 +449,10 @@ impl Drop for SessionCloseTaskOwner {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         if matches!(&*phase, SessionClosePhase::Running) {
-            *phase = SessionClosePhase::Failed(
-                "owned Agent close task ended before publishing settlement".to_string(),
-            );
+            // Losing the local close task is not a physical backend receipt.
+            // There may be no real Run identity to return, so keep the existing
+            // Notify observation pending instead of fabricating a terminal.
+            *phase = SessionClosePhase::NotSettled(None);
         }
         #[cfg(test)]
         {
@@ -462,6 +472,10 @@ async fn run_session_close_attempt(session: Arc<AcpSession>, mut owner: SessionC
     let result = session.agent.close().await;
     owner.settle(match result {
         Ok(()) => SessionClosePhase::Settled,
+        Err(ReactError::ExecutionNotSettled {
+            run_id,
+            execution_id,
+        }) => SessionClosePhase::NotSettled(Some((run_id, execution_id))),
         Err(error) => SessionClosePhase::Failed(error.to_string()),
     });
 }
@@ -586,8 +600,10 @@ impl SessionRegistry {
     /// Finish a close attempt after facade-owned operations have drained.
     ///
     /// Concurrent callers with the same lease join one Agent close attempt.
-    /// A failed attempt preserves the Session and returns the same failure to
-    /// every waiter. Call `begin_close_session` again to obtain a retry lease.
+    /// An ordinary failed attempt preserves the Session and returns the same
+    /// failure to every waiter; begin again for its retry. A nonterminal
+    /// observation preserves its identity and original generation. Unknown
+    /// owner loss without an identity keeps the existing Notify wait pending.
     pub async fn finish_close_session(&self, lease: SessionCloseLease) -> Result<()> {
         self.finish_close_session_inner(lease, None).await
     }
@@ -620,7 +636,15 @@ impl SessionRegistry {
                         *phase = SessionClosePhase::Running;
                         FinishCloseAction::Start
                     }
-                    SessionClosePhase::Running => FinishCloseAction::Wait,
+                    SessionClosePhase::Running | SessionClosePhase::NotSettled(None) => {
+                        FinishCloseAction::Wait
+                    }
+                    SessionClosePhase::NotSettled(Some((run_id, execution_id))) => {
+                        FinishCloseAction::Observation {
+                            run_id,
+                            execution_id,
+                        }
+                    }
                     SessionClosePhase::Settled => FinishCloseAction::Settled,
                     SessionClosePhase::Failed(error) => FinishCloseAction::Failed(error),
                 }
@@ -678,6 +702,15 @@ impl SessionRegistry {
                     }
                     return Ok(());
                 }
+                FinishCloseAction::Observation {
+                    run_id,
+                    execution_id,
+                } => {
+                    return Err(ReactError::ExecutionNotSettled {
+                        run_id,
+                        execution_id,
+                    });
+                }
                 FinishCloseAction::Failed(error) => {
                     return Err(ReactError::Other(format!(
                         "ACP Session {} close did not settle: {error}",
@@ -722,10 +755,21 @@ impl SessionRegistry {
         }))
         .await;
         let mut failures = Vec::new();
+        let mut observation = None;
         for (id, result) in results {
-            if let Err(error) = result {
-                failures.push(format!("{id}: {error}"));
+            match result {
+                Err(error @ ReactError::ExecutionNotSettled { .. }) => {
+                    // join_all has already driven every original close. Each
+                    // receipt retains its own identity; preserve one original
+                    // typed refusal rather than flattening any into Failed.
+                    observation.get_or_insert(error);
+                }
+                Err(error) => failures.push(format!("{id}: {error}")),
+                Ok(()) => {}
             }
+        }
+        if let Some(error) = observation {
+            return Err(error);
         }
         if failures.is_empty() {
             Ok(())
@@ -907,6 +951,255 @@ mod tests {
                 async move { Ok(stream::iter(vec![Ok(AgentEvent::FinalAnswer(answer))]).boxed()) },
             )
         }
+    }
+
+    type ClosePhysicalJoin =
+        futures::future::Shared<BoxFuture<'static, std::result::Result<(), String>>>;
+
+    struct PhysicalCloseObservationAgent {
+        attempts: Arc<std::sync::atomic::AtomicUsize>,
+        started: Arc<Notify>,
+        release: Arc<Notify>,
+        report: Option<Arc<Notify>>,
+        stopped: Arc<AtomicBool>,
+        producer: Arc<StdMutex<Option<ClosePhysicalJoin>>>,
+        effect: PathBuf,
+    }
+
+    impl Agent for PhysicalCloseObservationAgent {
+        fn name(&self) -> &str {
+            "physical-close-observation"
+        }
+        fn model_name(&self) -> &str {
+            "test"
+        }
+        fn system_prompt(&self) -> &str {
+            "test"
+        }
+        fn execute<'a>(&'a self, task: &'a str) -> BoxFuture<'a, Result<String>> {
+            Box::pin(async move { Ok(task.to_string()) })
+        }
+        fn execute_stream<'a>(
+            &'a self,
+            task: &'a str,
+        ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+            let answer = task.to_string();
+            Box::pin(
+                async move { Ok(stream::iter(vec![Ok(AgentEvent::FinalAnswer(answer))]).boxed()) },
+            )
+        }
+        fn close<'a>(&'a self) -> BoxFuture<'a, Result<()>> {
+            use futures::FutureExt;
+            Box::pin(async move {
+                if self.attempts.fetch_add(1, Ordering::AcqRel) == 0 {
+                    let started = self.started.clone();
+                    let entered = started.notified();
+                    tokio::pin!(entered);
+                    entered.as_mut().enable();
+                    let notify = started.clone();
+                    let release = self.release.clone();
+                    let effect = self.effect.clone();
+                    let stopped = self.stopped.clone();
+                    let producer = tokio::spawn(async move {
+                        let write = tokio::fs::write(&effect, b"original-close-entered").await;
+                        notify.notify_waiters();
+                        write.map_err(|error| error.to_string())?;
+                        release.notified().await;
+                        tokio::fs::write(&effect, b"original-close-physically-joined")
+                            .await
+                            .map_err(|error| error.to_string())?;
+                        stopped.store(true, Ordering::Release);
+                        Ok::<(), String>(())
+                    });
+                    let joined = async move { producer.await.map_err(|error| error.to_string())? }
+                        .boxed()
+                        .shared();
+                    *self
+                        .producer
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner()) = Some(joined);
+                    entered.await;
+                }
+                if let Some(report) = self.report.as_ref() {
+                    report.notified().await;
+                }
+                Err(ReactError::ExecutionNotSettled {
+                    run_id: "original-close-run".to_string(),
+                    execution_id: Some("original-close-execution".to_string()),
+                })
+            })
+        }
+    }
+
+    async fn assert_close_observation_keeps_original_receipt(all: bool) -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let effect = directory.path().join("close-effect.txt");
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let release = Arc::new(Notify::new());
+        let stopped = Arc::new(AtomicBool::new(false));
+        let producer = Arc::new(StdMutex::new(None::<ClosePhysicalJoin>));
+        let unused_factory: Arc<dyn AcpSessionFactory> = Arc::new(|_context| async {
+            Err(ReactError::Other(
+                "factory unused in controlled close".to_string(),
+            ))
+        });
+        let registry = SessionRegistry::new(unused_factory, 2);
+        let session = Arc::new(AcpSession::new(
+            context("physical-close"),
+            Box::new(PhysicalCloseObservationAgent {
+                attempts: attempts.clone(),
+                started: Arc::new(Notify::new()),
+                release: release.clone(),
+                report: None,
+                stopped: stopped.clone(),
+                producer: producer.clone(),
+                effect: effect.clone(),
+            }),
+        ));
+        registry
+            .sessions
+            .write()
+            .await
+            .insert(session.context.session_id.clone(), session.clone());
+        let peer_attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        if all {
+            let peer = Arc::new(AcpSession::new(
+                context("settled-peer"),
+                Box::new(RetryCloseProbeAgent {
+                    failures_remaining: std::sync::atomic::AtomicUsize::new(0),
+                    attempts: peer_attempts.clone(),
+                }),
+            ));
+            registry
+                .sessions
+                .write()
+                .await
+                .insert(peer.context.session_id.clone(), peer);
+        }
+        let observations = async {
+            let original = registry
+                .begin_close_session(&session.context.session_id)
+                .await?
+                .ok_or_else(|| ReactError::Other("original close receipt missing".to_string()))?;
+            let first = tokio::time::timeout(Duration::from_secs(1), async {
+                if all {
+                    registry.close_all().await
+                } else {
+                    registry.finish_close_session(original.clone()).await
+                }
+            })
+            .await
+            .map_err(|_| ReactError::Other("close observation did not return".to_string()))?;
+            let repeated = registry
+                .begin_close_session(&session.context.session_id)
+                .await?
+                .ok_or_else(|| ReactError::Other("repeated close receipt missing".to_string()))?;
+            let second = tokio::time::timeout(Duration::from_secs(1), async {
+                if all {
+                    registry.close_all().await
+                } else {
+                    registry.finish_close_session(repeated.clone()).await
+                }
+            })
+            .await
+            .map_err(|_| ReactError::Other("repeated observation did not return".to_string()))?;
+            let held_effect = tokio::fs::read(&effect).await?;
+            Ok::<_, ReactError>((
+                first,
+                second,
+                original.generation(),
+                repeated.generation(),
+                attempts.load(Ordering::Acquire),
+                stopped.load(Ordering::Acquire),
+                held_effect,
+            ))
+        }
+        .await;
+        // Always release and join the one actual backend before failing a test.
+        release.notify_one();
+        let joined = producer
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        if let Some(joined) = joined {
+            tokio::time::timeout(Duration::from_secs(1), joined)
+                .await
+                .map_err(|_| ReactError::Other("original close backend did not join".to_string()))?
+                .map_err(ReactError::Other)?;
+        }
+        let (
+            first,
+            second,
+            generation,
+            repeated_generation,
+            calls,
+            stopped_while_held,
+            held_effect,
+        ) = observations?;
+        let is_observation = |result: &Result<()>| {
+            matches!(result,
+            Err(ReactError::ExecutionNotSettled { run_id, execution_id })
+            if run_id == "original-close-run" && execution_id.as_deref() == Some("original-close-execution"))
+        };
+        eprintln!(
+            "CLOSE_OBSERVATION_BOUNDARY {}",
+            serde_json::json!({
+                "all": all, "first": format!("{first:?}"), "second": format!("{second:?}"),
+                "original_generation":generation, "repeated_generation":repeated_generation,
+                "close_calls_while_original_held":calls, "physical_stopped_while_held":stopped_while_held,
+                "physical_joined_after_release":stopped.load(Ordering::Acquire)
+            })
+        );
+        assert!(
+            is_observation(&first),
+            "close must preserve original nonterminal identity"
+        );
+        assert!(is_observation(&second));
+        assert_eq!(
+            generation, repeated_generation,
+            "observation is not a retry receipt"
+        );
+        assert_eq!(calls, 1, "repeat observation must not resend close");
+        assert!(!stopped_while_held);
+        assert_eq!(held_effect, b"original-close-entered");
+        assert!(stopped.load(Ordering::Acquire));
+        assert_eq!(
+            tokio::fs::read(&effect).await?,
+            b"original-close-physically-joined"
+        );
+        assert!(
+            registry
+                .get(&session.context.session_id)
+                .await
+                .is_some_and(|current| Arc::ptr_eq(&current, &session))
+        );
+        assert!(session.begin_turn().is_err());
+        if all {
+            assert_eq!(
+                peer_attempts.load(Ordering::Acquire),
+                1,
+                "unknown must not skip a known peer close"
+            );
+            assert!(
+                registry
+                    .get(&SessionId::new("settled-peer".to_string()))
+                    .await
+                    .is_none()
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn session_close_observation_preserves_identity_and_same_original_receipt() -> Result<()>
+    {
+        assert_close_observation_keeps_original_receipt(false).await
+    }
+
+    #[tokio::test]
+    async fn session_close_observation_close_all_joins_peers_without_reissuing_unknown()
+    -> Result<()> {
+        assert_close_observation_keeps_original_receipt(true).await
     }
 
     fn context(id: &str) -> AcpSessionContext {
@@ -1306,80 +1599,141 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn aborted_owned_close_task_publishes_failure_and_allows_retry() -> Result<()> {
-        let unused_factory: Arc<dyn AcpSessionFactory> = Arc::new(|_context| async {
-            Err(ReactError::Other(
-                "factory is unused in this test".to_string(),
-            ))
-        });
-        let registry = Arc::new(SessionRegistry::new(unused_factory, 1));
+    async fn close_observation_unidentified_owner_loss_keeps_original_generation() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let effect = directory.path().join("held-close-effect.txt");
         let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let started = Arc::new(Notify::new());
         let release = Arc::new(Notify::new());
+        let report = Arc::new(Notify::new());
+        let stopped = Arc::new(AtomicBool::new(false));
+        let producer = Arc::new(StdMutex::new(None::<ClosePhysicalJoin>));
+        let unused_factory: Arc<dyn AcpSessionFactory> = Arc::new(|_context| async {
+            Err(ReactError::Other(
+                "factory unused in owner-loss test".to_string(),
+            ))
+        });
+        let registry = Arc::new(SessionRegistry::new(unused_factory, 1));
         let session = Arc::new(AcpSession::new(
-            context("aborted-owner"),
-            Box::new(ControlledCloseProbeAgent {
-                attempts: Arc::clone(&attempts),
-                started: Arc::clone(&started),
-                release: Arc::clone(&release),
+            context("lost-close-owner"),
+            Box::new(PhysicalCloseObservationAgent {
+                attempts: attempts.clone(),
+                started: started.clone(),
+                release: release.clone(),
+                report: Some(report.clone()),
+                stopped: stopped.clone(),
+                producer: producer.clone(),
+                effect: effect.clone(),
             }),
         ));
         registry
             .sessions
             .write()
             .await
-            .insert(session.context.session_id.clone(), Arc::clone(&session));
+            .insert(session.context.session_id.clone(), session.clone());
         let lease = registry
             .begin_close_session(&session.context.session_id)
             .await?
-            .ok_or_else(|| ReactError::Other("close lease missing".to_string()))?;
-
-        let close_started = started.notified();
-        let finish = tokio::spawn({
-            let registry = Arc::clone(&registry);
+            .ok_or_else(|| ReactError::Other("original close lease missing".to_string()))?;
+        let entered = started.notified();
+        tokio::pin!(entered);
+        entered.as_mut().enable();
+        let mut first = tokio::spawn({
+            let registry = registry.clone();
             let lease = lease.clone();
             async move { registry.finish_close_session(lease).await }
         });
-        tokio::time::timeout(Duration::from_secs(1), close_started)
+        tokio::time::timeout(Duration::from_secs(1), &mut entered)
             .await
-            .map_err(|_| ReactError::Other("Agent close did not start".to_string()))?;
-        let abort = tokio::time::timeout(Duration::from_secs(1), async {
-            loop {
-                let abort = lease
-                    .receipt
-                    .abort
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner())
-                    .clone();
-                if let Some(abort) = abort {
-                    return abort;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .map_err(|_| ReactError::Other("owned close abort handle missing".to_string()))?;
+            .map_err(|_| ReactError::Other("original close producer did not enter".to_string()))?;
+        let abort = lease
+            .receipt
+            .abort
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+            .ok_or_else(|| ReactError::Other("original close owner missing".to_string()))?;
         abort.abort();
-        let error = tokio::time::timeout(Duration::from_secs(1), finish)
-            .await
-            .map_err(|_| ReactError::Other("finish waiter remained stuck".to_string()))?
-            .map_err(|join_error| {
-                ReactError::Other(format!("finish waiter join failed: {join_error}"))
-            })?
-            .err()
-            .ok_or_else(|| ReactError::Other("aborted close unexpectedly settled".to_string()))?;
-        assert!(error.to_string().contains("ended before publishing"));
-        assert_eq!(attempts.load(Ordering::Acquire), 1);
-        assert!(registry.get(&session.context.session_id).await.is_some());
-
-        let retry = registry
+        let first_observation = tokio::time::timeout(Duration::from_millis(100), &mut first).await;
+        let first_returned_without_identity = first_observation.is_ok();
+        let repeated_lease = registry
             .begin_close_session(&session.context.session_id)
             .await?
-            .ok_or_else(|| ReactError::Other("retry close lease missing".to_string()))?;
+            .ok_or_else(|| ReactError::Other("repeated close lease missing".to_string()))?;
+        let repeated_generation = repeated_lease.generation();
+        let mut repeated = tokio::spawn({
+            let registry = registry.clone();
+            async move { registry.finish_close_session(repeated_lease).await }
+        });
+        let repeated_observation =
+            tokio::time::timeout(Duration::from_millis(100), &mut repeated).await;
+        let repeated_returned_without_identity = repeated_observation.is_ok();
+        let calls_while_held = attempts.load(Ordering::Acquire);
+        let stopped_while_held = stopped.load(Ordering::Acquire);
+        let held_effect = tokio::fs::read(&effect).await;
+        // These are test-owned observer tasks, not the original physical backend.
+        // Close the actual backend and join it before asserting the counterexample.
         release.notify_one();
-        registry.finish_close_session(retry).await?;
-        assert_eq!(attempts.load(Ordering::Acquire), 2);
-        assert!(registry.get(&session.context.session_id).await.is_none());
+        report.notify_waiters();
+        let original = producer
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        let joined = match original {
+            Some(joined) => Some(tokio::time::timeout(Duration::from_secs(1), joined).await),
+            None => None,
+        };
+        if !first_returned_without_identity {
+            first.abort();
+            let _ = first.await;
+        }
+        if !repeated_returned_without_identity
+            && tokio::time::timeout(Duration::from_millis(100), &mut repeated)
+                .await
+                .is_err()
+        {
+            repeated.abort();
+            let _ = repeated.await;
+        }
+        if let Some(joined) = joined {
+            joined
+                .map_err(|_| ReactError::Other("original close backend did not join".to_string()))?
+                .map_err(ReactError::Other)?;
+        } else {
+            return Err(ReactError::Other(
+                "original backend join missing".to_string(),
+            ));
+        }
+        eprintln!(
+            "CLOSE_OWNER_LOSS_BOUNDARY {}",
+            serde_json::json!({
+                "returned_without_canonical_identity":first_returned_without_identity,
+                "repeat_returned_without_canonical_identity":repeated_returned_without_identity,
+                "original_generation":lease.generation(), "repeated_generation":repeated_generation,
+                "actual_close_calls_while_held":calls_while_held,
+                "physical_stopped_while_held":stopped_while_held,
+                "original_backend_joined_after_release":stopped.load(Ordering::Acquire)
+            })
+        );
+        assert!(
+            !first_returned_without_identity,
+            "lost owner is not an ordinary failed close receipt"
+        );
+        assert!(!repeated_returned_without_identity);
+        assert_eq!(lease.generation(), repeated_generation);
+        assert_eq!(
+            calls_while_held, 1,
+            "unknown close owner cannot authorize a second close mutation"
+        );
+        assert!(!stopped_while_held);
+        assert_eq!(held_effect?, b"original-close-entered");
+        assert!(stopped.load(Ordering::Acquire));
+        assert_eq!(
+            tokio::fs::read(&effect).await?,
+            b"original-close-physically-joined"
+        );
+        assert!(registry.get(&session.context.session_id).await.is_some());
+        assert!(session.begin_turn().is_err());
         Ok(())
     }
 

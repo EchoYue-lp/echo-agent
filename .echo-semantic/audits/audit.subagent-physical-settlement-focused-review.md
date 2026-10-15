@@ -6,13 +6,13 @@
   "boundary_ref": "boundary.task-subagent-workflow",
   "lens": "time_lifecycle",
   "freshness": "examined",
-  "revision": "source:3fd9e1ed897ce9ee4088530ea89cde93193cea1eb1d5a1afcd612ab083e2deb7",
+  "revision": "source:951cf5e91f3d0fb879bda5e1960e21750accb35acdc3246c14fb6a900b53225e",
   "finding_refs": [
     "finding.subagent-physical-settlement-observation"
   ],
   "challenges": {
     "original-owner-and-typed-uncertainty": {
-      "revision": "source:3fd9e1ed897ce9ee4088530ea89cde93193cea1eb1d5a1afcd612ab083e2deb7",
+      "revision": "87223c8163f6b30479fbd44eadd09736db50bd5d",
       "source_refs": [
         "echo-core/src/agent/admission.rs",
         "echo-core/src/agent/mod.rs",
@@ -27,7 +27,7 @@
       ]
     },
     "react-subagent-resources": {
-      "revision": "source:3fd9e1ed897ce9ee4088530ea89cde93193cea1eb1d5a1afcd612ab083e2deb7",
+      "revision": "87223c8163f6b30479fbd44eadd09736db50bd5d",
       "source_refs": [
         "src/agent/react/lifecycle.rs",
         "src/agent/react/run/stream_channel.rs",
@@ -41,13 +41,23 @@
       ]
     },
     "canonical-tool-physical-settlement": {
-      "revision": "source:3fd9e1ed897ce9ee4088530ea89cde93193cea1eb1d5a1afcd612ab083e2deb7",
+      "revision": "87223c8163f6b30479fbd44eadd09736db50bd5d",
       "source_refs": [
         "echo-execution/src/tools.rs",
         "echo-tools/src/code.rs",
         "src/agent/snapshot.rs",
         "src/agent/react/run/pipeline.rs",
         "src/agent/react/run/phases/tools.rs"
+      ],
+      "evidence_refs": [
+        "evidence.subagent-physical-settlement-repair"
+      ]
+    },
+    "session-close-observation": {
+      "revision": "source:951cf5e91f3d0fb879bda5e1960e21750accb35acdc3246c14fb6a900b53225e",
+      "source_refs": [
+        "src/acp/session.rs",
+        "docs/adr/0088-subagent-settlement-observation.md"
       ],
       "evidence_refs": [
         "evidence.subagent-physical-settlement-repair"
@@ -103,3 +113,7 @@ consumer qualification and exact merged-main CI are not claimed.
 Caller-provided
 opaque resource graphs require consumer qualification: internal retention having
 no self cycle does not prove arbitrary external Any values cycle-free.
+
+## ACP close独立增量复审
+
+同一独立reviewer在87223c8后读取唯一生产session.rs及三规范增量，精40文件当前字节全match，C0/I0/M0。核查私有Some/None观察、同generation、无重发、原Notify等待、无synthetic身份/新owner task，close_all真实join所有entry后才typed返回，以及ordinary Failed的新generation retry与真正Settled指针限定清理不变。两typed入口与无identity loss的原before均真101；全原Session18after0、2160B、581输入前后相同、零warning、fmt与Plan0已读取。前面三个challenge绑定已推送87223c8的原source，不重标原工程执行时间或声称这些原集合在新cut重跑。六门禁/17feature/consumer/main仍待验。

@@ -4,7 +4,7 @@ id: baseline.repository
 kind: baseline
 source_snapshot:
   base_revision: a6346643bda47679a96760f56f45e41fd73b61b0
-  content_digest: 3fd9e1ed897ce9ee4088530ea89cde93193cea1eb1d5a1afcd612ab083e2deb7
+  content_digest: 951cf5e91f3d0fb879bda5e1960e21750accb35acdc3246c14fb6a900b53225e
 inventory_closure: closed
 behavior_model_closure: closed
 map_refs:
@@ -518,3 +518,5 @@ source_snapshot.base_revision 使用已经发布的共同祖先 a634，仅承担
 ## Physical settlement B focused source checkpoint
 
 The new content digest is the canonical digest of the frozen B source and maintained documents. The existing published lineage base remains unchanged. Historical Git observations above and their source digests retain their original epoch; no old Evidence/Audit revision is moved to this candidate. Current focused ownership tests and independent review are recorded by evidence.subagent-physical-settlement-repair and audit.subagent-physical-settlement-focused-review. This snapshot maintenance does not claim six merge gates, feature matrix, consumer qualification, main CI, or new global behavioral closure.
+
+The subsequent ACP close increment has canonical source digest 951cf5e91f3d0fb879bda5e1960e21750accb35acdc3246c14fb6a900b53225e. The preceding focused source digest 3fd9e1ed897ce9ee4088530ea89cde93193cea1eb1d5a1afcd612ab083e2deb7 remains recoverable in pushed commit 87223c8163f6b30479fbd44eadd09736db50bd5d. Full gates/consumer/main remain incomplete.

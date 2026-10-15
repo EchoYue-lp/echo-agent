@@ -15,10 +15,12 @@
   ],
   "boundary_ref": "boundary.task-subagent-workflow",
   "behavior_refs": [
-    "behavior.task-subagent-execution"
+    "behavior.task-subagent-execution",
+    "behavior.agent-turn-lifecycle"
   ],
   "rule_refs": [
-    "rule.task-subagent-authority"
+    "rule.task-subagent-authority",
+    "rule.turn-terminal-authority"
   ],
   "evidence_refs": [
     "evidence.subagent-physical-settlement-repair"
@@ -72,3 +74,8 @@ Closure requires current-source held-cleanup, normal-long-run, exact sibling,
 repeat-request, caller-drop/unwind, unknown restart, late uncertainty, original
 mode capacity/resources, input watch and post-CAS priority proofs with independent
 review. Focused verification does not represent merged-main completion.
+
+ACP close increment is independently reviewed C0/I0/M0 after genuine held-backend
+identity/retry and unidentified owner-loss failures. All 18 original Session tests
+pass after the repair, including ordinary retry/success. Remaining full merge,
+feature and consumer/main acceptance keeps this Finding open.

@@ -3,7 +3,7 @@
   "schema_version": 1,
   "id": "evidence.subagent-physical-settlement-repair",
   "kind": "evidence",
-  "observed_at": "source:3fd9e1ed897ce9ee4088530ea89cde93193cea1eb1d5a1afcd612ab083e2deb7",
+  "observed_at": "source:951cf5e91f3d0fb879bda5e1960e21750accb35acdc3246c14fb6a900b53225e",
   "source_refs": [
     "docs/adr/0088-subagent-settlement-observation.md",
     "docs/subagent-cancellation-observation.md",
@@ -36,11 +36,14 @@
     "src/tools/builtin/agent_dispatch.rs",
     "tests/acp_agent_adapter.rs",
     "tests/agent_handle_turn_driver.rs",
-    "tests/facade_smoke.rs"
+    "tests/facade_smoke.rs",
+    "src/acp/session.rs"
   ],
   "supports": [
     "behavior.task-subagent-execution",
-    "rule.task-subagent-authority"
+    "rule.task-subagent-authority",
+    "behavior.agent-turn-lifecycle",
+    "rule.turn-terminal-authority"
   ],
   "limitations": [
     "Focused framework implementation checkpoint; six merge gates, independent-feature matrix, SDK/CLI consumer qualification and exact merged-main CI remain separate and incomplete.",
@@ -82,11 +85,17 @@ Canonical started/draining Tool 调用在 Manager configured timeout、React can
 
 此前各自切点Core426/Orchestration473/Team30/ACP10均0；无相关源变化时保其有限结果，不将不同切点或重复测试累加为unique覆盖。原Subagent65/66、React84和各编译/fixture失败仍为历史，不替代最后189/69切点。
 
+## ACP Session close增量
+
+87223c8163f6b30479fbd44eadd09736db50bd5d是已提交并推送的前一focused源码切点，不把其335/189/69/16集合冒充本次重跑。此后唯一新增生产文件src/acp/session.rs：close/close_all两个真实before各在原file backend held时把身份变Other、generation1变2、实际close调用2，2877B/exit101；无identity owner-loss真实before也在backend held时回Failed并重发，1402B/exit101。两轮编译诊断零，各581输入无漂移；释放并join原backend后才断言。
+
+修复复用原receipt的私有NotSettled(Some原run/execution)/None知识，保同generation与Session/Agent。Some返回原typed，None用原Notify观察且不造identity或新owner task。close_all先join全部原close并保各自receipt，再返回首原typed；普通returnedError的原失败重试/成功清理/latelease语义不变。当前全原ACP Session模块18/0/0、2160B、零编译诊断、581guard0，原普通失败新generation与close_all retry等均实执行。当前fmtall/check各0、0B且581无变化，Plan官方validate0。独立增量复审绑定40source-doc冻结，PASS C0/I0/M0。
+
 ## 已知缺口
 
 Raw receipts, failures/passes and input maps remain only in this checkout's
 .echo-semantic/local/subagent-physical-settlement-b/; they are not source_refs or
-committed raw archives. The 39 source/test/maintained-document files are frozen.
+committed raw archives. The 40 source/test/maintained-document files are frozen.
 Final independent source review is PASS C0/I0/M0, recorded by the Finding's Audit.
 Remaining acceptance is incomplete and the Finding stays open. Six merge gates,
 applicable features, SDK/CLI consumer pins and exact main CI are not borrowed from
