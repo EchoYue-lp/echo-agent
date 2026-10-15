@@ -1027,8 +1027,9 @@ pub trait Agent: Send + Sync {
     /// Execute a task with cooperative cancellation support.
     ///
     /// The default implementation wraps [`Self::execute_stream`] with a
-    /// cancellation-aware wrapper. When `cancel` is triggered, the stream
-    /// yields [`AgentEvent::Cancelled`] and terminates.
+    /// cancellation-aware wrapper. Cancellation retains the original source
+    /// through physical EOF before publishing [`AgentEvent::Cancelled`]. An
+    /// unresolved source observation is propagated without a fake terminal.
     ///
     /// # ⚠️ Warning
     ///
@@ -1095,8 +1096,9 @@ pub trait Agent: Send + Sync {
     /// Chat streaming variant with cooperative cancellation support.
     ///
     /// The default implementation wraps [`Self::chat_stream`] with a
-    /// cancellation-aware wrapper. When `cancel` is triggered, the stream
-    /// yields [`AgentEvent::Cancelled`] and terminates.
+    /// cancellation-aware wrapper. Cancellation retains the original source
+    /// through physical EOF before publishing [`AgentEvent::Cancelled`]. An
+    /// unresolved source observation is propagated without a fake terminal.
     fn chat_stream_with_cancel<'a>(
         &'a self,
         message: &'a str,
@@ -1491,59 +1493,79 @@ impl Agent for Box<dyn Agent> {
 /// Wrap an agent event stream with cooperative cancellation support.
 ///
 /// A cancellation event is a delivery cause, not the producer's closure
-/// receipt. Keep the original source until EOF after publishing that cause.
+/// receipt. Publish cancellation only after the original source's EOF.
 fn cancel_aware_stream<'a>(
-    mut stream: BoxStream<'a, Result<AgentEvent>>,
+    stream: BoxStream<'a, Result<AgentEvent>>,
     cancel: CancellationToken,
 ) -> BoxStream<'a, Result<AgentEvent>> {
-    let wrapped = async_stream::stream! {
-        loop {
-            let next = tokio::select! {
-                biased;
-                next = stream.next() => next,
-                _ = cancel.cancelled() => {
-                    yield Ok(AgentEvent::Cancelled);
-                    while let Some(item) = stream.next().await {
-                        if matches!(&item, Err(ReactError::ExecutionNotSettled { .. })) { yield item; }
-                    }
-                    break;
-                }
-            };
-            match next {
-                Some(event) => {
-                    let terminal_error = matches!(&event, Err(error)
-                        if !matches!(error, ReactError::ExecutionNotSettled { .. }));
-                    yield event;
-                    if terminal_error {
-                        while let Some(item) = stream.next().await {
-                        if matches!(&item, Err(ReactError::ExecutionNotSettled { .. })) { yield item; }
-                    }
-                        break;
-                    }
-                }
-                None => break,
-            }
-        }
-    };
-    Box::pin(wrapped)
+    retaining_source_stream(stream, Some(cancel), None)
 }
 
 fn invocation_retaining_stream<'a>(
-    mut stream: BoxStream<'a, Result<AgentEvent>>,
+    stream: BoxStream<'a, Result<AgentEvent>>,
     invocation: AgentInvocationContext,
+) -> BoxStream<'a, Result<AgentEvent>> {
+    retaining_source_stream(stream, None, Some(invocation))
+}
+
+// Both existing wrappers retain the same source. A cancellation terminal is
+// delayed until physical EOF; if the source reported uncertainty, a later
+// original terminal must confirm its closure first. No timer or owner is added.
+fn retaining_source_stream<'a>(
+    mut stream: BoxStream<'a, Result<AgentEvent>>,
+    cancel: Option<CancellationToken>,
+    invocation: Option<AgentInvocationContext>,
 ) -> BoxStream<'a, Result<AgentEvent>> {
     let wrapped = async_stream::stream! {
         let _invocation = invocation;
-        while let Some(event) = stream.next().await {
-            let terminal_error = matches!(&event, Err(error)
-                if !matches!(error, ReactError::ExecutionNotSettled { .. }));
-            yield event;
-            if terminal_error {
-                while let Some(item) = stream.next().await {
-                        if matches!(&item, Err(ReactError::ExecutionNotSettled { .. })) { yield item; }
+        let mut cancel_requested = false;
+        let mut business_observed = false;
+        let mut source_observation_pending = false;
+        loop {
+            let next = if cancel_requested || business_observed {
+                stream.next().await
+            } else if let Some(cancel) = cancel.as_ref() {
+                tokio::select! {
+                    biased;
+                    next = stream.next() => next,
+                    _ = cancel.cancelled() => {
+                        cancel_requested = true;
+                        continue;
                     }
-                break;
+                }
+            } else {
+                stream.next().await
+            };
+            let Some(item) = next else { break; };
+            match &item {
+                Err(ReactError::ExecutionNotSettled { .. }) => {
+                    source_observation_pending = true;
+                    yield item;
+                }
+                Ok(event) if event.is_terminal() => {
+                    let confirms_observation = source_observation_pending;
+                    source_observation_pending = false;
+                    if !cancel_requested && (!business_observed || confirms_observation) {
+                        // A confirmation after a delivered terminal is consumed
+                        // by the original drainer, not replayed as another
+                        // canonical business terminal by the normalizer.
+                        business_observed = true;
+                        yield item;
+                    }
+                }
+                Err(_) if !cancel_requested && !business_observed => {
+                    business_observed = true;
+                    yield item;
+                }
+                Ok(_) if !cancel_requested && !business_observed => yield item,
+                _ => {}
             }
+        }
+        if cancel_requested && !business_observed && !source_observation_pending {
+            // With prior uncertainty this projection is backed by a genuine
+            // later source terminal AND the just-observed original EOF. A
+            // cancelled token or EOF alone never clears that uncertainty.
+            yield Ok(AgentEvent::Cancelled);
         }
     };
     Box::pin(wrapped)
@@ -1882,15 +1904,11 @@ mod default_pure_text_chat_tests {
         );
         assert_eq!(agent.calls.load(Ordering::SeqCst), 1);
         cancel.cancel();
-        assert!(matches!(
-            events.next().await,
-            Some(Ok(AgentEvent::Cancelled))
-        ));
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(20), events.next())
                 .await
                 .is_err(),
-            "cancel delivery is not the original producer's EOF"
+            "cancel terminal waits for the original producer's EOF"
         );
         assert_eq!(
             drops.load(Ordering::SeqCst),
@@ -1898,6 +1916,10 @@ mod default_pure_text_chat_tests {
             "original invocation guard remains owned while cleanup is held"
         );
         agent.release_cleanup.notify_one();
+        assert!(matches!(
+            events.next().await,
+            Some(Ok(AgentEvent::Cancelled))
+        ));
         assert!(events.next().await.is_none());
         drop(events);
         assert_eq!(drops.load(Ordering::SeqCst), 1);

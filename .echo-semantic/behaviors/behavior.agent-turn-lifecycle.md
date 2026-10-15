@@ -51,3 +51,7 @@ ADR 0009/0010 确认 tracked input 与 TurnReceipt 权威；用户要求明确 A
 原观察revision、needs_review与未闭路线不重标。本B增量由ADR0088及evidence.subagent-physical-settlement-repair的当前源码与独审承接：观察Unknown不是TurnReceipt/Task终态；原raw producer/Join、permit和资源不能由取消、logical terminal、socket或local task Drop代替。原Rule所述bounded reaper不能作为B当前强制释放策略。ACP close同receipt保Some原typed身份或无identity的None知识，同generation/repeat不重发；普通明确返回失败仍按原策略重试，真实close成功仍按原指针限定清理。完整gate/consumer/main与其它开放路线独立，不以本局部增量宣全域verified。
 
 Headless便利观察返回经私有owner投影保原HeadlessRunHandle，内部stored result无owner环；原5值/格式不变，不把Unknown文本视为物理关闭。可能取消等待且需后续保原authority者用start_headless持handle，销毁最后parent不是停止凭证；新增Rust构造器/getter不自动接受为语言API。
+
+## 同原live source的晚结算
+
+观察知识不是首业务失败。同一已绑定run/execution/source在最新观察之后给出原显式terminal并真EOF，原driver可以清其观察并只结算原input/receipt一次，保首真实取消或业务错误及canonical序列。单EOF、normalizer合成terminal、wrong-generation或sink观察不是该来源的物理证明；无source则仍Unknown，不重调Agent。默认取消投影等原source实际闭合，不用token生成能消观察的假凭证。此局部已有真实红绿及独立复审；相关Scheduler/Workflow后继与最终交付仍开放。

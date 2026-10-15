@@ -73,3 +73,16 @@ original stream drains to EOF. Output delivery failure stops delivery and return
 its first cause only after that physical closure. Unknown closure remains typed
 and retains the original resource projection. Ordinary non-draining ToolManager
 methods keep their existing bounded policy.
+
+## A later result from the same live source
+
+An intermediate `ExecutionNotSettled` does not make the original stream unusable.
+Continue that same source: a later explicit terminal for its bound run/execution,
+followed by actual EOF, can let the original owner settle once. Preserve the first
+business cause and value fields. Source identity and execution Option must match;
+sink observations are separate. EOF alone, synthetic terminal projections, wrong
+generation or a newer observation cannot release the original claim/resources.
+The default Core cancellation wrapper retains physical drain and defers its one
+cancel terminal until that source closes; if an observation occurred, a later
+original terminal is required. No-source setup uncertainty stays unknown. This
+adds no new wire event, replay operation, registry or deadline.

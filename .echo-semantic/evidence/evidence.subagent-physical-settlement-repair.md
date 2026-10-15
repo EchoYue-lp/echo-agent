@@ -3,7 +3,7 @@
   "schema_version": 1,
   "id": "evidence.subagent-physical-settlement-repair",
   "kind": "evidence",
-  "observed_at": "source:f8a94d2c787deeda1eab3361e4993ccf20cb7fd2b4d925fbb1b1a12719c45360",
+  "observed_at": "source:dc6cda9f74b78ed1264a0aed0ccd95fe36d44880bfde5f4ce110e5ade49cc2cf",
   "source_refs": [
     "docs/adr/0088-subagent-settlement-observation.md",
     "docs/subagent-cancellation-observation.md",
@@ -119,3 +119,15 @@ Headless便利API另有真实生产反例：原React+LLM Tool调用已启动file
 ## 明确未闭合的live-source后继
 
 实际live source可先报告ExecutionNotSettled并保原producer，随后给出同owner/generation的合法terminal和physical EOF。当前TurnDriver在观察分支停止正常envelope消费，raw drain不保留后到terminal；SubagentExecutor虽继续读，其saved physical_uncertainty在EOF后仍无条件上送。因此有效后到结算可能被旧观察知识覆盖。此源路径已识别，但本checkpoint尚未为其新增真实red/green或实施修复，不能把上述23绿冒充这条义务已闭。无source或无合法terminal的EOF仍需保持Unknown；后继必须保首真实业务cause、exact claim、input/owner/permit与wrong-generation拒绝。宽Finding保持open，Plan保持ready，不交付main。
+
+## Live-source局部闭合与新的切点
+
+上面的23门禁及“尚未新增反例”描述属于已公开开发checkpoint f0a6cd1c13706c20955209b698c1f891c09d78b3，不代表本次新源码的完整门禁。新Driver真实同源counter在原producer held、后到FinalAnswer与真实EOF均已发生后仍返回旧typed观察，2903B/exit101；执行输入与原源码副本保任务本地，非编译红。
+
+当前复用原Core stream wrappers与normalizer：原raw source上的观察只可由同绑定run/execution的后到显式terminal及实际EOF消除，foreign/wrong-attempt、没有后terminal的EOF、terminal后再到观察、normalizer合成错误、同字面身份的sink观察都不冒物理证明。取消只固定首cause；默认wrapper保同source，只有实际闭合且观察已被后到原terminal确认时才发唯一取消terminal。Driver继续原envelope消费，不重放既有事件，原input watch在真结算时清观察。Subagent从同源projection得到真实结果后沿原controller/CAS结算，不重启执行。
+
+同Driver counter修后实际0。最终相关集合Core全426/0/0（33599B）、Orchestration全477/0/0（42020B）、Subagent executor70/0/0（7486B）；真实Team normal/cancel两路径保原claim/active/guard与file effect至原EOF，随后同claim一次结算为Completed或Cancelled，claim清理、activefalse、执行计数1。默认包装器取消fixture改成真实poll接纳→EOF前pending→release→唯一Cancel，原2s/physical assertions保持；原两早Cancel断言及新未接纳取消的调度fixture首次34pass/3fail原件6618B/101保留，未放宽生产优先级。
+
+每次581 Rust/Cargo输入前后同、日志无截断且编译诊断零。其后两个matchguard及tail let-chain只等价短路折叠，独立逐copy复核通过；三crate no-default/subagent,acp lib+tests Clippy原101两lint保留，修后同命令0/648B/零warning，fmtcheck0/0B。独立有限实现审查PASS C0/I0/M0，绑定七文件freeze2；后续Plan仅登记已确认Scheduler/Workflow必要后继，不改变Rust或以上测试切点。当前源码摘要在这些focused结果后观测，不重写执行时间。全部raw只在任务本地，不新增提交归档。
+
+该切片只闭合同原live source的结算消费；Scheduler callback观察终态化/owner-loss重放，以及Workflow resume重排/heartbeat失败/TTL恢复仍须各自真实counter和窄设计。普通错误既有重试合同不因此全部改变。宽Finding仍open、Plan ready；旧f0a23不充当当前代码的六门禁/17feature、SDK/CLI或精确main CI资格。

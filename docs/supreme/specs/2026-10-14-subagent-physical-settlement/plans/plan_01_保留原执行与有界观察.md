@@ -19,11 +19,11 @@ design_sections:
   - ref: design.md § Observation and settlement
     digest: sha256:a814268a6ea99e90df16da929ed721fd66ff2c58fa26289fa7d6e69476f77b5d
   - ref: design.md § Stream ownership and cause ordering
-    digest: sha256:670473183c568ca8baa881e504c71483cc59575d1f93594cb9e428b2a3f93288
+    digest: sha256:053f56607a35244cfd2d1aa46cabbbefdc4a537caf1665c76467eaf240238451
   - ref: design.md § Recovery and limits
     digest: sha256:6ceb3e3ddf365401b051fd40eaa6ade66ed97649d786c8f1ce2e423e3e2b40a1
   - ref: design.md § Acceptance
-    digest: sha256:175dbeb282e1c3244ca105ca2b0c8d2445f10c9b8c2206644108f86620f57591
+    digest: sha256:582eb269e55945fe55c5f8c138c5d625a2c4c42651e1a58a7d6ea5f61020dec8
 delivery_ref: null
 todos:
   - id: observe-without-terminal
@@ -43,11 +43,16 @@ todos:
       - src/agent/react/run/stream_channel.rs
       - echo-core/src/agent/event_envelope.rs
       - echo-execution/src/tools.rs
+      - echo-core/src/agent/mod.rs
+      - echo-orchestration/src/runtime/turn_driver.rs
     acceptance:
       - 三mode cancellation/deadline/raw
         failure均在原EOF后发布一次原cause和terminal，drop收尾不abort原producer或提前释放guard。
       - Canonical started Tool 的 timeout/Complete/receiver-close
         保原future、permit和资源；真实Task claim在原producer关闭前保留，普通非draining策略不变。
+      - 同原run/execution/source的观察后真实terminal+EOF结算原receipt/input/exact
+        claim一次，首cause保；no-terminalEOF/foreign
+        generation/lateUnknown/sink观察均不伪消。
   - id: typed-observation-and-delivery
     summary: 收敛观察错误的非终态消费边界、维护ADR与语义并以独审和完整门禁交付
     files:
@@ -63,6 +68,9 @@ todos:
       - src/acp/session.rs
       - src/headless.rs
       - echo-agent-learning/tests/example_contracts/demo54_headless.rs
+      - echo-orchestration/src/scheduler/runner.rs
+      - echo-orchestration/src/workflow/graph.rs
+      - echo-orchestration/src/workflow/checkpoint_store.rs
     acceptance:
       - 所有实际terminal producers在观察错误分支不emit Failed、不retry
         mutation；源码引用和当前snapshot准确，原反例不被成功日志覆盖，独立复审行动0。
@@ -70,6 +78,9 @@ todos:
         loss保原Notify观察而不造identity/Failed，普通返回error重试与真成功关闭保持。
       - Headless便利返回显式携同原handle，内部result无owner环；真实fileproducer
         held时原guard/permit不释放，原5公开值/格式/普通close保，外部Rust literals迁移。
+      - 原Scheduler真实FireFn的typed观察须沿既有occurrence/journal/active-attempt保Unknown与owner，不伪Failed或普通重投；按原源真counter与最窄设计准入完成该必要消费者闭包。
+      - 已接受registered LlmClient/CheckpointStore的真实Workflow
+        resume消费者：先独立counter与窄设计，typed观察/heartbeat失败不能重排原仍未闭producer，原claim/TTL/restart权限必须有持久证据；普通error重试策略保。
 artifact_id: plan:19bdc455-30ff-4251-96cb-05d6615792b9
 lifecycle: ready
 ---

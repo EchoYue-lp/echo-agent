@@ -704,6 +704,23 @@ impl AgentTurnDriver {
                 })
             });
 
+        // Observe the original source before envelope normalization. Only a
+        // genuine later terminal on this same bound source can supersede its
+        // matching observation; synthetic delivery errors are not receipts.
+        let source_observation = std::sync::Arc::new(std::sync::Mutex::new(None::<ReactError>));
+        let source_progress = source_observation.clone();
+        let source_run = request
+            .identity
+            .run_id
+            .as_ref()
+            .map(|value| value.as_str())
+            .unwrap_or(request.identity.turn_id.as_str())
+            .to_string();
+        let source_execution = request
+            .identity
+            .execution_id
+            .as_ref()
+            .map(|value| value.as_str().to_string());
         let input = request.input;
         let raw = match (&input, request.mode, invocation) {
             (TurnInput::Text(message), TurnMode::Chat, None) => {
@@ -801,6 +818,33 @@ impl AgentTurnDriver {
                 ));
             }
         }
+        .inspect(move |item| {
+            let mut pending = source_progress.lock().unwrap_or_else(|p| p.into_inner());
+            let matches_owner = |error: &ReactError| {
+                matches!(error,
+                ReactError::ExecutionNotSettled { run_id, execution_id }
+                    if run_id == &source_run && execution_id == &source_execution)
+            };
+            match item {
+                Err(ReactError::ExecutionNotSettled {
+                    run_id,
+                    execution_id,
+                }) => {
+                    // A foreign observation cannot be cleared by this owner's
+                    // terminal, even when a later matching observation arrives.
+                    if pending.as_ref().is_none_or(matches_owner) {
+                        *pending = Some(ReactError::ExecutionNotSettled {
+                            run_id: run_id.clone(),
+                            execution_id: execution_id.clone(),
+                        });
+                    }
+                }
+                Ok(event) if event.is_terminal() && pending.as_ref().is_some_and(matches_owner) => {
+                    *pending = None;
+                }
+                _ => {}
+            }
+        })
         .fuse();
         let mut outcome: Option<TurnOutcome> = None;
         let mut delivery = TurnDeliveryOutcome::NotAttempted;
@@ -829,7 +873,9 @@ impl AgentTurnDriver {
                             if let Some(lifecycle) = input_lifecycle.as_ref() {
                                 lifecycle.observe_not_settled(&error);
                             }
-                            observation = Some(error);
+                            // Keep consuming this original source: a later
+                            // real terminal and EOF may resolve its observation.
+                            continue;
                         }
                     }
                     break;
@@ -913,12 +959,18 @@ impl AgentTurnDriver {
         // physical settlement. Retain every opened original source through
         // actual EOF, preserving the cause and accounting already observed.
         while let Some(item) = raw.next().await {
-            if let Err(error @ ReactError::ExecutionNotSettled { .. }) = item {
-                if let Some(lifecycle) = input_lifecycle.as_ref() {
-                    lifecycle.observe_not_settled(&error);
-                }
-                observation.get_or_insert(error);
+            if let Err(error @ ReactError::ExecutionNotSettled { .. }) = item
+                && let Some(lifecycle) = input_lifecycle.as_ref()
+            {
+                lifecycle.observe_not_settled(&error);
             }
+        }
+        if let Some(error) = source_observation
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take()
+        {
+            return Err(error);
         }
         if let Some(error) = observation {
             return Err(error);
@@ -1575,7 +1627,26 @@ mod tests {
         Ok(())
     }
 
+    struct ObservationPhysicalSource {
+        effect: std::path::PathBuf,
+        observation_consumed: tokio::sync::Notify,
+        terminal_consumed: tokio::sync::Notify,
+        terminal: fn() -> Option<AgentEvent>,
+    }
+
+    struct ObservationResource {
+        _permit: tokio::sync::OwnedSemaphorePermit,
+        drops: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Drop for ObservationResource {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
     struct ObservationAgent {
+        physical: Option<Arc<ObservationPhysicalSource>>,
         setup_observation: bool,
         stream_observation: bool,
         release_terminal: Arc<tokio::sync::Notify>,
@@ -1618,14 +1689,35 @@ mod tests {
                     return Err(pending_observation());
                 }
                 let stream = async_stream::stream! {
+                    if let Some(physical) = self.physical.as_ref()
+                        && let Err(error) = tokio::fs::write(&physical.effect, b"original-source-entered").await
+                    {
+                        yield Err(ReactError::Other(error.to_string()));
+                        return;
+                    }
                     if self.stream_observation {
                         yield Err(pending_observation());
                     } else {
                         yield Ok(AgentEvent::Token("before observation".to_string()));
                     }
+                    if let Some(physical) = self.physical.as_ref() {
+                        physical.observation_consumed.notify_one();
+                    }
                     self.release_terminal.notified().await;
-                    yield Ok(AgentEvent::FinalAnswer("later terminal".to_string()));
+                    let terminal = self.physical.as_ref()
+                        .map(|physical| (physical.terminal)())
+                        .unwrap_or_else(|| Some(AgentEvent::FinalAnswer("later terminal".to_string())));
+                    if let Some(terminal) = terminal { yield Ok(terminal); }
+                    if let Some(physical) = self.physical.as_ref() {
+                        physical.terminal_consumed.notify_one();
+                    }
                     self.release_eof.notified().await;
+                    if let Some(physical) = self.physical.as_ref()
+                        && let Err(error) = tokio::fs::write(&physical.effect, b"original-source-physically-closed").await
+                    {
+                        yield Err(ReactError::Other(error.to_string()));
+                        return;
+                    }
                     self.raw_closed.store(true, Ordering::SeqCst);
                 };
                 Ok(stream.boxed())
@@ -1665,8 +1757,239 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn matching_live_source_terminal_and_eof_settle_the_original_input()
+    -> echo_core::error::Result<()> {
+        assert_live_source_closure(true, true, false, false).await
+    }
+
+    #[tokio::test]
+    async fn matching_live_source_after_cancel_preserves_cancel_cause_until_physical_eof()
+    -> echo_core::error::Result<()> {
+        assert_live_source_closure(true, true, true, false).await
+    }
+
+    #[tokio::test]
+    async fn matching_live_source_without_terminal_cannot_settle_from_eof_or_cancel()
+    -> echo_core::error::Result<()> {
+        for cancel in [false, true] {
+            assert_live_source_closure(false, true, cancel, false).await?;
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn live_source_terminal_cannot_clear_foreign_or_sink_observation()
+    -> echo_core::error::Result<()> {
+        assert_live_source_closure(true, false, false, false).await?;
+        assert_live_source_closure(true, true, false, true).await
+    }
+
+    async fn assert_live_source_closure(
+        has_terminal: bool,
+        matching_identity: bool,
+        cancel_after_observation: bool,
+        sink_observation: bool,
+    ) -> echo_core::error::Result<()> {
+        let directory =
+            tempfile::tempdir().map_err(|error| ReactError::Other(error.to_string()))?;
+        let physical = Arc::new(ObservationPhysicalSource {
+            effect: directory.path().join("original-source-effect.txt"),
+            observation_consumed: tokio::sync::Notify::new(),
+            terminal_consumed: tokio::sync::Notify::new(),
+            terminal: if has_terminal {
+                || Some(AgentEvent::FinalAnswer("later terminal".to_string()))
+            } else {
+                || None
+            },
+        });
+        let agent = Arc::new(ObservationAgent {
+            physical: Some(physical.clone()),
+            setup_observation: false,
+            stream_observation: true,
+            release_terminal: Arc::new(tokio::sync::Notify::new()),
+            release_eof: Arc::new(tokio::sync::Notify::new()),
+            raw_closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        });
+        let capacity = Arc::new(tokio::sync::Semaphore::new(1));
+        let permit = capacity
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|error| ReactError::Other(error.to_string()))?;
+        let drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let invocation = AgentInvocationContext {
+            runtime: Some(echo_core::tools::ExternalRunContext {
+                run_id: Some("original-observed-run".to_string()),
+                execution_id: Some("original-observed-attempt".to_string()),
+                ..Default::default()
+            }),
+            resource_guards: vec![echo_core::tools::InvocationResourceGuard::new(
+                ObservationResource {
+                    _permit: permit,
+                    drops: drops.clone(),
+                },
+            )],
+            ..Default::default()
+        };
+        let cancel = CancellationToken::new();
+        let (request, mut input) = TurnRequest::new(
+            identity("matching-live-source")
+                .with_run_id("original-observed-run")?
+                .with_execution_id(if matching_identity {
+                    "original-observed-attempt"
+                } else {
+                    "different-attempt"
+                })?,
+            "task",
+        )
+        .mode(TurnMode::Execute)
+        .cancel(cancel.clone())
+        .invocation(invocation)
+        .with_input_receipt();
+        let sink = Arc::new(ObservedTerminalSink::default());
+        let owned_agent = agent.clone();
+        let owned_sink: Arc<dyn EventSink> = if sink_observation {
+            Arc::new(ObservationSink)
+        } else {
+            sink.clone()
+        };
+        let mut drive = Box::pin(async move {
+            AgentTurnDriver
+                .drive(owned_agent.as_ref(), request, owned_sink.as_ref())
+                .await
+        });
+        let observed = tokio::time::timeout(
+            StdDuration::from_secs(2),
+            async {
+                tokio::select! {
+                    result = drive.as_mut() => Err(ReactError::Other(format!("source completed before observation: {result:?}"))),
+                    _ = physical.observation_consumed.notified() => Ok(()),
+                }
+            },
+        )
+        .await;
+        let held = (
+            futures::poll!(drive.as_mut()).is_pending(),
+            capacity.available_permits(),
+            drops.load(Ordering::SeqCst),
+            input.state(),
+        );
+        let held_effect = tokio::fs::read(&physical.effect).await;
+        let observed_input = futures::poll!(Box::pin(input.wait_for_turn_settled()).as_mut());
+        if cancel_after_observation {
+            cancel.cancel();
+            // Poll this exact owner while its source terminal remains held,
+            // admitting cancellation before making either branch ready.
+            assert!(futures::poll!(drive.as_mut()).is_pending());
+        }
+        agent.release_terminal.notify_one();
+        let terminal = tokio::time::timeout(
+            StdDuration::from_secs(2),
+            async {
+                tokio::select! {
+                    result = drive.as_mut() => Err(ReactError::Other(format!("source completed before physical EOF: {result:?}"))),
+                    _ = physical.terminal_consumed.notified() => Ok(()),
+                }
+            },
+        )
+        .await;
+        let after_terminal = (
+            futures::poll!(drive.as_mut()).is_pending(),
+            capacity.available_permits(),
+            drops.load(Ordering::SeqCst),
+            input.state(),
+        );
+        // Always open the original EOF barrier and join this same drive before
+        // any assertion. No re-execution substitutes for a physical receipt.
+        agent.release_eof.notify_one();
+        let result = tokio::time::timeout(StdDuration::from_secs(2), drive)
+            .await
+            .map_err(|_| {
+                ReactError::Other("original live-source drive did not close".to_string())
+            })?;
+        assert!(matches!(observed, Ok(Ok(()))));
+        assert!(matches!(terminal, Ok(Ok(()))));
+        assert_eq!(held, (true, 0, 0, TurnInputState::Accepted));
+        assert_eq!(after_terminal, (true, 0, 0, TurnInputState::Accepted));
+        assert_eq!(
+            held_effect.map_err(|error| ReactError::Other(error.to_string()))?,
+            b"original-source-entered"
+        );
+        assert!(
+            matches!(observed_input, std::task::Poll::Ready(Err(ReactError::ExecutionNotSettled { run_id, execution_id }))
+            if run_id == "original-observed-run" && execution_id.as_deref() == Some("original-observed-attempt"))
+        );
+        assert!(agent.raw_closed.load(Ordering::SeqCst));
+        assert_eq!(
+            tokio::fs::read(&physical.effect)
+                .await
+                .map_err(|error| ReactError::Other(error.to_string()))?,
+            b"original-source-physically-closed"
+        );
+        assert_eq!(capacity.available_permits(), 1);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        eprintln!(
+            "LIVE_SOURCE_SETTLEMENT_FACTS {}",
+            serde_json::json!({
+                "run_id": "original-observed-run", "execution_id": "original-observed-attempt",
+                "held_pending": held.0, "held_capacity": held.1, "held_drops": held.2,
+                "terminal_pending": after_terminal.0, "terminal_capacity": after_terminal.1,
+                "terminal_drops": after_terminal.2,
+                "physical_source_closed": agent.raw_closed.load(Ordering::SeqCst),
+                "final_capacity": capacity.available_permits(), "final_drops": drops.load(Ordering::SeqCst),
+                "driver_result": format!("{result:?}")
+            })
+        );
+        if !has_terminal || !matching_identity || sink_observation {
+            assert!(
+                matches!(result, Err(ReactError::ExecutionNotSettled { ref run_id, ref execution_id })
+                if run_id == "original-observed-run" && execution_id.as_deref() == Some("original-observed-attempt"))
+            );
+            assert_eq!(input.state(), TurnInputState::Accepted);
+            return Ok(());
+        }
+        let expected_outcome = if cancel_after_observation {
+            TurnOutcome::Cancelled
+        } else {
+            TurnOutcome::Completed
+        };
+        let expected_input = if cancel_after_observation {
+            AgentSteerTurnOutcome::Cancelled
+        } else {
+            AgentSteerTurnOutcome::Completed
+        };
+        let receipt = result.map_err(|error| {
+            ReactError::Other(format!(
+                "same-owner real terminal and physical EOF remained sticky: {error:?}"
+            ))
+        })?;
+        assert_eq!(receipt.outcome, expected_outcome);
+        assert_eq!(
+            receipt.final_answer.as_deref(),
+            (!cancel_after_observation).then_some("later terminal")
+        );
+        assert!(matches!(
+            input.wait_for_turn_settled().await?,
+            TurnInputState::TurnSettled { outcome, .. } if outcome == expected_input
+        ));
+        assert_eq!(
+            *sink
+                .terminals
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()),
+            vec![if cancel_after_observation {
+                "cancelled"
+            } else {
+                "completed"
+            }]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn setup_observation_has_no_failed_receipt_or_event() -> echo_core::error::Result<()> {
         let agent = ObservationAgent {
+            physical: None,
             setup_observation: true,
             stream_observation: false,
             release_terminal: Arc::new(tokio::sync::Notify::new()),
@@ -1705,6 +2028,7 @@ mod tests {
             [(true, false), (false, false), (true, true), (false, true)]
         {
             let agent = ObservationAgent {
+                physical: None,
                 setup_observation: false,
                 stream_observation,
                 release_terminal: Arc::new(tokio::sync::Notify::new()),
@@ -1743,6 +2067,7 @@ mod tests {
     -> echo_core::error::Result<()> {
         for stream_observation in [true, false] {
             let agent = ObservationAgent {
+                physical: None,
                 setup_observation: false,
                 stream_observation,
                 release_terminal: Arc::new(tokio::sync::Notify::new()),
@@ -1847,6 +2172,7 @@ mod tests {
     -> echo_core::error::Result<()> {
         for cancelled in [true, false] {
             let agent = ObservationAgent {
+                physical: None,
                 setup_observation: false,
                 stream_observation: false,
                 release_terminal: Arc::new(tokio::sync::Notify::new()),
@@ -1874,13 +2200,17 @@ mod tests {
                     .terminals
                     .lock()
                     .unwrap_or_else(|error| error.into_inner()),
-                vec![expected_status]
+                if cancelled {
+                    vec![]
+                } else {
+                    vec![expected_status]
+                }
             );
             assert!(!agent.raw_closed.load(Ordering::SeqCst));
             assert!(!matches!(input.state(), TurnInputState::TurnSettled { .. }));
             if cancelled {
                 // Even the later original terminal cannot substitute for EOF
-                // or replace the cancellation cause already delivered.
+                // or replace the cancellation cause already admitted.
                 agent.release_terminal.notify_one();
                 assert!(futures::poll!(drive.as_mut()).is_pending());
                 assert!(!agent.raw_closed.load(Ordering::SeqCst));
@@ -1963,72 +2293,83 @@ mod tests {
     #[tokio::test]
     async fn late_cleanup_observation_prevents_receipt_after_delivered_terminal()
     -> echo_core::error::Result<()> {
-        for cancelled in [true, false] {
-            let agent = TailObservationAgent {
-                release_terminal: tokio::sync::Notify::new(),
-                release_observation: tokio::sync::Notify::new(),
-                release_eof: tokio::sync::Notify::new(),
-                raw_closed: std::sync::atomic::AtomicBool::new(false),
-            };
-            let sink = ObservedTerminalSink::default();
-            let cancel = CancellationToken::new();
-            let (request, input) = TurnRequest::new(identity("late-cleanup-observation"), "task")
-                .mode(TurnMode::Execute)
-                .cancel(cancel.clone())
-                .with_input_receipt();
-            if !cancelled {
-                agent.release_terminal.notify_one();
-            }
-            // Use the actual default cancellation and invocation wrappers;
-            // cancellation drains must forward knowledge from this same source.
-            let mut drive = Box::pin(AgentTurnDriver.drive(&agent, request, &sink));
-            assert!(futures::poll!(drive.as_mut()).is_pending());
-            if cancelled {
-                cancel.cancel();
+        for matching_identity in [false, true] {
+            for cancelled in [true, false] {
+                let agent = TailObservationAgent {
+                    release_terminal: tokio::sync::Notify::new(),
+                    release_observation: tokio::sync::Notify::new(),
+                    release_eof: tokio::sync::Notify::new(),
+                    raw_closed: std::sync::atomic::AtomicBool::new(false),
+                };
+                let sink = ObservedTerminalSink::default();
+                let cancel = CancellationToken::new();
+                let source_identity = if matching_identity {
+                    identity("late-cleanup-observation")
+                        .with_run_id("original-observed-run")?
+                        .with_execution_id("original-observed-attempt")?
+                } else {
+                    identity("late-cleanup-observation")
+                };
+                let (request, input) = TurnRequest::new(source_identity, "task")
+                    .mode(TurnMode::Execute)
+                    .cancel(cancel.clone())
+                    .with_input_receipt();
+                if !cancelled {
+                    agent.release_terminal.notify_one();
+                }
+                // Use the actual default cancellation and invocation wrappers;
+                // cancellation drains must forward knowledge from this same source.
+                let mut drive = Box::pin(AgentTurnDriver.drive(&agent, request, &sink));
                 assert!(futures::poll!(drive.as_mut()).is_pending());
-                agent.release_terminal.notify_one();
+                if cancelled {
+                    cancel.cancel();
+                    assert!(futures::poll!(drive.as_mut()).is_pending());
+                    agent.release_terminal.notify_one();
+                    assert!(futures::poll!(drive.as_mut()).is_pending());
+                }
+                // Cancellation cannot manufacture a terminal after an unresolved
+                // late observation; the non-cancelled earlier terminal remains.
+                let expected = if cancelled { vec![] } else { vec!["completed"] };
+                assert_eq!(
+                    *sink
+                        .terminals
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner()),
+                    expected
+                );
+                assert_eq!(input.state(), TurnInputState::Accepted);
+                assert!(!agent.raw_closed.load(Ordering::SeqCst));
+                agent.release_observation.notify_one();
                 assert!(futures::poll!(drive.as_mut()).is_pending());
-            }
-            let expected = if cancelled { "cancelled" } else { "completed" };
-            assert_eq!(
-                *sink
-                    .terminals
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner()),
-                vec![expected]
-            );
-            assert_eq!(input.state(), TurnInputState::Accepted);
-            assert!(!agent.raw_closed.load(Ordering::SeqCst));
-            agent.release_observation.notify_one();
-            assert!(futures::poll!(drive.as_mut()).is_pending());
-            assert_eq!(input.state(), TurnInputState::Accepted);
-            assert_input_observation(
-                &input,
-                "original-observed-run",
-                Some("original-observed-attempt"),
-            )
-            .await;
-            assert!(!agent.raw_closed.load(Ordering::SeqCst));
-            agent.release_eof.notify_one();
-            assert!(matches!(drive.await,
+                assert_eq!(input.state(), TurnInputState::Accepted);
+                assert_input_observation(
+                    &input,
+                    "original-observed-run",
+                    Some("original-observed-attempt"),
+                )
+                .await;
+                assert!(!agent.raw_closed.load(Ordering::SeqCst));
+                agent.release_eof.notify_one();
+                assert!(matches!(drive.await,
                 Err(ReactError::ExecutionNotSettled { run_id, execution_id })
                 if run_id == "original-observed-run"
                     && execution_id.as_deref() == Some("original-observed-attempt")));
-            assert!(agent.raw_closed.load(Ordering::SeqCst));
-            assert_eq!(input.state(), TurnInputState::Accepted);
-            assert_input_observation(
-                &input,
-                "original-observed-run",
-                Some("original-observed-attempt"),
-            )
-            .await;
-            assert_eq!(
-                *sink
-                    .terminals
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner()),
-                vec![expected]
-            );
+                assert!(agent.raw_closed.load(Ordering::SeqCst));
+                assert_eq!(input.state(), TurnInputState::Accepted);
+                assert_input_observation(
+                    &input,
+                    "original-observed-run",
+                    Some("original-observed-attempt"),
+                )
+                .await;
+                assert_eq!(
+                    *sink
+                        .terminals
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner()),
+                    expected
+                );
+            }
         }
         Ok(())
     }

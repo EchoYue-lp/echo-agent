@@ -6,7 +6,7 @@
   "boundary_ref": "boundary.task-subagent-workflow",
   "lens": "time_lifecycle",
   "freshness": "examined",
-  "revision": "source:f8a94d2c787deeda1eab3361e4993ccf20cb7fd2b4d925fbb1b1a12719c45360",
+  "revision": "source:dc6cda9f74b78ed1264a0aed0ccd95fe36d44880bfde5f4ce110e5ade49cc2cf",
   "finding_refs": [
     "finding.subagent-physical-settlement-observation"
   ],
@@ -64,11 +64,22 @@
       ]
     },
     "headless-original-owner": {
-      "revision": "source:f8a94d2c787deeda1eab3361e4993ccf20cb7fd2b4d925fbb1b1a12719c45360",
+      "revision": "f0a6cd1c13706c20955209b698c1f891c09d78b3",
       "source_refs": [
         "src/headless.rs",
         "echo-agent-learning/tests/example_contracts/demo54_headless.rs",
         "docs/adr/0088-subagent-settlement-observation.md"
+      ],
+      "evidence_refs": [
+        "evidence.subagent-physical-settlement-repair"
+      ]
+    },
+    "live-source-late-settlement": {
+      "revision": "source:dc6cda9f74b78ed1264a0aed0ccd95fe36d44880bfde5f4ce110e5ade49cc2cf",
+      "source_refs": [
+        "echo-core/src/agent/mod.rs",
+        "echo-orchestration/src/runtime/turn_driver.rs",
+        "src/agent/subagent/executor.rs"
       ],
       "evidence_refs": [
         "evidence.subagent-physical-settlement-repair"
@@ -140,3 +151,9 @@ no self cycle does not prove arbitrary external Any values cycle-free.
 ## 本checkpoint审查与后继边界
 
 23本地门禁已通过，只支持当前工程资格。Headless、三Clippy等价短路与三旧fixture校正的限定源码增量各有C0/I0/M0独审；这不是对live-source已识别的sticky observation路径出具无缺陷结论。该路径尚待真实反例与同owner/gen合法terminal+EOF闭合证明，宽Finding仍open。其余原未检查路由和跨仓组合限制不变。
+
+## Live-source有限实施增量
+
+独立reviewer settlement_b_final_source_review对七路径freeze2 d06621ebf5e6385b8bab5cc499b219ae35da2a4c0eb149686a4fcd64a19dd768核当前字节，PASS C0/I0/M0。核原rawtap在normalizer前、精确身份与latestUnknown顺序、foreign保留、sink独立、Core取消终态在真实EOF后、input原watch及Team原claim/active/effect闭包。真正before2903B/101、同caseafter0和Core426/Orch477/Executor70实际0、每581guard与0warning均已读取；测试后仅等价两个matchguard和一个tailif折叠，currentClippy2/fmt2实际0亦已核。
+
+原Headless challenge固定真实已公开f0a6，23原门禁仍属于该历史切点。此增量不是重新全库逐字审或当前full6/17资格。Scheduler与Workflow两个实际消费者的typed观察/重排/owner-loss后继未实施，旧普通重试义务不删除；消费者和main资格仍未闭。

@@ -2590,6 +2590,18 @@ impl SubagentExecutor {
         })?;
         invocation.history = (!messages.is_empty()).then_some(messages);
         let event_identity = echo_core::agent::EventIdentity::from_invocation(&invocation)?;
+        let source_observation = Arc::new(Mutex::new(None::<ReactError>));
+        let source_progress = source_observation.clone();
+        let source_run = event_identity
+            .run_id
+            .as_ref()
+            .map(|value| value.as_str())
+            .unwrap_or(event_identity.turn_id.as_str())
+            .to_string();
+        let source_execution = event_identity
+            .execution_id
+            .as_ref()
+            .map(|value| value.as_str().to_string());
         // Route by content: text-only invocations use the text streaming path
         // (agents that implement only `execute_stream` stay dispatch-
         // compatible); genuinely multimodal input requires the message
@@ -2611,6 +2623,31 @@ impl SubagentExecutor {
                     .await?
             }
         }
+        .inspect(move |item| {
+            let mut pending = source_progress.lock().unwrap_or_else(|p| p.into_inner());
+            let matches_owner = |error: &ReactError| {
+                matches!(error,
+                ReactError::ExecutionNotSettled { run_id, execution_id }
+                    if run_id == &source_run && execution_id == &source_execution)
+            };
+            match item {
+                Err(ReactError::ExecutionNotSettled {
+                    run_id,
+                    execution_id,
+                }) => {
+                    if pending.as_ref().is_none_or(matches_owner) {
+                        *pending = Some(ReactError::ExecutionNotSettled {
+                            run_id: run_id.clone(),
+                            execution_id: execution_id.clone(),
+                        });
+                    }
+                }
+                Ok(event) if event.is_terminal() && pending.as_ref().is_some_and(matches_owner) => {
+                    *pending = None;
+                }
+                _ => {}
+            }
+        })
         .fuse();
         let _steering_lease = if let Some(binding) = control {
             let attachment = control_turn_id
@@ -2625,13 +2662,12 @@ impl SubagentExecutor {
                 Err(error) => {
                     Self::record_first_cause(&first_cause, error);
                     cancel.cancel();
-                    let mut uncertain = None;
-                    while let Some(item) = raw_stream.next().await {
-                        if let Err(error @ ReactError::ExecutionNotSettled { .. }) = item {
-                            uncertain.get_or_insert(error);
-                        }
-                    }
-                    if let Some(error) = uncertain {
+                    while raw_stream.next().await.is_some() {}
+                    if let Some(error) = source_observation
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .take()
+                    {
                         return Err(error);
                     }
                     return Err(Self::take_first_cause(&first_cause).ok_or_else(|| {
@@ -2654,14 +2690,10 @@ impl SubagentExecutor {
         let mut pending_tool_evidence = HashMap::<String, (String, serde_json::Value)>::new();
         let mut observed_evidence = Vec::new();
         let mut observed_artifacts = Vec::new();
-        let mut physical_uncertainty = None;
 
         while let Some(event_result) = stream.next().await {
             let event_result = match event_result {
-                Err(error @ ReactError::ExecutionNotSettled { .. }) => {
-                    physical_uncertainty.get_or_insert(error);
-                    continue;
-                }
+                Err(ReactError::ExecutionNotSettled { .. }) => continue,
                 other => other,
             };
             if first_cause
@@ -2853,12 +2885,12 @@ impl SubagentExecutor {
         drop(stream);
         // Envelope EOF only proves terminal projection. The original stream
         // may still own a producer/finally; consume that source to its real EOF.
-        while let Some(item) = raw_stream.next().await {
-            if let Err(error @ ReactError::ExecutionNotSettled { .. }) = item {
-                physical_uncertainty.get_or_insert(error);
-            }
-        }
-        if let Some(error) = physical_uncertainty {
+        while raw_stream.next().await.is_some() {}
+        if let Some(error) = source_observation
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take()
+        {
             return Err(error);
         }
         if let Some(error) = Self::take_first_cause(&first_cause) {
@@ -4180,6 +4212,225 @@ mod tests {
                 0,
                 "foreign physical authority remains unknown; its original invocation guard cannot be released"
             );
+        }
+        Ok(())
+    }
+
+    struct LiveObservationAgent {
+        barrier: Arc<StreamSettlementBarrier>,
+        release_terminal: Arc<tokio::sync::Notify>,
+        terminal_seen: Arc<tokio::sync::Notify>,
+        cancelled_seen: Arc<tokio::sync::Notify>,
+        effect: std::path::PathBuf,
+        cancelled: bool,
+        executions: Arc<AtomicUsize>,
+    }
+
+    impl Agent for LiveObservationAgent {
+        fn name(&self) -> &str {
+            "live-observation"
+        }
+        fn model_name(&self) -> &str {
+            "fixture"
+        }
+        fn system_prompt(&self) -> &str {
+            ""
+        }
+        fn execute<'a>(&'a self, _task: &'a str) -> futures::future::BoxFuture<'a, Result<String>> {
+            Box::pin(async { Err(ReactError::Other("live source required".to_string())) })
+        }
+        fn execute_stream<'a>(
+            &'a self,
+            _task: &'a str,
+        ) -> futures::future::BoxFuture<
+            'a,
+            Result<futures::stream::BoxStream<'a, Result<AgentEvent>>>,
+        > {
+            Box::pin(async { Err(ReactError::Other("bound invocation required".to_string())) })
+        }
+        fn execute_stream_with_invocation_context<'a>(
+            &'a self,
+            _task: &'a str,
+            cancel: CancellationToken,
+            invocation: AgentInvocationContext,
+        ) -> futures::future::BoxFuture<
+            'a,
+            Result<futures::stream::BoxStream<'a, Result<AgentEvent>>>,
+        > {
+            Box::pin(async move {
+                let identity = echo_core::agent::EventIdentity::from_invocation(&invocation)?;
+                let run_id = identity
+                    .run_id
+                    .as_ref()
+                    .map(|value| value.as_str())
+                    .unwrap_or(identity.turn_id.as_str())
+                    .to_string();
+                let execution_id = identity
+                    .execution_id
+                    .as_ref()
+                    .map(|value| value.as_str().to_string());
+                self.executions.fetch_add(1, Ordering::SeqCst);
+                let source = async_stream::stream! {
+                    let _invocation = invocation;
+                    if let Err(error) = tokio::fs::write(&self.effect, b"same-source-entered").await {
+                        yield Err(ReactError::Other(error.to_string())); return;
+                    }
+                    yield Err(ReactError::ExecutionNotSettled { run_id, execution_id });
+                    self.barrier.started.notify_one();
+                    if self.cancelled {
+                        cancel.cancelled().await;
+                        self.cancelled_seen.notify_one();
+                    }
+                    self.release_terminal.notified().await;
+                    yield Ok(AgentEvent::FinalAnswer("same source completed".to_string()));
+                    self.terminal_seen.notify_one();
+                    self.barrier.release_cleanup.notified().await;
+                    if let Err(error) = tokio::fs::write(&self.effect, b"same-source-closed").await {
+                        yield Err(ReactError::Other(error.to_string())); return;
+                    }
+                    self.barrier.physical_stopped.store(true, Ordering::SeqCst);
+                };
+                Ok(source.boxed())
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn matching_live_source_closes_the_original_team_claim_after_observation() -> Result<()> {
+        for cancelled in [false, true] {
+            let (registry, executor) = make_executor().await;
+            let executor = Arc::new(executor);
+            let barrier = Arc::new(StreamSettlementBarrier::default());
+            let terminal_seen = Arc::new(tokio::sync::Notify::new());
+            let cancelled_seen = Arc::new(tokio::sync::Notify::new());
+            let release_terminal = Arc::new(tokio::sync::Notify::new());
+            let directory = tempfile::tempdir()?;
+            let effect = directory.path().join("same-source.txt");
+            let executions = Arc::new(AtomicUsize::new(0));
+            registry
+                .register(
+                    SubagentDefinition::new("live-observation", "original live source"),
+                    Box::new(LiveObservationAgent {
+                        barrier: barrier.clone(),
+                        release_terminal: release_terminal.clone(),
+                        terminal_seen: terminal_seen.clone(),
+                        cancelled_seen: cancelled_seen.clone(),
+                        effect: effect.clone(),
+                        cancelled,
+                        executions: executions.clone(),
+                    }),
+                )
+                .await;
+            let definition = super::super::builder::SubagentBuilder::new("live-team")
+                .team(super::super::team::TeamSpec {
+                    strategy: super::super::team::TeamStrategy::Pipeline(vec![
+                        "live-observation".to_string(),
+                    ]),
+                    manager: String::new(),
+                    subagents: Vec::new(),
+                    config: super::super::team::TeamConfig::default(),
+                })
+                .build();
+            registry
+                .register(definition, Box::new(MockAgent::new("live-team")))
+                .await;
+            let drops = Arc::new(AtomicUsize::new(0));
+            let mut request = unknown_request(ExecutionMode::Team, CancellationToken::new());
+            request.agent_name = "live-team".to_string();
+            request.mode_override = None;
+            request.runtime_context = Some(echo_core::tools::ExternalRunContext {
+                run_id: Some("live-team-run".to_string()),
+                resource_guards: vec![echo_core::tools::InvocationResourceGuard::new(
+                    DispatchGuardDrop(drops.clone()),
+                )],
+                ..Default::default()
+            });
+            let runner = executor.clone();
+            let mut dispatch = tokio::spawn(async move { runner.dispatch(request).await });
+            let entered =
+                tokio::time::timeout(Duration::from_secs(2), barrier.started.notified()).await;
+            let runtime = executor
+                .team_runtime_handles("live-team-run")
+                .first()
+                .cloned()
+                .ok_or_else(|| ReactError::Other("same Team runtime missing".to_string()))?;
+            let task = runtime
+                .snapshot()
+                .await?
+                .tasks
+                .into_iter()
+                .find(|task| task.execution.claim.is_some())
+                .ok_or_else(|| ReactError::Other("same Team claim missing".to_string()))?;
+            let claim = task
+                .execution
+                .claim
+                .clone()
+                .ok_or_else(|| ReactError::Other("claim missing".to_string()))?;
+            let held =
+                !dispatch.is_finished() && runtime.is_active() && drops.load(Ordering::SeqCst) == 0;
+            let held_effect = tokio::fs::read(&effect).await;
+            if cancelled {
+                runtime
+                    .request_attempt_interrupt(&task.spec.id, &claim)
+                    .await
+                    .map_err(|error| ReactError::Other(error.to_string()))?;
+            }
+            let cancel_seen = if cancelled {
+                tokio::time::timeout(Duration::from_secs(2), cancelled_seen.notified())
+                    .await
+                    .is_ok()
+            } else {
+                true
+            };
+            release_terminal.notify_one();
+            let terminal =
+                tokio::time::timeout(Duration::from_secs(2), terminal_seen.notified()).await;
+            let held_terminal =
+                !dispatch.is_finished() && runtime.is_active() && drops.load(Ordering::SeqCst) == 0;
+            let snapshot = runtime.snapshot().await?;
+            let same_claim = snapshot
+                .tasks
+                .iter()
+                .find(|item| item.spec.id == task.spec.id)
+                .is_some_and(|item| {
+                    item.execution.claim.as_ref() == Some(&claim)
+                        && item.execution.status == crate::tasks::TaskStatus::Running
+                });
+            // Release and join the original invocation before every assertion.
+            barrier.release_cleanup.notify_one();
+            let result = tokio::time::timeout(Duration::from_secs(2), &mut dispatch)
+                .await
+                .map_err(|_| ReactError::Other("same Team owner did not join".to_string()))?
+                .map_err(|error| ReactError::Other(error.to_string()))?;
+            let after = runtime.snapshot().await?;
+            let final_task = after
+                .tasks
+                .iter()
+                .find(|item| item.spec.id == task.spec.id)
+                .ok_or_else(|| ReactError::Other("settled same Team task missing".to_string()))?;
+            assert!(entered.is_ok() && cancel_seen && terminal.is_ok());
+            assert!(held && held_terminal && same_claim);
+            assert_eq!(held_effect?, b"same-source-entered");
+            assert_eq!(tokio::fs::read(&effect).await?, b"same-source-closed");
+            assert!(barrier.physical_stopped.load(Ordering::SeqCst));
+            assert_eq!(executions.load(Ordering::SeqCst), 1);
+            assert!(final_task.execution.claim.is_none());
+            assert_eq!(
+                final_task.execution.status,
+                if cancelled {
+                    crate::tasks::TaskStatus::Cancelled
+                } else {
+                    crate::tasks::TaskStatus::Completed
+                }
+            );
+            assert!(!runtime.is_active());
+            if cancelled {
+                assert!(
+                    matches!(result, Err(ReactError::Agent(error)) if matches!(*error, AgentError::Cancelled(_)))
+                );
+            } else {
+                assert_eq!(result?.outcome.status, SubagentStatus::Completed);
+            }
         }
         Ok(())
     }
