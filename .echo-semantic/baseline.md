@@ -3,8 +3,8 @@ schema_version: 1
 id: baseline.repository
 kind: baseline
 source_snapshot:
-  base_revision: 9886502c83d6b1f6fa9212eb221db0e5874deaee
-  content_digest: 2a003bba7a854b548d1e65040aa00d0390af215d9f1114d5755cd6a9563197a2
+  base_revision: 6563d26570cc4a8d93c86b7e37443b0559476807
+  content_digest: 77d8b6e0696f0e1fc7fd8a486a2aa6e7ffcce0df90bf331e5ca39da934ef0e47
 inventory_closure: closed
 behavior_model_closure: closed
 map_refs:

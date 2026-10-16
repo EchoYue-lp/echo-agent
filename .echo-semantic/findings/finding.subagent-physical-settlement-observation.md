@@ -23,7 +23,8 @@
     "rule.turn-terminal-authority"
   ],
   "evidence_refs": [
-    "evidence.subagent-physical-settlement-repair"
+    "evidence.subagent-physical-settlement-repair",
+    "evidence.workflow-observation-negative-controls"
   ],
   "audit_refs": [
     "audit.subagent-physical-settlement-focused-review"
@@ -34,7 +35,8 @@
     "evidence.subagent-physical-settlement-repair"
   ],
   "verification_evidence_refs": [
-    "evidence.subagent-physical-settlement-repair"
+    "evidence.subagent-physical-settlement-repair",
+    "evidence.workflow-observation-negative-controls"
   ],
   "rereview_audit_refs": [
     "audit.subagent-physical-settlement-focused-review"
@@ -108,3 +110,9 @@ Finding仍open：当前最终6+17尚未重跑、SDK注册Store/三语Host与CLI�
 当前663框架代码完整6+17实际全0，主测试3620/0/3既有opt-in忽略，逐581输入无漂移。中英文checkpoint指南随后同步已接受A，既有文档runtime合同新输入实际1pass，精PF纠正重放与独审均0；新Source文档摘要和旧23执行摘要通过不变581码桥关联，不伪造新epoch运行。
 
 本Finding仍open，仅保跨仓最终SDK三语Host/CLI消费与精确merged-main CI交付缺口；不因本地23通过冒main已交付或所有remote Store已验证。既有Graph-specific foreign/lateUnknown专例未单独跑的覆盖限制不删除，无source/无receipt仍不承诺自动恢复。
+
+## Graph 两项负例覆盖补证
+
+6563基础上，原Graph live-source fixture新增foreign→matching→localterminal→EOF与matching→terminal→latestUnknown→EOF两具名case，生产Graph/node/store未改。新五控5/0/0、workflow子集93/0/0实际通过并保原源/claim/内存输出与同实例checkpoint断言；详情绑定evidence.workflow-observation-negative-controls。前文“专例未单独跑”继续描述原历史切点，不再代表本补证缺失。
+
+本Finding仍open。新两case只补Memory同实例的Graph观察顺序覆盖，不新增File、跨重启、remoteStore、SDK/CLI或当前完整合并门禁资格，不以本次focused通过关闭整个跨仓交付Finding。

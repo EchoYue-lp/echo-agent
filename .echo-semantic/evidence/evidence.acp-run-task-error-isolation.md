@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.acp-run-task-error-isolation
 kind: evidence
-observed_at: source:2a003bba7a854b548d1e65040aa00d0390af215d9f1114d5755cd6a9563197a2
+observed_at: 6563d26570cc4a8d93c86b7e37443b0559476807
 source_refs:
 - src/acp/runtime.rs
 - src/acp/adapter.rs
