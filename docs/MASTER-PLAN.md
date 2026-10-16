@@ -1,6 +1,6 @@
 # Framework delivery checkpoints
 
-This checkpoint tracks ACP Run error isolation. The accepted cancellation and
+These checkpoints track ACP Run isolation and bounded Workflow test evidence. The accepted cancellation and
 physical-settlement authority remains [ADR0088](adr/0088-subagent-settlement-observation.md)
 and its linked design; this file records delivery progress only.
 
@@ -11,7 +11,7 @@ and its linked design; this file records delivery progress only.
 | Waiter and receipt priority | Complete | 43 ACP unit tests pass; existing/later waiters, receipt-only wait, receipt priority and stale-error rejection |
 | Independent implementation review | Complete | Zero Critical/Important/Minor findings; focused clippy passes with warnings denied |
 | Full gates and feature matrix | Complete | Latest main9886502 merged; six workspace gates and 17 standalone features pass, zero warnings/source drift |
-| PR / exact main | In review | PR191, published checkpoint30b9bf05; squash only after final review, then verify exact merged-main CI |
+| PR / exact main | Complete | PR191 merged6563d265, reviewed tree2875ec0d; exact CI38958501642 passed all seven jobs |
 
 The canonical production path is still `AcpConnectionServices::prepare_run` /
 `RunEntry` / `AgentTurnDriver`; standard Prompt consumes the Run's fallible
@@ -35,6 +35,53 @@ the delivery tree. Installed0.5 task validation separately exposed historical
 reference errors and a bounded-reference-closure limit; no native Hook/Stop
 success is claimed and no historical material or tool limit is rewritten.
 
-Current next step: commit the final thin validation record, complete final
-review and squash PR191, then verify the exact merged-main CI. Local raw
-artifacts remain ignored and must not be staged.
+ACP delivery is accepted on exact main6563d265. The original worktree and ignored
+evidence remain available; task build artifacts were cleaned after referenced
+executables were archived and verified. No raw artifacts are staged.
+
+## Workflow observation negative controls
+
+Base6563d265; branch `test/Echoyue/workflow-observation-negative-controls`.
+Only the existing Graph test fixture changes. Production Graph/Node/Store,
+public API, checkpoint formats and accepted SDK pins remain unchanged.
+
+Two named cases fill the earlier Audit's unexecuted Graph-specific paths:
+foreign observation followed by matching progress/local terminal/EOF retains
+the original foreign identity; matching terminal followed by a later matching
+Unknown remains unresolved after EOF. Both preserve the original claim and
+one physical source, reject replacement admission and publish no result or
+assistant message into the actual resumed state or same-instance Memory snapshot.
+The original matching-observation/later-terminal/EOF positive path stays intact.
+
+Focused five controls: 5 passed / 0 failed / 0 ignored / 505 filtered.
+Default-feature `workflow::` subset: 93 passed / 0 failed / 0 ignored / 417
+filtered. Both exact selectors, source hashes and raw digests are in
+`evidence.workflow-observation-negative-controls`; this is not a new full
+workspace, all-feature or merged-main result. The new cases do not add File,
+restart or remote Store proof. The broad Finding remains open.
+
+Independent candidate and post-execution result reviews passed with zero
+Critical/Important/Minor findings. Exact Git checkpoint qualification and file
+necessity checks precede the normal focused milestone commit/push.
+The coordinator owns later heavy-slot/main-gate scheduling. No additional Cargo
+is authorized during SDK/CLI's current build window.
+
+No public behavior/API changed, so existing product docs, examples and website
+need no new feature text or call-site changes. This current index and the thin
+Evidence/Audit/Finding chain record the added proof; raw runs and caches stay local.
+
+### Workflow complete local gates
+
+The coordinator subsequently scheduled all six required workspace gates on the
+same frozen1023 Rust/Cargo inputs; all passed without warning, truncation or
+source drift. Full all-target/all-feature tests: 3629 passed / 0 failed / 3
+existing live ignored tests across87 top-level harness summaries; two real
+`echo_state` child-process tests each passed separately. Both new Graph controls
+are present as actual `ok` results. The test-only change triggers no public-API
+or feature-topology matrix.
+
+Only the thin final record and source snapshot metadata change after those
+executions; the1023 tested inputs remain identical. Final exact-Git semantic
+qualification, independent final review, file necessity and exact merged-main CI
+are the remaining delivery steps. SDK's accepted framework target remains6563;
+this test branch does not change consumer pins or close the broad Finding.

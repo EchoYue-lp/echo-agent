@@ -117,6 +117,17 @@
       "evidence_refs": [
         "evidence.subagent-physical-settlement-repair"
       ]
+    },
+    "graph-foreign-and-latest-observation-controls": {
+      "revision": "source:5d89e64c394894674208e32f5978a76c16e4c26081038a4378fe62dccf16908d",
+      "source_refs": [
+        "echo-orchestration/src/workflow/graph.rs",
+        "echo-orchestration/src/workflow/node.rs",
+        "echo-orchestration/src/workflow/checkpoint_store.rs"
+      ],
+      "evidence_refs": [
+        "evidence.workflow-observation-negative-controls"
+      ]
     }
   }
 }
@@ -213,3 +224,11 @@ reviewer实际读取PF纠正链：有效宽PF两路径allow+mutable，check0→r
 
 
 历史快照固定：后继ZIP依赖修复开始时，将原source:736ac2观测固定到875cc22f；canonical对该Git树实算源码digest仍精等736ac2。此为同一旧源码/文档的可恢复定位，不新增B测试、复审或mainCI通过声明。
+
+## Graph foreign 与 latestUnknown 具名负例补证
+
+accepted6563上仅扩现有测试fixture，生产Graph/Node/Store不变。两个具名负例分别验证foreign→matching→localterminal→EOF仍保原foreign身份、matching→terminal→latermatchingUnknown→EOF仍保最新观察；同原claim不可重领，实际resumed内存及MemoryStore snapshot均无结果/assistant提交，calls1/drop1。原matching正控路径不变。新五控5/0/0及workflow子集93/0/0均实际exit0、零warning/源码漂移；精源码与完整raw摘要见evidence.workflow-observation-negative-controls。
+
+此处补足原审查206所述两项Graph专例未执行的局部覆盖，不把旧历史限制重写成当时已通过，不宣File/重启/remoteStore新证明。独立候选与执行结果复审均C0/I0/M0，原Finding继续open；新源码完整合并门禁、SDK/CLI消费者及精main资格仍独立验收。
+
+本测试增量随后完成同一1023 Rust/Cargo输入的六条完整workspace门禁，全部actual0、零warning/漂移；主3629/0/3既有live忽略、两个nested各1单列，两Graph具名负例均在全套实际ok。原始源与最终薄文稿之间用不变输入桥关联，最终currentSource另做精确Git树资格；不把文稿更新冒充新一次Cargo执行。最后合并前独立复审及精main CI仍分别验收，不据此关闭宽Finding或SDK/CLI消费缺口。

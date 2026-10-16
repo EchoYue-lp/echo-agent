@@ -3937,7 +3937,7 @@ mod tests {
             calls: Arc<AtomicUsize>,
             identity: Arc<std::sync::Mutex<Option<(String, String)>>>,
             path: std::path::PathBuf,
-            terminal: bool,
+            mode: u8,
         }
         impl Agent for LiveAgent {
             fn name(&self) -> &str {
@@ -3991,7 +3991,7 @@ mod tests {
                     let slot = self.slot.clone();
                     let drops = self.drops.clone();
                     let path = self.path.clone();
-                    let terminal = self.terminal;
+                    let mode = self.mode;
                     let source = async_stream::stream! {
                         let _guard = SourceDrop(drops); let entered = Arc::new(Notify::new()); let ready = entered.clone();
                         let backend = tokio::spawn(async move {
@@ -3999,9 +3999,18 @@ mod tests {
                             std::fs::write(&path, "closed").map_err(|error| error.to_string())?; Ok::<(),String>(())
                         }).map(|result| result.map_err(|error| error.to_string()).and_then(|result|result)).boxed().shared();
                         *slot.lock().await = Some(backend.clone()); entered.notified().await;
-                        yield Err(ReactError::ExecutionNotSettled { run_id: run, execution_id: Some(execution) }); observed.notify_one();
+                        if mode == 3 {
+                            yield Err(ReactError::ExecutionNotSettled {
+                                run_id: "foreign-workflow-run".into(),
+                                execution_id: Some("foreign-workflow-execution".into()),
+                            });
+                        }
+                        yield Err(ReactError::ExecutionNotSettled { run_id: run.clone(), execution_id: Some(execution.clone()) }); observed.notify_one();
                         if let Err(error) = backend.await { yield Err(ReactError::Other(error)); return; }
-                        if terminal { yield Ok(AgentEvent::FinalAnswer("later genuine Node answer".into())); }
+                        if mode != 2 { yield Ok(AgentEvent::FinalAnswer("later genuine Node answer".into())); }
+                        if mode == 4 {
+                            yield Err(ReactError::ExecutionNotSettled { run_id: run, execution_id: Some(execution) });
+                        }
                         source_tail_ready.notify_one(); eof_release.notified().await;
                     };
                     Ok(Box::pin(source) as BoxStream<'a, Result<AgentEvent>>)
@@ -4030,17 +4039,38 @@ mod tests {
             calls: calls.clone(),
             identity: identity.clone(),
             path: path.clone(),
-            terminal: mode != 2,
+            mode,
         };
         let store = Arc::new(MemoryCheckpointStore::new());
         let cancel = CancellationToken::new();
+        let state_probe = Arc::new(std::sync::Mutex::new(None::<SharedState>));
+        let builder = GraphBuilder::new("live-original-workflow-source")
+            .add_agent_node("effect", agent, "task", "result")
+            .set_entry("effect")
+            .set_finish("effect")
+            .interrupt_before(vec!["effect"])
+            .revision("live-source-v1");
+        let builder = if mode >= 3 {
+            let probe = state_probe.clone();
+            // Observe the resumed Graph's actual state before the Agent node;
+            // the original matching positive controls retain their old path.
+            builder
+                .add_function_node("capture-state", move |state: &SharedState| {
+                    let probe = probe.clone();
+                    let state = state.clone();
+                    Box::pin(async move {
+                        *probe.lock().unwrap_or_else(|error| error.into_inner()) = Some(state);
+                        Ok(())
+                    })
+                })
+                .set_entry("capture-state")
+                .add_edge("capture-state", "effect")
+                .interrupt_before(vec!["capture-state"])
+        } else {
+            builder
+        };
         let graph = Arc::new(
-            GraphBuilder::new("live-original-workflow-source")
-                .add_agent_node("effect", agent, "task", "result")
-                .set_entry("effect")
-                .set_finish("effect")
-                .interrupt_before(vec!["effect"])
-                .revision("live-source-v1")
+            builder
                 .build()?
                 .with_checkpoint_store(store.clone())
                 .with_cancel_token(cancel.clone()),
@@ -4066,6 +4096,20 @@ mod tests {
             .load(&checkpoint.id)
             .await?
             .and_then(|claim| claim.resume_attempt_id);
+        let replacement_while_held = if mode >= 3 {
+            store.claim(&checkpoint.id).await?
+        } else {
+            None
+        };
+        let held_output = if mode >= 3 {
+            state_probe
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .as_ref()
+                .map(|state| (state.contains("result"), state.messages().is_empty()))
+        } else {
+            None
+        };
         let before_terminal_drops = drops.load(Ordering::SeqCst);
         backend_release.notify_one();
         let backend_cleanup = match slot.lock().await.take() {
@@ -4102,6 +4146,14 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert!(original_attempt.is_some());
         assert_eq!(claim_before_eof, original_attempt);
+        if mode >= 3 {
+            assert!(replacement_while_held.is_none());
+            assert_eq!(
+                held_output,
+                Some((false, true)),
+                "resumed state must be observable and output-free while held"
+            );
+        }
         match mode {
             0 => {
                 assert!(
@@ -4117,18 +4169,52 @@ mod tests {
                 assert!(claim_after.is_some_and(|claim| claim.resume_attempt_id.is_none()));
             }
             _ => {
-                let expected = identity
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner())
-                    .clone();
+                let expected = if mode == 3 {
+                    Some((
+                        "foreign-workflow-run".into(),
+                        "foreign-workflow-execution".into(),
+                    ))
+                } else {
+                    identity
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .clone()
+                };
                 assert!(
                     matches!(result, Err(ReactError::ExecutionNotSettled { ref run_id, execution_id: Some(ref execution_id) }) if expected.as_ref().is_some_and(|(run,execution)|run==run_id && execution==execution_id))
                 );
                 assert_eq!(
-                    claim_after.and_then(|claim| claim.resume_attempt_id),
+                    claim_after
+                        .as_ref()
+                        .and_then(|claim| claim.resume_attempt_id.clone()),
                     original_attempt
                 );
                 assert!(replacement.is_none());
+                if mode >= 3 {
+                    let state = state_probe
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .clone()
+                        .ok_or_else(|| {
+                            ReactError::Other("resumed state probe disappeared".into())
+                        })?;
+                    assert!(
+                        !state.contains("result"),
+                        "unknown source must not commit its answer"
+                    );
+                    assert!(
+                        state.messages().is_empty(),
+                        "unknown source must not append an assistant message"
+                    );
+                    let durable = claim_after
+                        .as_ref()
+                        .ok_or_else(|| {
+                            ReactError::Other("protected checkpoint disappeared".into())
+                        })?
+                        .restore_state()?;
+                    assert!(!durable.contains("result"));
+                    assert!(durable.messages().is_empty());
+                }
             }
         }
         Ok(())
@@ -4145,6 +4231,15 @@ mod tests {
     #[tokio::test]
     async fn workflow_live_source_eof_without_terminal_keeps_protected_claim() -> Result<()> {
         assert_workflow_live_source_settlement(2).await
+    }
+    #[tokio::test]
+    async fn workflow_live_source_foreign_observation_survives_matching_progress_and_local_terminal()
+    -> Result<()> {
+        assert_workflow_live_source_settlement(3).await
+    }
+    #[tokio::test]
+    async fn workflow_live_source_late_matching_unknown_requires_a_new_terminal() -> Result<()> {
+        assert_workflow_live_source_settlement(4).await
     }
 
     async fn assert_graph_waiter_drop_retains_original_source(streaming: bool) -> Result<()> {
