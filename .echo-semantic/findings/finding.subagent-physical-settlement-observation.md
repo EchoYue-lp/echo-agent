@@ -96,3 +96,9 @@ f0a6公开checkpoint之后，同源真实terminal+physical EOF仍被旧观察覆
 原Scheduler消费者缺口已有真实红绿：保护同occurrence/attempt、保原callback及Handle parent，不从typed观察、borrowed drop、shutdown或panic制造terminal/replay；legacy本次effect也在原EffectStarted中升级。最终whole53与原Delivery14、相关Clippy/fmt实际0，独立增量C0/I0/M0。先前“Scheduler未实施”仅属于ffff历史切点。
 
 本Finding继续open。用户已接受Workflow保护合同A；其Graph/Store/heartbeat与持久化恢复尚待同任务正式增量实施、真实反例及验证。当前新Scheduler字节仍需最终6+17、SDK/CLI适配与精确merged-main CI，不借f0a历史23通过关闭本Finding。
+
+## Workflow A局部闭合与交付边界
+
+3ded之后已按用户接受A实现原claim effect-before保护、NativeStore原锁/私有格式与Graph唯一ownedloop/Node rawsource闭合；真实重claim、caller/stream Drop、marker降级、chat截流、fanout panic、identity/firstyield/heartbeat及typed Store错误反例均有保留原件与after。Core427/Orch508、相关Clippy/fmt实际0及独立有界审通过；原File reader真实双进程证明限定旧3ded模块与原依赖，不宣全部旧写者/掉电/跨平台保证。
+
+Finding仍open：当前最终6+17尚未重跑、SDK注册Store/三语Host与CLI精确新main消费及merged-main CI未完成。此前“Workflow尚未实施”仅为3ded以前历史状态；无source未知仍无强制恢复/解锁承诺。

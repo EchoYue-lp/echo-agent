@@ -6,7 +6,7 @@
   "boundary_ref": "boundary.task-subagent-workflow",
   "lens": "time_lifecycle",
   "freshness": "examined",
-  "revision": "source:065f76a43c642bebd6ae745da3f9e1b4e8d4bc25231b052c2d293e06a52201a9",
+  "revision": "source:8c966478a4ac91d40efe70c2c3cc744090449d165c3ba1cf57ec91111070caed",
   "finding_refs": [
     "finding.subagent-physical-settlement-observation"
   ],
@@ -86,10 +86,22 @@
       ]
     },
     "scheduler-original-occurrence": {
-      "revision": "source:065f76a43c642bebd6ae745da3f9e1b4e8d4bc25231b052c2d293e06a52201a9",
+      "revision": "3dedb9a6834cd28a3718d9852023722a6d24f4dc",
       "source_refs": [
         "echo-orchestration/src/scheduler/runner.rs",
         "echo-state/src/delivery.rs"
+      ],
+      "evidence_refs": [
+        "evidence.subagent-physical-settlement-repair"
+      ]
+    },
+    "workflow-protected-original-owner": {
+      "revision": "source:8c966478a4ac91d40efe70c2c3cc744090449d165c3ba1cf57ec91111070caed",
+      "source_refs": [
+        "echo-orchestration/src/workflow/graph.rs",
+        "echo-orchestration/src/workflow/checkpoint_store.rs",
+        "echo-orchestration/src/workflow/node.rs",
+        "echo-core/src/agent/mod.rs"
       ],
       "evidence_refs": [
         "evidence.subagent-physical-settlement-repair"
@@ -173,3 +185,11 @@ no self cycle does not prove arbitrary external Any values cycle-free.
 独立reviewer settlement_b_final_source_review复核Scheduler全部相关入口及本次有界增量，最终C0/I0/M0，绑定六路径freeze2 5836dad5e3dba290d0edefef8d4cf635dcf4acb1f8d54d0cbe6793e053cecf28、源码patch71d4198c92e8951d1fa40d1ea7bd672cae4be23b347c1efa89c0bb0a6b4c1a1b。原Handle parent/StrongWeak、factory与poll panic、borrowed waiter、同journal保护、legacy当前attempt升级、exactclaim原子替换与retained_bytes/terminal retention、None旧字节与Some旧decoder拒绝均已审。最后I1两gate只作用None，Some等同原completion；真实poison与cancel反例after、whole53、fmt/Clippy及581guard均已实际读取。误报的pre-effect Claimed永久卡已沿canonical selector撤回，没有据此增加实现。
 
 ADR中Workflow A已接受但尚未本增量实施的措辞已核；不是另一个待用户选择。此次审查不重宣全仓没有缺陷或最终23门禁已覆盖当前新代码。原live-source challenge固定ffff6101，历史23固定f0a6；Workflow A、跨仓消费者与merged-main资格仍开放。
+
+## Workflow A有限实施增量
+
+NativeStore由sdk_archive_role_review独立源码/原件专审C0/I0/M0，绑定原生产d58e39b2及实际旧reader proof2；当前相对该cut仅实际protect bytes拒原wrapper/bare两decoder断言，生产不变且原Store16再次0。旧File模块来自公开3ded，probe只是该模块/未变共享类型与精依赖闭包，不是旧完整框架binary；四双进程同fd实际WouldBlock后才放行。最早sleep-only竞争结论已由更强proof2替代，不冒实际掉电或旧delete/clear安全。
+
+Graph/Core由settlement_b_final_source_review对相关原路径与有界增量独审，最终C0/I0/M0，精九文件freeze3 1f80e51b457ed072a6620369c65bfe594c618418c0390db359bc33cd5d990a53。核唯一owned原loop、caller/firstyield Drop、fanout panic保同siblings、legacy chat raw adapter、won claim身份与knownattempt、matching source terminal/EOF及Store知识分离。typed renew/requeue真实红绿、ordinary aux诊断不改首cause已核；Core427/33575B按不变源复用，当前Orch508/45195B、Clippy227B、fmt0B实际0，逐581输入/零warning/无截断均已读。
+
+当前只支持必要开发checkpoint。Graph-specific foreign/lateUnknown的专例未在本切片单独执行；Core/Driver旧negative不充作其新运行。历史23固定f0a，Scheduler challenge固定3ded；新源码最终6+17、SDK注册Store/三语Host、CLI消费与精确main CI仍待，Finding open、Plan ready。全部raw、probe源码和候选留local，没有原件包进入Git。

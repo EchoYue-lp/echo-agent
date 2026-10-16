@@ -3,7 +3,7 @@
   "schema_version": 1,
   "id": "evidence.subagent-physical-settlement-repair",
   "kind": "evidence",
-  "observed_at": "source:065f76a43c642bebd6ae745da3f9e1b4e8d4bc25231b052c2d293e06a52201a9",
+  "observed_at": "source:8c966478a4ac91d40efe70c2c3cc744090449d165c3ba1cf57ec91111070caed",
   "source_refs": [
     "docs/adr/0088-subagent-settlement-observation.md",
     "docs/subagent-cancellation-observation.md",
@@ -40,7 +40,11 @@
     "src/acp/session.rs",
     "echo-agent-learning/tests/example_contracts/demo54_headless.rs",
     "echo-orchestration/src/scheduler/runner.rs",
-    "echo-state/src/delivery.rs"
+    "echo-state/src/delivery.rs",
+    "echo-orchestration/src/workflow/graph.rs",
+    "echo-orchestration/src/workflow/checkpoint_store.rs",
+    "echo-orchestration/src/workflow/node.rs",
+    "echo-orchestration/src/workflow/mod.rs"
   ],
   "supports": [
     "behavior.task-subagent-execution",
@@ -50,12 +54,13 @@
     "rule.fact-projection-separation"
   ],
   "limitations": [
-    "The 23 applicable local gates (six original framework commands plus 17 independent features) pass only this checkpoint. The known live-source observation-to-terminal consumer gap, SDK/CLI qualification and exact merged-main CI remain incomplete.",
+    "The historical 23 local gates belong to public f0a6 only, not this later Workflow source. Final six/17 and SDK/CLI/exact merged-main qualification remain pending.",
     "Original first 6472-byte before raw was overwritten by a later invocation; preserved command receipt, source and tool-session assertion remain, not a reconstructed full raw.",
     "Local raw is task-scoped, not bundled into the repository. Each reported run proves only its actual input cut; unavailable raw is not fresh passing evidence.",
     "The new real React Tool/Team task cases are after assertions, not represented as individually executed original-source counterexamples. Genuine Manager/pipeline/RunCode and resource counterexamples have separate retained before runs.",
     "Caller-provided opaque resource graphs require consumer ownership review. Internal retention has no manager/self projection cycle; arbitrary Any guards are not universally cycle-free.",
-    "The current Scheduler 53 and unchanged Delivery 14 focused results do not replace final six gates/17 features, accepted Workflow A implementation, consumer qualification or exact merged-main CI; historical 23 gates belong to f0a6 only."
+    "The current Scheduler 53 and unchanged Delivery 14 focused results do not replace final six gates/17 features, accepted Workflow A implementation, consumer qualification or exact merged-main CI; historical 23 gates belong to f0a6 only.",
+    "Workflow focused checks cover native Memory/File and original Rust Agent/Function sources; they do not prove SDK DSL Function support, registered Llm/Store Host behavior, every remote Store durability contract, real power-loss survival or Windows/Unix barrier equivalence. Graph-specific foreign/late-Unknown cases were source-reviewed, not separately executed here."
   ]
 }
 ---
@@ -147,3 +152,15 @@ Headless便利API另有真实生产反例：原React+LLM Tool调用已启动file
 最终Scheduler模块53/0/0（5470B）、原Delivery模块14/0/0（2874B，相关源码未再变）、fmtcheck0/0B、两crate lib+tests Clippy0/226B。最终四命令各581 Rust/Cargo输入前后同、零warning且无截断；不把重叠counter叠为unique。原主after编译错误、错误过滤0case、legacy fixture首次failure及Plan早收据覆盖限制保持任务本地事实，不当作有效红绿。独立实现复审PASS C0/I0/M0，绑定六路径freeze2 5836dad5e3dba290d0edefef8d4cf635dcf4acb1f8d54d0cbe6793e053cecf28。
 
 文档、ADR与Rust调用迁移说明随源维护；当前无需要改变的示例值或website产品展示。最终workspace门禁将编译示例；本focused不借未执行的demo/consumer资格。Workflow A已由用户单独接受，绑定原SDK proposal SHA256 23c5a59ae405ecd71c3e79b6d945e77e8b7927e0e1f0176ad91047147341a09f，尚未由本Scheduler增量实施或验证。Finding保持open，Plan ready，最终全6+17、SDK/CLI消费及精确main CI仍待后续最终代码。
+
+## Workflow A原claim与source的局部闭合
+
+前述Scheduler切片已公开3dedb9a6834cd28a3718d9852023722a6d24f4dc，其“Workflow尚未实施”是历史状态。用户接受原proposal23c5的A后，现复用原CheckpointStore/Graph/Node/原目录OS锁：同claim positive protect先于Node effect；默认false的绑定Store在可执行resume/branch的claim/fork前拒绝，Deferred/Rejected/fresh入口保持区别。Memory保护只承诺同实例，File版本化私有记录保原attempt且禁止expiry/CRUD隐式解除。普通已知物理结束错误仍requeue，source-less或Store侧观察保typed身份与原claim。
+
+原3ded Graph/Node同真实file backend的Memory/File重claim两例修前2748B/101，borrowed caller/stream Drop丢原Node guard两例1808B/101；均释放并join原backend再断言。修复只共享原不可变Node/Edge/Store能力，每次调用由一个owned原loop继续驱动原source，observer Drop仅signal/detach。取消、Node timeout、fanout panic/sibling与heartbeat失败均保同原future到真正EOF；panic分支自身已展开的Rust局部资源不伪称仍可保留。原Agent source身份独立绑定；matching观察后真实terminal+EOF可原claim一次结算，取消首cause保留，无terminalEOF仍未知。Core默认structured plain-user chat复用原raw adapter，不用适配器synthetic EOF冒原source关闭。
+
+marker混旧/损坏两例真实2495B/101后同例0；早编译错和未真正准入backend的chat fixture失败单独保留，不当作物理红。valid chat before1249B/101和fanout1574B/101修后同例0；身份loadA/claimB、first-buffered-yield Drop、heartbeat三个定向inverse真实101后严格恢复原correct source，最终Graph模块实际覆盖其after，不冒公开3ded原before。Store renew/requeue typed观察两例2299B/101后同例0，Node EOF不清不同Store权威；普通aux requeue消息记录diagnostic而不替换首业务cause。
+
+File实际protect bytes在持久测试中对原旧wrapper/bare两个decoder均拒绝。冻结3ded旧File模块、未变共享types/utils及精依赖闭包的本地probe完成8原automatic methods拒绝/bytes与mode不变、2真legacy控制及4真实双进程原同fd锁交错；每次实际WouldBlock后才放行，不借最初sleep-only竞争推定。它不是整个旧F二进制或任意旧writer保证，旧delete/clear仍不安全，必须禁止降级接管。原atomic_write seam注入可见写后Err证明Node0及同attempt重试重新写barrier，不当作实际内核掉电试验；observer Drop时原blocking writer仍持同OS锁。全部probe/源码副本/raw只local，不入Git。
+
+最终focused为Core全427、Orchestration全508，均0失败/0忽略；Graph模块包含45例（不与全lib叠加），Store16包含于其中。两crate all-target Clippy与fmtcheck实际0、零warning/无截断，各581 Rust/Cargo/config输入前后一致。独立有界Graph/Core实施审与NativeStore专审均C0/I0/M0；只支持此开发checkpoint。Graph-specific foreign/lateUnknown仅本次source审，不借Core/Driver旧负例当新Graph运行。文档/ADR/迁移同步，examples与website无需改产品值；最终workspace门禁仍须实际编译示例。宽Finding open、Plan ready，最终6+17、SDK三语Host/CLI消费及精确main CI尚待最终代码，不借f0a历史23资格。

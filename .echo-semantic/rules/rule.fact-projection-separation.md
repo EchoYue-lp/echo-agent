@@ -44,3 +44,7 @@ visibility 已闭合，完整 event family 分类仍未完成，故本规则保�
 ## 已准入Scheduler effect与物理未知
 
 Scheduler复用同DeliveryLedger事实权威。EffectStarted的可选payload替换须精claim且仅Claimed phase，原event同时安装保护知识并重算原retained_bytes；无替换时旧序列化不变。原callback真实结束才能正常terminal；typed观察、observer Drop、shutdown与owner loss不证明物理结束，受保护attempt不得因liveness hint消失而重投。旧历史恢复与本次新effect准入不同：本次effect前必须安装保护，不能让旧payload豁免新已知未知。该局部由原B Evidence/Audit承接，不更改其它delivery未知的普通策略或宣全域exactly-once。
+
+## Workflow受保护claim与观察知识
+
+已接受A要求在同Store exact attempt上收到protect positive后才准Node effect；保护是禁止expiry/replay的知识而非physical receipt。原source真实terminal+EOF与精身份确认后才可用原ack/requeue；heartbeat、observer Drop、claim本地缺失或不同Store观察不提供该证明。Memory实例边界、File持久私有保护/原目录OS锁与remote声明能力分别验证，不能用业务KV、trace或后置RPC替代同权威保护。该规则不改其它普通已结束错误的重试合同。

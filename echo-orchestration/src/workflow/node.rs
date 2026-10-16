@@ -177,50 +177,85 @@ impl Node {
         &'a self,
         state: &'a SharedState,
         cancel: CancellationToken,
+        control: Arc<super::graph::GraphExecutionControl>,
+        node_name: &'a str,
+        execution_id: &'a str,
     ) -> BoxStream<'a, Result<String>> {
         let stream = async_stream::try_stream! {
             match &self.action {
-                NodeAction::Agent {
-                    agent,
-                    input_key,
-                    output_key,
-                    use_execute,
-                } => {
+                NodeAction::Agent { agent, input_key, output_key, use_execute } => {
                     let input = state.get::<String>(input_key).unwrap_or_default();
-                    let mut events = if *use_execute {
-                        agent.execute_stream_with_cancel(&input, cancel).await?
+                    let run_id = control.run_id().ok_or_else(|| ReactError::Other("Workflow invocation has no bound run identity".into()))?;
+                    let invocation = echo_core::agent::AgentInvocationContext {
+                        runtime: Some(echo_core::tools::ExternalRunContext {
+                            run_id: Some(run_id.clone()),
+                            turn_id: Some(control.operation_id.clone()),
+                            execution_id: Some(execution_id.to_string()),
+                            cancel: Some(Arc::new(cancel.clone())),
+                            ..Default::default()
+                        }),
+                        cancel: Some(cancel.clone()),
+                        ..Default::default()
+                    };
+                    let raw = if *use_execute {
+                        agent.execute_stream_with_invocation_context(&input, cancel.clone(), invocation).await
                     } else {
-                        agent.chat_stream_with_cancel(&input, cancel).await?
+                        agent.chat_stream_message_with_invocation_context(echo_core::llm::types::Message::user(input), cancel.clone(), invocation).await
+                    };
+                    let mut events = match raw {
+                        Ok(events) => events.fuse(),
+                        Err(error @ ReactError::ExecutionNotSettled { .. }) => { Err(error)?; return; }
+                        Err(error) => { control.record_error(Some(node_name), error); return; }
                     };
                     let mut final_answer = None;
+                    let mut observation = None;
                     while let Some(event) = events.next().await {
-                        match event? {
-                            AgentEvent::Token(token) => yield token,
-                            AgentEvent::FinalAnswer(answer) => final_answer = Some(answer),
-                            AgentEvent::Cancelled => {
-                                Err(ReactError::Agent(Box::new(AgentError::Cancelled(
-                                    format!("Workflow Agent node '{}' cancelled", agent.name()),
-                                ))))?;
+                        match event {
+                            Err(error @ ReactError::ExecutionNotSettled { .. }) => {
+                                // A foreign observation cannot be overwritten by
+                                // matching local progress on this source.
+                                let foreign_pending = observation.as_ref().is_some_and(|error: &ReactError| !matches!(error, ReactError::ExecutionNotSettled { run_id: observed_run, execution_id: Some(observed_execution) } if observed_run == &run_id && observed_execution == execution_id));
+                                if !foreign_pending { observation = Some(error); }
                             }
-                            AgentEvent::Error { message, .. } => {
-                                Err(ReactError::Other(message))?;
+                            Err(error) => control.record_error(Some(node_name), error),
+                            Ok(event) => {
+                                if event.is_terminal() && observation.as_ref().is_some_and(|error| matches!(error, ReactError::ExecutionNotSettled { run_id: observed_run, execution_id: Some(observed_execution) } if observed_run == &run_id && observed_execution == execution_id)) {
+                                    observation = None;
+                                }
+                                match event {
+                                    AgentEvent::Token(token) if !control.has_error() => yield token,
+                                    AgentEvent::FinalAnswer(answer) => if final_answer.is_none() { final_answer = Some(answer); },
+                                    AgentEvent::Cancelled => control.record_error(Some(node_name), ReactError::Agent(Box::new(AgentError::Cancelled(format!("Workflow Agent node '{}' cancelled", agent.name()))))),
+                                    AgentEvent::Error { message, .. } => control.record_error(Some(node_name), ReactError::Other(message)),
+                                    _ => {}
+                                }
                             }
-                            _ => {}
                         }
                     }
-                    let output = final_answer.ok_or_else(|| {
-                        ReactError::Agent(Box::new(AgentError::NoResponse {
-                            model: agent.model_name().to_string(),
-                            agent: agent.name().to_string(),
-                        }))
-                    })?;
-                    Self::commit_agent_output(state, output_key, output)?;
+                    if let Some(error) = observation { Err(error)?; }
+                    if !control.has_error() {
+                        match final_answer {
+                            Some(output) => if let Err(error) = Self::commit_agent_output(state, output_key, output) { control.record_error(Some(node_name), error); },
+                            None => control.record_error(Some(node_name), ReactError::Agent(Box::new(AgentError::NoResponse { model: agent.model_name().to_string(), agent: agent.name().to_string() }))),
+                        }
+                    }
                 }
                 NodeAction::Subgraph(subgraph) => {
-                    let result = Box::pin(subgraph.run(state.clone())).await?;
-                    state.deep_merge(&result.state)?;
+                    match subgraph.run_nested(state.clone(), control.clone()).await? {
+                        super::graph::GraphLoopOutcome::Settled(result) => match *result {
+                            super::graph::RunUntilInterruptResult::Completed(result) => { state.deep_merge(&result.state)?; }
+                            _ => control.record_error(Some(node_name), ReactError::Other("Nested Graph returned an unexpected interrupt".into())),
+                        },
+                        super::graph::GraphLoopOutcome::CauseRecorded => {}
+                    }
                 }
-                NodeAction::Function(f) => f.call(state).await?,
+                NodeAction::Function(f) => {
+                    match f.call(state).await {
+                        Err(error @ ReactError::ExecutionNotSettled { .. }) => Err(error)?,
+                        Err(error) => control.record_error(Some(node_name), error),
+                        Ok(()) => {}
+                    }
+                }
                 NodeAction::Passthrough => {}
             }
         };
@@ -235,7 +270,16 @@ mod tests {
     use super::*;
 
     async fn drain_node(node: &Node, state: &SharedState) -> Result<()> {
-        let mut stream = node.execute_stream(state, CancellationToken::new());
+        let control =
+            super::super::graph::GraphExecutionControl::new(Some(uuid::Uuid::new_v4().to_string()));
+        let execution_id = uuid::Uuid::new_v4().to_string();
+        let mut stream = node.execute_stream(
+            state,
+            CancellationToken::new(),
+            control,
+            "test-node",
+            &execution_id,
+        );
         while let Some(token) = stream.next().await {
             let _ = token?;
         }

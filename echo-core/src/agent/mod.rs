@@ -1136,10 +1136,16 @@ pub trait Agent: Send + Sync {
                 // The adapter owns text for as long as the legacy stream can
                 // borrow it. Legacy setup starts on first poll; its original
                 // setup error is emitted as a stream error, never a success.
-                let stream = async_stream::try_stream! {
-                    let mut legacy = self.chat_stream_with_cancel(&text, cancel).await?;
-                    while let Some(event) = legacy.next().await {
-                        yield event?;
+                let stream = async_stream::stream! {
+                    match self.chat_stream_with_cancel(&text, cancel).await {
+                        Ok(legacy) => {
+                            // Retain the same Result source through cleanup.
+                            // The existing wrapper preserves the first business
+                            // error and necessary later observation/confirmation.
+                            let mut legacy = retaining_source_stream(legacy, None, None);
+                            while let Some(event) = legacy.next().await { yield event; }
+                        }
+                        Err(error) => yield Err(error),
                     }
                 };
                 return Ok(Box::pin(stream) as BoxStream<'a, Result<AgentEvent>>);
@@ -1573,6 +1579,120 @@ fn retaining_source_stream<'a>(
 
 #[cfg(test)]
 mod invocation_retaining_stream_tests {
+    #[tokio::test]
+    async fn structured_legacy_chat_preserves_observation_and_original_live_source() -> Result<()> {
+        use futures::FutureExt;
+        use tokio::sync::{Mutex, Notify};
+        struct SourceDrop(Arc<AtomicUsize>);
+        impl Drop for SourceDrop {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        type Backend = futures::future::Shared<BoxFuture<'static, std::result::Result<(), String>>>;
+        struct LegacyChat {
+            release: Arc<Notify>,
+            join: Arc<Mutex<Option<Backend>>>,
+            drops: Arc<AtomicUsize>,
+            path: std::path::PathBuf,
+        }
+        impl Agent for LegacyChat {
+            fn name(&self) -> &str {
+                "legacy-live-chat"
+            }
+            fn model_name(&self) -> &str {
+                "test"
+            }
+            fn system_prompt(&self) -> &str {
+                "test"
+            }
+            fn execute<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<String>> {
+                Box::pin(async { Ok("unused".into()) })
+            }
+            fn execute_stream<'a>(
+                &'a self,
+                _: &'a str,
+            ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+                Box::pin(async move {
+                    let release = self.release.clone();
+                    let path = self.path.clone();
+                    let slot = self.join.clone();
+                    let drops = self.drops.clone();
+                    let source = async_stream::stream! {
+                        let _scope = SourceDrop(drops);
+                        let entered = Arc::new(Notify::new());
+                        let producer_entered = entered.clone();
+                        let backend = tokio::spawn(async move {
+                            std::fs::write(&path, "entered").map_err(|error| error.to_string())?;
+                            producer_entered.notify_one();
+                            release.notified().await;
+                            std::fs::write(&path, "closed").map_err(|error| error.to_string())?;
+                            Ok::<(), String>(())
+                        }).map(|result| result.map_err(|error| error.to_string()).and_then(|result| result)).boxed().shared();
+                        *slot.lock().await = Some(backend.clone());
+                        entered.notified().await;
+                        yield Err(ReactError::ExecutionNotSettled { run_id: "original-chat-run".into(), execution_id: Some("original-chat-attempt".into()) });
+                        if let Err(error) = backend.await { yield Err(ReactError::Other(error)); return; }
+                        yield Ok(AgentEvent::FinalAnswer("same original source".into()));
+                    };
+                    Ok(Box::pin(source) as BoxStream<'a, Result<AgentEvent>>)
+                })
+            }
+        }
+        let directory =
+            std::env::temp_dir().join(format!("echo_legacy_chat_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory)?;
+        let path = directory.join("effect.txt");
+        let release = Arc::new(Notify::new());
+        let join = Arc::new(Mutex::new(None));
+        let drops = Arc::new(AtomicUsize::new(0));
+        let agent = LegacyChat {
+            release: release.clone(),
+            join: join.clone(),
+            drops: drops.clone(),
+            path: path.clone(),
+        };
+        let mut source = agent
+            .chat_stream_message_with_invocation_context(
+                Message::user("plain user".to_string()),
+                CancellationToken::new(),
+                AgentInvocationContext::default(),
+            )
+            .await?;
+        let first = source.next().await;
+        let early = tokio::time::timeout(std::time::Duration::from_millis(20), source.next()).await;
+        let held = std::fs::read_to_string(&path).ok();
+        let early_drops = drops.load(Ordering::SeqCst);
+        release.notify_one();
+        let cleanup = match join.lock().await.take() {
+            Some(backend) => backend.await.map_err(ReactError::Other),
+            None => Err(ReactError::Other("missing original backend".into())),
+        };
+        let mut tail = Vec::new();
+        while let Some(event) = source.next().await {
+            tail.push(event);
+        }
+        let closed = std::fs::read_to_string(&path).ok();
+        let _ = std::fs::remove_dir_all(&directory);
+        cleanup?;
+        assert!(matches!(
+            first,
+            Some(Err(ReactError::ExecutionNotSettled { .. }))
+        ));
+        assert_eq!(held.as_deref(), Some("entered"));
+        assert_eq!(closed.as_deref(), Some("closed"));
+        assert!(
+            early.is_err(),
+            "legacy source ended instead of retaining its physical continuation: {early:?}"
+        );
+        assert_eq!(early_drops, 0);
+        assert!(
+            matches!(tail.as_slice(), [Ok(AgentEvent::FinalAnswer(answer))] if answer == "same original source")
+        );
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
     use super::*;
     use crate::tools::InvocationResourceGuard;
     use std::sync::Arc;

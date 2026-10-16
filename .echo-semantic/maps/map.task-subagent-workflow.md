@@ -133,15 +133,18 @@ scenarios:
     status: needs_review
     source_refs:
     - echo-orchestration/src/workflow/graph.rs
+    - echo-orchestration/src/workflow/node.rs
     - echo-orchestration/src/workflow/checkpoint_store.rs
     - echo-orchestration/src/workflow/dag.rs
     finding_refs:
+    - finding.subagent-physical-settlement-observation
     - finding.workflow-dag-authority
     - finding.workflow-entry-loop-drift
     - finding.workflow-checkpoint-claim-recovery
     - finding.workflow-checkpoint-resurrection-race
     - finding.workflow-parallel-failure-settlement
     evidence_refs:
+    - evidence.subagent-physical-settlement-repair
     - evidence.task-subagent-workflow
     - evidence.workflow-parallel-failure-settlement-repair
     - evidence.workflow-parallel-failure-settlement-verification
@@ -150,11 +153,12 @@ scenarios:
     - evidence.workflow-entry-loop-authority-repair
     - evidence.workflow-entry-loop-authority-verification
     audit_refs:
+    - audit.subagent-physical-settlement-focused-review
     - audit.workflow-parallel-failure-settlement-rereview
     - audit.workflow-checkpoint-claim-settlement-rereview
     - audit.workflow-entry-loop-authority-rereview
     unknown: checkpoint claim/lease、并行sibling settlement及四执行入口事件对等已关闭；Task/Graph/DagWorkflow长期边界已由ADR 0059裁决，仍待独立复审、严格语义门禁与远端交付
-    next_step: 对Finding
+    next_step: B/A局部原source与protected claim已有focused证据；按当前最终源码完成6+17、SDK/CLI消费和精确main CI，不借历史闭合记录替代
   cron-scheduler:
     status: mapped
     source_refs:
