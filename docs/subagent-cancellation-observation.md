@@ -27,6 +27,15 @@ Non-cooperative producers can keep existing capacity occupied indefinitely.
   original receipt. An observation produces no Failed receipt; live original
   streams are drained to actual EOF. Existing `core:run` / `_echo_agent/run/start`
   routing does not change.
+- ACP `prepare_run` records a driver observation on the original `RunEntry`
+  and completes its connection task successfully, because an official ACP
+  spawned-task error closes the whole server. Use `RunEntry::wait_result()`
+  to observe either the original receipt or its structured Run error. An error
+  retains the original lease, remains nonterminal and does not permit retry.
+  Standard Prompt returns it as a request error; unrelated requests continue.
+  `wait_receipt()` and bounded SDK Run waits remain receipt-only, including
+  after cancellation or EOF. A real committed receipt takes precedence over
+  earlier observation; transport failures still propagate.
 - `subagent_status_from_error` becomes fallible for the same nonterminal case.
 - `TurnInputReceipt::wait_for_accepted`, `wait_for_drained` and
   `wait_for_turn_settled` return `Result<TurnInputState>`. The original watch

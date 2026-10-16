@@ -241,7 +241,10 @@ pub struct RunEntry {
 
 #[derive(Clone)]
 enum RunLifecycle {
-    Running,
+    Running {
+        // Observer knowledge only: neither a terminal nor permission to retry.
+        driver_error: Option<agent_client_protocol::Error>,
+    },
     Settled(Arc<TurnReceipt>),
 }
 
@@ -259,7 +262,7 @@ impl RunEntry {
             stream_id,
             ledger,
             cancel,
-            lifecycle: StdMutex::new(RunLifecycle::Running),
+            lifecycle: StdMutex::new(RunLifecycle::Running { driver_error: None }),
             unsettled_lease: StdMutex::new(None),
             settled: Notify::new(),
             revoked: AtomicBool::new(false),
@@ -296,8 +299,8 @@ impl RunEntry {
             self.lifecycle
                 .lock()
                 .map(|lifecycle| lifecycle.clone())
-                .unwrap_or(RunLifecycle::Running),
-            RunLifecycle::Running
+                .unwrap_or(RunLifecycle::Running { driver_error: None }),
+            RunLifecycle::Running { .. }
         )
     }
 
@@ -307,27 +310,31 @@ impl RunEntry {
             .lock()
             .ok()
             .and_then(|lifecycle| match lifecycle.clone() {
-                RunLifecycle::Running => None,
+                RunLifecycle::Running { .. } => None,
                 RunLifecycle::Settled(receipt) => Some(receipt),
             })
     }
 
-    fn retain_unsettled_lease(&self, lease: ActiveTurnLease) {
-        let lifecycle = self
+    fn observe_driver_error(&self, lease: ActiveTurnLease, error: agent_client_protocol::Error) {
+        let mut lifecycle = self
             .lifecycle
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        if matches!(*lifecycle, RunLifecycle::Running) {
+        if let RunLifecycle::Running { driver_error } = &mut *lifecycle
+            && driver_error.is_none()
+        {
             *self
                 .unsettled_lease
                 .lock()
                 .unwrap_or_else(|error| error.into_inner()) = Some(lease);
+            *driver_error = Some(error);
+            self.settled.notify_waiters();
         }
     }
 
     pub(crate) fn settle(&self, receipt: TurnReceipt) {
         if let Ok(mut lifecycle) = self.lifecycle.lock()
-            && matches!(*lifecycle, RunLifecycle::Running)
+            && matches!(*lifecycle, RunLifecycle::Running { .. })
         {
             *lifecycle = RunLifecycle::Settled(Arc::new(receipt));
             drop(
@@ -350,6 +357,35 @@ impl RunEntry {
             notified.as_mut().enable();
             if let Some(receipt) = self.receipt() {
                 return receipt;
+            }
+            notified.await;
+        }
+    }
+
+    /// Observe the original receipt or a driver error without declaring settlement.
+    ///
+    /// An error preserves its structured observation identity and the original
+    /// Session lease. It is not a terminal receipt or permission to retry. A
+    /// committed receipt takes precedence over earlier observer knowledge.
+    /// [`Self::wait_receipt`] remains the receipt-only boundary for persistence
+    /// and physical close. Multiple and later observers see the same result.
+    pub async fn wait_result(&self) -> agent_client_protocol::Result<Arc<TurnReceipt>> {
+        loop {
+            let notified = self.settled.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            let result = {
+                let lifecycle = self
+                    .lifecycle
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                match &*lifecycle {
+                    RunLifecycle::Settled(receipt) => Some(Ok(receipt.clone())),
+                    RunLifecycle::Running { driver_error } => driver_error.clone().map(Err),
+                }
+            };
+            if let Some(result) = result {
+                return result;
             }
             notified.await;
         }
@@ -627,6 +663,10 @@ impl AcpConnectionServices {
     /// on the connection. Registration reserves the run id; the driver only
     /// starts once the spawned task runs. A duplicate run id is a caller
     /// bug and fails without touching the Session's run slot.
+    /// Run-level driver errors are recorded on [`RunEntry::wait_result`];
+    /// the task completes successfully after recording them because an official
+    /// ACP spawned-task error shuts down the entire connection. Receipt-only
+    /// observers continue waiting for authoritative physical settlement.
     pub async fn prepare_run(
         self: &Arc<Self>,
         spec: RunStartSpec,
@@ -698,7 +738,6 @@ impl AcpConnectionServices {
                 {
                     Ok(receipt) => receipt,
                     Err(error) => {
-                        drive_entry.retain_unsettled_lease(lease);
                         let data = match error {
                             ReactError::ExecutionNotSettled {
                                 run_id,
@@ -721,7 +760,11 @@ impl AcpConnectionServices {
                             }
                             error => serde_json::Value::String(error.to_string()),
                         };
-                        return Err(agent_client_protocol::Error::internal_error().data(data));
+                        drive_entry.observe_driver_error(
+                            lease,
+                            agent_client_protocol::Error::internal_error().data(data),
+                        );
+                        return Ok(());
                     }
                 }
             };
@@ -1185,13 +1228,93 @@ mod turn_identity_tests {
     }
 
     #[tokio::test]
+    async fn run_observation_wakes_all_waiters_without_settling_receipt() -> Result<()> {
+        let (services, session) = prepared_session(ForeignObservationAgent).await?;
+        let (entry, task) = services
+            .prepare_run(spec(session.clone(), TurnMode::Execute, false, None)?)
+            .await?;
+        let mut waiters = (0..16)
+            .map(|_| Box::pin(entry.wait_result()))
+            .collect::<Vec<_>>();
+        for waiter in &mut waiters {
+            assert!(futures::poll!(waiter.as_mut()).is_pending());
+        }
+        let mut receipt_only = Box::pin(entry.wait_receipt());
+        assert!(futures::poll!(receipt_only.as_mut()).is_pending());
+        task.await
+            .map_err(|error| ReactError::Other(error.to_string()))?;
+        let expected = serde_json::json!({
+            "observation": "not_settled", "run_id": "foreign-physical-run",
+            "execution_id": "foreign-physical-attempt",
+        });
+        let results =
+            tokio::time::timeout(Duration::from_secs(1), futures::future::join_all(waiters))
+                .await
+                .map_err(|_| {
+                    ReactError::Other("Run observation lost a waiter wakeup".to_string())
+                })?;
+        for result in results {
+            assert_eq!(
+                result.err().and_then(|error| error.data),
+                Some(expected.clone())
+            );
+        }
+        assert_eq!(
+            entry.wait_result().await.err().and_then(|error| error.data),
+            Some(expected)
+        );
+        assert!(futures::poll!(receipt_only.as_mut()).is_pending());
+        assert!(entry.receipt().is_none());
+        assert!(session.begin_turn().is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn real_run_receipt_precedes_observation_and_rejects_late_error() -> Result<()> {
+        let (services, session) = prepared_session(ForeignObservationAgent).await?;
+        let (entry, task) = services
+            .prepare_run(spec(session.clone(), TurnMode::Execute, false, None)?)
+            .await?;
+        task.await
+            .map_err(|error| ReactError::Other(error.to_string()))?;
+        assert!(entry.wait_result().await.is_err());
+        // Exercise the authority's real settle operation, rather than treating
+        // driver task completion or observation as a receipt.
+        entry.settle(TurnReceipt::cancelled(entry.run_id.clone())?);
+        let receipt = entry.wait_receipt().await;
+        let result = entry
+            .wait_result()
+            .await
+            .map_err(|error| ReactError::Other(error.to_string()))?;
+        assert!(Arc::ptr_eq(&receipt, &result));
+        let next_lease = session.begin_turn()?;
+        entry.observe_driver_error(
+            next_lease,
+            agent_client_protocol::Error::internal_error().data("stale observation"),
+        );
+        let result = entry
+            .wait_result()
+            .await
+            .map_err(|error| ReactError::Other(error.to_string()))?;
+        assert!(Arc::ptr_eq(&receipt, &result));
+        assert!(!entry.is_running());
+        assert!(
+            session.begin_turn().is_ok(),
+            "a late observation must not retain a new lease"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn foreign_setup_observation_retains_same_session_lease_and_registry_identity()
     -> Result<()> {
         let (services, session) = prepared_session(ForeignObservationAgent).await?;
         let original = spec(session.clone(), TurnMode::Execute, false, None)?;
         let run_id = original.run_id.clone();
         let (entry, task) = services.prepare_run(original).await?;
-        let error = task.await.err().ok_or_else(|| {
+        task.await
+            .map_err(|error| ReactError::Other(error.to_string()))?;
+        let error = entry.wait_result().await.err().ok_or_else(|| {
             ReactError::Other("foreign observation unexpectedly returned success".to_string())
         })?;
         assert_eq!(

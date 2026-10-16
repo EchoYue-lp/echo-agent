@@ -34,6 +34,34 @@ Replace infallible `AgentFailure::From<&ReactError>` with `TryFrom<&ReactError>`
 
 Foreign Agent setup can expose not-settled identity without returning a stream. There is no canonical future to invent or re-execute. ACP retains the original active Session lease within the existing RunEntry's uncertain-owner resource slot and keeps Running/no receipt; only authoritative receipt/fence releases it. Admission, close and restart must not infer completion from missing process-local control, disconnect or revocation. No permanent pending task or mem::forget is used to simulate ownership; other framework consumers preserve their own existing resource/fence authority.
 
+### ACP Run errors and connection lifetime
+
+The official pinned `agent-client-protocol` 2.1.0 `ConnectionTo::spawn`
+contract shuts down the entire server when a spawned task returns `Err`.
+Its JSON-RPC request responder instead returns an error for one request. A
+driver's nonterminal Run observation belongs to the latter scope; it must not
+make unrelated Sessions or bounded Run observers lose their connection.
+
+Keep the original `RunEntry` lifecycle mutex and its existing Running/Settled
+states. Running can retain the driver's structured ACP error alongside the
+original Session lease. `RunEntry::wait_result()` exposes that observer result
+to Rust consumers, with a committed receipt taking precedence; it does not
+declare physical completion or permit retry. The lease and observation are
+recorded under the same lifecycle lock, and registered waiters are notified.
+Receipt-only `wait_receipt()` and shutdown continue waiting for real settlement.
+The standard Prompt consumes `wait_result()` before and after request
+cancellation, returning its error through the existing request responder without
+persisting a fictional receipt. The shared prepared task returns `Ok` after
+recording a Run error, so SDK Host's existing `spawn(task)` stays usable.
+
+Returning the original Run error from the actor task kills the connection;
+logging it and returning `Ok` alone loses diagnostics and leaves Prompt waiting
+forever. Creating a Failed/Cancelled receipt would release uncertain physical
+ownership. Those alternatives are rejected. Ordinary Agent errors still produce
+their original Failed receipt; real spawn, transport and responder errors keep
+their existing propagation. This is an ACP observer API refinement within B,
+not a new Run state, store, wire method or accepted language contract.
+
 Root interruption adds required `RuntimeDagController::request_task_interruption(run_id, task, claim, disposition) -> Result<bool>` to delegate to the existing exact-claim request CAS without terminal settlement. True is same-claim durable admission, false is supersession, and errors retain the original claim/unknown. No default success or alternate state mutation is provided. Store/Team/SDK/CLI controller source implementations migrate explicitly; no new wire operation is introduced.
 
 Original attempt projections retain shared/local permits and physical-closure knowledge through uncertain exits; neither a string error nor durable claim disappearance releases physical ownership. First request clocks require successful admission. React retains steering and execution resources in the existing close authority, fences new turns and reports unknown on close; no new scheduler or parked replacement task is involved. All opened stream sources drain through actual EOF before ordinary terminal/cancellation receipts as well as observer errors.

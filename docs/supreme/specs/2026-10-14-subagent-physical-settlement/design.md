@@ -127,6 +127,20 @@ A JoinError from the sole operation owner lacks a closure receipt and remains ty
 
 A foreign Agent setup may return ExecutionNotSettled without a stream/JoinHandle. Its identity is not a closure receipt and cannot be repaired by re-running drive. ACP keeps the original active Session lease in the same RunEntry's explicit uncertain-owner slot, remains Running/no receipt, and rejects admission/close completion until authoritative closure/fence. No leaked lease via mem::forget or permanently parked fake owner task. Existing receipts release that same slot; disconnect/revocation alone do not. CLI/SDK consumers separately preserve their existing resources/unknown fence under the same rule.
 
+ACP isolates that Run observation from the official connection actor's fatal
+task result. The original Running lifecycle payload holds the structured driver
+error under the same mutex as settlement, retaining its original lease.
+`RunEntry::wait_result()` returns a real receipt first or that observer error;
+it pre-registers notification and supports existing and later waiters.
+`wait_receipt()` remains receipt-only. A committed receipt rejects subsequent
+observation writes. Standard Prompt uses the observer result for both normal
+and request-cancel waits and sends a request error without receipt persistence.
+The shared prepared task finishes successfully only after recording its Run
+error; actual transport/spawn failures remain errors. The official pinned ACP
+runtime makes task errors connection-fatal, while its existing request error
+responder isolates a single request. No SDK catch, second Run authority, new
+terminal, retry or language contract is introduced. See ADR0088's ACP refinement.
+
 Non-cooperative work retains its original claim and execution limits indefinitely; new work is subject to existing admission, not an unbounded replacement supervisor pool. A caller can stop waiting after grace without releasing those limits. Transport disconnect alone does not prove remote finally. Restart without a matching original generation/physical receipt remains AuthorityUnknown; reconciliation cannot redispatch an existing Running claim. Existing exact CAS can settle only after authoritative closure/fence. A local process's actual owned death is evidence; a missing local registry is not.
 
 ## References and decision

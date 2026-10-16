@@ -695,12 +695,16 @@ async fn drive_prompt<P: AcpConnectionProfile>(
         return responder.respond_with_error(error);
     }
     profile.run_spawned(entry.clone());
-    let receipt = tokio::select! {
-        receipt = entry.wait_receipt() => receipt,
+    let result = tokio::select! {
+        result = entry.wait_result() => result,
         () = request_cancellation.cancelled() => {
             entry.cancel();
-            entry.wait_receipt().await
+            entry.wait_result().await
         }
+    };
+    let receipt = match result {
+        Ok(receipt) => receipt,
+        Err(error) => return responder.respond_with_error(error),
     };
     if let Err(error) = profile.persist_run_settled(&entry, &receipt) {
         return responder.respond_with_error(framework_error(error));
