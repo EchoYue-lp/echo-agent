@@ -10,6 +10,7 @@
 use super::providers::SearchProvider;
 use super::providers::brave::BraveSearchProvider;
 use super::providers::duckduckgo::DuckDuckGoProvider;
+use super::providers::exa::ExaSearchProvider;
 use super::providers::tavily::TavilyProvider;
 use echo_core::error::{Result, ToolError};
 use echo_core::tools::pagination::PageRequest;
@@ -54,15 +55,26 @@ impl WebSearchTool {
         Self::new(Box::new(TavilyProvider::new(api_key)))
     }
 
+    /// Create with Exa Search (requires an API key).
+    pub fn with_exa(api_key: impl Into<String>) -> Self {
+        Self::new(Box::new(ExaSearchProvider::new(api_key)))
+    }
+
     /// Auto-select the best available Provider
     ///
-    /// Priority: Tavily > Brave > DuckDuckGo
+    /// Priority: Exa > Tavily > Brave > DuckDuckGo.
+    /// Selection happens at construction; request failures do not switch providers.
     ///
     /// Reads API keys from environment variables:
-    /// - `TAVILY_API_KEY` → Tavily (AI-optimized, highest quality)
+    /// - `EXA_API_KEY` → Exa (nonempty key)
+    /// - `TAVILY_API_KEY` → Tavily
     /// - `BRAVE_SEARCH_API_KEY` → Brave Search (high quality)
     /// - No key → DuckDuckGo (free fallback)
     pub fn auto() -> Self {
+        if let Some(provider) = ExaSearchProvider::from_env() {
+            tracing::info!("WebSearch: auto-selected Exa Provider");
+            return Self::new(Box::new(provider));
+        }
         if let Some(provider) = TavilyProvider::from_env() {
             tracing::info!("WebSearch: auto-selected Tavily Provider");
             return Self::new(Box::new(provider));

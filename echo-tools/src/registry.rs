@@ -116,7 +116,7 @@ impl ToolPack for StandardToolPack {
             tools.extend([
                 ToolPackEntry::read_only(Box::new(WebFetchTool::new())),
                 ToolPackEntry::read_only(Box::new(WebExtractTool)),
-                ToolPackEntry::read_only(Box::new(WebSearchTool::with_duckduckgo())),
+                ToolPackEntry::read_only(Box::new(WebSearchTool::auto())),
             ]);
         }
 

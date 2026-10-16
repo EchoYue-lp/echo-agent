@@ -1,10 +1,11 @@
 //! Search engine Provider abstraction
 //!
 //! Defines the [`SearchProvider`] trait and [`SearchResult`] type,
-//! supporting multiple search engine backends (DuckDuckGo, Brave, Tavily, etc.).
+//! supporting multiple search engine backends (DuckDuckGo, Brave, Tavily, Exa, etc.).
 
 pub mod brave;
 pub mod duckduckgo;
+pub mod exa;
 pub mod tavily;
 pub mod utils;
 
@@ -30,7 +31,7 @@ pub struct SearchResult {
 ///
 /// # Extension
 ///
-/// To implement `BraveSearchProvider` or `TavilyProvider`, simply implement this trait
+/// To add another search engine, simply implement this trait
 /// and pass it via `WebSearchTool::new(provider)`.
 #[async_trait]
 pub trait SearchProvider: Send + Sync {

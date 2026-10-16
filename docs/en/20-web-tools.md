@@ -25,7 +25,8 @@ WebSearchTool                      ← search tool (implements Tool trait)
 SearchProvider trait               ← abstract search engine interface
     ├─ DuckDuckGoProvider          ← free, no API key required (default)
     ├─ BraveSearchProvider         ← paid API, high quality
-    └─ TavilyProvider              ← AI-optimized search, designed for agents
+    ├─ TavilyProvider              ← AI-optimized search, designed for agents
+    └─ ExaSearchProvider           ← Exa internet search with highlights
 
 WebFetchTool                       ← web page fetcher (implements Tool trait)
     └─ HTML → readable text (html2text)
@@ -57,8 +58,8 @@ let answer = agent.execute("Search for Rust 2024 edition new features").await?;
 ### Auto-select Provider
 
 ```rust
-// Auto-select by priority: Tavily > Brave > DuckDuckGo
-// Reads API keys from env: TAVILY_API_KEY / BRAVE_SEARCH_API_KEY
+// Auto-select by priority: Exa > Tavily > Brave > DuckDuckGo
+// Reads API keys from env: EXA_API_KEY / TAVILY_API_KEY / BRAVE_SEARCH_API_KEY
 agent.add_tool(Box::new(WebSearchTool::auto()));
 ```
 
@@ -71,21 +72,23 @@ agent.add_tool(Box::new(WebSearchTool::auto()));
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `query` | string | Yes | Search query |
-| `max_results` | integer | No | Max results to return (default 5, max 10) |
+| `limit` | integer | No | Results per page (default 5, max 10) |
+| `cursor` | string | No | Continue with `page.next_cursor` and the same query/limit |
 
 ### Output Format
 
+```json
+[
+  {
+    "title": "Rust Programming Language",
+    "url": "https://www.rust-lang.org/",
+    "snippet": "A language empowering everyone to build reliable and efficient software."
+  }
+]
 ```
-Search results (3 results):
 
-1. Rust Programming Language
-   https://www.rust-lang.org/
-   A language empowering everyone to build reliable and efficient software.
-
-2. Rust Documentation
-   https://doc.rust-lang.org/
-   The Rust programming language documentation.
-```
+Pagination divides at most ten fetched results locally. A continuation reissues
+the search; if the result snapshot changes, restart without the old cursor.
 
 ### Search Providers
 
@@ -127,6 +130,23 @@ let tool = WebSearchTool::auto();
 
 Get an API key at: https://tavily.com/
 
+#### Exa
+
+```rust
+let tool = WebSearchTool::with_exa("your-api-key");
+// Or select from EXA_API_KEY at Agent construction time:
+let tool = WebSearchTool::auto();
+```
+
+Calls `POST https://api.exa.ai/search` with `type: auto`. Search highlights become
+`snippet`; this provider does not fetch full page bodies. See the
+[official Exa Search API](https://docs.exa.ai/reference/search).
+
+The standard tool pack (including EKO) uses `auto()`: a nonempty `EXA_API_KEY`
+selects Exa first, followed by Tavily, Brave and DuckDuckGo. Selection happens at
+construction; API failures do not switch engines. Restart/rebuild the Agent after
+changing keys. `with_duckduckgo()` and the other explicit constructors pin an engine.
+
 #### Provider Comparison
 
 | Provider | Cost | Quality | Latency | Notes |
@@ -134,6 +154,7 @@ Get an API key at: https://tavily.com/
 | DuckDuckGo | Free | Medium | Higher | HTML scraping, no key needed |
 | Brave | Free 2k/mo | High | Low | Official API, stable |
 | Tavily | Paid (free tier) | Highest | Low | AI-optimized, agent-first design |
+| Exa | API credits | — | — | Official search API; highlights become snippets |
 
 ---
 
@@ -222,6 +243,7 @@ echo_agent = { version = "1.3", features = ["web"] }
 
 | Variable | Description |
 |----------|-------------|
+| `EXA_API_KEY` | Exa Search API key (nonempty) |
 | `BRAVE_SEARCH_API_KEY` | Brave Search API key |
 | `TAVILY_API_KEY` | Tavily API key |
 

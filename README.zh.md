@@ -620,7 +620,7 @@ impl MyCallback {
 ```rust
 use echo_agent::tools::web::{WebSearchTool, WebFetchTool};
 
-// 自动选择最佳提供商：Tavily > Brave > DuckDuckGo
+// 自动选择最佳提供商：Exa > Tavily > Brave > DuckDuckGo
 agent.add_tool(Box::new(WebSearchTool::auto()));
 agent.add_tool(Box::new(WebFetchTool::new()));
 ```
@@ -630,6 +630,7 @@ agent.add_tool(Box::new(WebFetchTool::new()));
 | DuckDuckGo | 免费 | 中等 | HTML 抓取，无需 API Key |
 | Brave | 免费 2k/月 | 高 | 官方 API |
 | Tavily | 付费（有免费额度） | 最高 | 为 Agent AI 优化 |
+| Exa | API 额度 | 搜索摘要 | `EXA_API_KEY`；互联网搜索 |
 
 ### 21. 自我审查 — 作为工具的质量评估
 

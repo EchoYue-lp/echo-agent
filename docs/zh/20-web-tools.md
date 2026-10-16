@@ -25,7 +25,8 @@ WebSearchTool                      ← 搜索工具（Tool trait 实现）
 SearchProvider trait               ← 搜索引擎抽象接口
     ├─ DuckDuckGoProvider          ← 免费，无需 API Key（默认）
     ├─ BraveSearchProvider         ← 付费 API，高质量
-    └─ TavilyProvider              ← AI 优化搜索，专为 Agent 设计
+    ├─ TavilyProvider              ← AI 优化搜索，专为 Agent 设计
+    └─ ExaSearchProvider           ← Exa 互联网搜索，highlights 作为摘要
 
 WebFetchTool                       ← 网页获取工具（Tool trait 实现）
     └─ HTML → 可读文本（html2text）
@@ -57,8 +58,8 @@ let answer = agent.execute("搜索 Rust 2024 edition 新特性").await?;
 ### 自动选择 Provider
 
 ```rust
-// 自动按优先级选择：Tavily > Brave > DuckDuckGo
-// 从环境变量读取 API Key：TAVILY_API_KEY / BRAVE_SEARCH_API_KEY
+// 自动按优先级选择：Exa > Tavily > Brave > DuckDuckGo
+// 从环境变量读取 API Key：EXA_API_KEY / TAVILY_API_KEY / BRAVE_SEARCH_API_KEY
 agent.add_tool(Box::new(WebSearchTool::auto()));
 ```
 
@@ -71,21 +72,23 @@ agent.add_tool(Box::new(WebSearchTool::auto()));
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | `query` | string | 是 | 搜索关键词 |
-| `max_results` | integer | 否 | 最大返回结果数（默认 5，最大 10） |
+| `limit` | integer | 否 | 每页结果数（默认 5，最大 10）|
+| `cursor` | string | 否 | 使用 `page.next_cursor`，保持 query/limit 相同 |
 
 ### 返回格式
 
+```json
+[
+  {
+    "title": "Rust Programming Language",
+    "url": "https://www.rust-lang.org/",
+    "snippet": "A language empowering everyone to build reliable and efficient software."
+  }
+]
 ```
-搜索结果（共 3 条）:
 
-1. Rust Programming Language
-   https://www.rust-lang.org/
-   A language empowering everyone to build reliable and efficient software.
-
-2. Rust Documentation
-   https://doc.rust-lang.org/
-   The Rust programming language documentation.
-```
+分页在抓取到的最多十条结果内进行。续页会重新搜索；结果快照变化时，需要移除旧 cursor
+重新开始。
 
 ### 搜索引擎 Provider
 
@@ -127,6 +130,21 @@ let tool = WebSearchTool::auto();
 
 注册获取 API Key：https://tavily.com/
 
+#### Exa
+
+```rust
+let tool = WebSearchTool::with_exa("your-api-key");
+// 或在创建 Agent 时从 EXA_API_KEY 自动选择：
+let tool = WebSearchTool::auto();
+```
+
+调用 `POST https://api.exa.ai/search`，使用 `type: auto`，将搜索 highlights 映射为
+`snippet`；该后端不抓取完整网页正文。参考 [Exa 官方搜索接口](https://docs.exa.ai/reference/search)。
+
+标准工具包（包括 EKO）使用 `auto()`：非空 `EXA_API_KEY` 优先选择 Exa，其次为 Tavily、
+Brave、DuckDuckGo。在构造时选择后端，请求失败不会切换引擎。修改 Key 后需重启或重建
+Agent；`with_duckduckgo()` 等显式构造函数可固定使用某个引擎。
+
 #### Provider 对比
 
 | Provider | 费用 | 质量 | 延迟 | 说明 |
@@ -134,6 +152,7 @@ let tool = WebSearchTool::auto();
 | DuckDuckGo | 免费 | 中 | 较高 | HTML 抓取，无需 Key |
 | Brave | 免费 2000 次/月 | 高 | 低 | 官方 API，稳定可靠 |
 | Tavily | 付费（有免费额度） | 最高 | 低 | AI 优化，专为 Agent 设计 |
+| Exa | API 额度 | — | — | 官方搜索接口；highlights 映射为摘要 |
 
 ---
 
@@ -222,6 +241,7 @@ echo_agent = { version = "1.3", features = ["web"] }
 
 | 环境变量 | 说明 |
 |----------|------|
+| `EXA_API_KEY` | Exa Search API Key（非空）|
 | `BRAVE_SEARCH_API_KEY` | Brave Search API Key |
 | `TAVILY_API_KEY` | Tavily API Key |
 

@@ -52,6 +52,7 @@ agent.add_tool(Box::new(WebSearchTool::auto()));
 
 Provider priority in `auto()`:
 
+- `EXA_API_KEY` (nonempty) -> Exa
 - `TAVILY_API_KEY` -> Tavily
 - `BRAVE_SEARCH_API_KEY` -> Brave
 - otherwise DuckDuckGo
