@@ -1,0 +1,20 @@
+# Original registry provenance; this is audit attribution, not a build lock.
+schema_version = 1
+
+[[package]]
+name = "rust_xlsxwriter"
+version = "0.82.0"
+checksum = "d61a82de4e7b30fc427909f2c5aafaada88cc7ae8316edabae435f74341f9278"
+manifest = "vendor/rust_xlsxwriter-0.82.0/Cargo.toml"
+
+[[package]]
+name = "calamine"
+version = "0.36.1"
+checksum = "5fa68281b1a76b54a62156474adb06bb380a67e07dd60656e3217152b42183f3"
+manifest = "vendor/calamine-0.36.1/Cargo.toml"
+
+[[package]]
+name = "docx-rs"
+version = "0.4.22"
+checksum = "7fdf00e8af6d0b3e92d4bbf9b76f773d8b84ea80f310324ad16cbdc2e653e02c"
+manifest = "vendor/docx-rs-0.4.22/Cargo.toml"

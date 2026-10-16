@@ -31,6 +31,7 @@ code_refs:
 rule_refs:
 - rule.framework-layer-ownership
 evidence_refs:
+- evidence.framework-yanked-zip-repair
 - evidence.workspace-structure
 - evidence.workspace-topology-doc-repair
 - evidence.workspace-topology-doc-verification
@@ -44,6 +45,7 @@ evidence_refs:
 - evidence.framework-dependency-final-full-verification
 - evidence.framework-dependency-final-gate-archive
 finding_refs:
+- finding.framework-yanked-zip-ci
 - finding.framework-dependency-policy-ci
 ---
 
@@ -84,3 +86,6 @@ Workspace manifests、各 crate 根模块、root facade、facade smoke、learnin
 
 
 依赖本地修复收口：新23完整工程最终通过及独立源码review PASS/action0见 evidence.framework-dependency-final-full-verification / audit.framework-dependency-policy-rereview，原分层/状态不扩展为remote/consumer/全risk已验。
+
+
+本次875主线新CI撤回依赖故障由 finding.framework-yanked-zip-ci 单独跟踪；原quinn/YAML问题及其已完成证据不改写。媒体构建改为原发布版本源码的最小ZIP9适配，原工具行为/分层/审核策略不变；当前candidate媒体/独立解析结果不代正式新锁全门禁、消费者或精确mainCI。

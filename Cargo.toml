@@ -21,6 +21,7 @@ default-members = [
     "echo-orchestration",
 ]
 resolver = "3"
+exclude = ["vendor/rust_xlsxwriter-0.82.0", "vendor/calamine-0.36.1", "vendor/docx-rs-0.4.22"]
 
 [package]
 name = "echo_agent"
@@ -157,3 +158,8 @@ harness = false
 [[bench]]
 name = "journal_bench"
 harness = false
+
+[workspace.dependencies]
+rust_xlsxwriter = { version = "=0.82.0", path = "vendor/rust_xlsxwriter-0.82.0" }
+calamine = { version = "=0.36.1", path = "vendor/calamine-0.36.1" }
+docx-rs = { version = "=0.4.22", path = "vendor/docx-rs-0.4.22" }

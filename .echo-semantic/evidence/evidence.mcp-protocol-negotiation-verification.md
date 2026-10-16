@@ -1,19 +1,30 @@
 ---
-schema_version: 1
-id: evidence.mcp-protocol-negotiation-verification
-kind: evidence
-observed_at: eadf1a3d5a498bdbccd3742a7e1a457cb27b172d
-source_refs:
-  - echo-integration/src/mcp/client.rs
-  - echo-integration/src/mcp/types.rs
-  - docs/en/08-mcp.md
-  - docs/zh/08-mcp.md
-supports: [behavior.extension-publication, rule.extension-generation-authority]
-limitations:
-  - 未执行 echo-agent workspace 完整合并门禁或远端 CI
-  - semantic strict snapshot 当前受共享 baseline/source digest 旧 revision 约束，由集成分支统一刷新
-  - 测试使用确定性 transport fixture，不声明真实第三方 server 的网络可用性
+{
+  "schema_version": 1,
+  "id": "evidence.mcp-protocol-negotiation-verification",
+  "kind": "evidence",
+  "observed_at": "7110a27e7b0e9841dcfa0d4cca1cdbc053d96177",
+  "source_refs": [
+    "echo-integration/src/mcp/client.rs",
+    "echo-integration/src/mcp/types.rs",
+    "docs/en/08-mcp.md",
+    "docs/zh/08-mcp.md"
+  ],
+  "supports": [
+    "behavior.extension-publication",
+    "rule.extension-generation-authority"
+  ],
+  "limitations": [
+    "Current7110 native observation only; original unavailable history, old executions and old reviews are not reconstructed or reexecuted.",
+    "Current source/test/limit mapping is in evidence.framework-history-current-reobservation; full05 is existing execution, not a newly run historical command."
+  ]
+}
 ---
+
+# Current observation and historical record
+
+The machine header now records only the bounded native observation at `7110a27e7b0e9841dcfa0d4cca1cdbc053d96177`; current source/tests and limitations are in `evidence.framework-history-current-reobservation`. Original observation `eadf1a3d5a498bdbccd3742a7e1a457cb27b172d` and its complete metadata remain in [the immutable875 document](https://github.com/EchoYue-lp/echo-agent/blob/875cc22f2e99c7ccd83c07e02c03fe221c5e3f6c/.echo-semantic/evidence/evidence.mcp-protocol-negotiation-verification.md). The original execution counts, before/after claims and review prose below are preserved verbatim as historical statements, not rerun or equivalence claims for7110.
+
 
 # MCP protocol negotiation 验证证据
 

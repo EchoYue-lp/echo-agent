@@ -1,30 +1,42 @@
 ---
-schema_version: 1
-id: audit.skill-activation-authority-rereview
-kind: audit
-boundary_ref: boundary.extension-lifecycle
-lens: state_authority
-freshness: examined
-revision: 8b912e97840b000adf6d844c805508aa5f18a2c8
-finding_refs: [finding.skill-activation-authority]
-challenges:
-  checkpoint-and-policy-authority:
-    revision: 8b912e97840b000adf6d844c805508aa5f18a2c8
-    source_refs: [src/agent/snapshot.rs, src/agent/react/mod.rs, echo-execution/src/skills/registry.rs]
-    evidence_refs: [evidence.skill-activation-authority-repair, evidence.skill-activation-authority-verification]
-  definition-reconciliation:
-    revision: 8b912e97840b000adf6d844c805508aa5f18a2c8
-    source_refs: [src/agent/react/capabilities.rs, echo-sdk-host/src/core_profile/facade/source_operations.rs, src/agent/react/tests.rs]
-    evidence_refs: [evidence.skill-activation-authority-repair, evidence.skill-activation-authority-verification]
-  activation-effect-singleflight:
-    revision: 8b912e97840b000adf6d844c805508aa5f18a2c8
-    source_refs: [echo-execution/src/skills/registry.rs, echo-execution/src/skills/external/activate_tool.rs]
-    evidence_refs: [evidence.skill-activation-authority-repair, evidence.skill-activation-authority-verification]
-  public-contract-classification:
-    revision: 8b912e97840b000adf6d844c805508aa5f18a2c8
-    source_refs: [echo-sdk-protocol/src/facade.rs, docs/adr/0044-skill-activation-authority.md]
-    evidence_refs: [evidence.skill-activation-authority-repair, evidence.skill-activation-authority-verification]
+{
+  "schema_version": 1,
+  "id": "audit.skill-activation-authority-rereview",
+  "kind": "audit",
+  "boundary_ref": "boundary.extension-lifecycle",
+  "lens": "state_authority",
+  "freshness": "examined",
+  "revision": "7110a27e7b0e9841dcfa0d4cca1cdbc053d96177",
+  "finding_refs": [
+    "finding.skill-activation-authority",
+    "finding.framework-historical-source-observation-retention"
+  ],
+  "challenges": {
+    "current-native-source-and-existing-regressions": {
+      "revision": "7110a27e7b0e9841dcfa0d4cca1cdbc053d96177",
+      "source_refs": [
+        "src/agent/snapshot.rs",
+        "src/agent/react/mod.rs",
+        "echo-execution/src/skills/registry.rs",
+        "src/agent/react/capabilities.rs",
+        "src/agent/react/tests.rs",
+        "echo-execution/src/skills/external/activate_tool.rs",
+        "docs/adr/0044-skill-activation-authority.md"
+      ],
+      "evidence_refs": [
+        "evidence.framework-history-current-reobservation"
+      ]
+    }
+  }
+}
 ---
+
+# Current observation and historical record
+
+The machine header now records only the bounded native observation at `7110a27e7b0e9841dcfa0d4cca1cdbc053d96177`; current source/tests and limitations are in `evidence.framework-history-current-reobservation`. Original observation `8b912e97840b000adf6d844c805508aa5f18a2c8` and its complete metadata remain in [the immutable875 document](https://github.com/EchoYue-lp/echo-agent/blob/875cc22f2e99c7ccd83c07e02c03fe221c5e3f6c/.echo-semantic/audits/audit.skill-activation-authority-rereview.md). The original execution counts, before/after claims and review prose below are preserved verbatim as historical statements, not rerun or equivalence claims for7110.
+
+The former F references `echo-sdk-host/src/core_profile/facade/source_operations.rs`, `echo-sdk-protocol/src/facade.rs` belong to the independent SDK accepted-contract owner. These obligations remain in scope there; the common current evidence gives stable019e source links and the old7f14 execution epoch, while new SDK Host/three-language acceptance is unverified here.
+
 
 # Skill activation authority 独立复审
 

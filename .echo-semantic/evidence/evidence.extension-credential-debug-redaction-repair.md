@@ -1,29 +1,41 @@
 ---
-schema_version: 1
-id: evidence.extension-credential-debug-redaction-repair
-kind: evidence
-observed_at: 98a2e11cfb6e88e2f310ae2c2b40cd9e009534a4
-source_refs:
-  - echo-integration/src/redaction.rs
-  - echo-integration/src/mcp/server_config.rs
-  - echo-integration/src/mcp/config_loader.rs
-  - echo-integration/src/mcp/client.rs
-  - echo-integration/src/mcp/transport/mod.rs
-  - echo-integration/src/mcp/transport/http.rs
-  - echo-integration/src/mcp/transport/sse.rs
-  - echo-integration/src/mcp/transport/stdio.rs
-  - echo-integration/src/channels/channels/qq/channel.rs
-  - echo-integration/src/channels/channels/qq/api.rs
-  - echo-integration/src/channels/channels/qq/gateway.rs
-  - echo-integration/src/channels/channels/feishu/channel.rs
-  - echo-integration/src/channels/channels/feishu/api.rs
-  - echo-integration/src/channels/channels/feishu/long_poll.rs
-  - echo-integration/src/channels/channels/feishu/webhook.rs
-supports: [behavior.extension-publication, rule.extension-generation-authority]
-limitations:
-  - 仅约束框架拥有的配置 Debug、transport 日志与返回错误；embedding application 自行序列化原始配置仍由调用方负责
-  - 不改变 extension 连接、权限判定、请求值或全局 Trace/Audit retention 合同
+{
+  "schema_version": 1,
+  "id": "evidence.extension-credential-debug-redaction-repair",
+  "kind": "evidence",
+  "observed_at": "7110a27e7b0e9841dcfa0d4cca1cdbc053d96177",
+  "source_refs": [
+    "echo-integration/src/redaction.rs",
+    "echo-integration/src/mcp/server_config.rs",
+    "echo-integration/src/mcp/config_loader.rs",
+    "echo-integration/src/mcp/client.rs",
+    "echo-integration/src/mcp/transport/mod.rs",
+    "echo-integration/src/mcp/transport/http.rs",
+    "echo-integration/src/mcp/transport/sse.rs",
+    "echo-integration/src/mcp/transport/stdio.rs",
+    "echo-integration/src/channels/channels/qq/channel.rs",
+    "echo-integration/src/channels/channels/qq/api.rs",
+    "echo-integration/src/channels/channels/qq/gateway.rs",
+    "echo-integration/src/channels/channels/feishu/channel.rs",
+    "echo-integration/src/channels/channels/feishu/api.rs",
+    "echo-integration/src/channels/channels/feishu/long_poll.rs",
+    "echo-integration/src/channels/channels/feishu/webhook.rs"
+  ],
+  "supports": [
+    "behavior.extension-publication",
+    "rule.extension-generation-authority"
+  ],
+  "limitations": [
+    "Current7110 native observation only; original unavailable history, old executions and old reviews are not reconstructed or reexecuted.",
+    "Current source/test/limit mapping is in evidence.framework-history-current-reobservation; full05 is existing execution, not a newly run historical command."
+  ]
+}
 ---
+
+# Current observation and historical record
+
+The machine header now records only the bounded native observation at `7110a27e7b0e9841dcfa0d4cca1cdbc053d96177`; current source/tests and limitations are in `evidence.framework-history-current-reobservation`. Original observation `98a2e11cfb6e88e2f310ae2c2b40cd9e009534a4` and its complete metadata remain in [the immutable875 document](https://github.com/EchoYue-lp/echo-agent/blob/875cc22f2e99c7ccd83c07e02c03fe221c5e3f6c/.echo-semantic/evidence/evidence.extension-credential-debug-redaction-repair.md). The original execution counts, before/after claims and review prose below are preserved verbatim as historical statements, not rerun or equivalence claims for7110.
+
 
 # Extension credential diagnostic redaction 修复证据
 

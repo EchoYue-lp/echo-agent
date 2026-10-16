@@ -1,25 +1,36 @@
 ---
-schema_version: 1
-id: evidence.extension-credential-debug-redaction-verification
-kind: evidence
-observed_at: 98a2e11cfb6e88e2f310ae2c2b40cd9e009534a4
-source_refs:
-  - echo-integration/src/redaction.rs
-  - echo-integration/src/mcp/transport/mod.rs
-  - echo-integration/src/mcp/server_config.rs
-  - echo-integration/src/mcp/config_loader.rs
-  - echo-integration/src/channels/channels/qq/channel.rs
-  - echo-integration/src/channels/channels/feishu/channel.rs
-  - docs/en/08-mcp.md
-  - docs/zh/08-mcp.md
-  - docs/en/15-im-channels.md
-  - docs/zh/15-im-channels.md
-supports: [behavior.extension-publication, rule.extension-generation-authority]
-limitations:
-  - 未运行完整 workspace 合并门禁，按用户要求留到发起 MR 或合入 main 前统一执行
-  - 未连接真实 QQ、Feishu 或外部 MCP server；验证覆盖可确定的 formatting、error 和 feature 编译合同
-  - echo-website 存在用户未提交改动且此前明确延后同步，本切片未修改该独立仓库
+{
+  "schema_version": 1,
+  "id": "evidence.extension-credential-debug-redaction-verification",
+  "kind": "evidence",
+  "observed_at": "7110a27e7b0e9841dcfa0d4cca1cdbc053d96177",
+  "source_refs": [
+    "echo-integration/src/redaction.rs",
+    "echo-integration/src/mcp/transport/mod.rs",
+    "echo-integration/src/mcp/server_config.rs",
+    "echo-integration/src/mcp/config_loader.rs",
+    "echo-integration/src/channels/channels/qq/channel.rs",
+    "echo-integration/src/channels/channels/feishu/channel.rs",
+    "docs/en/08-mcp.md",
+    "docs/zh/08-mcp.md",
+    "docs/en/15-im-channels.md",
+    "docs/zh/15-im-channels.md"
+  ],
+  "supports": [
+    "behavior.extension-publication",
+    "rule.extension-generation-authority"
+  ],
+  "limitations": [
+    "Current7110 native observation only; original unavailable history, old executions and old reviews are not reconstructed or reexecuted.",
+    "Current source/test/limit mapping is in evidence.framework-history-current-reobservation; full05 is existing execution, not a newly run historical command."
+  ]
+}
 ---
+
+# Current observation and historical record
+
+The machine header now records only the bounded native observation at `7110a27e7b0e9841dcfa0d4cca1cdbc053d96177`; current source/tests and limitations are in `evidence.framework-history-current-reobservation`. Original observation `98a2e11cfb6e88e2f310ae2c2b40cd9e009534a4` and its complete metadata remain in [the immutable875 document](https://github.com/EchoYue-lp/echo-agent/blob/875cc22f2e99c7ccd83c07e02c03fe221c5e3f6c/.echo-semantic/evidence/evidence.extension-credential-debug-redaction-verification.md). The original execution counts, before/after claims and review prose below are preserved verbatim as historical statements, not rerun or equivalence claims for7110.
+
 
 # Extension credential diagnostic redaction 验证证据
 

@@ -96,6 +96,14 @@ jobs:
       - uses: taiki-e/install-action@cargo-audit
       - name: Audit vulnerabilities and maintenance warnings
         run: cargo audit --deny warnings
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - name: Verify bundled dependency audit attribution
+        run: |
+          python -B -m unittest discover -s scripts/tests -p 'test_vendored_media_audit_lock.py'
+          python -B scripts/generate-vendored-media-audit-lock.py --output "$RUNNER_TEMP/media-registry-origin.lock"
+          cargo audit --deny warnings --file "$RUNNER_TEMP/media-registry-origin.lock"
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           arguments: --workspace --all-features --locked

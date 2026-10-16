@@ -1,19 +1,32 @@
 ---
-schema_version: 1
-id: evidence.mcp-tool-local-classification-repair
-kind: evidence
-observed_at: 72d1fccf74b85afe9a74e684ca3748b64642affb
-source_refs:
-  - echo-integration/src/mcp/tool_adapter.rs
-  - echo-orchestration/src/human_loop/service.rs
-  - src/agent/snapshot.rs
-  - src/agent/react/run/pipeline.rs
-  - docs/adr/0050-mcp-tool-local-classification.md
-supports: [behavior.effect-permission-execution, behavior.extension-publication, rule.permission-effect-order]
-limitations:
-  - 最终多分支整合仍需统一重生成 Rust public inventory 并执行完整 MR 门禁
-  - 未连接第三方生产 MCP server；协议 adapter 与 Agent pipeline 由确定性测试分层组合验证
+{
+  "schema_version": 1,
+  "id": "evidence.mcp-tool-local-classification-repair",
+  "kind": "evidence",
+  "observed_at": "7110a27e7b0e9841dcfa0d4cca1cdbc053d96177",
+  "source_refs": [
+    "echo-integration/src/mcp/tool_adapter.rs",
+    "echo-orchestration/src/human_loop/service.rs",
+    "src/agent/snapshot.rs",
+    "src/agent/react/run/pipeline.rs",
+    "docs/adr/0050-mcp-tool-local-classification.md"
+  ],
+  "supports": [
+    "behavior.effect-permission-execution",
+    "behavior.extension-publication",
+    "rule.permission-effect-order"
+  ],
+  "limitations": [
+    "Current7110 native observation only; original unavailable history, old executions and old reviews are not reconstructed or reexecuted.",
+    "Current source/test/limit mapping is in evidence.framework-history-current-reobservation; full05 is existing execution, not a newly run historical command."
+  ]
+}
 ---
+
+# Current observation and historical record
+
+The machine header now records only the bounded native observation at `7110a27e7b0e9841dcfa0d4cca1cdbc053d96177`; current source/tests and limitations are in `evidence.framework-history-current-reobservation`. Original observation `72d1fccf74b85afe9a74e684ca3748b64642affb` and its complete metadata remain in [the immutable875 document](https://github.com/EchoYue-lp/echo-agent/blob/875cc22f2e99c7ccd83c07e02c03fe221c5e3f6c/.echo-semantic/evidence/evidence.mcp-tool-local-classification-repair.md). The original execution counts, before/after claims and review prose below are preserved verbatim as historical statements, not rerun or equivalence claims for7110.
+
 
 # MCP Tool 本地分类修复证据
 

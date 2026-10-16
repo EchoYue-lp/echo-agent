@@ -4,7 +4,7 @@ id: baseline.repository
 kind: baseline
 source_snapshot:
   base_revision: a6346643bda47679a96760f56f45e41fd73b61b0
-  content_digest: 736ac2f84a41dec62d79c2f5e9e544cf6a8e80d23bddaffe0cc57a7971cc44ac
+  content_digest: d05de8aeb8655e4bc78aa98764cb6e04421860a891a734821c24327d5f3559e3
 inventory_closure: closed
 behavior_model_closure: closed
 map_refs:
@@ -82,6 +82,8 @@ regions:
   status: in_scope
 - path: tests
   status: supporting
+- path: vendor
+  status: generated_or_vendor
 boundaries:
 - id: boundary.workspace-architecture
   map_ref: map.workspace-architecture

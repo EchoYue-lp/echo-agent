@@ -1,22 +1,35 @@
 ---
-schema_version: 1
-id: audit.command-cell-settlement-rereview
-kind: audit
-boundary_ref: boundary.task-subagent-workflow
-lens: time_lifecycle
-freshness: examined
-revision: f44fcb47c31668ec32104096fa0a729e75a1d39a
-finding_refs: [finding.command-cell-cancel-artifact-settlement, finding.command-cell-retention-lease-prune-race]
-challenges:
-  cancellation-finalizer:
-    revision: f44fcb47c31668ec32104096fa0a729e75a1d39a
-    source_refs: [echo-orchestration/src/tasks/command_cell.rs]
-    evidence_refs: [evidence.command-cell-cancel-artifact-settlement-repair, evidence.command-cell-cancel-artifact-settlement-verification]
-  lease-aware-removal:
-    revision: f44fcb47c31668ec32104096fa0a729e75a1d39a
-    source_refs: [echo-orchestration/src/tasks/command_cell.rs]
-    evidence_refs: [evidence.command-cell-cancel-artifact-settlement-repair, evidence.command-cell-cancel-artifact-settlement-verification]
+{
+  "schema_version": 1,
+  "id": "audit.command-cell-settlement-rereview",
+  "kind": "audit",
+  "boundary_ref": "boundary.task-subagent-workflow",
+  "lens": "time_lifecycle",
+  "freshness": "examined",
+  "revision": "7110a27e7b0e9841dcfa0d4cca1cdbc053d96177",
+  "finding_refs": [
+    "finding.command-cell-cancel-artifact-settlement",
+    "finding.command-cell-retention-lease-prune-race",
+    "finding.framework-historical-source-observation-retention"
+  ],
+  "challenges": {
+    "current-native-source-and-existing-regressions": {
+      "revision": "7110a27e7b0e9841dcfa0d4cca1cdbc053d96177",
+      "source_refs": [
+        "echo-orchestration/src/tasks/command_cell.rs"
+      ],
+      "evidence_refs": [
+        "evidence.framework-history-current-reobservation"
+      ]
+    }
+  }
+}
 ---
+
+# Current observation and historical record
+
+The machine header now records only the bounded native observation at `7110a27e7b0e9841dcfa0d4cca1cdbc053d96177`; current source/tests and limitations are in `evidence.framework-history-current-reobservation`. Original observation `f44fcb47c31668ec32104096fa0a729e75a1d39a` and its complete metadata remain in [the immutable875 document](https://github.com/EchoYue-lp/echo-agent/blob/875cc22f2e99c7ccd83c07e02c03fe221c5e3f6c/.echo-semantic/audits/audit.command-cell-settlement-rereview.md). The original execution counts, before/after claims and review prose below are preserved verbatim as historical statements, not rerun or equivalence claims for7110.
+
 
 # CommandCell settlement independent rereview
 

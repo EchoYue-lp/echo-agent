@@ -1,0 +1,448 @@
+use serde::Serialize;
+use std::io::Write;
+
+use crate::documents::BuildXML;
+use crate::escape::escape_owned;
+use crate::types::*;
+use crate::xml_builder::*;
+use crate::StyleType;
+
+use super::*;
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Style {
+    pub style_id: String,
+    pub name: Name,
+    pub style_type: StyleType,
+    pub run_property: RunProperty,
+    pub paragraph_property: ParagraphProperty,
+    pub table_property: TableProperty,
+    pub table_cell_property: TableCellProperty,
+    pub based_on: Option<BasedOn>,
+    pub next: Option<Next>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub link: Option<Link>,
+    #[serde(skip_serializing_if = "is_true")]
+    pub q_format: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ui_priority: Option<usize>,
+    #[serde(skip_serializing_if = "is_false")]
+    pub semi_hidden: bool,
+    #[serde(skip_serializing_if = "is_false")]
+    pub unhide_when_used: bool,
+}
+
+const fn is_true(v: &bool) -> bool {
+    *v
+}
+
+const fn is_false(v: &bool) -> bool {
+    !*v
+}
+
+impl Default for Style {
+    fn default() -> Self {
+        let name = Name::new("");
+        let rpr = RunProperty::new();
+        let ppr = ParagraphProperty::new();
+        Style {
+            style_id: "".to_owned(),
+            style_type: StyleType::Paragraph,
+            name,
+            run_property: rpr,
+            paragraph_property: ppr,
+            table_property: TableProperty::new(),
+            table_cell_property: TableCellProperty::new(),
+            based_on: None,
+            next: None,
+            link: None,
+            q_format: true,
+            ui_priority: None,
+            semi_hidden: false,
+            unhide_when_used: false,
+        }
+    }
+}
+
+impl Style {
+    pub fn new(style_id: impl Into<String>, style_type: StyleType) -> Self {
+        let default = Default::default();
+        Style {
+            style_id: escape_owned(style_id.into()),
+            style_type,
+            ..default
+        }
+    }
+
+    pub fn name(mut self, name: impl Into<String>) -> Self {
+        self.name = Name::new(name);
+        self
+    }
+
+    pub fn based_on(mut self, base: impl Into<String>) -> Self {
+        self.based_on = Some(BasedOn::new(base));
+        self
+    }
+
+    pub fn next(mut self, next: impl Into<String>) -> Self {
+        self.next = Some(Next::new(next));
+        self
+    }
+
+    pub fn link(mut self, link: impl Into<String>) -> Self {
+        self.link = Some(Link::new(link));
+        self
+    }
+
+    pub fn q_format(mut self, q_format: bool) -> Self {
+        self.q_format = q_format;
+        self
+    }
+
+    pub fn ui_priority(mut self, ui_priority: usize) -> Self {
+        self.ui_priority = Some(ui_priority);
+        self
+    }
+
+    pub fn semi_hidden(mut self) -> Self {
+        self.semi_hidden = true;
+        self
+    }
+
+    pub fn unhide_when_used(mut self) -> Self {
+        self.unhide_when_used = true;
+        self
+    }
+
+    pub fn size(mut self, size: usize) -> Self {
+        self.run_property = self.run_property.size(size);
+        self
+    }
+
+    pub fn color(mut self, color: impl Into<String>) -> Self {
+        self.run_property = self.run_property.color(color);
+        self
+    }
+
+    /// Sets the theme color reference (`w:themeColor`) on the style's run color.
+    pub fn theme_color(mut self, theme_color: crate::types::ThemeColor) -> Self {
+        self.run_property = self.run_property.theme_color(theme_color);
+        self
+    }
+
+    /// Sets the theme shade modifier (`w:themeShade`) on the style's run color.
+    pub fn theme_shade(mut self, theme_shade: impl Into<String>) -> Self {
+        self.run_property = self.run_property.theme_shade(theme_shade);
+        self
+    }
+
+    /// Sets the theme tint modifier (`w:themeTint`) on the style's run color.
+    pub fn theme_tint(mut self, theme_tint: impl Into<String>) -> Self {
+        self.run_property = self.run_property.theme_tint(theme_tint);
+        self
+    }
+
+    pub fn highlight(mut self, color: impl Into<String>) -> Self {
+        self.run_property = self.run_property.highlight(color);
+        self
+    }
+
+    pub fn bold(mut self) -> Self {
+        self.run_property = self.run_property.bold();
+        self
+    }
+
+    pub fn italic(mut self) -> Self {
+        self.run_property = self.run_property.italic();
+        self
+    }
+
+    pub fn underline(mut self, line_type: impl Into<String>) -> Self {
+        self.run_property = self.run_property.underline(line_type);
+        self
+    }
+
+    pub fn vanish(mut self) -> Self {
+        self.run_property = self.run_property.vanish();
+        self
+    }
+
+    pub fn text_border(mut self, b: TextBorder) -> Self {
+        self.run_property = self.run_property.text_border(b);
+        self
+    }
+
+    pub fn fonts(mut self, f: RunFonts) -> Self {
+        self.run_property = self.run_property.fonts(f);
+        self
+    }
+
+    pub fn align(mut self, alignment_type: AlignmentType) -> Self {
+        self.paragraph_property = self.paragraph_property.align(alignment_type);
+        self
+    }
+
+    pub fn text_alignment(mut self, alignment_type: TextAlignmentType) -> Self {
+        self.paragraph_property = self.paragraph_property.text_alignment(alignment_type);
+        self
+    }
+
+    pub fn snap_to_grid(mut self, v: bool) -> Self {
+        self.paragraph_property = self.paragraph_property.snap_to_grid(v);
+        self
+    }
+
+    pub fn line_spacing(mut self, spacing: LineSpacing) -> Self {
+        self.paragraph_property = self.paragraph_property.line_spacing(spacing);
+        self
+    }
+
+    pub fn indent(
+        mut self,
+        left: Option<i32>,
+        special_indent: Option<SpecialIndentType>,
+        end: Option<i32>,
+        start_chars: Option<i32>,
+    ) -> Self {
+        self.paragraph_property =
+            self.paragraph_property
+                .indent(left, special_indent, end, start_chars);
+        self
+    }
+
+    pub fn hanging_chars(mut self, chars: i32) -> Self {
+        self.paragraph_property = self.paragraph_property.hanging_chars(chars);
+        self
+    }
+
+    pub fn first_line_chars(mut self, chars: i32) -> Self {
+        self.paragraph_property = self.paragraph_property.first_line_chars(chars);
+        self
+    }
+
+    pub fn outline_lvl(mut self, l: usize) -> Self {
+        self.paragraph_property = self.paragraph_property.outline_lvl(l);
+        self
+    }
+
+    pub fn table_property(mut self, p: TableProperty) -> Self {
+        self.table_property = p;
+        self
+    }
+
+    pub fn table_indent(mut self, v: i32) -> Self {
+        self.table_property = self.table_property.indent(v);
+        self
+    }
+
+    pub fn table_align(mut self, v: TableAlignmentType) -> Self {
+        self.table_property = self.table_property.align(v);
+        self
+    }
+
+    pub fn style(mut self, s: impl Into<String>) -> Self {
+        self.table_property = self.table_property.style(s);
+        self
+    }
+
+    pub fn layout(mut self, t: TableLayoutType) -> Self {
+        self.table_property = self.table_property.layout(t);
+        self
+    }
+
+    pub fn width(mut self, w: usize, t: WidthType) -> Self {
+        self.table_property = self.table_property.width(w, t);
+        self
+    }
+
+    pub fn margins(mut self, margins: TableCellMargins) -> Self {
+        self.table_property = self.table_property.set_margins(margins);
+        self
+    }
+
+    pub fn set_borders(mut self, borders: TableBorders) -> Self {
+        self.table_property = self.table_property.set_borders(borders);
+        self
+    }
+
+    pub fn set_border(mut self, border: TableBorder) -> Self {
+        self.table_property = self.table_property.set_border(border);
+        self
+    }
+
+    pub fn clear_border(mut self, position: TableBorderPosition) -> Self {
+        self.table_property = self.table_property.clear_border(position);
+        self
+    }
+
+    pub fn clear_all_border(mut self) -> Self {
+        self.table_property = self.table_property.clear_all_border();
+        self
+    }
+
+    pub fn table_cell_property(mut self, p: TableCellProperty) -> Self {
+        self.table_cell_property = p;
+        self
+    }
+
+    // frameProperty
+    pub fn wrap(mut self, wrap: impl Into<String>) -> Self {
+        self.paragraph_property.frame_property = Some(FrameProperty {
+            wrap: Some(wrap.into()),
+            ..self.paragraph_property.frame_property.unwrap_or_default()
+        });
+        self
+    }
+
+    pub fn v_anchor(mut self, anchor: impl Into<String>) -> Self {
+        self.paragraph_property.frame_property = Some(FrameProperty {
+            v_anchor: Some(anchor.into()),
+            ..self.paragraph_property.frame_property.unwrap_or_default()
+        });
+        self
+    }
+
+    pub fn h_anchor(mut self, anchor: impl Into<String>) -> Self {
+        self.paragraph_property.frame_property = Some(FrameProperty {
+            h_anchor: Some(anchor.into()),
+            ..self.paragraph_property.frame_property.unwrap_or_default()
+        });
+        self
+    }
+
+    pub fn h_rule(mut self, r: impl Into<String>) -> Self {
+        self.paragraph_property.frame_property = Some(FrameProperty {
+            h_rule: Some(r.into()),
+            ..self.paragraph_property.frame_property.unwrap_or_default()
+        });
+        self
+    }
+
+    pub fn x_align(mut self, align: impl Into<String>) -> Self {
+        self.paragraph_property.frame_property = Some(FrameProperty {
+            x_align: Some(align.into()),
+            ..self.paragraph_property.frame_property.unwrap_or_default()
+        });
+        self
+    }
+
+    pub fn y_align(mut self, align: impl Into<String>) -> Self {
+        self.paragraph_property.frame_property = Some(FrameProperty {
+            y_align: Some(align.into()),
+            ..self.paragraph_property.frame_property.unwrap_or_default()
+        });
+        self
+    }
+
+    pub fn h_space(mut self, x: i32) -> Self {
+        self.paragraph_property.frame_property = Some(FrameProperty {
+            h_space: Some(x),
+            ..self.paragraph_property.frame_property.unwrap_or_default()
+        });
+        self
+    }
+
+    pub fn v_space(mut self, x: i32) -> Self {
+        self.paragraph_property.frame_property = Some(FrameProperty {
+            v_space: Some(x),
+            ..self.paragraph_property.frame_property.unwrap_or_default()
+        });
+        self
+    }
+
+    pub fn frame_x(mut self, x: i32) -> Self {
+        self.paragraph_property.frame_property = Some(FrameProperty {
+            x: Some(x),
+            ..self.paragraph_property.frame_property.unwrap_or_default()
+        });
+        self
+    }
+
+    pub fn frame_y(mut self, y: i32) -> Self {
+        self.paragraph_property.frame_property = Some(FrameProperty {
+            y: Some(y),
+            ..self.paragraph_property.frame_property.unwrap_or_default()
+        });
+        self
+    }
+
+    pub fn frame_width(mut self, n: u32) -> Self {
+        self.paragraph_property.frame_property = Some(FrameProperty {
+            w: Some(n),
+            ..self.paragraph_property.frame_property.unwrap_or_default()
+        });
+        self
+    }
+
+    pub fn frame_height(mut self, n: u32) -> Self {
+        self.paragraph_property.frame_property = Some(FrameProperty {
+            h: Some(n),
+            ..self.paragraph_property.frame_property.unwrap_or_default()
+        });
+        self
+    }
+}
+
+impl BuildXML for Style {
+    fn build_to<W: Write>(
+        &self,
+        stream: crate::xml::writer::EventWriter<W>,
+    ) -> crate::xml::writer::Result<crate::xml::writer::EventWriter<W>> {
+        // Set "Normal" as default if you need change these values please fix it
+        XMLBuilder::from(stream)
+            .open_style(self.style_type, &self.style_id)?
+            .add_child(&self.name)?
+            .add_child(&self.run_property)?
+            .add_child(&self.paragraph_property)?
+            .apply_if(self.style_type == StyleType::Table, |b| {
+                b.add_child(&self.table_cell_property)?
+                    .add_child(&self.table_property)
+            })?
+            .add_optional_child(&self.next)?
+            .add_optional_child(&self.link)?
+            .apply_if(self.q_format, |b| b.add_child(&QFormat::new()))?
+            .apply_if(self.ui_priority.is_some(), |b| {
+                b.ui_priority(self.ui_priority.unwrap_or_default())
+            })?
+            .apply_if(self.semi_hidden, |b| b.semi_hidden())?
+            .apply_if(self.unhide_when_used, |b| b.unhide_when_used())?
+            .add_optional_child(&self.based_on)?
+            .close()?
+            .into_inner()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+
+    use super::*;
+    #[cfg(test)]
+    use pretty_assertions::assert_eq;
+    use std::str;
+
+    #[test]
+    fn test_build() {
+        let c = Style::new("Heading", StyleType::Paragraph).name("Heading1");
+        let b = c.build();
+        assert_eq!(
+            str::from_utf8(&b).unwrap(),
+            r#"<w:style w:type="paragraph" w:styleId="Heading"><w:name w:val="Heading1" /><w:rPr /><w:pPr><w:rPr /></w:pPr><w:qFormat /></w:style>"#
+        );
+    }
+
+    #[test]
+    fn test_build_with_visibility_flags() {
+        let c = Style::new("MyStyle", StyleType::Paragraph)
+            .name("My Style")
+            .q_format(false)
+            .ui_priority(99)
+            .semi_hidden()
+            .unhide_when_used();
+        let b = c.build();
+        assert_eq!(
+            str::from_utf8(&b).unwrap(),
+            r#"<w:style w:type="paragraph" w:styleId="MyStyle"><w:name w:val="My Style" /><w:rPr /><w:pPr><w:rPr /></w:pPr><w:uiPriority w:val="99" /><w:semiHidden /><w:unhideWhenUsed /></w:style>"#
+        );
+    }
+}

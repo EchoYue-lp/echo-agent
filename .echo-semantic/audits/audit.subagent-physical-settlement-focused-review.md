@@ -6,7 +6,7 @@
   "boundary_ref": "boundary.task-subagent-workflow",
   "lens": "time_lifecycle",
   "freshness": "examined",
-  "revision": "source:736ac2f84a41dec62d79c2f5e9e544cf6a8e80d23bddaffe0cc57a7971cc44ac",
+  "revision": "875cc22f2e99c7ccd83c07e02c03fe221c5e3f6c",
   "finding_refs": [
     "finding.subagent-physical-settlement-observation"
   ],
@@ -108,7 +108,7 @@
       ]
     },
     "workflow-guide-protection-contract": {
-      "revision": "source:736ac2f84a41dec62d79c2f5e9e544cf6a8e80d23bddaffe0cc57a7971cc44ac",
+      "revision": "875cc22f2e99c7ccd83c07e02c03fe221c5e3f6c",
       "source_refs": [
         "docs/en/17-graph-workflow.md",
         "docs/zh/17-graph-workflow.md",
@@ -210,3 +210,6 @@ Graph/Core由settlement_b_final_source_review对相关原路径与有界增量�
 同settlement_b_final_source_review逐原件核663的六门禁/17feature及581输入，actual全0、无warning/截断；05独算主3620/0/3、两child不叠。旧9source仍精freeze3，未重新逐字审全仓；原bounded实施结论继续适用。当前仅两guide checkpoint章节新增，固定manifest fdbcec48e7bc39e696b259d84a26fabcd902b0144b83ba32791b94090d714c68与patch/copies/current字节一致，规范/API/限制和demo39链接核实，BeforeNode/finish及其它正文未变。
 
 reviewer实际读取PF纠正链：有效宽PF两路径allow+mutable，check0→restore精663→前置check0→同candidate重放→同full05原binary读取新文档contract2 1pass/193B0→finalcheck0；9source/581无变，首次错误与旧PFmutable证据缺口未追认为通过。内容、执行输入桥及该限定流程收口C0/I0/M0。当前Source摘要是在指南改后观测，23仍固定663旧文档epoch；不是对新指南倒填全23执行。SDK/CLI、精确main CI及最终交付仍待。
+
+
+历史快照固定：后继ZIP依赖修复开始时，将原source:736ac2观测固定到875cc22f；canonical对该Git树实算源码digest仍精等736ac2。此为同一旧源码/文档的可恢复定位，不新增B测试、复审或mainCI通过声明。

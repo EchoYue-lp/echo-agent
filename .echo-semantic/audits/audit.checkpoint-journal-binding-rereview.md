@@ -1,26 +1,37 @@
 ---
-schema_version: 1
-id: audit.checkpoint-journal-binding-rereview
-kind: audit
-boundary_ref: boundary.observation-persistence-delivery
-lens: data_durability
-freshness: examined
-revision: dcd25a8a19c21c3247965e527684d89c96d68ac7
-finding_refs: [finding.checkpoint-journal-binding]
-challenges:
-  foreign-checkpoint-and-generation:
-    revision: dcd25a8a19c21c3247965e527684d89c96d68ac7
-    source_refs: [echo-state/src/journal/mod.rs, echo-state/src/journal/file.rs]
-    evidence_refs: [evidence.checkpoint-journal-binding-repair, evidence.checkpoint-journal-binding-verification]
-  pruned-segmented-identity:
-    revision: dcd25a8a19c21c3247965e527684d89c96d68ac7
-    source_refs: [echo-state/src/journal/mod.rs, echo-state/src/journal/segmented.rs]
-    evidence_refs: [evidence.checkpoint-journal-binding-repair, evidence.checkpoint-journal-binding-verification]
-  receipt-and-schema-boundary:
-    revision: dcd25a8a19c21c3247965e527684d89c96d68ac7
-    source_refs: [echo-state/src/journal/mod.rs, echo-state/src/journal/file.rs, echo-state/src/journal/segmented.rs, docs/adr/0055-checkpoint-journal-identity.md]
-    evidence_refs: [evidence.checkpoint-journal-binding-repair, evidence.checkpoint-journal-binding-verification]
+{
+  "schema_version": 1,
+  "id": "audit.checkpoint-journal-binding-rereview",
+  "kind": "audit",
+  "boundary_ref": "boundary.observation-persistence-delivery",
+  "lens": "data_durability",
+  "freshness": "examined",
+  "revision": "7110a27e7b0e9841dcfa0d4cca1cdbc053d96177",
+  "finding_refs": [
+    "finding.checkpoint-journal-binding",
+    "finding.framework-historical-source-observation-retention"
+  ],
+  "challenges": {
+    "current-native-source-and-existing-regressions": {
+      "revision": "7110a27e7b0e9841dcfa0d4cca1cdbc053d96177",
+      "source_refs": [
+        "echo-state/src/journal/mod.rs",
+        "echo-state/src/journal/file.rs",
+        "echo-state/src/journal/segmented.rs",
+        "docs/adr/0055-checkpoint-journal-identity.md"
+      ],
+      "evidence_refs": [
+        "evidence.framework-history-current-reobservation"
+      ]
+    }
+  }
+}
 ---
+
+# Current observation and historical record
+
+The machine header now records only the bounded native observation at `7110a27e7b0e9841dcfa0d4cca1cdbc053d96177`; current source/tests and limitations are in `evidence.framework-history-current-reobservation`. Original observation `dcd25a8a19c21c3247965e527684d89c96d68ac7` and its complete metadata remain in [the immutable875 document](https://github.com/EchoYue-lp/echo-agent/blob/875cc22f2e99c7ccd83c07e02c03fe221c5e3f6c/.echo-semantic/audits/audit.checkpoint-journal-binding-rereview.md). The original execution counts, before/after claims and review prose below are preserved verbatim as historical statements, not rerun or equivalence claims for7110.
+
 
 # Checkpoint 与 Journal generation 绑定独立复审
 

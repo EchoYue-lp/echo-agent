@@ -3,7 +3,7 @@
   "schema_version": 1,
   "id": "evidence.subagent-physical-settlement-repair",
   "kind": "evidence",
-  "observed_at": "source:736ac2f84a41dec62d79c2f5e9e544cf6a8e80d23bddaffe0cc57a7971cc44ac",
+  "observed_at": "875cc22f2e99c7ccd83c07e02c03fe221c5e3f6c",
   "source_refs": [
     "docs/adr/0088-subagent-settlement-observation.md",
     "docs/subagent-cancellation-observation.md",
@@ -178,3 +178,6 @@ File实际protect bytes在持久测试中对原旧wrapper/bare两个decoder均�
 首次guide预检候选符号错误导致record失败，链式shell仍apply了已授权2doc；旧PF完整mutable快照未保，不倒追认首次。纠正链真实保存当前有效宽PF的两路径allow/mutable证据，check0后仅2doc恢复精663（其余tracked不动、diff空），再次前置check0后重放同候选，再用同binary同case得到contract2的193B0，并做finalcheck0。原failure与纠正时序均保，后续步骤显式失败即停。独立最终有界审核内容、实际重放、23原件与581桥C0/I0/M0。
 
 这些结果支持框架分支交付准备；不证明SDK注册Store/三语Host和CLI已消费最终main，也不代替精确merged-main CI。Finding open、Plan ready保持；最终canonical快照/change与staged artifact另按实际候选验证。网站不在本仓直接改，正式指南由对应website lane同步；框架示例已在workspace all-target测试链真实覆盖。
+
+
+历史快照固定：后继ZIP依赖修复开始时，将原source:736ac2观测固定到875cc22f；canonical对该Git树实算源码digest仍精等736ac2。此为同一旧源码/文档的可恢复定位，不新增B测试、复审或mainCI通过声明。
