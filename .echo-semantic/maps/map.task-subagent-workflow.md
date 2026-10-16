@@ -158,7 +158,7 @@ scenarios:
     - audit.workflow-checkpoint-claim-settlement-rereview
     - audit.workflow-entry-loop-authority-rereview
     unknown: checkpoint claim/lease、并行sibling settlement及四执行入口事件对等已关闭；Task/Graph/DagWorkflow长期边界已由ADR 0059裁决，仍待独立复审、严格语义门禁与远端交付
-    next_step: B/A局部原source与protected claim已有focused证据；按当前最终源码完成6+17、SDK/CLI消费和精确main CI，不借历史闭合记录替代
+    next_step: B/A原框架663代码6+17及新指南runtime合同已实际通过；继续SDK/CLI最终main消费和精确main CI，不把本地资格冒远端交付
   cron-scheduler:
     status: mapped
     source_refs:

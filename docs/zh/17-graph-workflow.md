@@ -308,29 +308,40 @@ let result = workflow.run("分析这些数据").await?;
 
 ## 检查点与恢复
 
-```rust
-use echo_agent::workflow::{Graph, MemoryCheckpointStore, CheckpointStore};
+Graph 绑定自己的 `Arc<dyn CheckpointStore>`：用 `with_checkpoint_store` 选择
+`MemoryCheckpointStore` 或 `FileCheckpointStore`。通过 `run_until_interrupt(state)`
+运行到已配置的 before/after 中断，从 `RunUntilInterruptResult::Interrupted` 取出
+`InterruptState.checkpoint`，再调用 `resume(checkpoint, ApprovalDecision::Approved)`。
+需要修改恢复状态时使用 `resume_with_state`；分支使用 `branch_from`。基础 Graph/state
+用法见已纳入可执行合同的 [demo39](https://github.com/EchoYue-lp/echo-agent/blob/main/echo-agent-learning/tests/example_contracts/demo39_workflow.rs)；
+检查点入口以当前 [Graph 源码](https://github.com/EchoYue-lp/echo-agent/blob/main/echo-orchestration/src/workflow/graph.rs)为准。
 
-let checkpoint_store = MemoryCheckpointStore::new();
+可执行的 Approved/Modified 恢复要求该 Graph 绑定的 Store 声明
+`supports_protected_claims()`，并在赢取原 claim 后、Node 副作用之前成功执行
+`protect_claim(checkpoint_id, attempt_id)`。默认能力为 false；不支持时在 claim 之前拒绝，
+`branch_from` 在创建分支检查点之前拒绝。Deferred 仍只加载/校验；Rejected 使用原
+claim/ack 结算而不执行 Node。fresh `run`、`run_until_interrupt`、`run_stream`
+不因此要求保护能力。自定义和 SDK-backed Store 须在同一 claim 权威上实现原子的保护，
+以及原 renew、ack、requeue 和 generation-CAS；能力声明本身不是持久化证明。
 
-// 带检查点运行
-let graph = GraphBuilder::new("long_running")
-    // ... 节点定义
-    .build()?;
+只有原 continuation 真正结束后，成功结果才 ack，已知物理结束的普通错误才按原策略
+requeue。保护失败或其确认丢失时不执行 Node，也不通过 ack/requeue 回滚未知保护。
+`ExecutionNotSettled` 是观察知识，不是 Failed 或重试许可；无后续权威来源时保原 claim。
+同一绑定 source 的后到真实 terminal 加实际 EOF 可以确认自己的观察，单独 EOF、
+断连或本地 owner 消失不能。不同 Store 侧的观察不会被 Node 的本地 terminal 清除。
 
-let result = graph.run_with_checkpoints(state.clone(), &checkpoint_store).await?;
+Graph 仍为原 attempt heartbeat 续租，但受保护的 claim 即使停止续租也不会因 TTL
+自动回收或重投；真正未保护的旧记录保持原 lease 恢复策略。取消、节点超时、heartbeat
+失败、fanout sibling 失败及 stream 关闭会发取消信号，并继续排空同一已开始的 source。
+取消 borrowed waiter 或丢弃已 poll 的 stream 不会重新执行 Node。调用者应在未知观察后
+保留原 Graph/Agent/Store parent；销毁所有 parent 不构成物理停止证明，也没有自动恢复承诺。
 
-// 中断后从检查点恢复
-let checkpoint_id = checkpoint_store.latest()?.id;
-let resumed = graph.resume_from_checkpoint(&checkpoint_store, &checkpoint_id).await?;
-```
-
-恢复通过 `CheckpointStore` 的 claim lease 完成。成功的 continuation 必须 ack，
-节点失败或恢复异常会 requeue；文件 store 的 claim 在 `load`/`list` 中保持可见，
-长时间 continuation 运行期间由 `Graph` 使用同一 attempt heartbeat 续租，只有停止
-续租的崩溃 claim 才能在 lease 到期后重新发现。对活动 claim 修改标签会因 generation
-冲突失败，不会复活已领取的 continuation。自定义和 SDK-backed store 必须实现 renew、
-ack、requeue 与 generation-CAS；不支持的结算会失败关闭。
+Memory 的保护只限同一 Store 实例；File 用原目录 OS 锁和版本化私有记录跨重启保留保护。
+受保护记录不能被 expiry、save/delete/clear 隐式解除，混合 clear 会在任何删除前整体拒绝。
+已验证的旧格式自动读取路径会拒绝新保护格式，但旧 delete/clear 不安全，禁止旧写者接管保护数据。
+没有新增强制解锁或 receipt-query API。完整约束见
+[ADR 0088](../adr/0088-subagent-settlement-observation.md) 与
+[Rust 迁移说明](../subagent-cancellation-observation.md)。
 
 批准 `BeforeNode` checkpoint 只会跳过它所代表的那一次中断，后续节点自己的中断仍会
 正常检查。finish 节点与其它可执行节点使用相同的 before/after 中断语义；从 finish 后的

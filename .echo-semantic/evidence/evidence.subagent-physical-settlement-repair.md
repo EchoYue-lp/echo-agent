@@ -3,7 +3,7 @@
   "schema_version": 1,
   "id": "evidence.subagent-physical-settlement-repair",
   "kind": "evidence",
-  "observed_at": "source:8c966478a4ac91d40efe70c2c3cc744090449d165c3ba1cf57ec91111070caed",
+  "observed_at": "source:736ac2f84a41dec62d79c2f5e9e544cf6a8e80d23bddaffe0cc57a7971cc44ac",
   "source_refs": [
     "docs/adr/0088-subagent-settlement-observation.md",
     "docs/subagent-cancellation-observation.md",
@@ -44,7 +44,10 @@
     "echo-orchestration/src/workflow/graph.rs",
     "echo-orchestration/src/workflow/checkpoint_store.rs",
     "echo-orchestration/src/workflow/node.rs",
-    "echo-orchestration/src/workflow/mod.rs"
+    "echo-orchestration/src/workflow/mod.rs",
+    "docs/en/17-graph-workflow.md",
+    "docs/zh/17-graph-workflow.md",
+    "echo-agent-learning/tests/documentation_contract.rs"
   ],
   "supports": [
     "behavior.task-subagent-execution",
@@ -54,13 +57,14 @@
     "rule.fact-projection-separation"
   ],
   "limitations": [
-    "The historical 23 local gates belong to public f0a6 only, not this later Workflow source. Final six/17 and SDK/CLI/exact merged-main qualification remain pending.",
+    "Final six plus17 gates actually pass Rust/Cargo inputs at public663cf644. This later document snapshot has unchanged581 code inputs and a fresh existing documentation runtime test; SDK/CLI consumers and exact merged-main CI remain pending.",
     "Original first 6472-byte before raw was overwritten by a later invocation; preserved command receipt, source and tool-session assertion remain, not a reconstructed full raw.",
     "Local raw is task-scoped, not bundled into the repository. Each reported run proves only its actual input cut; unavailable raw is not fresh passing evidence.",
     "The new real React Tool/Team task cases are after assertions, not represented as individually executed original-source counterexamples. Genuine Manager/pipeline/RunCode and resource counterexamples have separate retained before runs.",
     "Caller-provided opaque resource graphs require consumer ownership review. Internal retention has no manager/self projection cycle; arbitrary Any guards are not universally cycle-free.",
     "The current Scheduler 53 and unchanged Delivery 14 focused results do not replace final six gates/17 features, accepted Workflow A implementation, consumer qualification or exact merged-main CI; historical 23 gates belong to f0a6 only.",
-    "Workflow focused checks cover native Memory/File and original Rust Agent/Function sources; they do not prove SDK DSL Function support, registered Llm/Store Host behavior, every remote Store durability contract, real power-loss survival or Windows/Unix barrier equivalence. Graph-specific foreign/late-Unknown cases were source-reviewed, not separately executed here."
+    "Workflow focused checks cover native Memory/File and original Rust Agent/Function sources; they do not prove SDK DSL Function support, registered Llm/Store Host behavior, every remote Store durability contract, real power-loss survival or Windows/Unix barrier equivalence. Graph-specific foreign/late-Unknown cases were source-reviewed, not separately executed here.",
+    "The first bilingual-guide preflight record failed due to an invalid candidate symbol, then a chained shell still applied the authorized guides; it is not retroactively passed. Corrective exact663 restore, valid mutable-PF check, same candidate replay and fresh document contract are independently reviewed. The original old-PF mutable snapshot was not retained."
   ]
 }
 ---
@@ -164,3 +168,13 @@ marker混旧/损坏两例真实2495B/101后同例0；早编译错和未真正准
 File实际protect bytes在持久测试中对原旧wrapper/bare两个decoder均拒绝。冻结3ded旧File模块、未变共享types/utils及精依赖闭包的本地probe完成8原automatic methods拒绝/bytes与mode不变、2真legacy控制及4真实双进程原同fd锁交错；每次实际WouldBlock后才放行，不借最初sleep-only竞争推定。它不是整个旧F二进制或任意旧writer保证，旧delete/clear仍不安全，必须禁止降级接管。原atomic_write seam注入可见写后Err证明Node0及同attempt重试重新写barrier，不当作实际内核掉电试验；observer Drop时原blocking writer仍持同OS锁。全部probe/源码副本/raw只local，不入Git。
 
 最终focused为Core全427、Orchestration全508，均0失败/0忽略；Graph模块包含45例（不与全lib叠加），Store16包含于其中。两crate all-target Clippy与fmtcheck实际0、零warning/无截断，各581 Rust/Cargo/config输入前后一致。独立有界Graph/Core实施审与NativeStore专审均C0/I0/M0；只支持此开发checkpoint。Graph-specific foreign/lateUnknown仅本次source审，不借Core/Driver旧负例当新Graph运行。文档/ADR/迁移同步，examples与website无需改产品值；最终workspace门禁仍须实际编译示例。宽Finding open、Plan ready，最终6+17、SDK三语Host/CLI消费及精确main CI尚待最终代码，不借f0a历史23资格。
+
+## 最终框架门禁与指南运行输入桥
+
+上述Workflow局部由公开663cf644ab6ad7b039366529bdd0e5837d922cf5/treee3385a74f71b98985f9e7e9ae2900e77949d7c1f保存。本次在该精确源码执行完整六门禁与17个独立feature：六项均actual0，原bytes依次0/0/19617/3056/377315/3443；完整测试88个raw结果块3622/0/3，扣echo_state两嵌套子harness各1后为86主块、3620pass/0fail/3既有opt-in忽略。三忽略仍是live LSP/scholarly/Zotero，未冒执行；criterion Success属于原all-target链路，不另加用例计数。17个acp至chart独立检查全部actual0、无截断、零编译诊断。每项581 Rust/Cargo/config输入前后精同，JOBS1、DEV/TEST DEBUG0、STRIP=symbols、INCREMENTAL0，原9GiB/free5GiB资源守卫从未降低；预警/原历史中断均不当作绿。
+
+23运行期间源码及原规范冻结在663。随后只同步中英文17号指南checkpoint章节，删除不存在的run_with_checkpoints/resume_from_checkpoint/latest示例及protected claim可TTL重投的旧承诺，复用真实Graph API和已执行demo39基础Graph/state链接；不宣demo39演示checkpoint。保护能力在claim/prefork之前拒、真闭合才ack/requeue、不同Store观察、Memory实例/File原锁与旧delete/clear限制均与已接受A一致。指南之后的新Source摘要包含这些文档，不能冒它是23最初运行摘要。其581运行码与663全部相同，唯一实际runtime读取指南的既有documentation_contract使用full05原all-feature二进制与原test名新跑1/0/0（193B），binary/doc/testSHA、before/after均留任务本地，不新Rust测试/feature组合。
+
+首次guide预检候选符号错误导致record失败，链式shell仍apply了已授权2doc；旧PF完整mutable快照未保，不倒追认首次。纠正链真实保存当前有效宽PF的两路径allow/mutable证据，check0后仅2doc恢复精663（其余tracked不动、diff空），再次前置check0后重放同候选，再用同binary同case得到contract2的193B0，并做finalcheck0。原failure与纠正时序均保，后续步骤显式失败即停。独立最终有界审核内容、实际重放、23原件与581桥C0/I0/M0。
+
+这些结果支持框架分支交付准备；不证明SDK注册Store/三语Host和CLI已消费最终main，也不代替精确merged-main CI。Finding open、Plan ready保持；最终canonical快照/change与staged artifact另按实际候选验证。网站不在本仓直接改，正式指南由对应website lane同步；框架示例已在workspace all-target测试链真实覆盖。

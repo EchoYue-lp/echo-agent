@@ -6,7 +6,7 @@
   "boundary_ref": "boundary.task-subagent-workflow",
   "lens": "time_lifecycle",
   "freshness": "examined",
-  "revision": "source:8c966478a4ac91d40efe70c2c3cc744090449d165c3ba1cf57ec91111070caed",
+  "revision": "source:736ac2f84a41dec62d79c2f5e9e544cf6a8e80d23bddaffe0cc57a7971cc44ac",
   "finding_refs": [
     "finding.subagent-physical-settlement-observation"
   ],
@@ -96,12 +96,23 @@
       ]
     },
     "workflow-protected-original-owner": {
-      "revision": "source:8c966478a4ac91d40efe70c2c3cc744090449d165c3ba1cf57ec91111070caed",
+      "revision": "663cf644ab6ad7b039366529bdd0e5837d922cf5",
       "source_refs": [
         "echo-orchestration/src/workflow/graph.rs",
         "echo-orchestration/src/workflow/checkpoint_store.rs",
         "echo-orchestration/src/workflow/node.rs",
         "echo-core/src/agent/mod.rs"
+      ],
+      "evidence_refs": [
+        "evidence.subagent-physical-settlement-repair"
+      ]
+    },
+    "workflow-guide-protection-contract": {
+      "revision": "source:736ac2f84a41dec62d79c2f5e9e544cf6a8e80d23bddaffe0cc57a7971cc44ac",
+      "source_refs": [
+        "docs/en/17-graph-workflow.md",
+        "docs/zh/17-graph-workflow.md",
+        "echo-agent-learning/tests/documentation_contract.rs"
       ],
       "evidence_refs": [
         "evidence.subagent-physical-settlement-repair"
@@ -193,3 +204,9 @@ NativeStore由sdk_archive_role_review独立源码/原件专审C0/I0/M0，绑定�
 Graph/Core由settlement_b_final_source_review对相关原路径与有界增量独审，最终C0/I0/M0，精九文件freeze3 1f80e51b457ed072a6620369c65bfe594c618418c0390db359bc33cd5d990a53。核唯一owned原loop、caller/firstyield Drop、fanout panic保同siblings、legacy chat raw adapter、won claim身份与knownattempt、matching source terminal/EOF及Store知识分离。typed renew/requeue真实红绿、ordinary aux诊断不改首cause已核；Core427/33575B按不变源复用，当前Orch508/45195B、Clippy227B、fmt0B实际0，逐581输入/零warning/无截断均已读。
 
 当前只支持必要开发checkpoint。Graph-specific foreign/lateUnknown的专例未在本切片单独执行；Core/Driver旧negative不充作其新运行。历史23固定f0a，Scheduler challenge固定3ded；新源码最终6+17、SDK注册Store/三语Host、CLI消费与精确main CI仍待，Finding open、Plan ready。全部raw、probe源码和候选留local，没有原件包进入Git。
+
+## 最终23与双语指南有界增量
+
+同settlement_b_final_source_review逐原件核663的六门禁/17feature及581输入，actual全0、无warning/截断；05独算主3620/0/3、两child不叠。旧9source仍精freeze3，未重新逐字审全仓；原bounded实施结论继续适用。当前仅两guide checkpoint章节新增，固定manifest fdbcec48e7bc39e696b259d84a26fabcd902b0144b83ba32791b94090d714c68与patch/copies/current字节一致，规范/API/限制和demo39链接核实，BeforeNode/finish及其它正文未变。
+
+reviewer实际读取PF纠正链：有效宽PF两路径allow+mutable，check0→restore精663→前置check0→同candidate重放→同full05原binary读取新文档contract2 1pass/193B0→finalcheck0；9source/581无变，首次错误与旧PFmutable证据缺口未追认为通过。内容、执行输入桥及该限定流程收口C0/I0/M0。当前Source摘要是在指南改后观测，23仍固定663旧文档epoch；不是对新指南倒填全23执行。SDK/CLI、精确main CI及最终交付仍待。

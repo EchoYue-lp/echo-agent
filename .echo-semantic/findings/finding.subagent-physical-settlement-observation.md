@@ -102,3 +102,9 @@ f0a6公开checkpoint之后，同源真实terminal+physical EOF仍被旧观察覆
 3ded之后已按用户接受A实现原claim effect-before保护、NativeStore原锁/私有格式与Graph唯一ownedloop/Node rawsource闭合；真实重claim、caller/stream Drop、marker降级、chat截流、fanout panic、identity/firstyield/heartbeat及typed Store错误反例均有保留原件与after。Core427/Orch508、相关Clippy/fmt实际0及独立有界审通过；原File reader真实双进程证明限定旧3ded模块与原依赖，不宣全部旧写者/掉电/跨平台保证。
 
 Finding仍open：当前最终6+17尚未重跑、SDK注册Store/三语Host与CLI精确新main消费及merged-main CI未完成。此前“Workflow尚未实施”仅为3ded以前历史状态；无source未知仍无强制恢复/解锁承诺。
+
+## 框架最终本地资格
+
+当前663框架代码完整6+17实际全0，主测试3620/0/3既有opt-in忽略，逐581输入无漂移。中英文checkpoint指南随后同步已接受A，既有文档runtime合同新输入实际1pass，精PF纠正重放与独审均0；新Source文档摘要和旧23执行摘要通过不变581码桥关联，不伪造新epoch运行。
+
+本Finding仍open，仅保跨仓最终SDK三语Host/CLI消费与精确merged-main CI交付缺口；不因本地23通过冒main已交付或所有remote Store已验证。既有Graph-specific foreign/lateUnknown专例未单独跑的覆盖限制不删除，无source/无receipt仍不承诺自动恢复。
