@@ -19,11 +19,11 @@ design_sections:
   - ref: design.md § Observation and settlement
     digest: sha256:a814268a6ea99e90df16da929ed721fd66ff2c58fa26289fa7d6e69476f77b5d
   - ref: design.md § Stream ownership and cause ordering
-    digest: sha256:053f56607a35244cfd2d1aa46cabbbefdc4a537caf1665c76467eaf240238451
+    digest: sha256:e3d93935c5b0b14e2a5a7959ae276db71ae23c8484ea066a2fddfd27da2069df
   - ref: design.md § Recovery and limits
     digest: sha256:6ceb3e3ddf365401b051fd40eaa6ade66ed97649d786c8f1ce2e423e3e2b40a1
   - ref: design.md § Acceptance
-    digest: sha256:582eb269e55945fe55c5f8c138c5d625a2c4c42651e1a58a7d6ea5f61020dec8
+    digest: sha256:f1a3ec7b2ce37467d6d9049d3beead677198b4dd54f2651577cc3a857f4bc283
 delivery_ref: null
 todos:
   - id: observe-without-terminal
@@ -71,6 +71,7 @@ todos:
       - echo-orchestration/src/scheduler/runner.rs
       - echo-orchestration/src/workflow/graph.rs
       - echo-orchestration/src/workflow/checkpoint_store.rs
+      - echo-state/src/delivery.rs
     acceptance:
       - 所有实际terminal producers在观察错误分支不emit Failed、不retry
         mutation；源码引用和当前snapshot准确，原反例不被成功日志覆盖，独立复审行动0。
@@ -78,7 +79,8 @@ todos:
         loss保原Notify观察而不造identity/Failed，普通返回error重试与真成功关闭保持。
       - Headless便利返回显式携同原handle，内部result无owner环；真实fileproducer
         held时原guard/permit不释放，原5公开值/格式/普通close保，外部Rust literals迁移。
-      - 原Scheduler真实FireFn的typed观察须沿既有occurrence/journal/active-attempt保Unknown与owner，不伪Failed或普通重投；按原源真counter与最窄设计准入完成该必要消费者闭包。
+      - Scheduler原EffectStarted精claim事件可选payload原子保护current
+        callback，包括legacy原首次replay的新attempt；wrongclaim不改payload/seq，原None字节和旧history控制保，Some/保护checkpoint拒旧reader；Handle借用保原parent及normal结果，未知不重投。
       - 已接受registered LlmClient/CheckpointStore的真实Workflow
         resume消费者：先独立counter与窄设计，typed观察/heartbeat失败不能重排原仍未闭producer，原claim/TTL/restart权限必须有持久证据；普通error重试策略保。
 artifact_id: plan:19bdc455-30ff-4251-96cb-05d6615792b9

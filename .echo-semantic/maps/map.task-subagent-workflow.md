@@ -165,10 +165,12 @@ scenarios:
     - finding.scheduler-task-id-uniqueness
     - finding.scheduler-control-fire-race
     evidence_refs:
+    - evidence.subagent-physical-settlement-repair
     - evidence.task-subagent-workflow
     - evidence.scheduler-occurrence-authority-repair
     - evidence.scheduler-occurrence-authority-verification
     audit_refs:
+    - audit.subagent-physical-settlement-focused-review
     - audit.scheduler-occurrence-authority-rereview
     behavior_refs:
     - behavior.task-subagent-execution

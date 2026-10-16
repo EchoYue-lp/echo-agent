@@ -175,6 +175,11 @@ pub enum DeliveryEvent<Route = String, Payload = Value> {
         attempt_id: String,
         turn_id: String,
         started_at: DateTime<Utc>,
+        /// Optional exact-claim payload revision, committed before the effect.
+        /// Absent preserves existing serialized events; unknown-field denying
+        /// older readers reject a new protected revision instead of ignoring it.
+        #[serde(default = "Option::default", skip_serializing_if = "Option::is_none")]
+        replacement_payload: Option<Payload>,
     },
     MailboxAccepted {
         message_id: String,
@@ -674,6 +679,7 @@ where
                 entry.next_attempt_at = None;
             }
             DeliveryEvent::EffectStarted {
+                replacement_payload,
                 message_id,
                 attempt_id,
                 turn_id,
@@ -691,6 +697,23 @@ where
                         "message {message_id} cannot start an effect from {:?}",
                         entry.phase
                     ));
+                }
+                if let Some(payload) = replacement_payload {
+                    // Reuse the canonical envelope size calculation. Validation
+                    // of owner/phase precedes any payload or cost mutation.
+                    let revised = DeliveryRecord::new(
+                        DeliveryEnvelope {
+                            message_id: entry.message_id.clone(),
+                            route: entry.route.clone(),
+                            payload: payload.clone(),
+                            metadata: entry.metadata.clone(),
+                            correlation_id: entry.correlation_id.clone(),
+                            causation_id: entry.causation_id.clone(),
+                        },
+                        entry.persisted_at,
+                    )?;
+                    entry.payload = revised.payload;
+                    entry.retained_bytes = revised.retained_bytes;
                 }
                 entry.phase = DeliveryPhase::EffectStarted;
                 entry.effect_started_at = Some(*started_at);
@@ -1497,6 +1520,7 @@ where
     {
         let event = match transition {
             DeliveryTransition::EffectStarted { turn_id } => DeliveryEvent::EffectStarted {
+                replacement_payload: None,
                 message_id: claim.message_id.clone(),
                 attempt_id: claim.attempt_id.clone(),
                 turn_id,
@@ -1770,6 +1794,221 @@ mod tests {
     }
 
     #[test]
+    fn effect_payload_revision_requires_exact_claim_and_recovers_original_envelope_cost()
+    -> Result<()> {
+        let journal = Arc::new(MemoryEventJournal::new());
+        let checkpoints = Arc::new(MemoryCheckpointStore::new());
+        let ledger = DeliveryLedger::new(
+            journal.clone(),
+            checkpoints.clone() as Arc<dyn CheckpointStore<DeliveryLedgerProjection>>,
+            DeliveryLedgerConfig::default(),
+            1,
+        );
+        let original = envelope("payload-revision");
+        ledger
+            .enqueue(original.clone())
+            .map_err(|error| ReactError::Other(error.to_string()))?;
+        let claim = ledger
+            .claim_next()
+            .map_err(|error| ReactError::Other(error.to_string()))?
+            .ok_or_else(|| ReactError::Other("exact revision claim missing".to_string()))?;
+        let protected = serde_json::json!({"physical_settlement_v1":{"text":"original effect 原身份","padding":"x".repeat(200)}});
+        let before =
+            ledger.with_projection(|projection| projection.record(&claim.message_id).cloned());
+        let sequence = journal.next_sequence();
+        assert!(
+            ledger
+                .apply(DeliveryEvent::EffectStarted {
+                    message_id: claim.message_id.clone(),
+                    attempt_id: "wrong-generation".to_string(),
+                    turn_id: "original-turn".to_string(),
+                    started_at: Utc::now(),
+                    replacement_payload: Some(protected.clone()),
+                })
+                .is_err()
+        );
+        assert_eq!(journal.next_sequence(), sequence);
+        assert_eq!(
+            ledger.with_projection(|projection| projection.record(&claim.message_id).cloned()),
+            before
+        );
+        ledger
+            .apply(DeliveryEvent::EffectStarted {
+                message_id: claim.message_id.clone(),
+                attempt_id: claim.attempt_id.clone(),
+                turn_id: "original-turn".to_string(),
+                started_at: Utc::now(),
+                replacement_payload: Some(protected.clone()),
+            })
+            .map_err(|error| ReactError::Other(error.to_string()))?;
+        let record = ledger
+            .with_projection(|projection| projection.record(&claim.message_id).cloned())
+            .ok_or_else(|| ReactError::Other("revised record missing".to_string()))?;
+        let mut expected = original;
+        expected.payload = protected.clone();
+        let size = serde_json::to_vec(&expected)
+            .map_err(|error| ReactError::Other(error.to_string()))?
+            .len();
+        assert_eq!(record.payload, protected);
+        assert_eq!(record.retained_bytes, size);
+        assert_eq!(record.route, expected.route);
+        assert_eq!(record.metadata, expected.metadata);
+        assert_eq!(record.correlation_id, expected.correlation_id);
+        assert_eq!(record.causation_id, expected.causation_id);
+        assert_eq!(
+            record.attempt_id.as_deref(),
+            Some(claim.attempt_id.as_str())
+        );
+        let sequence = journal.next_sequence();
+        assert!(
+            ledger
+                .apply(DeliveryEvent::EffectStarted {
+                    message_id: claim.message_id.clone(),
+                    attempt_id: claim.attempt_id.clone(),
+                    turn_id: "original-turn".to_string(),
+                    started_at: Utc::now(),
+                    replacement_payload: Some(serde_json::json!({"illegal":"second start"})),
+                })
+                .is_err()
+        );
+        assert_eq!(journal.next_sequence(), sequence);
+        for store in [checkpoints, Arc::new(MemoryCheckpointStore::new())] {
+            let recovered = DeliveryLedger::new(
+                journal.clone(),
+                store as Arc<dyn CheckpointStore<DeliveryLedgerProjection>>,
+                DeliveryLedgerConfig::default(),
+                1,
+            );
+            recovered.recover()?;
+            assert_eq!(
+                recovered
+                    .with_projection(|projection| projection.record(&claim.message_id).cloned()),
+                Some(record.clone())
+            );
+        }
+        ledger
+            .settle(
+                &claim,
+                DeliverySettlement::terminal(
+                    Some("original-turn".to_string()),
+                    DeliveryOutcome::Completed,
+                    None,
+                    None,
+                    None,
+                ),
+            )
+            .map_err(|error| ReactError::Other(error.to_string()))?;
+        assert_eq!(
+            ledger.with_projection(|projection| projection.terminal_retained_bytes),
+            size
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn revised_effect_payload_uses_existing_terminal_byte_retention() -> Result<()> {
+        let original = envelope("retained-revision");
+        let old_size = serde_json::to_vec(&original)
+            .map_err(|error| ReactError::Other(error.to_string()))?
+            .len();
+        let ledger = DeliveryLedger::new(
+            Arc::new(MemoryEventJournal::new()),
+            Arc::new(MemoryCheckpointStore::new()),
+            DeliveryLedgerConfig {
+                terminal_retention: 256,
+                terminal_retention_bytes: old_size.saturating_add(1),
+            },
+            1,
+        );
+        ledger
+            .enqueue(original)
+            .map_err(|error| ReactError::Other(error.to_string()))?;
+        let claim = ledger
+            .claim_next()
+            .map_err(|error| ReactError::Other(error.to_string()))?
+            .ok_or_else(|| ReactError::Other("retention claim missing".to_string()))?;
+        ledger
+            .apply(DeliveryEvent::EffectStarted {
+                message_id: claim.message_id.clone(),
+                attempt_id: claim.attempt_id.clone(),
+                turn_id: "retention-turn".to_string(),
+                started_at: Utc::now(),
+                replacement_payload: Some(serde_json::json!({"larger":"x".repeat(1000)})),
+            })
+            .map_err(|error| ReactError::Other(error.to_string()))?;
+        ledger
+            .settle(
+                &claim,
+                DeliverySettlement::terminal(
+                    Some("retention-turn".to_string()),
+                    DeliveryOutcome::Completed,
+                    None,
+                    None,
+                    None,
+                ),
+            )
+            .map_err(|error| ReactError::Other(error.to_string()))?;
+        assert!(
+            ledger.with_projection(|projection| projection.record(&claim.message_id).is_none())
+        );
+        assert_eq!(
+            ledger.with_projection(|projection| projection.terminal_retained_bytes),
+            0
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn absent_effect_payload_field_keeps_legacy_bytes_and_revision_rejects_old_decoder()
+    -> Result<()> {
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields, rename_all = "snake_case", tag = "kind")]
+        enum LegacyEffectEvent {
+            EffectStarted {
+                message_id: String,
+                attempt_id: String,
+                turn_id: String,
+                started_at: DateTime<Utc>,
+            },
+        }
+        let text = r#"{"kind":"effect_started","message_id":"legacy","attempt_id":"attempt","turn_id":"turn","started_at":"2026-10-16T00:00:00Z"}"#;
+        let event: DeliveryEvent =
+            serde_json::from_str(text).map_err(|error| ReactError::Other(error.to_string()))?;
+        assert_eq!(
+            serde_json::to_string(&event).map_err(|error| ReactError::Other(error.to_string()))?,
+            text
+        );
+        let legacy: LegacyEffectEvent =
+            serde_json::from_str(text).map_err(|error| ReactError::Other(error.to_string()))?;
+        let LegacyEffectEvent::EffectStarted {
+            message_id,
+            attempt_id,
+            turn_id,
+            started_at,
+        } = legacy;
+        assert_eq!(
+            (message_id.as_str(), attempt_id.as_str(), turn_id.as_str()),
+            ("legacy", "attempt", "turn")
+        );
+        let revised: DeliveryEvent = DeliveryEvent::EffectStarted {
+            message_id,
+            attempt_id,
+            turn_id,
+            started_at,
+            replacement_payload: Some(serde_json::json!({"protected":true})),
+        };
+        let new_text = serde_json::to_string(&revised)
+            .map_err(|error| ReactError::Other(error.to_string()))?;
+        assert!(serde_json::from_str::<LegacyEffectEvent>(&new_text).is_err());
+        assert_eq!(
+            serde_json::from_str::<DeliveryEvent>(&new_text)
+                .map_err(|error| ReactError::Other(error.to_string()))?,
+            revised
+        );
+        Ok(())
+    }
+
+    #[test]
     fn lifecycle_keeps_fifo_and_rejects_stale_claim() -> Result<()> {
         let ledger = ledger();
         let now = Utc::now();
@@ -1806,6 +2045,7 @@ mod tests {
         assert!(
             ledger
                 .apply(DeliveryEvent::EffectStarted {
+                    replacement_payload: None,
                     message_id: "first".to_string(),
                     attempt_id: "stale".to_string(),
                     turn_id: "turn-1".to_string(),
@@ -1909,6 +2149,7 @@ mod tests {
             claimed_at: now,
         })?;
         apply(DeliveryEvent::EffectStarted {
+            replacement_payload: None,
             message_id: "rejected-effect".to_string(),
             attempt_id: "attempt-1".to_string(),
             turn_id: "candidate-turn".to_string(),
@@ -1964,6 +2205,7 @@ mod tests {
             claimed_at: now,
         })?;
         apply(DeliveryEvent::EffectStarted {
+            replacement_payload: None,
             message_id: "accepted-effect".to_string(),
             attempt_id: "attempt-1".to_string(),
             turn_id: "accepted-turn".to_string(),
@@ -2013,6 +2255,7 @@ mod tests {
             claimed_at: now,
         })?;
         apply(DeliveryEvent::EffectStarted {
+            replacement_payload: None,
             message_id: "lifecycle".to_string(),
             attempt_id: "attempt-1".to_string(),
             turn_id: "turn-1".to_string(),

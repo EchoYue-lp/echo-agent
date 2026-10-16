@@ -90,3 +90,9 @@ feature and consumer/main acceptance keeps this Finding open.
 f0a6公开checkpoint之后，同源真实terminal+physical EOF仍被旧观察覆盖的Driver反例已实际101并修后0；Core426/Orch477/Subagent70及适用三crate Clippy/fmt实际0，独立有限source增量C0/I0/M0。匹配源成功/取消结算、无terminalEOF、foreign/wrong-attempt、晚观察和sink独立强例保留。旧23资格仍固定f0a6，不借给当前新源码。
 
 本Finding继续open：已确认Scheduler callback把typed观察变Failed/终态及owner-loss重投，Workflow resume无条件requeue且heartbeat失败会丢原future，File lease或远端checkpoint恢复尚无未知物理权威闭包。两者按原Plan同Outcome后继独立调查/真实counter/窄设计；未实施，不声称新恢复协议或普通重试合同全改。当前全6+17与跨仓消费、精确merged-main CI仍待最终代码验证。
+
+## Scheduler局部闭合与后继边界
+
+原Scheduler消费者缺口已有真实红绿：保护同occurrence/attempt、保原callback及Handle parent，不从typed观察、borrowed drop、shutdown或panic制造terminal/replay；legacy本次effect也在原EffectStarted中升级。最终whole53与原Delivery14、相关Clippy/fmt实际0，独立增量C0/I0/M0。先前“Scheduler未实施”仅属于ffff历史切点。
+
+本Finding继续open。用户已接受Workflow保护合同A；其Graph/Store/heartbeat与持久化恢复尚待同任务正式增量实施、真实反例及验证。当前新Scheduler字节仍需最终6+17、SDK/CLI适配与精确merged-main CI，不借f0a历史23通过关闭本Finding。

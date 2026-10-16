@@ -6,7 +6,7 @@
   "boundary_ref": "boundary.task-subagent-workflow",
   "lens": "time_lifecycle",
   "freshness": "examined",
-  "revision": "source:dc6cda9f74b78ed1264a0aed0ccd95fe36d44880bfde5f4ce110e5ade49cc2cf",
+  "revision": "source:065f76a43c642bebd6ae745da3f9e1b4e8d4bc25231b052c2d293e06a52201a9",
   "finding_refs": [
     "finding.subagent-physical-settlement-observation"
   ],
@@ -75,11 +75,21 @@
       ]
     },
     "live-source-late-settlement": {
-      "revision": "source:dc6cda9f74b78ed1264a0aed0ccd95fe36d44880bfde5f4ce110e5ade49cc2cf",
+      "revision": "ffff6101be6adc8f06351987e8c4166fd3bd98bd",
       "source_refs": [
         "echo-core/src/agent/mod.rs",
         "echo-orchestration/src/runtime/turn_driver.rs",
         "src/agent/subagent/executor.rs"
+      ],
+      "evidence_refs": [
+        "evidence.subagent-physical-settlement-repair"
+      ]
+    },
+    "scheduler-original-occurrence": {
+      "revision": "source:065f76a43c642bebd6ae745da3f9e1b4e8d4bc25231b052c2d293e06a52201a9",
+      "source_refs": [
+        "echo-orchestration/src/scheduler/runner.rs",
+        "echo-state/src/delivery.rs"
       ],
       "evidence_refs": [
         "evidence.subagent-physical-settlement-repair"
@@ -157,3 +167,9 @@ no self cycle does not prove arbitrary external Any values cycle-free.
 独立reviewer settlement_b_final_source_review对七路径freeze2 d06621ebf5e6385b8bab5cc499b219ae35da2a4c0eb149686a4fcd64a19dd768核当前字节，PASS C0/I0/M0。核原rawtap在normalizer前、精确身份与latestUnknown顺序、foreign保留、sink独立、Core取消终态在真实EOF后、input原watch及Team原claim/active/effect闭包。真正before2903B/101、同caseafter0和Core426/Orch477/Executor70实际0、每581guard与0warning均已读取；测试后仅等价两个matchguard和一个tailif折叠，currentClippy2/fmt2实际0亦已核。
 
 原Headless challenge固定真实已公开f0a6，23原门禁仍属于该历史切点。此增量不是重新全库逐字审或当前full6/17资格。Scheduler与Workflow两个实际消费者的typed观察/重排/owner-loss后继未实施，旧普通重试义务不删除；消费者和main资格仍未闭。
+
+## Scheduler有限实施增量
+
+独立reviewer settlement_b_final_source_review复核Scheduler全部相关入口及本次有界增量，最终C0/I0/M0，绑定六路径freeze2 5836dad5e3dba290d0edefef8d4cf635dcf4acb1f8d54d0cbe6793e053cecf28、源码patch71d4198c92e8951d1fa40d1ea7bd672cae4be23b347c1efa89c0bb0a6b4c1a1b。原Handle parent/StrongWeak、factory与poll panic、borrowed waiter、同journal保护、legacy当前attempt升级、exactclaim原子替换与retained_bytes/terminal retention、None旧字节与Some旧decoder拒绝均已审。最后I1两gate只作用None，Some等同原completion；真实poison与cancel反例after、whole53、fmt/Clippy及581guard均已实际读取。误报的pre-effect Claimed永久卡已沿canonical selector撤回，没有据此增加实现。
+
+ADR中Workflow A已接受但尚未本增量实施的措辞已核；不是另一个待用户选择。此次审查不重宣全仓没有缺陷或最终23门禁已覆盖当前新代码。原live-source challenge固定ffff6101，历史23固定f0a6；Workflow A、跨仓消费者与merged-main资格仍开放。

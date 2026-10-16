@@ -40,3 +40,7 @@ Persistence 文档、ADR 0007/0019/0030/0053/0055 与 journal/delivery/event tes
 
 用户要求明确 Journal、Projection、Trace、Delivery Ledger 谁是事实源；diagnostic persistence
 visibility 已闭合，完整 event family 分类仍未完成，故本规则保持 needs_review。
+
+## 已准入Scheduler effect与物理未知
+
+Scheduler复用同DeliveryLedger事实权威。EffectStarted的可选payload替换须精claim且仅Claimed phase，原event同时安装保护知识并重算原retained_bytes；无替换时旧序列化不变。原callback真实结束才能正常terminal；typed观察、observer Drop、shutdown与owner loss不证明物理结束，受保护attempt不得因liveness hint消失而重投。旧历史恢复与本次新effect准入不同：本次effect前必须安装保护，不能让旧payload豁免新已知未知。该局部由原B Evidence/Audit承接，不更改其它delivery未知的普通策略或宣全域exactly-once。

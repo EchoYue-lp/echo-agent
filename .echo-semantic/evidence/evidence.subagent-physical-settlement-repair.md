@@ -3,7 +3,7 @@
   "schema_version": 1,
   "id": "evidence.subagent-physical-settlement-repair",
   "kind": "evidence",
-  "observed_at": "source:dc6cda9f74b78ed1264a0aed0ccd95fe36d44880bfde5f4ce110e5ade49cc2cf",
+  "observed_at": "source:065f76a43c642bebd6ae745da3f9e1b4e8d4bc25231b052c2d293e06a52201a9",
   "source_refs": [
     "docs/adr/0088-subagent-settlement-observation.md",
     "docs/subagent-cancellation-observation.md",
@@ -38,20 +38,24 @@
     "tests/agent_handle_turn_driver.rs",
     "tests/facade_smoke.rs",
     "src/acp/session.rs",
-    "echo-agent-learning/tests/example_contracts/demo54_headless.rs"
+    "echo-agent-learning/tests/example_contracts/demo54_headless.rs",
+    "echo-orchestration/src/scheduler/runner.rs",
+    "echo-state/src/delivery.rs"
   ],
   "supports": [
     "behavior.task-subagent-execution",
     "rule.task-subagent-authority",
     "behavior.agent-turn-lifecycle",
-    "rule.turn-terminal-authority"
+    "rule.turn-terminal-authority",
+    "rule.fact-projection-separation"
   ],
   "limitations": [
     "The 23 applicable local gates (six original framework commands plus 17 independent features) pass only this checkpoint. The known live-source observation-to-terminal consumer gap, SDK/CLI qualification and exact merged-main CI remain incomplete.",
     "Original first 6472-byte before raw was overwritten by a later invocation; preserved command receipt, source and tool-session assertion remain, not a reconstructed full raw.",
     "Local raw is task-scoped, not bundled into the repository. Each reported run proves only its actual input cut; unavailable raw is not fresh passing evidence.",
     "The new real React Tool/Team task cases are after assertions, not represented as individually executed original-source counterexamples. Genuine Manager/pipeline/RunCode and resource counterexamples have separate retained before runs.",
-    "Caller-provided opaque resource graphs require consumer ownership review. Internal retention has no manager/self projection cycle; arbitrary Any guards are not universally cycle-free."
+    "Caller-provided opaque resource graphs require consumer ownership review. Internal retention has no manager/self projection cycle; arbitrary Any guards are not universally cycle-free.",
+    "The current Scheduler 53 and unchanged Delivery 14 focused results do not replace final six gates/17 features, accepted Workflow A implementation, consumer qualification or exact merged-main CI; historical 23 gates belong to f0a6 only."
   ]
 }
 ---
@@ -131,3 +135,15 @@ Headless便利API另有真实生产反例：原React+LLM Tool调用已启动file
 每次581 Rust/Cargo输入前后同、日志无截断且编译诊断零。其后两个matchguard及tail let-chain只等价短路折叠，独立逐copy复核通过；三crate no-default/subagent,acp lib+tests Clippy原101两lint保留，修后同命令0/648B/零warning，fmtcheck0/0B。独立有限实现审查PASS C0/I0/M0，绑定七文件freeze2；后续Plan仅登记已确认Scheduler/Workflow必要后继，不改变Rust或以上测试切点。当前源码摘要在这些focused结果后观测，不重写执行时间。全部raw只在任务本地，不新增提交归档。
 
 该切片只闭合同原live source的结算消费；Scheduler callback观察终态化/owner-loss重放，以及Workflow resume重排/heartbeat失败/TTL恢复仍须各自真实counter和窄设计。普通错误既有重试合同不因此全部改变。宽Finding仍open、Plan ready；旧f0a23不充当当前代码的六门禁/17feature、SDK/CLI或精确main CI资格。
+
+## Scheduler原occurrence所有权增量
+
+前面live-source结果已由公开ffff6101be6adc8f06351987e8c4166fd3bd98bd保存；其关于Scheduler未实施的句子是当时状态。当前Scheduler复用唯一OccurrenceAuthority、原DeliveryLedger/journal、原callback与claim，不增加scheduler/store/公共TaskStatus。新scheduled/manual payload以版本化私有保护合同持久保存，旧decoder拒绝该新wrapper。原EffectStarted新增可选replacement_payload，精claim/Claimed校验后与effect admission同event安装并按原envelope重算retained_bytes；None保持旧JSON，Some由旧deny-unknown decoder拒绝。旧历史可按原合同首次replay，但本次新physical attempt在callback前也必须同claim升级保护，不能借legacy标签重投已知未结算effect。
+
+原callback factory与future均在同一个owned producer内执行，borrowed waiter取消/shutdown不drop它。typed观察或owner join loss不更新last_run、不提交Failed/Completed，也不把protected occurrence重排；其它独立occurrence继续推进。正常已结束success/error仍沿原结果和terminal策略。SchedulerHandle强持同Runner，join/shutdown改为借用&mut，原JoinHandle在Pending时不take，完成后缓存结果；重复观察不执行第二callback。只有调用方保留的原parent承担后续资源可达性，销毁最后parent不等物理停止，也不承诺无receipt自动恢复。
+
+真实before包括：typed callback在后台file producer held时被记Failed/ERROR（1919B/101）；borrowed drop与shutdown提前丢原callback（2265B/101、2fail）；唯一Handle出口丢原Fn资源/permit（1439B/101）；legacy本次Unknown被重claim（1814B/101）。各例均先release并join同原backend后断言，无后台残留。修后同例通过，另核factory/poll panic、scheduled/manual两准入、真实旧字节恢复、独立journal路径、重复join与借用取消。新admitted Some不能被后到cancel或真实definition poison的准入gate提前短路；两实际before分别1576B/101与1780B/101，修后各同case0。poison在真实physical关闭后的旧projection错误仍保留，不清poison或强改成功。
+
+最终Scheduler模块53/0/0（5470B）、原Delivery模块14/0/0（2874B，相关源码未再变）、fmtcheck0/0B、两crate lib+tests Clippy0/226B。最终四命令各581 Rust/Cargo输入前后同、零warning且无截断；不把重叠counter叠为unique。原主after编译错误、错误过滤0case、legacy fixture首次failure及Plan早收据覆盖限制保持任务本地事实，不当作有效红绿。独立实现复审PASS C0/I0/M0，绑定六路径freeze2 5836dad5e3dba290d0edefef8d4cf635dcf4acb1f8d54d0cbe6793e053cecf28。
+
+文档、ADR与Rust调用迁移说明随源维护；当前无需要改变的示例值或website产品展示。最终workspace门禁将编译示例；本focused不借未执行的demo/consumer资格。Workflow A已由用户单独接受，绑定原SDK proposal SHA256 23c5a59ae405ecd71c3e79b6d945e77e8b7927e0e1f0176ad91047147341a09f，尚未由本Scheduler增量实施或验证。Finding保持open，Plan ready，最终全6+17、SDK/CLI消费及精确main CI仍待后续最终代码。
