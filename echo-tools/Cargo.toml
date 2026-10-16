@@ -60,10 +60,10 @@ scraper = { version = "0.27", optional = true }
 html2text = { version = "0.14", optional = true }
 url = { version = "2", optional = true }
 lopdf = { version = "0.44", default-features = false, optional = true }
-calamine = { version = "0.36", features = ["dates"], optional = true }
+calamine = { workspace = true, features = ["dates"], optional = true }
 chrono = { version = "0.4", optional = true }
-rust_xlsxwriter = { version = "0.82", optional = true }
-docx-rs = { version = "0.4.22", optional = true }
+rust_xlsxwriter = { workspace = true, optional = true }
+docx-rs = { workspace = true, optional = true }
 encoding_rs = { version = "0.8", optional = true }
 tree-sitter = { version = "0.26.11", optional = true }
 tree-sitter-rust = { version = "0.24.2", optional = true }

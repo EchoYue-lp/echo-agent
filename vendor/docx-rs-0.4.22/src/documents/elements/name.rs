@@ -1,0 +1,67 @@
+use serde::{Serialize, Serializer};
+use std::io::Write;
+
+use std::str::FromStr;
+
+use crate::documents::BuildXML;
+use crate::{escape, xml_builder::*};
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Name {
+    name: String,
+}
+
+impl Name {
+    pub fn new(name: impl Into<String>) -> Name {
+        Name {
+            name: escape::escape_owned(name.into()),
+        }
+    }
+
+    pub fn starts_with(&self, s: &str) -> bool {
+        self.name.starts_with(s)
+    }
+
+    pub fn is_heading(&self) -> bool {
+        self.name.to_lowercase().starts_with("heading")
+    }
+
+    pub fn get_heading_number(&self) -> Option<usize> {
+        let replaced = self.name.to_lowercase().replace("heading ", "");
+        usize::from_str(&replaced).ok()
+    }
+}
+
+impl BuildXML for Name {
+    fn build_to<W: Write>(
+        &self,
+        stream: crate::xml::writer::EventWriter<W>,
+    ) -> crate::xml::writer::Result<crate::xml::writer::EventWriter<W>> {
+        XMLBuilder::from(stream).name(&self.name)?.into_inner()
+    }
+}
+
+impl Serialize for Name {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.name)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+
+    use super::*;
+    #[cfg(test)]
+    use pretty_assertions::assert_eq;
+    use std::str;
+
+    #[test]
+    fn test_build() {
+        let c = Name::new("Heading");
+        let b = c.build();
+        assert_eq!(str::from_utf8(&b).unwrap(), r#"<w:name w:val="Heading" />"#);
+    }
+}

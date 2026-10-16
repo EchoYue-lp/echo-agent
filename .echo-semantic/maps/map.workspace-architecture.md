@@ -4,7 +4,7 @@ id: map.workspace-architecture
 kind: capability_map
 title: Workspace 架构与公共组合
 risk: high
-observed_at: 39e78a93c90b3bb61640cb4b78ce58dd700da5c1
+observed_at: source:d05de8aeb8655e4bc78aa98764cb6e04421860a891a734821c24327d5f3559e3
 boundary_refs:
 - boundary.workspace-architecture
 behavior_refs:
@@ -13,6 +13,7 @@ behavior_refs:
 rule_refs:
 - rule.framework-layer-ownership
 evidence_refs:
+- evidence.framework-yanked-zip-repair
 - evidence.workspace-structure
 - evidence.telemetry-subscriber-composition-repair
 - evidence.high-risk-audit-frontier
@@ -31,12 +32,14 @@ evidence_refs:
 - evidence.framework-dependency-final-full-verification
 - evidence.framework-dependency-final-gate-archive
 finding_refs:
+- finding.framework-yanked-zip-ci
 - finding.workspace-topology-doc-drift
 - finding.public-feature-table-drift
 - finding.readme-example-target-drift
 - finding.semantic-baseline-squash-ancestry
 - finding.framework-dependency-policy-ci
 audit_refs:
+- audit.framework-yanked-zip-source-review
 - audit.workspace-architecture.contract-evidence
 - audit.workspace-topology-doc-rereview
 - audit.feature-table-doc-rereview
@@ -55,6 +58,29 @@ related_map_refs:
 - map.protocol-surfaces
 - map.eval-evolution
 scenarios:
+  media-dependency-build-source:
+    status: needs_review
+    source_refs:
+    - Cargo.toml
+    - Cargo.lock
+    - echo-tools/Cargo.toml
+    - echo-tools/tests/zip9_media_compat.rs
+    - vendor/README.md
+    - vendor/registry-origins.toml
+    - scripts/generate-vendored-media-audit-lock.py
+    - scripts/tests/test_vendored_media_audit_lock.py
+    - .github/workflows/rust-ci.yml
+    - docs/adr/0089-non-yanked-media-dependencies.md
+    behavior_refs:
+    - behavior.workspace-composition
+    rule_refs:
+    - rule.framework-layer-ownership
+    evidence_refs:
+    - evidence.framework-yanked-zip-repair
+    finding_refs:
+    - finding.framework-yanked-zip-ci
+    unknown: Focused media/source checks do not establish complete gates or exact merged-main dependency-policy CI.
+    next_step: Complete the newly adopted lock's full6 and independent17 gates, independent final review and exact main CI.
   telemetry-subscriber-composition:
     status: needs_review
     source_refs:
@@ -259,3 +285,6 @@ Rust facade、外部 SDK Host、docs 与 examples 展示同一 capability；采�
 
 
 依赖当前结论：独立源码review PASS/action0、新23完整命令最终0已齐，localFinding resolved；old34d5历史Git保持，不替代finalmetadata/remote/main/SDK验收。
+
+
+本次875主线新CI撤回依赖故障由 finding.framework-yanked-zip-ci 单独跟踪；原quinn/YAML问题及其已完成证据不改写。媒体构建改为原发布版本源码的最小ZIP9适配，原工具行为/分层/审核策略不变；当前candidate媒体/独立解析结果不代正式新锁全门禁、消费者或精确mainCI。
