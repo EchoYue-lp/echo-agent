@@ -4,7 +4,7 @@ id: map.workspace-architecture
 kind: capability_map
 title: Workspace 架构与公共组合
 risk: high
-observed_at: source:d05de8aeb8655e4bc78aa98764cb6e04421860a891a734821c24327d5f3559e3
+observed_at: 9886502c83d6b1f6fa9212eb221db0e5874deaee
 boundary_refs:
 - boundary.workspace-architecture
 behavior_refs:

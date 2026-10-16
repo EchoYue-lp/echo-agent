@@ -109,6 +109,31 @@ impl Agent for RecordingAgent {
         let id = self.id;
         let turn = self.turns.fetch_add(1, Ordering::AcqRel).saturating_add(1);
         Box::pin(async move {
+            if message == "not-settled-setup" {
+                return Err(ReactError::ExecutionNotSettled {
+                    run_id: "original-foreign-run".to_string(),
+                    execution_id: Some("original-foreign-execution".to_string()),
+                });
+            }
+            if message == "ordinary-setup-error" {
+                return Err(ReactError::Other("ordinary setup failure".to_string()));
+            }
+            if message == "not-settled-after-cancel" {
+                let events = async_stream::stream! {
+                    self.gate.started.fetch_add(1, Ordering::AcqRel);
+                    self.gate.started_notify.notify_waiters();
+                    cancel.cancelled().await;
+                    yield Err(ReactError::ExecutionNotSettled {
+                        run_id: "original-foreign-run".to_string(),
+                        execution_id: Some("original-foreign-execution".to_string()),
+                    });
+                    self.gate.started.fetch_add(1, Ordering::AcqRel);
+                    self.gate.started_notify.notify_waiters();
+                    self.gate.release.notified().await;
+                    self.gate.cancelled.fetch_add(1, Ordering::AcqRel);
+                };
+                return Ok(Box::pin(events) as BoxStream<'a, Result<AgentEvent>>);
+            }
             if message == "wait-for-cancel" {
                 let events = async_stream::stream! {
                     cancel.cancelled().await;
@@ -236,9 +261,15 @@ impl Agent for RecordingAgent {
                 reasoning_blocks: None,
             } => {
                 return Box::pin(async move {
-                    let events = async_stream::try_stream! {
-                        let mut legacy = self.chat_stream_with_cancel(&text, cancel).await?;
-                        while let Some(event) = legacy.next().await { yield event?; }
+                    let events = async_stream::stream! {
+                        match self.chat_stream_with_cancel(&text, cancel).await {
+                            Ok(mut legacy) => {
+                                // An observation is an item, not permission for
+                                // this fixture adapter to drop the original source.
+                                while let Some(event) = legacy.next().await { yield event; }
+                            }
+                            Err(error) => yield Err(error),
+                        }
                     };
                     Ok(Box::pin(events) as BoxStream<'a, Result<AgentEvent>>)
                 });
@@ -489,6 +520,248 @@ fn absolute_test_path(name: &str) -> Result<PathBuf> {
 
 fn client_error(message: &str) -> Error {
     Error::internal_error().data(message.to_string())
+}
+
+#[derive(Clone, Default)]
+struct CapturedRunRuntime {
+    services: Arc<OnceLock<Arc<echo_agent::acp::AcpConnectionServices>>>,
+    connection: Arc<OnceLock<ConnectionTo<Client>>>,
+}
+
+impl AcpConnectionProfile for CapturedRunRuntime {
+    fn negotiate_hello(&self, _hello: &serde_json::Value) -> std::result::Result<(), String> {
+        Err("standard-only test profile".to_string())
+    }
+
+    fn attach(
+        &self,
+        services: Arc<echo_agent::acp::AcpConnectionServices>,
+    ) -> agent_client_protocol::Builder<
+        AcpRole,
+        impl agent_client_protocol::HandleDispatchFrom<Client>,
+        impl agent_client_protocol::RunWithConnectionTo<Client>,
+        impl agent_client_protocol::HandleConnectionClose<Client>,
+        agent_client_protocol::RawConnectionContext,
+    > {
+        let _ = self.services.set(services);
+        let captured = self.connection.clone();
+        AcpRole.builder().with_spawned(async move |connection| {
+            let _ = captured.set(connection);
+            Ok(())
+        })
+    }
+}
+
+async fn run_error_isolation_case(
+    shared_start: bool,
+    cancelled_stream: bool,
+) -> agent_client_protocol::Result<()> {
+    let factory = TestFactory::new();
+    let gate = factory.gate.clone();
+    let captured = CapturedRunRuntime::default();
+    let client_runtime = captured.clone();
+    let adapter = AcpAgentAdapter::with_config(
+        factory.session_factory(),
+        AcpAdapterConfig {
+            shutdown_timeout: Duration::from_millis(50),
+            ..AcpAdapterConfig::default()
+        },
+    )
+    .map_err(Error::into_internal_error)?
+    .with_profile(captured);
+    let _close_owner = adapter.close_owner();
+    let (server, client) = Channel::duplex();
+    let (server_result, client_result) = tokio::join!(
+        adapter.connect_to(server),
+        Client
+            .builder()
+            .connect_with(client, async move |connection| {
+                connection
+                    .send_request(v1::InitializeRequest::new(ProtocolVersion::V1))
+                    .block_task()
+                    .await?;
+                let session_id = connection
+                    .send_request(v1::NewSessionRequest::new(
+                        absolute_test_path("run-error-isolation")
+                            .map_err(Error::into_internal_error)?,
+                    ))
+                    .block_task()
+                    .await?
+                    .session_id;
+                let services = client_runtime
+                    .services
+                    .get()
+                    .cloned()
+                    .ok_or_else(|| client_error("server services missing"))?;
+                let session = services
+                    .sessions()
+                    .get(&session_id)
+                    .await
+                    .ok_or_else(|| client_error("original Session missing"))?;
+                let entry = if shared_start {
+                    // This is the same framework entry point and official spawn used by SDK Host.
+                    let mut spec =
+                        extension_spec(&session, None).map_err(Error::into_internal_error)?;
+                    spec.turn.input =
+                        echo_agent::runtime::TurnInput::Text("not-settled-setup".to_string());
+                    let (entry, task) = services
+                        .prepare_run(spec)
+                        .await
+                        .map_err(Error::into_internal_error)?;
+                    let server_connection = client_runtime
+                        .connection
+                        .get()
+                        .ok_or_else(|| client_error("server connection missing"))?;
+                    let (finished, observed) = tokio::sync::oneshot::channel();
+                    server_connection.spawn(async move {
+                        let result = task.await;
+                        let _ = finished.send(());
+                        result
+                    })?;
+                    observed.await.map_err(Error::into_internal_error)?;
+                    entry
+                } else {
+                    let prompt = connection.send_request(v1::PromptRequest::new(
+                        session_id.clone(),
+                        vec![v1::ContentBlock::Text(v1::TextContent::new(
+                            if cancelled_stream {
+                                "not-settled-after-cancel"
+                            } else {
+                                "not-settled-setup"
+                            },
+                        ))],
+                    ));
+                    if cancelled_stream {
+                        gate.wait_started(1).await?;
+                        prompt.cancel()?;
+                        gate.wait_started(2).await?;
+                    }
+                    let mut response = Box::pin(prompt.block_task());
+                    if cancelled_stream {
+                        assert!(
+                            tokio::time::timeout(Duration::from_millis(10), &mut response)
+                                .await
+                                .is_err(),
+                            "observation cannot drop the held original producer"
+                        );
+                        let run_id = format!("{}:turn:1", session_id);
+                        let original = services
+                            .run(&run_id)
+                            .await
+                            .ok_or_else(|| client_error("held Run missing"))?;
+                        assert!(original.receipt().is_none());
+                        assert!(session.begin_turn().is_err());
+                        // Dispatch remains available even while the original source drains.
+                        connection
+                            .send_request(v1::NewSessionRequest::new(
+                                absolute_test_path("held-other-session")
+                                    .map_err(Error::into_internal_error)?,
+                            ))
+                            .block_task()
+                            .await?;
+                        gate.release.notify_one();
+                    }
+                    let error = response
+                        .await
+                        .err()
+                        .ok_or_else(|| client_error("unknown Run returned a successful Prompt"))?;
+                    assert_eq!(error.code, ErrorCode::InternalError);
+                    assert_eq!(
+                        error.data,
+                        Some(serde_json::json!({
+                            "observation": "not_settled", "run_id": "original-foreign-run",
+                            "execution_id": "original-foreign-execution",
+                        }))
+                    );
+                    let run_id = format!("{}:turn:1", session_id);
+                    services
+                        .run(&run_id)
+                        .await
+                        .ok_or_else(|| client_error("original Run missing"))?
+                };
+                assert!(entry.is_running());
+                assert!(entry.receipt().is_none());
+                assert!(session.begin_turn().is_err());
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(10), entry.wait_receipt())
+                        .await
+                        .is_err()
+                );
+                // An unrelated legal request on the same official connection must still work.
+                let other = connection
+                    .send_request(v1::NewSessionRequest::new(
+                        absolute_test_path("other-session").map_err(Error::into_internal_error)?,
+                    ))
+                    .block_task()
+                    .await?
+                    .session_id;
+                let ordinary = connection
+                    .send_request(v1::PromptRequest::new(
+                        other.clone(),
+                        vec![v1::ContentBlock::Text(v1::TextContent::new(
+                            "ordinary-setup-error",
+                        ))],
+                    ))
+                    .block_task()
+                    .await;
+                assert_eq!(
+                    ordinary.err().map(|error| error.code),
+                    Some(ErrorCode::InternalError)
+                );
+                if cancelled_stream {
+                    assert_eq!(
+                        gate.cancelled.load(Ordering::Acquire),
+                        1,
+                        "the same producer reached real EOF"
+                    );
+                }
+                let response = connection
+                    .send_request(v1::PromptRequest::new(
+                        other,
+                        vec![v1::ContentBlock::Text(v1::TextContent::new("healthy"))],
+                    ))
+                    .block_task()
+                    .await?;
+                assert_eq!(response.stop_reason, v1::StopReason::EndTurn);
+                assert!(services.cancel_run(&entry.run_id).await);
+                let _ = services.remove_run(&entry.run_id).await;
+                assert!(entry.receipt().is_none());
+                assert!(
+                    session.begin_turn().is_err(),
+                    "cancellation/revocation is not physical closure"
+                );
+                let recovered = services
+                    .run(&entry.run_id)
+                    .await
+                    .ok_or_else(|| client_error("unknown original Run was removed"))?;
+                assert!(Arc::ptr_eq(&entry, &recovered));
+                Ok(())
+            })
+    );
+    client_result?;
+    assert!(
+        server_result.is_err(),
+        "EOF must still report the original unsettled owner"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn standard_run_error_isolation_keeps_connection_and_original_owner()
+-> agent_client_protocol::Result<()> {
+    run_error_isolation_case(false, false).await
+}
+
+#[tokio::test]
+async fn shared_run_error_isolation_keeps_connection_and_original_owner()
+-> agent_client_protocol::Result<()> {
+    run_error_isolation_case(true, false).await
+}
+
+#[tokio::test]
+async fn cancelled_stream_run_error_isolation_drains_original_source_before_responding()
+-> agent_client_protocol::Result<()> {
+    run_error_isolation_case(false, true).await
 }
 
 #[test]

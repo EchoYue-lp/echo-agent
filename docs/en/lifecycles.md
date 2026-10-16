@@ -70,6 +70,15 @@ through connection return and any failed close; dropping it after admission
 forfeits retry ownership and violates the contract. Dropping it before the
 connection starts rejects setup without creating an Agent.
 
+ACP Run driver observations are isolated from connection failures. A prepared
+connection task records its structured error in the original `RunEntry`;
+`wait_result()` returns that observation or the real receipt, with committed
+receipts taking precedence. Standard Prompt returns an observation as a request
+error and other Sessions remain usable. `wait_receipt()` still waits only for
+real settlement: cancellation, task return and transport EOF cannot release an
+unknown original lease or authorize retry. See
+[ADR 0088](../adr/0088-subagent-settlement-observation.md).
+
 An adapter restoring an ACP Session with durable native Run identities calls
 `session.reserve_recovered_turn_ids(&persisted_run_ids)` before publishing the
 restored Session or admitting another Turn. The Session's existing `TurnSlot`

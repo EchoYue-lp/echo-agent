@@ -56,6 +56,13 @@ adapter.connect_retaining_close_owner(transport)`，在 poll、await 或 spawn `
 全部关闭成功；接纳后提前 drop 会放弃重试所有权，属于违反调用合同。连接启动前 drop
 则会拒绝建立连接，不创建 Agent。
 
+ACP Run 的 driver 观察错误与连接故障隔离。prepared task 把结构化错误记录在原
+`RunEntry`；`wait_result()` 返回该观察或真实 receipt，已提交 receipt 优先。
+标准 Prompt 通过原 request responder 返回观察错误，其它 Session 继续可用。
+`wait_receipt()` 仍只等待真实结算：取消、task 返回和 transport EOF 都不能释放
+原未知 lease 或授权重试。参见
+[ADR 0088](../adr/0088-subagent-settlement-observation.md)。
+
 Adapter 从持久化 native Run identity 恢复 ACP Session 时，在发布恢复后的 Session
 或接纳下一 Turn 前调用 `session.reserve_recovered_turn_ids(&persisted_run_ids)`。
 现有 `TurnSlot` 在同一锁内拥有恢复预留与分配权威；framework 校验自身 Session

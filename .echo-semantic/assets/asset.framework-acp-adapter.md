@@ -31,6 +31,7 @@ rule_refs:
 - rule.turn-terminal-authority
 - rule.framework-layer-ownership
 evidence_refs:
+- evidence.acp-run-task-error-isolation
 - evidence.provider-protocol-quality
 - evidence.workspace-structure
 - evidence.agent-adapter-close-settlement-repair
@@ -75,5 +76,9 @@ runtime authority 负责；adapter 不拥有第二个 Agent/Run 状态机。
 
 具体 SDK Host 对 protocol DTO 的转换将在独立仓库中继续维护；framework 只保证通用 ACP
 adapter 的行为和接口，不拥有 SDK language parity。
+
+ACP Run driver 的非terminal观察由原RunEntry保存并通过wait_result观察，标准Prompt用原
+request responder返回错误，不能把单Run观察作为official spawn的全连接fatal错误。
+wait_receipt、原lease、receipt与close权威不变；独立SDK消费验收另行绑定framework pin。
 
 组合候选补充范围：ACP 恢复身份预留仍由 Session TurnSlot 唯一分配；LSP response/diagnostic 由 framework 解析，URI 单缓存区分有效结果与明确错误，fatal admission 后不返回假空。当前只有指定切片的局部复审和反例证据，组合 23 项门禁运行中；SDK 已发布 pin、其它协议缺口和 main 仍各自验收。
