@@ -1,30 +1,38 @@
 ---
-schema_version: 1
-id: audit.workflow-entry-loop-authority-rereview
-kind: audit
-boundary_ref: boundary.task-subagent-workflow
-lens: failure_concurrency
-freshness: examined
-revision: c7e54e6785f85422af83d4b384f01c2493eddc79
-finding_refs: [finding.workflow-entry-loop-drift]
-challenges:
-  four-entry-single-authority:
-    revision: c7e54e6785f85422af83d4b384f01c2493eddc79
-    source_refs: [echo-orchestration/src/workflow/graph.rs, docs/adr/0052-workflow-entry-loop-authority.md]
-    evidence_refs: [evidence.workflow-entry-loop-authority-repair, evidence.workflow-entry-loop-authority-verification]
-  event-terminal-order:
-    revision: c7e54e6785f85422af83d4b384f01c2493eddc79
-    source_refs: [echo-orchestration/src/workflow/graph.rs, echo-orchestration/src/workflow/node.rs, echo-orchestration/src/workflow/mod.rs]
-    evidence_refs: [evidence.workflow-entry-loop-authority-repair, evidence.workflow-entry-loop-authority-verification]
-  producer-cancellation-settlement:
-    revision: c7e54e6785f85422af83d4b384f01c2493eddc79
-    source_refs: [echo-orchestration/src/workflow/graph.rs, echo-orchestration/src/workflow/node.rs]
-    evidence_refs: [evidence.workflow-entry-loop-authority-repair, evidence.workflow-entry-loop-authority-verification]
-  checkpoint-resume-continuity:
-    revision: c7e54e6785f85422af83d4b384f01c2493eddc79
-    source_refs: [echo-orchestration/src/workflow/graph.rs, echo-orchestration/src/workflow/checkpoint_store.rs]
-    evidence_refs: [evidence.workflow-entry-loop-authority-repair, evidence.workflow-entry-loop-authority-verification]
+{
+  "schema_version": 1,
+  "id": "audit.workflow-entry-loop-authority-rereview",
+  "kind": "audit",
+  "boundary_ref": "boundary.task-subagent-workflow",
+  "lens": "failure_concurrency",
+  "freshness": "examined",
+  "revision": "7110a27e7b0e9841dcfa0d4cca1cdbc053d96177",
+  "finding_refs": [
+    "finding.workflow-entry-loop-drift",
+    "finding.framework-historical-source-observation-retention"
+  ],
+  "challenges": {
+    "current-native-source-and-existing-regressions": {
+      "revision": "7110a27e7b0e9841dcfa0d4cca1cdbc053d96177",
+      "source_refs": [
+        "echo-orchestration/src/workflow/graph.rs",
+        "docs/adr/0052-workflow-entry-loop-authority.md",
+        "echo-orchestration/src/workflow/node.rs",
+        "echo-orchestration/src/workflow/mod.rs",
+        "echo-orchestration/src/workflow/checkpoint_store.rs"
+      ],
+      "evidence_refs": [
+        "evidence.framework-history-current-reobservation"
+      ]
+    }
+  }
+}
 ---
+
+# Current observation and historical record
+
+The machine header now records only the bounded native observation at `7110a27e7b0e9841dcfa0d4cca1cdbc053d96177`; current source/tests and limitations are in `evidence.framework-history-current-reobservation`. Original observation `c7e54e6785f85422af83d4b384f01c2493eddc79` and its complete metadata remain in [the immutable875 document](https://github.com/EchoYue-lp/echo-agent/blob/875cc22f2e99c7ccd83c07e02c03fe221c5e3f6c/.echo-semantic/audits/audit.workflow-entry-loop-authority-rereview.md). The original execution counts, before/after claims and review prose below are preserved verbatim as historical statements, not rerun or equivalence claims for7110.
+
 
 # Workflow 入口循环权威独立复审
 

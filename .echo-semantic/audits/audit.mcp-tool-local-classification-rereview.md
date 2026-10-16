@@ -1,26 +1,37 @@
 ---
-schema_version: 1
-id: audit.mcp-tool-local-classification-rereview
-kind: audit
-boundary_ref: boundary.extension-lifecycle
-lens: permission_external
-freshness: examined
-revision: 72d1fccf74b85afe9a74e684ca3748b64642affb
-finding_refs: [finding.mcp-tool-permission-classification]
-challenges:
-  annotation-trust-boundary:
-    revision: 72d1fccf74b85afe9a74e684ca3748b64642affb
-    source_refs: [echo-integration/src/mcp/tool_adapter.rs]
-    evidence_refs: [evidence.mcp-tool-local-classification-repair, evidence.mcp-tool-local-classification-verification]
-  plan-surface-and-execution:
-    revision: 72d1fccf74b85afe9a74e684ca3748b64642affb
-    source_refs: [src/agent/snapshot.rs, src/agent/react/run/pipeline.rs]
-    evidence_refs: [evidence.mcp-tool-local-classification-repair, evidence.mcp-tool-local-classification-verification]
-  live-permission-mode-authority:
-    revision: 72d1fccf74b85afe9a74e684ca3748b64642affb
-    source_refs: [echo-orchestration/src/human_loop/service.rs, src/agent/snapshot.rs]
-    evidence_refs: [evidence.mcp-tool-local-classification-verification]
+{
+  "schema_version": 1,
+  "id": "audit.mcp-tool-local-classification-rereview",
+  "kind": "audit",
+  "boundary_ref": "boundary.extension-lifecycle",
+  "lens": "permission_external",
+  "freshness": "examined",
+  "revision": "7110a27e7b0e9841dcfa0d4cca1cdbc053d96177",
+  "finding_refs": [
+    "finding.mcp-tool-permission-classification",
+    "finding.framework-historical-source-observation-retention"
+  ],
+  "challenges": {
+    "current-native-source-and-existing-regressions": {
+      "revision": "7110a27e7b0e9841dcfa0d4cca1cdbc053d96177",
+      "source_refs": [
+        "echo-integration/src/mcp/tool_adapter.rs",
+        "src/agent/snapshot.rs",
+        "src/agent/react/run/pipeline.rs",
+        "echo-orchestration/src/human_loop/service.rs"
+      ],
+      "evidence_refs": [
+        "evidence.framework-history-current-reobservation"
+      ]
+    }
+  }
+}
 ---
+
+# Current observation and historical record
+
+The machine header now records only the bounded native observation at `7110a27e7b0e9841dcfa0d4cca1cdbc053d96177`; current source/tests and limitations are in `evidence.framework-history-current-reobservation`. Original observation `72d1fccf74b85afe9a74e684ca3748b64642affb` and its complete metadata remain in [the immutable875 document](https://github.com/EchoYue-lp/echo-agent/blob/875cc22f2e99c7ccd83c07e02c03fe221c5e3f6c/.echo-semantic/audits/audit.mcp-tool-local-classification-rereview.md). The original execution counts, before/after claims and review prose below are preserved verbatim as historical statements, not rerun or equivalence claims for7110.
+
 
 # MCP Tool 本地分类独立复审
 

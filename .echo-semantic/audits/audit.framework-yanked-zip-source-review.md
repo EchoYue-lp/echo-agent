@@ -5,12 +5,12 @@ kind: audit
 boundary_ref: boundary.workspace-architecture
 lens: contract_evidence
 freshness: examined
-revision: source:d05de8aeb8655e4bc78aa98764cb6e04421860a891a734821c24327d5f3559e3
+revision: 7110a27e7b0e9841dcfa0d4cca1cdbc053d96177
 finding_refs:
 - finding.framework-yanked-zip-ci
 challenges:
   original-media-source-and-registry-advisory-coverage:
-    revision: source:d05de8aeb8655e4bc78aa98764cb6e04421860a891a734821c24327d5f3559e3
+    revision: 7110a27e7b0e9841dcfa0d4cca1cdbc053d96177
     source_refs:
     - Cargo.toml
     - Cargo.lock
@@ -62,7 +62,7 @@ in evidence.framework-yanked-zip-repair; raw remains ignored.
 ## 问题记录
 
 Current bounded source and advisory-coverage increments pass C0/I0/M0. The task
-Finding remains open for full six/17 and exact mainCI; no new exception or
+Finding remains open for exact mainCI; all local six/17 now pass; no new exception or
 source allowlist is accepted. The earlier PR181 resolved Finding is unchanged.
 
 ## 残余风险
@@ -76,9 +76,13 @@ failed; exact new-main CI still runs its original online commands.
 
 ## 未检查项
 
-New complete workspace/independent feature gates, new merged-mainCI and actual
-SDK/CLI consumer delivery remain separate. Current code provenance and focused
-checks do not establish those outcomes or a complete imported-code security audit.
+Exact new merged-mainCI and actual SDK/CLI consumer delivery remain separate.
+Local full23 does not establish those outcomes or a complete imported-code security audit.
 
 
 The later four-file EOF-only import normalization removes exactly four terminal newline bytes, preserving complete license terms and all production Rust. It is a bounded packaging identity increment; it does not claim new runtime evidence or replace the source/coverage review above.
+
+
+## Full execution evidence increment
+
+The current evidence binds actual7110 execution: prescribed6+independent17 all0, complete raw SHA/bytes, all1763 input maps identical, compiler diagnostics0. Main Rust results3622/0/3 retain the original three opt-in tests and exclude the two repeated child-process result rows. New records do not rereview449 imported files or infer exact mainCI/consumer success. The independent final evidence review is limited to these execution/source-identity records and the Issue188 backlink; source and accepted contracts are unchanged.

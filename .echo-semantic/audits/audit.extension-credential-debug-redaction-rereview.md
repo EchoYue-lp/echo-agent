@@ -1,26 +1,51 @@
 ---
-schema_version: 1
-id: audit.extension-credential-debug-redaction-rereview
-kind: audit
-boundary_ref: boundary.extension-lifecycle
-lens: permission_external
-freshness: examined
-revision: 98a2e11cfb6e88e2f310ae2c2b40cd9e009534a4
-finding_refs: [finding.extension-credential-debug-redaction]
-challenges:
-  config-debug-and-exact-secrets:
-    revision: 98a2e11cfb6e88e2f310ae2c2b40cd9e009534a4
-    source_refs: [echo-integration/src/redaction.rs, echo-integration/src/mcp/server_config.rs, echo-integration/src/mcp/config_loader.rs, echo-integration/src/channels/channels/qq/channel.rs, echo-integration/src/channels/channels/feishu/channel.rs]
-    evidence_refs: [evidence.extension-credential-debug-redaction-repair, evidence.extension-credential-debug-redaction-verification]
-  transport-error-and-url-redaction:
-    revision: 98a2e11cfb6e88e2f310ae2c2b40cd9e009534a4
-    source_refs: [echo-integration/src/mcp/transport/mod.rs, echo-integration/src/mcp/transport/http.rs, echo-integration/src/mcp/transport/sse.rs, echo-integration/src/mcp/transport/stdio.rs, echo-integration/src/channels/channels/qq/api.rs, echo-integration/src/channels/channels/qq/gateway.rs, echo-integration/src/channels/channels/feishu/api.rs, echo-integration/src/channels/channels/feishu/long_poll.rs, echo-integration/src/channels/channels/feishu/webhook.rs]
-    evidence_refs: [evidence.extension-credential-debug-redaction-repair, evidence.extension-credential-debug-redaction-verification]
-  global-retention-and-permission-boundary:
-    revision: 98a2e11cfb6e88e2f310ae2c2b40cd9e009534a4
-    source_refs: [echo-core/src/utils/retention.rs, src/trace/mod.rs, echo-state/src/audit/file.rs, echo-integration/src/lib.rs]
-    evidence_refs: [evidence.extension-credential-debug-redaction-repair, evidence.extension-credential-debug-redaction-verification]
+{
+  "schema_version": 1,
+  "id": "audit.extension-credential-debug-redaction-rereview",
+  "kind": "audit",
+  "boundary_ref": "boundary.extension-lifecycle",
+  "lens": "permission_external",
+  "freshness": "examined",
+  "revision": "7110a27e7b0e9841dcfa0d4cca1cdbc053d96177",
+  "finding_refs": [
+    "finding.extension-credential-debug-redaction",
+    "finding.framework-historical-source-observation-retention"
+  ],
+  "challenges": {
+    "current-native-source-and-existing-regressions": {
+      "revision": "7110a27e7b0e9841dcfa0d4cca1cdbc053d96177",
+      "source_refs": [
+        "echo-integration/src/redaction.rs",
+        "echo-integration/src/mcp/server_config.rs",
+        "echo-integration/src/mcp/config_loader.rs",
+        "echo-integration/src/channels/channels/qq/channel.rs",
+        "echo-integration/src/channels/channels/feishu/channel.rs",
+        "echo-integration/src/mcp/transport/mod.rs",
+        "echo-integration/src/mcp/transport/http.rs",
+        "echo-integration/src/mcp/transport/sse.rs",
+        "echo-integration/src/mcp/transport/stdio.rs",
+        "echo-integration/src/channels/channels/qq/api.rs",
+        "echo-integration/src/channels/channels/qq/gateway.rs",
+        "echo-integration/src/channels/channels/feishu/api.rs",
+        "echo-integration/src/channels/channels/feishu/long_poll.rs",
+        "echo-integration/src/channels/channels/feishu/webhook.rs",
+        "echo-core/src/utils/retention.rs",
+        "src/trace/mod.rs",
+        "echo-state/src/audit/file.rs",
+        "echo-integration/src/lib.rs"
+      ],
+      "evidence_refs": [
+        "evidence.framework-history-current-reobservation"
+      ]
+    }
+  }
+}
 ---
+
+# Current observation and historical record
+
+The machine header now records only the bounded native observation at `7110a27e7b0e9841dcfa0d4cca1cdbc053d96177`; current source/tests and limitations are in `evidence.framework-history-current-reobservation`. Original observation `98a2e11cfb6e88e2f310ae2c2b40cd9e009534a4` and its complete metadata remain in [the immutable875 document](https://github.com/EchoYue-lp/echo-agent/blob/875cc22f2e99c7ccd83c07e02c03fe221c5e3f6c/.echo-semantic/audits/audit.extension-credential-debug-redaction-rereview.md). The original execution counts, before/after claims and review prose below are preserved verbatim as historical statements, not rerun or equivalence claims for7110.
+
 
 # Extension credential diagnostic redaction 独立复审
 

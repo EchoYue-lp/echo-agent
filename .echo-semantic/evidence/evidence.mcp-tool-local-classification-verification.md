@@ -1,19 +1,34 @@
 ---
-schema_version: 1
-id: evidence.mcp-tool-local-classification-verification
-kind: evidence
-observed_at: 72d1fccf74b85afe9a74e684ca3748b64642affb
-source_refs:
-  - echo-integration/src/mcp/tool_adapter.rs
-  - echo-orchestration/src/human_loop/service.rs
-  - src/agent/snapshot.rs
-  - src/agent/react/run/pipeline.rs
-  - echo-sdk-protocol/tests/facade_inventory.rs
-supports: [behavior.effect-permission-execution, behavior.extension-publication, rule.permission-effect-order]
-limitations:
-  - 完整 workspace 合并门禁与远端 CI 尚未执行
-  - 最终集成分支需统一刷新后续 public trait implementation 和 current_mode inventory identity
+{
+  "schema_version": 1,
+  "id": "evidence.mcp-tool-local-classification-verification",
+  "kind": "evidence",
+  "observed_at": "7110a27e7b0e9841dcfa0d4cca1cdbc053d96177",
+  "source_refs": [
+    "echo-integration/src/mcp/tool_adapter.rs",
+    "echo-orchestration/src/human_loop/service.rs",
+    "src/agent/snapshot.rs",
+    "src/agent/react/run/pipeline.rs"
+  ],
+  "supports": [
+    "behavior.effect-permission-execution",
+    "behavior.extension-publication",
+    "rule.permission-effect-order"
+  ],
+  "limitations": [
+    "Current7110 native observation only; original unavailable history, old executions and old reviews are not reconstructed or reexecuted.",
+    "Current source/test/limit mapping is in evidence.framework-history-current-reobservation; full05 is existing execution, not a newly run historical command.",
+    "Prior SDK source paths moved to the independent accepted SDK product; current SDK runtime/inventory acceptance remains unverified by this F observation."
+  ]
+}
 ---
+
+# Current observation and historical record
+
+The machine header now records only the bounded native observation at `7110a27e7b0e9841dcfa0d4cca1cdbc053d96177`; current source/tests and limitations are in `evidence.framework-history-current-reobservation`. Original observation `72d1fccf74b85afe9a74e684ca3748b64642affb` and its complete metadata remain in [the immutable875 document](https://github.com/EchoYue-lp/echo-agent/blob/875cc22f2e99c7ccd83c07e02c03fe221c5e3f6c/.echo-semantic/evidence/evidence.mcp-tool-local-classification-verification.md). The original execution counts, before/after claims and review prose below are preserved verbatim as historical statements, not rerun or equivalence claims for7110.
+
+The former F references `echo-sdk-protocol/tests/facade_inventory.rs` belong to the independent SDK accepted-contract owner. These obligations remain in scope there; the common current evidence gives stable019e source links and the old7f14 execution epoch, while new SDK Host/three-language acceptance is unverified here.
+
 
 # MCP Tool 本地分类验证证据
 

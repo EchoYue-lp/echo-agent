@@ -1,32 +1,44 @@
 ---
-schema_version: 1
-id: evidence.skill-activation-authority-repair
-kind: evidence
-observed_at: 8b912e97840b000adf6d844c805508aa5f18a2c8
-source_refs:
-  - echo-execution/src/skills/registry.rs
-  - echo-execution/src/skills/mod.rs
-  - echo-execution/src/skills/external/activate_tool.rs
-  - echo-execution/src/skills/external/resource_tool.rs
-  - echo-execution/src/skills/external/run_script_tool.rs
-  - src/skills/mod.rs
-  - src/agent/react/capabilities.rs
-  - src/agent/react/mod.rs
-  - src/agent/react/run/context.rs
-  - src/agent/react/tests.rs
-  - src/agent/snapshot.rs
-  - echo-sdk-host/src/core_profile/facade/source_operations.rs
-  - echo-sdk-protocol/src/facade.rs
-  - CHANGELOG.md
-  - docs/adr/0044-skill-activation-authority.md
-  - docs/en/07-skills.md
-  - docs/zh/07-skills.md
-supports: [behavior.extension-publication, rule.extension-generation-authority]
-limitations:
-  - Catalog descriptors and prepared documents remain copied into the concurrent tool adapter because their lookup and mutation contracts differ from runtime activation
-  - Checkpoint restore re-establishes installed names and descriptor-derived policy but does not replay inline commands or recreate missing definitions
-  - A restored active Skill has no process-local cached activation content; explicit reactivation fails closed until reset rather than replaying an uncertain effect
+{
+  "schema_version": 1,
+  "id": "evidence.skill-activation-authority-repair",
+  "kind": "evidence",
+  "observed_at": "7110a27e7b0e9841dcfa0d4cca1cdbc053d96177",
+  "source_refs": [
+    "echo-execution/src/skills/registry.rs",
+    "echo-execution/src/skills/mod.rs",
+    "echo-execution/src/skills/external/activate_tool.rs",
+    "echo-execution/src/skills/external/resource_tool.rs",
+    "echo-execution/src/skills/external/run_script_tool.rs",
+    "src/skills/mod.rs",
+    "src/agent/react/capabilities.rs",
+    "src/agent/react/mod.rs",
+    "src/agent/react/run/context.rs",
+    "src/agent/react/tests.rs",
+    "src/agent/snapshot.rs",
+    "CHANGELOG.md",
+    "docs/adr/0044-skill-activation-authority.md",
+    "docs/en/07-skills.md",
+    "docs/zh/07-skills.md"
+  ],
+  "supports": [
+    "behavior.extension-publication",
+    "rule.extension-generation-authority"
+  ],
+  "limitations": [
+    "Current7110 native observation only; original unavailable history, old executions and old reviews are not reconstructed or reexecuted.",
+    "Current source/test/limit mapping is in evidence.framework-history-current-reobservation; full05 is existing execution, not a newly run historical command.",
+    "Prior SDK source paths moved to the independent accepted SDK product; current SDK runtime/inventory acceptance remains unverified by this F observation."
+  ]
+}
 ---
+
+# Current observation and historical record
+
+The machine header now records only the bounded native observation at `7110a27e7b0e9841dcfa0d4cca1cdbc053d96177`; current source/tests and limitations are in `evidence.framework-history-current-reobservation`. Original observation `8b912e97840b000adf6d844c805508aa5f18a2c8` and its complete metadata remain in [the immutable875 document](https://github.com/EchoYue-lp/echo-agent/blob/875cc22f2e99c7ccd83c07e02c03fe221c5e3f6c/.echo-semantic/evidence/evidence.skill-activation-authority-repair.md). The original execution counts, before/after claims and review prose below are preserved verbatim as historical statements, not rerun or equivalence claims for7110.
+
+The former F references `echo-sdk-host/src/core_profile/facade/source_operations.rs`, `echo-sdk-protocol/src/facade.rs` belong to the independent SDK accepted-contract owner. These obligations remain in scope there; the common current evidence gives stable019e source links and the old7f14 execution epoch, while new SDK Host/three-language acceptance is unverified here.
+
 
 # Skill activation 唯一权威修复证据
 

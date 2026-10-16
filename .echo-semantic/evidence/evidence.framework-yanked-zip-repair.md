@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.framework-yanked-zip-repair
 kind: evidence
-observed_at: source:d05de8aeb8655e4bc78aa98764cb6e04421860a891a734821c24327d5f3559e3
+observed_at: 7110a27e7b0e9841dcfa0d4cca1cdbc053d96177
 source_refs:
 - Cargo.toml
 - Cargo.lock
@@ -30,7 +30,7 @@ supports:
 - behavior.workspace-composition
 - rule.framework-layer-ownership
 limitations:
-- Candidate media compatibility and independent metadata resolution are not full workspace gates, SDK consumer compilation or exact merged-main CI.
+- Local full6+independent17 qualify exact7110 source; exact merged-main CI and SDK/CLI consumer compilation remain separate.
 - Standard Git HTTPS fetch failed; local audit/deny used caches independently verified before and after against the live official GitHub API HEAD and tree, without stale/no-yanked/new-ignore flags. Exact main CI must still run its original online commands.
 - Current ZIP9 name decoding is total over UTF8/CP437 bytes; the fallible iterator error propagation is source-checked, not claimed executed by a fabricated input.
 - Registry publication is not qualified; normal path stripping would select the original registry parent constraints.
@@ -68,3 +68,12 @@ Independent final bounded source/necessity review passed C0/I0/M0 at freeze4; se
 
 
 Final import whitespace check rejected four upstream extra EOF blank lines. Only those terminal newlines were removed from the two README files, CHANGELOG and LICENSE_MIT; license terms and every production Rust byte are unchanged from the reviewed source. The final vendor import has13 differences and436 byte-identical original files; the earlier candidate9/440 statement remains historical. This is packaging normalization, not an audit waiver or a new media behavior.
+
+
+## Current local full qualification
+
+At public7110a27e7b0e9841dcfa0d4cca1cdbc053d96177/treec4633e8d344e98096d619a34909ce2f8e05240d8, all six prescribed workspace gates and all17 independent features actually exited0. All23 raw files are complete/noTrunc/noSignal, no compiler warnings, and all1763 non-semantic inputs match before/after and across every command. The profile is jobs1/debug0/strip symbols/incremental0 with one target. The source digest remains d05de8aeb8655e4bc78aa98764cb6e04421860a891a734821c24327d5f3559e3. This Git observation fixes the actual execution epoch; later semantic-only changes are not new test epochs.
+
+Full tests have89 result blocks: raw3624pass/0fail/3ignored, including the same two echo_state file_lease_child_process singleton results. Excluding their duplicate count gives3622 main passes/0fail/3 existing opt-in live tests (LSP, scholarly providers and credentialed Zotero). Python origin guards8/0 and focused media2/0 are separate scopes, not added to the Rust total. Ignored raw index full23-actual-summary1.json binds every command, log SHA/bytes and source guard; full05-results-analysis1.json records the row/child context.
+
+Peak target use was7896854528B; minimum available disk21954043904B. The official own-target cargo clean then exited0 (14547files/7.2GiB), target absent,2317 Git-visible sources and status unchanged; raw, immutable source/tooling and archives retained. The first process precheck failed closed on unrelated macOS ps non-UTF8 argument bytes before clean; the corrected bytes PID/comm-only check passed, not retroactively the first one. Exact mainCI's original online audit/deny and real SDK/CLI delivery remain pending, so the task Finding stays open.

@@ -13,6 +13,7 @@ behavior_refs:
 rule_refs:
 - rule.framework-layer-ownership
 evidence_refs:
+- evidence.framework-history-current-reobservation
 - evidence.framework-yanked-zip-repair
 - evidence.workspace-structure
 - evidence.telemetry-subscriber-composition-repair
@@ -32,6 +33,7 @@ evidence_refs:
 - evidence.framework-dependency-final-full-verification
 - evidence.framework-dependency-final-gate-archive
 finding_refs:
+- finding.framework-historical-source-observation-retention
 - finding.framework-yanked-zip-ci
 - finding.workspace-topology-doc-drift
 - finding.public-feature-table-drift
@@ -39,6 +41,7 @@ finding_refs:
 - finding.semantic-baseline-squash-ancestry
 - finding.framework-dependency-policy-ci
 audit_refs:
+- audit.framework-history-current-reobservation
 - audit.framework-yanked-zip-source-review
 - audit.workspace-architecture.contract-evidence
 - audit.workspace-topology-doc-rereview
@@ -79,8 +82,8 @@ scenarios:
     - evidence.framework-yanked-zip-repair
     finding_refs:
     - finding.framework-yanked-zip-ci
-    unknown: Focused media/source checks do not establish complete gates or exact merged-main dependency-policy CI.
-    next_step: Complete the newly adopted lock's full6 and independent17 gates, independent final review and exact main CI.
+    unknown: Local23 qualifies exact7110; exact merged-main dependency-policy CI and consumer delivery remain pending.
+    next_step: Confirm the final published main CI and each consumer using its own actual lock and the canonical origin helper.
   telemetry-subscriber-composition:
     status: needs_review
     source_refs:

@@ -21,7 +21,8 @@ audit_refs:
 decision_refs: []
 repair_evidence_refs:
 - evidence.framework-yanked-zip-repair
-verification_evidence_refs: []
+verification_evidence_refs:
+- evidence.framework-yanked-zip-repair
 rereview_audit_refs:
 - audit.framework-yanked-zip-source-review
 discovered_at: 875cc22f2e99c7ccd83c07e02c03fe221c5e3f6c
@@ -47,3 +48,8 @@ Root批准最小原版本源码适配：449必要vendor文件、原许可证、�
 
 
 The source-adoption review found official scanners skip path/Git packages. This side effect is repaired by one canonical framework registry-origin audit view, with strict owner/source/version/checksum guards and unchanged actual build lock. Real historical quinn advisories prove the scanner control; no media CVE is invented. Eight persistent guards and the official origin-view scans passed; final review, full gates and mainCI remain pending.
+
+
+## Current qualification and tracker
+
+[GitHub Issue188](https://github.com/EchoYue-lp/echo-agent/issues/188) is the unique external tracker. Earlier processing paragraphs describe development checkpoints. Current exact7110 code has all6+17 local gates0, Rust3622/0/3 existing opt-in ignored (children not double-counted), unchanged1763 source inputs and independent source/coverage review0. Evidence/Audit carry the bounded receipts. Status remains open until the exact new main dependency-policy/CI and delivery are confirmed; no old PR181 Finding is rewritten.

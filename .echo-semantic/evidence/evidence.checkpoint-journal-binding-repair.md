@@ -1,23 +1,34 @@
 ---
-schema_version: 1
-id: evidence.checkpoint-journal-binding-repair
-kind: evidence
-observed_at: dcd25a8a19c21c3247965e527684d89c96d68ac7
-source_refs:
-  - echo-state/src/journal/mod.rs
-  - echo-state/src/journal/file.rs
-  - echo-state/src/journal/segmented.rs
-  - src/state/mod.rs
-  - tests/acp_agent_adapter.rs
-  - docs/en/41-persistence-concepts.md
-  - docs/zh/41-persistence-concepts.md
-  - docs/adr/0055-checkpoint-journal-identity.md
-supports: [behavior.observation-persistence, rule.fact-projection-separation]
-limitations:
-  - full workspace all-feature integration gate and remote CI remain pending for the final delivery branch
-  - independent source and incremental test reviews passed; the revision-bound rereview Audit covers the implementation candidate but not the final cross-task delivery branch
-  - schema version 1 Journal and checkpoint files are rejected rather than migrated during the current pre-stable development phase
+{
+  "schema_version": 1,
+  "id": "evidence.checkpoint-journal-binding-repair",
+  "kind": "evidence",
+  "observed_at": "7110a27e7b0e9841dcfa0d4cca1cdbc053d96177",
+  "source_refs": [
+    "echo-state/src/journal/mod.rs",
+    "echo-state/src/journal/file.rs",
+    "echo-state/src/journal/segmented.rs",
+    "src/state/mod.rs",
+    "tests/acp_agent_adapter.rs",
+    "docs/en/41-persistence-concepts.md",
+    "docs/zh/41-persistence-concepts.md",
+    "docs/adr/0055-checkpoint-journal-identity.md"
+  ],
+  "supports": [
+    "behavior.observation-persistence",
+    "rule.fact-projection-separation"
+  ],
+  "limitations": [
+    "Current7110 native observation only; original unavailable history, old executions and old reviews are not reconstructed or reexecuted.",
+    "Current source/test/limit mapping is in evidence.framework-history-current-reobservation; full05 is existing execution, not a newly run historical command."
+  ]
+}
 ---
+
+# Current observation and historical record
+
+The machine header now records only the bounded native observation at `7110a27e7b0e9841dcfa0d4cca1cdbc053d96177`; current source/tests and limitations are in `evidence.framework-history-current-reobservation`. Original observation `dcd25a8a19c21c3247965e527684d89c96d68ac7` and its complete metadata remain in [the immutable875 document](https://github.com/EchoYue-lp/echo-agent/blob/875cc22f2e99c7ccd83c07e02c03fe221c5e3f6c/.echo-semantic/evidence/evidence.checkpoint-journal-binding-repair.md). The original execution counts, before/after claims and review prose below are preserved verbatim as historical statements, not rerun or equivalence claims for7110.
+
 
 # Checkpoint 与 Journal generation 绑定修复证据
 

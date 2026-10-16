@@ -1,21 +1,33 @@
 ---
-schema_version: 1
-id: evidence.hook-permission-precedence-repair
-kind: evidence
-observed_at: eadf1a3d5a498bdbccd3742a7e1a457cb27b172d
-source_refs:
-  - echo-execution/src/skills/hooks.rs
-  - src/agent/react/run/pipeline.rs
-  - docs/en/07-skills.md
-  - docs/en/23-hooks.md
-  - docs/zh/07-skills.md
-  - docs/zh/23-hooks.md
-supports: [behavior.effect-permission-execution, behavior.extension-publication, rule.permission-effect-order]
-limitations:
-  - 本修复只改变 Agent 自动工具 Hook 的 permission action 归约；不改变 direct-user、终端、文件选择器或 MCP 连接入口
-  - deny 仍在最高优先级决策已确定后阻断后续 Hook 执行；其它非 permission action 不因本修复获得新的执行保证
-  - 完整 workspace 门禁、远端 CI 和主线语义快照刷新由集成分支统一执行
+{
+  "schema_version": 1,
+  "id": "evidence.hook-permission-precedence-repair",
+  "kind": "evidence",
+  "observed_at": "7110a27e7b0e9841dcfa0d4cca1cdbc053d96177",
+  "source_refs": [
+    "echo-execution/src/skills/hooks.rs",
+    "src/agent/react/run/pipeline.rs",
+    "docs/en/07-skills.md",
+    "docs/en/23-hooks.md",
+    "docs/zh/07-skills.md",
+    "docs/zh/23-hooks.md"
+  ],
+  "supports": [
+    "behavior.effect-permission-execution",
+    "behavior.extension-publication",
+    "rule.permission-effect-order"
+  ],
+  "limitations": [
+    "Current7110 native observation only; original unavailable history, old executions and old reviews are not reconstructed or reexecuted.",
+    "Current source/test/limit mapping is in evidence.framework-history-current-reobservation; full05 is existing execution, not a newly run historical command."
+  ]
+}
 ---
+
+# Current observation and historical record
+
+The machine header now records only the bounded native observation at `7110a27e7b0e9841dcfa0d4cca1cdbc053d96177`; current source/tests and limitations are in `evidence.framework-history-current-reobservation`. Original observation `eadf1a3d5a498bdbccd3742a7e1a457cb27b172d` and its complete metadata remain in [the immutable875 document](https://github.com/EchoYue-lp/echo-agent/blob/875cc22f2e99c7ccd83c07e02c03fe221c5e3f6c/.echo-semantic/evidence/evidence.hook-permission-precedence-repair.md). The original execution counts, before/after claims and review prose below are preserved verbatim as historical statements, not rerun or equivalence claims for7110.
+
 
 # Hook permission precedence 修复证据
 

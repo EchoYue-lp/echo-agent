@@ -1,52 +1,34 @@
 ---
-schema_version: 1
-id: evidence.workflow-entry-loop-authority-repair
-kind: evidence
-observed_at: c7e54e6785f85422af83d4b384f01c2493eddc79
-source_refs:
-  - echo-orchestration/src/workflow/graph.rs
-  - echo-orchestration/src/workflow/node.rs
-  - echo-orchestration/src/workflow/pipelines/data_pipeline.rs
-  - echo-orchestration/src/workflow/pipelines/writing_pipeline.rs
-  - docs/adr/0052-workflow-entry-loop-authority.md
-  - docs/en/17-graph-workflow.md
-  - docs/zh/17-graph-workflow.md
-supports: [behavior.task-subagent-execution]
-limitations:
-  - 完整workspace门禁、all-features与远端CI留给任务汇总分支
-  - 不修改CheckpointStore、SDK facade、Task DAG、DagWorkflow或Scheduler合同
-evidence_type: behavior_equivalence
-before_revision: c5f7688212d45d5bdcdbf60342605e8bfb176cae
-after_revision: c7e54e6785f85422af83d4b384f01c2493eddc79
-scenario_results:
-  four-entry-routing-authority:
-    status: matched
-    source_refs: [echo-orchestration/src/workflow/graph.rs, docs/adr/0052-workflow-entry-loop-authority.md]
-  checkpoint-resume-settlement:
-    status: matched
-    source_refs: [echo-orchestration/src/workflow/graph.rs, echo-orchestration/src/workflow/checkpoint_store.rs]
-  workflow-event-terminal-order:
-    status: matched
-    source_refs: [echo-orchestration/src/workflow/graph.rs, echo-orchestration/src/workflow/mod.rs]
-  agent-token-and-final-state:
-    status: matched
-    source_refs: [echo-orchestration/src/workflow/node.rs, echo-orchestration/src/workflow/graph.rs]
-  agent-producer-cancellation:
-    status: matched
-    source_refs: [echo-orchestration/src/workflow/node.rs, echo-orchestration/src/workflow/graph.rs]
-command_results:
-  - command: "CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_BUILD_JOBS=2 cargo test -p echo_orchestration --lib workflow:: --locked"
-    exit_code: 0
-  - command: "CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_BUILD_JOBS=2 cargo test -p echo-agent-learning --test example_contracts contract_demo34_workflow_stream --locked"
-    exit_code: 0
-  - command: "CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_BUILD_JOBS=2 cargo test -p echo-agent-learning --test example_contracts --features testing contract_demo39_workflow --locked"
-    exit_code: 0
-coverage:
-  - Fresh run, interruptible run, claimed resume, and public stream delegation
-  - Linear, conditional, loop, fan-out, finish, cancellation, timeout, and checkpoint continuation
-  - Token, NodeError, NodeEnd, Completed, path, step, and SharedState ordering
-  - Agent producer cancellation on stream drop, Graph cancel, timeout, and sibling failure
+{
+  "schema_version": 1,
+  "id": "evidence.workflow-entry-loop-authority-repair",
+  "kind": "evidence",
+  "observed_at": "7110a27e7b0e9841dcfa0d4cca1cdbc053d96177",
+  "source_refs": [
+    "echo-orchestration/src/workflow/graph.rs",
+    "echo-orchestration/src/workflow/node.rs",
+    "echo-orchestration/src/workflow/pipelines/data_pipeline.rs",
+    "echo-orchestration/src/workflow/pipelines/writing_pipeline.rs",
+    "docs/adr/0052-workflow-entry-loop-authority.md",
+    "docs/en/17-graph-workflow.md",
+    "docs/zh/17-graph-workflow.md",
+    "echo-orchestration/src/workflow/checkpoint_store.rs",
+    "echo-orchestration/src/workflow/mod.rs"
+  ],
+  "supports": [
+    "behavior.task-subagent-execution"
+  ],
+  "limitations": [
+    "Current7110 native observation only; original unavailable history, old executions and old reviews are not reconstructed or reexecuted.",
+    "Current source/test/limit mapping is in evidence.framework-history-current-reobservation; full05 is existing execution, not a newly run historical command."
+  ]
+}
 ---
+
+# Current observation and historical record
+
+The machine header now records only the bounded native observation at `7110a27e7b0e9841dcfa0d4cca1cdbc053d96177`; current source/tests and limitations are in `evidence.framework-history-current-reobservation`. Original observation `c7e54e6785f85422af83d4b384f01c2493eddc79` and its complete metadata remain in [the immutable875 document](https://github.com/EchoYue-lp/echo-agent/blob/875cc22f2e99c7ccd83c07e02c03fe221c5e3f6c/.echo-semantic/evidence/evidence.workflow-entry-loop-authority-repair.md). The original execution counts, before/after claims and review prose below are preserved verbatim as historical statements, not rerun or equivalence claims for7110.
+
 
 # Workflow 入口循环权威修复证据
 

@@ -1,22 +1,37 @@
 ---
-schema_version: 1
-id: audit.mcp-protocol-negotiation-rereview
-kind: audit
-boundary_ref: boundary.extension-lifecycle
-lens: contract_evidence
-freshness: examined
-revision: eadf1a3d5a498bdbccd3742a7e1a457cb27b172d
-finding_refs: [finding.mcp-version-doc-drift]
-challenges:
-  supported-version-selection:
-    revision: eadf1a3d5a498bdbccd3742a7e1a457cb27b172d
-    source_refs: [echo-integration/src/mcp/client.rs, echo-integration/src/mcp/types.rs]
-    evidence_refs: [evidence.mcp-protocol-negotiation-repair, evidence.mcp-protocol-negotiation-verification]
-  unknown-version-settlement:
-    revision: eadf1a3d5a498bdbccd3742a7e1a457cb27b172d
-    source_refs: [echo-integration/src/mcp/client.rs, docs/en/08-mcp.md, docs/zh/08-mcp.md]
-    evidence_refs: [evidence.mcp-protocol-negotiation-repair, evidence.mcp-protocol-negotiation-verification]
+{
+  "schema_version": 1,
+  "id": "audit.mcp-protocol-negotiation-rereview",
+  "kind": "audit",
+  "boundary_ref": "boundary.extension-lifecycle",
+  "lens": "contract_evidence",
+  "freshness": "examined",
+  "revision": "7110a27e7b0e9841dcfa0d4cca1cdbc053d96177",
+  "finding_refs": [
+    "finding.mcp-version-doc-drift",
+    "finding.framework-historical-source-observation-retention"
+  ],
+  "challenges": {
+    "current-native-source-and-existing-regressions": {
+      "revision": "7110a27e7b0e9841dcfa0d4cca1cdbc053d96177",
+      "source_refs": [
+        "echo-integration/src/mcp/client.rs",
+        "echo-integration/src/mcp/types.rs",
+        "docs/en/08-mcp.md",
+        "docs/zh/08-mcp.md"
+      ],
+      "evidence_refs": [
+        "evidence.framework-history-current-reobservation"
+      ]
+    }
+  }
+}
 ---
+
+# Current observation and historical record
+
+The machine header now records only the bounded native observation at `7110a27e7b0e9841dcfa0d4cca1cdbc053d96177`; current source/tests and limitations are in `evidence.framework-history-current-reobservation`. Original observation `eadf1a3d5a498bdbccd3742a7e1a457cb27b172d` and its complete metadata remain in [the immutable875 document](https://github.com/EchoYue-lp/echo-agent/blob/875cc22f2e99c7ccd83c07e02c03fe221c5e3f6c/.echo-semantic/audits/audit.mcp-protocol-negotiation-rereview.md). The original execution counts, before/after claims and review prose below are preserved verbatim as historical statements, not rerun or equivalence claims for7110.
+
 
 # MCP protocol negotiation 独立复审
 
