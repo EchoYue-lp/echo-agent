@@ -10,8 +10,8 @@ and its linked design; this file records delivery progress only.
 | Local Run observation isolation | Implemented | Same two cases pass; expanded ACP integration 29 pass |
 | Waiter and receipt priority | Complete | 43 ACP unit tests pass; existing/later waiters, receipt-only wait, receipt priority and stale-error rejection |
 | Independent implementation review | Complete | Zero Critical/Important/Minor findings; focused clippy passes with warnings denied |
-| Full gates and feature matrix | Pending | Merge latest main, six required workspace gates and standalone feature checks |
-| PR / exact main | Pending | Squash after independent review; verify exact merged-main CI |
+| Full gates and feature matrix | Complete | Latest main9886502 merged; six workspace gates and 17 standalone features pass, zero warnings/source drift |
+| PR / exact main | In review | PR191, published checkpoint30b9bf05; squash only after final review, then verify exact merged-main CI |
 
 The canonical production path is still `AcpConnectionServices::prepare_run` /
 `RunEntry` / `AgentTurnDriver`; standard Prompt consumes the Run's fallible
@@ -24,6 +24,17 @@ call sites need no change and are compiled by the full all-target gates. The
 website has no new product feature or wire contract to describe; no website
 change is required. SDK/CLI consumer validation stays separately owned.
 
-Current next step: qualify the semantic task evidence and publish the first
-source checkpoint; then run full final gates. Local raw artifacts
-remain ignored and must not be staged.
+Full all-target/all-feature tests: 3,627 passed / 0 failed / 3 ignored across
+87 top-level harness summaries. Two real `echo_state` child-process harnesses
+each passed one test (382 filtered each), counted separately. The three existing
+ignored tests require installed LSP, live scholarly providers or Zotero credentials.
+
+The accepted c0bc semantic validator passed strict source and base9886502
+change-evidence qualification on a clean independent Git candidate identical to
+the delivery tree. Installed0.5 task validation separately exposed historical
+reference errors and a bounded-reference-closure limit; no native Hook/Stop
+success is claimed and no historical material or tool limit is rewritten.
+
+Current next step: commit the final thin validation record, complete final
+review and squash PR191, then verify the exact merged-main CI. Local raw
+artifacts remain ignored and must not be staged.

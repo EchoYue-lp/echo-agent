@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.acp-run-task-error-isolation
 kind: evidence
-observed_at: source:1744259e3d9571ddb65a2fe542c858bc87acee1ad0243d3e50e14a97aecda72f
+observed_at: source:2a003bba7a854b548d1e65040aa00d0390af215d9f1114d5755cd6a9563197a2
 source_refs:
 - src/acp/runtime.rs
 - src/acp/adapter.rs
@@ -20,7 +20,7 @@ supports:
 limitations:
 - Task-scoped ACP repair only; global semantic closure is not checked.
 - SDK immutable-Host and three-language consumer qualification require their own exact framework pin.
-- Full workspace gates, standalone features and exact merged-main CI remain pending at this checkpoint.
+- Exact merged-main CI and independently owned SDK pin qualification remain pending at this pre-merge checkpoint.
 ---
 
 # ACP Run observation is not a connection-fatal task error
@@ -77,7 +77,41 @@ The ACP unit suite subsequently passed 43/43, including concurrent and later
 observers, receipt-only pending behavior, committed receipt priority and rejection
 of a late observation. Focused clippy passed with `-D warnings`. Independent
 implementation review passed with zero Critical/Important/Minor findings.
-These focused results do not replace the pending full gates, standalone feature
-matrix, SDK pin validation or exact merged-main CI. The installed semantic task
-validator's historical-reference diagnostics are tracked independently; no old
-semantic object is rewritten to make that tool accept a historical path.
+These focused results do not replace SDK pin validation or exact merged-main CI.
+
+## 最终本地资格
+
+All six required workspace gates and all 17 standalone feature checks passed
+on the frozen Rust/Cargo inputs committed as `30b9bf05`. Commands are exactly
+the repository AGENTS matrix: fmt, fmt check, workspace/all-target/all-feature
+clippy with warnings denied, production panic-class clippy, workspace/all-target/
+all-feature locked tests, workspace/lib/no-default locked check; then individual
+`cargo check -p echo_agent --no-default-features --features <feature> --locked`
+for acp, a2a, mcp, lsp, sqlite, telemetry, topology, subagent, web, media, data,
+statistics, channels, git, database, rag and chart. All 23 commands exited zero,
+with zero warnings and unchanged Rust/Cargo inputs. Only resource settings
+jobs1, incremental0, debug0 and stripped symbols were applied; assertions,
+overflow checks and panic behavior were not overridden.
+
+Full tests: 87 top-level harness summaries, 3,627 passed / 0 failed / 3 ignored.
+Two nested `echo_state` file-lease subprocesses each passed one test, each with
+382 filtered; they are not added again to the top-level count. Existing ignored
+tests require installed LSP, online scholarly providers or Zotero credentials.
+The full-test raw has 376,026 bytes and SHA-256
+`7581e998aa7e23513f7cb788deaf50d6e573f8f3aff775a20cecd1bd36d34655`.
+
+The accepted c0bc306b semantic validator, verified against its clean Git blob,
+passed strict-source and base9886502 change-evidence qualification on the clean
+independent Git candidate with the exact staged delivery tree. The old workspace
+map's `source:d05...` was proven identical to exact public9886502 and rebound to
+that recoverable historical commit; its claims and historical epoch are unchanged.
+Only the baseline's necessary current source digest/base metadata is refreshed.
+
+Installed0.5 task checks remain distinct: the new Evidence's three required
+headings were corrected; 551 historical missing-path errors disappeared under
+the read-only historical-reference candidate. Its remaining 211 owner-map errors
+were narrowed by declaring the existing direct maps, exposing the task closure
+budget (29 diagnostics). No tool budget, old semantic claims or native receipts
+were altered to make that task mode pass. This source-tree qualification is not
+a claim of installed Hook/Stop success, global behavioral closure, SDK consumer
+success or merged-main CI. Raw attempts and classification remain ignored locally.
