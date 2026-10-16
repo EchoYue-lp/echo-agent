@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.workflow-observation-negative-controls
 kind: evidence
-observed_at: source:77d8b6e0696f0e1fc7fd8a486a2aa6e7ffcce0df90bf331e5ca39da934ef0e47
+observed_at: source:5d89e64c394894674208e32f5978a76c16e4c26081038a4378fe62dccf16908d
 source_refs:
 - echo-orchestration/src/workflow/graph.rs
 - echo-orchestration/src/workflow/node.rs
@@ -15,7 +15,7 @@ supports:
 - rule.turn-terminal-authority
 limitations:
 - Two new named Graph scenarios use the same MemoryCheckpointStore instance; they do not add File, restart, remote Store or power-loss evidence.
-- Focused tests only; complete new-source merge gates, exact main CI and SDK/CLI pin qualification remain separate.
+- All six local workspace gates passed on the frozen code; exact merged-main CI and independently owned SDK/CLI pin qualification remain separate.
 - No production code, public API, state authority, checkpoint format or accepted SDK contract changes.
 ---
 
@@ -84,3 +84,28 @@ candidate with `--strict-snapshot`, then `--strict-snapshot --base 6563d265...
 0.5 native Hook/Stop receipt or new main acceptance. Tested and final source
 snapshots differ only in thin current documentation; all1023 Rust/Cargo inputs,
 including the full Graph fixture, remain byte-identical to the executed controls.
+
+## 完整本地门禁
+
+All six repository workspace gates passed on the same frozen1023 Rust/Cargo
+inputs: `cargo fmt --all`, fmt check, all-target/all-feature Clippy with warnings
+denied, production four panic-class Clippy, the full all-target/all-feature
+locked tests, and the workspace/lib/no-default-feature locked check. Each raw
+receipt exits0 without warning, truncation or input drift. These are fresh
+results for the two added Graph tests, not reused from the earlier ACP delivery.
+
+Full tests: 87 top-level harness summaries, 3629 passed / 0 failed / 3 existing
+live ignored tests (installed LSP, scholarly providers, Zotero credentials).
+Two `echo_state` child-process harnesses each passed one test with382 filtered;
+they are not counted again in the top-level total. Both new Graph named cases
+actually report `ok` in the full suite. Raw379245 bytes, SHA-256
+`449a49eeaee20112e8d130d4684061f1af2fafa5ee76a5bfc0c7981aa87e8258`.
+Full-test peak target7087173632 bytes, minimum free9486630912 bytes; neither
+the9GiB target bound nor the5GiB free floor was reached.
+
+No manifest, feature topology, public API or production branch changed, so the
+standalone feature matrix is not triggered by this test-only slice. Current
+documentation and semantic metadata are qualified on the final exact Git tree;
+all1023 executed Rust/Cargo inputs remain byte-identical. Formal source references
+use main ancestor6563 or the final current source snapshot, so no historical
+source lookup depends on deleting this task branch or a PR-only commit.

@@ -116,3 +116,5 @@ Finding仍open：当前最终6+17尚未重跑、SDK注册Store/三语Host与CLI�
 6563基础上，原Graph live-source fixture新增foreign→matching→localterminal→EOF与matching→terminal→latestUnknown→EOF两具名case，生产Graph/node/store未改。新五控5/0/0、workflow子集93/0/0实际通过并保原源/claim/内存输出与同实例checkpoint断言；详情绑定evidence.workflow-observation-negative-controls。前文“专例未单独跑”继续描述原历史切点，不再代表本补证缺失。
 
 本Finding仍open。新两case只补Memory同实例的Graph观察顺序覆盖，不新增File、跨重启、remoteStore、SDK/CLI或当前完整合并门禁资格，不以本次focused通过关闭整个跨仓交付Finding。
+
+本Graph测试增量的当前六条完整workspace门禁已按冻结的1023 Rust/Cargo输入实际全部0，主3629/0/3、两个nested各1单列；新增两具名case在全套实际执行。此结果补齐此前本测试分支的完整本地门禁资格，不新增运行时行为、状态或恢复保证。本Finding继续open：最终独审/必要性与精main CI、独立SDK/CLI消费者及其它未闭边界仍按各自证据验收。

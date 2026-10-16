@@ -69,3 +69,19 @@ is authorized during SDK/CLI's current build window.
 No public behavior/API changed, so existing product docs, examples and website
 need no new feature text or call-site changes. This current index and the thin
 Evidence/Audit/Finding chain record the added proof; raw runs and caches stay local.
+
+### Workflow complete local gates
+
+The coordinator subsequently scheduled all six required workspace gates on the
+same frozen1023 Rust/Cargo inputs; all passed without warning, truncation or
+source drift. Full all-target/all-feature tests: 3629 passed / 0 failed / 3
+existing live ignored tests across87 top-level harness summaries; two real
+`echo_state` child-process tests each passed separately. Both new Graph controls
+are present as actual `ok` results. The test-only change triggers no public-API
+or feature-topology matrix.
+
+Only the thin final record and source snapshot metadata change after those
+executions; the1023 tested inputs remain identical. Final exact-Git semantic
+qualification, independent final review, file necessity and exact merged-main CI
+are the remaining delivery steps. SDK's accepted framework target remains6563;
+this test branch does not change consumer pins or close the broad Finding.
