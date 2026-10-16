@@ -111,8 +111,8 @@ async fn publish_completed_call(
     tx: &mpsc::Sender<Result<AgentEvent>>,
     call_id: &str,
     outcome: ToolCallOutcome,
-) -> Option<String> {
-    match outcome {
+) -> Result<Option<String>> {
+    Ok(match outcome {
         Ok(execution) => {
             let name = execution.name;
             let mut result = execution.result;
@@ -148,13 +148,20 @@ async fn publish_completed_call(
                 .await;
             (name == TOOL_FINAL_ANSWER).then_some(output)
         }
-        Err(error) => {
-            let name = error.name;
-            let message = error
-                .result
-                .error
-                .clone()
-                .unwrap_or_else(|| error.error.to_string());
+        Err(failure) => {
+            let crate::agent::snapshot::ToolCallFailure {
+                name,
+                error,
+                result,
+            } = failure;
+            if matches!(&error, ReactError::ExecutionNotSettled { .. }) {
+                return Err(error);
+            }
+            let result = match result {
+                Some(result) => result,
+                None => return Err(error),
+            };
+            let message = result.error.clone().unwrap_or_else(|| error.to_string());
             context.lock().await.push(Message::tool_result(
                 call_id.to_string(),
                 name.clone(),
@@ -164,12 +171,12 @@ async fn publish_completed_call(
                 .send(Ok(AgentEvent::ToolResult {
                     call_id: call_id.to_string(),
                     name,
-                    result: error.result,
+                    result,
                 }))
                 .await;
             None
         }
-    }
+    })
 }
 
 async fn close_cancelled_batch(
@@ -208,6 +215,7 @@ async fn close_failed_batch(
     success_count: usize,
     error: ReactError,
 ) -> Result<()> {
+    let terminal = AgentEvent::from_error("tool_batch", &error)?;
     let failure_count = tool_names.len().saturating_sub(success_count);
     snap.fire_post_tool_batch(tool_names, success_count, failure_count)
         .await;
@@ -219,9 +227,7 @@ async fn close_failed_batch(
     )
     .await;
     let _ = tx.send(Ok(AgentEvent::ToolBatchEnd)).await;
-    let _ = tx
-        .send(Ok(AgentEvent::from_error("tool_batch", &error)))
-        .await;
+    let _ = tx.send(Ok(terminal)).await;
     Ok(())
 }
 
@@ -233,7 +239,14 @@ async fn settle_interrupted_calls(
     completed: &mut CompletedToolCalls,
     emitted_invocations: &mut HashSet<String>,
     settlement: InterruptedSettlement<'_>,
-) -> PublishedWave {
+) -> Result<PublishedWave> {
+    // Refuse this wave's observation before publishing any captured result or
+    // synthesizing interrupted peer results into the transcript.
+    for (call_id, _, _) in calls {
+        if let Some((_, Err(failure))) = completed.get(call_id) {
+            crate::error::AgentFailure::try_from(&failure.error)?;
+        }
+    }
     let mut published = PublishedWave::default();
     for (call_id, name, input) in calls {
         if emitted_invocations.insert(call_id.clone()) {
@@ -252,7 +265,8 @@ async fn settle_interrupted_calls(
         }
         if let Some((_, outcome)) = completed.remove(call_id) {
             let succeeded = outcome.is_ok();
-            if let Some(answer) = publish_completed_call(snap, context, tx, call_id, outcome).await
+            if let Some(answer) =
+                publish_completed_call(snap, context, tx, call_id, outcome).await?
             {
                 published.final_answers.push(answer);
             }
@@ -286,7 +300,7 @@ async fn settle_interrupted_calls(
             .await;
         published.failures = published.failures.saturating_add(1);
     }
-    published
+    Ok(published)
 }
 
 #[derive(Clone, Copy)]
@@ -506,6 +520,8 @@ pub(crate) async fn run_tools(
                 let cancellation_grace = tokio::time::sleep(Duration::ZERO);
                 tokio::pin!(cancellation_grace);
                 let mut cancellation_observed = false;
+                let mut cancellation_grace_elapsed = false;
+                let mut batch_timed_out = false;
 
                 let mut stream_open = true;
                 while !futs.is_empty() || stream_open {
@@ -516,40 +532,12 @@ pub(crate) async fn run_tools(
                                 forward_pipeline_event(tx, &mut emitted_invocations, event).await;
                             }
                         },
-                        _ = &mut cancellation_grace, if cancellation_observed => {
+                        _ = &mut cancellation_grace, if cancellation_observed && !cancellation_grace_elapsed => {
+                            cancellation_grace_elapsed = true;
                             tracing::warn!(
                                 grace_ms = TOOL_CANCELLATION_GRACE_PERIOD.as_millis(),
-                                "tool batch cancellation grace period elapsed"
+                                "tool batch cancellation observation elapsed; retaining original executions"
                             );
-                            while let Ok(event) = stream_rx.try_recv() {
-                                forward_pipeline_event(tx, &mut emitted_invocations, event).await;
-                            }
-                            let mut ready = std::mem::take(
-                                &mut *completed.lock().unwrap_or_else(|error| error.into_inner()),
-                            );
-                            let published = settle_interrupted_calls(
-                                snap,
-                                context,
-                                tx,
-                                &remaining_calls,
-                                &mut ready,
-                                &mut emitted_invocations,
-                                InterruptedSettlement {
-                                    category: crate::tools::ToolFailureCategory::Cancelled,
-                                    message: "Tool call cancellation grace period elapsed",
-                                },
-                            ).await;
-                            batch_success_count = batch_success_count.saturating_add(published.successes);
-                            close_cancelled_batch(
-                                snap,
-                                context,
-                                tx,
-                                &batch_tool_names,
-                                batch_success_count,
-                            ).await?;
-                            return Ok(IterOutcome::TerminalSettled {
-                                outcome: crate::agent::AgentSteerTurnOutcome::Cancelled,
-                            });
                         }
                         _ = &mut cancel, if !cancellation_observed => {
                             cancellation_observed = true;
@@ -558,39 +546,12 @@ pub(crate) async fn run_tools(
                             );
                         },
                         _ = &mut timeout, if !cancellation_observed => {
-                            let error = ReactError::from(crate::error::ToolError::Timeout(
-                                "batch timeout".into()
-                            ));
-                            while let Ok(event) = stream_rx.try_recv() {
-                                forward_pipeline_event(tx, &mut emitted_invocations, event).await;
-                            }
-                            let mut ready = std::mem::take(
-                                &mut *completed.lock().unwrap_or_else(|error| error.into_inner()),
-                            );
-                            let published = settle_interrupted_calls(
-                                snap,
-                                context,
-                                tx,
-                                &remaining_calls,
-                                &mut ready,
-                                &mut emitted_invocations,
-                                InterruptedSettlement {
-                                    category: crate::tools::ToolFailureCategory::Timeout,
-                                    message: "Tool batch timeout elapsed",
-                                },
-                            ).await;
-                            batch_success_count = batch_success_count.saturating_add(published.successes);
-                            close_failed_batch(
-                                snap,
-                                context,
-                                tx,
-                                &batch_tool_names,
-                                batch_success_count,
-                                error,
-                            ).await?;
-                            return Ok(IterOutcome::TerminalSettled {
-                                outcome: crate::agent::AgentSteerTurnOutcome::Failed,
-                            });
+                            // Record the first cause, signal the original scope,
+                            // and keep polling the same owned futures to closure.
+                            batch_timed_out = true;
+                            cancellation_observed = true;
+                            cancellation_grace_elapsed = true;
+                            if let Some(cancel) = snap.cancel_token.as_ref() { cancel.cancel(); }
                         }
                         event = stream_rx.recv(), if stream_open => {
                             match event {
@@ -619,21 +580,39 @@ pub(crate) async fn run_tools(
                     &mut ready,
                     &mut emitted_invocations,
                     InterruptedSettlement {
-                        category: if cancellation_observed {
+                        category: if batch_timed_out {
+                            crate::tools::ToolFailureCategory::Timeout
+                        } else if cancellation_observed {
                             crate::tools::ToolFailureCategory::Cancelled
                         } else {
                             crate::tools::ToolFailureCategory::Unavailable
                         },
-                        message: if cancellation_observed {
+                        message: if batch_timed_out {
+                            "Tool batch timeout elapsed"
+                        } else if cancellation_observed {
                             "Tool call cancelled before returning a result"
                         } else {
                             "Tool call finished without a result"
                         },
                     },
                 )
-                .await;
+                .await?;
                 batch_success_count = batch_success_count.saturating_add(published.successes);
                 batch_failure_count = batch_failure_count.saturating_add(published.failures);
+                if batch_timed_out {
+                    close_failed_batch(
+                        snap,
+                        context,
+                        tx,
+                        &batch_tool_names,
+                        batch_success_count,
+                        ReactError::from(crate::error::ToolError::Timeout("batch timeout".into())),
+                    )
+                    .await?;
+                    return Ok(IterOutcome::TerminalSettled {
+                        outcome: crate::agent::AgentSteerTurnOutcome::Failed,
+                    });
+                }
                 if cancellation_observed {
                     close_cancelled_batch(
                         snap,
@@ -670,7 +649,7 @@ pub(crate) async fn run_tools(
                             message: "Tool batch cancelled before this call started",
                         },
                     )
-                    .await;
+                    .await?;
                     batch_success_count = batch_success_count.saturating_add(published.successes);
                     close_cancelled_batch(
                         snap,
@@ -701,43 +680,18 @@ pub(crate) async fn run_tools(
                 let cancellation_grace = tokio::time::sleep(Duration::ZERO);
                 tokio::pin!(cancellation_grace);
                 let mut cancellation_observed = false;
+                let mut cancellation_grace_elapsed = false;
                 let result = loop {
                     tokio::select! {
                         biased;
                         result = &mut execution => break result,
-                        _ = &mut cancellation_grace, if cancellation_observed => {
+                        _ = &mut cancellation_grace, if cancellation_observed && !cancellation_grace_elapsed => {
+                            cancellation_grace_elapsed = true;
                             tracing::warn!(
                                 tool = %fname,
                                 grace_ms = TOOL_CANCELLATION_GRACE_PERIOD.as_millis(),
-                                "tool cancellation grace period elapsed"
+                                "tool cancellation observation elapsed; retaining original execution"
                             );
-                            while let Ok(event) = stream_rx.try_recv() {
-                                forward_pipeline_event(tx, &mut emitted_invocations, event).await;
-                            }
-                            let mut completed = HashMap::new();
-                            let published = settle_interrupted_calls(
-                                snap,
-                                context,
-                                tx,
-                                &remaining_calls,
-                                &mut completed,
-                                &mut emitted_invocations,
-                                InterruptedSettlement {
-                                    category: crate::tools::ToolFailureCategory::Cancelled,
-                                    message: "Tool call cancellation grace period elapsed",
-                                },
-                            ).await;
-                            batch_success_count = batch_success_count.saturating_add(published.successes);
-                            close_cancelled_batch(
-                                snap,
-                                context,
-                                tx,
-                                &batch_tool_names,
-                                batch_success_count,
-                            ).await?;
-                            return Ok(IterOutcome::TerminalSettled {
-                                outcome: crate::agent::AgentSteerTurnOutcome::Cancelled,
-                            });
                         }
                         _ = async {
                             match snap.cancel_token.as_ref() {
@@ -776,7 +730,7 @@ pub(crate) async fn run_tools(
                         message: "Tool batch cancelled after this call completed",
                     },
                 )
-                .await;
+                .await?;
                 batch_success_count = batch_success_count.saturating_add(published.successes);
                 batch_failure_count = batch_failure_count.saturating_add(published.failures);
                 if cancellation_observed {
@@ -972,7 +926,7 @@ mod tests {
                 "rich-output",
                 Ok(outcome),
             )
-            .await;
+            .await?;
             let event = rx
                 .try_recv()
                 .map_err(|error| crate::error::ReactError::Other(error.to_string()))?;
@@ -1009,7 +963,7 @@ mod tests {
         let failure = crate::agent::snapshot::ToolCallFailure {
             name: "error_only".to_string(),
             error: crate::error::ReactError::Other("raw secret diagnostic".to_string()),
-            result: ToolResult::error("guarded diagnostic"),
+            result: Some(ToolResult::error("guarded diagnostic")),
         };
         let answer = publish_completed_call(
             &snapshot,
@@ -1018,7 +972,7 @@ mod tests {
             "error-only",
             Err(failure),
         )
-        .await;
+        .await?;
         assert!(answer.is_none());
         let event = rx
             .try_recv()
@@ -1174,7 +1128,7 @@ mod tests {
                 message: "batch timeout",
             },
         )
-        .await;
+        .await?;
         assert_eq!((published.successes, published.failures), (1, 2));
         assert_eq!(callback.interrupted.load(Ordering::SeqCst), 2);
         assert_eq!(callback.ordinary_errors.load(Ordering::SeqCst), 0);

@@ -55,9 +55,9 @@ use super::state::SharedState;
 use crate::human_loop::ApprovalDecision;
 use echo_core::agent::Agent;
 use echo_core::error::{AgentError, ReactError, Result};
-use futures::StreamExt;
 use futures::future::BoxFuture;
 use futures::stream::{BoxStream, FuturesUnordered};
+use futures::{FutureExt, StreamExt};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
@@ -615,8 +615,15 @@ impl GraphBuilder {
 
         Ok(Graph {
             name: self.name,
-            nodes: self.nodes,
-            edges: edge_map,
+            nodes: self
+                .nodes
+                .into_iter()
+                .map(|(name, node)| (name, Arc::new(node)))
+                .collect(),
+            edges: edge_map
+                .into_iter()
+                .map(|(name, edges)| (name, edges.into_iter().map(Arc::new).collect()))
+                .collect(),
             entry,
             finish_nodes: self.finish_nodes,
             max_steps: 100,
@@ -625,6 +632,8 @@ impl GraphBuilder {
             cancel_token: None,
             graph_revision,
             node_timeout: self.node_timeout,
+            #[cfg(test)]
+            before_stream_observation: None,
         })
     }
 
@@ -645,9 +654,9 @@ pub struct Graph {
     /// Graph name
     pub name: String,
     /// Node registry
-    nodes: HashMap<String, Node>,
+    nodes: HashMap<String, Arc<Node>>,
     /// Adjacency list: from -> [Edge]
-    edges: HashMap<String, Vec<Edge>>,
+    edges: HashMap<String, Vec<Arc<Edge>>>,
     /// Entry node
     entry: String,
     /// List of finish nodes
@@ -664,6 +673,8 @@ pub struct Graph {
     graph_revision: String,
     /// Optional per-node execution deadline.
     node_timeout: Option<Duration>,
+    #[cfg(test)]
+    before_stream_observation: Option<Arc<tokio::sync::Notify>>,
 }
 
 /// Graph execution result
@@ -677,7 +688,99 @@ pub struct GraphResult {
     pub steps: usize,
 }
 
+// This is invocation-local observation/cause state, never a checkpoint or
+// execution registry. The sole owned loop consumes the original error once.
+pub(crate) struct GraphExecutionControl {
+    pub(crate) cancel: CancellationToken,
+    run_id: std::sync::Mutex<Option<String>>,
+    attempt_id: std::sync::Mutex<Option<String>>,
+    pub(crate) operation_id: String,
+    cause: std::sync::Mutex<Option<(Option<String>, ReactError)>>,
+}
+
+pub(crate) enum GraphLoopOutcome {
+    Settled(Box<RunUntilInterruptResult>),
+    CauseRecorded,
+}
+
+impl GraphExecutionControl {
+    pub(crate) fn new(run_id: Option<String>) -> Arc<Self> {
+        Arc::new(Self {
+            cancel: CancellationToken::new(),
+            run_id: std::sync::Mutex::new(run_id),
+            attempt_id: std::sync::Mutex::new(None),
+            operation_id: uuid::Uuid::new_v4().to_string(),
+            cause: std::sync::Mutex::new(None),
+        })
+    }
+
+    fn bind_run(&self, run_id: &str) {
+        *self
+            .run_id
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(run_id.to_string());
+    }
+
+    pub(crate) fn run_id(&self) -> Option<String> {
+        self.run_id
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+
+    pub(crate) fn record_error(&self, node: Option<&str>, error: ReactError) {
+        let mut candidate = Some((node.map(str::to_string), error));
+        {
+            let mut cause = self.cause.lock().unwrap_or_else(|error| error.into_inner());
+            if cause.is_none() {
+                *cause = candidate.take();
+            }
+        }
+        drop(candidate);
+        self.cancel.cancel();
+    }
+
+    pub(crate) fn has_error(&self) -> bool {
+        self.cause
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .is_some()
+    }
+
+    fn node_error(&self, node: &str) -> Option<String> {
+        self.cause
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+            .and_then(|(origin, error)| {
+                (origin.as_deref() == Some(node)).then(|| error.to_string())
+            })
+    }
+
+    fn finish(&self, result: Result<GraphLoopOutcome>) -> Result<RunUntilInterruptResult> {
+        if let Err(error @ ReactError::ExecutionNotSettled { .. }) = result {
+            return Err(error);
+        }
+        let cause = self
+            .cause
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
+        if let Some((_, error)) = cause {
+            return Err(error);
+        }
+        match result {
+            Ok(GraphLoopOutcome::Settled(result)) => Ok(*result),
+            Ok(GraphLoopOutcome::CauseRecorded) => Err(ReactError::Other(
+                "Graph stopped without its recorded cause".into(),
+            )),
+            Err(error) => Err(error),
+        }
+    }
+}
+
 struct GraphExecution {
+    control: Arc<GraphExecutionControl>,
     state: SharedState,
     current: String,
     path: Vec<String>,
@@ -688,6 +791,79 @@ struct GraphExecution {
 }
 
 impl Graph {
+    fn retained_definition(&self) -> Self {
+        Self {
+            name: self.name.clone(),
+            nodes: self.nodes.clone(),
+            edges: self.edges.clone(),
+            entry: self.entry.clone(),
+            finish_nodes: self.finish_nodes.clone(),
+            max_steps: self.max_steps,
+            interrupt_config: self.interrupt_config.clone(),
+            checkpoint_store: self.checkpoint_store.clone(),
+            cancel_token: self.cancel_token.clone(),
+            graph_revision: self.graph_revision.clone(),
+            node_timeout: self.node_timeout,
+            #[cfg(test)]
+            before_stream_observation: self.before_stream_observation.clone(),
+        }
+    }
+
+    async fn observe_owned(
+        owner: tokio::task::JoinHandle<Result<GraphLoopOutcome>>,
+        control: Arc<GraphExecutionControl>,
+    ) -> Result<RunUntilInterruptResult> {
+        let guard = control.cancel.clone().drop_guard();
+        let result = match owner.await {
+            Ok(result) => control.finish(result),
+            Err(error) => match control.run_id() {
+                Some(run_id) => Err(ReactError::ExecutionNotSettled {
+                    run_id,
+                    execution_id: control
+                        .attempt_id
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .clone(),
+                }),
+                None => Err(ReactError::Other(format!(
+                    "Graph owner stopped before effect admission: {error}"
+                ))),
+            },
+        };
+        let _ = guard.disarm();
+        result
+    }
+
+    async fn run_owned(
+        &self,
+        state: SharedState,
+        honor_interrupts: bool,
+    ) -> Result<RunUntilInterruptResult> {
+        let runtime = tokio::runtime::Handle::try_current().map_err(|error| {
+            ReactError::Other(format!("Graph execution requires a Tokio runtime: {error}"))
+        })?;
+        let control = GraphExecutionControl::new(Some(uuid::Uuid::new_v4().to_string()));
+        let execution = self.fresh_execution(state, control.clone());
+        let owner = self.retained_definition();
+        let task = runtime
+            .spawn(async move { owner.execute_loop(execution, honor_interrupts, None).await });
+        Self::observe_owned(task, control).await
+    }
+
+    pub(crate) async fn run_nested(
+        &self,
+        state: SharedState,
+        control: Arc<GraphExecutionControl>,
+    ) -> Result<GraphLoopOutcome> {
+        self.execute_loop(self.fresh_execution(state, control), false, None)
+            .await
+    }
+
+    /// Whether this Graph's bound Store supports durable physical claim protection.
+    pub fn supports_protected_claims(&self) -> bool {
+        self.checkpoint_store.supports_protected_claims()
+    }
+
     fn emit_event(
         events: Option<&UnboundedSender<WorkflowEvent>>,
         event: WorkflowEvent,
@@ -706,47 +882,80 @@ impl Graph {
         node: &Node,
         state: &SharedState,
         events: Option<&UnboundedSender<WorkflowEvent>>,
-    ) -> Result<()> {
+        control: Arc<GraphExecutionControl>,
+    ) -> Result<bool> {
+        if control.cancel.is_cancelled() || self.is_cancelled() {
+            control.record_error(
+                Some(node_name),
+                ReactError::Agent(Box::new(AgentError::Cancelled(format!(
+                    "Graph '{}' cancelled before node admission",
+                    self.name
+                )))),
+            );
+            return Ok(false);
+        }
+        let node_cancel = control.cancel.child_token();
+        let execution_id = uuid::Uuid::new_v4().to_string();
         let execution = async {
-            let node_cancel = CancellationToken::new();
-            let cancel_guard = node_cancel.clone().drop_guard();
-            let mut tokens = node.execute_stream(state, node_cancel);
+            let mut tokens = node.execute_stream(
+                state,
+                node_cancel.clone(),
+                control.clone(),
+                node_name,
+                &execution_id,
+            );
+            let mut uncertainty = None;
             while let Some(token) = tokens.next().await {
-                let token = token?;
-                if let Some(events) = events {
-                    Self::emit_event(
-                        Some(events),
-                        WorkflowEvent::Token {
-                            node_name: node_name.to_string(),
-                            token,
-                        },
-                    )?;
+                match token {
+                    Ok(token) if !control.has_error() => {
+                        if let Err(error) = Self::emit_event(
+                            events,
+                            WorkflowEvent::Token {
+                                node_name: node_name.to_string(),
+                                token,
+                            },
+                        ) {
+                            control.record_error(Some(node_name), error);
+                            node_cancel.cancel();
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(error @ ReactError::ExecutionNotSettled { .. }) => {
+                        uncertainty = Some(error)
+                    }
+                    Err(error) => control.record_error(Some(node_name), error),
                 }
             }
-            let _ = cancel_guard.disarm();
-            Ok(())
-        };
-        let timed = async {
-            if let Some(timeout) = self.node_timeout {
-                tokio::time::timeout(timeout, execution)
-                    .await
-                    .map_err(|_| {
-                        ReactError::Other(format!("Workflow node timed out after {timeout:?}"))
-                    })?
-            } else {
-                execution.await
+            if let Some(error) = uncertainty {
+                return Err(error);
             }
-        };
-        if let Some(cancel) = &self.cancel_token {
-            tokio::select! {
-                result = timed => result,
-                () = cancel.cancelled() => Err(ReactError::Agent(Box::new(AgentError::Cancelled(
-                    format!("Graph '{}' node execution cancelled", self.name),
-                )))),
+            if let Some(message) = control.node_error(node_name)
+                && let Err(error) = Self::emit_event(
+                    events,
+                    WorkflowEvent::NodeError {
+                        node_name: node_name.to_string(),
+                        error: message,
+                    },
+                )
+            {
+                control.record_error(Some(node_name), error);
             }
-        } else {
-            timed.await
-        }
+            Ok(!control.has_error())
+        };
+        tokio::pin!(execution);
+        let deadline = self
+            .node_timeout
+            .and_then(|duration| tokio::time::Instant::now().checked_add(duration));
+        let interrupted = tokio::select! {
+            biased;
+            result = &mut execution => return result,
+            () = control.cancel.cancelled() => ReactError::Agent(Box::new(AgentError::Cancelled(format!("Graph '{}' node execution cancelled", self.name)))),
+            () = async { match &self.cancel_token { Some(token) => token.cancelled().await, None => std::future::pending().await } } => ReactError::Agent(Box::new(AgentError::Cancelled(format!("Graph '{}' node execution cancelled", self.name)))),
+            () = async { match deadline { Some(deadline) => tokio::time::sleep_until(deadline).await, None => std::future::pending().await } } => ReactError::Other(format!("Workflow node timed out after {:?}", self.node_timeout)),
+        };
+        control.record_error(Some(node_name), interrupted);
+        node_cancel.cancel();
+        execution.await
     }
 
     fn validate_checkpoint(&self, checkpoint: &Checkpoint) -> Result<()> {
@@ -824,7 +1033,8 @@ impl Graph {
         path: &mut Vec<String>,
         step_count: &mut usize,
         events: Option<&UnboundedSender<WorkflowEvent>>,
-    ) -> Result<()> {
+        control: Arc<GraphExecutionControl>,
+    ) -> Result<bool> {
         let remaining = self.max_steps.saturating_sub(*step_count);
         if targets.len() > remaining {
             return Err(ReactError::Agent(Box::new(
@@ -850,65 +1060,79 @@ impl Graph {
                 },
             )?;
         }
-        let route_cancel = CancellationToken::new();
+        let source_run = control
+            .run_id()
+            .ok_or_else(|| ReactError::Other("Graph fanout has no bound run identity".into()))?;
+        let source_attempt = control
+            .attempt_id
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
         let mut branch_results = vec![false; branches.len()];
         let mut pending = FuturesUnordered::new();
         for (index, (target_name, node, branch_state)) in branches.iter().enumerate() {
-            let branch_cancel = route_cancel.clone();
+            let control = control.clone();
             let target_name = target_name.clone();
+            let source_run = source_run.clone();
+            let source_attempt = source_attempt.clone();
             pending.push(async move {
                 let started = Instant::now();
-                let result = tokio::select! {
-                    result = self.execute_node(&target_name, node, branch_state, events) => result,
-                    () = branch_cancel.cancelled() => Err(ReactError::Agent(Box::new(
-                        AgentError::Cancelled("parallel sibling cancelled after branch failure".to_string()),
-                    ))),
+                // Consume the panicked future once. Its own Rust locals may
+                // already be unwound; that is not closure proof for its peer.
+                let result = match std::panic::AssertUnwindSafe(self.execute_node(
+                    &target_name,
+                    node,
+                    branch_state,
+                    events,
+                    control,
+                ))
+                .catch_unwind()
+                .await
+                {
+                    Ok(result) => result,
+                    Err(_) => Err(ReactError::ExecutionNotSettled {
+                        run_id: source_run,
+                        execution_id: source_attempt,
+                    }),
                 };
                 (index, target_name, started.elapsed(), result)
             });
         }
+        let mut uncertainty = None;
         while let Some((index, target_name, elapsed, result)) = pending.next().await {
             match result {
-                Ok(()) => {
+                Ok(true) => {
                     let completed = branch_results.get_mut(index).ok_or_else(|| {
                         ReactError::Other(
                             "Parallel branch index escaped its result set".to_string(),
                         )
                     })?;
                     *completed = true;
-                    Self::emit_event(
+                    if let Err(error) = Self::emit_event(
                         events,
                         WorkflowEvent::NodeEnd {
                             node_name: target_name,
                             step_index: step_count.saturating_add(index),
                             elapsed,
                         },
-                    )?;
+                    ) {
+                        control.record_error(None, error);
+                    }
                 }
-                Err(error) => {
-                    let event_result = Self::emit_event(
-                        events,
-                        WorkflowEvent::NodeError {
-                            node_name: target_name,
-                            error: error.to_string(),
-                        },
-                    );
-                    route_cancel.cancel();
-                    let _ = tokio::time::timeout(super::WORKFLOW_TASK_DRAIN_TIMEOUT, async {
-                        while pending.next().await.is_some() {}
-                    })
-                    .await;
-                    event_result?;
-                    return Err(error);
+                Ok(false) => {}
+                Err(error @ ReactError::ExecutionNotSettled { .. }) => {
+                    uncertainty = Some(error);
+                    control.cancel.cancel();
                 }
+                Err(error) => control.record_error(Some(&target_name), error),
             }
         }
         drop(pending);
-        if self.is_cancelled() {
-            return Err(ReactError::Agent(Box::new(AgentError::Cancelled(format!(
-                "Graph '{}' cancelled during parallel fan-out",
-                self.name
-            )))));
+        if let Some(error) = uncertainty {
+            return Err(error);
+        }
+        if control.has_error() {
+            return Ok(false);
         }
         for ((target_name, _, branch_state), completed) in branches.into_iter().zip(branch_results)
         {
@@ -921,7 +1145,7 @@ impl Graph {
             path.push(target_name);
             *step_count = step_count.saturating_add(1);
         }
-        Ok(())
+        Ok(true)
     }
 
     /// Terminal marker node name
@@ -950,8 +1174,13 @@ impl Graph {
             .unwrap_or(false)
     }
 
-    fn fresh_execution(&self, state: SharedState) -> GraphExecution {
+    fn fresh_execution(
+        &self,
+        state: SharedState,
+        control: Arc<GraphExecutionControl>,
+    ) -> GraphExecution {
         GraphExecution {
+            control,
             state,
             current: self.entry.clone(),
             path: Vec::new(),
@@ -1000,17 +1229,21 @@ impl Graph {
         mut execution: GraphExecution,
         honor_interrupts: bool,
         events: Option<UnboundedSender<WorkflowEvent>>,
-    ) -> Result<RunUntilInterruptResult> {
+    ) -> Result<GraphLoopOutcome> {
         let workflow_start = Instant::now();
         info!(graph = %self.name, entry = %execution.current, "Starting graph execution");
 
         loop {
-            if self.is_cancelled() {
+            if self.is_cancelled() || execution.control.cancel.is_cancelled() {
                 warn!(graph = %self.name, steps = execution.step_count, "Graph execution cancelled");
-                return Err(ReactError::Agent(Box::new(AgentError::Cancelled(format!(
-                    "Graph '{}' cancelled after {} steps",
-                    self.name, execution.step_count
-                )))));
+                execution.control.record_error(
+                    None,
+                    ReactError::Agent(Box::new(AgentError::Cancelled(format!(
+                        "Graph '{}' cancelled after {} steps",
+                        self.name, execution.step_count
+                    )))),
+                );
+                return Ok(GraphLoopOutcome::CauseRecorded);
             }
 
             let continuation =
@@ -1024,14 +1257,19 @@ impl Graph {
                         then = %then,
                         "Executing parallel fan-out"
                     );
-                    self.execute_parallel_route(
-                        &execution.state,
-                        &targets,
-                        &mut execution.path,
-                        &mut execution.step_count,
-                        events.as_ref(),
-                    )
-                    .await?;
+                    if !self
+                        .execute_parallel_route(
+                            &execution.state,
+                            &targets,
+                            &mut execution.path,
+                            &mut execution.step_count,
+                            events.as_ref(),
+                            execution.control.clone(),
+                        )
+                        .await?
+                    {
+                        return Ok(GraphLoopOutcome::CauseRecorded);
+                    }
                     execution.current = then;
                     continue;
                 }
@@ -1043,7 +1281,8 @@ impl Graph {
             if execution.current == Self::END {
                 return self
                     .complete_execution(execution, workflow_start, events.as_ref())
-                    .await;
+                    .await
+                    .map(|result| GraphLoopOutcome::Settled(Box::new(result)));
             }
 
             if execution.step_count >= self.max_steps {
@@ -1074,12 +1313,21 @@ impl Graph {
                 )?;
                 let checkpoint = match execution.parent_checkpoint.as_ref() {
                     Some(parent) => checkpoint.continue_run(parent),
-                    None => checkpoint,
+                    None => {
+                        let mut checkpoint = checkpoint;
+                        if let Some(run_id) = execution.control.run_id() {
+                            checkpoint.workflow_run_id = run_id;
+                        }
+                        checkpoint
+                    }
                 };
                 self.checkpoint_store.save(&checkpoint).await?;
-                return Ok(RunUntilInterruptResult::Interrupted(
-                    InterruptState::before_node(checkpoint, execution.current),
-                ));
+                return Ok(GraphLoopOutcome::Settled(Box::new(
+                    RunUntilInterruptResult::Interrupted(InterruptState::before_node(
+                        checkpoint,
+                        execution.current,
+                    )),
+                )));
             }
             execution.skip_interrupt_before_once = false;
 
@@ -1098,18 +1346,17 @@ impl Graph {
                 },
             )?;
             let node_start = Instant::now();
-            if let Err(error) = self
-                .execute_node(&execution.current, node, &execution.state, events.as_ref())
-                .await
-            {
-                Self::emit_event(
+            if !self
+                .execute_node(
+                    &execution.current,
+                    node,
+                    &execution.state,
                     events.as_ref(),
-                    WorkflowEvent::NodeError {
-                        node_name: execution.current.clone(),
-                        error: error.to_string(),
-                    },
-                )?;
-                return Err(error);
+                    execution.control.clone(),
+                )
+                .await?
+            {
+                return Ok(GraphLoopOutcome::CauseRecorded);
             }
             Self::emit_event(
                 events.as_ref(),
@@ -1152,12 +1399,21 @@ impl Graph {
                 )?;
                 let checkpoint = match execution.parent_checkpoint.as_ref() {
                     Some(parent) => checkpoint.continue_run(parent),
-                    None => checkpoint,
+                    None => {
+                        let mut checkpoint = checkpoint;
+                        if let Some(run_id) = execution.control.run_id() {
+                            checkpoint.workflow_run_id = run_id;
+                        }
+                        checkpoint
+                    }
                 };
                 self.checkpoint_store.save(&checkpoint).await?;
-                return Ok(RunUntilInterruptResult::Interrupted(
-                    InterruptState::after_node(checkpoint, execution.current),
-                ));
+                return Ok(GraphLoopOutcome::Settled(Box::new(
+                    RunUntilInterruptResult::Interrupted(InterruptState::after_node(
+                        checkpoint,
+                        execution.current,
+                    )),
+                )));
             }
 
             match next {
@@ -1175,10 +1431,7 @@ impl Graph {
     ///
     /// Starting from the entry node, execute nodes in sequence following edge routing logic, until reaching a finish node or `__end__`.
     pub async fn run(&self, state: SharedState) -> Result<GraphResult> {
-        match self
-            .execute_loop(self.fresh_execution(state), false, None)
-            .await?
-        {
+        match self.run_owned(state, false).await? {
             RunUntilInterruptResult::Completed(result) => Ok(result),
             _ => Err(ReactError::Other(
                 "Non-interrupting graph execution returned a non-terminal outcome".to_string(),
@@ -1198,8 +1451,7 @@ impl Graph {
     /// - `RunUntilInterruptResult::Completed(GraphResult)` - Execution completed
     /// - `RunUntilInterruptResult::Interrupted(InterruptState)` - Paused at an interrupt point
     pub async fn run_until_interrupt(&self, state: SharedState) -> Result<RunUntilInterruptResult> {
-        self.execute_loop(self.fresh_execution(state), true, None)
-            .await
+        self.run_owned(state, true).await
     }
 
     /// Resume execution from a Checkpoint
@@ -1221,6 +1473,32 @@ impl Graph {
         decision: ApprovalDecision,
         state_updates: Option<std::collections::HashMap<String, Value>>,
     ) -> Result<RunUntilInterruptResult> {
+        let runtime = tokio::runtime::Handle::try_current().map_err(|error| {
+            ReactError::Other(format!("Graph execution requires a Tokio runtime: {error}"))
+        })?;
+        let owner = self.retained_definition();
+        let control = GraphExecutionControl::new(None);
+        let original_control = control.clone();
+        let task = runtime.spawn(async move {
+            owner
+                .resume_owned(
+                    checkpoint_reference,
+                    decision,
+                    state_updates,
+                    original_control,
+                )
+                .await
+        });
+        Self::observe_owned(task, control).await
+    }
+
+    async fn resume_owned(
+        &self,
+        checkpoint_reference: Checkpoint,
+        decision: ApprovalDecision,
+        state_updates: Option<HashMap<String, Value>>,
+        control: Arc<GraphExecutionControl>,
+    ) -> Result<GraphLoopOutcome> {
         if matches!(decision, ApprovalDecision::Deferred) {
             let checkpoint = self
                 .checkpoint_store
@@ -1231,11 +1509,18 @@ impl Graph {
                 })?;
             self.validate_checkpoint(&checkpoint)?;
             info!(graph = %self.name, checkpoint_id = %checkpoint.id, "Resume deferred");
-            return Ok(RunUntilInterruptResult::Deferred(Self::interrupt_state(
-                checkpoint,
+            return Ok(GraphLoopOutcome::Settled(Box::new(
+                RunUntilInterruptResult::Deferred(Self::interrupt_state(checkpoint)),
             )));
         }
 
+        if !matches!(decision, ApprovalDecision::Rejected { .. })
+            && !self.supports_protected_claims()
+        {
+            return Err(ReactError::Other(
+                "Checkpoint store does not provide protected claims".into(),
+            ));
+        }
         if !self.checkpoint_store.supports_claim_settlement() {
             return Err(ReactError::Other(
                 "Checkpoint store does not provide atomic claim settlement".to_string(),
@@ -1260,12 +1545,19 @@ impl Graph {
                 "Checkpoint store returned a claim without a resume attempt identity".to_string(),
             )
         })?;
+        *control
+            .attempt_id
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(attempt_id.clone());
         if let Err(error) = self.validate_checkpoint(&checkpoint) {
             if let Err(requeue_error) = self
                 .checkpoint_store
                 .requeue_claim(&checkpoint.id, &attempt_id)
                 .await
             {
+                if matches!(requeue_error, ReactError::ExecutionNotSettled { .. }) {
+                    return Err(requeue_error);
+                }
                 return Err(ReactError::Other(format!(
                     "Checkpoint validation failed: {error}; checkpoint requeue failed: {requeue_error}"
                 )));
@@ -1273,22 +1565,55 @@ impl Graph {
             return Err(error);
         }
 
+        // The won claim, not the earlier load, is the execution authority.
+        control.bind_run(&checkpoint.workflow_run_id);
+        if !matches!(decision, ApprovalDecision::Rejected { .. }) {
+            self.checkpoint_store
+                .protect_claim(&checkpoint.id, &attempt_id)
+                .await?;
+        }
         let result = self
-            .resume_claimed_with_heartbeat(checkpoint.clone(), decision, state_updates, &attempt_id)
+            .resume_claimed_with_heartbeat(
+                checkpoint.clone(),
+                decision,
+                state_updates,
+                &attempt_id,
+                control.clone(),
+            )
             .await;
         match result {
+            Ok(GraphLoopOutcome::CauseRecorded) => {
+                if let Err(error) = self
+                    .checkpoint_store
+                    .requeue_claim(&checkpoint.id, &attempt_id)
+                    .await
+                {
+                    if matches!(error, ReactError::ExecutionNotSettled { .. }) {
+                        return Err(error);
+                    }
+                    // Preserve the first typed business cause while keeping the
+                    // auxiliary failure visible; neither error is a retry receipt.
+                    warn!(checkpoint_id = %checkpoint.id, attempt_id = %attempt_id, error = %error,
+                        "Checkpoint requeue failed after the original workflow cause");
+                }
+                Ok(GraphLoopOutcome::CauseRecorded)
+            }
             Ok(result) => {
                 self.checkpoint_store
                     .ack_claim(&checkpoint.id, &attempt_id)
                     .await?;
                 Ok(result)
             }
+            Err(error @ ReactError::ExecutionNotSettled { .. }) => Err(error),
             Err(error) => {
                 if let Err(requeue_error) = self
                     .checkpoint_store
                     .requeue_claim(&checkpoint.id, &attempt_id)
                     .await
                 {
+                    if matches!(requeue_error, ReactError::ExecutionNotSettled { .. }) {
+                        return Err(requeue_error);
+                    }
                     return Err(ReactError::Other(format!(
                         "Workflow resume failed: {error}; checkpoint requeue failed: {requeue_error}"
                     )));
@@ -1304,10 +1629,11 @@ impl Graph {
         decision: ApprovalDecision,
         state_updates: Option<std::collections::HashMap<String, Value>>,
         attempt_id: &str,
-    ) -> Result<RunUntilInterruptResult> {
+        control: Arc<GraphExecutionControl>,
+    ) -> Result<GraphLoopOutcome> {
         let Some(interval) = self.checkpoint_store.claim_heartbeat_interval() else {
             return self
-                .resume_claimed(checkpoint, decision, state_updates)
+                .resume_claimed(checkpoint, decision, state_updates, control.clone())
                 .await;
         };
         if interval.is_zero() {
@@ -1317,7 +1643,7 @@ impl Graph {
         }
 
         let checkpoint_id = checkpoint.id.clone();
-        let resume = self.resume_claimed(checkpoint, decision, state_updates);
+        let resume = self.resume_claimed(checkpoint, decision, state_updates, control.clone());
         tokio::pin!(resume);
         let first_tick = tokio::time::Instant::now()
             .checked_add(interval)
@@ -1335,9 +1661,17 @@ impl Graph {
                         .renew_claim(&checkpoint_id, attempt_id)
                         .await
                     {
-                        break Err(ReactError::Other(format!(
-                            "Checkpoint claim heartbeat failed: {error}"
-                        )));
+                        if matches!(error, ReactError::ExecutionNotSettled { .. }) {
+                            // Store knowledge is a different physical authority.
+                            // A Node terminal cannot discharge this observation.
+                            control.cancel.cancel();
+                            let _ = resume.await;
+                            break Err(error);
+                        }
+                        control.record_error(None, ReactError::Other(format!("Checkpoint claim heartbeat failed: {error}")));
+                        // Retain the exact same pinned resume future. Protection
+                        // survives restart; cancellation alone is not closure.
+                        break resume.await;
                     }
                 }
             }
@@ -1349,7 +1683,8 @@ impl Graph {
         checkpoint: Checkpoint,
         decision: ApprovalDecision,
         state_updates: Option<std::collections::HashMap<String, Value>>,
-    ) -> Result<RunUntilInterruptResult> {
+        control: Arc<GraphExecutionControl>,
+    ) -> Result<GraphLoopOutcome> {
         if let ApprovalDecision::Rejected { reason } = decision {
             info!(
                 graph = %self.name,
@@ -1357,12 +1692,14 @@ impl Graph {
                 reason = reason.as_deref().unwrap_or("no reason"),
                 "Resume rejected, aborting workflow"
             );
-            return Ok(RunUntilInterruptResult::Rejected {
-                state: checkpoint.restore_state()?,
-                path: checkpoint.path,
-                steps: checkpoint.step_count,
-                reason,
-            });
+            return Ok(GraphLoopOutcome::Settled(Box::new(
+                RunUntilInterruptResult::Rejected {
+                    state: checkpoint.restore_state()?,
+                    path: checkpoint.path,
+                    steps: checkpoint.step_count,
+                    reason,
+                },
+            )));
         }
 
         let state = checkpoint.restore_state()?;
@@ -1380,6 +1717,7 @@ impl Graph {
         let skip_interrupt_before_once = checkpoint.interrupt_type == InterruptType::BeforeNode
             && matches!(checkpoint.continuation, WorkflowContinuation::Node);
         let execution = GraphExecution {
+            control,
             state,
             current: checkpoint.current_node.clone(),
             path: checkpoint.path.clone(),
@@ -1437,6 +1775,11 @@ impl Graph {
         state_updates: std::collections::HashMap<String, Value>,
         branch_name: Option<String>,
     ) -> Result<RunUntilInterruptResult> {
+        if !self.supports_protected_claims() {
+            return Err(ReactError::Other(
+                "Checkpoint store does not provide protected claims".into(),
+            ));
+        }
         let (state, parent_cp) = self.restore_to_checkpoint(checkpoint_id).await?;
 
         // Apply state updates
@@ -1536,49 +1879,40 @@ impl Graph {
         &self,
         state: SharedState,
     ) -> Result<BoxStream<'_, Result<WorkflowEvent>>> {
-        let (events, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-        let execution = self.execute_loop(self.fresh_execution(state), false, Some(events));
+        let owner = self.retained_definition();
+        #[cfg(test)]
+        let before_stream_observation = self.before_stream_observation.clone();
         let stream = async_stream::try_stream! {
-            enum StreamPoll {
-                Event(Option<WorkflowEvent>),
-                Outcome(Box<Result<RunUntilInterruptResult>>),
-            }
-
-            tokio::pin!(execution);
+            let runtime = tokio::runtime::Handle::try_current().map_err(|error| ReactError::Other(format!("Graph execution requires a Tokio runtime: {error}")))?;
+            let control = GraphExecutionControl::new(Some(uuid::Uuid::new_v4().to_string()));
+            let execution = owner.fresh_execution(state, control.clone());
+            let (events, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+            let stream_guard = control.cancel.clone().drop_guard();
+            let task = runtime.spawn(async move { owner.execute_loop(execution, false, Some(events)).await });
+            #[cfg(test)]
+            if let Some(gate) = before_stream_observation { gate.notified().await; }
+            let observed = Self::observe_owned(task, control);
+            tokio::pin!(observed);
+            enum Poll { Event(Option<WorkflowEvent>), Outcome(Box<Result<RunUntilInterruptResult>>) }
             loop {
                 let poll = tokio::select! {
                     biased;
-                    event = receiver.recv() => StreamPoll::Event(event),
-                    outcome = &mut execution => StreamPoll::Outcome(Box::new(outcome)),
+                    event = receiver.recv() => Poll::Event(event),
+                    result = &mut observed => Poll::Outcome(Box::new(result)),
                 };
                 match poll {
-                    StreamPoll::Event(Some(event)) => yield event,
-                    StreamPoll::Event(None) => {
-                        let outcome = (&mut execution).await?;
-                        if !matches!(outcome, RunUntilInterruptResult::Completed(_)) {
-                            Err(ReactError::Other(
-                                "Streaming graph execution returned a non-terminal outcome".to_string(),
-                            ))?;
-                        }
-                        break;
-                    }
-                    StreamPoll::Outcome(outcome) => {
-                        while let Ok(event) = receiver.try_recv() {
-                            yield event;
-                        }
-                        let outcome = *outcome;
-                        let outcome = outcome?;
-                        if !matches!(outcome, RunUntilInterruptResult::Completed(_)) {
-                            Err(ReactError::Other(
-                                "Streaming graph execution returned a non-terminal outcome".to_string(),
-                            ))?;
-                        }
+                    Poll::Event(Some(event)) => yield event,
+                    Poll::Event(None) => { let _ = observed.await?; break; }
+                    Poll::Outcome(result) => {
+                        while let Ok(event) = receiver.try_recv() { yield event; }
+                        let result = *result;
+                        let _ = result?;
                         break;
                     }
                 }
             }
+            let _ = stream_guard.disarm();
         };
-
         Ok(Box::pin(stream))
     }
 
@@ -1743,14 +2077,16 @@ mod tests {
             let cancelled = self.cancelled.clone();
             Box::pin(async move {
                 started.store(true, Ordering::SeqCst);
-                let _producer = tokio::spawn(async move {
+                let producer = tokio::spawn(async move {
                     cancel.cancelled().await;
                     cancelled.store(true, Ordering::SeqCst);
                 });
-                let events: BoxStream<'a, Result<AgentEvent>> = Box::pin(
-                    stream::iter([Ok(AgentEvent::Token("ready".to_string()))])
-                        .chain(stream::pending()),
-                );
+                // The original producer actually closes after cancellation;
+                // EOF must join it rather than use a never-ending placeholder.
+                let events: BoxStream<'a, Result<AgentEvent>> = Box::pin(async_stream::stream! {
+                    yield Ok(AgentEvent::Token("ready".to_string()));
+                    if let Err(error) = producer.await { yield Err(ReactError::Other(format!("cancellation probe producer failed: {error}"))); }
+                });
                 Ok(events)
             })
         }
@@ -2715,6 +3051,1375 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn physical_fanout_panic_retains_other_original_branch() -> Result<()> {
+        use futures::FutureExt;
+        use std::sync::atomic::AtomicUsize;
+        use tokio::sync::{Mutex, Notify};
+        struct BranchDrop(Arc<AtomicUsize>);
+        impl Drop for BranchDrop {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let directory =
+            std::env::temp_dir().join(format!("echo_fanout_owner_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory)?;
+        let effect = directory.join("effect.txt");
+        let release = Arc::new(Notify::new());
+        let entered = Arc::new(AtomicBool::new(false));
+        let drops = Arc::new(AtomicUsize::new(0));
+        let slot = Arc::new(Mutex::new(None));
+        let node_release = release.clone();
+        let node_entered = entered.clone();
+        let node_effect = effect.clone();
+        let node_drops = drops.clone();
+        let node_slot = slot.clone();
+        let panic_entered = entered.clone();
+        let store = Arc::new(MemoryCheckpointStore::new());
+        let graph = Arc::new(
+            GraphBuilder::new("fanout-panic-physical")
+                .add_function_node("start", |_| Box::pin(async { Ok(()) }))
+                .add_function_node("held", move |_| {
+                    let release = node_release.clone();
+                    let entered = node_entered.clone();
+                    let effect = node_effect.clone();
+                    let drops = node_drops.clone();
+                    let slot = node_slot.clone();
+                    Box::pin(async move {
+                        let _scope = BranchDrop(drops);
+                        let backend = tokio::spawn(async move {
+                            std::fs::write(&effect, "entered")
+                                .map_err(|error| error.to_string())?;
+                            entered.store(true, Ordering::SeqCst);
+                            release.notified().await;
+                            std::fs::write(&effect, "closed").map_err(|error| error.to_string())?;
+                            Ok::<(), String>(())
+                        })
+                        .map(|result| {
+                            result
+                                .map_err(|error| error.to_string())
+                                .and_then(|result| result)
+                        })
+                        .boxed()
+                        .shared();
+                        *slot.lock().await = Some(backend.clone());
+                        backend.await.map_err(ReactError::Other)
+                    })
+                })
+                .add_function_node("panic", move |_| {
+                    let entered = panic_entered.clone();
+                    Box::pin(async move {
+                        while !entered.load(Ordering::SeqCst) {
+                            tokio::task::yield_now().await;
+                        }
+                        std::panic::resume_unwind(Box::new("controlled branch poll loss"))
+                    })
+                })
+                .add_function_node("merge", |_| Box::pin(async { Ok(()) }))
+                .set_entry("start")
+                .add_parallel_edge("start", vec!["held".into(), "panic".into()], "merge")
+                .set_finish("merge")
+                .interrupt_after(vec!["start"])
+                .revision("fanout-owner-v1")
+                .build()?
+                .with_checkpoint_store(store.clone()),
+        );
+        let checkpoint = match graph.run_until_interrupt(SharedState::new()).await? {
+            RunUntilInterruptResult::Interrupted(interrupt) => interrupt.checkpoint,
+            other => {
+                return Err(ReactError::Other(format!(
+                    "expected fanout interrupt, got {other:?}"
+                )));
+            }
+        };
+        let observer_graph = graph.clone();
+        let observer_checkpoint = checkpoint.clone();
+        let mut observer = tokio::spawn(async move {
+            observer_graph
+                .resume(observer_checkpoint, ApprovalDecision::Approved)
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !entered.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .map_err(|_| ReactError::Other("held original branch never started".into()))?;
+        let early = tokio::time::timeout(Duration::from_millis(20), &mut observer).await;
+        let pending = early.is_err();
+        let before_release_drops = drops.load(Ordering::SeqCst);
+        let held = std::fs::read_to_string(&effect).ok();
+        let original_attempt = store
+            .load(&checkpoint.id)
+            .await?
+            .and_then(|claim| claim.resume_attempt_id);
+        release.notify_one();
+        let cleanup = match slot.lock().await.take() {
+            Some(backend) => backend.await.map_err(ReactError::Other),
+            None => Err(ReactError::Other("missing original branch join".into())),
+        };
+        let result = match early {
+            Ok(result) => result,
+            Err(_) => observer.await,
+        }
+        .map_err(|error| ReactError::Other(format!("borrowed resume join: {error}")))?;
+        let replacement = store.claim(&checkpoint.id).await?;
+        let closed = std::fs::read_to_string(&effect).ok();
+        let _ = std::fs::remove_dir_all(&directory);
+        cleanup?;
+        assert_eq!(held.as_deref(), Some("entered"));
+        assert_eq!(closed.as_deref(), Some("closed"));
+        assert!(
+            pending,
+            "one panicked branch destroyed/settled its still-live sibling: {result:?}"
+        );
+        assert_eq!(before_release_drops, 0);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert!(
+            matches!(result, Err(ReactError::ExecutionNotSettled { ref run_id, ref execution_id }) if run_id == &checkpoint.workflow_run_id && execution_id == &original_attempt)
+        );
+        assert!(
+            replacement.is_none(),
+            "panic is not a physical receipt for the original protected attempt"
+        );
+        Ok(())
+    }
+
+    struct ControlledMemoryStore {
+        inner: Arc<MemoryCheckpointStore>,
+        protected: bool,
+        claims: std::sync::atomic::AtomicUsize,
+        saves: std::sync::atomic::AtomicUsize,
+        load_gate: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
+        first_load: AtomicBool,
+        fail_heartbeat: bool,
+        heartbeat_observation: bool,
+        requeue_observation: bool,
+        requeue_error: bool,
+        requeues: std::sync::atomic::AtomicUsize,
+        heartbeat_failed: Arc<tokio::sync::Notify>,
+    }
+
+    impl ControlledMemoryStore {
+        fn new(protected: bool) -> Self {
+            Self {
+                inner: Arc::new(MemoryCheckpointStore::new()),
+                protected,
+                claims: std::sync::atomic::AtomicUsize::new(0),
+                saves: std::sync::atomic::AtomicUsize::new(0),
+                load_gate: None,
+                first_load: AtomicBool::new(true),
+                fail_heartbeat: false,
+                heartbeat_observation: false,
+                requeue_observation: false,
+                requeue_error: false,
+                requeues: std::sync::atomic::AtomicUsize::new(0),
+                heartbeat_failed: Arc::new(tokio::sync::Notify::new()),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl CheckpointStore for ControlledMemoryStore {
+        async fn save(&self, checkpoint: &Checkpoint) -> Result<()> {
+            self.saves.fetch_add(1, Ordering::SeqCst);
+            self.inner.save(checkpoint).await
+        }
+        async fn load(&self, id: &str) -> Result<Option<Checkpoint>> {
+            let result = self.inner.load(id).await?;
+            if let Some((entered, release)) = &self.load_gate
+                && self.first_load.swap(false, Ordering::SeqCst)
+            {
+                entered.notify_one();
+                release.notified().await;
+            }
+            Ok(result)
+        }
+        async fn claim(&self, id: &str) -> Result<Option<Checkpoint>> {
+            self.claims.fetch_add(1, Ordering::SeqCst);
+            self.inner.claim(id).await
+        }
+        async fn ack_claim(&self, id: &str, attempt: &str) -> Result<()> {
+            self.inner.ack_claim(id, attempt).await
+        }
+        async fn requeue_claim(&self, id: &str, attempt: &str) -> Result<()> {
+            self.requeues.fetch_add(1, Ordering::SeqCst);
+            if self.requeue_error {
+                return Err(ReactError::Other(
+                    "controlled auxiliary requeue failure".into(),
+                ));
+            }
+            if self.requeue_observation {
+                return Err(ReactError::ExecutionNotSettled {
+                    run_id: "original-store-run".into(),
+                    execution_id: Some("original-store-attempt".into()),
+                });
+            }
+            self.inner.requeue_claim(id, attempt).await
+        }
+        async fn renew_claim(&self, id: &str, attempt: &str) -> Result<()> {
+            if self.fail_heartbeat {
+                self.heartbeat_failed.notify_one();
+                if self.heartbeat_observation {
+                    return Err(ReactError::ExecutionNotSettled {
+                        run_id: "original-store-run".into(),
+                        execution_id: Some("original-store-attempt".into()),
+                    });
+                }
+                return Err(ReactError::Other("controlled heartbeat failure".into()));
+            }
+            self.inner.renew_claim(id, attempt).await
+        }
+        fn claim_heartbeat_interval(&self) -> Option<Duration> {
+            self.fail_heartbeat.then_some(Duration::from_millis(5))
+        }
+        fn supports_claim_settlement(&self) -> bool {
+            true
+        }
+        fn supports_protected_claims(&self) -> bool {
+            self.protected
+        }
+        async fn protect_claim(&self, id: &str, attempt: &str) -> Result<()> {
+            self.inner.protect_claim(id, attempt).await
+        }
+        async fn save_if_generation(
+            &self,
+            checkpoint: &Checkpoint,
+            generation: u64,
+        ) -> Result<bool> {
+            self.inner.save_if_generation(checkpoint, generation).await
+        }
+        async fn list(&self) -> Result<Vec<super::super::checkpoint_store::CheckpointInfo>> {
+            self.inner.list().await
+        }
+        async fn delete(&self, id: &str) -> Result<()> {
+            self.inner.delete(id).await
+        }
+        async fn clear(&self) -> Result<()> {
+            self.inner.clear().await
+        }
+    }
+
+    struct InvocationIdentityProbe(
+        Arc<std::sync::Mutex<Vec<echo_core::tools::ExternalRunContext>>>,
+    );
+    impl Agent for InvocationIdentityProbe {
+        fn name(&self) -> &str {
+            "workflow-invocation-identity"
+        }
+        fn model_name(&self) -> &str {
+            "test"
+        }
+        fn system_prompt(&self) -> &str {
+            "test"
+        }
+        fn execute<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<String>> {
+            Box::pin(async {
+                Err(ReactError::Other(
+                    "must use original context-aware entry".into(),
+                ))
+            })
+        }
+        fn execute_stream<'a>(
+            &'a self,
+            _: &'a str,
+        ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+            Box::pin(async {
+                Err(ReactError::Other(
+                    "must use original context-aware stream".into(),
+                ))
+            })
+        }
+        fn execute_stream_with_invocation_context<'a>(
+            &'a self,
+            _: &'a str,
+            _: CancellationToken,
+            invocation: echo_core::agent::AgentInvocationContext,
+        ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+            Box::pin(async move {
+                let runtime = invocation.runtime.ok_or_else(|| {
+                    ReactError::Other("missing original invocation context".into())
+                })?;
+                self.0
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .push(runtime);
+                Ok(Box::pin(stream::iter([Ok(AgentEvent::FinalAnswer(
+                    "one original invocation".into(),
+                ))])) as BoxStream<'a, Result<AgentEvent>>)
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn won_checkpoint_claim_binds_identity_after_concurrent_pending_replacement() -> Result<()>
+    {
+        let loaded = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let mut controlled = ControlledMemoryStore::new(true);
+        controlled.load_gate = Some((loaded.clone(), release.clone()));
+        let store = Arc::new(controlled);
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let graph = Arc::new(
+            GraphBuilder::new("won-claim-identity")
+                .add_agent_node(
+                    "effect",
+                    InvocationIdentityProbe(seen.clone()),
+                    "task",
+                    "result",
+                )
+                .set_entry("effect")
+                .set_finish("effect")
+                .interrupt_before(vec!["effect"])
+                .revision("identity-v1")
+                .build()?
+                .with_checkpoint_store(store.clone()),
+        );
+        let checkpoint = match graph.run_until_interrupt(SharedState::new()).await? {
+            RunUntilInterruptResult::Interrupted(interrupt) => interrupt.checkpoint,
+            other => {
+                return Err(ReactError::Other(format!(
+                    "expected checkpoint, got {other:?}"
+                )));
+            }
+        };
+        let observer_graph = graph.clone();
+        let reference = checkpoint.clone();
+        let observer = tokio::spawn(async move {
+            observer_graph
+                .resume(reference, ApprovalDecision::Approved)
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), loaded.notified())
+            .await
+            .map_err(|_| ReactError::Other("original load did not reach barrier".into()))?;
+        let mut replacement = checkpoint.clone();
+        replacement.workflow_run_id = uuid::Uuid::new_v4().to_string();
+        replacement.generation = replacement.generation.saturating_add(1);
+        // This is a real legal pending save on the original Memory authority,
+        // not a Store inventing another claim response.
+        store.inner.save(&replacement).await?;
+        release.notify_one();
+        let result = observer
+            .await
+            .map_err(|error| ReactError::Other(error.to_string()))?;
+        let contexts = seen.lock().unwrap_or_else(|error| error.into_inner());
+        assert!(matches!(result, Ok(RunUntilInterruptResult::Completed(_))));
+        assert_eq!(contexts.len(), 1);
+        let context = contexts
+            .first()
+            .ok_or_else(|| ReactError::Other("original Agent was not invoked".into()))?;
+        assert_eq!(
+            context.run_id.as_deref(),
+            Some(replacement.workflow_run_id.as_str())
+        );
+        assert_ne!(
+            context.run_id.as_deref(),
+            Some(checkpoint.workflow_run_id.as_str())
+        );
+        assert!(
+            context
+                .turn_id
+                .as_ref()
+                .is_some_and(|turn| Some(turn) != context.run_id.as_ref())
+        );
+        assert!(
+            context
+                .execution_id
+                .as_ref()
+                .is_some_and(|execution| Some(execution) != context.run_id.as_ref()
+                    && Some(execution) != context.turn_id.as_ref())
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unsupported_protection_rejects_executable_resume_and_branch_before_mutation()
+    -> Result<()> {
+        let store = Arc::new(ControlledMemoryStore::new(false));
+        let effects = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let node_effects = effects.clone();
+        let graph = GraphBuilder::new("unsupported-protection")
+            .add_function_node("effect", move |_| {
+                let effects = node_effects.clone();
+                Box::pin(async move {
+                    effects.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                })
+            })
+            .set_entry("effect")
+            .set_finish("effect")
+            .interrupt_before(vec!["effect"])
+            .revision("capability-v1")
+            .build()?
+            .with_checkpoint_store(store.clone());
+        assert!(!graph.supports_protected_claims());
+        let checkpoint = match graph.run_until_interrupt(SharedState::new()).await? {
+            RunUntilInterruptResult::Interrupted(interrupt) => interrupt.checkpoint,
+            other => {
+                return Err(ReactError::Other(format!(
+                    "expected fresh interrupt, got {other:?}"
+                )));
+            }
+        };
+        let saves = store.saves.load(Ordering::SeqCst);
+        assert!(
+            graph
+                .resume(checkpoint.clone(), ApprovalDecision::Approved)
+                .await
+                .is_err()
+        );
+        assert!(
+            graph
+                .resume_with_state(checkpoint.clone(), HashMap::new())
+                .await
+                .is_err()
+        );
+        assert!(
+            graph
+                .branch_from(&checkpoint.id, HashMap::new(), Some("not-saved".into()))
+                .await
+                .is_err()
+        );
+        assert_eq!(store.claims.load(Ordering::SeqCst), 0);
+        assert_eq!(store.saves.load(Ordering::SeqCst), saves);
+        assert_eq!(effects.load(Ordering::SeqCst), 0);
+        assert!(matches!(
+            graph
+                .resume(checkpoint.clone(), ApprovalDecision::Deferred)
+                .await,
+            Ok(RunUntilInterruptResult::Deferred(_))
+        ));
+        assert_eq!(store.claims.load(Ordering::SeqCst), 0);
+        assert!(matches!(
+            graph
+                .resume(
+                    checkpoint,
+                    ApprovalDecision::Rejected {
+                        reason: Some("not executed".into())
+                    }
+                )
+                .await,
+            Ok(RunUntilInterruptResult::Rejected { .. })
+        ));
+        assert_eq!(store.claims.load(Ordering::SeqCst), 1);
+        assert_eq!(effects.load(Ordering::SeqCst), 0);
+        // Fresh execution still has no protected-Store capability requirement.
+        assert!(graph.run(SharedState::new()).await.is_ok());
+        assert_eq!(effects.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn first_buffered_graph_stream_yield_drop_signals_original_owner() -> Result<()> {
+        use std::sync::atomic::AtomicUsize;
+        use tokio::sync::{Mutex, Notify};
+        type Backend = futures::future::Shared<BoxFuture<'static, std::result::Result<(), String>>>;
+        struct SourceDrop(Arc<AtomicUsize>);
+        impl Drop for SourceDrop {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        struct BufferedSource {
+            entered: Arc<Notify>,
+            cancelled: Arc<Notify>,
+            release: Arc<Notify>,
+            join: Arc<Mutex<Option<Backend>>>,
+            drops: Arc<AtomicUsize>,
+            path: std::path::PathBuf,
+        }
+        impl Agent for BufferedSource {
+            fn name(&self) -> &str {
+                "first-yield-source"
+            }
+            fn model_name(&self) -> &str {
+                "test"
+            }
+            fn system_prompt(&self) -> &str {
+                "test"
+            }
+            fn execute<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<String>> {
+                Box::pin(async {
+                    Err(ReactError::Other(
+                        "requires original cancellable stream".into(),
+                    ))
+                })
+            }
+            fn execute_stream<'a>(
+                &'a self,
+                _: &'a str,
+            ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+                Box::pin(async {
+                    Err(ReactError::Other(
+                        "requires original cancellation scope".into(),
+                    ))
+                })
+            }
+            fn execute_stream_with_cancel<'a>(
+                &'a self,
+                _: &'a str,
+                cancel: CancellationToken,
+            ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+                let entered = self.entered.clone();
+                let cancelled = self.cancelled.clone();
+                let release = self.release.clone();
+                let join = self.join.clone();
+                let drops = self.drops.clone();
+                let path = self.path.clone();
+                Box::pin(async move {
+                    let source = async_stream::stream! {
+                        let _guard = SourceDrop(drops);
+                        let backend_entered = Arc::new(Notify::new()); let ready = backend_entered.clone();
+                        let backend = tokio::spawn(async move {
+                            std::fs::write(&path, "entered").map_err(|error| error.to_string())?; ready.notify_one();
+                            release.notified().await;
+                            std::fs::write(&path, "closed").map_err(|error| error.to_string())?; Ok::<(), String>(())
+                        }).map(|result| result.map_err(|error| error.to_string()).and_then(|result| result)).boxed().shared();
+                        *join.lock().await = Some(backend.clone()); backend_entered.notified().await;
+                        entered.notify_one();
+                        let result = tokio::select! {
+                            () = cancel.cancelled() => { cancelled.notify_one(); backend.await }
+                            result = backend.clone() => result,
+                        };
+                        match result { Ok(()) => yield Ok(AgentEvent::FinalAnswer("closed original source".into())), Err(error) => yield Err(ReactError::Other(error)) }
+                    };
+                    Ok(Box::pin(source) as BoxStream<'a, Result<AgentEvent>>)
+                })
+            }
+        }
+        let directory =
+            std::env::temp_dir().join(format!("echo_first_yield_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory)?;
+        let path = directory.join("effect.txt");
+        let entered = Arc::new(Notify::new());
+        let cancelled = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let join = Arc::new(Mutex::new(None));
+        let drops = Arc::new(AtomicUsize::new(0));
+        let agent = BufferedSource {
+            entered: entered.clone(),
+            cancelled: cancelled.clone(),
+            release: release.clone(),
+            join: join.clone(),
+            drops: drops.clone(),
+            path: path.clone(),
+        };
+        let mut graph = GraphBuilder::new("buffered-first-stream-yield")
+            .add_agent_node("effect", agent, "task", "result")
+            .set_entry("effect")
+            .set_finish("effect")
+            .build()?;
+        // Controlled legal scheduling: original NodeStart is buffered and the
+        // real source has entered before the first observer select is polled.
+        graph.before_stream_observation = Some(entered);
+        let mut source = graph.run_stream(SharedState::new()).await?;
+        let first = tokio::time::timeout(Duration::from_secs(2), source.next()).await;
+        drop(source);
+        let signalled = tokio::time::timeout(Duration::from_millis(20), cancelled.notified())
+            .await
+            .is_ok();
+        let held = std::fs::read_to_string(&path).ok();
+        let early_drops = drops.load(Ordering::SeqCst);
+        release.notify_one();
+        let cleanup = match join.lock().await.take() {
+            Some(backend) => backend.await.map_err(ReactError::Other),
+            None => Err(ReactError::Other(
+                "missing original buffered source backend".into(),
+            )),
+        };
+        let tail = tokio::time::timeout(Duration::from_secs(2), async {
+            while drops.load(Ordering::SeqCst) != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        let closed = std::fs::read_to_string(&path).ok();
+        let _ = std::fs::remove_dir_all(&directory);
+        cleanup?;
+        assert!(matches!(
+            first,
+            Ok(Some(Ok(WorkflowEvent::NodeStart { .. })))
+        ));
+        assert_eq!(held.as_deref(), Some("entered"));
+        assert_eq!(closed.as_deref(), Some("closed"));
+        assert_eq!(early_drops, 0);
+        assert!(
+            signalled,
+            "dropping the first buffered yield never signalled the original still-held source"
+        );
+        assert!(tail.is_ok());
+        Ok(())
+    }
+
+    async fn assert_heartbeat_retains_original_source(store_observation: bool) -> Result<()> {
+        use std::sync::atomic::AtomicUsize;
+        use tokio::sync::{Mutex, Notify, Semaphore};
+        struct SourceDrop(Arc<AtomicUsize>);
+        impl Drop for SourceDrop {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let directory =
+            std::env::temp_dir().join(format!("echo_heartbeat_owner_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory)?;
+        let path = directory.join("effect.txt");
+        let release = Arc::new(Notify::new());
+        let entered = Arc::new(Notify::new());
+        let drops = Arc::new(AtomicUsize::new(0));
+        let capacity = Arc::new(Semaphore::new(1));
+        let slot = Arc::new(Mutex::new(None));
+        let effects = Arc::new(AtomicUsize::new(0));
+        let mut controlled = ControlledMemoryStore::new(true);
+        controlled.fail_heartbeat = true;
+        controlled.heartbeat_observation = store_observation;
+        let store = Arc::new(controlled);
+        let node_release = release.clone();
+        let node_entered = entered.clone();
+        let node_drops = drops.clone();
+        let node_capacity = capacity.clone();
+        let node_slot = slot.clone();
+        let node_path = path.clone();
+        let node_effects = effects.clone();
+        let graph = Arc::new(
+            GraphBuilder::new("heartbeat-physical-owner")
+                .add_function_node("effect", move |_| {
+                    let release = node_release.clone();
+                    let entered = node_entered.clone();
+                    let drops = node_drops.clone();
+                    let capacity = node_capacity.clone();
+                    let slot = node_slot.clone();
+                    let path = node_path.clone();
+                    let effects = node_effects.clone();
+                    Box::pin(async move {
+                        let _permit = capacity
+                            .acquire_owned()
+                            .await
+                            .map_err(|error| ReactError::Other(error.to_string()))?;
+                        let _scope = SourceDrop(drops);
+                        effects.fetch_add(1, Ordering::SeqCst);
+                        let backend = tokio::spawn(async move {
+                            std::fs::write(&path, "entered").map_err(|error| error.to_string())?;
+                            entered.notify_one();
+                            release.notified().await;
+                            std::fs::write(&path, "closed").map_err(|error| error.to_string())?;
+                            Ok::<(), String>(())
+                        })
+                        .map(|result| {
+                            result
+                                .map_err(|error| error.to_string())
+                                .and_then(|result| result)
+                        })
+                        .boxed()
+                        .shared();
+                        *slot.lock().await = Some(backend.clone());
+                        backend.await.map_err(ReactError::Other)
+                    })
+                })
+                .set_entry("effect")
+                .set_finish("effect")
+                .interrupt_before(vec!["effect"])
+                .revision("heartbeat-v1")
+                .build()?
+                .with_checkpoint_store(store.clone()),
+        );
+        let checkpoint = match graph.run_until_interrupt(SharedState::new()).await? {
+            RunUntilInterruptResult::Interrupted(interrupt) => interrupt.checkpoint,
+            other => {
+                return Err(ReactError::Other(format!(
+                    "expected checkpoint, got {other:?}"
+                )));
+            }
+        };
+        let observer_graph = graph.clone();
+        let reference = checkpoint.clone();
+        let mut observer = tokio::spawn(async move {
+            observer_graph
+                .resume(reference, ApprovalDecision::Approved)
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), entered.notified())
+            .await
+            .map_err(|_| ReactError::Other("original heartbeat node never entered".into()))?;
+        let original_attempt = store
+            .inner
+            .load(&checkpoint.id)
+            .await?
+            .and_then(|claim| claim.resume_attempt_id);
+        tokio::time::timeout(Duration::from_secs(2), store.heartbeat_failed.notified())
+            .await
+            .map_err(|_| ReactError::Other("original renewal never failed".into()))?;
+        let early = tokio::time::timeout(Duration::from_millis(20), &mut observer).await;
+        let pending = early.is_err();
+        let held = std::fs::read_to_string(&path).ok();
+        let early_drops = drops.load(Ordering::SeqCst);
+        let early_permits = capacity.available_permits();
+        let replacement = store.inner.claim(&checkpoint.id).await?;
+        release.notify_one();
+        let cleanup = match slot.lock().await.take() {
+            Some(backend) => backend.await.map_err(ReactError::Other),
+            None => Err(ReactError::Other(
+                "missing original heartbeat backend join".into(),
+            )),
+        };
+        let result = match early {
+            Ok(result) => result,
+            Err(_) => observer.await,
+        }
+        .map_err(|error| ReactError::Other(error.to_string()))?;
+        let after = store.inner.load(&checkpoint.id).await?;
+        let closed = std::fs::read_to_string(&path).ok();
+        let _ = std::fs::remove_dir_all(&directory);
+        cleanup?;
+        assert_eq!(held.as_deref(), Some("entered"));
+        assert_eq!(closed.as_deref(), Some("closed"));
+        assert!(
+            pending && early_drops == 0 && early_permits == 0 && replacement.is_none(),
+            "heartbeat error was treated as physical closure: pending={pending}, drops={early_drops}, permits={early_permits}, replacement={replacement:?}, result={result:?}"
+        );
+        assert!(original_attempt.is_some());
+        if store_observation {
+            assert!(
+                matches!(result, Err(ReactError::ExecutionNotSettled { ref run_id, execution_id: Some(ref execution_id) }) if run_id=="original-store-run" && execution_id=="original-store-attempt"),
+                "Store observation lost: {result:?}"
+            );
+            assert_eq!(
+                after.and_then(|claim| claim.resume_attempt_id),
+                original_attempt
+            );
+        } else {
+            assert!(
+                matches!(result, Err(ReactError::Other(ref message)) if message.contains("Checkpoint claim heartbeat failed: controlled heartbeat failure"))
+            );
+            assert!(
+                after.is_some_and(|claim| claim.resume_attempt_id.is_none()),
+                "known physical error must keep its ordinary requeue policy"
+            );
+        }
+        assert_eq!(capacity.available_permits(), 1);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(effects.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn heartbeat_failure_retains_original_node_claim_and_permit_until_physical_close()
+    -> Result<()> {
+        assert_heartbeat_retains_original_source(false).await
+    }
+    #[tokio::test]
+    async fn store_observation_heartbeat_is_not_a_node_closure_or_business_failure() -> Result<()> {
+        assert_heartbeat_retains_original_source(true).await
+    }
+
+    #[tokio::test]
+    async fn store_observation_requeue_preserves_original_typed_identity() -> Result<()> {
+        let mut controlled = ControlledMemoryStore::new(true);
+        controlled.requeue_observation = true;
+        let store = Arc::new(controlled);
+        let effects = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let node_effects = effects.clone();
+        let mut graph = GraphBuilder::new("store-requeue-observation")
+            .add_function_node("effect", move |_| {
+                let effects = node_effects.clone();
+                Box::pin(async move {
+                    effects.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                })
+            })
+            .set_entry("effect")
+            .set_finish("effect")
+            .interrupt_before(vec!["effect"])
+            .revision("store-error-v1")
+            .build()?
+            .with_checkpoint_store(store.clone());
+        let checkpoint = match graph.run_until_interrupt(SharedState::new()).await? {
+            RunUntilInterruptResult::Interrupted(interrupt) => interrupt.checkpoint,
+            other => {
+                return Err(ReactError::Other(format!(
+                    "expected checkpoint, got {other:?}"
+                )));
+            }
+        };
+        graph.set_max_steps(0);
+        let result = graph
+            .resume(checkpoint.clone(), ApprovalDecision::Approved)
+            .await;
+        assert_eq!(effects.load(Ordering::SeqCst), 0);
+        assert!(
+            store
+                .inner
+                .load(&checkpoint.id)
+                .await?
+                .is_some_and(|claim| claim.resume_attempt_id.is_some())
+        );
+        assert!(
+            matches!(result,Err(ReactError::ExecutionNotSettled { ref run_id,execution_id:Some(ref execution_id) }) if run_id=="original-store-run" && execution_id=="original-store-attempt"),
+            "Store observation was flattened: {result:?}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn store_observation_ordinary_requeue_error_keeps_original_cause_and_claim() -> Result<()>
+    {
+        let mut controlled = ControlledMemoryStore::new(true);
+        controlled.requeue_error = true;
+        let store = Arc::new(controlled);
+        let effects = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let original_effects = effects.clone();
+        let graph = GraphBuilder::new("ordinary-requeue-diagnostic")
+            .add_function_node("effect", move |_| {
+                let effects = original_effects.clone();
+                Box::pin(async move {
+                    effects.fetch_add(1, Ordering::SeqCst);
+                    Err(ReactError::Agent(Box::new(AgentError::Cancelled(
+                        "original Node cause".into(),
+                    ))))
+                })
+            })
+            .set_entry("effect")
+            .set_finish("effect")
+            .interrupt_before(vec!["effect"])
+            .revision("ordinary-requeue-v1")
+            .build()?
+            .with_checkpoint_store(store.clone());
+        let checkpoint = match graph.run_until_interrupt(SharedState::new()).await? {
+            RunUntilInterruptResult::Interrupted(interrupt) => interrupt.checkpoint,
+            other => {
+                return Err(ReactError::Other(format!(
+                    "expected checkpoint, got {other:?}"
+                )));
+            }
+        };
+        let result = graph
+            .resume(checkpoint.clone(), ApprovalDecision::Approved)
+            .await;
+        assert!(
+            matches!(result, Err(ReactError::Agent(ref error)) if matches!(error.as_ref(), AgentError::Cancelled(message) if message=="original Node cause")),
+            "first business cause changed: {result:?}"
+        );
+        assert_eq!(effects.load(Ordering::SeqCst), 1);
+        assert_eq!(store.requeues.load(Ordering::SeqCst), 1);
+        assert!(
+            store
+                .inner
+                .load(&checkpoint.id)
+                .await?
+                .is_some_and(|claim| claim.resume_attempt_id.is_some())
+        );
+        assert!(store.inner.claim(&checkpoint.id).await?.is_none());
+        Ok(())
+    }
+
+    async fn assert_workflow_live_source_settlement(mode: u8) -> Result<()> {
+        use std::sync::atomic::AtomicUsize;
+        use tokio::sync::{Mutex, Notify};
+        type Backend = futures::future::Shared<BoxFuture<'static, std::result::Result<(), String>>>;
+        struct SourceDrop(Arc<AtomicUsize>);
+        impl Drop for SourceDrop {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        struct LiveAgent {
+            backend_release: Arc<Notify>,
+            eof_release: Arc<Notify>,
+            observed: Arc<Notify>,
+            source_tail_ready: Arc<Notify>,
+            slot: Arc<Mutex<Option<Backend>>>,
+            drops: Arc<AtomicUsize>,
+            calls: Arc<AtomicUsize>,
+            identity: Arc<std::sync::Mutex<Option<(String, String)>>>,
+            path: std::path::PathBuf,
+            terminal: bool,
+        }
+        impl Agent for LiveAgent {
+            fn name(&self) -> &str {
+                "matching-live-workflow-source"
+            }
+            fn model_name(&self) -> &str {
+                "test"
+            }
+            fn system_prompt(&self) -> &str {
+                "test"
+            }
+            fn execute<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<String>> {
+                Box::pin(async {
+                    Err(ReactError::Other("must use original context stream".into()))
+                })
+            }
+            fn execute_stream<'a>(
+                &'a self,
+                _: &'a str,
+            ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+                Box::pin(async {
+                    Err(ReactError::Other("must bind original Node identity".into()))
+                })
+            }
+            fn execute_stream_with_invocation_context<'a>(
+                &'a self,
+                _: &'a str,
+                _: CancellationToken,
+                context: echo_core::agent::AgentInvocationContext,
+            ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+                Box::pin(async move {
+                    let runtime = context
+                        .runtime
+                        .ok_or_else(|| ReactError::Other("missing runtime".into()))?;
+                    let run = runtime
+                        .run_id
+                        .ok_or_else(|| ReactError::Other("missing run".into()))?;
+                    let execution = runtime
+                        .execution_id
+                        .ok_or_else(|| ReactError::Other("missing execution".into()))?;
+                    *self
+                        .identity
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner()) =
+                        Some((run.clone(), execution.clone()));
+                    self.calls.fetch_add(1, Ordering::SeqCst);
+                    let backend_release = self.backend_release.clone();
+                    let eof_release = self.eof_release.clone();
+                    let observed = self.observed.clone();
+                    let source_tail_ready = self.source_tail_ready.clone();
+                    let slot = self.slot.clone();
+                    let drops = self.drops.clone();
+                    let path = self.path.clone();
+                    let terminal = self.terminal;
+                    let source = async_stream::stream! {
+                        let _guard = SourceDrop(drops); let entered = Arc::new(Notify::new()); let ready = entered.clone();
+                        let backend = tokio::spawn(async move {
+                            std::fs::write(&path, "entered").map_err(|error| error.to_string())?; ready.notify_one(); backend_release.notified().await;
+                            std::fs::write(&path, "closed").map_err(|error| error.to_string())?; Ok::<(),String>(())
+                        }).map(|result| result.map_err(|error| error.to_string()).and_then(|result|result)).boxed().shared();
+                        *slot.lock().await = Some(backend.clone()); entered.notified().await;
+                        yield Err(ReactError::ExecutionNotSettled { run_id: run, execution_id: Some(execution) }); observed.notify_one();
+                        if let Err(error) = backend.await { yield Err(ReactError::Other(error)); return; }
+                        if terminal { yield Ok(AgentEvent::FinalAnswer("later genuine Node answer".into())); }
+                        source_tail_ready.notify_one(); eof_release.notified().await;
+                    };
+                    Ok(Box::pin(source) as BoxStream<'a, Result<AgentEvent>>)
+                })
+            }
+        }
+        let directory =
+            std::env::temp_dir().join(format!("echo_workflow_live_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory)?;
+        let path = directory.join("effect.txt");
+        let backend_release = Arc::new(Notify::new());
+        let eof_release = Arc::new(Notify::new());
+        let observed = Arc::new(Notify::new());
+        let source_tail_ready = Arc::new(Notify::new());
+        let slot = Arc::new(Mutex::new(None));
+        let drops = Arc::new(AtomicUsize::new(0));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let identity = Arc::new(std::sync::Mutex::new(None));
+        let agent = LiveAgent {
+            backend_release: backend_release.clone(),
+            eof_release: eof_release.clone(),
+            observed: observed.clone(),
+            source_tail_ready: source_tail_ready.clone(),
+            slot: slot.clone(),
+            drops: drops.clone(),
+            calls: calls.clone(),
+            identity: identity.clone(),
+            path: path.clone(),
+            terminal: mode != 2,
+        };
+        let store = Arc::new(MemoryCheckpointStore::new());
+        let cancel = CancellationToken::new();
+        let graph = Arc::new(
+            GraphBuilder::new("live-original-workflow-source")
+                .add_agent_node("effect", agent, "task", "result")
+                .set_entry("effect")
+                .set_finish("effect")
+                .interrupt_before(vec!["effect"])
+                .revision("live-source-v1")
+                .build()?
+                .with_checkpoint_store(store.clone())
+                .with_cancel_token(cancel.clone()),
+        );
+        let checkpoint = match graph.run_until_interrupt(SharedState::new()).await? {
+            RunUntilInterruptResult::Interrupted(interrupt) => interrupt.checkpoint,
+            other => {
+                return Err(ReactError::Other(format!(
+                    "expected checkpoint, got {other:?}"
+                )));
+            }
+        };
+        let owner = graph.clone();
+        let reference = checkpoint.clone();
+        let mut observer =
+            tokio::spawn(async move { owner.resume(reference, ApprovalDecision::Approved).await });
+        let admitted = tokio::time::timeout(Duration::from_secs(2), observed.notified()).await;
+        if mode == 1 {
+            cancel.cancel();
+        }
+        let held = std::fs::read_to_string(&path).ok();
+        let original_attempt = store
+            .load(&checkpoint.id)
+            .await?
+            .and_then(|claim| claim.resume_attempt_id);
+        let before_terminal_drops = drops.load(Ordering::SeqCst);
+        backend_release.notify_one();
+        let backend_cleanup = match slot.lock().await.take() {
+            Some(backend) => backend.await.map_err(ReactError::Other),
+            None => Err(ReactError::Other("missing original live backend".into())),
+        };
+        let tail_ready =
+            tokio::time::timeout(Duration::from_secs(2), source_tail_ready.notified()).await;
+        let premature = tokio::time::timeout(Duration::from_millis(20), &mut observer).await;
+        let waits_for_eof = premature.is_err();
+        let claim_before_eof = store
+            .load(&checkpoint.id)
+            .await?
+            .and_then(|claim| claim.resume_attempt_id);
+        let before_eof_drops = drops.load(Ordering::SeqCst);
+        eof_release.notify_one();
+        let result = match premature {
+            Ok(result) => result,
+            Err(_) => observer.await,
+        }
+        .map_err(|error| ReactError::Other(error.to_string()))?;
+        let claim_after = store.load(&checkpoint.id).await?;
+        let replacement = store.claim(&checkpoint.id).await?;
+        let closed = std::fs::read_to_string(&path).ok();
+        let _ = std::fs::remove_dir_all(&directory);
+        backend_cleanup?;
+        assert!(admitted.is_ok() && tail_ready.is_ok());
+        assert_eq!(held.as_deref(), Some("entered"));
+        assert_eq!(closed.as_deref(), Some("closed"));
+        assert!(waits_for_eof);
+        assert_eq!(before_terminal_drops, 0);
+        assert_eq!(before_eof_drops, 0);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(original_attempt.is_some());
+        assert_eq!(claim_before_eof, original_attempt);
+        match mode {
+            0 => {
+                assert!(
+                    matches!(result, Ok(RunUntilInterruptResult::Completed(ref result)) if result.state.get::<String>("result").as_deref()==Some("later genuine Node answer"))
+                );
+                assert!(claim_after.is_none());
+                assert!(replacement.is_none());
+            }
+            1 => {
+                assert!(
+                    matches!(result, Err(ReactError::Agent(ref error)) if matches!(error.as_ref(), AgentError::Cancelled(_)))
+                );
+                assert!(claim_after.is_some_and(|claim| claim.resume_attempt_id.is_none()));
+            }
+            _ => {
+                let expected = identity
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .clone();
+                assert!(
+                    matches!(result, Err(ReactError::ExecutionNotSettled { ref run_id, execution_id: Some(ref execution_id) }) if expected.as_ref().is_some_and(|(run,execution)|run==run_id && execution==execution_id))
+                );
+                assert_eq!(
+                    claim_after.and_then(|claim| claim.resume_attempt_id),
+                    original_attempt
+                );
+                assert!(replacement.is_none());
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn workflow_live_source_matching_terminal_and_eof_settle_original_claim() -> Result<()> {
+        assert_workflow_live_source_settlement(0).await
+    }
+    #[tokio::test]
+    async fn workflow_live_source_late_terminal_keeps_first_cancellation_cause() -> Result<()> {
+        assert_workflow_live_source_settlement(1).await
+    }
+    #[tokio::test]
+    async fn workflow_live_source_eof_without_terminal_keeps_protected_claim() -> Result<()> {
+        assert_workflow_live_source_settlement(2).await
+    }
+
+    async fn assert_graph_waiter_drop_retains_original_source(streaming: bool) -> Result<()> {
+        use futures::FutureExt;
+        use std::sync::atomic::AtomicUsize;
+        use tokio::sync::{Mutex, Notify};
+        struct SourceDrop(Arc<AtomicUsize>);
+        impl Drop for SourceDrop {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let directory =
+            std::env::temp_dir().join(format!("echo_graph_owner_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory)?;
+        let effect = directory.join("effect.txt");
+        let release = Arc::new(Notify::new());
+        let entered = Arc::new(Notify::new());
+        let source_ready = Arc::new(Notify::new());
+        let drops = Arc::new(AtomicUsize::new(0));
+        let backend_join = Arc::new(Mutex::new(None));
+        let node_release = release.clone();
+        let node_entered = entered.clone();
+        let node_ready = source_ready.clone();
+        let node_effect = effect.clone();
+        let node_drops = drops.clone();
+        let node_join = backend_join.clone();
+        let store = Arc::new(MemoryCheckpointStore::new());
+        let graph = Arc::new(
+            GraphBuilder::new("borrowed-graph-owner")
+                .add_function_node("effect", move |_state: &SharedState| {
+                    let release = node_release.clone();
+                    let entered = node_entered.clone();
+                    let source_ready = node_ready.clone();
+                    let effect = node_effect.clone();
+                    let drops = node_drops.clone();
+                    let slot = node_join.clone();
+                    Box::pin(async move {
+                        let _scope = SourceDrop(drops);
+                        let backend = tokio::spawn(async move {
+                            std::fs::write(&effect, "entered")
+                                .map_err(|error| error.to_string())?;
+                            entered.notify_one();
+                            release.notified().await;
+                            std::fs::write(&effect, "closed").map_err(|error| error.to_string())?;
+                            Ok::<(), String>(())
+                        })
+                        .map(|result| {
+                            result
+                                .map_err(|error| error.to_string())
+                                .and_then(|result| result)
+                        })
+                        .boxed()
+                        .shared();
+                        *slot.lock().await = Some(backend.clone());
+                        source_ready.notify_one();
+                        backend.await.map_err(ReactError::Other)
+                    })
+                })
+                .set_entry("effect")
+                .set_finish("effect")
+                .interrupt_before(vec!["effect"])
+                .revision("owner-v1")
+                .build()?
+                .with_checkpoint_store(store.clone()),
+        );
+        let checkpoint = if streaming {
+            None
+        } else {
+            match graph.run_until_interrupt(SharedState::new()).await? {
+                RunUntilInterruptResult::Interrupted(interrupt) => Some(interrupt.checkpoint),
+                other => {
+                    return Err(ReactError::Other(format!(
+                        "expected interrupt, got {other:?}"
+                    )));
+                }
+            }
+        };
+        let observer_graph = graph.clone();
+        let observer_checkpoint = checkpoint.clone();
+        let observer = tokio::spawn(async move {
+            if let Some(checkpoint) = observer_checkpoint {
+                observer_graph
+                    .resume(checkpoint, ApprovalDecision::Approved)
+                    .await
+                    .map(|_| ())
+            } else {
+                let mut stream = observer_graph.run_stream(SharedState::new()).await?;
+                while let Some(event) = stream.next().await {
+                    event?;
+                }
+                Ok(())
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            entered.notified().await;
+            source_ready.notified().await;
+        })
+        .await
+        .map_err(|_| ReactError::Other("original graph producer never entered".into()))?;
+        let original_attempt = if let Some(checkpoint) = &checkpoint {
+            store
+                .load(&checkpoint.id)
+                .await?
+                .and_then(|checkpoint| checkpoint.resume_attempt_id)
+        } else {
+            None
+        };
+        observer.abort();
+        let observer_result = observer.await;
+        let before_release_drops = drops.load(Ordering::SeqCst);
+        let held = std::fs::read_to_string(&effect).ok();
+        release.notify_one();
+        let backend = backend_join.lock().await.take();
+        let cleanup = match backend {
+            Some(backend) => backend.await.map_err(ReactError::Other),
+            None => Err(ReactError::Other("missing original backend join".into())),
+        };
+        // Wait for the original owner/destructor tail, never re-execute.
+        let tail = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let settled = if let Some(checkpoint) = &checkpoint {
+                    store
+                        .load(&checkpoint.id)
+                        .await?
+                        .is_none_or(|checkpoint| checkpoint.resume_attempt_id.is_none())
+                } else {
+                    true
+                };
+                if drops.load(Ordering::SeqCst) == 1 && settled {
+                    break Ok::<(), ReactError>(());
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        let closed = std::fs::read_to_string(&effect).ok();
+        let _ = std::fs::remove_dir_all(&directory);
+        cleanup?;
+        assert!(observer_result.is_err_and(|error| error.is_cancelled()));
+        assert_eq!(held.as_deref(), Some("entered"));
+        assert_eq!(closed.as_deref(), Some("closed"));
+        if !streaming {
+            assert!(original_attempt.is_some());
+        }
+        assert_eq!(
+            before_release_drops, 0,
+            "borrowed observer/stream Drop destroyed the original Node future before its live backend closed"
+        );
+        tail.map_err(|_| {
+            ReactError::Other(
+                "same original Graph owner did not settle after physical closure".into(),
+            )
+        })??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn physical_graph_resume_waiter_drop_keeps_original_source() -> Result<()> {
+        assert_graph_waiter_drop_retains_original_source(false).await
+    }
+
+    #[tokio::test]
+    async fn physical_graph_stream_drop_keeps_original_source() -> Result<()> {
+        assert_graph_waiter_drop_retains_original_source(true).await
+    }
+
+    async fn assert_unknown_resume_keeps_exact_claim(file_store: bool) -> Result<()> {
+        use tokio::sync::{Mutex, Notify};
+        let directory =
+            std::env::temp_dir().join(format!("echo_workflow_physical_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory)?;
+        let effect = directory.join("effect.txt");
+        let store: Arc<dyn CheckpointStore> = if file_store {
+            Arc::new(FileCheckpointStore::new(directory.join("checkpoints")))
+        } else {
+            Arc::new(MemoryCheckpointStore::new())
+        };
+        let release = Arc::new(Notify::new());
+        let entered = Arc::new(Notify::new());
+        let original_join = Arc::new(Mutex::new(None));
+        let original_claim: Arc<Mutex<Option<Checkpoint>>> = Arc::new(Mutex::new(None));
+        let callback_claim = original_claim.clone();
+        let callback_join = original_join.clone();
+        let callback_release = release.clone();
+        let callback_entered = entered.clone();
+        let callback_effect = effect.clone();
+        let graph = GraphBuilder::new("protected-resume-observation")
+            .add_function_node("effect", move |_state: &SharedState| {
+                let claim = callback_claim.clone();
+                let join = callback_join.clone();
+                let release = callback_release.clone();
+                let entered = callback_entered.clone();
+                let effect = callback_effect.clone();
+                Box::pin(async move {
+                    let producer_entered = entered.clone();
+                    *join.lock().await = Some(tokio::spawn(async move {
+                        std::fs::write(&effect, "entered")?;
+                        producer_entered.notify_one();
+                        release.notified().await;
+                        std::fs::write(&effect, "closed")?;
+                        Ok::<(), ReactError>(())
+                    }));
+                    entered.notified().await;
+                    let checkpoint = claim.lock().await.clone().ok_or_else(|| {
+                        ReactError::Other("missing original checkpoint identity".into())
+                    })?;
+                    Err(ReactError::ExecutionNotSettled {
+                        run_id: checkpoint.workflow_run_id,
+                        execution_id: None,
+                    })
+                })
+            })
+            .set_entry("effect")
+            .set_finish("effect")
+            .interrupt_before(vec!["effect"])
+            .revision("physical-v1")
+            .build()?
+            .with_checkpoint_store(store.clone());
+        let checkpoint = match graph.run_until_interrupt(SharedState::new()).await? {
+            RunUntilInterruptResult::Interrupted(interrupt) => interrupt.checkpoint,
+            other => {
+                return Err(ReactError::Other(format!(
+                    "expected original interrupt, got {other:?}"
+                )));
+            }
+        };
+        *original_claim.lock().await = Some(checkpoint.clone());
+        let result = graph
+            .resume(checkpoint.clone(), ApprovalDecision::Approved)
+            .await;
+        // A new Store instance over the same directory tests real recovery, not
+        // presence in list/load (which also expose active claims).
+        let observer: Arc<dyn CheckpointStore> = if file_store {
+            Arc::new(FileCheckpointStore::new(directory.join("checkpoints")))
+        } else {
+            store.clone()
+        };
+        let replacement = observer.claim(&checkpoint.id).await;
+        let held = std::fs::read_to_string(&effect).ok();
+        release.notify_one();
+        let backend = original_join.lock().await.take();
+        let cleanup = match backend {
+            Some(backend) => backend
+                .await
+                .map_err(|error| ReactError::Other(format!("original backend join: {error}")))?,
+            None => Err(ReactError::Other(
+                "node never started its physical backend".into(),
+            )),
+        };
+        let closed = std::fs::read_to_string(&effect).ok();
+        let _ = std::fs::remove_dir_all(&directory);
+        cleanup?;
+        assert_eq!(held.as_deref(), Some("entered"));
+        assert_eq!(closed.as_deref(), Some("closed"));
+        assert!(
+            matches!(result, Err(ReactError::ExecutionNotSettled { ref run_id, execution_id: None }) if run_id == &checkpoint.workflow_run_id),
+            "original observation lost: {result:?}"
+        );
+        let replacement = replacement?;
+        assert!(
+            replacement.is_none(),
+            "same physical effect is still held but checkpoint was reclaimed: {replacement:?}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn physical_unknown_resume_keeps_memory_claim() -> Result<()> {
+        assert_unknown_resume_keeps_exact_claim(false).await
+    }
+
+    #[tokio::test]
+    async fn physical_unknown_resume_keeps_file_claim_across_reopen() -> Result<()> {
+        assert_unknown_resume_keeps_exact_claim(true).await
     }
 
     #[tokio::test]

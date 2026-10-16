@@ -863,6 +863,18 @@ impl PipelineStage for ExecuteStage {
                 // result: policy matches may span chunk boundaries. The
                 // terminal ToolResult remains the guarded output authority.
                 let guarded_stream = snapshot.guard.guard_manager.is_some();
+                // Delivery failure can cancel this Tool attempt's descendants,
+                // while the invocation parent and sibling Tools remain live.
+                let stream_cancel = std::sync::Arc::new(
+                    tool_ctx
+                        .cancel
+                        .as_ref()
+                        .map(|cancel| cancel.child_token())
+                        .unwrap_or_default(),
+                );
+                let mut streaming_ctx = tool_ctx.clone();
+                streaming_ctx.cancel = Some(stream_cancel.clone());
+                let mut delivery_error = None;
                 let (event_tx, mut event_rx) = mpsc::channel(64);
                 let mut execution = Box::pin(
                     snapshot
@@ -871,7 +883,7 @@ impl PipelineStage for ExecuteStage {
                         .execute_tool_stream_with_context_draining_started_checked(
                             &ctx.tool_name,
                             ctx.params.clone(),
-                            &tool_ctx,
+                            &streaming_ctx,
                             Some(event_tx),
                             &admission,
                         ),
@@ -883,15 +895,19 @@ impl PipelineStage for ExecuteStage {
                         event = event_rx.recv(), if stream_open => {
                             match event {
                                 Some(event) => {
-                                    if !guarded_stream && !matches!(event, ToolStreamEvent::Complete(_)) {
-                                        stream_tx
+                                    if delivery_error.is_none()
+                                        && !guarded_stream
+                                        && !matches!(event, ToolStreamEvent::Complete(_))
+                                        && stream_tx
                                             .send(ToolPipelineEvent::Stream {
                                                 call_id: ctx.call_id.clone(),
                                                 name: ctx.tool_name.clone(),
                                                 event,
                                             })
-                                            .await
-                                            .map_err(|_| ReactError::Other("Tool stream receiver closed".into()))?;
+                                            .await.is_err()
+                                    {
+                                        delivery_error = Some(ReactError::Other("Tool stream receiver closed".into()));
+                                        stream_cancel.cancel();
                                     }
                                 }
                                 None => stream_open = false,
@@ -901,16 +917,32 @@ impl PipelineStage for ExecuteStage {
                     }
                 };
                 while let Some(event) = event_rx.recv().await {
-                    if !guarded_stream && !matches!(event, ToolStreamEvent::Complete(_)) {
-                        stream_tx
+                    if delivery_error.is_none()
+                        && !guarded_stream
+                        && !matches!(event, ToolStreamEvent::Complete(_))
+                        && stream_tx
                             .send(ToolPipelineEvent::Stream {
                                 call_id: ctx.call_id.clone(),
                                 name: ctx.tool_name.clone(),
                                 event,
                             })
                             .await
-                            .map_err(|_| ReactError::Other("Tool stream receiver closed".into()))?;
+                            .is_err()
+                    {
+                        delivery_error =
+                            Some(ReactError::Other("Tool stream receiver closed".into()));
+                        stream_cancel.cancel();
                     }
+                }
+                // Only the original Manager's completed future/stream may
+                // release this owner. Unknown closure takes precedence over a
+                // delivery cause; ordinary delivery errors retain their text.
+                let result = match result {
+                    Err(error @ ReactError::ExecutionNotSettled { .. }) => return Err(error),
+                    result => result,
+                };
+                if let Some(error) = delivery_error {
+                    return Err(error);
                 }
                 result
             } else {
@@ -963,6 +995,7 @@ impl PipelineStage for ExecuteStage {
             .is_none_or(|tool| tool.risk_level() != crate::tools::ToolRiskLevel::ReadOnly);
         let result = match execution_result {
             Ok(r) => r,
+            Err(error @ ReactError::ExecutionNotSettled { .. }) => return Err(error),
             Err(e) => {
                 let err_msg = e.to_string();
                 let failure = crate::tools::ToolFailure::from_error(&e, may_have_side_effects);
@@ -1613,6 +1646,9 @@ impl ToolExecutionPipeline {
                 "Pipeline stage running"
             );
             if let Err(error) = stage.run(ctx, snapshot).await {
+                if matches!(&error, ReactError::ExecutionNotSettled { .. }) {
+                    return Err(error);
+                }
                 ctx.emit_invocation().await?;
                 if ctx.callback_started {
                     let message = error.to_string();
@@ -2469,6 +2505,10 @@ mod tests {
             assert!(
                 failure
                     .result
+                    .as_ref()
+                    .ok_or_else(|| crate::error::ReactError::Other(
+                        "expected captured ToolResult".to_string()
+                    ))?
                     .error
                     .as_deref()
                     .is_some_and(|reason| reason.contains(".env"))
@@ -2544,6 +2584,10 @@ mod tests {
         assert!(
             failure
                 .result
+                .as_ref()
+                .ok_or_else(|| crate::error::ReactError::Other(
+                    "expected captured ToolResult".to_string()
+                ))?
                 .error
                 .as_deref()
                 .is_some_and(|reason| reason.contains(".env"))
@@ -3112,7 +3156,15 @@ mod tests {
         };
 
         assert_eq!(
-            failure.result.failure.map(|failure| failure.category),
+            failure
+                .result
+                .as_ref()
+                .ok_or_else(|| crate::error::ReactError::Other(
+                    "expected captured ToolResult".to_string()
+                ))?
+                .failure
+                .as_ref()
+                .map(|failure| failure.category),
             Some(crate::tools::ToolFailureCategory::InvalidArguments)
         );
         Ok(())
@@ -3149,7 +3201,7 @@ mod tests {
         if let Err(failure) = execution {
             return Err(crate::error::ReactError::Other(format!(
                 "streaming guard tool failed: {}",
-                failure.result.output
+                failure.error
             )));
         }
         assert_eq!(observed.load(std::sync::atomic::Ordering::SeqCst), 1);
@@ -3252,6 +3304,234 @@ mod tests {
             .collect();
         assert_eq!(terminal_ids, vec!["call-b", "call-a"]);
         assert!(matches!(events.last(), Some(AgentEvent::ToolBatchEnd)));
+        Ok(())
+    }
+
+    type ClosedDeliveryProducer = futures::future::Shared<
+        futures::future::BoxFuture<'static, std::result::Result<(), String>>,
+    >;
+
+    struct ClosedDeliverySourceDrop(Arc<std::sync::atomic::AtomicUsize>);
+    impl Drop for ClosedDeliverySourceDrop {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    struct ClosedDeliveryStreamingTool {
+        started: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+        cancellation_observed: Arc<std::sync::atomic::AtomicBool>,
+        source_drops: Arc<std::sync::atomic::AtomicUsize>,
+        producer: Arc<std::sync::Mutex<Option<ClosedDeliveryProducer>>>,
+        effect: std::path::PathBuf,
+    }
+
+    impl Tool for ClosedDeliveryStreamingTool {
+        fn name(&self) -> &str {
+            "closed_delivery"
+        }
+        fn description(&self) -> &str {
+            "streams while the original effect producer remains held"
+        }
+        fn parameters(&self) -> Value {
+            serde_json::json!({"type":"object"})
+        }
+        fn supports_streaming(&self) -> bool {
+            true
+        }
+        fn execute_stream_with_context<'a>(
+            &'a self,
+            _params: ToolParameters,
+            ctx: &ToolContext,
+        ) -> futures::future::BoxFuture<
+            'a,
+            Result<Pin<Box<dyn Stream<Item = ToolStreamEvent> + Send + 'a>>>,
+        > {
+            use futures::{FutureExt, StreamExt};
+            let ctx = ctx.clone();
+            Box::pin(async move {
+                let started = self.started.clone();
+                let release = self.release.clone();
+                let observed = self.cancellation_observed.clone();
+                let cancel = ctx.cancel.clone().ok_or_else(|| {
+                    ReactError::Other("closed delivery Tool cancellation scope missing".to_string())
+                })?;
+                let effect = self.effect.clone();
+                let producer = tokio::spawn(async move {
+                    tokio::fs::write(&effect, b"original-producer-entered")
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    started.notify_one();
+                    tokio::select! {
+                        _ = cancel.cancelled() => {
+                            observed.store(true, std::sync::atomic::Ordering::SeqCst);
+                            release.notified().await;
+                        }
+                        _ = release.notified() => {}
+                    }
+                    tokio::fs::write(&effect, b"original-producer-closed")
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    Ok::<(), String>(())
+                });
+                let joined = async move { producer.await.map_err(|error| error.to_string())? }
+                    .boxed()
+                    .shared();
+                *self
+                    .producer
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()) = Some(joined.clone());
+                let stream = futures::stream::unfold(
+                    (
+                        0_u8,
+                        joined,
+                        ClosedDeliverySourceDrop(self.source_drops.clone()),
+                    ),
+                    |(step, producer, source)| async move {
+                        match step {
+                            0 => Some((
+                                ToolStreamEvent::Output {
+                                    channel: ToolOutputChannel::Stdout,
+                                    chunk: "original output".to_string(),
+                                },
+                                (1, producer, source),
+                            )),
+                            1 => {
+                                let result = match producer.clone().await {
+                                    Ok(()) => ToolResult::success("physical producer joined"),
+                                    Err(error) => ToolResult::error(error),
+                                };
+                                Some((ToolStreamEvent::Complete(result), (2, producer, source)))
+                            }
+                            _ => None,
+                        }
+                    },
+                );
+                Ok(stream.boxed())
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn closed_pipeline_delivery_retains_original_stream_until_physical_join() -> Result<()> {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        let directory = tempfile::tempdir()?;
+        let effect = directory.path().join("original-effect.txt");
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let observed = Arc::new(AtomicBool::new(false));
+        let drops = Arc::new(AtomicUsize::new(0));
+        let producer = Arc::new(std::sync::Mutex::new(None::<ClosedDeliveryProducer>));
+        let agent = crate::agent::ReactAgentBuilder::new()
+            .model("test-model")
+            .tool_execution(crate::tools::ToolExecutionConfig {
+                timeout_ms: 0,
+                retry_on_fail: false,
+                ..Default::default()
+            })
+            .tool(Box::new(ClosedDeliveryStreamingTool {
+                started: started.clone(),
+                release: release.clone(),
+                cancellation_observed: observed.clone(),
+                source_drops: drops.clone(),
+                producer: producer.clone(),
+                effect: effect.clone(),
+            }))
+            .build()?;
+        let parent = crate::agent::CancellationToken::new();
+        let sibling = parent.child_token();
+        let invocation = echo_core::agent::AgentInvocationContext {
+            cancel: Some(parent.clone()),
+            ..Default::default()
+        };
+        let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent_with_invocation(
+            &agent,
+            &invocation,
+        );
+        let (sender, receiver) = mpsc::channel(1);
+        drop(receiver);
+        let mut context = streaming_context("closed-delivery", "unused", 0, 0, sender);
+        context.tool_name = "closed_delivery".to_string();
+        context.requested_tool_name = context.tool_name.clone();
+        let mut execution = tokio::spawn(async move {
+            let result = ExecuteStage.run(&mut context, &snapshot).await;
+            (result, context.result)
+        });
+        let start =
+            tokio::time::timeout(std::time::Duration::from_secs(2), started.notified()).await;
+        let early = tokio::time::timeout(std::time::Duration::from_millis(100), &mut execution)
+            .await
+            .ok();
+        let returned_while_held = early.is_some();
+        let drops_while_held = drops.load(Ordering::SeqCst);
+        let signalled_while_held = observed.load(Ordering::SeqCst);
+        let caller_or_sibling_cancelled = parent.is_cancelled() || sibling.is_cancelled();
+        let held_effect = tokio::fs::read(&effect).await;
+        // Always close and join the one actual producer before assertions.
+        release.notify_one();
+        let original = producer
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        let physical_join = match original {
+            Some(joined) => {
+                Some(tokio::time::timeout(std::time::Duration::from_secs(2), joined).await)
+            }
+            None => None,
+        };
+        let result = match early {
+            Some(result) => result,
+            None => match tokio::time::timeout(std::time::Duration::from_secs(2), &mut execution)
+                .await
+            {
+                Ok(result) => result,
+                Err(_) => {
+                    execution.abort();
+                    let _ = execution.await;
+                    return Err(ReactError::Other(
+                        "pipeline did not finish after original producer join".to_string(),
+                    ));
+                }
+            },
+        }
+        .map_err(|error| ReactError::Other(error.to_string()))?;
+        let closed_effect = tokio::fs::read(&effect).await;
+        if let Some(joined) = physical_join {
+            joined
+                .map_err(|_| {
+                    ReactError::Other("released output producer did not join".to_string())
+                })?
+                .map_err(ReactError::Other)?;
+        } else {
+            return Err(ReactError::Other(
+                "original output producer missing".to_string(),
+            ));
+        }
+        assert!(start.is_ok());
+        assert!(
+            !returned_while_held,
+            "closed pipeline delivery dropped its live Manager/stream"
+        );
+        assert_eq!(drops_while_held, 0);
+        assert!(
+            signalled_while_held,
+            "closed delivery must signal the original Tool cleanup scope"
+        );
+        assert!(
+            !caller_or_sibling_cancelled,
+            "delivery closes only this Tool child scope"
+        );
+        assert_eq!(held_effect?, b"original-producer-entered");
+        assert_eq!(closed_effect?, b"original-producer-closed");
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert!(
+            matches!(result.0, Err(ReactError::Other(message)) if message == "Tool stream receiver closed")
+        );
+        assert!(
+            result.1.is_none(),
+            "delivery failure must not fabricate an execution result"
+        );
         Ok(())
     }
 
@@ -3474,12 +3754,24 @@ mod tests {
             .ok_or_else(|| ReactError::Other("post-use block was not enforced".into()))?;
         let final_reason = failure
             .result
+            .as_ref()
+            .ok_or_else(|| {
+                crate::error::ReactError::Other("expected captured ToolResult".to_string())
+            })?
             .error
             .as_deref()
             .ok_or_else(|| ReactError::Other("terminal reason missing".into()))?;
         assert!(failure.error.to_string().contains(final_reason));
         assert_eq!(
-            failure.result.failure.as_ref().map(|value| value.category),
+            failure
+                .result
+                .as_ref()
+                .ok_or_else(|| crate::error::ReactError::Other(
+                    "expected captured ToolResult".to_string()
+                ))?
+                .failure
+                .as_ref()
+                .map(|value| value.category),
             Some(crate::tools::ToolFailureCategory::Cancelled)
         );
         assert_eq!(
@@ -3905,10 +4197,7 @@ mod tests {
             )
             .await
             .map_err(|failure| {
-                ReactError::Other(format!(
-                    "tool unexpectedly failed: {}",
-                    failure.result.output
-                ))
+                ReactError::Other(format!("tool unexpectedly failed: {}", failure.error))
             })?;
         assert_eq!(outcome.result.output, "");
         let terminal_outputs: Vec<_> = audit
@@ -3957,13 +4246,26 @@ mod tests {
                 .err()
                 .ok_or_else(|| ReactError::Other("tool input guard allowed execution".into()))?;
             assert!(
-                failure.result.output.contains("tool input policy rejected")
+                failure
+                    .result
+                    .as_ref()
+                    .ok_or_else(|| crate::error::ReactError::Other(
+                        "expected captured ToolResult".to_string()
+                    ))?
+                    .output
+                    .contains("tool input policy rejected")
                     || failure
                         .error
                         .to_string()
                         .contains("tool input policy rejected"),
                 "unexpected guard failure output={:?} error={}",
-                failure.result.output,
+                failure
+                    .result
+                    .as_ref()
+                    .ok_or_else(|| crate::error::ReactError::Other(
+                        "expected captured ToolResult".to_string()
+                    ))?
+                    .output,
                 failure.error
             );
             assert_eq!(executions.load(std::sync::atomic::Ordering::SeqCst), 0);
@@ -4011,7 +4313,15 @@ mod tests {
                 .await
                 .err()
                 .ok_or_else(|| ReactError::Other("guard failure was not terminal".into()))?;
-            assert!(!failure.result.success);
+            assert!(
+                !failure
+                    .result
+                    .as_ref()
+                    .ok_or_else(|| crate::error::ReactError::Other(
+                        "expected captured ToolResult".to_string()
+                    ))?
+                    .success
+            );
             assert_eq!(executions.load(std::sync::atomic::Ordering::SeqCst), 0);
         }
         Ok(())
@@ -4311,10 +4621,23 @@ mod tests {
                 .ok_or_else(|| {
                     ReactError::Other("failed tool unexpectedly succeeded".to_string())
                 })?;
-            assert!(!failure.result.output.contains("raw-secret"));
+            assert!(
+                !failure
+                    .result
+                    .as_ref()
+                    .ok_or_else(|| crate::error::ReactError::Other(
+                        "expected captured ToolResult".to_string()
+                    ))?
+                    .output
+                    .contains("raw-secret")
+            );
             assert!(
                 failure
                     .result
+                    .as_ref()
+                    .ok_or_else(|| crate::error::ReactError::Other(
+                        "expected captured ToolResult".to_string()
+                    ))?
                     .error
                     .as_deref()
                     .is_some_and(|error| !error.contains("raw-secret"))
@@ -4336,7 +4659,7 @@ mod tests {
                     .iter()
                     .all(|error| !error.contains("raw-secret"))
             );
-            assert!(failure.result.effects.iter().any(|effect| matches!(
+            assert!(failure.result.as_ref().ok_or_else(|| crate::error::ReactError::Other("expected captured ToolResult".to_string()))?.effects.iter().any(|effect| matches!(
                 effect,
                 echo_core::tools::ToolEffect::FileEdit { path } if path == "src/output-error.rs"
             )));
@@ -4374,8 +4697,10 @@ mod tests {
             .ok_or_else(|| {
                 ReactError::Other("partial failure unexpectedly succeeded".to_string())
             })?;
-        let failure = result
-            .result
+        let captured = result.result.as_ref().ok_or_else(|| {
+            ReactError::Other("ordinary partial failure lost its original ToolResult".to_string())
+        })?;
+        let failure = captured
             .failure
             .as_ref()
             .ok_or_else(|| ReactError::Other("typed failure missing".to_string()))?;
@@ -4405,7 +4730,7 @@ mod tests {
                 .unwrap_or("")
                 .contains("raw-secret")
         );
-        assert!(result.result.effects.iter().any(|effect| matches!(
+        assert!(captured.effects.iter().any(|effect| matches!(
             effect,
             echo_core::tools::ToolEffect::FileEdit { path } if path == "src/partial-failure.rs"
         )));
@@ -4637,8 +4962,27 @@ mod tests {
             .await
             .err()
             .ok_or_else(|| ReactError::Other("failed tool unexpectedly succeeded".to_string()))?;
-        assert_eq!(failure.result.error.as_deref(), Some(""));
-        assert_eq!(failure.result.output, "");
+        assert_eq!(
+            failure
+                .result
+                .as_ref()
+                .ok_or_else(|| crate::error::ReactError::Other(
+                    "expected captured ToolResult".to_string()
+                ))?
+                .error
+                .as_deref(),
+            Some("")
+        );
+        assert_eq!(
+            failure
+                .result
+                .as_ref()
+                .ok_or_else(|| crate::error::ReactError::Other(
+                    "expected captured ToolResult".to_string()
+                ))?
+                .output,
+            ""
+        );
         let terminal_outputs: Vec<_> = audit
             .snapshot()
             .into_iter()
@@ -4702,10 +5046,29 @@ mod tests {
                 .ok_or_else(|| {
                     ReactError::Other("error-only tool unexpectedly succeeded".to_string())
                 })?;
-            assert_eq!(failure.result.error.as_deref(), Some(expected.as_str()));
+            assert_eq!(
+                failure
+                    .result
+                    .as_ref()
+                    .ok_or_else(|| crate::error::ReactError::Other(
+                        "expected captured ToolResult".to_string()
+                    ))?
+                    .error
+                    .as_deref(),
+                Some(expected.as_str())
+            );
             assert!(!failure.error.to_string().contains("sensitive-token"));
-            assert_eq!(failure.result.output, "");
-            assert!(failure.result.effects.iter().any(|effect| matches!(
+            assert_eq!(
+                failure
+                    .result
+                    .as_ref()
+                    .ok_or_else(|| crate::error::ReactError::Other(
+                        "expected captured ToolResult".to_string()
+                    ))?
+                    .output,
+                ""
+            );
+            assert!(failure.result.as_ref().ok_or_else(|| crate::error::ReactError::Other("expected captured ToolResult".to_string()))?.effects.iter().any(|effect| matches!(
                 effect,
                 echo_core::tools::ToolEffect::FileEdit { path } if path == "src/error-only.rs"
             )));
@@ -4913,7 +5276,9 @@ mod tests {
         let failure = outcome.err().ok_or_else(|| {
             ReactError::Other("post-use rejection incorrectly returned success".to_string())
         })?;
-        let result = failure.result;
+        let result = failure.result.ok_or_else(|| {
+            crate::error::ReactError::Other("expected captured ToolResult".to_string())
+        })?;
         assert!(!result.success);
         assert!(
             result
@@ -5036,19 +5401,43 @@ mod tests {
             .ok_or_else(|| ReactError::Other("post-hook block was not enforced".to_string()))?;
         let diagnostic = failure
             .result
+            .as_ref()
+            .ok_or_else(|| {
+                crate::error::ReactError::Other("expected captured ToolResult".to_string())
+            })?
             .error
             .as_deref()
             .ok_or_else(|| ReactError::Other("guarded terminal reason missing".to_string()))?;
         assert!(!diagnostic.contains("opaque output"));
         assert!(!failure.error.to_string().contains("opaque output"));
         assert!(failure.error.to_string().contains(diagnostic));
-        assert!(failure.result.failure.as_ref().is_some_and(|value| {
-            value.category == crate::tools::ToolFailureCategory::PartialSideEffect
-        }));
-        assert!(failure.result.effects.iter().any(|effect| matches!(
-            effect,
-            echo_core::tools::ToolEffect::FileEdit { path } if path == "src/lib.rs"
-        )));
+        assert!(
+            failure
+                .result
+                .as_ref()
+                .ok_or_else(|| crate::error::ReactError::Other(
+                    "expected captured ToolResult".to_string()
+                ))?
+                .failure
+                .as_ref()
+                .is_some_and(|value| {
+                    value.category == crate::tools::ToolFailureCategory::PartialSideEffect
+                })
+        );
+        assert!(
+            failure
+                .result
+                .as_ref()
+                .ok_or_else(|| crate::error::ReactError::Other(
+                    "expected captured ToolResult".to_string()
+                ))?
+                .effects
+                .iter()
+                .any(|effect| matches!(
+                    effect,
+                    echo_core::tools::ToolEffect::FileEdit { path } if path == "src/lib.rs"
+                ))
+        );
         let run = store
             .load(&run_id)
             .await?

@@ -95,6 +95,109 @@ async fn cancel_aware<T>(
     }
 }
 
+// Only canonical started/draining calls use this helper. Their configured
+// deadline requests cooperative cancellation; it never drops the original
+// execution or its permit. Ordinary bounded ToolManager calls stay unchanged.
+async fn await_started_execution<T>(
+    execution: impl std::future::Future<Output = Result<T>>,
+    ctx: &ToolContext,
+    timeout: Option<Duration>,
+    tool_name: &str,
+    completed: Option<&std::sync::atomic::AtomicBool>,
+) -> Result<T> {
+    let Some(timeout) = timeout else {
+        return execution.await;
+    };
+    let mut execution = Box::pin(execution);
+    let cancelled = async {
+        match ctx.cancel.as_ref() {
+            Some(cancel) => cancel.cancelled().await,
+            None => std::future::pending().await,
+        }
+    };
+    tokio::select! {
+        biased;
+        result = &mut execution => result,
+        _ = cancelled => execution.await,
+        _ = tokio::time::sleep(timeout) => {
+            // Already-observed business or delivery knowledge remains first;
+            // waiting for original finally/EOF cannot rewrite it as timeout.
+            let completed_first = completed.is_some_and(|completed| completed.load(Ordering::Acquire));
+            if let Some(cancel) = ctx.cancel.as_ref() { cancel.cancel(); }
+            match execution.await {
+                Err(error @ ReactError::ExecutionNotSettled { .. }) => Err(error),
+                result if completed_first => result,
+                _ => Err(ToolError::Timeout(tool_name.to_string()).into()),
+            }
+        }
+    }
+}
+
+fn started_execution_context(ctx: &ToolContext, drain_started: bool) -> Option<ToolContext> {
+    drain_started.then(|| {
+        let mut child = ctx.clone();
+        // An individual Tool timeout must not cancel the parent/sibling scope.
+        child.cancel = Some(Arc::new(
+            ctx.cancel
+                .as_ref()
+                .map(|cancel| cancel.child_token())
+                .unwrap_or_default(),
+        ));
+        child
+    })
+}
+
+// This is a resource projection inside the existing manager, not another
+// quota or execution registry. The original read/write semaphore is unchanged.
+struct StartedToolResources {
+    permit: Option<OwnedSemaphorePermit>,
+    projection: Option<echo_core::agent::admission::KeyedExecutionLease>,
+    guards: Vec<echo_core::tools::InvocationResourceGuard>,
+    unsettled: bool,
+}
+
+impl StartedToolResources {
+    fn new(
+        permit: Option<OwnedSemaphorePermit>,
+        authority: &Arc<echo_core::agent::admission::KeyedExecutionAdmission>,
+        ctx: &ToolContext,
+        drain_started: bool,
+    ) -> Result<Self> {
+        let projection = if drain_started {
+            Some(
+                authority
+                    .issue(format!("tool-physical:{}", uuid::Uuid::new_v4()))
+                    .map_err(|error| ReactError::Other(error.to_string()))?,
+            )
+        } else {
+            None
+        };
+        Ok(Self {
+            permit,
+            projection,
+            guards: if drain_started {
+                ctx.resource_guards.clone()
+            } else {
+                Vec::new()
+            },
+            unsettled: false,
+        })
+    }
+}
+
+impl Drop for StartedToolResources {
+    fn drop(&mut self) {
+        if self.unsettled
+            && let Some(projection) = self.projection.take()
+        {
+            projection.retain_unknown_with_resources(Some(Box::new((
+                self.permit.take(),
+                std::mem::take(&mut self.guards),
+            ))));
+        }
+    }
+}
+
 pub use echo_core::tools::{
     ScriptExecutionProfile, ScriptExecutionProfileResolver, Tool, ToolContext, ToolExecutionConfig,
     ToolFailure, ToolFailureCategory, ToolOutputChannel, ToolParameters, ToolRecoveryAction,
@@ -239,6 +342,9 @@ type CachedToolDefinitions = Option<((u64, u64), Vec<ToolDefinition>)>;
 
 /// 工具管理器 — thread-safe tool registry and executor.
 pub struct ToolManager {
+    // Reuse the canonical keyed resource mechanism to retain original permits
+    // and invocation guards on typed unknown/unwind, with no second limit.
+    started_resources: Arc<echo_core::agent::admission::KeyedExecutionAdmission>,
     tools: DashMap<String, Arc<dyn Tool>>,
     registration_lock: parking_lot::Mutex<()>,
     config: ToolExecutionConfig,
@@ -703,6 +809,9 @@ impl Default for ToolManager {
 impl ToolManager {
     pub fn new() -> Self {
         Self {
+            started_resources: Arc::new(
+                echo_core::agent::admission::KeyedExecutionAdmission::default(),
+            ),
             tools: DashMap::new(),
             registration_lock: parking_lot::Mutex::new(()),
             semaphore: None,
@@ -724,6 +833,9 @@ impl ToolManager {
             .max_read_concurrency
             .map(|n| Arc::new(Semaphore::new(n.max(1))));
         Self {
+            started_resources: Arc::new(
+                echo_core::agent::admission::KeyedExecutionAdmission::default(),
+            ),
             tools: DashMap::new(),
             registration_lock: parking_lot::Mutex::new(()),
             semaphore,
@@ -935,8 +1047,9 @@ impl ToolManager {
     /// Cancellation still rejects a call while it waits for a concurrency
     /// permit or retry delay. Once the tool future starts, this method does not
     /// race-drop it. The tool continues to receive `ctx.cancel` for cooperative
-    /// shutdown, while the caller must bound the drain and drop this future
-    /// when its grace period expires.
+    /// shutdown. A configured execution timeout signals that same child scope
+    /// and records the timeout cause, but retains the original future/permit
+    /// until physical closure. Only outer observation may expire.
     pub async fn execute_tool_with_context_draining_started(
         &self,
         tool_name: &str,
@@ -1017,6 +1130,8 @@ impl ToolManager {
         };
 
         reject_cancelled(ctx, tool_name)?;
+        let mut physical =
+            StartedToolResources::new(_permit, &self.started_resources, ctx, drain_started)?;
 
         let max_retries = if self.config.retry_on_fail {
             self.config.max_retries
@@ -1037,9 +1152,24 @@ impl ToolManager {
                 wait_retry_delay(Duration::from_millis(delay_ms), ctx, tool_name).await?;
             }
 
+            let owned_context = started_execution_context(ctx, drain_started);
+            let attempt_context = owned_context.as_ref().unwrap_or(ctx);
             let execution = async {
                 if let Some(check) = admission {
                     check(tool.as_ref())?;
+                }
+                physical.unsettled = drain_started;
+                if drain_started {
+                    let timeout = (self.config.timeout_ms > 0 && !tool.manages_own_timeout())
+                        .then(|| Duration::from_millis(self.config.timeout_ms));
+                    return await_started_execution(
+                        tool.execute_with_context(parameters.clone(), attempt_context),
+                        attempt_context,
+                        timeout,
+                        tool_name,
+                        None,
+                    )
+                    .await;
                 }
                 if self.config.timeout_ms > 0 && !tool.manages_own_timeout() {
                     match tokio::time::timeout(
@@ -1056,6 +1186,8 @@ impl ToolManager {
                 }
             };
             let result = cancel_aware(execution, ctx, tool_name, drain_started).await;
+            physical.unsettled =
+                drain_started && matches!(&result, Err(ReactError::ExecutionNotSettled { .. }));
 
             match result {
                 Ok(result) if result.success => {
@@ -1079,6 +1211,7 @@ impl ToolManager {
                         .and_then(|failure| failure.retry_after_ms);
                 }
                 Ok(result) => return Ok(result),
+                Err(error @ ReactError::ExecutionNotSettled { .. }) => return Err(error),
                 Err(error) if attempt < max_retries => {
                     let failure = ToolFailure::from_error(&error, !is_read);
                     if failure.allows_automatic_retry() {
@@ -1222,6 +1355,8 @@ impl ToolManager {
         };
 
         reject_cancelled(ctx, tool_name)?;
+        let mut physical =
+            StartedToolResources::new(_permit, &self.started_resources, ctx, drain_started)?;
 
         let max_retries = if self.config.retry_on_fail {
             self.config.max_retries
@@ -1242,50 +1377,102 @@ impl ToolManager {
             }
 
             let mut output_forwarded = false;
+            let completed = std::sync::atomic::AtomicBool::new(false);
+            let owned_context = started_execution_context(ctx, drain_started);
+            let attempt_context = owned_context.as_ref().unwrap_or(ctx);
             let consume_stream = async {
                 use futures::StreamExt;
 
                 if let Some(check) = admission {
                     check(tool.as_ref())?;
                 }
+                physical.unsettled = drain_started;
 
                 let mut stream = tool
-                    .execute_stream_with_context(parameters.clone(), ctx)
+                    .execute_stream_with_context(parameters.clone(), attempt_context)
                     .await?;
+                let mut terminal_result = None;
+                let mut delivery_failure = None;
                 while let Some(event) = stream.next().await {
+                    if terminal_result.is_some() {
+                        continue;
+                    }
                     match event {
-                        ToolStreamEvent::Complete(result) => return Ok(result),
+                        ToolStreamEvent::Complete(result) => {
+                            if !drain_started {
+                                return Ok(result);
+                            }
+                            terminal_result = Some(result);
+                            completed.store(true, Ordering::Release);
+                        }
                         event @ ToolStreamEvent::Output { .. } => {
                             output_forwarded = true;
-                            if let Some(tx) = event_tx.as_ref() {
-                                tx.send(event)
-                                    .await
-                                    .map_err(|_| ToolError::ExecutionFailed {
-                                        tool: tool_name.to_string(),
-                                        message: "Tool stream receiver closed".into(),
-                                    })?;
+                            if let Some(tx) = event_tx.as_ref()
+                                && delivery_failure.is_none()
+                                && tx.send(event).await.is_err()
+                            {
+                                let error: ReactError = ToolError::ExecutionFailed {
+                                    tool: tool_name.to_string(),
+                                    message: "Tool stream receiver closed".into(),
+                                }
+                                .into();
+                                if !drain_started {
+                                    return Err(error);
+                                }
+                                delivery_failure = Some(error);
+                                completed.store(true, Ordering::Release);
+                                if let Some(cancel) = attempt_context.cancel.as_ref() {
+                                    cancel.cancel();
+                                }
                             }
                         }
                         event @ ToolStreamEvent::Progress { .. } => {
-                            if let Some(tx) = event_tx.as_ref() {
-                                tx.send(event)
-                                    .await
-                                    .map_err(|_| ToolError::ExecutionFailed {
-                                        tool: tool_name.to_string(),
-                                        message: "Tool stream receiver closed".into(),
-                                    })?;
+                            if let Some(tx) = event_tx.as_ref()
+                                && delivery_failure.is_none()
+                                && tx.send(event).await.is_err()
+                            {
+                                let error: ReactError = ToolError::ExecutionFailed {
+                                    tool: tool_name.to_string(),
+                                    message: "Tool stream receiver closed".into(),
+                                }
+                                .into();
+                                if !drain_started {
+                                    return Err(error);
+                                }
+                                delivery_failure = Some(error);
+                                completed.store(true, Ordering::Release);
+                                if let Some(cancel) = attempt_context.cancel.as_ref() {
+                                    cancel.cancel();
+                                }
                             }
                         }
                     }
                 }
-                Err(ToolError::ExecutionFailed {
-                    tool: tool_name.to_string(),
-                    message: "Tool stream ended without a Complete event".into(),
+                if let Some(error) = delivery_failure {
+                    return Err(error);
                 }
-                .into())
+                terminal_result.ok_or_else(|| {
+                    ToolError::ExecutionFailed {
+                        tool: tool_name.to_string(),
+                        message: "Tool stream ended without a Complete event".into(),
+                    }
+                    .into()
+                })
             };
 
             let execution = async {
+                if drain_started {
+                    let timeout = (self.config.timeout_ms > 0 && !tool.manages_own_timeout())
+                        .then(|| Duration::from_millis(self.config.timeout_ms));
+                    return await_started_execution(
+                        consume_stream,
+                        attempt_context,
+                        timeout,
+                        tool_name,
+                        Some(&completed),
+                    )
+                    .await;
+                }
                 if self.config.timeout_ms > 0 && !tool.manages_own_timeout() {
                     match tokio::time::timeout(
                         Duration::from_millis(self.config.timeout_ms),
@@ -1301,6 +1488,8 @@ impl ToolManager {
                 }
             };
             let result = cancel_aware(execution, ctx, tool_name, drain_started).await;
+            physical.unsettled =
+                drain_started && matches!(&result, Err(ReactError::ExecutionNotSettled { .. }));
 
             match result {
                 Ok(result) if result.success => {
@@ -1325,6 +1514,7 @@ impl ToolManager {
                         .and_then(|failure| failure.retry_after_ms);
                 }
                 Ok(result) => return Ok(result),
+                Err(error @ ReactError::ExecutionNotSettled { .. }) => return Err(error),
                 Err(error) if attempt < max_retries && !output_forwarded => {
                     let failure = ToolFailure::from_error(&error, !is_read);
                     if failure.allows_automatic_retry() {
@@ -1473,6 +1663,622 @@ mod execute_with_context_tests {
         started: Arc<tokio::sync::Notify>,
         finished: Arc<AtomicBool>,
         calls: Arc<AtomicUsize>,
+    }
+
+    type PhysicalCleanupJoin = futures::future::Shared<
+        futures::future::BoxFuture<'static, std::result::Result<(), String>>,
+    >;
+
+    struct PhysicalCleanupTool {
+        streaming: bool,
+        observe_unknown: bool,
+        emit_output: bool,
+        terminal: ToolResult,
+        started: Arc<tokio::sync::Notify>,
+        complete_emitted: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+        cancellation_observed: Arc<AtomicBool>,
+        source_drops: Arc<AtomicUsize>,
+        producer: Arc<Mutex<Option<PhysicalCleanupJoin>>>,
+        effect: PathBuf,
+    }
+
+    impl PhysicalCleanupTool {
+        fn start_producer(&self, ctx: &ToolContext) -> PhysicalCleanupJoin {
+            use futures::FutureExt;
+            let started = self.started.clone();
+            let release = self.release.clone();
+            let cancellation_observed = self.cancellation_observed.clone();
+            let cancel = ctx.cancel.clone();
+            let effect = self.effect.clone();
+            let resources = ctx.resource_guards.clone();
+            let producer = tokio::spawn(async move {
+                let _resources = resources;
+                tokio::fs::write(&effect, b"producer-entered")
+                    .await
+                    .map_err(|error| error.to_string())?;
+                started.notify_one();
+                let cancellation = async {
+                    match cancel {
+                        Some(cancel) => cancel.cancelled().await,
+                        None => std::future::pending().await,
+                    }
+                };
+                tokio::select! {
+                    _ = cancellation => {
+                        cancellation_observed.store(true, AtomicOrdering::SeqCst);
+                        release.notified().await;
+                    }
+                    _ = release.notified() => {}
+                }
+                tokio::fs::write(&effect, b"producer-physically-closed")
+                    .await
+                    .map_err(|error| error.to_string())?;
+                Ok::<(), String>(())
+            });
+            // The Tool future/stream and the test join the same original task.
+            // Even a broken early manager return leaves a recoverable join for
+            // mandatory test cleanup before any regression assertion fires.
+            let joined = async move { producer.await.map_err(|error| error.to_string())? }
+                .boxed()
+                .shared();
+            *self
+                .producer
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = Some(joined.clone());
+            joined
+        }
+    }
+
+    impl Tool for PhysicalCleanupTool {
+        fn name(&self) -> &str {
+            "physical_cleanup"
+        }
+        fn description(&self) -> &str {
+            "retains a real effect producer through cleanup"
+        }
+        fn parameters(&self) -> Value {
+            json!({"type": "object"})
+        }
+        fn supports_streaming(&self) -> bool {
+            self.streaming
+        }
+        fn execute_with_context<'a>(
+            &'a self,
+            _params: ToolParameters,
+            ctx: &'a ToolContext,
+        ) -> futures::future::BoxFuture<'a, Result<ToolResult>> {
+            Box::pin(async move {
+                let _source = GuardDropCounter(self.source_drops.clone());
+                let original = self.start_producer(ctx);
+                if self.observe_unknown {
+                    return Err(ReactError::ExecutionNotSettled {
+                        run_id: "original-tool-run".to_string(),
+                        execution_id: Some("original-tool-execution".to_string()),
+                    });
+                }
+                original.await.map_err(ReactError::Other)?;
+                Ok(ToolResult::success("physical cleanup finished"))
+            })
+        }
+        fn execute_stream_with_context<'a>(
+            &'a self,
+            _params: ToolParameters,
+            ctx: &ToolContext,
+        ) -> futures::future::BoxFuture<
+            'a,
+            Result<Pin<Box<dyn Stream<Item = ToolStreamEvent> + Send + 'a>>>,
+        > {
+            use futures::StreamExt;
+            let ctx = ctx.clone();
+            Box::pin(async move {
+                let producer = self.start_producer(&ctx);
+                let complete = self.complete_emitted.clone();
+                let terminal = self.terminal.clone();
+                let emit_output = self.emit_output;
+                let state = (0_u8, producer, GuardDropCounter(self.source_drops.clone()));
+                let stream = futures::stream::unfold(state, move |(phase, producer, source)| {
+                    let complete = complete.clone();
+                    let terminal = terminal.clone();
+                    async move {
+                        if phase == 0 && emit_output {
+                            Some((
+                                ToolStreamEvent::Output {
+                                    channel: ToolOutputChannel::Stdout,
+                                    chunk: "owned physical progress".to_string(),
+                                },
+                                (1, producer, source),
+                            ))
+                        } else if phase <= 1 {
+                            complete.notify_one();
+                            Some((ToolStreamEvent::Complete(terminal), (2, producer, source)))
+                        } else {
+                            let _ = producer.await;
+                            None
+                        }
+                    }
+                });
+                Ok(stream.boxed())
+            })
+        }
+    }
+
+    fn physical_cleanup_directory() -> std::io::Result<PathBuf> {
+        let target = std::env::var_os("CARGO_TARGET_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../target"));
+        let path = target
+            .join("physical-cleanup-tests")
+            .join(uuid::Uuid::new_v4().to_string());
+        std::fs::create_dir_all(&path)?;
+        Ok(path)
+    }
+
+    async fn finish_physical_cleanup(
+        release: &tokio::sync::Notify,
+        producer: &Mutex<Option<PhysicalCleanupJoin>>,
+    ) -> Result<()> {
+        // Always release and join before asserting the captured early-return
+        // facts. A red counter must not leave its effect producer running.
+        release.notify_one();
+        let original = producer
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+            .ok_or_else(|| ReactError::Other("physical producer was not launched".to_string()))?;
+        tokio::time::timeout(Duration::from_secs(2), original)
+            .await
+            .map_err(|_| ReactError::Other("released physical producer did not join".to_string()))?
+            .map_err(ReactError::Other)
+    }
+
+    async fn join_released_manager(
+        execution: &mut tokio::task::JoinHandle<Result<ToolResult>>,
+        early: Option<std::result::Result<Result<ToolResult>, tokio::task::JoinError>>,
+    ) -> Result<Result<ToolResult>> {
+        let joined = match early {
+            Some(joined) => joined,
+            None => match tokio::time::timeout(Duration::from_secs(2), &mut *execution).await {
+                Ok(joined) => joined,
+                Err(_) => {
+                    // The physical producer has already been released/joined.
+                    // Bound a broken manager's test cleanup without aborting
+                    // the original effect task or masking its early return.
+                    execution.abort();
+                    let _ = execution.await;
+                    return Err(ReactError::Other(
+                        "manager did not finish after physical join".to_string(),
+                    ));
+                }
+            },
+        };
+        joined.map_err(|error| ReactError::Other(error.to_string()))
+    }
+
+    #[tokio::test]
+    async fn draining_started_timeout_retains_original_producer_future_and_permit_until_join()
+    -> Result<()> {
+        let directory = physical_cleanup_directory()?;
+        let effect = directory.join("effect.txt");
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let signalled = Arc::new(AtomicBool::new(false));
+        let source_drops = Arc::new(AtomicUsize::new(0));
+        let producer = Arc::new(Mutex::new(None));
+        let manager = Arc::new(ToolManager::new_with_config(ToolExecutionConfig {
+            timeout_ms: 20,
+            retry_on_fail: false,
+            max_retries: 0,
+            retry_delay_ms: 0,
+            max_concurrency: Some(1),
+            max_read_concurrency: None,
+        }));
+        manager.try_register(Box::new(PhysicalCleanupTool {
+            streaming: false,
+            observe_unknown: false,
+            emit_output: false,
+            terminal: ToolResult::success("physical cleanup finished"),
+            started: started.clone(),
+            complete_emitted: Arc::new(tokio::sync::Notify::new()),
+            release: release.clone(),
+            cancellation_observed: signalled.clone(),
+            source_drops: source_drops.clone(),
+            producer: producer.clone(),
+            effect: effect.clone(),
+        }))?;
+        let parent = Arc::new(tokio_util::sync::CancellationToken::new());
+        let ctx = ToolContext {
+            cancel: Some(parent.clone()),
+            ..Default::default()
+        };
+        let execution_manager = manager.clone();
+        let mut execution = tokio::spawn(async move {
+            execution_manager
+                .execute_tool_with_context_draining_started(
+                    "physical_cleanup",
+                    ToolParameters::new(),
+                    &ctx,
+                )
+                .await
+        });
+        let start = tokio::time::timeout(Duration::from_secs(2), started.notified()).await;
+        let early = tokio::time::timeout(Duration::from_millis(100), &mut execution)
+            .await
+            .ok();
+        let returned_while_held = early.is_some();
+        let permit_while_held = manager
+            .semaphore
+            .as_ref()
+            .map(|permit| permit.available_permits());
+        let drops_while_held = source_drops.load(AtomicOrdering::SeqCst);
+        let signal_while_held = signalled.load(AtomicOrdering::SeqCst);
+        let parent_cancelled = parent.is_cancelled();
+        let effect_while_held = tokio::fs::read(&effect).await;
+        let cleanup = finish_physical_cleanup(&release, &producer).await;
+        let result = join_released_manager(&mut execution, early).await;
+        let final_effect = tokio::fs::read(&effect).await;
+        let removal = tokio::fs::remove_dir_all(&directory).await;
+        eprintln!(
+            "PHYSICAL_TOOL_BOUNDARY {}",
+            json!({
+                "early_return": returned_while_held,
+                "permit_while_held": permit_while_held,
+                "source_drops_while_held": drops_while_held,
+                "effect_while_held": effect_while_held.as_ref().ok().map(|bytes| String::from_utf8_lossy(bytes).into_owned()),
+                "effect_after_release": final_effect.as_ref().ok().map(|bytes| String::from_utf8_lossy(bytes).into_owned()),
+                "original_producer_joined": cleanup.is_ok(),
+            })
+        );
+        cleanup?;
+        removal?;
+        assert!(start.is_ok());
+        assert!(
+            !returned_while_held,
+            "manager returned while original producer was held"
+        );
+        assert_eq!(permit_while_held, Some(0));
+        assert_eq!(drops_while_held, 0);
+        assert!(
+            signal_while_held,
+            "configured timeout must signal original attempt cleanup"
+        );
+        assert!(
+            !parent_cancelled,
+            "one attempt timeout must not cancel its caller scope"
+        );
+        assert_eq!(effect_while_held?, b"producer-entered");
+        assert_eq!(final_effect?, b"producer-physically-closed");
+        let error = result?.err().ok_or_else(|| {
+            ReactError::Other("configured timeout lost its original cause".to_string())
+        })?;
+        assert!(
+            matches!(error, ReactError::Tool(inner) if matches!(inner.as_ref(), ToolError::Timeout(name) if name == "physical_cleanup"))
+        );
+        assert_eq!(source_drops.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(
+            manager
+                .semaphore
+                .as_ref()
+                .map(|permit| permit.available_permits()),
+            Some(1)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn draining_started_stream_complete_retains_original_stream_through_physical_eof()
+    -> Result<()> {
+        let directory = physical_cleanup_directory()?;
+        let effect = directory.join("effect.txt");
+        let started = Arc::new(tokio::sync::Notify::new());
+        let complete = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let source_drops = Arc::new(AtomicUsize::new(0));
+        let producer = Arc::new(Mutex::new(None));
+        let manager = Arc::new(ToolManager::new_with_config(ToolExecutionConfig {
+            timeout_ms: 20,
+            retry_on_fail: false,
+            max_retries: 0,
+            retry_delay_ms: 0,
+            max_concurrency: Some(1),
+            max_read_concurrency: None,
+        }));
+        let expected_result = ToolResult::success("logical complete")
+            .with_data(json!({"detail": "原结果", "sequence": 1}))
+            .with_meta("producer", "original");
+        manager.try_register(Box::new(PhysicalCleanupTool {
+            streaming: true,
+            observe_unknown: false,
+            emit_output: false,
+            terminal: expected_result.clone(),
+            started: started.clone(),
+            complete_emitted: complete.clone(),
+            release: release.clone(),
+            cancellation_observed: Arc::new(AtomicBool::new(false)),
+            source_drops: source_drops.clone(),
+            producer: producer.clone(),
+            effect: effect.clone(),
+        }))?;
+        let parent = Arc::new(tokio_util::sync::CancellationToken::new());
+        let ctx = ToolContext {
+            cancel: Some(parent.clone()),
+            ..Default::default()
+        };
+        let execution_manager = manager.clone();
+        let mut execution = tokio::spawn(async move {
+            execution_manager
+                .execute_tool_stream_with_context_draining_started(
+                    "physical_cleanup",
+                    ToolParameters::new(),
+                    &ctx,
+                    None,
+                )
+                .await
+        });
+        let start = tokio::time::timeout(Duration::from_secs(2), started.notified()).await;
+        let complete_seen = tokio::time::timeout(Duration::from_secs(2), complete.notified()).await;
+        let early = tokio::time::timeout(Duration::from_millis(50), &mut execution)
+            .await
+            .ok();
+        // The original Complete preceded both the configured deadline and this
+        // later caller cancellation. Neither may rewrite its business payload.
+        parent.cancel();
+        let late = if early.is_none() {
+            tokio::time::timeout(Duration::from_millis(10), &mut execution)
+                .await
+                .ok()
+        } else {
+            None
+        };
+        let early = early.or(late);
+        let returned_while_held = early.is_some();
+        let permit_while_held = manager
+            .semaphore
+            .as_ref()
+            .map(|permit| permit.available_permits());
+        let drops_while_held = source_drops.load(AtomicOrdering::SeqCst);
+        let effect_while_held = tokio::fs::read(&effect).await;
+        let cleanup = finish_physical_cleanup(&release, &producer).await;
+        let result = join_released_manager(&mut execution, early).await;
+        let final_effect = tokio::fs::read(&effect).await;
+        let removal = tokio::fs::remove_dir_all(&directory).await;
+        eprintln!(
+            "PHYSICAL_TOOL_BOUNDARY {}",
+            json!({
+                "early_return": returned_while_held,
+                "permit_while_held": permit_while_held,
+                "source_drops_while_held": drops_while_held,
+                "effect_while_held": effect_while_held.as_ref().ok().map(|bytes| String::from_utf8_lossy(bytes).into_owned()),
+                "effect_after_release": final_effect.as_ref().ok().map(|bytes| String::from_utf8_lossy(bytes).into_owned()),
+                "original_producer_joined": cleanup.is_ok(),
+            })
+        );
+        cleanup?;
+        removal?;
+        assert!(start.is_ok());
+        assert!(
+            complete_seen.is_ok(),
+            "original source must actually emit Complete"
+        );
+        assert!(
+            !returned_while_held,
+            "logical Complete is not original producer EOF"
+        );
+        assert_eq!(permit_while_held, Some(0));
+        assert_eq!(drops_while_held, 0);
+        assert_eq!(effect_while_held?, b"producer-entered");
+        assert_eq!(final_effect?, b"producer-physically-closed");
+        let result = result??;
+        assert!(result.success);
+        assert_eq!(
+            serde_json::to_value(&result)?,
+            serde_json::to_value(&expected_result)?
+        );
+        assert_eq!(source_drops.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(
+            manager
+                .semaphore
+                .as_ref()
+                .map(|permit| permit.available_permits()),
+            Some(1)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn draining_started_observation_retains_original_permit_and_resources() -> Result<()> {
+        let directory = physical_cleanup_directory()?;
+        let effect = directory.join("unknown-effect.txt");
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let producer = Arc::new(Mutex::new(None));
+        let resources_dropped = Arc::new(AtomicUsize::new(0));
+        let manager = Arc::new(ToolManager::new_with_config(ToolExecutionConfig {
+            timeout_ms: 0,
+            retry_on_fail: false,
+            max_retries: 0,
+            retry_delay_ms: 0,
+            max_concurrency: Some(1),
+            max_read_concurrency: None,
+        }));
+        manager.try_register(Box::new(PhysicalCleanupTool {
+            streaming: false,
+            observe_unknown: true,
+            emit_output: false,
+            terminal: ToolResult::success("not a receipt"),
+            started: started.clone(),
+            complete_emitted: Arc::new(tokio::sync::Notify::new()),
+            release: release.clone(),
+            cancellation_observed: Arc::new(AtomicBool::new(false)),
+            source_drops: Arc::new(AtomicUsize::new(0)),
+            producer: producer.clone(),
+            effect: effect.clone(),
+        }))?;
+        let ctx = ToolContext {
+            resource_guards: vec![InvocationResourceGuard::new(GuardDropCounter(
+                resources_dropped.clone(),
+            ))],
+            ..Default::default()
+        };
+        let result = manager
+            .execute_tool_with_context_draining_started(
+                "physical_cleanup",
+                ToolParameters::new(),
+                &ctx,
+            )
+            .await;
+        drop(ctx);
+        let entered = tokio::time::timeout(Duration::from_secs(2), started.notified()).await;
+        let permit_while_held = manager
+            .semaphore
+            .as_ref()
+            .map(|permit| permit.available_permits());
+        let effect_while_held = tokio::fs::read(&effect).await;
+        let cleanup = finish_physical_cleanup(&release, &producer).await;
+        let final_effect = tokio::fs::read(&effect).await;
+        let resources_before_authority_drop = resources_dropped.load(AtomicOrdering::SeqCst);
+        drop(manager);
+        let resources_after_authority_drop = resources_dropped.load(AtomicOrdering::SeqCst);
+        let removal = tokio::fs::remove_dir_all(&directory).await;
+        eprintln!(
+            "PHYSICAL_TOOL_UNKNOWN {}",
+            json!({
+                "permit_while_held": permit_while_held,
+                "effect_while_held": effect_while_held.as_ref().ok().map(|bytes| String::from_utf8_lossy(bytes).into_owned()),
+                "original_producer_joined": cleanup.is_ok(),
+                "resources_before_authority_drop": resources_before_authority_drop,
+            })
+        );
+        cleanup?;
+        removal?;
+        assert!(entered.is_ok());
+        assert!(
+            matches!(result, Err(ReactError::ExecutionNotSettled { run_id, execution_id })
+            if run_id == "original-tool-run" && execution_id.as_deref() == Some("original-tool-execution"))
+        );
+        assert_eq!(effect_while_held?, b"producer-entered");
+        assert_eq!(final_effect?, b"producer-physically-closed");
+        assert_eq!(
+            permit_while_held,
+            Some(0),
+            "observation return is not original producer closure"
+        );
+        assert_eq!(
+            resources_before_authority_drop, 0,
+            "no closure receipt has reached the original manager authority"
+        );
+        assert_eq!(resources_after_authority_drop, 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn draining_started_closed_output_retains_original_stream_until_physical_join()
+    -> Result<()> {
+        let directory = physical_cleanup_directory()?;
+        let effect = directory.join("effect.txt");
+        let started = Arc::new(tokio::sync::Notify::new());
+        let complete = Arc::new(tokio::sync::Notify::new());
+        let signalled = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(tokio::sync::Notify::new());
+        let source_drops = Arc::new(AtomicUsize::new(0));
+        let producer = Arc::new(Mutex::new(None));
+        let manager = Arc::new(ToolManager::new_with_config(ToolExecutionConfig {
+            timeout_ms: 0,
+            retry_on_fail: false,
+            max_retries: 0,
+            retry_delay_ms: 0,
+            max_concurrency: Some(1),
+            max_read_concurrency: None,
+        }));
+        let expected_result = ToolResult::success("logical complete")
+            .with_data(json!({"detail": "原结果", "sequence": 1}))
+            .with_meta("producer", "original");
+        manager.try_register(Box::new(PhysicalCleanupTool {
+            streaming: true,
+            observe_unknown: false,
+            emit_output: true,
+            terminal: expected_result.clone(),
+            started: started.clone(),
+            complete_emitted: complete.clone(),
+            release: release.clone(),
+            cancellation_observed: signalled.clone(),
+            source_drops: source_drops.clone(),
+            producer: producer.clone(),
+            effect: effect.clone(),
+        }))?;
+        let parent = Arc::new(tokio_util::sync::CancellationToken::new());
+        let ctx = ToolContext {
+            cancel: Some(parent.clone()),
+            ..Default::default()
+        };
+        let (events, receiver) = tokio::sync::mpsc::channel(1);
+        drop(receiver);
+        let execution_manager = manager.clone();
+        let mut execution = tokio::spawn(async move {
+            execution_manager
+                .execute_tool_stream_with_context_draining_started(
+                    "physical_cleanup",
+                    ToolParameters::new(),
+                    &ctx,
+                    Some(events),
+                )
+                .await
+        });
+        let start = tokio::time::timeout(Duration::from_secs(2), started.notified()).await;
+        let early = tokio::time::timeout(Duration::from_millis(50), &mut execution)
+            .await
+            .ok();
+        let returned_while_held = early.is_some();
+        let permit_while_held = manager
+            .semaphore
+            .as_ref()
+            .map(|permit| permit.available_permits());
+        let drops_while_held = source_drops.load(AtomicOrdering::SeqCst);
+        let effect_while_held = tokio::fs::read(&effect).await;
+        let cleanup = finish_physical_cleanup(&release, &producer).await;
+        let result = join_released_manager(&mut execution, early).await;
+        let final_effect = tokio::fs::read(&effect).await;
+        let removal = tokio::fs::remove_dir_all(&directory).await;
+        eprintln!(
+            "PHYSICAL_TOOL_BOUNDARY {}",
+            json!({
+                "early_return": returned_while_held,
+                "permit_while_held": permit_while_held,
+                "source_drops_while_held": drops_while_held,
+                "effect_while_held": effect_while_held.as_ref().ok().map(|bytes| String::from_utf8_lossy(bytes).into_owned()),
+                "effect_after_release": final_effect.as_ref().ok().map(|bytes| String::from_utf8_lossy(bytes).into_owned()),
+                "original_producer_joined": cleanup.is_ok(),
+            })
+        );
+        cleanup?;
+        removal?;
+        assert!(start.is_ok());
+        assert!(
+            !returned_while_held,
+            "closed output observer is not original producer EOF"
+        );
+        assert_eq!(permit_while_held, Some(0));
+        assert_eq!(drops_while_held, 0);
+        assert_eq!(effect_while_held?, b"producer-entered");
+        assert_eq!(final_effect?, b"producer-physically-closed");
+        assert!(!parent.is_cancelled());
+        assert!(signalled.load(AtomicOrdering::SeqCst));
+        let error = result?.err().ok_or_else(|| {
+            ReactError::Other("closed output lost its original delivery error".to_string())
+        })?;
+        assert!(
+            matches!(error, ReactError::Tool(error) if matches!(error.as_ref(), ToolError::ExecutionFailed { tool, message }
+            if tool == "physical_cleanup" && message == "Tool stream receiver closed"))
+        );
+        assert_eq!(source_drops.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(
+            manager
+                .semaphore
+                .as_ref()
+                .map(|permit| permit.available_permits()),
+            Some(1)
+        );
+        Ok(())
     }
 
     struct TimedOutTool {

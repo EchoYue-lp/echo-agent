@@ -535,6 +535,8 @@ async fn main() {
 
 ### 9. Multi-Agent Orchestration — Orchestrator + Subagent teams
 
+Cancellation observers and original producer settlement are separate; see the [Rust migration and ownership contract](docs/subagent-cancellation-observation.md).
+
 Coordinate multiple specialized agents through the shared Subagent lifecycle.
 
 Three execution modes:

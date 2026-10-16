@@ -45,7 +45,7 @@ async fn settle_final_intervention(
                 .await;
             let error = ReactError::Other(detail);
             let _ = tx
-                .send(Ok(AgentEvent::from_error("intervention", &error)))
+                .send(AgentEvent::from_error("intervention", &error))
                 .await;
             snap.fire_hook(crate::skills::hooks::HookEvent::SessionEnd, Some("blocked"))
                 .await;
@@ -69,13 +69,12 @@ pub(crate) async fn settle_final_guard_failure(
     tx: &mpsc::Sender<Result<AgentEvent>>,
     error: ReactError,
 ) -> Result<crate::agent::AgentSteerTurnOutcome> {
+    let terminal = AgentEvent::from_error("output_guard", &error)?;
     let detail = error.to_string();
     settle_terminal_projection(snap, context, Some(detail.clone()), tx).await?;
     snap.finalize_run(crate::trace::RunStatus::Failed, None, Some(&detail))
         .await;
-    let _ = tx
-        .send(Ok(AgentEvent::from_error("output_guard", &error)))
-        .await;
+    let _ = tx.send(Ok(terminal)).await;
     snap.fire_hook(crate::skills::hooks::HookEvent::SessionEnd, Some("blocked"))
         .await;
     Ok(crate::agent::AgentSteerTurnOutcome::Failed)
@@ -380,7 +379,7 @@ pub(crate) async fn finalize_no_response(
         model: snap.config.model_name.clone(),
         agent: snap.config.agent_name.clone(),
     }));
-    let _ = tx.send(Ok(AgentEvent::from_error("llm", &error))).await;
+    let _ = tx.send(AgentEvent::from_error("llm", &error)).await;
     Ok(())
 }
 
@@ -416,9 +415,7 @@ pub(crate) async fn finalize_max_iterations(
     let error = ReactError::Agent(Box::new(AgentError::MaxIterationsExceeded(
         snap.config.max_iterations,
     )));
-    let _ = tx
-        .send(Ok(AgentEvent::from_error("react_loop", &error)))
-        .await;
+    let _ = tx.send(AgentEvent::from_error("react_loop", &error)).await;
     Ok(())
 }
 

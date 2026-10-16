@@ -45,8 +45,10 @@ pub struct AgentFailure {
     pub message: String,
 }
 
-impl From<&ReactError> for AgentFailure {
-    fn from(error: &ReactError) -> Self {
+impl TryFrom<&ReactError> for AgentFailure {
+    type Error = ReactError;
+
+    fn try_from(error: &ReactError) -> std::result::Result<Self, Self::Error> {
         let (category, terminal_kind, retryable, code, http_status) = match error {
             ReactError::Llm(inner) => match inner.as_ref() {
                 LlmError::NetworkError(_) => (
@@ -293,6 +295,15 @@ impl From<&ReactError> for AgentFailure {
                 "io",
                 None,
             ),
+            ReactError::ExecutionNotSettled {
+                run_id,
+                execution_id,
+            } => {
+                return Err(ReactError::ExecutionNotSettled {
+                    run_id: run_id.clone(),
+                    execution_id: execution_id.clone(),
+                });
+            }
             ReactError::Other(_) => (
                 AgentFailureCategory::Other,
                 AgentTerminalKind::Failed,
@@ -301,14 +312,14 @@ impl From<&ReactError> for AgentFailure {
                 None,
             ),
         };
-        Self {
+        Ok(Self {
             category,
             terminal_kind,
             retryable,
             code: code.to_string(),
             http_status,
             message: error.to_string(),
-        }
+        })
     }
 }
 
@@ -336,6 +347,13 @@ impl AgentFailure {
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum ReactError {
+    /// The cancellation observer expired while the original execution owner
+    /// still retains cleanup. This is knowledge, never an Agent terminal.
+    #[error("execution not settled: run {run_id}, execution {execution_id:?}")]
+    ExecutionNotSettled {
+        run_id: String,
+        execution_id: Option<String>,
+    },
     /// LLM-related error
     #[error("LLM Error: {0}")]
     Llm(Box<LlmError>),
@@ -797,24 +815,43 @@ mod agent_failure_tests {
     use super::*;
 
     #[test]
-    fn structured_output_failures_preserve_typed_codes() {
+    fn unsettled_observation_is_refused_by_terminal_classification() -> Result<()> {
+        for execution_id in [None, Some("attempt-a".to_string())] {
+            let observation = ReactError::ExecutionNotSettled {
+                run_id: "run-a".to_string(),
+                execution_id: execution_id.clone(),
+            };
+            assert!(matches!(AgentFailure::try_from(&observation),
+                Err(ReactError::ExecutionNotSettled { run_id, execution_id: actual })
+                    if run_id == "run-a" && actual == execution_id));
+            assert!(matches!(
+                crate::agent::AgentEvent::from_error("observer", &observation),
+                Err(ReactError::ExecutionNotSettled { .. })
+            ));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn structured_output_failures_preserve_typed_codes() -> Result<()> {
         let mismatch = ReactError::from(StructuredOutputError::SchemaMismatch {
             name: "person".to_string(),
             schema_path: "/properties/age/type".to_string(),
         });
-        let failure = AgentFailure::from(&mismatch);
+        let failure = AgentFailure::try_from(&mismatch)?;
         assert_eq!(failure.category, AgentFailureCategory::Parse);
         assert_eq!(failure.code, "structured_schema_mismatch");
         assert!(!failure.retryable);
 
         let missing = ReactError::from(StructuredOutputError::MissingResponseFormat);
-        let failure = AgentFailure::from(&missing);
+        let failure = AgentFailure::try_from(&missing)?;
         assert_eq!(failure.category, AgentFailureCategory::Config);
         assert_eq!(failure.code, "structured_missing_response_format");
+        Ok(())
     }
 
     #[test]
-    fn preserves_terminal_and_retry_facts() -> std::result::Result<(), serde_json::Error> {
+    fn preserves_terminal_and_retry_facts() -> Result<()> {
         let cases = [
             (
                 ReactError::Llm(Box::new(LlmError::ApiError {
@@ -900,13 +937,15 @@ mod agent_failure_tests {
             ),
         ];
         for (error, category, terminal, retryable, status) in cases {
-            let failure = AgentFailure::from(&error);
+            let failure = AgentFailure::try_from(&error)?;
             assert_eq!(failure.category, category);
             assert_eq!(failure.terminal_kind, terminal);
             assert_eq!(failure.retryable, retryable);
             assert_eq!(failure.http_status, status);
-            let json = serde_json::to_string(&failure)?;
-            let decoded: AgentFailure = serde_json::from_str(&json)?;
+            let json =
+                serde_json::to_string(&failure).map_err(|e| ReactError::Other(e.to_string()))?;
+            let decoded: AgentFailure =
+                serde_json::from_str(&json).map_err(|e| ReactError::Other(e.to_string()))?;
             assert_eq!(decoded, failure);
         }
         Ok(())

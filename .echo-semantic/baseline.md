@@ -4,7 +4,7 @@ id: baseline.repository
 kind: baseline
 source_snapshot:
   base_revision: a6346643bda47679a96760f56f45e41fd73b61b0
-  content_digest: 399c6b119b30d0b29a8996c97bc074a8de36509adaa67fb3141e6eae1884fa28
+  content_digest: 736ac2f84a41dec62d79c2f5e9e544cf6a8e80d23bddaffe0cc57a7971cc44ac
 inventory_closure: closed
 behavior_model_closure: closed
 map_refs:
@@ -514,3 +514,9 @@ Channel invocation本地三链现已闭合：same source d056完整23/current23/
 source_snapshot.base_revision 使用已经发布的共同祖先 a634，仅承担可恢复谱系与祖先校验；它不声称摘要399c6b119b30d0b29a8996c97bc074a8de36509adaa67fb3141e6eae1884fa28就是a634旧tree。content_digest仍由官方方法对当前所有非semantic文件计算，并与保存完整原始包的真实2c9 Git tree完全相同；仅后继语义元提交的afa不会改变这个源码摘要。机器 --base 当前任务预检基准与这个发布谱系字段职责不同。
 
 前述2c9是实际源码/归档观察切点，原Evidence/Audit各自046/a193/141运行来源不改；Root将保留可远端获取的provenance标签确保squash后来源仍可回放，未在本段宣称标签已经创建。该一字段修正让最终squash主线以a634为祖先，避免把未合入任务commit当main祖先。源码、工程输入、覆盖与两closure状态均未更改。
+
+## Physical settlement B focused source checkpoint
+
+The new content digest is the canonical digest of the frozen B source and maintained documents. The existing published lineage base remains unchanged. Historical Git observations above and their source digests retain their original epoch; no old Evidence/Audit revision is moved to this candidate. Current focused ownership tests and independent review are recorded by evidence.subagent-physical-settlement-repair and audit.subagent-physical-settlement-focused-review. This snapshot maintenance does not claim six merge gates, feature matrix, consumer qualification, main CI, or new global behavioral closure.
+
+The subsequent ACP close increment has canonical source digest 951cf5e91f3d0fb879bda5e1960e21750accb35acdc3246c14fb6a900b53225e. The preceding focused source digest 3fd9e1ed897ce9ee4088530ea89cde93193cea1eb1d5a1afcd612ab083e2deb7 remains recoverable in pushed commit 87223c8163f6b30479fbd44eadd09736db50bd5d. Full gates/consumer/main remain incomplete.

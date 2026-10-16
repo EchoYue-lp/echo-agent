@@ -12,6 +12,7 @@ behavior_refs:
 rule_refs:
 - rule.task-subagent-authority
 evidence_refs:
+- evidence.subagent-physical-settlement-repair
 - evidence.task-subagent-workflow
 - evidence.high-risk-audit-frontier
 - evidence.task-patch-claim-cas-repair
@@ -43,6 +44,7 @@ evidence_refs:
 - evidence.framework-final-34d5-full-verification
 - evidence.framework-final-34d5-gate-archive
 finding_refs:
+- finding.subagent-physical-settlement-observation
 - finding.task-patch-claim-race
 - finding.task-subagent-attempt-link
 - finding.subagent-factory-cancellation
@@ -131,15 +133,18 @@ scenarios:
     status: needs_review
     source_refs:
     - echo-orchestration/src/workflow/graph.rs
+    - echo-orchestration/src/workflow/node.rs
     - echo-orchestration/src/workflow/checkpoint_store.rs
     - echo-orchestration/src/workflow/dag.rs
     finding_refs:
+    - finding.subagent-physical-settlement-observation
     - finding.workflow-dag-authority
     - finding.workflow-entry-loop-drift
     - finding.workflow-checkpoint-claim-recovery
     - finding.workflow-checkpoint-resurrection-race
     - finding.workflow-parallel-failure-settlement
     evidence_refs:
+    - evidence.subagent-physical-settlement-repair
     - evidence.task-subagent-workflow
     - evidence.workflow-parallel-failure-settlement-repair
     - evidence.workflow-parallel-failure-settlement-verification
@@ -148,11 +153,12 @@ scenarios:
     - evidence.workflow-entry-loop-authority-repair
     - evidence.workflow-entry-loop-authority-verification
     audit_refs:
+    - audit.subagent-physical-settlement-focused-review
     - audit.workflow-parallel-failure-settlement-rereview
     - audit.workflow-checkpoint-claim-settlement-rereview
     - audit.workflow-entry-loop-authority-rereview
     unknown: checkpoint claim/lease、并行sibling settlement及四执行入口事件对等已关闭；Task/Graph/DagWorkflow长期边界已由ADR 0059裁决，仍待独立复审、严格语义门禁与远端交付
-    next_step: 对Finding
+    next_step: B/A原框架663代码6+17及新指南runtime合同已实际通过；继续SDK/CLI最终main消费和精确main CI，不把本地资格冒远端交付
   cron-scheduler:
     status: mapped
     source_refs:
@@ -163,10 +169,12 @@ scenarios:
     - finding.scheduler-task-id-uniqueness
     - finding.scheduler-control-fire-race
     evidence_refs:
+    - evidence.subagent-physical-settlement-repair
     - evidence.task-subagent-workflow
     - evidence.scheduler-occurrence-authority-repair
     - evidence.scheduler-occurrence-authority-verification
     audit_refs:
+    - audit.subagent-physical-settlement-focused-review
     - audit.scheduler-occurrence-authority-rereview
     behavior_refs:
     - behavior.task-subagent-execution
@@ -276,3 +284,8 @@ TaskEvent/progress、Subagent envelopes、Workflow events 和 command snapshots 
 
 
 当前候选最终复审：audit.framework-final-34d5-gate-rereview 绑定新23真实工程收据与完整已审源码，implementation review PASS/action0；不替代独立SDK/main验收，不升级原broad状态。
+
+
+## B 取消观察增量（验证中）
+
+用户已选择保留原 physical owner，仅首次 admitted root cancel/whole pause 的观察受 grace 限制。ExecutionNotSettled 不是 AgentFailure/Task 终态，不授权释放原资源或重执行；exact A 与 sibling B 分离。当前新 Finding 保持 open，强回归、资源收尾增量和完整交付门禁尚未全部结束；历史已审范围不因本段自动扩张。

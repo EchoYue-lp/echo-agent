@@ -421,11 +421,19 @@ pub struct TeamRuntimeHandle {
 
 pub(super) struct TeamRuntimeExecutionGuard {
     active_executions: Arc<AtomicUsize>,
+    physically_settled: bool,
+}
+impl TeamRuntimeExecutionGuard {
+    pub(super) fn settle(&mut self) {
+        self.physically_settled = true;
+    }
 }
 
 impl Drop for TeamRuntimeExecutionGuard {
     fn drop(&mut self) {
-        self.active_executions.fetch_sub(1, Ordering::SeqCst);
+        if self.physically_settled {
+            self.active_executions.fetch_sub(1, Ordering::SeqCst);
+        }
     }
 }
 
@@ -459,6 +467,7 @@ impl TeamRuntimeHandle {
         self.active_executions.fetch_add(1, Ordering::SeqCst);
         TeamRuntimeExecutionGuard {
             active_executions: Arc::clone(&self.active_executions),
+            physically_settled: false,
         }
     }
 
@@ -517,9 +526,21 @@ impl TeamRuntimeHandle {
         spec: &TeamSpec,
         objective: &str,
         cancel: CancellationToken,
-        _active: TeamRuntimeExecutionGuard,
+        mut active: TeamRuntimeExecutionGuard,
     ) -> Result<TeamExecutionResult> {
-        execute_team_on_runtime_service(spec, objective, &self.run_id, cancel, &self.service).await
+        let result = execute_team_on_runtime_service_inner(
+            spec,
+            objective,
+            &self.run_id,
+            cancel,
+            &self.service,
+            true,
+        )
+        .await;
+        if !matches!(&result, Err(ReactError::ExecutionNotSettled { .. })) {
+            active.settle();
+        }
+        result
     }
 }
 
@@ -1007,6 +1028,20 @@ pub async fn execute_team_on_runtime_service<R>(
 where
     R: TeamRuntime,
 {
+    execute_team_on_runtime_service_inner(spec, objective, run_id, cancel, service, false).await
+}
+
+async fn execute_team_on_runtime_service_inner<R>(
+    spec: &TeamSpec,
+    objective: &str,
+    run_id: &str,
+    cancel: CancellationToken,
+    service: &TeamRuntimeServiceHandle<R>,
+    physical_owner: bool,
+) -> Result<TeamExecutionResult>
+where
+    R: TeamRuntime,
+{
     validate_team_spec(spec)?;
     let timeout = spec.config.default_timeout_secs;
     let timeout_cancel = cancel.clone();
@@ -1017,6 +1052,7 @@ where
         cancel,
         service.runtime().clone(),
         service.runtime_tasks().clone(),
+        physical_owner,
     );
     if timeout == 0 {
         execution.await
@@ -1028,8 +1064,9 @@ where
                 timeout_cancel.cancel();
                 let settlement = execution.await;
                 let detail = match settlement {
+                    Err(error @ ReactError::ExecutionNotSettled { .. }) => return Err(error),
                     Err(error)
-                        if AgentFailure::from(&error).terminal_kind
+                        if AgentFailure::try_from(&error)?.terminal_kind
                             != AgentTerminalKind::Cancelled =>
                     {
                         format!(
@@ -1051,6 +1088,7 @@ async fn execute_team_inner<R>(
     cancel: CancellationToken,
     runtime: Arc<R>,
     runtime_tasks: Arc<RuntimeTaskService<R>>,
+    physical_owner: bool,
 ) -> Result<TeamExecutionResult>
 where
     R: TeamRuntime,
@@ -1081,7 +1119,13 @@ where
             validate_manager_graph(run_id, &graph, &initial.tasks, &expanded.tasks)?;
         } else {
             validate_team_graph_specs(run_id, &graph, &initial.tasks)?;
-            drive_team_graph(runtime_tasks.as_ref(), run_id, cancel.child_token()).await?;
+            drive_team_graph(
+                runtime_tasks.as_ref(),
+                run_id,
+                cancel.child_token(),
+                physical_owner,
+            )
+            .await?;
             let plan =
                 manager_plan_output(runtime.as_ref(), run_id, &initial.terminal_task_id).await?;
             let expanded = manager_subagent::expand_graph(spec, objective, &plan)?;
@@ -1103,7 +1147,13 @@ where
             };
             validate_manager_graph(run_id, &committed, &initial.tasks, &expanded.tasks)?;
         }
-        drive_team_graph(runtime_tasks.as_ref(), run_id, cancel.child_token()).await?;
+        drive_team_graph(
+            runtime_tasks.as_ref(),
+            run_id,
+            cancel.child_token(),
+            physical_owner,
+        )
+        .await?;
         synthesis_task_id.to_string()
     } else {
         let compiled = compile_team_graph(spec, objective)?;
@@ -1116,7 +1166,7 @@ where
         )
         .await?;
         validate_team_graph_specs(run_id, &graph, &compiled.tasks)?;
-        drive_team_graph(runtime_tasks.as_ref(), run_id, cancel).await?;
+        drive_team_graph(runtime_tasks.as_ref(), run_id, cancel, physical_owner).await?;
         compiled.terminal_task_id
     };
 
@@ -1324,11 +1374,17 @@ async fn drive_team_graph<R>(
     runtime_tasks: &RuntimeTaskService<R>,
     run_id: &str,
     cancel: CancellationToken,
+    physical_owner: bool,
 ) -> Result<()>
 where
     R: TeamRuntime,
 {
-    match runtime_tasks.execute(run_id, cancel).await? {
+    let outcome = if physical_owner {
+        runtime_tasks.execute_to_settlement(run_id, cancel).await?
+    } else {
+        runtime_tasks.execute(run_id, cancel).await?
+    };
+    match outcome {
         RuntimeDagOutcome::Completed => {}
         RuntimeDagOutcome::Failed { error, .. } => {
             return Err(ReactError::Other(format!("Team graph failed: {error}")));
@@ -1606,6 +1662,19 @@ impl RuntimeDagController for TeamRuntimeController {
             .map_err(|error| ReactError::Other(error.to_string()))
     }
 
+    async fn request_task_interruption(
+        &self,
+        run_id: &str,
+        task: &Task,
+        claim: &TaskClaim,
+        disposition: RuntimeInterruptionDisposition,
+    ) -> Result<bool> {
+        self.revisions
+            .request_runtime_task_interruption(run_id, &task.spec.id, claim, disposition)
+            .await
+            .map_err(|error| ReactError::Other(error.to_string()))
+    }
+
     async fn reserve_attempt_control(&self, context: &TaskSubagentContext) -> Result<()> {
         self.dispatch_controller
             .reserve_attempt(context.clone())
@@ -1743,7 +1812,7 @@ impl RuntimeDagController for TeamRuntimeController {
             },
             Err(error) => {
                 let message = error.to_string();
-                match AgentFailure::from(&error).terminal_kind {
+                match AgentFailure::try_from(&error)?.terminal_kind {
                     AgentTerminalKind::Cancelled => RuntimeTaskResolutionRequest::Cancelled,
                     AgentTerminalKind::TimedOut => {
                         RuntimeTaskResolutionRequest::TimedOut { error: message }
@@ -1914,6 +1983,46 @@ mod tests {
 
     fn manager_plan_result(agent_name: String, plan: &str) -> SubagentResult {
         SubagentResult::sync_result(&agent_name, plan.to_string(), Duration::ZERO)
+    }
+
+    #[tokio::test]
+    async fn unknown_team_keeps_original_handle_active_and_claim_queryable() -> Result<()> {
+        let dispatch: TeamDispatchFn = Arc::new(|request| {
+            Box::pin(async move {
+                Err(ReactError::ExecutionNotSettled {
+                    run_id: request.context.run_id().to_string(),
+                    execution_id: request.context.execution_id(),
+                })
+            })
+        });
+        let runtime = Arc::new(TeamRuntimeController::new(dispatch));
+        let handle = TeamRuntimeHandle::new(
+            "unknown-team-owner".to_string(),
+            runtime,
+            RuntimeTaskServiceConfig::default(),
+        );
+        let spec = TeamSpec {
+            strategy: TeamStrategy::Pipeline(vec!["member".to_string()]),
+            manager: String::new(),
+            subagents: Vec::new(),
+            config: TeamConfig::default(),
+        };
+        let result = handle
+            .execute(&spec, "retain original owner", CancellationToken::new())
+            .await;
+        assert!(matches!(
+            result,
+            Err(ReactError::ExecutionNotSettled { .. })
+        ));
+        assert!(
+            handle.is_active(),
+            "unknown cannot make the original handle eligible for inactive pruning"
+        );
+        let snapshot = handle.snapshot().await?;
+        assert!(snapshot.tasks.iter().any(|task| task.execution.status
+            == crate::tasks::TaskStatus::Running
+            && task.execution.claim.is_some()));
+        Ok(())
     }
 
     #[tokio::test]

@@ -340,15 +340,19 @@ pub fn envelope_event_stream_after<'a>(
         }
         let mut sequence = last_persisted_sequence;
         let mut terminal_emitted = false;
+        let mut observation_only = false;
         let mut tool_calls = HashMap::<String, EventId>::new();
 
         while let Some(item) = stream.next().await {
             let payload = match item {
                 Ok(event) => event,
-                Err(error) => AgentEvent::Error {
-                    source: "agent_stream".to_string(),
-                    message: error.to_string(),
-                    failure: crate::error::AgentFailure::from(&error),
+                Err(error) => match AgentEvent::from_error("agent_stream", &error) {
+                    Ok(terminal) => terminal,
+                    Err(observation) => {
+                        observation_only = true;
+                        yield Err(observation);
+                        continue;
+                    }
                 },
             };
 
@@ -391,7 +395,7 @@ pub fn envelope_event_stream_after<'a>(
             }
         }
 
-        if !terminal_emitted {
+        if !terminal_emitted && !observation_only {
             let Some(next_sequence) = sequence.checked_add(1) else {
                 yield Err(crate::error::ReactError::Other(
                     "event sequence exhausted before terminal event".to_string(),

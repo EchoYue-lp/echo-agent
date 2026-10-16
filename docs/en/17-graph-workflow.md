@@ -312,31 +312,53 @@ let result = workflow.run("Analyze this data").await?;
 
 ## Checkpoint & Resume
 
-```rust
-use echo_agent::workflow::{Graph, MemoryCheckpointStore, CheckpointStore};
+A Graph binds its own `Arc<dyn CheckpointStore>` through `with_checkpoint_store`,
+using `MemoryCheckpointStore` or `FileCheckpointStore`. Call
+`run_until_interrupt(state)` with configured before/after interrupts, obtain
+`InterruptState.checkpoint` from `RunUntilInterruptResult::Interrupted`, then call
+`resume(checkpoint, ApprovalDecision::Approved)`. Use `resume_with_state` for state
+updates and `branch_from` for a branch. The executable
+[demo39 contract](https://github.com/EchoYue-lp/echo-agent/blob/main/echo-agent-learning/tests/example_contracts/demo39_workflow.rs)
+shows basic Graph/state usage; the checkpoint entry points are in the current
+[Graph source](https://github.com/EchoYue-lp/echo-agent/blob/main/echo-orchestration/src/workflow/graph.rs).
 
-let checkpoint_store = MemoryCheckpointStore::new();
+Executable Approved/Modified resumes require the bound Store to declare
+`supports_protected_claims()` and successfully perform
+`protect_claim(checkpoint_id, attempt_id)` after winning the original claim and
+before any Node effect. The default capability is false: unsupported execution
+fails before claim, and `branch_from` fails before saving a fork. Deferred still
+only loads/validates; Rejected uses the original claim/ack settlement without
+executing a Node. Fresh `run`, `run_until_interrupt` and `run_stream` are not gated
+on protection. Custom and SDK-backed Stores must implement atomic protection on
+the same claim authority, plus the existing renew, ack, requeue and generation-CAS
+operations. Declaring capability is not itself evidence of durability.
 
-// Run with checkpointing
-let graph = GraphBuilder::new("long_running")
-    // ... node definitions
-    .build()?;
+Only actual original continuation closure allows a success to ack or a known
+ordinary failure to follow its existing requeue policy. A failed or lost protect
+acknowledgement starts no Node and does not ack/requeue an uncertain protection.
+`ExecutionNotSettled` is observation knowledge, not Failed or retry permission;
+without an authoritative later source the original claim stays held. A genuine
+later terminal from the same bound source followed by its actual EOF can confirm
+that source's observation. EOF alone, disconnection or missing local ownership
+cannot. A local Node terminal cannot clear a different Store's observation.
 
-let result = graph.run_with_checkpoints(state.clone(), &checkpoint_store).await?;
+Graph still renews the exact attempt through heartbeat, but a protected claim
+cannot expire or replay automatically after missed renewals. Genuine old
+unprotected records retain their lease recovery policy. Cancellation, node
+timeout, heartbeat failure, fanout sibling failure and stream closure signal
+cancellation and continue draining the same started source. Dropping a borrowed
+waiter or a polled stream does not execute the Node again. Retain the original
+Graph/Agent/Store parent after an unknown observation; destroying every parent
+is not physical-stop proof or an automatic-recovery guarantee.
 
-// Resume from checkpoint if interrupted
-let checkpoint_id = checkpoint_store.latest()?.id;
-let resumed = graph.resume_from_checkpoint(&checkpoint_store, &checkpoint_id).await?;
-```
-
-Resume uses the `CheckpointStore` claim lease. A successful continuation is
-acknowledged; a node or restore failure requeues the claim. File-store claims
-remain visible to `load` and `list`; `Graph` renews the exact attempt while a
-long continuation is active, and only a missed heartbeat can make a crashed
-claim discoverable again. Tagging an active claim fails its generation
-compare-and-save instead of resurrecting the continuation. Custom and
-SDK-backed stores must implement renew, acknowledge, requeue, and
-generation-CAS; unsupported settlement fails closed.
+Memory protection is limited to the same Store instance. File retains it across
+restart through the original directory OS lock and versioned private records.
+Expiry, save/delete/clear cannot implicitly remove protection; mixed clear
+refuses the whole mutation before deleting any record. The verified old automatic reader
+rejects the protected format, but old delete/clear remain unsafe: do not downgrade
+writers onto protected data. There is no new force-unlock or receipt-query API.
+See [ADR 0088](../adr/0088-subagent-settlement-observation.md) and the
+[Rust migration guide](../subagent-cancellation-observation.md).
 
 Approval of a `BeforeNode` checkpoint skips only that exact interrupt once.
 Any configured interrupt on a subsequent node is still evaluated. Finish nodes

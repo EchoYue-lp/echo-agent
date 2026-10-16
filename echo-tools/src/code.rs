@@ -440,6 +440,7 @@ impl Tool for RunCodeTool {
                     }
                     Ok(tool_result)
                 }
+                Err(error @ ReactError::ExecutionNotSettled { .. }) => Err(error),
                 Err(error) => Ok(sandbox_error_result(error)),
             }
         })
@@ -578,6 +579,7 @@ mod tests {
         actual_isolation: Option<IsolationLevel>,
         available: bool,
         result: ExecutionResult,
+        observation: Option<(String, Option<String>)>,
         seen: std::sync::Mutex<Option<RecordedCall>>,
     }
 
@@ -616,7 +618,16 @@ mod tests {
             _command: SandboxCommand,
         ) -> BoxFuture<'_, std::result::Result<ExecutionResult, ReactError>> {
             let result = self.result.clone();
-            Box::pin(async move { Ok(result) })
+            let observation = self.observation.clone();
+            Box::pin(async move {
+                if let Some((run_id, execution_id)) = observation {
+                    return Err(ReactError::ExecutionNotSettled {
+                        run_id,
+                        execution_id,
+                    });
+                }
+                Ok(result)
+            })
         }
 
         fn execute_with_limits_and_cancel(
@@ -631,7 +642,16 @@ mod tests {
                 .unwrap_or_else(|poisoned| poisoned.into_inner()) =
                 Some(RecordedCall { command, limits });
             let result = self.result.clone();
-            Box::pin(async move { Ok(result) })
+            let observation = self.observation.clone();
+            Box::pin(async move {
+                if let Some((run_id, execution_id)) = observation {
+                    return Err(ReactError::ExecutionNotSettled {
+                        run_id,
+                        execution_id,
+                    });
+                }
+                Ok(result)
+            })
         }
 
         fn execute_with_isolation_receipt(
@@ -675,6 +695,7 @@ mod tests {
             actual_isolation: None,
             available,
             result,
+            observation: None,
             seen: std::sync::Mutex::new(None),
         })
     }
@@ -816,6 +837,7 @@ mod tests {
             actual_isolation: Some(IsolationLevel::OsSandbox),
             available: true,
             result: success_execution("selected local OS sandbox"),
+            observation: None,
             seen: std::sync::Mutex::new(None),
         });
         let result = RunCodeTool::new()
@@ -1046,6 +1068,36 @@ mod tests {
                 .execute_with_context(script_params("python", "analysis.py"), &ctx)
                 .await
                 .is_err()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn run_code_preserves_original_sandbox_observation_without_tool_failure() -> Result<()> {
+        let mut sandbox = recording_sandbox(
+            IsolationLevel::OsSandbox,
+            true,
+            success_execution("must-not-project"),
+        );
+        Arc::get_mut(&mut sandbox)
+            .ok_or_else(|| ReactError::Other("fixture sandbox unexpectedly shared".to_string()))?
+            .observation = Some((
+            "original-sandbox-run".to_string(),
+            Some("original-sandbox-execution".to_string()),
+        ));
+        let observation = RunCodeTool::new()
+            .with_sandbox(sandbox.clone())
+            .execute_with_context(code_params("python", "print(1)"), &ToolContext::default())
+            .await;
+        assert!(matches!(observation,
+            Err(ReactError::ExecutionNotSettled { run_id, execution_id })
+                if run_id == "original-sandbox-run" && execution_id.as_deref() == Some("original-sandbox-execution")));
+        assert!(
+            sandbox
+                .seen
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_some()
         );
         Ok(())
     }

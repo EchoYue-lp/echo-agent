@@ -115,10 +115,10 @@ Each joined attempt resolves through the existing exact-claim settlement path
 immediately, even while an unrelated sibling remains active in the same wave.
 Resolution policy, CAS and cleanup futures have independent, wave-bounded
 supervised owners. The existing join supervisor concurrently observes dispatch
-joins, settlement receipts, the root token and cancellation grace. A slow review
-or Store cannot suspend root dispatch abort or another task's exact settlement.
-Root abort stops dispatch handles only; it never aborts an in-flight CAS whose
-commit is unknown. If the calling execution future is dropped, the settlement
+joins, settlement receipts and the root token. [ADR0088](0088-subagent-settlement-observation.md)
+changes cancellation grace to a scoped observer deadline; it never aborts the
+original dispatch or an in-flight CAS whose commit is unknown. Slow review or
+Store work does not change that observation deadline or prove physical stop. If the calling execution future is dropped, the settlement
 owner retains the same controller and shared control projections until it
 settles or reports unknown authority. A private exit guard retains the same
 watch sender and shared projection map independently of the parent's observer.
@@ -158,8 +158,9 @@ is not yet known. The owner retains claim response, control reservation,
 shared admission, dispatch joins and settlement until the normal framework
 interruption policy has committed an outcome. This includes caller exit while
 a claim response is held, before reservation completes, or while a physical
-dispatch ignores cancellation. Physical abort is joined before an exact claim
-can be settled; observer disappearance is never a terminal receipt.
+dispatch ignores cancellation. The original producer must physically close
+before an exact claim is settled; grace expiry and observer disappearance are
+never terminal receipts. Lost owners without closure remain AuthorityUnknown.
 
 A wave retains known exact claims before any awaited reservation. An unexpected
 external reservation/controller unwind transfers that wave's actual JoinSet to

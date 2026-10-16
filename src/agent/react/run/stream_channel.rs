@@ -17,10 +17,10 @@
 use super::super::ReactAgent;
 use super::phases::{self, IterOutcome, LoopState, PrepareOutcome};
 use super::types::{StreamInit, StreamMode};
-use crate::agent::{AGENT_CANCELLATION_SETTLE_PERIOD, AgentEvent};
+use crate::agent::AgentEvent;
 use crate::error::Result;
 use crate::llm::types::{ContentPart, Message, MessageContent};
-use futures::Stream;
+use futures::{Stream, StreamExt};
 use std::future::Future;
 use std::ops::ControlFlow;
 use std::pin::Pin;
@@ -60,7 +60,7 @@ async fn finish_pre_spawn_terminal(
                         Some(&error.to_string()),
                     )
                     .await;
-                events.push(Ok(AgentEvent::from_error("react_loop", &error)));
+                events.push(AgentEvent::from_error("react_loop", &error));
             } else {
                 snapshot
                     .finalize_run(crate::trace::RunStatus::Failed, None, Some(&reason))
@@ -80,10 +80,66 @@ async fn finish_pre_spawn_terminal(
                     Some(&error.to_string()),
                 )
                 .await;
-            events.push(Ok(AgentEvent::from_error("react_loop", &error)));
+            events.push(AgentEvent::from_error("react_loop", &error));
         }
     }
     (crate::agent::AgentSteerTurnOutcome::Failed, events)
+}
+
+struct ReactStreamTurnOwner {
+    lease: Option<crate::agent::react::lifecycle::ReactAgentTurnLease>,
+    steering: Option<crate::agent::steer::ActiveTurnLease>,
+    execution: Option<tokio::sync::OwnedMutexGuard<()>>,
+    // Snapshot merges invocation and runtime guards; retain that original
+    // bundle with the same physical owner if settlement remains unknown.
+    resource_guards: Vec<echo_core::tools::InvocationResourceGuard>,
+    run_id: String,
+    execution_id: Option<String>,
+}
+
+impl ReactStreamTurnOwner {
+    fn settle(&mut self, outcome: crate::agent::AgentSteerTurnOutcome) {
+        if let Some(steering) = self.steering.take() {
+            steering.settle(outcome);
+        }
+        if let Some(lease) = self.lease.take() {
+            lease.settle();
+        }
+        self.execution.take();
+        self.resource_guards.clear();
+    }
+
+    fn retain_unknown(&mut self) {
+        if let Some(mut steering) = self.steering.take() {
+            steering.retain_unknown();
+            if let Some(lease) = self.lease.take() {
+                lease.retain_unknown(
+                    self.run_id.clone(),
+                    self.execution_id.clone(),
+                    Box::new((
+                        steering,
+                        self.execution.take(),
+                        std::mem::take(&mut self.resource_guards),
+                    )),
+                );
+            }
+        } else if let Some(lease) = self.lease.take() {
+            lease.retain_unknown(
+                self.run_id.clone(),
+                self.execution_id.clone(),
+                Box::new((
+                    self.execution.take(),
+                    std::mem::take(&mut self.resource_guards),
+                )),
+            );
+        }
+    }
+}
+
+impl Drop for ReactStreamTurnOwner {
+    fn drop(&mut self) {
+        self.retain_unknown();
+    }
 }
 
 struct ManagedAgentEventStream {
@@ -93,6 +149,8 @@ struct ManagedAgentEventStream {
     runtime: tokio::runtime::Handle,
     pending_terminal: Option<Result<AgentEvent>>,
     receiver_closed: bool,
+    observation_run_id: String,
+    observation_execution_id: Option<String>,
 }
 
 impl ManagedAgentEventStream {
@@ -108,9 +166,11 @@ impl ManagedAgentEventStream {
             }
             Poll::Ready(Err(error)) => {
                 self.task.take();
-                Poll::Ready(Err(crate::error::ReactError::Other(format!(
-                    "agent stream producer failed: {error}"
-                ))))
+                tracing::error!(error=%error, panic=error.is_panic(), cancelled=error.is_cancelled(), "managed producer lost without physical receipt");
+                Poll::Ready(Err(crate::error::ReactError::ExecutionNotSettled {
+                    run_id: self.observation_run_id.clone(),
+                    execution_id: self.observation_execution_id.clone(),
+                }))
             }
         }
     }
@@ -161,20 +221,22 @@ impl Stream for ManagedAgentEventStream {
 
 impl Drop for ManagedAgentEventStream {
     fn drop(&mut self) {
-        let Some(mut task) = self.task.take() else {
+        let Some(task) = self.task.take() else {
             return;
         };
         self.cancel.cancel();
+        let (_, empty) = mpsc::channel(1);
+        let mut receiver = std::mem::replace(
+            &mut self.receiver,
+            tokio_stream::wrappers::ReceiverStream::new(empty),
+        );
         let reaper = self.runtime.spawn(async move {
-            if tokio::time::timeout(AGENT_CANCELLATION_SETTLE_PERIOD, &mut task)
-                .await
-                .is_err()
-            {
-                task.abort();
-                let _ = task.await;
-            }
+            // Retain the original receiver as well as its producer. Dropping
+            // only the reader can strand a final send during cleanup.
+            while receiver.next().await.is_some() {}
+            let _ = task.await;
         });
-        // The runtime owns the bounded reaper after the consumer releases the stream.
+        // Consumer drop releases observation only; the runtime keeps cleanup.
         std::mem::drop(reaper);
     }
 }
@@ -520,7 +582,7 @@ impl ReactAgent {
                     (None, None) => make_snapshot(self),
                 };
                 terminal_snapshot.trace_run_id = trace_run_id;
-                let terminal = AgentEvent::from_error("react_loop", &error);
+                let terminal = AgentEvent::from_error("react_loop", &error)?;
                 let (outcome, events) = finish_pre_spawn_terminal(
                     &terminal_snapshot,
                     &context,
@@ -603,7 +665,7 @@ impl ReactAgent {
             (None, Some(legacy)) => AgentSnapshot::from_agent_with_legacy_context(self, legacy),
             (None, None) => make_snapshot(self),
         };
-        snap.current_turn_id = Some(turn_id);
+        snap.current_turn_id = Some(turn_id.clone());
         snap.turn_steer_incarnation = Some(active_turn_lease.incarnation());
         snap.current_message = message.clone();
         snap.trace_run_id = trace_run_id;
@@ -629,11 +691,36 @@ impl ReactAgent {
                 )));
             }
         };
+        let observation_run_id = invocation
+            .as_ref()
+            .and_then(|context| context.runtime.as_ref())
+            .and_then(|runtime| runtime.run_id.clone())
+            .or_else(|| {
+                legacy_runtime
+                    .as_ref()
+                    .and_then(|runtime| runtime.current_run_id.clone())
+            })
+            .unwrap_or_else(|| turn_id.clone());
+        let observation_execution_id = invocation
+            .as_ref()
+            .and_then(|context| context.runtime.as_ref())
+            .and_then(|runtime| runtime.execution_id.clone())
+            .or_else(|| {
+                legacy_runtime
+                    .as_ref()
+                    .and_then(|runtime| runtime.execution_id.clone())
+            });
+        let mut physical_owner = ReactStreamTurnOwner {
+            lease: Some(turn_lease),
+            steering: Some(active_turn_lease),
+            execution: Some(execution_guard),
+            resource_guards: snap.resource_guards.clone(),
+            run_id: observation_run_id.clone(),
+            execution_id: observation_execution_id.clone(),
+        };
         let task = runtime.spawn(async move {
-            // The task owns both the execution guard and close lease for its
-            // full lifetime, even if the caller drops the returned stream.
-            let turn_lease = turn_lease;
-            let _execution_guard = execution_guard;
+            // The same original resources survive either an explicit unknown
+            // result or producer unwind; no parked replacement task is made.
             match snap
                 .run_core_loop(
                     context,
@@ -647,14 +734,24 @@ impl ReactAgent {
                 )
                 .await
             {
-                Ok(outcome) => active_turn_lease.settle(outcome),
+                Ok(outcome) => physical_owner.settle(outcome),
                 Err(error) => {
+                    if let crate::error::ReactError::ExecutionNotSettled {
+                        run_id,
+                        execution_id,
+                    } = &error
+                    {
+                        physical_owner.run_id = run_id.clone();
+                        physical_owner.execution_id = execution_id.clone();
+                        physical_owner.retain_unknown();
+                        let _ = tx.send(Err(error)).await;
+                        return;
+                    }
                     let outcome = if terminal_cancel.is_cancelled() {
                         crate::agent::AgentSteerTurnOutcome::Cancelled
                     } else {
                         crate::agent::AgentSteerTurnOutcome::Failed
                     };
-                    active_turn_lease.settle(outcome);
                     let settlement_already_observed =
                         failure_snapshot.transcript_settlement_was_observed();
                     if failure_snapshot.conversation_store.is_some() && !settlement_already_observed
@@ -675,12 +772,10 @@ impl ReactAgent {
                             Some(&error.to_string()),
                         )
                         .await;
-                    let _ = tx
-                        .send(Ok(AgentEvent::from_error("react_loop", &error)))
-                        .await;
+                    let _ = tx.send(AgentEvent::from_error("react_loop", &error)).await;
+                    physical_owner.settle(outcome);
                 }
             }
-            turn_lease.settle();
         });
 
         Ok(Box::pin(ManagedAgentEventStream {
@@ -690,6 +785,8 @@ impl ReactAgent {
             runtime,
             pending_terminal: None,
             receiver_closed: false,
+            observation_run_id,
+            observation_execution_id,
         }))
     }
 }
@@ -1327,6 +1424,8 @@ mod tests {
             runtime: tokio::runtime::Handle::current(),
             pending_terminal: None,
             receiver_closed: false,
+            observation_run_id: "managed-stream-test-run".to_string(),
+            observation_execution_id: Some("managed-stream-test-execution".to_string()),
         };
 
         terminal_rx.await.map_err(|_| {
@@ -1380,6 +1479,8 @@ mod tests {
             runtime: tokio::runtime::Handle::current(),
             pending_terminal: None,
             receiver_closed: false,
+            observation_run_id: "managed-stream-test-run".to_string(),
+            observation_execution_id: Some("managed-stream-test-execution".to_string()),
         };
 
         terminal_rx.await.map_err(|_| {
@@ -1400,7 +1501,12 @@ mod tests {
                     "buffered success escaped after producer failure".to_string(),
                 )
             })?;
-        if !failure.to_string().contains("agent stream producer failed") {
+        if !matches!(
+            &failure,
+            crate::error::ReactError::ExecutionNotSettled { run_id, execution_id }
+                if run_id == "managed-stream-test-run"
+                    && execution_id.as_deref() == Some("managed-stream-test-execution")
+        ) {
             return Err(crate::error::ReactError::Other(format!(
                 "managed stream returned unexpected failure: {failure}"
             )));
@@ -2951,9 +3057,18 @@ mod tests {
             })?;
         let stream = runtime.block_on(async {
             let stream = agent
-                .execute_stream_with_cancel(
+                .execute_stream_with_invocation_context(
                     "abort blocked producer",
                     crate::agent::CancellationToken::new(),
+                    echo_core::agent::AgentInvocationContext {
+                        runtime: Some(echo_core::tools::ExternalRunContext {
+                            run_id: Some("producer-original-run".to_string()),
+                            turn_id: Some("distinct-producer-turn".to_string()),
+                            execution_id: Some("producer-original-execution".to_string()),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
                 )
                 .await?;
             tokio::time::timeout(
@@ -2982,22 +3097,346 @@ mod tests {
                     "Agent close attempt {attempt} ignored unsettled producer debt"
                 ))
             })?;
-            assert!(
-                close_error
-                    .to_string()
-                    .contains("without canonical settlement")
+            assert!(matches!(close_error,
+                ReactError::ExecutionNotSettled { run_id, execution_id }
+                    if run_id == "producer-original-run"
+                        && execution_id.as_deref() == Some("producer-original-execution")
+            ));
+        }
+        Ok(())
+    }
+
+    struct ResourceGuardDropProof(Arc<std::sync::atomic::AtomicUsize>);
+
+    impl Drop for ResourceGuardDropProof {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn provider_observation_retains_original_react_admission_steering_and_execution_guard()
+    -> Result<()> {
+        let invocation_drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let runtime_drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let agent = agent_with_mock_llm(
+            MockLlmClient::new()
+                .with_delay(std::time::Duration::from_millis(50))
+                .with_error(ReactError::ExecutionNotSettled {
+                    run_id: "provider-original".to_string(),
+                    execution_id: Some("provider-attempt".to_string()),
+                }),
+        );
+        let invocation = echo_core::agent::AgentInvocationContext {
+            runtime: Some(echo_core::tools::ExternalRunContext {
+                turn_id: Some("observed-react-turn".to_string()),
+                resource_guards: vec![echo_core::tools::InvocationResourceGuard::new(
+                    ResourceGuardDropProof(runtime_drops.clone()),
+                )],
+                ..Default::default()
+            }),
+            resource_guards: vec![echo_core::tools::InvocationResourceGuard::new(
+                ResourceGuardDropProof(invocation_drops.clone()),
+            )],
+            ..Default::default()
+        };
+        let stream = agent
+            .execute_stream_with_invocation_context(
+                "observe provider",
+                crate::agent::CancellationToken::new(),
+                invocation,
+            )
+            .await?;
+        let steering = agent
+            .steer_input_tracked(
+                Some("observed-react-turn"),
+                Message::user("do not lose this input".to_string()),
+            )
+            .map_err(|error| ReactError::Other(error.to_string()))?;
+        let events = stream.collect::<Vec<_>>().await;
+        assert_eq!(
+            invocation_drops.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        assert_eq!(runtime_drops.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(events.iter().any(|item|matches!(item,Err(ReactError::ExecutionNotSettled{run_id,..})if run_id=="provider-original")));
+        assert!(!events.iter().any(|item| matches!(
+            item,
+            Ok(AgentEvent::Error { .. } | AgentEvent::Cancelled | AgentEvent::FinalAnswer(_))
+        )));
+        assert!(!matches!(
+            steering.state(),
+            crate::agent::AgentSteerState::TurnSettled { .. }
+        ));
+        assert!(
+            agent.execution_mutex.try_lock().is_err(),
+            "unknown producer still owns the original execution slot"
+        );
+        assert!(matches!(
+            agent
+                .execute_stream_with_cancel(
+                    "must not start another attempt",
+                    crate::agent::CancellationToken::new()
+                )
+                .await,
+            Err(ReactError::ExecutionNotSettled { .. })
+        ));
+        assert_eq!(
+            invocation_drops.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        assert_eq!(runtime_drops.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(matches!(
+            agent.close().await,
+            Err(ReactError::ExecutionNotSettled { .. })
+        ));
+        assert!(!matches!(
+            steering.state(),
+            crate::agent::AgentSteerState::TurnSettled { .. }
+        ));
+        assert_eq!(
+            invocation_drops.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        assert_eq!(runtime_drops.load(std::sync::atomic::Ordering::SeqCst), 0);
+        Ok(())
+    }
+
+    struct UnknownSettlementTool {
+        parallel: bool,
+        executions: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl crate::tools::Tool for UnknownSettlementTool {
+        fn name(&self) -> &str {
+            "unknown_settlement"
+        }
+        fn description(&self) -> &str {
+            "reports original physical settlement uncertainty"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type":"object"})
+        }
+        fn allows_parallel_batch_execution(&self) -> bool {
+            self.parallel
+        }
+        fn execute<'a>(
+            &'a self,
+            _parameters: crate::tools::ToolParameters,
+        ) -> futures::future::BoxFuture<'a, Result<crate::tools::ToolResult>> {
+            Box::pin(async move {
+                self.executions
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Err(ReactError::ExecutionNotSettled {
+                    run_id: "tool-original-run".to_string(),
+                    execution_id: Some("tool-original-attempt".to_string()),
+                })
+            })
+        }
+    }
+
+    #[derive(Default)]
+    struct UnknownToolCallbacks {
+        starts: std::sync::atomic::AtomicUsize,
+        completions: std::sync::atomic::AtomicUsize,
+    }
+
+    impl crate::agent::AgentCallback for UnknownToolCallbacks {
+        fn on_tool_start<'a>(
+            &'a self,
+            _agent: &'a str,
+            _tool: &'a str,
+            _args: &'a serde_json::Value,
+        ) -> futures::future::BoxFuture<'a, ()> {
+            Box::pin(async {
+                self.starts
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            })
+        }
+        fn on_tool_end<'a>(
+            &'a self,
+            _agent: &'a str,
+            _tool: &'a str,
+            _result: &'a str,
+        ) -> futures::future::BoxFuture<'a, ()> {
+            Box::pin(async {
+                self.completions
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            })
+        }
+        fn on_tool_error<'a>(
+            &'a self,
+            _agent: &'a str,
+            _tool: &'a str,
+            _error: &'a ReactError,
+        ) -> futures::future::BoxFuture<'a, ()> {
+            Box::pin(async {
+                self.completions
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn actual_tool_observation_has_no_result_completion_or_model_continuation() -> Result<()>
+    {
+        use crate::skills::hooks::{HookAction, HookEvent, HookRule, HooksDefinition};
+        use crate::trace::{RunEvent, RunStore};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        for parallel in [true, false] {
+            let executions = Arc::new(AtomicUsize::new(0));
+            let hooks = Arc::new(AtomicUsize::new(0));
+            let callbacks = Arc::new(UnknownToolCallbacks::default());
+            let invocation_drops = Arc::new(AtomicUsize::new(0));
+            let runtime_drops = Arc::new(AtomicUsize::new(0));
+            let traces = Arc::new(crate::trace::InMemoryRunStore::new());
+            let llm = Arc::new(
+                MockLlmClient::new()
+                    .then_tool_call("unknown-tool-call", "unknown_settlement", "{}")
+                    .with_response("must not continue"),
             );
+            let agent = ReactAgentBuilder::new()
+                .llm_client(llm.clone())
+                .system_prompt("Execute the requested tool.")
+                .callback(callbacks.clone())
+                .with_run_store(traces.clone())
+                .tool_execution(crate::tools::ToolExecutionConfig {
+                    retry_on_fail: false,
+                    ..Default::default()
+                })
+                .tool(Box::new(UnknownSettlementTool {
+                    parallel,
+                    executions: executions.clone(),
+                }))
+                .build()?;
+            {
+                let mut registry = agent.tools.hook_registry.write().await;
+                let count = hooks.clone();
+                registry.set_subagent_executor(Arc::new(move |_name, _task| {
+                    let count = count.clone();
+                    Box::pin(async move {
+                        count.fetch_add(1, Ordering::SeqCst);
+                        Ok("completion hook ran".to_string())
+                    })
+                }));
+                let mut definition = HooksDefinition::default();
+                for event in [HookEvent::PostToolUse, HookEvent::PostToolUseFailure] {
+                    definition.add_rules(
+                        event,
+                        vec![HookRule {
+                            matcher: "unknown_settlement".to_string(),
+                            hooks: vec![HookAction::Subagent {
+                                name: "unknown-completion-probe".to_string(),
+                                task: None,
+                                timeout: 0,
+                            }],
+                        }],
+                    );
+                }
+                registry.register_user_hooks(definition);
+            }
+            let invocation = echo_core::agent::AgentInvocationContext {
+                runtime: Some(echo_core::tools::ExternalRunContext {
+                    turn_id: Some("tool-original-turn".to_string()),
+                    resource_guards: vec![echo_core::tools::InvocationResourceGuard::new(
+                        ResourceGuardDropProof(runtime_drops.clone()),
+                    )],
+                    ..Default::default()
+                }),
+                resource_guards: vec![echo_core::tools::InvocationResourceGuard::new(
+                    ResourceGuardDropProof(invocation_drops.clone()),
+                )],
+                ..Default::default()
+            };
+            let events = agent
+                .execute_stream_with_invocation_context(
+                    "invoke tool",
+                    crate::agent::CancellationToken::new(),
+                    invocation,
+                )
+                .await?
+                .collect::<Vec<_>>()
+                .await;
+            assert_eq!(executions.load(Ordering::SeqCst), 1);
+            assert_eq!(callbacks.starts.load(Ordering::SeqCst), 1);
+            assert_eq!(callbacks.completions.load(Ordering::SeqCst), 0);
+            assert_eq!(hooks.load(Ordering::SeqCst), 0);
+            assert_eq!(llm.call_count(), 1);
+            assert!(events.iter().any(|event| matches!(event, Ok(AgentEvent::ToolCall { call_id, .. }) if call_id == "unknown-tool-call")));
+            assert!(events.iter().any(|event| matches!(event, Err(ReactError::ExecutionNotSettled { run_id, execution_id })
+                if run_id == "tool-original-run" && execution_id.as_deref() == Some("tool-original-attempt"))));
+            assert!(!events.iter().any(|event| matches!(
+                event,
+                Ok(AgentEvent::ToolResult { .. }
+                    | AgentEvent::Error { .. }
+                    | AgentEvent::Cancelled
+                    | AgentEvent::FinalAnswer(_))
+            )));
+            assert!(
+                !agent
+                    .get_messages()
+                    .await
+                    .iter()
+                    .any(|message| message.role == crate::llm::types::Role::Tool)
+            );
+            let runs = traces.list_all(8).await?;
+            assert!(!runs.is_empty());
+            for summary in runs {
+                let run = traces
+                    .load(&summary.run_id)
+                    .await?
+                    .ok_or_else(|| ReactError::Other("tool trace missing".to_string()))?;
+                assert!(!run.events.iter().any(|event| matches!(
+                    event,
+                    RunEvent::ToolResult { .. } | RunEvent::ToolError { .. }
+                )));
+            }
+            assert_eq!(invocation_drops.load(Ordering::SeqCst), 0);
+            assert_eq!(runtime_drops.load(Ordering::SeqCst), 0);
+            assert!(matches!(
+                agent
+                    .execute_stream_with_cancel(
+                        "no replacement",
+                        crate::agent::CancellationToken::new()
+                    )
+                    .await,
+                Err(ReactError::ExecutionNotSettled { .. })
+            ));
+            assert!(matches!(
+                agent.close().await,
+                Err(ReactError::ExecutionNotSettled { .. })
+            ));
+            assert_eq!(llm.call_count(), 1);
+            assert_eq!(invocation_drops.load(Ordering::SeqCst), 0);
+            assert_eq!(runtime_drops.load(Ordering::SeqCst), 0);
         }
         Ok(())
     }
 
     #[tokio::test]
     async fn provider_failure_settles_close_lease_and_close_is_idempotent() -> Result<()> {
+        let invocation_drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let runtime_drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let agent = agent_with_mock_llm(MockLlmClient::new().with_error(
             crate::error::ReactError::Other("injected provider failure".to_string()),
         ));
         let events = agent
-            .execute_stream_with_cancel("provider failure", crate::agent::CancellationToken::new())
+            .execute_stream_with_invocation_context(
+                "provider failure",
+                crate::agent::CancellationToken::new(),
+                echo_core::agent::AgentInvocationContext {
+                    runtime: Some(echo_core::tools::ExternalRunContext {
+                        resource_guards: vec![echo_core::tools::InvocationResourceGuard::new(
+                            ResourceGuardDropProof(runtime_drops.clone()),
+                        )],
+                        ..Default::default()
+                    }),
+                    resource_guards: vec![echo_core::tools::InvocationResourceGuard::new(
+                        ResourceGuardDropProof(invocation_drops.clone()),
+                    )],
+                    ..Default::default()
+                },
+            )
             .await?
             .collect::<Vec<_>>()
             .await;
@@ -3007,6 +3446,11 @@ mod tests {
 
         agent.close().await?;
         agent.close().await?;
+        assert_eq!(
+            invocation_drops.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert_eq!(runtime_drops.load(std::sync::atomic::Ordering::SeqCst), 1);
         Ok(())
     }
 
@@ -4601,7 +5045,10 @@ mod tests {
             Some("stale runtime B plan")
         );
 
-        agent
+        // Caller abort is not a physical receipt for an admitted preparation.
+        // Preserve the original atomic-hydration assertions without admitting
+        // another effect through this now-uncertain Agent.
+        let rejected = agent
             .run_stream_channel(
                 StreamInit {
                     text: "runtime-a-after-cancel".to_string(),
@@ -4611,23 +5058,27 @@ mod tests {
                 },
                 StreamMode::Chat,
             )
+            .await;
+        assert!(matches!(
+            rejected,
+            Err(ReactError::ExecutionNotSettled { .. })
+        ));
+        assert_eq!(llm.all_calls().len(), 1);
+        // Hydration may have staged B in private memory before the hook.
+        // The durable A checkpoint remains authoritative; the unknown fence
+        // rejects re-entry rather than silently rehydrating another turn.
+        let original_checkpoint = store
+            .get_checkpoint("runtime-a")
             .await?
-            .collect::<Vec<_>>()
-            .await
-            .into_iter()
-            .collect::<Result<Vec<_>>>()?;
-
-        let calls = llm.all_calls();
-        assert_eq!(calls.len(), 2);
-        let recovered = calls.get(1).ok_or_else(|| {
-            ReactError::Other("recovered runtime A call was not recorded".to_string())
-        })?;
-        assert!(recovered.iter().any(|message| {
+            .ok_or_else(|| ReactError::Other("runtime A checkpoint missing".to_string()))?;
+        assert!(original_checkpoint.current_plan.is_none());
+        let original = original_checkpoint.restore_messages()?;
+        assert!(original.iter().any(|message| {
             message
                 .text_content()
                 .is_some_and(|content| content == "runtime-a-first-user")
         }));
-        assert!(!recovered.iter().any(|message| {
+        assert!(!original.iter().any(|message| {
             message
                 .text_content()
                 .is_some_and(|content| content == "runtime-b-checkpoint-marker")
@@ -5973,6 +6424,7 @@ mod tests {
     struct StallingToolIntervention {
         entered: Arc<std::sync::atomic::AtomicBool>,
         tool_name: Option<&'static str>,
+        release: Arc<tokio::sync::Notify>,
     }
 
     impl crate::agent::InterventionCallback for StallingToolIntervention {
@@ -5985,7 +6437,13 @@ mod tests {
             if self.tool_name.is_none_or(|name| name == tool) {
                 self.entered
                     .store(true, std::sync::atomic::Ordering::Release);
-                Box::pin(std::future::pending())
+                let release = self.release.clone();
+                Box::pin(async move {
+                    release.notified().await;
+                    // This controlled pre-execution owner ends without
+                    // admitting Tool work after the batch cancellation.
+                    crate::agent::InterventionResult::cancel()
+                })
             } else {
                 Box::pin(async { crate::agent::InterventionResult::allow() })
             }
@@ -5998,6 +6456,7 @@ mod tests {
         use crate::trace::{InMemoryRunStore, RunEvent, RunStore};
 
         let entered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let release = Arc::new(tokio::sync::Notify::new());
         let store = Arc::new(InMemoryRunStore::new());
         let audit = Arc::new(crate::audit::InMemoryAuditLogger::new());
         let audit_callback = Arc::new(crate::audit::AuditCallback::new(
@@ -6021,6 +6480,7 @@ mod tests {
             ))
             .intervention_callback(Arc::new(StallingToolIntervention {
                 entered: Arc::clone(&entered),
+                release: release.clone(),
                 tool_name: None,
             }))
             .tool_execution(crate::tools::ToolExecutionConfig {
@@ -6032,14 +6492,26 @@ mod tests {
             .with_run_store(store.clone())
             .build()?;
         let stream = agent.execute_stream("run bounded tool").await?;
-        let events = tokio::time::timeout(
-            std::time::Duration::from_secs(3),
-            stream.collect::<Vec<_>>(),
-        )
-        .await
-        .map_err(|_| ReactError::Other("outer timeout did not settle".to_string()))?
+        let collection = stream.collect::<Vec<_>>();
+        tokio::pin!(collection);
+        // The 10ms configuration plus the existing 250ms batch overhead may
+        // record timeout, but the admitted callback still owns its future.
+        let observed =
+            tokio::time::timeout(std::time::Duration::from_millis(300), &mut collection).await;
+        let returned_before_original_callback = observed.is_ok();
+        release.notify_one();
+        let events = match observed {
+            Ok(events) => events,
+            Err(_) => tokio::time::timeout(std::time::Duration::from_secs(3), &mut collection)
+                .await
+                .map_err(|_| ReactError::Other("outer timeout did not settle".to_string()))?,
+        }
         .into_iter()
         .collect::<Result<Vec<_>>>()?;
+        assert!(
+            !returned_before_original_callback,
+            "timeout observation must not drop the original admitted callback"
+        );
         assert!(entered.load(std::sync::atomic::Ordering::Acquire));
         let call_position = events.iter().position(|event| {
             matches!(
@@ -6147,6 +6619,7 @@ mod tests {
         use crate::trace::{InMemoryRunStore, RunEvent, RunStore};
 
         let entered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let release = Arc::new(tokio::sync::Notify::new());
         let store = Arc::new(InMemoryRunStore::new());
         let llm = MockLlmClient::new()
             .then_tool_calls(vec![
@@ -6177,6 +6650,7 @@ mod tests {
             ))
             .intervention_callback(Arc::new(StallingToolIntervention {
                 entered: Arc::clone(&entered),
+                release: release.clone(),
                 tool_name: Some("slow_tool"),
             }))
             .tool_execution(crate::tools::ToolExecutionConfig {
@@ -6187,14 +6661,26 @@ mod tests {
             .with_run_store(store.clone())
             .build()?;
         let stream = agent.execute_stream("run both").await?;
-        let events = tokio::time::timeout(
-            std::time::Duration::from_secs(3),
-            stream.collect::<Vec<_>>(),
-        )
-        .await
-        .map_err(|_| ReactError::Other("concurrent timeout did not settle".to_string()))?
+        let collection = stream.collect::<Vec<_>>();
+        tokio::pin!(collection);
+        // The 10ms configuration plus the existing 250ms batch overhead may
+        // record timeout, but the admitted callback still owns its future.
+        let observed =
+            tokio::time::timeout(std::time::Duration::from_millis(300), &mut collection).await;
+        let returned_before_original_callback = observed.is_ok();
+        release.notify_one();
+        let events = match observed {
+            Ok(events) => events,
+            Err(_) => tokio::time::timeout(std::time::Duration::from_secs(3), &mut collection)
+                .await
+                .map_err(|_| ReactError::Other("concurrent timeout did not settle".to_string()))?,
+        }
         .into_iter()
         .collect::<Result<Vec<_>>>()?;
+        assert!(
+            !returned_before_original_callback,
+            "timeout observation must not drop the original admitted callback"
+        );
         assert!(entered.load(std::sync::atomic::Ordering::Acquire));
         let results = events
             .iter()

@@ -419,6 +419,8 @@ Bypass → Plan → Rules(deny-first) → ProtectedPaths → Cache(TTL) → Deni
 
 ### 9. 多 Agent 编排 — Orchestrator + Subagent 团队
 
+取消观察与原 producer 的实际结算分离；请参阅 [Rust 调用迁移与所有权合同](docs/subagent-cancellation-observation.md)。
+
 协调多个专业 Agent，支持上下文隔离和切换协议。
 
 三种执行模式：

@@ -376,9 +376,12 @@ impl AgentDispatchTool {
                                 let outcome = match handle.join().await {
                                     Ok(result) => result.outcome.status.as_str().to_string(),
                                     Err(error) => {
-                                        crate::agent::subagent::subagent_status_from_error(&error)
-                                            .as_str()
-                                            .to_string()
+                                        match crate::agent::subagent::subagent_status_from_error(
+                                            &error,
+                                        ) {
+                                            Ok(status) => status.as_str().to_string(),
+                                            Err(_) => return, // Observation is not a terminal effect.
+                                        }
                                     }
                                 };
                                 sink(echo_core::tools::ToolEffect::SubagentRun {
@@ -448,7 +451,7 @@ impl AgentDispatchTool {
                             echo_core::tools::ToolEffect::SubagentRun {
                                 agent_name: agent_name.to_string(),
                                 task: task.to_string(),
-                                outcome: crate::agent::subagent::subagent_status_from_error(&e)
+                                outcome: crate::agent::subagent::subagent_status_from_error(&e)?
                                     .as_str()
                                     .to_string(),
                             },

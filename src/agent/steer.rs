@@ -229,6 +229,13 @@ impl ActiveTurnLease {
             .set_steerable(&self.turn_id, &self.incarnation, steerable);
     }
 
+    pub(crate) fn retain_unknown(&mut self) {
+        // No physical receipt exists. Keep the original mailbox/input facts;
+        // even eventual object destruction must not publish Dropped as one.
+        self.settled = true;
+        self.set_steerable(false);
+    }
+
     pub(crate) fn settle(mut self, outcome: AgentSteerTurnOutcome) {
         self.mailbox
             .finish(&self.turn_id, &self.incarnation, outcome);

@@ -63,11 +63,6 @@ use futures::stream::BoxStream;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Maximum time spent draining cancelled workflow siblings before returning a
-/// terminal error. A bounded drain prevents detached node futures while still
-/// allowing cooperative cancellation to settle.
-pub(crate) const WORKFLOW_TASK_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
-
 /// Shareable agent handle for safe access across async tasks.
 ///
 /// Because the [`Agent`] trait takes `&self` for all methods and concrete

@@ -232,6 +232,9 @@ pub struct RunEntry {
     pub ledger: Arc<EventLedger>,
     cancel: crate::agent::CancellationToken,
     lifecycle: StdMutex<RunLifecycle>,
+    // Retain this Run's original Session admission when a foreign Agent can
+    // report uncertainty but cannot provide a physical-settlement receipt.
+    unsettled_lease: StdMutex<Option<ActiveTurnLease>>,
     settled: Notify,
     revoked: AtomicBool,
 }
@@ -257,6 +260,7 @@ impl RunEntry {
             ledger,
             cancel,
             lifecycle: StdMutex::new(RunLifecycle::Running),
+            unsettled_lease: StdMutex::new(None),
             settled: Notify::new(),
             revoked: AtomicBool::new(false),
         }
@@ -308,11 +312,30 @@ impl RunEntry {
             })
     }
 
+    fn retain_unsettled_lease(&self, lease: ActiveTurnLease) {
+        let lifecycle = self
+            .lifecycle
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if matches!(*lifecycle, RunLifecycle::Running) {
+            *self
+                .unsettled_lease
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = Some(lease);
+        }
+    }
+
     pub(crate) fn settle(&self, receipt: TurnReceipt) {
         if let Ok(mut lifecycle) = self.lifecycle.lock()
             && matches!(*lifecycle, RunLifecycle::Running)
         {
             *lifecycle = RunLifecycle::Settled(Arc::new(receipt));
+            drop(
+                self.unsettled_lease
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .take(),
+            );
             self.settled.notify_waiters();
         }
     }
@@ -357,7 +380,19 @@ impl RunRegistry {
     }
 
     pub async fn remove(&self, run_id: &str) -> Option<Arc<RunEntry>> {
-        self.runs.write().await.remove(run_id)
+        let mut runs = self.runs.write().await;
+        if let Some(entry) = runs.get(run_id)
+            && entry
+                .unsettled_lease
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .is_some()
+        {
+            // Revocation/transport teardown is not physical settlement. Keep
+            // uncertain admission reachable through this original registry.
+            return Some(entry.clone());
+        }
+        runs.remove(run_id)
     }
 
     /// Cancel every live run and wait (bounded) for their settlements.
@@ -657,9 +692,38 @@ impl AcpConnectionServices {
                     }
                 }
             } else {
-                AgentTurnDriver
+                match AgentTurnDriver
                     .drive(agent.as_ref(), turn, sink.as_ref())
                     .await
+                {
+                    Ok(receipt) => receipt,
+                    Err(error) => {
+                        drive_entry.retain_unsettled_lease(lease);
+                        let data = match error {
+                            ReactError::ExecutionNotSettled {
+                                run_id,
+                                execution_id,
+                            } => {
+                                let mut details = serde_json::Map::from_iter([
+                                    (
+                                        "observation".to_string(),
+                                        serde_json::Value::String("not_settled".to_string()),
+                                    ),
+                                    ("run_id".to_string(), serde_json::Value::String(run_id)),
+                                ]);
+                                if let Some(execution_id) = execution_id {
+                                    details.insert(
+                                        "execution_id".to_string(),
+                                        serde_json::Value::String(execution_id),
+                                    );
+                                }
+                                serde_json::Value::Object(details)
+                            }
+                            error => serde_json::Value::String(error.to_string()),
+                        };
+                        return Err(agent_client_protocol::Error::internal_error().data(data));
+                    }
+                }
             };
             drive_entry.settle(receipt);
             drop(lease);
@@ -987,8 +1051,8 @@ mod turn_identity_tests {
         }
     }
 
-    async fn prepared_session(
-        agent: CapturingAgent,
+    async fn prepared_session<A: Agent + Clone + 'static>(
+        agent: A,
     ) -> Result<(Arc<AcpConnectionServices>, Arc<AcpSession>)> {
         let factory: Arc<dyn super::super::session::AcpSessionFactory> =
             Arc::new(move |_context| {
@@ -1083,6 +1147,94 @@ mod turn_identity_tests {
             .ok_or_else(|| ReactError::Other("original receipt missing".to_string()))?;
         assert_eq!(receipt.turn_id.as_str(), expected);
         assert_eq!(receipt.outcome, TurnOutcome::Completed);
+        Ok(())
+    }
+
+    #[derive(Clone)]
+    struct ForeignObservationAgent;
+
+    impl Agent for ForeignObservationAgent {
+        fn name(&self) -> &str {
+            "foreign-observer"
+        }
+        fn model_name(&self) -> &str {
+            "none"
+        }
+        fn system_prompt(&self) -> &str {
+            ""
+        }
+        fn execute<'a>(&'a self, _task: &'a str) -> BoxFuture<'a, Result<String>> {
+            Box::pin(async {
+                Err(ReactError::ExecutionNotSettled {
+                    run_id: "foreign-physical-run".to_string(),
+                    execution_id: Some("foreign-physical-attempt".to_string()),
+                })
+            })
+        }
+        fn execute_stream<'a>(
+            &'a self,
+            _task: &'a str,
+        ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+            Box::pin(async {
+                Err(ReactError::ExecutionNotSettled {
+                    run_id: "foreign-physical-run".to_string(),
+                    execution_id: Some("foreign-physical-attempt".to_string()),
+                })
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn foreign_setup_observation_retains_same_session_lease_and_registry_identity()
+    -> Result<()> {
+        let (services, session) = prepared_session(ForeignObservationAgent).await?;
+        let original = spec(session.clone(), TurnMode::Execute, false, None)?;
+        let run_id = original.run_id.clone();
+        let (entry, task) = services.prepare_run(original).await?;
+        let error = task.await.err().ok_or_else(|| {
+            ReactError::Other("foreign observation unexpectedly returned success".to_string())
+        })?;
+        assert_eq!(
+            error.data,
+            Some(serde_json::json!({
+                "observation": "not_settled", "run_id": "foreign-physical-run",
+                "execution_id": "foreign-physical-attempt",
+            }))
+        );
+        assert!(entry.is_running());
+        assert!(entry.receipt().is_none());
+        assert_eq!(
+            entry
+                .unsettled_lease
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .as_ref()
+                .map(|lease| lease.turn.id()),
+            Some(run_id.as_str())
+        );
+        assert!(session.begin_turn().is_err());
+        let recovered = services.run(&run_id).await.ok_or_else(|| {
+            ReactError::Other("uncertain original Run entry disappeared".to_string())
+        })?;
+        assert!(Arc::ptr_eq(&entry, &recovered));
+        let removed = services.remove_run(&run_id).await;
+        assert!(
+            removed
+                .as_ref()
+                .is_some_and(|value| Arc::ptr_eq(value, &entry))
+        );
+        assert!(services.run(&run_id).await.is_some());
+        assert!(entry.cancellation().is_cancelled());
+        assert!(session.begin_turn().is_err());
+        assert_eq!(
+            services
+                .runs
+                .cancel_and_wait(Duration::from_millis(1))
+                .await,
+            1
+        );
+        assert!(entry.receipt().is_none());
+        assert!(session.begin_turn().is_err());
         Ok(())
     }
 

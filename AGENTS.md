@@ -69,7 +69,7 @@ CI 对 lib/bins 强制 `-D clippy::unwrap_used -D clippy::expect_used -D clippy:
 
 - **新任务必须在非 main 分支开发**,分支命名 `<type>/<user>/<任务名>`。`<type>` 是任务事件类型,与 conventional commits 前缀对齐:`feature`(新功能)、`fix`(bug 修复)、`doc`(文档)、`debug`(排查/诊断类调查)、`refactor`(重构)、`test`(补测试)、`chore`(构建/工具/依赖)。如 `fix/Echoyue/journal-race`。worktree 场景见后文。main 保持随时可发布。
 - 开发阶段可以细粒度拆分提交,每个 commit 只需通过 focused 快检(见"验证节奏"),**不要求每个 commit 跑全量门禁**。
-- **合并粒度 = 任务**:任务完成后,先 `git merge main` 进任务分支,在任务分支上跑下节全量门禁,开 PR 等远端 CI 全绿(或确认本地门禁已全绿),然后 **squash merge 成一个 commit 进 main**,commit message 用与分支一致的类型前缀(如 `fix: ...` / `feat: ...` / `docs: ...`)。门禁或 CI 不绿不得合并;合并后 `git branch -D` 删除任务分支。
+- **合并粒度 = 任务**:任务完成后,先 `git merge main` 进任务分支,在任务分支上跑下节适用的本地全量门禁,全部通过后开 PR 并 **squash merge 成一个 commit 进 main**,commit message 用与分支一致的类型前缀(如 `fix: ...` / `feat: ...` / `docs: ...`)。任务分支 push 和 PR 不触发 CI,不免除合并前本地门禁;CI 仅由 main push 触发,合并后必须核验该精确 main 提交的 CI 全绿才能完成交付。合并后 `git branch -D` 删除任务分支。
 
 ## 全量提交门禁(合并到 main 前强制)
 
@@ -129,11 +129,13 @@ done
 
 ## CI 职责边界(不要恢复完整门禁镜像或单一测试 job)
 
-完整 all-feature 门禁由任务分支在合并前执行一次。CI 只补本地 macOS 无法等价覆盖的
-信号:Linux all-target/all-feature lint、分组的默认 feature 测试、Windows 编译与原子
-文件替换测试、依赖审计,以及learning test中的semantic baseline target-main ancestry
-合同。PR使用base SHA、main push使用before SHA并checkout完整历史,使feature-only
-baseline revision在squash前失败。同一 ref 的旧 run 由 concurrency gate 自动取消。
+完整 all-feature 门禁由任务分支在合并前执行一次。CI 仅在 push 到 main 后运行,
+不监听 master、任务分支 push 或 pull_request;PR 没有 CI 不代表没有合并前门禁。
+CI 只补本地 macOS 无法等价覆盖的信号:Linux all-target/all-feature lint、分组的默认
+feature 测试、Windows 编译与原子文件替换测试、依赖审计,以及 learning test 中的
+semantic baseline target-main ancestry 合同。main push 使用 before SHA 并 checkout
+完整历史,校验 baseline revision 属于此前 main 历史。交付验收必须核验合并后的
+精确 main 提交 CI 全绿;同一 ref 的旧 run 由 concurrency gate 自动取消。
 
 Linux 测试分组是资源下限:单一 workspace test job 在标准 runner 上会 OOM;逐包运行
 all-feature 测试也曾令 `echo_agent`/`echo_tools` runner 失联。all-feature 测试属于本地

@@ -709,13 +709,13 @@ pub enum AgentPhase {
 
 impl AgentEvent {
     /// Build a terminal event while preserving the typed framework failure.
-    pub fn from_error(source: impl Into<String>, error: &ReactError) -> Self {
-        let failure = crate::error::AgentFailure::from(error);
-        Self::Error {
+    pub fn from_error(source: impl Into<String>, error: &ReactError) -> crate::error::Result<Self> {
+        let failure = crate::error::AgentFailure::try_from(error)?;
+        Ok(Self::Error {
             source: source.into(),
             message: failure.message.clone(),
             failure,
-        }
+        })
     }
 
     /// Build an unclassified terminal failure for boundaries that have no typed error.
@@ -1027,8 +1027,9 @@ pub trait Agent: Send + Sync {
     /// Execute a task with cooperative cancellation support.
     ///
     /// The default implementation wraps [`Self::execute_stream`] with a
-    /// cancellation-aware wrapper. When `cancel` is triggered, the stream
-    /// yields [`AgentEvent::Cancelled`] and terminates.
+    /// cancellation-aware wrapper. Cancellation retains the original source
+    /// through physical EOF before publishing [`AgentEvent::Cancelled`]. An
+    /// unresolved source observation is propagated without a fake terminal.
     ///
     /// # ⚠️ Warning
     ///
@@ -1095,8 +1096,9 @@ pub trait Agent: Send + Sync {
     /// Chat streaming variant with cooperative cancellation support.
     ///
     /// The default implementation wraps [`Self::chat_stream`] with a
-    /// cancellation-aware wrapper. When `cancel` is triggered, the stream
-    /// yields [`AgentEvent::Cancelled`] and terminates.
+    /// cancellation-aware wrapper. Cancellation retains the original source
+    /// through physical EOF before publishing [`AgentEvent::Cancelled`]. An
+    /// unresolved source observation is propagated without a fake terminal.
     fn chat_stream_with_cancel<'a>(
         &'a self,
         message: &'a str,
@@ -1134,10 +1136,16 @@ pub trait Agent: Send + Sync {
                 // The adapter owns text for as long as the legacy stream can
                 // borrow it. Legacy setup starts on first poll; its original
                 // setup error is emitted as a stream error, never a success.
-                let stream = async_stream::try_stream! {
-                    let mut legacy = self.chat_stream_with_cancel(&text, cancel).await?;
-                    while let Some(event) = legacy.next().await {
-                        yield event?;
+                let stream = async_stream::stream! {
+                    match self.chat_stream_with_cancel(&text, cancel).await {
+                        Ok(legacy) => {
+                            // Retain the same Result source through cleanup.
+                            // The existing wrapper preserves the first business
+                            // error and necessary later observation/confirmation.
+                            let mut legacy = retaining_source_stream(legacy, None, None);
+                            while let Some(event) = legacy.next().await { yield event; }
+                        }
+                        Err(error) => yield Err(error),
                     }
                 };
                 return Ok(Box::pin(stream) as BoxStream<'a, Result<AgentEvent>>);
@@ -1490,40 +1498,80 @@ impl Agent for Box<dyn Agent> {
 
 /// Wrap an agent event stream with cooperative cancellation support.
 ///
-/// When `cancel` is triggered, the stream yields [`AgentEvent::Cancelled`]
-/// and terminates. Shared by both `execute_stream_with_cancel` and
-/// `chat_stream_with_cancel` default implementations.
+/// A cancellation event is a delivery cause, not the producer's closure
+/// receipt. Publish cancellation only after the original source's EOF.
 fn cancel_aware_stream<'a>(
-    mut stream: BoxStream<'a, Result<AgentEvent>>,
+    stream: BoxStream<'a, Result<AgentEvent>>,
     cancel: CancellationToken,
 ) -> BoxStream<'a, Result<AgentEvent>> {
-    let wrapped = async_stream::try_stream! {
-        loop {
-            tokio::select! {
-                _ = cancel.cancelled() => {
-                    yield AgentEvent::Cancelled;
-                    break;
-                }
-                next = stream.next() => {
-                    match next {
-                        Some(event) => yield event?,
-                        None => break,
-                    }
-                }
-            }
-        }
-    };
-    Box::pin(wrapped)
+    retaining_source_stream(stream, Some(cancel), None)
 }
 
 fn invocation_retaining_stream<'a>(
-    mut stream: BoxStream<'a, Result<AgentEvent>>,
+    stream: BoxStream<'a, Result<AgentEvent>>,
     invocation: AgentInvocationContext,
 ) -> BoxStream<'a, Result<AgentEvent>> {
-    let wrapped = async_stream::try_stream! {
+    retaining_source_stream(stream, None, Some(invocation))
+}
+
+// Both existing wrappers retain the same source. A cancellation terminal is
+// delayed until physical EOF; if the source reported uncertainty, a later
+// original terminal must confirm its closure first. No timer or owner is added.
+fn retaining_source_stream<'a>(
+    mut stream: BoxStream<'a, Result<AgentEvent>>,
+    cancel: Option<CancellationToken>,
+    invocation: Option<AgentInvocationContext>,
+) -> BoxStream<'a, Result<AgentEvent>> {
+    let wrapped = async_stream::stream! {
         let _invocation = invocation;
-        while let Some(event) = stream.next().await {
-            yield event?;
+        let mut cancel_requested = false;
+        let mut business_observed = false;
+        let mut source_observation_pending = false;
+        loop {
+            let next = if cancel_requested || business_observed {
+                stream.next().await
+            } else if let Some(cancel) = cancel.as_ref() {
+                tokio::select! {
+                    biased;
+                    next = stream.next() => next,
+                    _ = cancel.cancelled() => {
+                        cancel_requested = true;
+                        continue;
+                    }
+                }
+            } else {
+                stream.next().await
+            };
+            let Some(item) = next else { break; };
+            match &item {
+                Err(ReactError::ExecutionNotSettled { .. }) => {
+                    source_observation_pending = true;
+                    yield item;
+                }
+                Ok(event) if event.is_terminal() => {
+                    let confirms_observation = source_observation_pending;
+                    source_observation_pending = false;
+                    if !cancel_requested && (!business_observed || confirms_observation) {
+                        // A confirmation after a delivered terminal is consumed
+                        // by the original drainer, not replayed as another
+                        // canonical business terminal by the normalizer.
+                        business_observed = true;
+                        yield item;
+                    }
+                }
+                Err(_) if !cancel_requested && !business_observed => {
+                    business_observed = true;
+                    yield item;
+                }
+                Ok(_) if !cancel_requested && !business_observed => yield item,
+                _ => {}
+            }
+        }
+        if cancel_requested && !business_observed && !source_observation_pending {
+            // With prior uncertainty this projection is backed by a genuine
+            // later source terminal AND the just-observed original EOF. A
+            // cancelled token or EOF alone never clears that uncertainty.
+            yield Ok(AgentEvent::Cancelled);
         }
     };
     Box::pin(wrapped)
@@ -1531,6 +1579,120 @@ fn invocation_retaining_stream<'a>(
 
 #[cfg(test)]
 mod invocation_retaining_stream_tests {
+    #[tokio::test]
+    async fn structured_legacy_chat_preserves_observation_and_original_live_source() -> Result<()> {
+        use futures::FutureExt;
+        use tokio::sync::{Mutex, Notify};
+        struct SourceDrop(Arc<AtomicUsize>);
+        impl Drop for SourceDrop {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        type Backend = futures::future::Shared<BoxFuture<'static, std::result::Result<(), String>>>;
+        struct LegacyChat {
+            release: Arc<Notify>,
+            join: Arc<Mutex<Option<Backend>>>,
+            drops: Arc<AtomicUsize>,
+            path: std::path::PathBuf,
+        }
+        impl Agent for LegacyChat {
+            fn name(&self) -> &str {
+                "legacy-live-chat"
+            }
+            fn model_name(&self) -> &str {
+                "test"
+            }
+            fn system_prompt(&self) -> &str {
+                "test"
+            }
+            fn execute<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<String>> {
+                Box::pin(async { Ok("unused".into()) })
+            }
+            fn execute_stream<'a>(
+                &'a self,
+                _: &'a str,
+            ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+                Box::pin(async move {
+                    let release = self.release.clone();
+                    let path = self.path.clone();
+                    let slot = self.join.clone();
+                    let drops = self.drops.clone();
+                    let source = async_stream::stream! {
+                        let _scope = SourceDrop(drops);
+                        let entered = Arc::new(Notify::new());
+                        let producer_entered = entered.clone();
+                        let backend = tokio::spawn(async move {
+                            std::fs::write(&path, "entered").map_err(|error| error.to_string())?;
+                            producer_entered.notify_one();
+                            release.notified().await;
+                            std::fs::write(&path, "closed").map_err(|error| error.to_string())?;
+                            Ok::<(), String>(())
+                        }).map(|result| result.map_err(|error| error.to_string()).and_then(|result| result)).boxed().shared();
+                        *slot.lock().await = Some(backend.clone());
+                        entered.notified().await;
+                        yield Err(ReactError::ExecutionNotSettled { run_id: "original-chat-run".into(), execution_id: Some("original-chat-attempt".into()) });
+                        if let Err(error) = backend.await { yield Err(ReactError::Other(error)); return; }
+                        yield Ok(AgentEvent::FinalAnswer("same original source".into()));
+                    };
+                    Ok(Box::pin(source) as BoxStream<'a, Result<AgentEvent>>)
+                })
+            }
+        }
+        let directory =
+            std::env::temp_dir().join(format!("echo_legacy_chat_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory)?;
+        let path = directory.join("effect.txt");
+        let release = Arc::new(Notify::new());
+        let join = Arc::new(Mutex::new(None));
+        let drops = Arc::new(AtomicUsize::new(0));
+        let agent = LegacyChat {
+            release: release.clone(),
+            join: join.clone(),
+            drops: drops.clone(),
+            path: path.clone(),
+        };
+        let mut source = agent
+            .chat_stream_message_with_invocation_context(
+                Message::user("plain user".to_string()),
+                CancellationToken::new(),
+                AgentInvocationContext::default(),
+            )
+            .await?;
+        let first = source.next().await;
+        let early = tokio::time::timeout(std::time::Duration::from_millis(20), source.next()).await;
+        let held = std::fs::read_to_string(&path).ok();
+        let early_drops = drops.load(Ordering::SeqCst);
+        release.notify_one();
+        let cleanup = match join.lock().await.take() {
+            Some(backend) => backend.await.map_err(ReactError::Other),
+            None => Err(ReactError::Other("missing original backend".into())),
+        };
+        let mut tail = Vec::new();
+        while let Some(event) = source.next().await {
+            tail.push(event);
+        }
+        let closed = std::fs::read_to_string(&path).ok();
+        let _ = std::fs::remove_dir_all(&directory);
+        cleanup?;
+        assert!(matches!(
+            first,
+            Some(Err(ReactError::ExecutionNotSettled { .. }))
+        ));
+        assert_eq!(held.as_deref(), Some("entered"));
+        assert_eq!(closed.as_deref(), Some("closed"));
+        assert!(
+            early.is_err(),
+            "legacy source ended instead of retaining its physical continuation: {early:?}"
+        );
+        assert_eq!(early_drops, 0);
+        assert!(
+            matches!(tail.as_slice(), [Ok(AgentEvent::FinalAnswer(answer))] if answer == "same original source")
+        );
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
     use super::*;
     use crate::tools::InvocationResourceGuard;
     use std::sync::Arc;
@@ -1796,6 +1958,7 @@ mod default_pure_text_chat_tests {
     struct LegacyTextAgent {
         calls: AtomicUsize,
         fail_setup: bool,
+        release_cleanup: tokio::sync::Notify,
     }
     impl Agent for LegacyTextAgent {
         fn name(&self) -> &str {
@@ -1828,11 +1991,11 @@ mod default_pure_text_chat_tests {
                     ));
                 }
                 // Keep the borrowed original text across the caller's later poll.
-                Ok(
-                    futures::stream::once(async move { Ok(AgentEvent::Token(text.to_string())) })
-                        .chain(futures::stream::pending())
-                        .boxed(),
-                )
+                Ok(async_stream::stream! {
+                    yield Ok(AgentEvent::Token(text.to_string()));
+                    self.release_cleanup.notified().await;
+                }
+                .boxed())
             })
         }
     }
@@ -1861,6 +2024,18 @@ mod default_pure_text_chat_tests {
         );
         assert_eq!(agent.calls.load(Ordering::SeqCst), 1);
         cancel.cancel();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), events.next())
+                .await
+                .is_err(),
+            "cancel terminal waits for the original producer's EOF"
+        );
+        assert_eq!(
+            drops.load(Ordering::SeqCst),
+            0,
+            "original invocation guard remains owned while cleanup is held"
+        );
+        agent.release_cleanup.notify_one();
         assert!(matches!(
             events.next().await,
             Some(Ok(AgentEvent::Cancelled))

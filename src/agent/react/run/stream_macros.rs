@@ -41,12 +41,8 @@ macro_rules! try_send_or {
             Ok(v) => v,
             Err(e) => {
                 let error: crate::error::ReactError = e.into();
-                let _ = $tx
-                    .send(Ok(crate::agent::AgentEvent::from_error(
-                        "react_loop",
-                        &error,
-                    )))
-                    .await;
+                let terminal = crate::agent::AgentEvent::from_error("react_loop", &error)?;
+                let _ = $tx.send(Ok(terminal)).await;
                 return Ok($bail);
             }
         }

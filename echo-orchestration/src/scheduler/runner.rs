@@ -97,13 +97,80 @@ impl SchedulerInvocation {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OccurrenceProtection {
+    LegacyAtLeastOnce,
+    PhysicalSettlementV1,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "OccurrencePayloadWire", into = "OccurrencePayloadWire")]
 struct OccurrencePayload {
+    task: CronTask,
+    scheduled_at: DateTime<Utc>,
+    trigger: SchedulerTrigger,
+    control_revision: u64,
+    protection: OccurrenceProtection,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct OccurrencePayloadFields {
     task: CronTask,
     scheduled_at: DateTime<Utc>,
     trigger: SchedulerTrigger,
     #[serde(default)]
     control_revision: u64,
+}
+
+// A protected wrapper has no legacy top-level task, so old decoders fail
+// closed instead of ignoring a new flag and replaying a protected effect.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+enum OccurrencePayloadWire {
+    ProtectedV1 {
+        physical_settlement_v1: OccurrencePayloadFields,
+    },
+    Legacy(OccurrencePayloadFields),
+}
+
+impl From<OccurrencePayload> for OccurrencePayloadWire {
+    fn from(value: OccurrencePayload) -> Self {
+        let fields = OccurrencePayloadFields {
+            task: value.task,
+            scheduled_at: value.scheduled_at,
+            trigger: value.trigger,
+            control_revision: value.control_revision,
+        };
+        match value.protection {
+            OccurrenceProtection::PhysicalSettlementV1 => Self::ProtectedV1 {
+                physical_settlement_v1: fields,
+            },
+            OccurrenceProtection::LegacyAtLeastOnce => Self::Legacy(fields),
+        }
+    }
+}
+
+impl From<OccurrencePayloadWire> for OccurrencePayload {
+    fn from(value: OccurrencePayloadWire) -> Self {
+        let (fields, protection) = match value {
+            OccurrencePayloadWire::ProtectedV1 {
+                physical_settlement_v1,
+            } => (
+                physical_settlement_v1,
+                OccurrenceProtection::PhysicalSettlementV1,
+            ),
+            OccurrencePayloadWire::Legacy(fields) => {
+                (fields, OccurrenceProtection::LegacyAtLeastOnce)
+            }
+        };
+        Self {
+            task: fields.task,
+            scheduled_at: fields.scheduled_at,
+            trigger: fields.trigger,
+            control_revision: fields.control_revision,
+            protection,
+        }
+    }
 }
 
 type OccurrenceEvent = DeliveryEvent<String, OccurrencePayload>;
@@ -314,7 +381,7 @@ impl OccurrenceAuthority {
             ))
         })?;
         self.reconcile_inactive_owner_loss_unlocked()?;
-        let Some(draft) = self
+        let Some(mut draft) = self
             .ledger
             .prepare_claim_next_available()
             .map_err(|error| ledger_error("prepare scheduler occurrence claim", error))?
@@ -327,9 +394,13 @@ impl OccurrenceAuthority {
                 .is_some_and(|record| record.outcome == Some(DeliveryOutcome::OutcomeUnknown))
         });
         if recovered_after_owner_loss {
+            // Old history may have its first recovery; this newly admitted
+            // physical attempt must be protected in the same original batch.
+            draft.claim.payload.protection = OccurrenceProtection::PhysicalSettlementV1;
             let batch = PreparedJournalBatch::new(vec![
                 draft.event,
                 DeliveryEvent::EffectStarted {
+                    replacement_payload: Some(draft.claim.payload.clone()),
                     message_id: draft.claim.message_id.clone(),
                     attempt_id: draft.claim.attempt_id.clone(),
                     turn_id: draft.claim.attempt_id.clone(),
@@ -370,9 +441,22 @@ impl OccurrenceAuthority {
             })
         });
         if !admitted {
+            let mut payload = claim.payload.clone();
+            payload.protection = OccurrenceProtection::PhysicalSettlementV1;
+            let mut event = self
+                .ledger
+                .prepare_begin_effect(claim, claim.attempt_id.clone())
+                .map_err(|error| ledger_error("prepare scheduler callback admission", error))?;
+            if let DeliveryEvent::EffectStarted {
+                replacement_payload,
+                ..
+            } = &mut event
+            {
+                *replacement_payload = Some(payload);
+            }
             let receipt = self
                 .ledger
-                .begin_effect(claim, claim.attempt_id.clone())
+                .apply(event)
                 .map_err(|error| ledger_error("commit scheduler callback admission", error))?;
             self.confirm_durable(&receipt, "commit scheduler callback admission")?;
         }
@@ -442,6 +526,9 @@ impl OccurrenceAuthority {
                             | DeliveryPhase::MailboxAccepted
                             | DeliveryPhase::Drained
                     )
+                })
+                .filter(|record| {
+                    record.payload.protection == OccurrenceProtection::LegacyAtLeastOnce
                 })
                 .filter(|record| {
                     record
@@ -681,29 +768,42 @@ where
 /// Owned handle for a running scheduler loop.
 pub struct SchedulerHandle {
     cancel: CancellationToken,
-    join: JoinHandle<()>,
+    join: Option<JoinHandle<()>>,
+    join_error: Option<String>,
+    owner: Arc<SchedulerRunner>,
 }
 
 impl SchedulerHandle {
-    /// Request shutdown without waiting for the loop to exit.
+    /// Signal the existing scheduler token; admitted callbacks keep their owner.
     pub fn cancel(&self) {
         self.cancel.cancel();
     }
 
-    /// Return whether the scheduler loop has exited.
+    /// Whether the loop ended, independently of physical callback settlement.
     pub fn is_finished(&self) -> bool {
-        self.join.is_finished()
+        self.join.as_ref().is_none_or(JoinHandle::is_finished)
     }
 
-    /// Wait for the scheduler loop to exit naturally.
-    pub async fn join(self) -> echo_core::error::Result<()> {
-        self.join.await.map_err(|error| {
-            echo_core::error::ReactError::Other(format!("Scheduler task failed: {error}"))
-        })
+    /// Observe the same loop without consuming its parent. Retain this handle
+    /// after an uncertain result; repeated observation never executes again.
+    pub async fn join(&mut self) -> echo_core::error::Result<()> {
+        if let Some(join) = self.join.as_mut() {
+            let result = join.await;
+            self.join.take();
+            self.join_error = result.err().map(|error| error.to_string());
+        }
+        if let Some(error) = self.owner.unsettled_occurrence() {
+            return Err(error);
+        }
+        match self.join_error.as_ref() {
+            Some(error) => Err(ledger_error("scheduler loop join", error)),
+            None => Ok(()),
+        }
     }
 
-    /// Cancel the scheduler and wait until all scheduler-owned work has stopped.
-    pub async fn shutdown(self) -> echo_core::error::Result<()> {
+    /// Signal shutdown and observe its loop. An unknown callback is not a
+    /// successful physical shutdown; the same caller-held parent is preserved.
+    pub async fn shutdown(&mut self) -> echo_core::error::Result<()> {
         self.cancel();
         self.join().await
     }
@@ -728,8 +828,119 @@ pub struct SchedulerRunner {
 struct AdmittedOccurrence {
     claim: DeliveryClaim<String, OccurrencePayload>,
     recovered_after_owner_loss: bool,
-    callback: BoxFuture<'static, echo_core::error::Result<String>>,
-    callback_owner: CallbackOwnerGuard,
+    completion: JoinHandle<echo_core::error::Result<String>>,
+}
+
+struct CallbackSettlementOwner {
+    store: CronTaskStore,
+    mutation_owner: SchedulerMutationOwner,
+    fire_fn: OccurrenceFireFn,
+    occurrence_authority: Arc<OccurrenceAuthority>,
+    tasks: Arc<RwLock<Vec<CronTask>>>,
+    control_lock: Arc<Mutex<()>>,
+}
+
+impl CallbackSettlementOwner {
+    async fn run(
+        self,
+        claim: DeliveryClaim<String, OccurrencePayload>,
+        recovered_after_owner_loss: bool,
+        callback_owner: CallbackOwnerGuard,
+    ) -> echo_core::error::Result<String> {
+        let payload = claim.payload.clone();
+        let callback_result = (self.fire_fn)(SchedulerInvocation {
+            occurrence_id: claim.message_id.clone(),
+            attempt_id: claim.attempt_id.clone(),
+            attempt: claim.attempt,
+            task: payload.task.clone(),
+            scheduled_at: payload.scheduled_at,
+            trigger: payload.trigger,
+            recovered_after_owner_loss,
+        })
+        .await;
+        if matches!(
+            &callback_result,
+            Err(echo_core::error::ReactError::ExecutionNotSettled { .. })
+        ) {
+            // This future returned observation, not physical settlement. Its
+            // original protected claim survives the liveness guard's Drop.
+            return callback_result;
+        }
+        let (outcome, result_text, callback_error) = match callback_result {
+            Ok(result) => (DeliveryOutcome::Completed, result, None),
+            Err(error) => {
+                let error_text = error.to_string();
+                (
+                    DeliveryOutcome::Failed,
+                    format!("ERROR: {error_text}"),
+                    Some(error),
+                )
+            }
+        };
+        let projection_result = {
+            let store = self.store.clone();
+            let owner = self.mutation_owner.clone();
+            let control = Arc::clone(&self.control_lock);
+            let tasks = Arc::clone(&self.tasks);
+            let task = payload.task.clone();
+            let result = result_text.clone();
+            run_owned_mutation("last-run projection owner", async move {
+                let _control = control.lock().await;
+                let mut tasks = tasks.write().await;
+                let updated = match store
+                    .update_last_run_for_task(&task, &result, Some(&owner))
+                    .await
+                {
+                    Ok(updated) => updated,
+                    Err(error) => {
+                        if store.is_authority_poisoned() {
+                            tasks.clear();
+                        }
+                        return Err(error);
+                    }
+                };
+                if let Some(cached) = tasks
+                    .iter_mut()
+                    .find(|candidate| candidate.same_definition(&updated))
+                {
+                    *cached = updated;
+                } else {
+                    tasks.push(updated);
+                }
+                Ok::<(), echo_core::error::ReactError>(())
+            })
+            .await
+        };
+        let settlement_reason = match (&callback_error, &projection_result) {
+            (Some(callback), Err(projection)) => Some(format!(
+                "callback failed: {callback}; last-run projection failed: {projection}"
+            )),
+            (Some(callback), Ok(())) => Some(callback.to_string()),
+            (None, Err(projection)) => Some(format!("last-run projection failed: {projection}")),
+            (None, Ok(())) => None,
+        };
+        let settlement_result = {
+            let _delivery = self.occurrence_authority.delivery_lock.lock().await;
+            self.occurrence_authority.settle(
+                &claim,
+                DeliverySettlement::terminal(
+                    Some(claim.attempt_id.clone()),
+                    outcome,
+                    None,
+                    settlement_reason,
+                    None,
+                ),
+            )
+        };
+
+        drop(callback_owner);
+        settlement_result?;
+        projection_result?;
+        match callback_error {
+            Some(error) => Err(error),
+            None => Ok(result_text),
+        }
+    }
 }
 
 impl SchedulerRunner {
@@ -771,13 +982,68 @@ impl SchedulerRunner {
         })
     }
 
-    /// Spawn the scheduler as a background tokio task.
+    // Construct exactly one retained execution after original durable admission.
+    fn start_admitted_callback(
+        &self,
+        mut claim: DeliveryClaim<String, OccurrencePayload>,
+        recovered_after_owner_loss: bool,
+    ) -> echo_core::error::Result<AdmittedOccurrence> {
+        let runtime = tokio::runtime::Handle::try_current()
+            .map_err(|error| ledger_error("callback owner runtime", error))?;
+        let owner = CallbackSettlementOwner {
+            store: self.store.clone(),
+            mutation_owner: self.mutation_owner.clone(),
+            fire_fn: self.fire_fn.clone(),
+            occurrence_authority: self.occurrence_authority.clone(),
+            tasks: self.tasks.clone(),
+            control_lock: self.control_lock.clone(),
+        };
+        claim.payload.protection = OccurrenceProtection::PhysicalSettlementV1;
+        let callback_owner = self.occurrence_authority.begin_effect(&claim)?;
+        let owned_claim = claim.clone();
+        let completion = runtime.spawn(async move {
+            owner
+                .run(owned_claim, recovered_after_owner_loss, callback_owner)
+                .await
+        });
+        Ok(AdmittedOccurrence {
+            claim,
+            recovered_after_owner_loss,
+            completion,
+        })
+    }
+
+    fn unsettled_occurrence(&self) -> Option<echo_core::error::ReactError> {
+        self.occurrence_authority
+            .ledger
+            .with_projection(|projection| {
+                projection
+                    .frontier()
+                    .find(|record| {
+                        record.payload.protection == OccurrenceProtection::PhysicalSettlementV1
+                            && record.effect_started_at.is_some()
+                    })
+                    .map(|record| echo_core::error::ReactError::ExecutionNotSettled {
+                        run_id: record.message_id.clone(),
+                        execution_id: record.attempt_id.clone(),
+                    })
+            })
+    }
+
+    /// Spawn the existing loop and return its explicit parent owner. Keep the
+    /// handle when join/shutdown reports unresolved physical callbacks.
     pub fn spawn(self: Arc<Self>) -> SchedulerHandle {
         let cancel = self.cancel.clone();
+        let owner = self.clone();
         let join = tokio::spawn(async move {
             self.run_loop().await;
         });
-        SchedulerHandle { cancel, join }
+        SchedulerHandle {
+            cancel,
+            join: Some(join),
+            join_error: None,
+            owner,
+        }
     }
 
     /// Main loop: tick every 30 seconds, checking and firing due tasks.
@@ -916,6 +1182,7 @@ impl SchedulerRunner {
         self.store.check_authority()?;
         let occurrence_id = scheduled_occurrence_id(&occurrence.task, occurrence.scheduled_at)?;
         let payload = OccurrencePayload {
+            protection: OccurrenceProtection::PhysicalSettlementV1,
             task: occurrence.task.clone(),
             scheduled_at: occurrence.scheduled_at,
             trigger: SchedulerTrigger::Scheduled,
@@ -972,11 +1239,16 @@ impl SchedulerRunner {
         mut admitted: Option<AdmittedOccurrence>,
     ) -> echo_core::error::Result<Option<String>> {
         loop {
-            self.store.check_authority()?;
-            if self.cancel.is_cancelled() {
-                return Err(echo_core::error::ReactError::Other(
-                    "Scheduler is cancelled; pending occurrences remain recoverable".into(),
-                ));
+            // New-admission gates cannot short-circuit an original owner
+            // which already durably started its effect. Its result/projection
+            // retains the existing post-closure error policy.
+            if admitted.is_none() {
+                self.store.check_authority()?;
+                if self.cancel.is_cancelled() {
+                    return Err(echo_core::error::ReactError::Other(
+                        "Scheduler is cancelled; pending occurrences remain recoverable".into(),
+                    ));
+                }
             }
             let admitted = if let Some(admitted) = admitted.take() {
                 admitted
@@ -1039,27 +1311,12 @@ impl SchedulerRunner {
                     }
                     continue;
                 }
-                let callback_owner = self.occurrence_authority.begin_effect(&claim)?;
-                AdmittedOccurrence {
-                    callback: (self.fire_fn)(SchedulerInvocation {
-                        occurrence_id: occurrence_id.clone(),
-                        attempt_id: claim.attempt_id.clone(),
-                        attempt: claim.attempt,
-                        task: payload.task.clone(),
-                        scheduled_at: payload.scheduled_at,
-                        trigger: payload.trigger,
-                        recovered_after_owner_loss,
-                    }),
-                    claim,
-                    recovered_after_owner_loss,
-                    callback_owner,
-                }
+                self.start_admitted_callback(claim, recovered_after_owner_loss)?
             };
             let AdmittedOccurrence {
                 claim,
                 recovered_after_owner_loss,
-                callback,
-                callback_owner,
+                completion,
             } = admitted;
             let occurrence_id = claim.message_id.clone();
             let is_target = target_occurrence_id == Some(occurrence_id.as_str());
@@ -1074,119 +1331,31 @@ impl SchedulerRunner {
                 recovered_after_owner_loss,
                 "Firing cron task"
             );
-            let callback_result = tokio::select! {
-                _ = self.cancel.cancelled() => {
-                    let _delivery = self.occurrence_authority.delivery_lock.lock().await;
-                    self.occurrence_authority.settle(
-                        &claim,
-                        DeliverySettlement::retry(
-                            Some(claim.attempt_id.clone()),
-                            DeliveryOutcome::OutcomeUnknown,
-                            None,
-                            Some("scheduler shutdown interrupted callback settlement".into()),
-                            Utc::now(),
-                        ),
-                    )?;
-                    debug!(task = %payload.task.name, %occurrence_id, "Cron task interrupted; occurrence requeued");
-                    return Err(echo_core::error::ReactError::Other(format!(
-                        "Scheduler occurrence '{occurrence_id}' was interrupted"
-                    )));
-                }
-                result = callback => result,
-            };
-
-            let (outcome, result_text, callback_error) = match callback_result {
-                Ok(result) => (DeliveryOutcome::Completed, result, None),
-                Err(error) => {
-                    let error_text = error.to_string();
-                    (
-                        DeliveryOutcome::Failed,
-                        format!("ERROR: {error_text}"),
-                        Some(error),
-                    )
-                }
-            };
-            let projection_result = {
-                let store = self.store.clone();
-                let owner = self.mutation_owner.clone();
-                let control = Arc::clone(&self.control_lock);
-                let tasks = Arc::clone(&self.tasks);
-                let task = payload.task.clone();
-                let result = result_text.clone();
-                run_owned_mutation("last-run projection owner", async move {
-                    let _control = control.lock().await;
-                    let mut tasks = tasks.write().await;
-                    let updated = match store
-                        .update_last_run_for_task(&task, &result, Some(&owner))
-                        .await
-                    {
-                        Ok(updated) => updated,
-                        Err(error) => {
-                            if store.is_authority_poisoned() {
-                                tasks.clear();
-                            }
-                            return Err(error);
-                        }
-                    };
-                    if let Some(cached) = tasks
-                        .iter_mut()
-                        .find(|candidate| candidate.same_definition(&updated))
-                    {
-                        *cached = updated;
-                    } else {
-                        tasks.push(updated);
-                    }
-                    Ok::<(), echo_core::error::ReactError>(())
+            let result = completion.await.unwrap_or_else(|_| {
+                Err(echo_core::error::ReactError::ExecutionNotSettled {
+                    run_id: claim.message_id.clone(),
+                    execution_id: Some(claim.attempt_id.clone()),
                 })
-                .await
-            };
-            let settlement_reason = match (&callback_error, &projection_result) {
-                (Some(callback), Err(projection)) => Some(format!(
-                    "callback failed: {callback}; last-run projection failed: {projection}"
-                )),
-                (Some(callback), Ok(())) => Some(callback.to_string()),
-                (None, Err(projection)) => {
-                    Some(format!("last-run projection failed: {projection}"))
+            });
+            match result {
+                Ok(result) => {
+                    info!(task = %payload.task.name, %occurrence_id, "Cron task completed");
+                    if is_target {
+                        return Ok(Some(result));
+                    }
                 }
-                (None, Ok(())) => None,
-            };
-            let settlement_result = {
-                let _delivery = self.occurrence_authority.delivery_lock.lock().await;
-                self.occurrence_authority.settle(
-                    &claim,
-                    DeliverySettlement::terminal(
-                        Some(claim.attempt_id.clone()),
-                        outcome,
-                        None,
-                        settlement_reason,
-                        None,
-                    ),
-                )
-            };
-
-            drop(callback_owner);
-            settlement_result?;
-
-            if let Err(error) = projection_result {
-                warn!(
-                    task = %payload.task.name,
-                    %occurrence_id,
-                    %error,
-                    "Callback settled but cron last-run projection could not be updated"
-                );
-                if is_target {
-                    return Err(error);
-                }
-            }
-            if let Some(error) = callback_error {
-                warn!(task = %payload.task.name, %occurrence_id, %error, "Cron task failed");
-                if is_target {
-                    return Err(error);
-                }
-            } else {
-                info!(task = %payload.task.name, %occurrence_id, "Cron task completed");
-                if is_target {
-                    return Ok(Some(result_text));
+                Err(error) => {
+                    if matches!(
+                        &error,
+                        echo_core::error::ReactError::ExecutionNotSettled { .. }
+                    ) {
+                        warn!(task = %payload.task.name, %occurrence_id, %error, "Cron callback physical settlement is unknown");
+                    } else {
+                        warn!(task = %payload.task.name, %occurrence_id, %error, "Cron task failed");
+                    }
+                    if is_target {
+                        return Err(error);
+                    }
                 }
             }
         }
@@ -1364,6 +1533,7 @@ impl SchedulerRunner {
             return Ok(None);
         }
         let payload = OccurrencePayload {
+            protection: OccurrenceProtection::PhysicalSettlementV1,
             control_revision: task.control_revision,
             task,
             scheduled_at: requested_at,
@@ -1382,25 +1552,8 @@ impl SchedulerRunner {
                 "a previous unstarted occurrence crossed manual admission",
             ));
         }
-        let callback_owner = self.occurrence_authority.begin_effect(&claim)?;
-        let callback = (self.fire_fn)(SchedulerInvocation {
-            occurrence_id: occurrence_id.clone(),
-            attempt_id: claim.attempt_id.clone(),
-            attempt: claim.attempt,
-            task: payload.task,
-            scheduled_at: requested_at,
-            trigger: SchedulerTrigger::Manual,
-            recovered_after_owner_loss,
-        });
-        Ok(Some((
-            occurrence_id,
-            AdmittedOccurrence {
-                claim,
-                recovered_after_owner_loss,
-                callback,
-                callback_owner,
-            },
-        )))
+        let admitted = self.start_admitted_callback(claim, recovered_after_owner_loss)?;
+        Ok(Some((occurrence_id, admitted)))
     }
 
     /// Reload tasks from the store.
@@ -1481,22 +1634,38 @@ mod tests {
             runner.occurrence_authority.enqueue_if_absent(
                 expected_id,
                 OccurrencePayload {
+                    protection: OccurrenceProtection::LegacyAtLeastOnce,
                     control_revision: task.control_revision,
                     task: task.clone(),
                     scheduled_at: Utc::now(),
                     trigger: SchedulerTrigger::Manual,
                 },
             )?;
-            let (first, _) = runner
+            let first = runner
                 .occurrence_authority
-                .claim_next()?
-                .ok_or_else(|| ledger_error("claim", "missing first claim"))?;
-            drop(runner.occurrence_authority.begin_effect(&first)?);
-            let (recovery, recovered) = runner
+                .ledger
+                .claim_next()
+                .map_err(|error| ledger_error("legacy first claim", error))?
+                .ok_or_else(|| ledger_error("legacy first claim", "missing"))?;
+            runner
                 .occurrence_authority
-                .claim_next()?
-                .ok_or_else(|| ledger_error("claim", "missing recovery claim"))?;
-            assert!(recovered);
+                .ledger
+                .begin_effect(&first, first.attempt_id.clone())
+                .map_err(|error| ledger_error("legacy first effect", error))?;
+            runner.occurrence_authority.reconcile_owner_loss()?;
+            let recovery = runner
+                .occurrence_authority
+                .ledger
+                .claim_next()
+                .map_err(|error| ledger_error("legacy second claim", error))?
+                .ok_or_else(|| ledger_error("legacy second claim", "missing"))?;
+            // Both prior attempts are original flat/None-field journal facts;
+            // the current callback starts only after reopening this history.
+            runner
+                .occurrence_authority
+                .ledger
+                .begin_effect(&recovery, recovery.attempt_id.clone())
+                .map_err(|error| ledger_error("legacy second effect", error))?;
             assert_eq!(recovery.attempt, 2);
             if remove {
                 runner.remove_task_exact(&task.id).await?;
@@ -1640,6 +1809,7 @@ mod tests {
             runner.occurrence_authority.enqueue_if_absent(
                 "queued",
                 OccurrencePayload {
+                    protection: OccurrenceProtection::LegacyAtLeastOnce,
                     control_revision: task.control_revision,
                     task: task.clone(),
                     scheduled_at: Utc::now(),
@@ -1919,6 +2089,7 @@ mod tests {
         runner.occurrence_authority.enqueue_if_absent(
             &occurrence_id,
             OccurrencePayload {
+                protection: OccurrenceProtection::LegacyAtLeastOnce,
                 control_revision: task.control_revision,
                 task,
                 scheduled_at,
@@ -2006,6 +2177,7 @@ mod tests {
             runner.occurrence_authority.enqueue_if_absent(
                 occurrence_id,
                 OccurrencePayload {
+                    protection: OccurrenceProtection::LegacyAtLeastOnce,
                     control_revision: task.control_revision,
                     task,
                     scheduled_at,
@@ -2113,6 +2285,7 @@ mod tests {
         runner_a.occurrence_authority.enqueue_if_absent(
             &a_occurrence_id,
             OccurrencePayload {
+                protection: OccurrenceProtection::LegacyAtLeastOnce,
                 control_revision: task_a.control_revision,
                 task: task_a,
                 scheduled_at,
@@ -2123,8 +2296,16 @@ mod tests {
             .occurrence_authority
             .claim_next()?
             .ok_or_else(|| echo_core::error::ReactError::Other("backend A claim missing".into()))?;
-        let a_owner = runner_a.occurrence_authority.begin_effect(&a_claim)?;
-        drop(a_owner);
+        // This isolation/restart control encodes genuine old flat history,
+        // before any current callback. New physical admissions are protected.
+        let receipt = runner_a
+            .occurrence_authority
+            .ledger
+            .begin_effect(&a_claim, a_claim.attempt_id.clone())
+            .map_err(|error| ledger_error("legacy backend A history", error))?;
+        runner_a
+            .occurrence_authority
+            .confirm_durable(&receipt, "legacy backend A history")?;
 
         let _ = runner_b.drain_pending(None).await?;
         assert_eq!(a_callbacks.load(Ordering::SeqCst), 0);
@@ -2212,11 +2393,14 @@ mod tests {
         let store = CronTaskStore::new().with_path(root.join("tasks.json"));
         let fire_started = Arc::new(tokio::sync::Notify::new());
         let fire_dropped = Arc::new(AtomicUsize::new(0));
+        let release = Arc::new(tokio::sync::Notify::new());
+        let release_for_fn = release.clone();
         let started_for_fn = Arc::clone(&fire_started);
         let dropped_for_fn = Arc::clone(&fire_dropped);
         let fire_fn: FireFn = Arc::new(move |_task| {
             let started = Arc::clone(&started_for_fn);
             let dropped = Arc::clone(&dropped_for_fn);
+            let release = release_for_fn.clone();
             Box::pin(async move {
                 struct DropMarker(Arc<AtomicUsize>);
                 impl Drop for DropMarker {
@@ -2227,8 +2411,8 @@ mod tests {
 
                 let _marker = DropMarker(dropped);
                 started.notify_one();
-                std::future::pending::<()>().await;
-                Ok("unreachable".to_string())
+                release.notified().await;
+                Ok("original callback physically closed".to_string())
             })
         });
         let runner =
@@ -2248,10 +2432,21 @@ mod tests {
             .single()
             .ok_or_else(|| echo_core::error::ReactError::Other("invalid test time".into()))?;
 
-        let handle = Arc::clone(&runner).spawn();
+        let mut handle = Arc::clone(&runner).spawn();
         let tick = tokio::spawn(async move { runner.tick_at(now).await });
         fire_started.notified().await;
-        handle.shutdown().await?;
+        let observation =
+            tokio::time::timeout(std::time::Duration::from_millis(20), handle.shutdown()).await;
+        let early_is_observation = matches!(
+            observation,
+            Err(_)
+                | Ok(Err(
+                    echo_core::error::ReactError::ExecutionNotSettled { .. }
+                ))
+        );
+        let held_drops = fire_dropped.load(Ordering::SeqCst);
+        let held_tick = !tick.is_finished();
+        release.notify_one();
         tokio::time::timeout(std::time::Duration::from_secs(1), tick)
             .await
             .map_err(|_| {
@@ -2263,77 +2458,18 @@ mod tests {
                 echo_core::error::ReactError::Other(format!("scheduler tick task failed: {error}"))
             })?;
 
+        handle.shutdown().await?;
+        assert!(early_is_observation && held_tick);
+        assert_eq!(held_drops, 0);
         assert_eq!(fire_dropped.load(Ordering::SeqCst), 1);
         let _ = std::fs::remove_dir_all(root);
         Ok(())
     }
 
     #[tokio::test]
-    async fn admitted_occurrence_is_replayed_immediately_after_restart()
+    async fn protected_scheduled_occurrence_is_not_replayed_after_observation()
     -> echo_core::error::Result<()> {
-        let root = std::env::temp_dir().join(format!(
-            "echo-scheduler-crash-replay-{}",
-            uuid::Uuid::new_v4()
-        ));
-        let store = CronTaskStore::new().with_path(root.join("tasks.json"));
-        let first_started = Arc::new(tokio::sync::Notify::new());
-        let first_started_for_fn = Arc::clone(&first_started);
-        let first_cancel = CancellationToken::new();
-        let first_fire_fn: FireFn = Arc::new(move |_task| {
-            let first_started = Arc::clone(&first_started_for_fn);
-            Box::pin(async move {
-                first_started.notify_one();
-                std::future::pending::<()>().await;
-                Ok("unreachable".to_string())
-            })
-        });
-        let first_runner = Arc::new(
-            SchedulerRunner::new(store.clone(), first_cancel.clone(), first_fire_fn).await?,
-        );
-        let task = CronTask::new("replay", "* * * * *", "run");
-        let task_id = task.id.clone();
-        first_runner.add_task(task.clone()).await?;
-        let task = current_task(&first_runner, &task_id).await?;
-        let occurrence = ScheduledOccurrence {
-            task,
-            scheduled_at: Utc
-                .with_ymd_and_hms(2026, 8, 13, 0, 1, 0)
-                .single()
-                .ok_or_else(|| echo_core::error::ReactError::Other("invalid test time".into()))?,
-        };
-        let first_for_fire = Arc::clone(&first_runner);
-        let first_fire = tokio::spawn(async move { first_for_fire.fire_task(occurrence).await });
-        first_started.notified().await;
-        first_cancel.cancel();
-        let interrupted = first_fire.await.map_err(|error| {
-            echo_core::error::ReactError::Other(format!("first scheduler fire failed: {error}"))
-        })?;
-        assert!(interrupted.is_err());
-        drop(first_runner);
-
-        let replayed = Arc::new(tokio::sync::Notify::new());
-        let replayed_for_fn = Arc::clone(&replayed);
-        let replay_fire_fn: FireFn = Arc::new(move |_task| {
-            let replayed = Arc::clone(&replayed_for_fn);
-            Box::pin(async move {
-                replayed.notify_one();
-                Ok("replayed".to_string())
-            })
-        });
-        let replay_runner =
-            Arc::new(SchedulerRunner::new(store, CancellationToken::new(), replay_fire_fn).await?);
-        let handle = Arc::clone(&replay_runner).spawn();
-        tokio::time::timeout(std::time::Duration::from_millis(250), replayed.notified())
-            .await
-            .map_err(|_| {
-                echo_core::error::ReactError::Other(
-                    "admitted occurrence was not replayed after restart".into(),
-                )
-            })?;
-        handle.shutdown().await?;
-
-        let _ = std::fs::remove_dir_all(root);
-        Ok(())
+        assert_observed_callback_protection(false, false, true).await
     }
 
     #[tokio::test]
@@ -2379,6 +2515,7 @@ mod tests {
             first_runner.occurrence_authority.enqueue_if_absent(
                 &occurrence_id,
                 OccurrencePayload {
+                    protection: OccurrenceProtection::LegacyAtLeastOnce,
                     task: task.clone(),
                     scheduled_at,
                     trigger: SchedulerTrigger::Scheduled,
@@ -2395,7 +2532,15 @@ mod tests {
                         )
                     })?;
             assert!(!recovered);
-            let callback_owner = first_runner.occurrence_authority.begin_effect(&claim)?;
+            // Simulate the actual old journal contract, not new admission.
+            let receipt = first_runner
+                .occurrence_authority
+                .ledger
+                .begin_effect(&claim, claim.attempt_id.clone())
+                .map_err(|error| ledger_error("legacy callback admission", error))?;
+            first_runner
+                .occurrence_authority
+                .confirm_durable(&receipt, "legacy callback admission")?;
             let callback = (first_runner.fire_fn)(SchedulerInvocation {
                 occurrence_id: occurrence_id.clone(),
                 attempt_id: claim.attempt_id.clone(),
@@ -2406,7 +2551,6 @@ mod tests {
                 recovered_after_owner_loss: false,
             });
             assert_eq!(callback.await?, "effect completed");
-            drop(callback_owner);
             let phase = first_runner
                 .occurrence_authority
                 .ledger
@@ -2489,7 +2633,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn aborted_callback_owner_is_reconciled_without_process_restart()
+    async fn borrowed_waiter_abort_preserves_original_callback_without_replay()
     -> echo_core::error::Result<()> {
         let root = std::env::temp_dir().join(format!(
             "echo-scheduler-aborted-owner-{}",
@@ -2498,16 +2642,19 @@ mod tests {
         let store = CronTaskStore::new().with_path(root.join("tasks.json"));
         let first_started = Arc::new(tokio::sync::Notify::new());
         let replayed = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let release_for_fn = release.clone();
         let started_for_fn = Arc::clone(&first_started);
         let replayed_for_fn = Arc::clone(&replayed);
         let fire_fn: OccurrenceFireFn = Arc::new(move |invocation| {
             let started = Arc::clone(&started_for_fn);
             let replayed = Arc::clone(&replayed_for_fn);
+            let release = release_for_fn.clone();
             Box::pin(async move {
                 if invocation.attempt == 1 {
                     started.notify_one();
-                    std::future::pending::<()>().await;
-                    return Ok("unreachable".to_string());
+                    release.notified().await;
+                    return Ok("same original callback completed".to_string());
                 }
                 assert!(invocation.recovered_after_owner_loss);
                 replayed.notify_one();
@@ -2530,13 +2677,27 @@ mod tests {
         assert!(aborted.is_err_and(|error| error.is_cancelled()));
 
         let _ = runner.drain_pending(None).await?;
-        tokio::time::timeout(std::time::Duration::from_millis(250), replayed.notified())
-            .await
-            .map_err(|_| {
-                echo_core::error::ReactError::Other(
-                    "aborted callback owner was not replayed in the live process".into(),
-                )
-            })?;
+        let unexpected_replay = futures::poll!(Box::pin(replayed.notified()).as_mut()).is_ready();
+        release.notify_one();
+        tokio::time::timeout(std::time::Duration::from_millis(250), async {
+            loop {
+                if runner
+                    .occurrence_authority
+                    .ledger
+                    .with_projection(|projection| {
+                        projection
+                            .records()
+                            .next()
+                            .is_some_and(|record| record.terminal)
+                    })
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .map_err(|_| ledger_error("original callback", "physical callback did not settle"))?;
         let completed = runner
             .occurrence_authority
             .ledger
@@ -2546,7 +2707,8 @@ mod tests {
             })?;
         assert_eq!(completed.phase, DeliveryPhase::TurnSettled);
         assert_eq!(completed.outcome, Some(DeliveryOutcome::Completed));
-        assert_eq!(completed.attempt, 2);
+        assert!(!unexpected_replay);
+        assert_eq!(completed.attempt, 1);
 
         drop(runner);
         let _ = std::fs::remove_dir_all(root);
@@ -2583,6 +2745,761 @@ mod tests {
 
         drop(runner);
         let _ = std::fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn observed_callback_keeps_original_occurrence_nonterminal_across_reopen()
+    -> echo_core::error::Result<()> {
+        assert_observed_callback_protection(false, false, false).await
+    }
+
+    #[tokio::test]
+    async fn legacy_occurrence_new_callback_is_protected_before_its_effect()
+    -> echo_core::error::Result<()> {
+        assert_observed_callback_protection(true, false, false).await
+    }
+
+    #[tokio::test]
+    async fn legacy_recovered_callback_is_protected_before_its_effect()
+    -> echo_core::error::Result<()> {
+        assert_observed_callback_protection(true, true, false).await
+    }
+
+    async fn assert_observed_callback_protection(
+        legacy: bool,
+        previously_started: bool,
+        scheduled: bool,
+    ) -> echo_core::error::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let effect = directory.path().join("original-scheduler-effect.txt");
+        let store = CronTaskStore::new().with_path(directory.path().join("tasks.json"));
+        let release = Arc::new(tokio::sync::Notify::new());
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let producer = Arc::new(StdMutex::new(None::<JoinHandle<std::io::Result<()>>>));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let fire_fn: OccurrenceFireFn = {
+            let release = release.clone();
+            let entered = entered.clone();
+            let producer = producer.clone();
+            let calls = calls.clone();
+            let effect = effect.clone();
+            Arc::new(move |invocation| {
+                let release = release.clone();
+                let entered = entered.clone();
+                let producer = producer.clone();
+                let calls = calls.clone();
+                let effect = effect.clone();
+                Box::pin(async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    let source_entered = entered.clone();
+                    let physical = tokio::spawn(async move {
+                        tokio::fs::write(&effect, b"original-scheduler-producer-entered").await?;
+                        source_entered.notify_one();
+                        release.notified().await;
+                        tokio::fs::write(&effect, b"original-scheduler-producer-closed").await
+                    });
+                    *producer.lock().unwrap_or_else(|error| error.into_inner()) = Some(physical);
+                    entered.notified().await;
+                    Err(echo_core::error::ReactError::ExecutionNotSettled {
+                        run_id: invocation.occurrence_id,
+                        execution_id: Some(invocation.attempt_id),
+                    })
+                })
+            })
+        };
+        let mut runner = SchedulerRunner::new_with_occurrence_context(
+            store.clone(),
+            CancellationToken::new(),
+            fire_fn.clone(),
+        )
+        .await?;
+        let task = CronTask::new("physical observation", "* * * * *", "one actual effect");
+        let task_id = task.id.clone();
+        runner.add_task(task).await?;
+        let result = if legacy {
+            // Actual old flat Persisted history, not a new callback relabeled
+            // legacy. This reader is now starting its first physical attempt.
+            let task = current_task(&runner, &task_id).await?;
+            runner.occurrence_authority.enqueue_if_absent(
+                "legacy-observation",
+                OccurrencePayload {
+                    control_revision: task.control_revision,
+                    task,
+                    scheduled_at: Utc::now(),
+                    trigger: SchedulerTrigger::Manual,
+                    protection: OccurrenceProtection::LegacyAtLeastOnce,
+                },
+            )?;
+            if previously_started {
+                // Encode genuine old admitted history through the unchanged
+                // generic helper (None field), not the new Scheduler admission.
+                let old_claim = runner
+                    .occurrence_authority
+                    .ledger
+                    .claim_next()
+                    .map_err(|error| ledger_error("old history claim", error))?
+                    .ok_or_else(|| ledger_error("old history claim", "missing"))?;
+                let receipt = runner
+                    .occurrence_authority
+                    .ledger
+                    .begin_effect(&old_claim, old_claim.attempt_id.clone())
+                    .map_err(|error| ledger_error("old history admission", error))?;
+                runner
+                    .occurrence_authority
+                    .confirm_durable(&receipt, "old history admission")?;
+                // The production restart path reconciles old orphaned history
+                // before target lookup. Reopen that same real journal here.
+                drop(runner);
+                runner = SchedulerRunner::new_with_occurrence_context(
+                    store.clone(),
+                    CancellationToken::new(),
+                    fire_fn.clone(),
+                )
+                .await?;
+            }
+            runner
+                .drain_pending(Some("legacy-observation"))
+                .await
+                .and_then(|result| {
+                    result
+                        .ok_or_else(|| ledger_error("legacy counter", "callback observation lost"))
+                })
+        } else if scheduled {
+            let task = current_task(&runner, &task_id).await?;
+            runner
+                .fire_task(ScheduledOccurrence {
+                    task,
+                    scheduled_at: Utc::now(),
+                })
+                .await
+                .map(|()| "scheduled source completed".to_string())
+        } else {
+            runner.run_once(&task_id).await
+        };
+        let before = runner
+            .occurrence_authority
+            .ledger
+            .with_projection(|projection| projection.records().next().cloned())
+            .ok_or_else(|| ledger_error("observation counter", "original occurrence missing"))?;
+        let task_before = current_task(&runner, &task_id).await?;
+        let held_effect = tokio::fs::read(&effect).await;
+        drop(runner);
+        let reopened =
+            SchedulerRunner::new_with_occurrence_context(store, CancellationToken::new(), fire_fn)
+                .await?;
+        // Checking admission suffices; never launch a second backend merely
+        // to prove the same still-held effect was reclaimable.
+        let replay = reopened.occurrence_authority.claim_next();
+        let after = reopened
+            .occurrence_authority
+            .ledger
+            .with_projection(|projection| projection.record(&before.message_id).cloned())
+            .ok_or_else(|| {
+                ledger_error(
+                    "observation counter",
+                    "original occurrence lost after reopen",
+                )
+            })?;
+        let calls_before_release = calls.load(Ordering::SeqCst);
+        // Close and join the same real backend before assertions, including red.
+        release.notify_one();
+        let physical = producer
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take()
+            .ok_or_else(|| {
+                ledger_error(
+                    "observation counter",
+                    format!("original backend join missing; invocation result={result:?}"),
+                )
+            })?;
+        tokio::time::timeout(std::time::Duration::from_secs(2), physical)
+            .await
+            .map_err(|_| {
+                ledger_error(
+                    "observation counter",
+                    "released original backend did not close",
+                )
+            })?
+            .map_err(|error| ledger_error("observation counter", error))??;
+        let closed_effect = tokio::fs::read(&effect).await?;
+        eprintln!(
+            "SCHEDULER_PHYSICAL_OBSERVATION {}",
+            serde_json::json!({
+                "legacy":legacy,"previously_started":previously_started,"protection_before":format!("{:?}",before.payload.protection),
+            "result":format!("{result:?}"),"phase_before":format!("{:?}",before.phase),
+                "terminal_before":before.terminal,"outcome_before":format!("{:?}",before.outcome),
+                "attempt_before":before.attempt_id,"phase_after_reopen":format!("{:?}",after.phase),
+                "attempt_after_reopen":after.attempt_id,"calls_before_release":calls_before_release,
+                "last_result":task_before.last_result,"physical_joined":true
+            })
+        );
+        assert_eq!(held_effect?, b"original-scheduler-producer-entered");
+        assert_eq!(closed_effect, b"original-scheduler-producer-closed");
+        assert!(
+            matches!(result, Err(echo_core::error::ReactError::ExecutionNotSettled { ref run_id, ref execution_id })
+            if run_id == &before.message_id && execution_id == &before.attempt_id)
+        );
+        assert_eq!(
+            before.payload.protection,
+            OccurrenceProtection::PhysicalSettlementV1,
+            "new physical attempts require protection even for old persisted occurrences"
+        );
+        assert_eq!(
+            before.phase,
+            DeliveryPhase::EffectStarted,
+            "observation is not a physical settlement"
+        );
+        assert!(!before.terminal);
+        assert!(before.outcome.is_none());
+        assert!(task_before.last_run_at.is_none() && task_before.last_result.is_none());
+        assert!(
+            matches!(replay, Ok(None)),
+            "unknown original effect cannot admit a replacement"
+        );
+        assert_eq!(after.phase, DeliveryPhase::EffectStarted);
+        assert_eq!(after.attempt_id, before.attempt_id);
+        assert!(!after.terminal);
+        assert_eq!(calls_before_release, 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn started_scheduler_callback_survives_borrowed_waiter_drop()
+    -> echo_core::error::Result<()> {
+        assert_started_scheduler_callback_retained(false, false, false).await
+    }
+
+    #[tokio::test]
+    async fn started_scheduler_callback_survives_shutdown_observation()
+    -> echo_core::error::Result<()> {
+        assert_started_scheduler_callback_retained(true, false, false).await
+    }
+
+    #[tokio::test]
+    async fn cancellation_after_manual_admission_waits_for_same_physical_callback()
+    -> echo_core::error::Result<()> {
+        assert_started_scheduler_callback_retained(true, true, false).await
+    }
+
+    #[tokio::test]
+    async fn poisoned_definition_after_admission_waits_for_same_physical_callback()
+    -> echo_core::error::Result<()> {
+        assert_started_scheduler_callback_retained(false, false, true).await
+    }
+
+    async fn assert_started_scheduler_callback_retained(
+        shutdown: bool,
+        cancel_after_admission: bool,
+        poison_after_admission: bool,
+    ) -> echo_core::error::Result<()> {
+        use futures::FutureExt;
+        type PhysicalJoin = futures::future::Shared<BoxFuture<'static, Result<(), String>>>;
+        let directory = tempfile::tempdir()?;
+        let effect = directory.path().join("started-effect.txt");
+        let backend = poison_after_admission.then(|| {
+            Arc::new(ReloadFailureStore {
+                inner: echo_state::memory::InMemoryStore::new(),
+                fault: AtomicUsize::new(0),
+                committed: tokio::sync::Notify::new(),
+                release: tokio::sync::Notify::new(),
+            })
+        });
+        let store = if let Some(backend) = backend.as_ref() {
+            CronTaskStore::with_backend_path_for_test(
+                backend.clone(),
+                directory.path().join("tasks.json"),
+            )
+        } else {
+            CronTaskStore::new().with_path(directory.path().join("tasks.json"))
+        };
+        let poisoned = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let split_admission = cancel_after_admission || poison_after_admission;
+        let observation_ready = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let producer = Arc::new(StdMutex::new(None::<PhysicalJoin>));
+        let drops = Arc::new(AtomicUsize::new(0));
+        let fire_fn: OccurrenceFireFn = {
+            let release = release.clone();
+            let entered = entered.clone();
+            let producer = producer.clone();
+            let effect = effect.clone();
+            let drops = drops.clone();
+            Arc::new(move |_| {
+                let release = release.clone();
+                let entered = entered.clone();
+                let producer = producer.clone();
+                let effect = effect.clone();
+                let drops = drops.clone();
+                Box::pin(async move {
+                    struct CallbackLifetime(Arc<AtomicUsize>);
+                    impl Drop for CallbackLifetime {
+                        fn drop(&mut self) {
+                            self.0.fetch_add(1, Ordering::SeqCst);
+                        }
+                    }
+                    let _lifetime = CallbackLifetime(drops);
+                    let backend = tokio::spawn(async move {
+                        tokio::fs::write(&effect, b"started-effect-held").await?;
+                        entered.notify_one();
+                        release.notified().await;
+                        tokio::fs::write(&effect, b"started-effect-closed").await
+                    });
+                    let physical = async move {
+                        backend
+                            .await
+                            .map_err(|error| error.to_string())?
+                            .map_err(|error| error.to_string())
+                    }
+                    .boxed()
+                    .shared();
+                    *producer.lock().unwrap_or_else(|error| error.into_inner()) =
+                        Some(physical.clone());
+                    physical
+                        .await
+                        .map_err(|error| ledger_error("original physical join", error))?;
+                    Ok("same physical callback completed".to_string())
+                })
+            })
+        };
+        let cancel = CancellationToken::new();
+        let runner = Arc::new(
+            SchedulerRunner::new_with_occurrence_context(store, cancel.clone(), fire_fn).await?,
+        );
+        let task = CronTask::new("started owner", "* * * * *", "one original effect");
+        let id = task.id.clone();
+        runner.add_task(task).await?;
+        let admitted = if split_admission {
+            runner.admit_manual(&id, Utc::now()).await?
+        } else {
+            None
+        };
+        let started_before = if split_admission {
+            Some(tokio::time::timeout(std::time::Duration::from_secs(2), entered.notified()).await)
+        } else {
+            None
+        };
+        let owned = runner.clone();
+        let owned_cancel = cancel.clone();
+        let owned_poisoned = poisoned.clone();
+        let owned_observation_ready = observation_ready.clone();
+        let mut manual = tokio::spawn(async move {
+            if let Some((occurrence_id, admitted)) = admitted {
+                if cancel_after_admission {
+                    owned_cancel.cancel();
+                }
+                if poison_after_admission {
+                    let backend =
+                        backend.ok_or_else(|| ledger_error("poison control", "backend missing"))?;
+                    backend.fault.store(7, Ordering::SeqCst);
+                    let mutation = owned.set_status(&id, CronTaskStatus::Disabled).await;
+                    if mutation.is_err() && owned.store.is_authority_poisoned() {
+                        owned_poisoned.store(true, Ordering::SeqCst);
+                    } else {
+                        return Err(ledger_error(
+                            "poison control",
+                            "real ambiguous mutation did not poison authority",
+                        ));
+                    }
+                }
+                owned_observation_ready.notify_one();
+                owned
+                    .drain_pending_with_admitted(Some(&occurrence_id), Some(admitted))
+                    .await
+                    .and_then(|result| {
+                        result.ok_or_else(|| ledger_error("admitted observer", "result missing"))
+                    })
+            } else {
+                owned.run_once(&id).await
+            }
+        });
+        let started = if let Some(started) = started_before {
+            started
+        } else {
+            tokio::time::timeout(std::time::Duration::from_secs(2), entered.notified()).await
+        };
+        let original = runner
+            .occurrence_authority
+            .ledger
+            .with_projection(|projection| projection.records().next().cloned())
+            .ok_or_else(|| ledger_error("owner counter", "original occurrence missing"))?;
+        if shutdown {
+            cancel.cancel();
+        }
+        let seam_ready = if split_admission {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                observation_ready.notified(),
+            )
+            .await
+            .is_ok()
+        } else {
+            true
+        };
+        // Existing cases drop the borrowed waiter. The admitted-cancel case
+        // checks that this same observer does not report an ordinary failure.
+        let early_result = if split_admission {
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut manual)
+                .await
+                .ok()
+        } else {
+            manual.abort();
+            let _ = (&mut manual).await;
+            None
+        };
+        let observer_pending = !split_admission || early_result.is_none();
+        let held_effect = tokio::fs::read(&effect).await;
+        let drops_while_held = drops.load(Ordering::SeqCst);
+        let active_while_held = runner
+            .occurrence_authority
+            .active_attempts
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .contains(original.attempt_id.as_deref().unwrap_or_default());
+        let reclaimed = runner.occurrence_authority.claim_next()?;
+        release.notify_one();
+        let physical = producer
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+            .ok_or_else(|| ledger_error("owner counter", "same original join missing"))?;
+        tokio::time::timeout(std::time::Duration::from_secs(2), physical)
+            .await
+            .map_err(|_| ledger_error("owner counter", "released backend failed to join"))?
+            .map_err(|error| ledger_error("owner counter", error))?;
+        let admitted_result = if split_admission {
+            let joined = if let Some(early) = early_result {
+                early
+            } else {
+                tokio::time::timeout(std::time::Duration::from_secs(2), &mut manual)
+                    .await
+                    .map_err(|_| {
+                        ledger_error("admitted observer", "original result did not arrive")
+                    })?
+            };
+            Some(joined.map_err(|error| ledger_error("admitted observer", error))?)
+        } else {
+            None
+        };
+        let after_release = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let settled = runner
+                    .occurrence_authority
+                    .ledger
+                    .with_projection(|projection| {
+                        projection
+                            .record(&original.message_id)
+                            .is_some_and(|record| record.terminal)
+                    });
+                if drops.load(Ordering::SeqCst) == 1 && (reclaimed.is_some() || settled) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        let closed_effect = tokio::fs::read(&effect).await?;
+        eprintln!(
+            "SCHEDULER_STARTED_OWNER {}",
+            serde_json::json!({"shutdown":shutdown,"cancel_after_admission":cancel_after_admission,
+            "poison_after_admission":poison_after_admission,"poisoned":poisoned.load(Ordering::SeqCst),
+            "observer_pending":observer_pending,"admitted_result":format!("{admitted_result:?}"),"drops_while_backend_held":drops_while_held,
+            "original_attempt":original.attempt_id,"active_while_held":active_while_held,"reclaimed":reclaimed.as_ref().map(|(claim,_)|&claim.attempt_id),"same_backend_joined":true})
+        );
+        assert!(started.is_ok() && seam_ready && after_release.is_ok());
+        assert!(
+            observer_pending,
+            "admitted callback cannot become a pre-admission failure"
+        );
+        if let Some(result) = admitted_result {
+            if poison_after_admission {
+                assert!(poisoned.load(Ordering::SeqCst));
+                assert!(
+                    matches!(result, Err(echo_core::error::ReactError::Other(_))),
+                    "real post-closure last-run poison keeps its original error policy"
+                );
+            } else {
+                assert_eq!(result?, "same physical callback completed");
+            }
+        }
+        assert_eq!(held_effect?, b"started-effect-held");
+        assert_eq!(closed_effect, b"started-effect-closed");
+        assert_eq!(
+            drops_while_held, 0,
+            "borrowed observation cannot drop the original started callback"
+        );
+        assert!(active_while_held);
+        assert!(
+            reclaimed.is_none(),
+            "held original effect must not admit a second physical attempt"
+        );
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn handle_only_unknown_shutdown_retains_original_callback_resource_root()
+    -> echo_core::error::Result<()> {
+        struct CallbackResource {
+            drops: Arc<AtomicUsize>,
+            _permit: tokio::sync::OwnedSemaphorePermit,
+        }
+        impl Drop for CallbackResource {
+            fn drop(&mut self) {
+                self.drops.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let directory = tempfile::tempdir()?;
+        let effect = directory.path().join("handle-only-effect.txt");
+        let capacity = Arc::new(tokio::sync::Semaphore::new(1));
+        let drops = Arc::new(AtomicUsize::new(0));
+        let resource = Arc::new(CallbackResource {
+            drops: drops.clone(),
+            _permit: capacity
+                .clone()
+                .acquire_owned()
+                .await
+                .map_err(|error| ledger_error("handle resource", error))?,
+        });
+        let resource_watch = Arc::downgrade(&resource);
+        let release = Arc::new(tokio::sync::Notify::new());
+        let observed = Arc::new(tokio::sync::Notify::new());
+        let producer = Arc::new(StdMutex::new(None::<JoinHandle<std::io::Result<()>>>));
+        let facts = {
+            let fire_fn: OccurrenceFireFn = {
+                let release = release.clone();
+                let observed = observed.clone();
+                let producer = producer.clone();
+                let effect = effect.clone();
+                Arc::new(move |invocation| {
+                    let resource = resource.clone();
+                    let release = release.clone();
+                    let observed = observed.clone();
+                    let producer = producer.clone();
+                    let effect = effect.clone();
+                    Box::pin(async move {
+                        let _original_resource = resource;
+                        let entered = Arc::new(tokio::sync::Notify::new());
+                        let original_entered = entered.clone();
+                        let physical = tokio::spawn(async move {
+                            tokio::fs::write(&effect, b"handle-only-source-held").await?;
+                            original_entered.notify_one();
+                            release.notified().await;
+                            tokio::fs::write(&effect, b"handle-only-source-closed").await
+                        });
+                        *producer.lock().unwrap_or_else(|error| error.into_inner()) =
+                            Some(physical);
+                        entered.notified().await;
+                        observed.notify_one();
+                        Err(echo_core::error::ReactError::ExecutionNotSettled {
+                            run_id: invocation.occurrence_id,
+                            execution_id: Some(invocation.attempt_id),
+                        })
+                    })
+                })
+            };
+            let runner = SchedulerRunner::new_with_occurrence_context(
+                CronTaskStore::new().with_path(directory.path().join("tasks.json")),
+                CancellationToken::new(),
+                fire_fn,
+            )
+            .await?;
+            let task = CronTask::new("handle only", "* * * * *", "original callback owner");
+            let id = task.id.clone();
+            runner.add_task(task).await?;
+            let task = current_task(&runner, &id).await?;
+            runner
+                .enqueue_scheduled(&ScheduledOccurrence {
+                    task,
+                    scheduled_at: Utc::now(),
+                })
+                .await?;
+            // No caller-held Runner or FireFn remains after this spawn.
+            let mut handle = Arc::new(runner).spawn();
+            let entered =
+                tokio::time::timeout(std::time::Duration::from_secs(2), observed.notified()).await;
+            let mut borrowed = Box::pin(handle.join());
+            assert!(futures::poll!(borrowed.as_mut()).is_pending());
+            drop(borrowed);
+            assert!(
+                handle.join.is_some(),
+                "cancelled borrowed wait keeps original join"
+            );
+            let shutdown = handle.shutdown().await;
+            let repeated = handle.join().await;
+            assert!(matches!((&shutdown, &repeated),
+                (Err(echo_core::error::ReactError::ExecutionNotSettled { run_id:a, execution_id:b }),
+                 Err(echo_core::error::ReactError::ExecutionNotSettled { run_id:c, execution_id:d })) if a==c && b==d));
+            let held = (
+                drops.load(Ordering::SeqCst),
+                capacity.available_permits(),
+                resource_watch.strong_count(),
+            );
+            let held_effect = tokio::fs::read(&effect).await;
+            release.notify_one();
+            let physical = producer
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .take()
+                .ok_or_else(|| ledger_error("handle counter", "original physical join missing"))?;
+            tokio::time::timeout(std::time::Duration::from_secs(2), physical)
+                .await
+                .map_err(|_| {
+                    ledger_error("handle counter", "released original backend did not close")
+                })?
+                .map_err(|error| ledger_error("handle counter", error))??;
+            (entered, shutdown, held, held_effect)
+            // With the borrowed API, scope exit explicitly destroys this last
+            // parent only after the same actual backend has closed and joined.
+        };
+        eprintln!(
+            "SCHEDULER_HANDLE_ROOT {}",
+            serde_json::json!({"shutdown":format!("{:?}",facts.1),
+            "drops_while_backend_held":facts.2.0,"capacity_while_held":facts.2.1,"strong_root_while_held":facts.2.2,
+            "same_backend_joined":true,"drops_after_parent_scope":drops.load(Ordering::SeqCst)})
+        );
+        assert!(facts.0.is_ok());
+        assert_eq!(facts.3?, b"handle-only-source-held");
+        assert_eq!(
+            tokio::fs::read(&effect).await?,
+            b"handle-only-source-closed"
+        );
+        assert!(matches!(
+            facts.1,
+            Err(echo_core::error::ReactError::ExecutionNotSettled { .. })
+        ));
+        assert_eq!(facts.2, (0, 0, 1));
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(capacity.available_permits(), 1);
+        assert_eq!(resource_watch.strong_count(), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn protected_callback_factory_and_poll_panic_keep_original_effect_fenced()
+    -> echo_core::error::Result<()> {
+        for poll_panic in [false, true] {
+            let directory = tempfile::tempdir()?;
+            let effect = directory.path().join("panicked-owner-source.txt");
+            let release = Arc::new(tokio::sync::Notify::new());
+            let entered = Arc::new(tokio::sync::Notify::new());
+            let producer = Arc::new(StdMutex::new(None::<JoinHandle<std::io::Result<()>>>));
+            let calls = Arc::new(AtomicUsize::new(0));
+            let fire_fn: OccurrenceFireFn = {
+                let release = release.clone();
+                let entered = entered.clone();
+                let producer = producer.clone();
+                let effect = effect.clone();
+                let calls = calls.clone();
+                Arc::new(move |_| {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    let release = release.clone();
+                    let entered = entered.clone();
+                    let effect = effect.clone();
+                    let backend = tokio::spawn(async move {
+                        tokio::fs::write(&effect, b"owner-panic-backend-held").await?;
+                        entered.notify_one();
+                        release.notified().await;
+                        tokio::fs::write(&effect, b"owner-panic-backend-closed").await
+                    });
+                    *producer.lock().unwrap_or_else(|error| error.into_inner()) = Some(backend);
+                    if !poll_panic {
+                        std::panic::resume_unwind(Box::new(
+                            "controlled original callback factory loss",
+                        ));
+                    }
+                    Box::pin(async move {
+                        std::panic::resume_unwind(Box::new(
+                            "controlled original callback poll loss",
+                        ));
+                    })
+                })
+            };
+            let store = CronTaskStore::new().with_path(directory.path().join("tasks.json"));
+            let runner = SchedulerRunner::new_with_occurrence_context(
+                store.clone(),
+                CancellationToken::new(),
+                fire_fn.clone(),
+            )
+            .await?;
+            let task = CronTask::new("owner loss", "* * * * *", "original effect");
+            let id = task.id.clone();
+            runner.add_task(task).await?;
+            let result = runner.run_once(&id).await;
+            let started =
+                tokio::time::timeout(std::time::Duration::from_secs(2), entered.notified()).await;
+            let record = runner
+                .occurrence_authority
+                .ledger
+                .with_projection(|projection| projection.records().next().cloned())
+                .ok_or_else(|| ledger_error("lost owner control", "original claim missing"))?;
+            let original_task = current_task(&runner, &id).await?;
+            let held_effect = tokio::fs::read(&effect).await;
+            drop(runner);
+            let reopened = SchedulerRunner::new_with_occurrence_context(
+                store,
+                CancellationToken::new(),
+                fire_fn,
+            )
+            .await?;
+            let next = reopened.occurrence_authority.claim_next()?;
+            release.notify_one();
+            let backend = producer
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .take()
+                .ok_or_else(|| ledger_error("lost owner control", "original backend missing"))?;
+            tokio::time::timeout(std::time::Duration::from_secs(2), backend)
+                .await
+                .map_err(|_| ledger_error("lost owner control", "original backend did not close"))?
+                .map_err(|error| ledger_error("lost owner control", error))??;
+            assert!(started.is_ok());
+            assert_eq!(held_effect?, b"owner-panic-backend-held");
+            assert_eq!(
+                tokio::fs::read(&effect).await?,
+                b"owner-panic-backend-closed"
+            );
+            assert!(
+                matches!(result,Err(echo_core::error::ReactError::ExecutionNotSettled {run_id,execution_id})
+                if run_id==record.message_id && execution_id==record.attempt_id)
+            );
+            assert_eq!(record.phase, DeliveryPhase::EffectStarted);
+            assert!(!record.terminal);
+            assert!(record.outcome.is_none() && original_task.last_result.is_none());
+            assert!(next.is_none());
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn protected_occurrence_payload_rejects_legacy_decoder_and_keeps_original_fields()
+    -> echo_core::error::Result<()> {
+        let task = CronTask::new("codec", "* * * * *", "original fields");
+        let mut payload = OccurrencePayload {
+            task,
+            scheduled_at: Utc::now(),
+            trigger: SchedulerTrigger::Manual,
+            control_revision: 7,
+            protection: OccurrenceProtection::LegacyAtLeastOnce,
+        };
+        let old = serde_json::to_value(&payload)
+            .map_err(|error| ledger_error("legacy encoding", error))?;
+        let decoded: OccurrencePayload = serde_json::from_value(old.clone())
+            .map_err(|error| ledger_error("legacy decoding", error))?;
+        assert_eq!(decoded, payload);
+        assert!(serde_json::from_value::<OccurrencePayloadFields>(old).is_ok());
+        payload.protection = OccurrenceProtection::PhysicalSettlementV1;
+        let protected = serde_json::to_value(&payload)
+            .map_err(|error| ledger_error("protected encoding", error))?;
+        assert!(serde_json::from_value::<OccurrencePayloadFields>(protected.clone()).is_err());
+        assert_eq!(
+            serde_json::from_value::<OccurrencePayload>(protected)
+                .map_err(|error| ledger_error("protected decoding", error))?,
+            payload
+        );
         Ok(())
     }
 
@@ -2954,6 +3871,7 @@ mod tests {
         runner.occurrence_authority.enqueue_if_absent(
             &occurrence_id,
             OccurrencePayload {
+                protection: OccurrenceProtection::LegacyAtLeastOnce,
                 control_revision: task.control_revision,
                 task: task.clone(),
                 scheduled_at,
@@ -3293,14 +4211,17 @@ mod tests {
         let temp = tempfile::tempdir()?;
         let store = CronTaskStore::new().with_path(temp.path().join("tasks.json"));
         let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
         let fire_fn: FireFn = Arc::new({
             let started = Arc::clone(&started);
+            let release = release.clone();
             move |_| {
                 let started = Arc::clone(&started);
+                let release = release.clone();
                 Box::pin(async move {
                     started.notify_one();
-                    std::future::pending::<()>().await;
-                    Ok("unreachable".into())
+                    release.notified().await;
+                    Ok("older original callback closed".into())
                 })
             }
         });
@@ -3312,6 +4233,7 @@ mod tests {
         runner.occurrence_authority.enqueue_if_absent(
             "older",
             OccurrencePayload {
+                protection: OccurrenceProtection::LegacyAtLeastOnce,
                 control_revision: task.control_revision,
                 task: task.clone(),
                 scheduled_at: Utc::now(),
@@ -3337,6 +4259,25 @@ mod tests {
                 matches!(record.event.as_ref(), OccurrenceEvent::Persisted { envelope, .. }
                     if envelope.message_id.starts_with("cron-manual:"))
             });
+        release.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if runner
+                    .occurrence_authority
+                    .ledger
+                    .with_projection(|projection| {
+                        projection
+                            .record("older")
+                            .is_some_and(|record| record.terminal)
+                    })
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .map_err(|_| ledger_error("older original callback", "not physically settled"))?;
         assert!(!persisted_manual);
         Ok(())
     }
@@ -3448,6 +4389,7 @@ mod tests {
         runner.add_task(task.clone()).await?;
         let task = current_task(&runner, &task.id).await?;
         let payload = OccurrencePayload {
+            protection: OccurrenceProtection::LegacyAtLeastOnce,
             control_revision: task.control_revision,
             task,
             scheduled_at: Utc::now(),

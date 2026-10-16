@@ -1958,7 +1958,7 @@ async fn text_only_agent_fallback_setup_error_keeps_original_canonical_failed_re
     let sink = CanonicalFailureSink::default();
     let receipt = echo_agent::runtime::AgentTurnDriver
         .drive(&LegacySetupFailureAgent, request, &sink)
-        .await;
+        .await?;
     assert_eq!(receipt.turn_id.as_str(), turn_id);
     assert!(
         matches!(receipt.outcome, echo_agent::runtime::TurnOutcome::Failed(ref failure) if failure.message == "original legacy setup failure")

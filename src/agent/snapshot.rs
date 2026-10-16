@@ -34,7 +34,8 @@ pub(crate) struct ProcessedToolOutput {
 pub(crate) struct ToolCallFailure {
     pub name: String,
     pub error: crate::error::ReactError,
-    pub result: ToolResult,
+    /// No result exists while the execution's physical settlement is unknown.
+    pub result: Option<ToolResult>,
 }
 
 pub(crate) struct ToolCallSuccess {
@@ -2764,7 +2765,16 @@ impl AgentRunSnapshot {
                 stream_tx,
             };
 
-            let pipeline_result = pipeline.run(&mut ctx, self).await;
+            let pipeline_result = match pipeline.run(&mut ctx, self).await {
+                Err(error @ crate::error::ReactError::ExecutionNotSettled { .. }) => {
+                    return Err(ToolCallFailure {
+                        name: ctx.tool_name,
+                        error,
+                        result: None,
+                    });
+                }
+                result => result,
+            };
             if !ctx.hook_messages.pre.is_empty() || !ctx.hook_messages.post.is_empty() {
                 let mut context = self.context.lock().await;
                 for message in &ctx.hook_messages.pre {
@@ -2811,7 +2821,7 @@ impl AgentRunSnapshot {
                                 message: reason,
                             }
                             .into(),
-                            result,
+                            result: Some(result),
                         });
                     }
 
@@ -2856,7 +2866,7 @@ impl AgentRunSnapshot {
                                 message,
                             }
                             .into(),
-                            result,
+                            result: Some(result),
                         });
                     }
                     let message = "Pipeline completed without result".to_string();
@@ -2869,10 +2879,10 @@ impl AgentRunSnapshot {
                     Err(ToolCallFailure {
                         name: ctx.tool_name,
                         error: crate::error::ReactError::Other(message.clone()),
-                        result: ToolResult::failure(
+                        result: Some(ToolResult::failure(
                             crate::tools::ToolFailureCategory::Permanent,
                             message,
-                        ),
+                        )),
                     })
                 }
                 Err(error) => {
@@ -2884,10 +2894,32 @@ impl AgentRunSnapshot {
                             tool.risk_level() != crate::tools::ToolRiskLevel::ReadOnly
                         });
                     let failure = ToolFailure::from_error(&error, may_have_side_effects);
-                    let result = ToolResult::failure(failure.category, error.to_string())
-                        .with_failure(failure);
-                    let telemetry_tool_name = ctx.tool_name.clone();
                     let error_message = error.to_string();
+                    let result = if !ctx.callback_started
+                        && ctx.result.is_none()
+                        && !self.tool_execution_started(&ctx.call_id)
+                        && self
+                            .cancel_token
+                            .as_ref()
+                            .is_some_and(|cancel| cancel.is_cancelled())
+                    {
+                        // The retained pre-execution owner has now really ended.
+                        // It never reached execution/trace stages, so use the
+                        // original interruption projector exactly once. Typed
+                        // unknown was already refused above, before this branch.
+                        self.settle_interrupted_tool_call(
+                            &ctx.call_id,
+                            &ctx.tool_name,
+                            &ctx.input,
+                            failure.category,
+                            &error_message,
+                        )
+                        .await
+                    } else {
+                        ToolResult::failure(failure.category, error_message.clone())
+                            .with_failure(failure)
+                    };
+                    let telemetry_tool_name = ctx.tool_name.clone();
                     self.record_skill_telemetry(
                         &telemetry_tool_name,
                         ctx.duration_ms,
@@ -2896,7 +2928,7 @@ impl AgentRunSnapshot {
                     );
                     Err(ToolCallFailure {
                         name: ctx.tool_name,
-                        result,
+                        result: Some(result),
                         error,
                     })
                 }
@@ -3859,6 +3891,10 @@ mod transcript_filter_tests {
         assert!(
             failure
                 .result
+                .as_ref()
+                .ok_or_else(|| crate::error::ReactError::Other(
+                    "expected captured ToolResult".to_string()
+                ))?
                 .error
                 .as_deref()
                 .is_some_and(|reason| reason.contains("read-only"))
@@ -3894,6 +3930,10 @@ mod transcript_filter_tests {
         assert!(
             failure
                 .result
+                .as_ref()
+                .ok_or_else(|| crate::error::ReactError::Other(
+                    "expected captured ToolResult".to_string()
+                ))?
                 .error
                 .as_deref()
                 .is_some_and(|reason| reason.contains("No tasks"))
@@ -3923,6 +3963,10 @@ mod transcript_filter_tests {
             assert!(
                 failure
                     .result
+                    .as_ref()
+                    .ok_or_else(|| crate::error::ReactError::Other(
+                        "expected captured ToolResult".to_string()
+                    ))?
                     .error
                     .as_deref()
                     .is_some_and(|reason| reason.contains("read-only"))
@@ -4022,6 +4066,10 @@ mod transcript_filter_tests {
         assert!(
             failure
                 .result
+                .as_ref()
+                .ok_or_else(|| crate::error::ReactError::Other(
+                    "expected captured ToolResult".to_string()
+                ))?
                 .error
                 .as_deref()
                 .is_some_and(|reason| reason.contains("Plan mode"))
@@ -4093,6 +4141,10 @@ mod transcript_filter_tests {
         assert!(
             failure
                 .result
+                .as_ref()
+                .ok_or_else(|| crate::error::ReactError::Other(
+                    "expected captured ToolResult".to_string()
+                ))?
                 .error
                 .as_deref()
                 .is_some_and(|reason| reason.contains("Plan mode"))
@@ -4164,6 +4216,10 @@ mod transcript_filter_tests {
         assert!(
             failure
                 .result
+                .as_ref()
+                .ok_or_else(|| crate::error::ReactError::Other(
+                    "expected captured ToolResult".to_string()
+                ))?
                 .error
                 .as_deref()
                 .is_some_and(|reason| reason.contains("Plan mode"))
@@ -4171,6 +4227,10 @@ mod transcript_filter_tests {
         assert_eq!(
             failure
                 .result
+                .as_ref()
+                .ok_or_else(|| crate::error::ReactError::Other(
+                    "expected captured ToolResult".to_string()
+                ))?
                 .failure
                 .as_ref()
                 .map(|failure| failure.category),
