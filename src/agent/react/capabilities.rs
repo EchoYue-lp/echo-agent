@@ -120,6 +120,7 @@ pub struct PreparedAgentModelDeactivation {
 
 impl PreparedTokenLimit {
     /// Publish the token limit to the exact agent locked during preparation.
+    /// Subsequent runs retain this explicit limit over model-profile defaults.
     pub fn commit(self) {
         let Self { mut agent, values } = self;
         agent.commit_prepared_token_limit(values);
@@ -685,12 +686,15 @@ impl ReactAgent {
         } = prepared;
         context.set_token_limit(token_limit, budget);
         self.config.token_limit = token_limit;
+        self.config.token_limit_explicit = true;
     }
 
     /// Set the token limit (context window budget) at runtime.
     ///
     /// This compatibility method remains non-blocking. Consumers that need a
     /// transactional multi-agent update should use the prepare/commit API.
+    /// A successful change remains explicit on subsequent runs, overriding
+    /// model-profile context-window defaults just like the config builder.
     pub fn set_token_limit(&mut self, token_limit: usize) -> crate::error::Result<()> {
         let mut context = self.memory.context.try_lock().map_err(|_| {
             crate::error::AgentError::ContextLimitExceeded(
@@ -704,6 +708,7 @@ impl ReactAgent {
         };
         context.set_token_limit(token_limit, budget);
         self.config.token_limit = token_limit;
+        self.config.token_limit_explicit = true;
         Ok(())
     }
 
@@ -2023,6 +2028,111 @@ mod tests {
     use crate::agent::config::AgentConfig;
     use crate::llm::types::Message;
     use crate::trace::RunStore;
+
+    struct TokenLimitRecorder(Arc<std::sync::atomic::AtomicUsize>);
+
+    impl ContextCompressor for TokenLimitRecorder {
+        fn compress(
+            &self,
+            input: echo_core::compression::CompressionInput,
+        ) -> futures::future::BoxFuture<
+            '_,
+            crate::error::Result<echo_core::compression::CompressionOutput>,
+        > {
+            self.0
+                .store(input.token_limit, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async move {
+                Ok(echo_core::compression::CompressionOutput {
+                    messages: input.messages,
+                    evicted: Vec::new(),
+                    checkpoint: None,
+                })
+            })
+        }
+    }
+
+    fn token_limit_publication_agent() -> ReactAgent {
+        let mut profile = echo_core::llm::capabilities::ModelProfile::from_provider_name(
+            "budget-test-model",
+            "openai",
+        );
+        profile.context_window = Some(128_000);
+        let config = AgentConfig::new("budget-test-model", "helper", "protected system prompt")
+            .enable_tool(false)
+            .auto_project_rules(false)
+            .model_profile(profile);
+        ReactAgent::new(config).with_llm_client(Arc::new(
+            crate::testing::MockLlmClient::new()
+                .with_model_name("budget-test-model")
+                .with_response("first reply")
+                .with_response("second reply"),
+        ))
+    }
+
+    async fn assert_token_limit_publication_runs(
+        agent: &ReactAgent,
+        expected_window: usize,
+    ) -> crate::error::Result<()> {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let observed = Arc::new(AtomicUsize::new(usize::MAX));
+        agent
+            .set_compressor(TokenLimitRecorder(Arc::clone(&observed)))
+            .await;
+        for turn in [None, Some("first turn"), Some("second turn")] {
+            if let Some(text) = turn {
+                assert!(!crate::agent::Agent::chat(agent, text).await?.is_empty());
+            }
+            let protected = agent.memory.context.lock().await.protected_token_estimate();
+            agent.force_compress_context().await?;
+            // Observe the compressor's real allowance, including the exact
+            // protected context retained by this run, rather than just config.
+            assert_eq!(
+                observed.load(Ordering::SeqCst).saturating_add(protected),
+                expected_window
+                    .saturating_sub(expected_window / 10)
+                    .saturating_sub(expected_window / 10)
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn token_limit_publication_live_survives_real_turns() -> crate::error::Result<()> {
+        let mut agent = token_limit_publication_agent();
+        agent.set_token_limit(100_000)?;
+        assert_token_limit_publication_runs(&agent, 100_000).await
+    }
+
+    #[tokio::test]
+    async fn token_limit_publication_prepared_survives_real_turns() -> crate::error::Result<()> {
+        let handle = AgentHandle::new(token_limit_publication_agent());
+        handle.prepare_token_limit(100_000).await?.commit();
+        let agent = handle.inner().read().await;
+        assert_token_limit_publication_runs(&agent, 100_000).await
+    }
+
+    #[tokio::test]
+    async fn token_limit_publication_unset_uses_model_profile() -> crate::error::Result<()> {
+        assert_token_limit_publication_runs(&token_limit_publication_agent(), 128_000).await
+    }
+
+    #[tokio::test]
+    async fn token_limit_publication_rejected_or_dropped_preserves_profile()
+    -> crate::error::Result<()> {
+        let mut agent = token_limit_publication_agent();
+        let context = Arc::clone(&agent.memory.context);
+        let busy = context.lock().await;
+        assert!(agent.set_token_limit(100_000).is_err());
+        drop(busy);
+        assert!(agent.set_token_limit(0).is_err());
+        assert!(!agent.config.token_limit_explicit);
+        let handle = AgentHandle::new(agent);
+        assert!(handle.prepare_token_limit(0).await.is_err());
+        drop(handle.prepare_token_limit(100_000).await?);
+        let agent = handle.inner().read().await;
+        assert!(!agent.config.token_limit_explicit);
+        assert_token_limit_publication_runs(&agent, 128_000).await
+    }
 
     struct IdentifiedCallback {
         id: &'static str,
