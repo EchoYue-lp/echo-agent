@@ -142,6 +142,7 @@ client；已开始的 run 保留自己的 snapshot。endpoint、凭据、协议�
 context limit 继续由调用方决定；隐式预算在下一次 prepare safe point 跟随新模型刷新。
 
 `set_llm_client`、`with_llm_client` 安装 opaque 自定义 client 时清除旧的重建配置。
+
 随后切换到其它模型需要显式提供替换 client 或配置，否则 `set_model` 返回现有
 `ConfigError::MissingConfig`，不修改当前状态。设置已经一致的模型是 no-op；空模型名与
 client 构造失败也不发布任何字段。`with_*llm_config` builder 保持返回 `Self`，安装失败
@@ -150,6 +151,14 @@ client 构造失败也不发布任何字段。`with_*llm_config` builder 保持�
 Prepared model generation 在 prepare 中解析并冻结模型事实，commit 只发布已准备好的
 值；丢弃 receipt 保留旧 generation。`AgentHandle` 转换出的 boxed Agent 按既有合同
 保留转换时的字符串快照；查询当前模型应读取同一 live handle。
+
+工厂已经构造好 client 时，可调用
+`ReactAgent::new_with_configured_llm_client(agent_config, client, original_config)`。
+它保留同一个 Arc 和原始重建配置，只查询一次 profile 后走普通 Context 初始化，
+不重建 client，也不将隐式预算变成显式。caller 必须提供构造 client 的原已校验配置；
+任意 client 只能检查非空且相同的模型身份，无法证明 endpoint/凭据关联。
+无效 pair 返回既有 typed 配置错误，不回显配置或凭据。应在应用 custom extensions
+之前构造，后续 opaque client 注入仍清除配置；这个 Rust 构造入口不新增 SDK 远程 API。
 
 ## Prompt Templates
 

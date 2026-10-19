@@ -491,6 +491,78 @@ impl IntentClassifier for ChainedClassifier {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn test_intent_router_config_threshold_and_available_skill_fence()
+    -> crate::error::Result<()> {
+        let skill_name = "review-中文🙂".to_string();
+        for (scenario, confidence, available_skills, expected) in [
+            (
+                "nondefault threshold rejects an otherwise allowed skill",
+                0.9_f32,
+                vec![skill_name.clone()],
+                Intent::Fallback,
+            ),
+            (
+                "skill fence rejects an otherwise confident classification",
+                1.0_f32,
+                vec!["other-skill".to_string()],
+                Intent::Fallback,
+            ),
+            (
+                "the same skill is retained when confidence and fence permit it",
+                1.0_f32,
+                vec![skill_name.clone()],
+                Intent::SkillRequired {
+                    skill_name: skill_name.clone(),
+                    confidence: 1.0,
+                },
+            ),
+        ] {
+            let response = serde_json::json!({
+                "intent": "SKILL",
+                "skill": skill_name.clone(),
+                "confidence": confidence,
+            })
+            .to_string();
+            // Every row starts with a valid SkillRequired. Malformed classifier
+            // output must not make either rejection control pass as Fallback.
+            let original = Intent::SkillRequired {
+                skill_name: skill_name.clone(),
+                confidence,
+            };
+            if LlmIntentClassifier::parse_response(&response) != original {
+                return Err(std::io::Error::other(format!(
+                    "{scenario}: test classification was not the expected SkillRequired"
+                ))
+                .into());
+            }
+            let classifier = LlmIntentClassifier::new(
+                Arc::new(crate::testing::MockLlmClient::new().with_response(response)),
+                vec![SkillDescription {
+                    name: skill_name.clone(),
+                    description: "Review the current Rust change 中文🙂".to_string(),
+                    example_triggers: Vec::new(),
+                }],
+            );
+            let router = crate::intent::IntentRouter::new(
+                Box::new(classifier),
+                crate::intent::IntentRouterConfig {
+                    confidence_threshold: 0.95,
+                    ..Default::default()
+                },
+            )
+            .with_available_skills(available_skills);
+            let actual = router.classify("review this change 中文🙂", &[]).await;
+            if actual != expected {
+                return Err(std::io::Error::other(format!(
+                    "{scenario}: expected {expected:?}, got {actual:?}"
+                ))
+                .into());
+            }
+        }
+        Ok(())
+    }
+
     #[test]
     fn test_keyword_classifier_empty_returns_fallback() {
         let classifier = KeywordClassifier::default();

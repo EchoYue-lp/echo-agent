@@ -185,6 +185,44 @@ releases. Version metadata without precedence and expiration is insufficient.
 
 ## Consequences
 
+### Constructing with an original configured client
+
+A factory can prepare one client and share its Arc across independent Agents.
+Opaque `with_llm_client` deliberately clears rebuild configuration, while
+`set_llm_config` builds a new client. Neither expresses this validated pair.
+`ReactAgent::new_with_configured_llm_client(config, client, llm_config)` is the
+single construction-only entry for the original client and its original config.
+It checks nonempty matching client/config model names, resolves the client facts
+once through the existing merge authority, freezes them in AgentConfig, then
+uses ordinary construction and the existing pure publisher. No second client
+build, prepared-generation token-limit commit or new state authority is added.
+Implicit budgets initialize from the profile; explicit limits and sampling stay
+caller-owned. Later opaque replacement still clears the retained config.
+
+The alternatives were repeated config construction (loses shared Arc identity),
+full prepared-generation seeding (marks the budget explicit and publishes other
+settings), and a live paired setter (adds mutation semantics while initial
+Context already exists). The construction-only entry meets the factory need
+with one public API and one private shared profile-preparation helper.
+
+[OpenAI Agents' provider](https://github.com/openai/openai-agents-python/blob/9abc9182d06dbd28330af888306031269d57a175/src/agents/models/openai_provider.py)
+retains a supplied client rather than inferring connection options;
+[AutoGen AssistantAgent](https://github.com/microsoft/autogen/blob/004749e6b7102c8fd317b9b1499ce5807223c278/python/packages/autogen-agentchat/src/autogen_agentchat/agents/_assistant_agent.py)
+also retains its supplied model client. These support preserving injected
+identity, not proving that arbitrary client/config inputs share credentials.
+The caller remains responsible for supplying the original validated pair:
+only model identity is observable through LlmClient. Rejection uses the existing
+typed configuration error without echoing configuration or credentials. The
+original configuration remains private process state; no wire/template getter
+or automatic cross-language operation follows from this Rust constructor.
+SDK factories apply it before extensions so later custom injection wins.
+
+Focused validation covers profile-query count, Arc/config retention, invalid
+pairs and credential-safe diagnostics, initialized implicit/explicit Context
+budgets, real same-Agent A/B HTTP consumption and subsequent custom replacement.
+The executable Rustdoc demonstrates the public entry. Refreshed SDK two-Session
+shared-client and Host proofs, main gates and website mirrors remain separate.
+
 - Provider and application integrations can refresh facts without introducing a
   second model-policy authority.
 - Resolution remains synchronous and side-effect free; fetching and persistence are

@@ -168,6 +168,17 @@ Commit only publishes prepared values, and dropping the receipt keeps the old
 generation. A boxed Agent created from an `AgentHandle` retains its documented
 conversion-time string snapshots; read the live handle for the current model.
 
+Factories that already built a client can use
+`ReactAgent::new_with_configured_llm_client(agent_config, client, original_config)`.
+It retains the same Arc and the original rebuild configuration, resolves the
+profile once before ordinary Context initialization, and preserves implicit
+versus explicit budget choices. It does not rebuild the client. Supply the
+original validated configuration: only nonempty matching model identity can be
+checked for arbitrary clients, not endpoint or credential provenance. Invalid
+pairs return a typed configuration error without including supplied secrets.
+Apply custom extensions afterward; later opaque client injection clears this
+configuration. This Rust construction entry does not introduce a remote SDK API.
+
 ## Prompt Templates
 
 `PromptTemplateManager` performs named template registration and variable

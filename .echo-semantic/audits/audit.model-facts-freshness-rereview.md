@@ -5,9 +5,13 @@ kind: audit
 boundary_ref: boundary.llm-provider-runtime
 lens: state_authority
 freshness: examined
-revision: f9906007599a9c9842474a65f4d8cb5a8a5228b8
+revision: source:1828e264adb8119b8b19c84ccc0e18b35067b6333f89c775e51856563290659e
 finding_refs: [finding.model-fact-freshness-authority, finding.provider-capability-authority, finding.runtime-token-limit-explicit-publication, finding.runtime-model-client-publication]
 challenges:
+  configured-client-construction:
+    revision: source:1828e264adb8119b8b19c84ccc0e18b35067b6333f89c775e51856563290659e
+    source_refs: [src/agent/react/mod.rs, src/agent/react/tests.rs, docs/adr/0047-model-facts-freshness-authority.md, docs/en/38-factory-modes.md, docs/zh/38-factory-modes.md]
+    evidence_refs: [evidence.configured-client-construction]
   runtime-explicit-limit-publication:
     revision: f9906007599a9c9842474a65f4d8cb5a8a5228b8
     source_refs: [src/agent/config.rs, src/agent/react/capabilities.rs, src/agent/snapshot.rs, src/agent/react/run/phases/prepare.rs]
@@ -127,3 +131,14 @@ older provider/tokenizer frontiers, the SDK factory/getter adaptation, native ta
 Stop, full engineering/feature gates, cold-history retention and exact-main CI
 are not promoted by this source review. The task-reader failure remains recorded;
 the official full strict check must separately validate actual Git history.
+
+## Configured-client constructor challenge
+
+Only the new construction challenge binds source:1828e264adb8119b8b19c84ccc0e18b35067b6333f89c775e51856563290659e. Existing publication
+challenges keep their actual f990 revisions and historical outcomes. The new
+entry reuses one merge/publisher, preserves original Arc/config and implicit
+initialization, rejects invalid pairs without secret-bearing diagnostics, and
+leaves opaque replacement semantics intact. evidence.configured-client-construction records actual focused
+consumption, including real HTTP and Rustdoc, and the separate fixture errors.
+Independent implementation/rereview and per-file necessity are still required
+before the normal milestone; full gates and new SDK/main remain separate.

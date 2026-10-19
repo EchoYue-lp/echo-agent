@@ -517,14 +517,16 @@ async fn runtime_model_publication_switches_actual_http() -> crate::error::Resul
         .await
         .map_err(|error| std::io::Error::other(error.to_string()))?
     });
-    let mut agent = ReactAgent::new(
+    let client: Arc<dyn crate::llm::LlmClient> = Arc::from(config.build_client()?);
+    let mut agent = ReactAgent::new_with_configured_llm_client(
         AgentConfig::new("model-a", "model-publication", "system")
             .enable_tool(false)
             .auto_project_rules(false)
             .session_id("same-session")
             .conversation_id("same-conversation"),
-    )
-    .with_llm_config(config);
+        client,
+        config,
+    )?;
     assert_eq!(Agent::chat(&agent, "first request").await?, "ok");
     // Compatible with the original infallible setter for the natural red
     // observation; the real HTTP assertion still rejects a failed rebind.
@@ -566,8 +568,13 @@ fn model_publication_state(agent: &ReactAgent) -> serde_json::Value {
 fn runtime_model_publication_custom_client_rejects_rebind_without_stale_config()
 -> crate::error::Result<()> {
     for builder_injection in [false, true] {
-        let mut agent = ReactAgent::new(AgentConfig::minimal("model-a", "test"));
-        agent.set_llm_config(test_llm_config("model-a"))?;
+        let config = test_llm_config("model-a");
+        let client: Arc<dyn crate::llm::LlmClient> = Arc::from(config.build_client()?);
+        let mut agent = ReactAgent::new_with_configured_llm_client(
+            AgentConfig::minimal("model-a", "test"),
+            client,
+            config,
+        )?;
         agent.set_temperature(Some(0.25));
         agent.set_max_tokens(Some(1024));
         let custom: Arc<dyn crate::llm::LlmClient> =
@@ -758,8 +765,9 @@ async fn runtime_model_publication_rebind_refreshes_implicit_not_explicit_budget
         if explicit {
             agent_config = agent_config.token_limit(100_000);
         }
-        let mut agent = ReactAgent::new(agent_config);
-        agent.set_llm_config(config.clone())?;
+        let client: Arc<dyn crate::llm::LlmClient> = Arc::from(config.build_client()?);
+        let mut agent =
+            ReactAgent::new_with_configured_llm_client(agent_config, client, config.clone())?;
         assert_eq!(Agent::chat(&agent, "before switch").await?, "ok");
         agent.set_model("model-b")?;
         assert_eq!(Agent::chat(&agent, "after switch").await?, "ok");
@@ -856,6 +864,138 @@ impl crate::llm::LlmClient for ModelPublicationProfileClient {
         self.queries.fetch_add(1, Ordering::SeqCst);
         self.profile.clone()
     }
+}
+
+#[tokio::test]
+async fn configured_client_constructor_keeps_arc_config_and_initial_budget()
+-> crate::error::Result<()> {
+    for explicit in [false, true] {
+        let queries = Arc::new(AtomicUsize::new(0));
+        let mut profile = echo_core::llm::capabilities::ModelProfile::from_provider_name(
+            "model-a",
+            "test-provider",
+        );
+        profile.context_window = Some(64_000);
+        let client: Arc<dyn crate::llm::LlmClient> = Arc::new(ModelPublicationProfileClient {
+            inner: crate::testing::MockLlmClient::new().with_model_name("model-a"),
+            profile: echo_core::llm::capabilities::ModelProfileResolution::from_explicit_profile(
+                profile,
+                SystemTime::now(),
+            ),
+            queries: Arc::clone(&queries),
+        });
+        let original = test_llm_config("model-a");
+        let mut config = AgentConfig::minimal("model-a", "test")
+            .temperature(Some(0.25))
+            .max_tokens(Some(1024))
+            .auto_project_rules(false);
+        if explicit {
+            config = config.token_limit(100_000);
+        }
+        let mut agent = ReactAgent::new_with_configured_llm_client(
+            config,
+            Arc::clone(&client),
+            original.clone(),
+        )?;
+        // Count only construction: invocation safe points may query again.
+        assert_eq!(queries.load(Ordering::SeqCst), 1);
+        assert!(
+            agent
+                .llm_client()
+                .is_some_and(|value| Arc::ptr_eq(value, &client))
+        );
+        assert_eq!(
+            serde_json::to_value(agent.llm_config())?,
+            serde_json::to_value(Some(&original))?
+        );
+        assert_eq!(agent.config.token_limit_explicit, explicit);
+        assert_eq!(
+            agent.config.token_limit,
+            if explicit { 100_000 } else { 64_000 }
+        );
+        assert_eq!(agent.config.get_temperature(), Some(0.25));
+        assert_eq!(agent.config.get_max_tokens(), Some(1024));
+        assert!(agent.thinking().is_none());
+        // A compressible message distinguishes the actual initial windows.
+        // A system-only view has nothing compressible even with zero allowance.
+        {
+            let mut context = agent.memory.context.lock().await;
+            context.push(Message::user("budget probe".to_string()));
+            assert_eq!(context.should_compress_with_overhead(70_000), !explicit);
+        }
+        agent.set_model("model-a")?;
+        assert_eq!(queries.load(Ordering::SeqCst), 1);
+        assert!(
+            agent
+                .llm_client()
+                .is_some_and(|value| Arc::ptr_eq(value, &client))
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn configured_client_constructor_rejects_bad_pairs_without_query_or_secret()
+-> crate::error::Result<()> {
+    let sentinel = "configured-client-private-key-sentinel";
+    for (client_model, config_model) in [
+        ("", ""),
+        ("model-a", ""),
+        ("", "model-a"),
+        ("model-a", "model-b"),
+    ] {
+        let queries = Arc::new(AtomicUsize::new(0));
+        let client: Arc<dyn crate::llm::LlmClient> = Arc::new(ModelPublicationProfileClient {
+            inner: crate::testing::MockLlmClient::new().with_model_name(client_model),
+            profile: echo_core::llm::capabilities::ModelProfileResolution::from_explicit_profile(
+                echo_core::llm::capabilities::ModelProfile::from_provider_name(
+                    client_model,
+                    "test-provider",
+                ),
+                SystemTime::now(),
+            ),
+            queries: Arc::clone(&queries),
+        });
+        let mut original = test_llm_config(config_model);
+        original.api_key = sentinel.to_string();
+        let result = ReactAgent::new_with_configured_llm_client(
+            AgentConfig::minimal("model-a", "test"),
+            Arc::clone(&client),
+            original,
+        );
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => {
+                return Err(std::io::Error::other("invalid configured pair was accepted").into());
+            }
+        };
+        assert!(matches!(&error, crate::error::ReactError::Config(value)
+            if matches!(value.as_ref(), crate::error::ConfigError::ConfigFileError(..))));
+        assert!(!format!("{error:?} {error}").contains(sentinel));
+        assert_eq!(queries.load(Ordering::SeqCst), 0);
+        assert_eq!(Arc::strong_count(&client), 1);
+    }
+    // Existing public paths have different contracts: custom Arc loses rebuild
+    // config; config construction builds a distinct Arc. Neither is this seam.
+    let original = test_llm_config("model-a");
+    let client: Arc<dyn crate::llm::LlmClient> = Arc::from(original.build_client()?);
+    let opaque = ReactAgent::new(AgentConfig::minimal("model-a", "test"))
+        .with_llm_client(Arc::clone(&client));
+    assert!(opaque.llm_config().is_none());
+    assert!(
+        opaque
+            .llm_client()
+            .is_some_and(|value| Arc::ptr_eq(value, &client))
+    );
+    let rebuilt =
+        ReactAgent::new(AgentConfig::minimal("model-a", "test")).with_llm_config(original);
+    assert!(rebuilt.llm_config().is_some());
+    assert!(
+        rebuilt
+            .llm_client()
+            .is_some_and(|value| !Arc::ptr_eq(value, &client))
+    );
+    Ok(())
 }
 
 #[tokio::test]

@@ -4,7 +4,7 @@ id: baseline.repository
 kind: baseline
 source_snapshot:
   base_revision: f3fa0705f62fe813a5a86bc41cd673f82f915a61
-  content_digest: b2639597dfa94b7e16aa312e46db6585d9df7636d6340c004ae978f18711d0f1
+  content_digest: 1828e264adb8119b8b19c84ccc0e18b35067b6333f89c775e51856563290659e
 inventory_closure: closed
 behavior_model_closure: closed
 map_refs:
@@ -546,3 +546,15 @@ aggregate/schema3 acceptance, exact-main CI and required website mirror sync.
 F41/ADR0056 join the already planned F38/ADR0047 official website sync after exact
 framework main; examples have no changed source-specific call site and remain
 covered by the later required workspace all-target gate.
+
+## Configured-client construction focused extension
+
+The current canonical source digest is 1828e264adb8119b8b19c84ccc0e18b35067b6333f89c775e51856563290659e; actual preflight base is674f2b41.
+The previous source digest b263 remains attached to that exact Git checkpoint
+for its projection/root qualification. No earlier closure flags, broad Behavior
+status or historical test total is promoted. The new bounded Evidence records
+10 native tests (three new, seven existing) and one executable public Rustdoc,
+plus focused Clippy/fmt; two earlier fixture failures remain separately recorded.
+One Rust public constructor is not automatically a new SDK remote contract.
+Consumer sharing/Host pin, full6+17, exact main CI, website mirrors and native
+Stop remain their original separate obligations.

@@ -396,6 +396,68 @@ impl ReactAgent {
         }
     }
 
+    /// Construct an agent with an already built client and its original config.
+    ///
+    /// Factories may share the same client across independent agents while
+    /// retaining the original configuration for later [`Self::set_model`]
+    /// changes. This constructor queries the client's model profile once and
+    /// initializes the ordinary Context budget from those frozen facts. It
+    /// neither rebuilds the client nor marks an implicit token limit explicit.
+    ///
+    /// The caller must supply the configuration originally used to build this
+    /// client. Only a nonempty matching model identity can be checked here;
+    /// arbitrary clients expose no endpoint or credential provenance. Retained
+    /// credentials stay in process. A later [`Self::set_llm_client`] clears the
+    /// configuration and keeps its existing opaque-client semantics.
+    ///
+    /// # Errors
+    /// Returns a configuration error for empty or mismatched client/config model
+    /// names, before constructing agent-owned subsystems. The error does not
+    /// include the supplied configuration or credentials.
+    ///
+    /// # Example
+    /// ```
+    /// use echo_agent::agent::{AgentConfig, ReactAgent};
+    /// use echo_agent::llm::{LlmApiProtocol, LlmClient, LlmConfig};
+    /// use std::sync::Arc;
+    /// # fn main() -> echo_agent::error::Result<()> {
+    /// let original = LlmConfig::for_provider(
+    ///     "local", "https://example.test/v1", "", "example-model",
+    ///     LlmApiProtocol::ChatCompletions,
+    /// )?;
+    /// let client: Arc<dyn LlmClient> = Arc::from(original.build_client()?);
+    /// let agent = ReactAgent::new_with_configured_llm_client(
+    ///     AgentConfig::minimal("example-model", "Help the user"),
+    ///     Arc::clone(&client), original,
+    /// )?;
+    /// assert!(agent.llm_client().is_some_and(|value| Arc::ptr_eq(value, &client)));
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn new_with_configured_llm_client(
+        mut config: AgentConfig,
+        client: Arc<dyn crate::llm::LlmClient>,
+        llm_config: LlmConfig,
+    ) -> Result<Self> {
+        let model_name = client.model_name().to_string();
+        if model_name.trim().is_empty()
+            || llm_config.model.trim().is_empty()
+            || model_name != llm_config.model
+        {
+            return Err(crate::error::ConfigError::ConfigFileError(
+                "configured client requires matching nonempty client/config model names"
+                    .to_string(),
+            )
+            .into());
+        }
+        let profile = Self::prepare_llm_profile_for_config(&config, client.as_ref());
+        config.model_name = model_name.clone();
+        config.model_profile = Some(profile.clone());
+        let mut agent = Self::new(config);
+        agent.install_llm_config(model_name, profile, client, Some(llm_config));
+        Ok(agent)
+    }
+
     #[cfg(feature = "subagent")]
     pub(crate) fn new_with_subagent_registry(
         config: AgentConfig,
@@ -1075,8 +1137,15 @@ impl ReactAgent {
         &self,
         client: &dyn crate::llm::LlmClient,
     ) -> echo_core::llm::capabilities::ModelProfileResolution {
+        Self::prepare_llm_profile_for_config(&self.config, client)
+    }
+
+    fn prepare_llm_profile_for_config(
+        config: &AgentConfig,
+        client: &dyn crate::llm::LlmClient,
+    ) -> echo_core::llm::capabilities::ModelProfileResolution {
         merge_model_profile_resolution(
-            self.config.model_profile.as_ref(),
+            config.model_profile.as_ref(),
             client.model_profile_resolution(),
         )
     }

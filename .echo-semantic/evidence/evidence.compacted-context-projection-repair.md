@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.compacted-context-projection-repair
 kind: evidence
-observed_at: source:b2639597dfa94b7e16aa312e46db6585d9df7636d6340c004ae978f18711d0f1
+observed_at: 674f2b41fd1bd25baedbf7102b26565f2771391d
 source_refs:
   - echo-state/src/compression/mod.rs
   - src/agent/snapshot.rs

@@ -5,15 +5,15 @@ kind: audit
 boundary_ref: boundary.context-memory
 lens: data_durability
 freshness: examined
-revision: source:b2639597dfa94b7e16aa312e46db6585d9df7636d6340c004ae978f18711d0f1
+revision: 674f2b41fd1bd25baedbf7102b26565f2771391d
 finding_refs: [finding.transcript-projection-settlement, finding.transcript-generation-runtime-identity, finding.checkpoint-current-plan-orphan-authority, finding.compacted-transcript-retained-ordinals, finding.canonical-root-system-refresh]
 challenges:
   compacted-retained-occurrence-identity:
-    revision: source:b2639597dfa94b7e16aa312e46db6585d9df7636d6340c004ae978f18711d0f1
+    revision: 674f2b41fd1bd25baedbf7102b26565f2771391d
     source_refs: [src/agent/snapshot.rs, src/state/mod.rs, echo-state/src/compression/mod.rs, src/agent/react/capabilities.rs, src/agent/react/run/phases/compact.rs, src/agent/react/tests.rs]
     evidence_refs: [evidence.compacted-context-projection-repair]
   canonical-root-refresh-identity:
-    revision: source:b2639597dfa94b7e16aa312e46db6585d9df7636d6340c004ae978f18711d0f1
+    revision: 674f2b41fd1bd25baedbf7102b26565f2771391d
     source_refs: [echo-state/src/compression/mod.rs, src/agent/react/mod.rs, src/agent/react/capabilities.rs, src/agent/react/run/context.rs, src/agent/react/tests.rs]
     evidence_refs: [evidence.compacted-context-projection-repair]
   transcript-projection-settlement:
