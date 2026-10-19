@@ -383,12 +383,14 @@ impl ReactAgent {
         &self,
         compressor: &dyn ContextCompressor,
     ) -> Result<(ForceCompressStats, Option<CompressionCheckpoint>)> {
-        self.memory
-            .context
-            .lock()
-            .await
+        let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(self);
+        let mut prepared = snapshot.prepare_manual_context_compaction().await?;
+        let result = prepared
+            .context_mut()?
             .force_compress_with(compressor)
-            .await
+            .await?;
+        prepared.commit(Some(compressor)).await?;
+        Ok(result)
     }
 
     /// Force compress with PreCompact/PostCompact hooks fired around the operation.
@@ -417,13 +419,13 @@ impl ReactAgent {
     ) -> Result<(ForceCompressStats, Option<CompressionCheckpoint>)> {
         self.fire_lifecycle_hook(crate::skills::hooks::HookEvent::PreCompact, Some(matcher))
             .await;
-        let (stats, checkpoint) = self
-            .memory
-            .context
-            .lock()
-            .await
+        let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(self);
+        let mut prepared = snapshot.prepare_manual_context_compaction().await?;
+        let (stats, checkpoint) = prepared
+            .context_mut()?
             .force_compress_with_focus(focus_instructions, window)
             .await?;
+        prepared.commit(None).await?;
         self.fire_post_compact_hook(matcher, &stats).await;
         Ok((stats, checkpoint))
     }
@@ -481,13 +483,13 @@ impl ReactAgent {
     ) -> Result<(ForceCompressStats, Option<CompressionCheckpoint>)> {
         self.fire_lifecycle_hook(crate::skills::hooks::HookEvent::PreCompact, Some("manual"))
             .await;
-        let (stats, checkpoint) = self
-            .memory
-            .context
-            .lock()
-            .await
+        let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(self);
+        let mut prepared = snapshot.prepare_manual_context_compaction().await?;
+        let (stats, checkpoint) = prepared
+            .context_mut()?
             .force_compress_with_options(focus, 40, cancel)
             .await?;
+        prepared.commit(None).await?;
         let (protected_message_count, protected_context_tokens) = {
             let context = self.memory.context.lock().await;
             (
@@ -875,10 +877,11 @@ impl ReactAgent {
         let has_injection = skill.system_prompt_injection().is_some();
         if let Some(injection) = skill.system_prompt_injection() {
             self.config.system_prompt.push_str(&injection);
+            let rendered = self.current_rendered_system_prompt();
             self.memory
                 .context
                 .try_lock()
-                .map(|mut ctx| ctx.update_system(self.config.system_prompt.clone()))
+                .map(|mut ctx| ctx.update_system(rendered))
                 .unwrap_or_else(|e| {
                     tracing::warn!("Failed to acquire context lock for skill injection: {}", e);
                 });
@@ -2048,24 +2051,18 @@ impl ReactAgent {
 
     // ── System Prompt ────────────────────────────────────────────────────────
 
-    /// Set the Agent's system prompt
+    /// Update the Agent's configured base system prompt.
     ///
-    /// # Parameters
-    /// * `prompt` - New system prompt
-    ///
-    /// # Description
-    /// This method updates the Agent's system prompt and synchronizes the update in the context manager.
-    /// The system prompt defines the Agent's role, behavior guidelines, and task instructions.
-    ///
-    /// # Note
-    /// Setting the system prompt overwrites all previous system prompt content.
-    /// If prompts were previously injected via skills, they will also be overwritten.
+    /// A runtime override retains its existing priority. The effective root is
+    /// rendered with the usual CoT, model-profile and project-rule layers.
+    /// Use `replace_system_prompt` to explicitly clear an active override.
     pub async fn set_system_prompt(&mut self, prompt: String) {
-        self.config.system_prompt = prompt.clone();
-        self.memory.context.lock().await.update_system(prompt);
+        self.config.system_prompt = prompt;
+        let rendered = self.current_rendered_system_prompt();
+        self.memory.context.lock().await.update_system(rendered);
         tracing::info!(
             agent = %self.config.agent_name,
-            "System prompt updated"
+            "Base system prompt updated"
         );
     }
 }

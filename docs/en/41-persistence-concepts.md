@@ -82,10 +82,40 @@ Restoration validates assistant tool calls and tool results as paired messages. 
 remains the product/event/transcript identity, while `runtime_state_id` selects the
 `RuntimeStateStore` checkpoint key. When they differ, callers should also set
 `transcript_generation_id` to the runtime incarnation. The framework then adds a typed
-generation + ordinal to canonical transcript records and persists only ordinal/digest cursor
+generation + ordinal to canonical transcript records and persists ordinal/digest cursor
 state in `AgentCheckpoint`. Repeated safe points and checkpoint/product-store crash cuts are
 idempotent even when two turns have identical content; compaction realigns the cursor only after
 the complete pre-compaction transcript is durable.
+
+Compression-derived summaries and rewritten tool payloads are model-context
+occurrences, not new transcript events. Internal checkpoint payload version 3
+keeps the original strictly ordered fact cursor and optional `context_only`
+position/digest bindings for derived occurrences. Full messages and bindings are
+saved in the same runtime CAS; pending checkpoints validate their current view
+against cursor-after. A new same-text turn still gets fresh ordinals, and clearing
+the active view preserves the append frontier. Version 1/2 records remain a legacy
+path without derived-origin proof; older framework readers reject version 3.
+
+Managed compression releases the Context lock while Store callbacks read its
+coherent pre-view. Candidate observer/cache updates become accepted only after
+checkpoint CAS succeeds. Failure or cancellation restores the volatile view and
+requires authoritative hydration before another managed write; a timeout may
+already have committed. Recovery does not replay a MemoryPromoter or claim to undo
+its external effects. See [ADR 0056](../adr/0056-durable-transcript-projection-settlement.md).
+
+The canonical root prompt is identified by `CanonicalContext.system_prompt`.
+Working-directory refresh and root prompt setters preserve other System messages,
+including restored summaries and Global Objectives, and retain projection scopes.
+They reuse an already present desired root. A standalone ContextManager without
+canonical context keeps its original first-System update behavior.
+
+Live root rendering preserves runtime-override priority over the configured base
+and the existing CoT, model-profile suffix and project-rule layers. A base prompt
+update or skill injection keeps an active override; `replace_system_prompt`
+explicitly clears it. The borrowed trait getter still reports the base prompt.
+Refresh and reset use the same effective renderer; reset accepts its final root
+and canonical metadata together while retaining its existing scope-reset behavior.
+
 When `transcript_generation_id` is present, it must equal the effective runtime-state identity.
 The framework rejects mismatches before admission side effects and checks again before a
 checkpoint write, so it cannot persist a checkpoint that recovery will reject for identity drift.

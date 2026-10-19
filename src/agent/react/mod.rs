@@ -826,6 +826,14 @@ impl ReactAgent {
     // ── Constructor helpers ───────────────────────────────────────────────────────
 
     fn build_system_prompt(config: &AgentConfig) -> String {
+        Self::render_system_prompt(config, &config.system_prompt)
+    }
+
+    fn current_rendered_system_prompt(&self) -> String {
+        Self::render_system_prompt(&self.config, &self.current_system_prompt())
+    }
+
+    fn render_system_prompt(config: &AgentConfig, base: &str) -> String {
         // ── Stable prefix: NEVER include per-request or per-session data ──
         // CWD, workspace info, timestamps, run_id, memory recall etc. belong
         // in the user message, not the system prompt. The system prefix is
@@ -833,13 +841,9 @@ impl ReactAgent {
         // prompt cache, OpenAI prefix cache) keys on — any change to it
         // invalidates the entire cache.
         let mut prompt = if config.enable_tool && config.enable_cot {
-            format!(
-                "{}\n\n{}",
-                config.system_prompt.trim_end(),
-                Self::COT_INSTRUCTION,
-            )
+            format!("{}\n\n{}", base.trim_end(), Self::COT_INSTRUCTION,)
         } else {
-            config.system_prompt.clone()
+            base.to_string()
         };
 
         if let Some(suffix) = config
@@ -1123,22 +1127,9 @@ impl ReactAgent {
     }
 
     fn refresh_root_system_prompt(&self) {
-        let system_prompt = Self::build_system_prompt(&self.config);
+        let system_prompt = self.current_rendered_system_prompt();
         if let Ok(mut ctx) = self.memory.context.try_lock() {
-            let mut messages = ctx.messages().to_vec();
-            if let Some(system) = messages
-                .iter_mut()
-                .find(|message| matches!(message.role, echo_core::llm::types::Role::System))
-            {
-                *system = echo_core::llm::types::Message::system(system_prompt.clone());
-            } else {
-                messages.insert(
-                    0,
-                    echo_core::llm::types::Message::system(system_prompt.clone()),
-                );
-            }
-            ctx.set_messages(messages);
-            ctx.set_canonical_system_prompt(Some(system_prompt));
+            ctx.update_system(system_prompt);
         } else {
             tracing::warn!(
                 "Could not acquire ContextManager lock to refresh working-dir system prompt; \
@@ -3406,8 +3397,8 @@ impl Agent for ReactAgent {
             .is_some()
         {
             // We can't return a reference to the RwLock contents directly,
-            // so fall back to config prompt. The override is picked up at
-            // the start of each new turn via build_system_prompt().
+            // so fall back to config prompt. The effective-root renderer
+            // consumes the override through current_system_prompt().
             // This method returns the "base" prompt for inspection.
             return &self.config.system_prompt;
         }
@@ -3746,19 +3737,10 @@ impl Agent for ReactAgent {
         *self
             .mutable_system_prompt
             .write()
-            .unwrap_or_else(|e| e.into_inner()) = Some(prompt.clone());
+            .unwrap_or_else(|e| e.into_inner()) = Some(prompt);
+        let rendered = self.current_rendered_system_prompt();
         if let Ok(mut context) = self.memory.context.try_lock() {
-            let mut messages = context.messages().to_vec();
-            if let Some(system) = messages
-                .iter_mut()
-                .find(|message| matches!(message.role, echo_core::llm::types::Role::System))
-            {
-                *system = echo_core::llm::types::Message::system(prompt.clone());
-            } else {
-                messages.insert(0, echo_core::llm::types::Message::system(prompt.clone()));
-            }
-            context.set_messages(messages);
-            context.set_canonical_system_prompt(Some(prompt));
+            context.update_system(rendered);
         }
     }
 

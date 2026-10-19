@@ -4,7 +4,7 @@ id: map.llm-provider-runtime
 kind: capability_map
 title: LLM Provider、Model Policy 与 Streaming
 risk: high
-observed_at: source:6e61249f5796e67d8daa2038c750f8452c9c6d41f5e14dcda791405fd2db5d06
+observed_at: f9906007599a9c9842474a65f4d8cb5a8a5228b8
 boundary_refs: [boundary.llm-provider-runtime]
 behavior_refs: [behavior.llm-provider-execution]
 rule_refs: [rule.provider-protocol-boundary]

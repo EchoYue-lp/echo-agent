@@ -89,9 +89,34 @@ Checkpoint:   journal=A, state@7
 `AgentInvocationContext` 可以显式拆分这两种身份：`runtime.conversation_id` 继续表示产品事件与
 transcript 身份，`runtime_state_id` 只选择 `RuntimeStateStore` checkpoint key。两者不同时，调用方
 还应把 runtime incarnation 传给 `transcript_generation_id`。framework 会为规范 transcript 记录
-附加 typed generation + ordinal，并在 `AgentCheckpoint` 中只保存 ordinal/digest cursor。即使两轮
+附加 typed generation + ordinal，并在 `AgentCheckpoint` 中保存 ordinal/digest cursor。即使两轮
 内容完全相同，多次 safe point、checkpoint 与产品 Store 的 crash cut 也保持幂等；压缩只在完整
 pre-compaction transcript 已落盘后重新对齐 cursor。
+
+压缩生成的摘要和改写后的工具内容属于模型上下文，不代表再次发生的 transcript 事件。
+内部 checkpoint payload version 3 保留严格递增的事实 ordinal/digest cursor，并用可选
+`context_only` 位置/digest 绑定标明派生项；完整 messages 与绑定通过同一次 runtime CAS
+保存。存在 pending 时，当前消息视图校验针对 cursor-after，原 cursor-before 的形状和
+lineage 约束保留。后续同文新 turn 仍分配新 ordinal，清空活跃视图也不倒退 append frontier。
+version 1/2 继续按缺少派生来源证明的 legacy 路径读取，旧 framework reader 会拒绝 version 3。
+
+Managed 压缩在 Store I/O 期间释放 Context 锁，让只读回调读取一致的 pre-view；候选 observer
+和 cache 只在 checkpoint CAS 成功后接受。失败或取消恢复的是 volatile view，后续 managed
+写入须先完成权威 hydration；timeout 时 CAS 可能已提交，不能声称 durable rollback。
+恢复不重放 MemoryPromoter，也不假称撤销其外部效果。详见
+[ADR 0056](../adr/0056-durable-transcript-projection-settlement.md)。
+
+canonical root prompt 的身份来自 `CanonicalContext.system_prompt`。
+工作目录刷新及根提示词 setter 会保留其它 System 消息（包括恢复出的摘要和 Global Objective）
+以及 projection scopes；已存在目标根时直接复用。未配置 canonical context 的独立
+ContextManager 继续保留原 first-System 更新语义。
+
+live 根提示词沿用 runtime override 优先于配置 base 的原顺序，并保留原有 CoT、
+模型 profile 后缀及项目规则层。更新 base 或注入 skill 不清除 active override；
+只有显式 `replace_system_prompt` 清除它，借用型 trait getter 仍返回 base。
+刷新与 reset 共用 effective renderer；reset 同时接受最终根消息和 canonical metadata，
+并保留原有清空 projection scopes 的语义。
+
 只要设置了 `transcript_generation_id`，它就必须与有效 runtime-state identity 相等。framework
 会在 admission 产生 guard、trace、context、模型或 checkpoint 副作用前拒绝不匹配，并在
 checkpoint 写入前再次校验，因此不会持久化出恢复端必然拒绝的 identity 漂移状态。

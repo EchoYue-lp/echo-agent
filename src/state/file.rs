@@ -2585,6 +2585,7 @@ mod tests {
             projected,
         )?;
         let cursor_before = super::super::TranscriptProjectionCheckpoint {
+            context_only: None,
             generation_id: runtime_state_id.to_string(),
             next_ordinal: 0,
             projected: Vec::new(),
@@ -2600,6 +2601,7 @@ mod tests {
             })
             .collect::<crate::error::Result<Vec<_>>>()?;
         let cursor_after = super::super::TranscriptProjectionCheckpoint {
+            context_only: None,
             generation_id: runtime_state_id.to_string(),
             next_ordinal: 1,
             projected,
@@ -2933,6 +2935,7 @@ mod tests {
         let digests =
             crate::memory::managed_import_projection_digests(conversation_id, &import.messages)?;
         let cursor = super::super::TranscriptProjectionCheckpoint {
+            context_only: None,
             generation_id: conversation_id.to_string(),
             next_ordinal: u64::try_from(digests.len()).map_err(|error| {
                 FileRuntimeStateStore::invalid_state(format!("import cursor overflow: {error}"))
@@ -3376,6 +3379,7 @@ mod tests {
             &checkpoint_only.restore_messages()?
         )?);
         let cursor = super::super::TranscriptProjectionCheckpoint {
+            context_only: None,
             generation_id: "legacy-cursor".to_string(),
             next_ordinal: 0,
             projected: Vec::new(),

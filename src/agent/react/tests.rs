@@ -1246,8 +1246,8 @@ async fn react_agent_set_system_prompt() {
 
     // set_system_prompt stores a runtime override in mutable_system_prompt.
     // The system_prompt() getter returns the base config prompt (cannot return
-    // a reference into RwLock). The override is applied at turn-start via
-    // build_system_prompt().
+    // a reference into RwLock). The effective-root renderer consumes the
+    // override through current_system_prompt().
     agent.set_system_prompt("New system prompt");
 
     // Base prompt is unchanged (by design — getter returns config value)
@@ -3827,6 +3827,802 @@ async fn recall_injects_memories_into_current_user_message() -> Result<(), Strin
 }
 
 // ── save_transcript_projection ──────────────────────────────────────────────
+
+#[tokio::test]
+async fn managed_compaction_checkpoint_preserves_retained_transcript_ordinals()
+-> crate::error::Result<()> {
+    struct EvictFinal;
+
+    impl crate::compression::ContextCompressor for EvictFinal {
+        fn compress(
+            &self,
+            input: echo_core::compression::CompressionInput,
+        ) -> futures::future::BoxFuture<
+            '_,
+            crate::error::Result<echo_core::compression::CompressionOutput>,
+        > {
+            Box::pin(async move {
+                let mut messages = input.messages;
+                let evicted = messages.pop().into_iter().collect();
+                Ok(echo_core::compression::CompressionOutput {
+                    messages,
+                    evicted,
+                    checkpoint: None,
+                })
+            })
+        }
+    }
+
+    let root = tempfile::tempdir()?;
+    let conversation_root = root.path().join("conversation");
+    let runtime_root = root.path().join("runtime");
+    let scope = "managed-compaction-retained-ordinals";
+    let mut agent =
+        ReactAgent::new(AgentConfig::new("test-model", "agent", "system").conversation_id(scope));
+    agent.set_conversation_store(Arc::new(crate::memory::FileConversationStore::new(
+        &conversation_root,
+    )?));
+    agent.set_state_store(Arc::new(crate::state::FileRuntimeStateStore::new(
+        &runtime_root,
+    )?));
+    let original = [
+        Message::user("same user text".to_string()),
+        Message::assistant_with_tools(vec![crate::llm::types::ToolCall {
+            id: "retained-tool-call".to_string(),
+            call_type: "function".to_string(),
+            function: crate::llm::types::FunctionCall {
+                name: "read_file".to_string(),
+                arguments: "{}".to_string(),
+            },
+        }]),
+        Message::tool_result(
+            "retained-tool-call".to_string(),
+            "read_file".to_string(),
+            "retained tool result".to_string(),
+        ),
+        Message::assistant("same final text".to_string()),
+    ];
+    {
+        let mut context = agent.memory.context.lock().await;
+        for message in original.iter().cloned() {
+            context.push(message);
+        }
+    }
+    agent.force_checkpoint().await?;
+    let before = crate::memory::ConversationStore::get_messages(
+        &crate::memory::FileConversationStore::new(&conversation_root)?,
+        scope,
+    )
+    .await?;
+    assert_eq!(before.len(), 4);
+
+    let (stats, _) = agent.force_compress_with(&EvictFinal).await?;
+    assert_eq!(stats.evicted, 1);
+    agent.force_checkpoint().await?;
+    let after = crate::memory::ConversationStore::get_messages(
+        &crate::memory::FileConversationStore::new(&conversation_root)?,
+        scope,
+    )
+    .await?;
+    assert_eq!(
+        after, before,
+        "retained messages must not be appended again"
+    );
+
+    let state = crate::state::RuntimeStateStore::load_runtime_state(
+        &crate::state::FileRuntimeStateStore::new(&runtime_root)?,
+        scope,
+        scope,
+    )
+    .await?
+    .ok_or_else(|| crate::error::ReactError::Other("runtime state missing".to_string()))?;
+    let checkpoint = state
+        .checkpoint
+        .ok_or_else(|| crate::error::ReactError::Other("runtime checkpoint missing".to_string()))?;
+    let payload = checkpoint.restore_managed_runtime_payload()?;
+    assert_eq!(
+        serde_json::to_value(
+            payload
+                .messages
+                .into_iter()
+                .filter(|message| message.role != Role::System)
+                .collect::<Vec<_>>()
+        )?,
+        serde_json::to_value(original.iter().take(3).cloned().collect::<Vec<_>>())?,
+    );
+    let cursor = payload
+        .transcript_projection
+        .ok_or_else(|| crate::error::ReactError::Other("runtime cursor missing".to_string()))?;
+    assert_eq!(cursor.next_ordinal, 4);
+    assert_eq!(
+        cursor
+            .projected
+            .iter()
+            .map(|message| message.ordinal)
+            .collect::<Vec<_>>(),
+        vec![0, 1, 2]
+    );
+
+    // A new turn may repeat old text; only the retained window reuses ordinals.
+    {
+        let mut context = agent.memory.context.lock().await;
+        context.push(Message::user("same user text".to_string()));
+        context.push(Message::assistant("same final text".to_string()));
+    }
+    agent.force_checkpoint().await?;
+    let appended = crate::memory::ConversationStore::get_messages(
+        &crate::memory::FileConversationStore::new(&conversation_root)?,
+        scope,
+    )
+    .await?;
+    let ordinals = appended
+        .iter()
+        .map(|message| {
+            crate::memory::transcript_projection_meta(message)?
+                .map(|meta| meta.ordinal)
+                .ok_or_else(|| {
+                    crate::error::ReactError::Other("transcript ordinal missing".to_string())
+                })
+        })
+        .collect::<crate::error::Result<Vec<_>>>()?;
+    assert_eq!(ordinals, vec![0, 1, 2, 3, 4, 5]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn canonical_root_agent_refresh_and_setters_keep_derived_system_and_scope()
+-> crate::error::Result<()> {
+    let root = tempfile::tempdir()?;
+    // Isolate base/override selection and canonical identity from project-rule
+    // discovery, which has its own feature-dependent harness inputs.
+    let mut agent = ReactAgent::new(
+        AgentConfig::new("test-model", "root-agent", "original root").auto_project_rules(false),
+    );
+    {
+        let mut context = agent.memory.context.lock().await;
+        let mut messages = context.messages().to_vec();
+        messages.insert(0, Message::system("derived system objective".to_string()));
+        context.set_messages(messages);
+        context.apply_projection_scope(
+            "root-agent-test",
+            &[crate::compression::ContextProjection {
+                marker: "retained-root-scope".to_string(),
+                message: Some(Message::user("protected source".to_string())),
+            }],
+        );
+    }
+    crate::agent::Agent::set_system_prompt(&agent, "trait root");
+    let systems = agent
+        .get_messages()
+        .await
+        .into_iter()
+        .filter(|message| message.role == Role::System)
+        .filter_map(|message| message.content.as_text())
+        .collect::<Vec<_>>();
+    assert!(
+        systems
+            .iter()
+            .any(|text| text == "derived system objective")
+    );
+    assert!(systems.iter().any(|text| text == "trait root"));
+    agent.set_working_dir(Some(root.path().to_path_buf()));
+    let refreshed = agent.get_messages().await;
+    let current_after_directory = agent.current_system_prompt();
+    assert_eq!(current_after_directory, "trait root");
+    assert!(
+        refreshed.iter().any(|message| message.role == Role::System
+            && message.content.as_text_ref() == Some(current_after_directory.as_str())),
+        "working-directory refresh must retain the effective prompt override"
+    );
+    assert!(refreshed.iter().any(|message| message.role == Role::System
+        && message.content.as_text_ref() == Some("derived system objective")));
+    ReactAgent::set_system_prompt(&mut agent, "async root".to_string()).await;
+    let messages = agent.get_messages().await;
+    assert_eq!(crate::agent::Agent::system_prompt(&agent), "async root");
+    let current_after_base_setter = agent.current_system_prompt();
+    assert_eq!(current_after_base_setter, "trait root");
+    assert!(
+        messages.iter().any(|message| message.role == Role::System
+            && message.content.as_text_ref() == Some(current_after_base_setter.as_str())),
+        "base setter must render the same effective prompt as the current getter"
+    );
+    assert!(messages.iter().any(|message| message.role == Role::System
+        && message.content.as_text_ref() == Some("derived system objective")));
+    assert!(
+        agent
+            .memory
+            .context
+            .lock()
+            .await
+            .has_projection("retained-root-scope")
+    );
+    agent.replace_system_prompt("replacement root");
+    assert_eq!(agent.current_system_prompt(), "replacement root");
+    assert_eq!(
+        crate::agent::Agent::system_prompt(&agent),
+        "replacement root"
+    );
+    let replaced = agent.get_messages().await;
+    assert!(replaced.iter().any(|message| message.role == Role::System
+        && message.content.as_text_ref() == Some("replacement root")));
+    assert!(replaced.iter().any(|message| message.role == Role::System
+        && message.content.as_text_ref() == Some("derived system objective")));
+    assert!(
+        agent
+            .memory
+            .context
+            .lock()
+            .await
+            .has_projection("retained-root-scope")
+    );
+    agent.reset_messages().await;
+    let reset = agent.get_messages().await;
+    assert_eq!(reset.len(), 1);
+    assert_eq!(
+        reset
+            .first()
+            .and_then(|message| message.content.as_text_ref()),
+        Some("replacement root")
+    );
+    Ok(())
+}
+
+fn managed_compaction_agent(
+    root: &std::path::Path,
+    scope: &str,
+) -> crate::error::Result<ReactAgent> {
+    let mut agent =
+        ReactAgent::new(AgentConfig::new("test-model", "agent", "system").conversation_id(scope));
+    agent.set_conversation_store(Arc::new(crate::memory::FileConversationStore::new(
+        root.join("conversation"),
+    )?));
+    agent.set_state_store(Arc::new(crate::state::FileRuntimeStateStore::new(
+        root.join("runtime"),
+    )?));
+    Ok(agent)
+}
+
+async fn managed_compaction_transcript(
+    root: &std::path::Path,
+    scope: &str,
+) -> crate::error::Result<Vec<crate::memory::StoredMessage>> {
+    crate::memory::ConversationStore::get_messages(
+        &crate::memory::FileConversationStore::new(root.join("conversation"))?,
+        scope,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn managed_compaction_horizon_restart_and_empty_preserve_fact_frontier()
+-> crate::error::Result<()> {
+    struct Empty;
+    impl crate::compression::ContextCompressor for Empty {
+        fn compress(
+            &self,
+            input: echo_core::compression::CompressionInput,
+        ) -> futures::future::BoxFuture<
+            '_,
+            crate::error::Result<echo_core::compression::CompressionOutput>,
+        > {
+            Box::pin(async move {
+                Ok(echo_core::compression::CompressionOutput {
+                    messages: Vec::new(),
+                    evicted: input.messages,
+                    checkpoint: None,
+                })
+            })
+        }
+    }
+    let root = tempfile::tempdir()?;
+    let scope = "managed-horizon-restart";
+    let agent = managed_compaction_agent(root.path(), scope)?;
+    {
+        let mut context = agent.memory.context.lock().await;
+        context.push(Message::user("same text".to_string()));
+        context.push(Message::assistant_with_tools(vec![
+            crate::llm::types::ToolCall {
+                id: "horizon-call".to_string(),
+                call_type: "function".to_string(),
+                function: crate::llm::types::FunctionCall {
+                    name: "read_file".to_string(),
+                    arguments: "{}".to_string(),
+                },
+            },
+        ]));
+        context.push(Message::tool_result(
+            "horizon-call".to_string(),
+            "read_file".to_string(),
+            "old raw tool result".repeat(20),
+        ));
+        context.push(Message::assistant("old final".to_string()));
+        context.push(Message::user("same text".to_string()));
+        context.push(Message::assistant("current final".to_string()));
+    }
+    agent.force_checkpoint().await?;
+    let original = managed_compaction_transcript(root.path(), scope).await?;
+    assert_eq!(original.len(), 6);
+    let horizon = crate::compression::horizon::VisibilityHorizonCompressor::new(
+        crate::compression::horizon::VisibilityHorizonConfig {
+            active_window_turns: 0,
+            enable_global_objective: true,
+            global_objective: Some("persist model objective".to_string()),
+            ..Default::default()
+        },
+    );
+    agent.force_compress_with(&horizon).await?;
+    let model_view = serde_json::to_value(agent.get_messages().await)?;
+    assert!(model_view.to_string().contains("Horizon compact"));
+    assert!(model_view.to_string().contains("persist model objective"));
+    assert_eq!(
+        managed_compaction_transcript(root.path(), scope).await?,
+        original
+    );
+    let restored = managed_compaction_agent(root.path(), scope)?;
+    restored.resume_from_state_store().await?.ok_or_else(|| {
+        crate::error::ReactError::Other("compacted checkpoint missing".to_string())
+    })?;
+    assert_eq!(
+        serde_json::to_value(restored.get_messages().await)?,
+        model_view
+    );
+    restored.force_checkpoint().await?;
+    assert_eq!(
+        managed_compaction_transcript(root.path(), scope).await?,
+        original
+    );
+    let checkpoint = crate::state::RuntimeStateStore::get_checkpoint(
+        &crate::state::FileRuntimeStateStore::new(root.path().join("runtime"))?,
+        scope,
+    )
+    .await?
+    .ok_or_else(|| crate::error::ReactError::Other("runtime checkpoint missing".to_string()))?;
+    let bound = checkpoint
+        .restore_managed_runtime_payload()?
+        .transcript_projection
+        .ok_or_else(|| crate::error::ReactError::Other("projection cursor missing".to_string()))?;
+    assert_eq!(
+        bound
+            .projected
+            .iter()
+            .map(|item| item.ordinal)
+            .collect::<Vec<_>>(),
+        vec![0, 3, 4, 5]
+    );
+    assert_eq!(bound.context_only.as_ref().map(Vec::len), Some(2));
+    restored.force_compress_with(&Empty).await?;
+    restored.force_checkpoint().await?;
+    assert_eq!(
+        managed_compaction_transcript(root.path(), scope).await?,
+        original
+    );
+    {
+        let mut context = restored.memory.context.lock().await;
+        context.push(Message::user("same text".to_string()));
+        context.push(Message::assistant("current final".to_string()));
+    }
+    restored.force_checkpoint().await?;
+    let messages = managed_compaction_transcript(root.path(), scope).await?;
+    let ordinals = messages
+        .iter()
+        .map(|message| {
+            crate::memory::transcript_projection_meta(message)?
+                .map(|item| item.ordinal)
+                .ok_or_else(|| crate::error::ReactError::Other("missing fact ordinal".to_string()))
+        })
+        .collect::<crate::error::Result<Vec<_>>>()?;
+    assert_eq!(ordinals, vec![0, 1, 2, 3, 4, 5, 6, 7]);
+    Ok(())
+}
+
+struct CompactionRewrite;
+impl crate::compression::ContextCompressor for CompactionRewrite {
+    fn compress(
+        &self,
+        input: echo_core::compression::CompressionInput,
+    ) -> futures::future::BoxFuture<
+        '_,
+        crate::error::Result<echo_core::compression::CompressionOutput>,
+    > {
+        Box::pin(async move {
+            let first = input.messages.first().cloned().ok_or_else(|| {
+                crate::error::ReactError::Other("first input missing".to_string())
+            })?;
+            let last =
+                input.messages.last().cloned().ok_or_else(|| {
+                    crate::error::ReactError::Other("last input missing".to_string())
+                })?;
+            let evicted = input
+                .messages
+                .iter()
+                .skip(1)
+                .take(input.messages.len().saturating_sub(2))
+                .cloned()
+                .collect();
+            Ok(echo_core::compression::CompressionOutput {
+                messages: vec![
+                    first,
+                    Message::user("derived model-only view".to_string()),
+                    last,
+                ],
+                evicted,
+                checkpoint: None,
+            })
+        })
+    }
+}
+
+struct CompactionObserver(Arc<AtomicUsize>);
+impl crate::compression::ContextCompressor for CompactionObserver {
+    fn compress(
+        &self,
+        input: echo_core::compression::CompressionInput,
+    ) -> futures::future::BoxFuture<
+        '_,
+        crate::error::Result<echo_core::compression::CompressionOutput>,
+    > {
+        Box::pin(async move {
+            Ok(echo_core::compression::CompressionOutput {
+                messages: input.messages,
+                evicted: Vec::new(),
+                checkpoint: None,
+            })
+        })
+    }
+    fn context_committed(&self, _messages: &[Message]) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+struct CompactionPromotion {
+    calls: Arc<AtomicUsize>,
+    entered: Arc<tokio::sync::Notify>,
+    pending: bool,
+}
+impl crate::compression::MemoryPromoter for CompactionPromotion {
+    fn promote(
+        &self,
+        messages: &[Message],
+    ) -> futures::future::BoxFuture<
+        '_,
+        crate::error::Result<crate::compression::MemoryPromotionReceipt>,
+    > {
+        let count = messages.len();
+        Box::pin(async move {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.entered.notify_one();
+            if self.pending {
+                std::future::pending::<()>().await;
+            }
+            Ok(crate::compression::MemoryPromotionReceipt {
+                submitted: count,
+                promoted: count,
+                deduplicated: 0,
+            })
+        })
+    }
+}
+
+async fn seed_compaction_probe(
+    agent: &ReactAgent,
+    observations: Arc<AtomicUsize>,
+) -> crate::error::Result<serde_json::Value> {
+    let mut messages = agent.get_messages().await;
+    messages.extend([
+        Message::user("original user".to_string()),
+        Message::assistant("old middle".to_string()),
+        Message::assistant("retained final".to_string()),
+    ]);
+    {
+        let mut context = agent.memory.context.lock().await;
+        context.set_compressor(CompactionObserver(observations));
+        context.set_messages(messages);
+    }
+    agent.force_checkpoint().await?;
+    serde_json::to_value(agent.get_messages().await).map_err(Into::into)
+}
+
+#[tokio::test]
+async fn managed_compaction_cancelled_promotion_restores_tuple_without_replay()
+-> crate::error::Result<()> {
+    let root = tempfile::tempdir()?;
+    let agent = Arc::new(managed_compaction_agent(
+        root.path(),
+        "cancelled-compaction-promotion",
+    )?);
+    let observations = Arc::new(AtomicUsize::new(0));
+    let original = seed_compaction_probe(&agent, observations.clone()).await?;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let entered = Arc::new(tokio::sync::Notify::new());
+    agent
+        .memory
+        .context
+        .lock()
+        .await
+        .set_memory_promoter(Arc::new(CompactionPromotion {
+            calls: calls.clone(),
+            entered: entered.clone(),
+            pending: true,
+        }));
+    let running = {
+        let agent = agent.clone();
+        tokio::spawn(async move { agent.force_compress_with(&CompactionRewrite).await })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
+        .await
+        .map_err(|_| crate::error::ReactError::Other("promoter was not entered".to_string()))?;
+    running.abort();
+    assert!(running.await.is_err_and(|error| error.is_cancelled()));
+    assert_eq!(serde_json::to_value(agent.get_messages().await)?, original);
+    assert_eq!(
+        agent
+            .memory
+            .context
+            .lock()
+            .await
+            .compression_metrics()
+            .total_compressions,
+        0
+    );
+    assert_eq!(observations.load(Ordering::SeqCst), 1);
+    assert!(agent.force_checkpoint().await.is_err());
+    agent.resume_from_state_store().await?;
+    agent.force_checkpoint().await?;
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "recovery must not re-run promotion"
+    );
+    assert_eq!(serde_json::to_value(agent.get_messages().await)?, original);
+    Ok(())
+}
+
+type CompactionProbeFuture<'a, T> = futures::future::BoxFuture<'a, crate::error::Result<T>>;
+
+struct CompactionRuntimeProbe {
+    inner: crate::state::FileRuntimeStateStore,
+    agent: std::sync::Mutex<std::sync::Weak<ReactAgent>>,
+    seen: std::sync::Mutex<Vec<serde_json::Value>>,
+    target: AtomicBool,
+    cancel_after_commit: bool,
+    entered: tokio::sync::Notify,
+}
+
+impl crate::state::RuntimeStateStore for CompactionRuntimeProbe {
+    fn runtime_state_capability(&self) -> crate::state::RuntimeStateCapability {
+        crate::state::RuntimeStateCapability::RevisionedV1
+    }
+    fn persistence_call_capability(&self) -> crate::memory::PersistenceCallCapability {
+        crate::memory::PersistenceCallCapability::AbsoluteDeadlineV1
+    }
+    fn compare_and_save_checkpoint_with_context<'a>(
+        &'a self,
+        context: crate::memory::PersistenceCallContext,
+        request: crate::state::RuntimeCheckpointCasRequest,
+    ) -> CompactionProbeFuture<'a, crate::state::RuntimeCheckpointCasReceipt> {
+        Box::pin(async move {
+            let payload = request.checkpoint.restore_managed_runtime_payload()?;
+            let target = payload.pending_transcript_projection.is_none()
+                && payload
+                    .transcript_projection
+                    .as_ref()
+                    .and_then(|cursor| cursor.context_only.as_ref())
+                    .is_some_and(|view| !view.is_empty())
+                && self.target.swap(false, Ordering::SeqCst);
+            if target {
+                let agent = self
+                    .agent
+                    .lock()
+                    .map_err(|error| crate::error::ReactError::Other(error.to_string()))?
+                    .upgrade()
+                    .ok_or_else(|| {
+                        crate::error::ReactError::Other("callback agent missing".to_string())
+                    })?;
+                let messages =
+                    tokio::time::timeout(std::time::Duration::from_secs(5), agent.get_messages())
+                        .await
+                        .map_err(|_| {
+                            crate::error::ReactError::Other(
+                                "read-only Store callback deadlocked".to_string(),
+                            )
+                        })?;
+                self.seen
+                    .lock()
+                    .map_err(|error| crate::error::ReactError::Other(error.to_string()))?
+                    .push(serde_json::to_value(messages)?);
+            }
+            let receipt =
+                crate::state::RuntimeStateStore::compare_and_save_checkpoint_with_context(
+                    &self.inner,
+                    context,
+                    request,
+                )
+                .await?;
+            if target && self.cancel_after_commit {
+                self.entered.notify_one();
+                std::future::pending::<()>().await;
+            }
+            Ok(receipt)
+        })
+    }
+    fn get_checkpoint<'a>(
+        &'a self,
+        id: &'a str,
+    ) -> CompactionProbeFuture<'a, Option<crate::state::AgentCheckpoint>> {
+        crate::state::RuntimeStateStore::get_checkpoint(&self.inner, id)
+    }
+    fn save_checkpoint<'a>(
+        &'a self,
+        checkpoint: &'a crate::state::AgentCheckpoint,
+    ) -> CompactionProbeFuture<'a, ()> {
+        crate::state::RuntimeStateStore::save_checkpoint(&self.inner, checkpoint)
+    }
+    fn save_checkpoint_for_scope<'a>(
+        &'a self,
+        scope: &'a str,
+        checkpoint: &'a crate::state::AgentCheckpoint,
+    ) -> CompactionProbeFuture<'a, ()> {
+        crate::state::RuntimeStateStore::save_checkpoint_for_scope(&self.inner, scope, checkpoint)
+    }
+    fn runtime_state_ids<'a>(&'a self, scope: &'a str) -> CompactionProbeFuture<'a, Vec<String>> {
+        crate::state::RuntimeStateStore::runtime_state_ids(&self.inner, scope)
+    }
+    fn clear_runtime_state<'a>(
+        &'a self,
+        scope: &'a str,
+        id: &'a str,
+    ) -> CompactionProbeFuture<'a, crate::state::RuntimeStateClearReceipt> {
+        crate::state::RuntimeStateStore::clear_runtime_state(&self.inner, scope, id)
+    }
+    fn clear_runtime_state_scope<'a>(
+        &'a self,
+        scope: &'a str,
+    ) -> CompactionProbeFuture<'a, crate::state::RuntimeStateScopeClearReceipt> {
+        crate::state::RuntimeStateStore::clear_runtime_state_scope(&self.inner, scope)
+    }
+    fn clear_conversation<'a>(&'a self, id: &'a str) -> CompactionProbeFuture<'a, ()> {
+        crate::state::RuntimeStateStore::clear_conversation(&self.inner, id)
+    }
+    fn load_runtime_state_with_context<'a>(
+        &'a self,
+        context: crate::memory::PersistenceCallContext,
+        scope: &'a str,
+        id: &'a str,
+    ) -> CompactionProbeFuture<'a, Option<crate::state::ManagedRuntimeStateSnapshot>> {
+        crate::state::RuntimeStateStore::load_runtime_state_with_context(
+            &self.inner,
+            context,
+            scope,
+            id,
+        )
+    }
+    fn load_scope_authority_with_context<'a>(
+        &'a self,
+        context: crate::memory::PersistenceCallContext,
+        scope: &'a str,
+    ) -> CompactionProbeFuture<'a, Option<crate::state::RuntimeScopeAuthority>> {
+        crate::state::RuntimeStateStore::load_scope_authority_with_context(
+            &self.inner,
+            context,
+            scope,
+        )
+    }
+    fn acknowledge_transcript_projection_with_context<'a>(
+        &'a self,
+        context: crate::memory::PersistenceCallContext,
+        request: crate::state::RuntimeTranscriptAckRequest,
+    ) -> CompactionProbeFuture<'a, crate::state::RuntimeCheckpointCasReceipt> {
+        crate::state::RuntimeStateStore::acknowledge_transcript_projection_with_context(
+            &self.inner,
+            context,
+            request,
+        )
+    }
+}
+
+#[tokio::test]
+async fn managed_compaction_store_read_reentry_and_commit_response_cancellation()
+-> crate::error::Result<()> {
+    for cancel_after_commit in [false, true] {
+        let root = tempfile::tempdir()?;
+        let scope = "compaction-read-reentry";
+        let runtime = Arc::new(CompactionRuntimeProbe {
+            inner: crate::state::FileRuntimeStateStore::new(root.path().join("runtime"))?,
+            agent: std::sync::Mutex::new(std::sync::Weak::new()),
+            seen: std::sync::Mutex::new(Vec::new()),
+            target: AtomicBool::new(true),
+            cancel_after_commit,
+            entered: tokio::sync::Notify::new(),
+        });
+        let mut agent = managed_compaction_agent(root.path(), scope)?;
+        agent.set_state_store(runtime.clone());
+        let agent = Arc::new(agent);
+        *runtime
+            .agent
+            .lock()
+            .map_err(|error| crate::error::ReactError::Other(error.to_string()))? =
+            Arc::downgrade(&agent);
+        let observations = Arc::new(AtomicUsize::new(0));
+        let original = seed_compaction_probe(&agent, observations.clone()).await?;
+        let transcript = managed_compaction_transcript(root.path(), scope).await?;
+        let promotions = Arc::new(AtomicUsize::new(0));
+        agent
+            .memory
+            .context
+            .lock()
+            .await
+            .set_memory_promoter(Arc::new(CompactionPromotion {
+                calls: promotions.clone(),
+                entered: Arc::new(tokio::sync::Notify::new()),
+                pending: false,
+            }));
+        if cancel_after_commit {
+            let running = {
+                let agent = agent.clone();
+                tokio::spawn(async move { agent.force_compress_with(&CompactionRewrite).await })
+            };
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                runtime.entered.notified(),
+            )
+            .await
+            .map_err(|_| {
+                crate::error::ReactError::Other(
+                    "CAS did not reach commit-before-response cut".to_string(),
+                )
+            })?;
+            assert_eq!(serde_json::to_value(agent.get_messages().await)?, original);
+            running.abort();
+            assert!(running.await.is_err_and(|error| error.is_cancelled()));
+            assert_eq!(serde_json::to_value(agent.get_messages().await)?, original);
+            assert_eq!(observations.load(Ordering::SeqCst), 1);
+            assert!(agent.force_checkpoint().await.is_err());
+            agent.resume_from_state_store().await?;
+        } else {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                agent.force_compress_with(&CompactionRewrite),
+            )
+            .await
+            .map_err(|_| {
+                crate::error::ReactError::Other("compaction read reentry timed out".to_string())
+            })??;
+        }
+        assert_eq!(
+            *runtime
+                .seen
+                .lock()
+                .map_err(|error| crate::error::ReactError::Other(error.to_string()))?,
+            vec![original]
+        );
+        assert!(
+            serde_json::to_value(agent.get_messages().await)?
+                .to_string()
+                .contains("derived model-only view")
+        );
+        if !cancel_after_commit {
+            assert_eq!(
+                observations.load(Ordering::SeqCst),
+                2,
+                "the accepted transform publishes its observer exactly once"
+            );
+        }
+        // Resume can notify its restored view and refresh the canonical root.
+        // Those existing restoration notifications are not this cancelled
+        // transform publishing a candidate; its zero-publication cut is above.
+        agent.force_checkpoint().await?;
+        assert_eq!(
+            managed_compaction_transcript(root.path(), scope).await?,
+            transcript
+        );
+        assert_eq!(
+            promotions.load(Ordering::SeqCst),
+            1,
+            "Store recovery must not replay the promoter"
+        );
+    }
+    Ok(())
+}
 
 #[tokio::test]
 async fn conversation_store_without_runtime_state_is_rejected_before_run_side_effects()

@@ -67,10 +67,11 @@ pub(crate) async fn run_compact(
     } else {
         Vec::new()
     };
+    let mut prepared = snap.prepare_context_compaction().await?;
     let prepare_result = try_send_or!(
         tx,
         {
-            let mut context = context.lock().await;
+            let context = prepared.context_mut()?;
             context.apply_projection_scope("pre-model", &projections);
             let current_query = context.latest_user_request();
             context
@@ -83,6 +84,10 @@ pub(crate) async fn run_compact(
         },
         CompactOutcome::Failed
     );
+
+    // Horizon-only rewrites also change the model view even when the primary
+    // compressor returns no statistics. Bind and persist the complete result.
+    prepared.commit(None).await?;
 
     if let Some(ref stats) = prepare_result.compressed {
         let (protected_message_count, protected_context_tokens) = {
@@ -132,7 +137,6 @@ pub(crate) async fn run_compact(
         for m in &r.messages {
             super::super::context::push_runtime_context_note(context, "Hook:PostCompact", m).await;
         }
-        snap.realign_transcript_projection(context).await?;
     }
 
     Ok(CompactOutcome::Continue(prepare_result.messages))
@@ -154,6 +158,104 @@ mod tests {
     use crate::trace::RunStore;
     use futures::future::BoxFuture;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[tokio::test]
+    async fn managed_compaction_horizon_only_prepare_persists_model_view() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let scope = "automatic-horizon-view";
+        let conversations = Arc::new(crate::memory::FileConversationStore::new(
+            root.path().join("conversation"),
+        )?);
+        let runtime = Arc::new(crate::state::FileRuntimeStateStore::new(
+            root.path().join("runtime"),
+        )?);
+        let mut agent = ReactAgent::new(
+            AgentConfig::new("test-model", "agent", "system")
+                .conversation_id(scope)
+                .enable_tool(false),
+        );
+        agent.set_conversation_store(conversations.clone());
+        agent.set_state_store(runtime.clone());
+        {
+            let mut context = agent.memory.context.lock().await;
+            context.push(Message::user("old user".to_string()));
+            context.push(Message::assistant_with_tools(vec![
+                crate::llm::types::ToolCall {
+                    id: "auto-horizon-call".to_string(),
+                    call_type: "function".to_string(),
+                    function: crate::llm::types::FunctionCall {
+                        name: "read_file".to_string(),
+                        arguments: "{}".to_string(),
+                    },
+                },
+            ]));
+            context.push(Message::tool_result(
+                "auto-horizon-call".to_string(),
+                "read_file".to_string(),
+                "old result".repeat(30),
+            ));
+            context.push(Message::assistant("old final".to_string()));
+            context.push(Message::user("current user".to_string()));
+            context.push(Message::assistant("current final".to_string()));
+            context.set_visibility_horizon(
+                crate::compression::horizon::VisibilityHorizonCompressor::new(
+                    crate::compression::horizon::VisibilityHorizonConfig {
+                        active_window_turns: 0,
+                        ..Default::default()
+                    },
+                ),
+            );
+        }
+        agent.force_checkpoint().await?;
+        let facts =
+            crate::memory::ConversationStore::get_messages(conversations.as_ref(), scope).await?;
+        let snapshot = AgentRunSnapshot::from_agent(&agent);
+        let (tx, mut rx) = mpsc::channel(16);
+        let outcome = run_compact(&snapshot, &agent.memory.context, &tx, 0).await?;
+        let CompactOutcome::Continue(messages) = outcome else {
+            return Err(crate::error::ReactError::Other(
+                "horizon prepare did not continue".to_string(),
+            ));
+        };
+        assert!(
+            serde_json::to_value(&messages)?
+                .to_string()
+                .contains("Horizon compact")
+        );
+        while let Ok(event) = rx.try_recv() {
+            assert!(
+                !matches!(event?, AgentEvent::ContextCompressed { .. }),
+                "horizon-only preparation must exercise the no-primary-stats path"
+            );
+        }
+        let checkpoint = crate::state::RuntimeStateStore::get_checkpoint(runtime.as_ref(), scope)
+            .await?
+            .ok_or_else(|| {
+                crate::error::ReactError::Other("horizon checkpoint missing".to_string())
+            })?;
+        let payload = checkpoint.restore_managed_runtime_payload()?;
+        assert_eq!(
+            serde_json::to_value(payload.messages)?,
+            serde_json::to_value(agent.get_messages().await)?
+        );
+        let cursor = payload
+            .transcript_projection
+            .ok_or_else(|| crate::error::ReactError::Other("horizon cursor missing".to_string()))?;
+        assert_eq!(
+            cursor
+                .projected
+                .iter()
+                .map(|message| message.ordinal)
+                .collect::<Vec<_>>(),
+            vec![0, 3, 4, 5]
+        );
+        assert_eq!(cursor.context_only.as_ref().map(Vec::len), Some(2));
+        assert_eq!(
+            crate::memory::ConversationStore::get_messages(conversations.as_ref(), scope).await?,
+            facts
+        );
+        Ok(())
+    }
 
     struct IterationProjector {
         calls: AtomicUsize,

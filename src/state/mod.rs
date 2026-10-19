@@ -131,6 +131,61 @@ pub struct TranscriptProjectionCheckpoint {
     pub generation_id: String,
     pub next_ordinal: u64,
     pub projected: Vec<TranscriptProjectionMessage>,
+    /// Derived context occurrences, interleaved with `projected` by position.
+    /// They have no transcript ordinal and do not acknowledge a new fact.
+    /// `None` denotes a legacy cursor without transformation provenance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_only: Option<Vec<TranscriptContextOnlyMessage>>,
+}
+
+/// One compression-derived occurrence in the active, user-visible model view.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TranscriptContextOnlyMessage {
+    pub position: usize,
+    pub digest: String,
+}
+
+impl TranscriptProjectionCheckpoint {
+    pub(crate) fn active_view(&self) -> crate::error::Result<Vec<(String, Option<u64>)>> {
+        let derived = self.context_only.as_deref().unwrap_or_default();
+        let total = self
+            .projected
+            .len()
+            .checked_add(derived.len())
+            .ok_or_else(|| {
+                invalid_checkpoint("transcript context view capacity exhausted".to_string())
+            })?;
+        let mut previous = None;
+        for item in derived {
+            if item.position >= total
+                || previous.is_some_and(|position| item.position <= position)
+                || item.digest.len() != 64
+                || !item.digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+            {
+                return Err(invalid_checkpoint(
+                    "transcript context binding is corrupt".to_string(),
+                ));
+            }
+            previous = Some(item.position);
+        }
+        let mut facts = self.projected.iter();
+        let mut derived = derived.iter().peekable();
+        let mut view = Vec::with_capacity(total);
+        for position in 0..total {
+            if derived.peek().is_some_and(|item| item.position == position) {
+                let item = derived.next().ok_or_else(|| {
+                    invalid_checkpoint("transcript context binding missing".to_string())
+                })?;
+                view.push((item.digest.clone(), None));
+            } else {
+                let item = facts.next().ok_or_else(|| {
+                    invalid_checkpoint("transcript context fact binding missing".to_string())
+                })?;
+                view.push((item.digest.clone(), Some(item.ordinal)));
+            }
+        }
+        Ok(view)
+    }
 }
 
 /// Last known retry classification for one durable transcript effect.
@@ -254,6 +309,32 @@ impl AgentCheckpoint {
         self.validate_pending_transcript_projection(
             payload.pending_transcript_projection.as_ref(),
         )?;
+        let effective = payload
+            .pending_transcript_projection
+            .as_ref()
+            .map(|pending| &pending.cursor_after)
+            .or(payload.transcript_projection.as_ref());
+        if let Some(cursor) = effective.filter(|cursor| cursor.context_only.is_some()) {
+            // A prepared checkpoint intentionally carries cursor_before at the
+            // top level. Only cursor_after describes its complete current view.
+            let visible = crate::agent::snapshot::filter_user_visible_transcript(&payload.messages);
+            let messages = crate::memory::project_messages(&self.conversation_id, &visible)?;
+            let digests = messages
+                .iter()
+                .map(crate::memory::transcript_projection_message_digest)
+                .collect::<crate::error::Result<Vec<_>>>()?;
+            let view = cursor.active_view()?;
+            if digests.len() != view.len()
+                || digests
+                    .iter()
+                    .zip(&view)
+                    .any(|(digest, (bound, _))| digest != bound)
+            {
+                return Err(invalid_checkpoint(
+                    "transcript context bindings do not match checkpoint messages".to_string(),
+                ));
+            }
+        }
         Ok(payload)
     }
 
@@ -262,6 +343,7 @@ impl AgentCheckpoint {
         projection: Option<&TranscriptProjectionCheckpoint>,
     ) -> crate::error::Result<()> {
         if let Some(projection) = projection.as_ref() {
+            projection.active_view()?;
             if projection.generation_id != self.conversation_id {
                 return Err(invalid_checkpoint(
                     "transcript projection generation does not match checkpoint identity"
@@ -390,8 +472,17 @@ impl AgentCheckpoint {
         transcript_projection: Option<TranscriptProjectionCheckpoint>,
         pending_transcript_projection: Option<PendingTranscriptProjection>,
     ) -> crate::error::Result<String> {
+        let bound = transcript_projection
+            .as_ref()
+            .is_some_and(|cursor| cursor.context_only.is_some())
+            || pending_transcript_projection
+                .as_ref()
+                .is_some_and(|pending| {
+                    pending.cursor_before.context_only.is_some()
+                        || pending.cursor_after.context_only.is_some()
+                });
         serde_json::to_string(&AgentCheckpointPayload {
-            schema_version: 2,
+            schema_version: if bound { 3 } else { 2 },
             messages,
             transcript_projection,
             pending_transcript_projection,
@@ -416,7 +507,7 @@ impl AgentCheckpoint {
             })?;
         match payload {
             AgentCheckpointPayloadCompat::Current(payload) => {
-                if !(1..=2).contains(&payload.schema_version) {
+                if !(1..=3).contains(&payload.schema_version) {
                     return Err(invalid_checkpoint(format!(
                         "unsupported checkpoint payload version {}",
                         payload.schema_version
@@ -426,6 +517,30 @@ impl AgentCheckpoint {
                     return Err(invalid_checkpoint(
                         "legacy checkpoint payload cannot contain pending transcript projection"
                             .to_string(),
+                    ));
+                }
+                let bound = payload
+                    .transcript_projection
+                    .as_ref()
+                    .is_some_and(|cursor| cursor.context_only.is_some())
+                    || payload
+                        .pending_transcript_projection
+                        .as_ref()
+                        .is_some_and(|pending| {
+                            pending.cursor_before.context_only.is_some()
+                                || pending.cursor_after.context_only.is_some()
+                        });
+                let effective = payload
+                    .pending_transcript_projection
+                    .as_ref()
+                    .map(|pending| &pending.cursor_after)
+                    .or(payload.transcript_projection.as_ref());
+                if (payload.schema_version < 3 && bound)
+                    || (payload.schema_version == 3
+                        && !effective.is_some_and(|cursor| cursor.context_only.is_some()))
+                {
+                    return Err(invalid_checkpoint(
+                        "checkpoint context binding requires payload version 3".to_string(),
                     ));
                 }
                 Ok(ManagedAgentCheckpointPayload {
@@ -2936,6 +3051,154 @@ mod checkpoint_tests {
         Ok(checkpoint)
     }
 
+    #[test]
+    fn context_binding_schema3_roundtrip_legacy_and_corruption() -> crate::error::Result<()> {
+        let messages = vec![
+            Message::user("fact user".to_string()),
+            Message::user("derived replacement".to_string()),
+            Message::assistant("fact final".to_string()),
+        ];
+        let projected = crate::memory::project_messages("conversation-1", &messages)?;
+        let digests = projected
+            .iter()
+            .map(crate::memory::transcript_projection_message_digest)
+            .collect::<crate::error::Result<Vec<_>>>()?;
+        let digest = |position| {
+            digests
+                .get(position)
+                .cloned()
+                .ok_or_else(|| invalid_checkpoint("test digest missing".to_string()))
+        };
+        let cursor = TranscriptProjectionCheckpoint {
+            generation_id: "conversation-1".to_string(),
+            next_ordinal: 3,
+            projected: vec![
+                TranscriptProjectionMessage {
+                    ordinal: 0,
+                    digest: digest(0)?,
+                },
+                TranscriptProjectionMessage {
+                    ordinal: 2,
+                    digest: digest(2)?,
+                },
+            ],
+            context_only: Some(vec![TranscriptContextOnlyMessage {
+                position: 1,
+                digest: digest(1)?,
+            }]),
+        };
+        let mut checkpoint = AgentCheckpoint::new("conversation-1");
+        checkpoint.messages_json =
+            AgentCheckpoint::serialize_payload(messages.clone(), Some(cursor.clone()))?;
+        let encoded: serde_json::Value = serde_json::from_str(&checkpoint.messages_json)?;
+        assert_eq!(
+            encoded
+                .get("schema_version")
+                .and_then(serde_json::Value::as_u64),
+            Some(3)
+        );
+        assert_eq!(
+            checkpoint
+                .restore_managed_runtime_payload()?
+                .transcript_projection,
+            Some(cursor.clone())
+        );
+        for corruption in 0..3 {
+            let mut bad = cursor.clone();
+            let derived = bad
+                .context_only
+                .as_mut()
+                .ok_or_else(|| invalid_checkpoint("test binding missing".to_string()))?;
+            let first = derived
+                .first_mut()
+                .ok_or_else(|| invalid_checkpoint("test binding empty".to_string()))?;
+            match corruption {
+                0 => first.position = usize::MAX,
+                1 => first.digest = "0".repeat(64),
+                _ => {
+                    let duplicate = first.clone();
+                    derived.push(duplicate);
+                }
+            }
+            checkpoint.messages_json =
+                AgentCheckpoint::serialize_payload(messages.clone(), Some(bad))?;
+            assert!(checkpoint.restore_managed_runtime_payload().is_err());
+        }
+        let mut downlabel = encoded;
+        *downlabel
+            .get_mut("schema_version")
+            .ok_or_else(|| invalid_checkpoint("test version missing".to_string()))? =
+            serde_json::json!(2);
+        checkpoint.messages_json = serde_json::to_string(&downlabel)?;
+        assert!(checkpoint.restore_managed_runtime_payload().is_err());
+        let mut legacy = cursor;
+        legacy.context_only = None;
+        checkpoint.messages_json =
+            AgentCheckpoint::serialize_payload(messages, Some(legacy.clone()))?;
+        let encoded: serde_json::Value = serde_json::from_str(&checkpoint.messages_json)?;
+        assert_eq!(
+            encoded
+                .get("schema_version")
+                .and_then(serde_json::Value::as_u64),
+            Some(2)
+        );
+        assert_eq!(
+            checkpoint
+                .restore_managed_runtime_payload()?
+                .transcript_projection,
+            Some(legacy)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn context_binding_pending_validates_after_view_and_original_lineage()
+    -> crate::error::Result<()> {
+        let (mut checkpoint, mut pending) =
+            pending_projection_checkpoint("conversation-1", "conversation-1", 1)?;
+        let messages = vec![Message::user("pending transcript".to_string())];
+        pending.batch = crate::memory::TranscriptProjectionBatch::prepare(
+            "conversation-1",
+            1,
+            "conversation-1",
+            0,
+            crate::memory::project_messages("conversation-1", &messages)?,
+        )?;
+        let item = pending
+            .batch
+            .items
+            .first()
+            .ok_or_else(|| invalid_checkpoint("test batch empty".to_string()))?;
+        pending.cursor_after.projected = vec![TranscriptProjectionMessage {
+            ordinal: 0,
+            digest: crate::memory::transcript_projection_message_digest(&item.message)?,
+        }];
+        pending.cursor_after.context_only = Some(Vec::new());
+        // Top-level legacy before is empty and intentionally cannot match the
+        // prepared current messages; the bound after view must match them.
+        checkpoint.messages_json = AgentCheckpoint::serialize_managed_payload(
+            messages.clone(),
+            Some(pending.cursor_before.clone()),
+            Some(pending.clone()),
+        )?;
+        assert!(
+            checkpoint
+                .restore_managed_runtime_payload()?
+                .pending_transcript_projection
+                .is_some()
+        );
+        if let Some(first) = pending.cursor_after.projected.first_mut() {
+            first.digest = "0".repeat(64);
+        }
+        checkpoint.messages_json = AgentCheckpoint::serialize_managed_payload(
+            messages,
+            Some(pending.cursor_before.clone()),
+            Some(pending),
+        )?;
+        assert!(checkpoint.restore_managed_runtime_payload().is_err());
+        Ok(())
+    }
+
     fn managed_projection_request(
         conversation_id: &str,
         expected_tombstone_epoch: Option<u64>,
@@ -2988,11 +3251,13 @@ mod checkpoint_tests {
         let pending = PendingTranscriptProjection {
             batch,
             cursor_before: TranscriptProjectionCheckpoint {
+                context_only: None,
                 generation_id: runtime_state_id.to_string(),
                 next_ordinal: 0,
                 projected: Vec::new(),
             },
             cursor_after: TranscriptProjectionCheckpoint {
+                context_only: None,
                 generation_id: runtime_state_id.to_string(),
                 next_ordinal: 1,
                 projected: vec![projected],
@@ -3392,6 +3657,7 @@ mod checkpoint_tests {
     fn transcript_projection_cursor_round_trips_and_rejects_corruption() -> crate::error::Result<()>
     {
         let projection = TranscriptProjectionCheckpoint {
+            context_only: None,
             generation_id: "conversation-1".to_string(),
             next_ordinal: 2,
             projected: vec![
@@ -3416,6 +3682,7 @@ mod checkpoint_tests {
         );
 
         let wrong_generation = TranscriptProjectionCheckpoint {
+            context_only: None,
             generation_id: "other".to_string(),
             next_ordinal: 1,
             projected: vec![TranscriptProjectionMessage {
@@ -3428,6 +3695,7 @@ mod checkpoint_tests {
         assert!(checkpoint.restore_transcript_projection().is_err());
 
         let duplicate_ordinal = TranscriptProjectionCheckpoint {
+            context_only: None,
             generation_id: "conversation-1".to_string(),
             next_ordinal: 2,
             projected: vec![
@@ -3450,6 +3718,7 @@ mod checkpoint_tests {
     #[test]
     fn transcript_cursor_checkpoint_has_bounded_digest_overhead() -> crate::error::Result<()> {
         let projection = TranscriptProjectionCheckpoint {
+            context_only: None,
             generation_id: "conversation-1".to_string(),
             next_ordinal: 100_000,
             projected: (0_u64..100_000)
@@ -3516,11 +3785,13 @@ mod checkpoint_tests {
         let pending = PendingTranscriptProjection {
             batch,
             cursor_before: TranscriptProjectionCheckpoint {
+                context_only: None,
                 generation_id: "conversation-1".to_string(),
                 next_ordinal: 0,
                 projected: Vec::new(),
             },
             cursor_after: TranscriptProjectionCheckpoint {
+                context_only: None,
                 generation_id: "conversation-1".to_string(),
                 next_ordinal: 1,
                 projected,

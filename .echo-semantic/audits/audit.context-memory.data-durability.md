@@ -5,9 +5,17 @@ kind: audit
 boundary_ref: boundary.context-memory
 lens: data_durability
 freshness: examined
-revision: f1e9027246760661144786e9e35615cd46d580c6
-finding_refs: [finding.transcript-projection-settlement, finding.transcript-generation-runtime-identity, finding.checkpoint-current-plan-orphan-authority]
+revision: source:b2639597dfa94b7e16aa312e46db6585d9df7636d6340c004ae978f18711d0f1
+finding_refs: [finding.transcript-projection-settlement, finding.transcript-generation-runtime-identity, finding.checkpoint-current-plan-orphan-authority, finding.compacted-transcript-retained-ordinals, finding.canonical-root-system-refresh]
 challenges:
+  compacted-retained-occurrence-identity:
+    revision: source:b2639597dfa94b7e16aa312e46db6585d9df7636d6340c004ae978f18711d0f1
+    source_refs: [src/agent/snapshot.rs, src/state/mod.rs, echo-state/src/compression/mod.rs, src/agent/react/capabilities.rs, src/agent/react/run/phases/compact.rs, src/agent/react/tests.rs]
+    evidence_refs: [evidence.compacted-context-projection-repair]
+  canonical-root-refresh-identity:
+    revision: source:b2639597dfa94b7e16aa312e46db6585d9df7636d6340c004ae978f18711d0f1
+    source_refs: [echo-state/src/compression/mod.rs, src/agent/react/mod.rs, src/agent/react/capabilities.rs, src/agent/react/run/context.rs, src/agent/react/tests.rs]
+    evidence_refs: [evidence.compacted-context-projection-repair]
   transcript-projection-settlement:
     revision: f1e9027246760661144786e9e35615cd46d580c6
     source_refs: [src/agent/snapshot.rs, src/agent/react/run/phases/compact.rs, src/agent/react/run/phases/finalize.rs]
@@ -23,6 +31,10 @@ challenges:
 ---
 
 # Context、Transcript 与 Checkpoint 数据持久性审计
+
+The original sections below retain the f1e fault epoch. Only the two new
+challenges bind current source:b2639597dfa94b7e16aa312e46db6585d9df7636d6340c004ae978f18711d0f1; examined means these hypotheses were
+checked, not that the broad Behavior or future SDK/main/full gates are verified.
 
 ## 审查范围
 
@@ -47,3 +59,18 @@ Transcript ensure/load/project/save failure 只告警；pre-compact 路径仍保
 ## 未检查项
 
 未验证 EKO 或外部 consumer 是否满足 ADR 0006 admission barrier，未执行 ConversationStore 故障注入，未审查长期 Evolution mutation。
+
+## Current retained-view and canonical-root challenges
+
+Independent source/runtime rereview is C0/I0/M0 for this slice. The first defect
+reallocated retained facts; sparse derived bindings now preserve original facts,
+strict ordering and new-turn append identity. The second persisted the right
+window but refreshed the wrong System occurrence; the shared canonical owner
+now preserves independent System payloads and renders the authoritative
+override-first current root value. Original before cuts, fixture-only
+errors, 12 distinct executed focused cases plus same-case value strengthening,
+current clippy/fmt, read-only Store
+reentry, synchronous cancellation restoration and observer acceptance are bound
+by evidence.compacted-context-projection-repair. Volatile restoration is not durable rollback; recovery reloads
+actual state and does not replay promotion. Finding resolution is local focused
+framework scope. Metadata/new ABI and new SDK/main delivery remain separate.

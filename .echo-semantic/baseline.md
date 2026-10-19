@@ -4,7 +4,7 @@ id: baseline.repository
 kind: baseline
 source_snapshot:
   base_revision: f3fa0705f62fe813a5a86bc41cd673f82f915a61
-  content_digest: 6e61249f5796e67d8daa2038c750f8452c9c6d41f5e14dcda791405fd2db5d06
+  content_digest: b2639597dfa94b7e16aa312e46db6585d9df7636d6340c004ae978f18711d0f1
 inventory_closure: closed
 behavior_model_closure: closed
 map_refs:
@@ -522,3 +522,27 @@ source_snapshot.base_revision 使用已经发布的共同祖先 a634，仅承担
 The new content digest is the canonical digest of the frozen B source and maintained documents. The existing published lineage base remains unchanged. Historical Git observations above and their source digests retain their original epoch; no old Evidence/Audit revision is moved to this candidate. Current focused ownership tests and independent review are recorded by evidence.subagent-physical-settlement-repair and audit.subagent-physical-settlement-focused-review. This snapshot maintenance does not claim six merge gates, feature matrix, consumer qualification, main CI, or new global behavioral closure.
 
 The subsequent ACP close increment has canonical source digest 951cf5e91f3d0fb879bda5e1960e21750accb35acdc3246c14fb6a900b53225e. The preceding focused source digest 3fd9e1ed897ce9ee4088530ea89cde93193cea1eb1d5a1afcd612ab083e2deb7 remains recoverable in pushed commit 87223c8163f6b30479fbd44eadd09736db50bd5d. Full gates/consumer/main remain incomplete.
+
+## Compacted-context and canonical-root focused checkpoint
+
+Current canonical source digest is b2639597dfa94b7e16aa312e46db6585d9df7636d6340c004ae978f18711d0f1, computed by the unchanged installed
+0.5 source_digest function after the source/docs freeze. Published lineage base
+f3fa remains unchanged; actual machine preflight/change-evidence base is f990.
+The preceding f990 tree independently hashes to 6e61249f5796e67d8daa2038c750f8452c9c6d41f5e14dcda791405fd2db5d06, so its earlier model
+and token-limit evidence retains that historical source identity and scope.
+
+Two new, distinct framework Findings close only the retained-ordinal and
+canonical-root occurrence/value local focused invariants, with one bounded Evidence and two
+current challenges in the existing Context-memory Audit. Twelve distinct tests
+(ten new, two existing controls), the fixture-only tail rerun, focused Clippy and
+fmt are actual; no old suite total is used as new proof. Broad Behavior statuses,
+inventory/behavior closure values and historical challenges are unchanged.
+
+Raw/copied sources/binaries/PF stay ignored. Old task-mode historical SDK reads
+and 512-closure limits retain their existing disposition; a full historical
+strict-snapshot/change-evidence run at actual f990 base is separate from native
+Stop, cumulative f3fa qualification, full six gates/17 features, new SDK Host
+aggregate/schema3 acceptance, exact-main CI and required website mirror sync.
+F41/ADR0056 join the already planned F38/ADR0047 official website sync after exact
+framework main; examples have no changed source-specific call site and remain
+covered by the later required workspace all-target gate.

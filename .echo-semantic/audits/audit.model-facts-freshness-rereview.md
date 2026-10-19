@@ -5,15 +5,15 @@ kind: audit
 boundary_ref: boundary.llm-provider-runtime
 lens: state_authority
 freshness: examined
-revision: source:6e61249f5796e67d8daa2038c750f8452c9c6d41f5e14dcda791405fd2db5d06
+revision: f9906007599a9c9842474a65f4d8cb5a8a5228b8
 finding_refs: [finding.model-fact-freshness-authority, finding.provider-capability-authority, finding.runtime-token-limit-explicit-publication, finding.runtime-model-client-publication]
 challenges:
   runtime-explicit-limit-publication:
-    revision: source:6e61249f5796e67d8daa2038c750f8452c9c6d41f5e14dcda791405fd2db5d06
+    revision: f9906007599a9c9842474a65f4d8cb5a8a5228b8
     source_refs: [src/agent/config.rs, src/agent/react/capabilities.rs, src/agent/snapshot.rs, src/agent/react/run/phases/prepare.rs]
     evidence_refs: [evidence.compression-token-tail, evidence.model-facts-authority-verification]
   runtime-model-frozen-publication:
-    revision: source:6e61249f5796e67d8daa2038c750f8452c9c6d41f5e14dcda791405fd2db5d06
+    revision: f9906007599a9c9842474a65f4d8cb5a8a5228b8
     source_refs: [src/agent/react/capabilities.rs, src/agent/react/mod.rs, src/agent/react/builder.rs, src/agent/react/tests.rs, src/channels.rs]
     evidence_refs: [evidence.model-facts-authority-repair, evidence.model-facts-authority-verification]
   fresh-fact-precedence:
