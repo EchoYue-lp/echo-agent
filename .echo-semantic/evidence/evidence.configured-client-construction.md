@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.configured-client-construction
 kind: evidence
-observed_at: source:1828e264adb8119b8b19c84ccc0e18b35067b6333f89c775e51856563290659e
+observed_at: 382cb600b0c8c52d1f6866682c6553e0c3369409
 source_refs:
   - docs/adr/0047-model-facts-freshness-authority.md
   - docs/en/38-factory-modes.md
@@ -114,3 +114,67 @@ known task-reader/native Stop limits, full engineering gates and main delivery
 remain distinct. F38/ADR0047 mirrors are part of the planned website sync after
 exact framework main; there is no changed standalone examples call site, and
 this new public example is covered by actual Rustdoc execution.
+
+## All-feature project-rule fixture epoch
+
+This later epoch changes only `src/agent/react/tests.rs`, source:4ad31ae30cca2dfe0d0b04d90dd656b2f3ddb3280337f5e4407e9fbe6fed8276. The
+constructor's prior 10 native tests/one Rustdoc and source1828 qualification stay
+at actual Git382cb600. The old Evidence observation and two Model Audit markers
+were losslessly rebound after official digest-at-revision reproduced source1828;
+old body/counts/status/source_refs remain historical, not newly reobserved.
+
+The final-engineering attempt at382cb600 passed fmt, fmt-check and both complete
+Clippy commands, then the unchanged full workspace/all-target/all-feature test
+command naturally exited101. Its root library target had1259passed/3failed/
+0ignored, raw192183B/SHAfe08ae348e88d18d8c2a2d1715af022b9504b696d9c26addb1268f4799362774.
+The failures were `file_checkpoint_legacy_plan_is_readable_but_not_republished`,
+`sqlite_checkpoint_legacy_plan_is_readable_but_not_republished` and
+`react_agent_reset_preserves_system_prompt`. Later targets and gates06/17feature
+checks had not run. Original raw/guard/source/input identities and the affected
+344784480-byte executable remain independently preserved outside target.
+
+Both legacy cases had already proved stale current_plan readable and removed
+on the next save; only their final message-count assertion failed. Ambient
+project rules made the new Agent's canonical root differ from a legacy bare
+System with no provenance. Preserving that unknown System and adding the actual
+root is correct under evidence.compacted-context-projection-repair. The shared
+fixture now disables ambient rule discovery to isolate plan metadata, retaining
+its real File/SQLite reopen/restore/save/plan assertions and exact count.
+
+Reset's bare-base oracle was wrong once the accepted effective renderer preserved
+the rule layer. Its fixture keeps project rules enabled, captures the complete
+constructor view, appends the same real user message, calls the same reset, then
+requires full serialized message equality, one System and the base text still
+present. Errors propagate through Result and first() replaces direct indexing.
+No renderer, unknown-System protection, restore path, policy or production source
+changes. No new Finding or reopening of the ordinal/root invariants follows.
+
+The first local after used a -p feature-union variant and passed2legacy+1reset;
+that is not reported as the original workspace variant. A subsequent workspace
+selector was interrupted by the existing9GiB target guard while compiling,
+exit-2/shell254, raw139B/SHA68eae9ff2e5959d25c065fa025e7fe3b9d64ca0c13b6ea157cefeb103207a310,
+zero tests executed, source unchanged and minimum free still above5GiB. Whole
+process-group interruption left no official runner receipt; none was invented.
+The owned package-only official cleanup/readiness is recorded locally.
+
+Current workspace/all-target/all-feature selectors actually execute the two
+legacy cases and the reset case successfully; zero matches in unrelated targets
+do not enlarge the count. Workspace same-union Clippy and fmt also exit0.
+`project-rules-test-oracles/focused-proof.json` binds exact commands/raw/source
+and the earlier failures/resource cut remain intact. The original full05 command
+and final complete23-step gate set still require execution on this new source;
+prior382 successes are not the new snapshot's full qualification.
+
+The first new preflight record failed because reuse lacked selected candidates.
+The already independently approved test patch was applied before that failure
+was inspected; this timing is not represented as a passed pre-edit gate. Official
+record2 exited0 before the first focused Cargo verification command. The exact
+path check exited0 during that command (09:10:43 UTC, between09:09:35 and09:10:59);
+it was not a pre-execution admission check. Neither is claimed as a pre-edit
+or native Hook/Stop gate.
+
+The independent Root reader reviewed the precise failure causes and test-only
+design C0/I0/M0 before implementation. Current runtime/source and exact four-path
+necessity rereview are required before the normal checkpoint. Formal docs/ADR/
+examples/site have no changed public API or product behavior in this test-only
+increment; their already pending framework mirror obligations remain in force.

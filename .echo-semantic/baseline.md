@@ -4,7 +4,7 @@ id: baseline.repository
 kind: baseline
 source_snapshot:
   base_revision: f3fa0705f62fe813a5a86bc41cd673f82f915a61
-  content_digest: 1828e264adb8119b8b19c84ccc0e18b35067b6333f89c775e51856563290659e
+  content_digest: 4ad31ae30cca2dfe0d0b04d90dd656b2f3ddb3280337f5e4407e9fbe6fed8276
 inventory_closure: closed
 behavior_model_closure: closed
 map_refs:
@@ -558,3 +558,15 @@ plus focused Clippy/fmt; two earlier fixture failures remain separately recorded
 One Rust public constructor is not automatically a new SDK remote contract.
 Consumer sharing/Host pin, full6+17, exact main CI, website mirrors and native
 Stop remain their original separate obligations.
+
+## Project-rule test oracle alignment
+
+Current canonical source is 4ad31ae30cca2dfe0d0b04d90dd656b2f3ddb3280337f5e4407e9fbe6fed8276; actual preflight base is382cb600. Only
+the existing test source changed: legacy-plan fixtures isolate ambient rules,
+and reset preserves the full rendered payload with rules still enabled. The
+existing configured-client Evidence records this separate epoch, actual three
+workspace-union passes, rawfull05 failures and resource cut without adding a
+Finding or semantic owner. Previous constructor/projection/root qualifications
+remain at their real snapshots, with source1828 machine markers losslessly
+bound to382cb600. Broad statuses/closure flags and native Stop are unchanged;
+final complete23gates, exact main CI and SDK/website delivery remain pending.

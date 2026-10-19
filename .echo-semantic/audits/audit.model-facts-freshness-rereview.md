@@ -5,11 +5,11 @@ kind: audit
 boundary_ref: boundary.llm-provider-runtime
 lens: state_authority
 freshness: examined
-revision: source:1828e264adb8119b8b19c84ccc0e18b35067b6333f89c775e51856563290659e
+revision: 382cb600b0c8c52d1f6866682c6553e0c3369409
 finding_refs: [finding.model-fact-freshness-authority, finding.provider-capability-authority, finding.runtime-token-limit-explicit-publication, finding.runtime-model-client-publication]
 challenges:
   configured-client-construction:
-    revision: source:1828e264adb8119b8b19c84ccc0e18b35067b6333f89c775e51856563290659e
+    revision: 382cb600b0c8c52d1f6866682c6553e0c3369409
     source_refs: [src/agent/react/mod.rs, src/agent/react/tests.rs, docs/adr/0047-model-facts-freshness-authority.md, docs/en/38-factory-modes.md, docs/zh/38-factory-modes.md]
     evidence_refs: [evidence.configured-client-construction]
   runtime-explicit-limit-publication:

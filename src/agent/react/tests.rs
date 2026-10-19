@@ -332,7 +332,10 @@ async fn assert_legacy_plan_is_not_republished(
     );
 
     let mut agent = ReactAgent::new(
+        // This fixture tests legacy plan metadata, not root identity across
+        // independently sourced ambient project-rule System messages.
         AgentConfig::new("test-model", "legacy-plan-agent", "system")
+            .auto_project_rules(false)
             .conversation_id("legacy-plan"),
     );
     agent.set_state_store(reopened.clone());
@@ -1159,10 +1162,13 @@ async fn react_agent_reset_is_idempotent() {
 
 /// After reset() the system prompt content should remain unchanged
 #[tokio::test]
-async fn react_agent_reset_preserves_system_prompt() {
+async fn react_agent_reset_preserves_system_prompt() -> crate::error::Result<()> {
     let system = "This is a custom system prompt";
     let config = AgentConfig::new("test-model", "agent", system);
     let agent = ReactAgent::new(config);
+    // Keep project rules enabled: reset must preserve the complete initial
+    // harness payload, including feature-dependent rules, rather than raw base.
+    let original = agent.get_messages().await;
 
     agent
         .memory
@@ -1174,8 +1180,20 @@ async fn react_agent_reset_preserves_system_prompt() {
 
     let messages = agent.memory.context.lock().await.messages().to_vec();
     assert_eq!(messages.len(), 1);
-    assert_eq!(messages[0].role, Role::System);
-    assert_eq!(messages[0].content.as_text_ref().unwrap_or(""), system);
+    assert_eq!(
+        serde_json::to_value(&messages)?,
+        serde_json::to_value(&original)?
+    );
+    let root = messages
+        .first()
+        .ok_or_else(|| std::io::Error::other("reset root missing"))?;
+    assert_eq!(root.role, Role::System);
+    assert!(
+        root.content
+            .as_text_ref()
+            .is_some_and(|text| text.contains(system))
+    );
+    Ok(())
 }
 
 // ── ReactAgent tool registration tests ─────────────────────────────────────────
