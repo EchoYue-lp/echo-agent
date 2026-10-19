@@ -9,10 +9,10 @@ primary_focus: failure_concurrency
 focus: [trigger_input, contract_evidence, time_lifecycle, result_side_effect]
 boundary: boundary.llm-provider-runtime
 observed_at: 2f4da65cd5b83daa07d6c0f36d47bb50fd259c91
-code_refs: [echo-core/src/llm/mod.rs, echo-core/src/llm/capabilities.rs, echo-core/src/budget.rs, echo-core/src/tokenizer.rs, echo-integration/src/providers/client.rs, echo-integration/src/providers/openai.rs, echo-integration/src/providers/anthropic.rs, echo-integration/src/providers/responses.rs]
+code_refs: [echo-core/src/llm/mod.rs, echo-core/src/llm/capabilities.rs, echo-core/src/budget.rs, echo-core/src/tokenizer.rs, echo-integration/src/providers/client.rs, echo-integration/src/providers/openai.rs, echo-integration/src/providers/anthropic.rs, echo-integration/src/providers/responses.rs, src/agent/react/capabilities.rs, src/agent/react/mod.rs, src/agent/react/builder.rs, src/agent/react/tests.rs, src/agent/snapshot.rs]
 rule_refs: [rule.provider-protocol-boundary]
-evidence_refs: [evidence.provider-protocol-quality, evidence.sse-eof-framing-acceptance-repair, evidence.sse-eof-framing-acceptance-verification, evidence.provider-stream-terminal-parity-repair, evidence.provider-stream-terminal-parity-verification]
-finding_refs: [finding.structured-output-main-path, finding.provider-capability-authority, finding.nonstream-cancellation-parity, finding.sse-eof-framing-acceptance, finding.provider-stream-terminal-parity]
+evidence_refs: [evidence.provider-protocol-quality, evidence.sse-eof-framing-acceptance-repair, evidence.sse-eof-framing-acceptance-verification, evidence.provider-stream-terminal-parity-repair, evidence.provider-stream-terminal-parity-verification, evidence.model-facts-authority-repair, evidence.model-facts-authority-verification]
+finding_refs: [finding.structured-output-main-path, finding.provider-capability-authority, finding.nonstream-cancellation-parity, finding.sse-eof-framing-acceptance, finding.provider-stream-terminal-parity, finding.runtime-model-client-publication]
 ---
 
 # LLM 与 Provider 执行
@@ -44,3 +44,13 @@ LLM contracts、provider implementations、ADR 0022 和 provider fixture/tests �
 ## 裁决记录
 
 快速变化的模型事实由消费方显式配置；全 provider failure matrix 留待高风险 audit。
+
+## Runtime model publication
+
+The configured model, concrete client and resolved model facts publish as one
+prepared generation. Different-model changes build and resolve first; failure
+preserves the installed generation and sampling. Custom client injection clears
+stale rebuild configuration. Prepared commit cannot call arbitrary client traits,
+parse configuration or resolve facts; ordinary run snapshots retain their own
+freshness safe point. The runtime-publication Finding tracks the actual HTTP
+counterexample and its repair independently from historical freshness Findings.

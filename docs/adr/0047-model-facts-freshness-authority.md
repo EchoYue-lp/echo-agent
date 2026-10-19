@@ -102,6 +102,71 @@ integrations can supersede it with fresh records without changing framework code
 
 ## Options Considered
 
+### Runtime client publication (2026-10-19 amendment)
+
+Two native consumer counterexamples exposed publication gaps rather than a new
+resolver requirement. A successful `set_token_limit(100_000)` lost its explicit
+precedence at the next run safe point and reverted to a 128,000-token profile.
+`set_model(B)` changed a config string while the same Session's next real HTTP
+request continued to use the installed client for A.
+
+The [OpenAI Agents model-provider contract](https://github.com/openai/openai-agents-python/blob/main/src/agents/models/interface.py)
+resolves a named model to an executable Model; the
+[Anthropic message contract](https://github.com/anthropics/anthropic-sdk-python/blob/main/src/anthropic/types/message_create_params.py)
+requires a concrete request model. Both distinguish actual model execution from
+descriptive metadata. This framework's adapters already bind their model at
+construction, so changing the concrete client through the existing `LlmConfig`
+path is the appropriate adaptation. `ChatRequest` gains no model override and
+SDK adapters gain no model-state authority.
+
+The accepted publication contract is:
+
+- `set_model`, `set_llm_config`, and `set_sourced_llm_config` return `Result<()>`.
+  Validation, client construction, profile queries and identity/freshness merging
+  finish before any Agent field is published. Failure leaves the current client,
+  rebuild config, model facts and sampling policy unchanged.
+- A configured model change clones the original provider/endpoint/credential,
+  modality and timeout configuration, changes the model and refreshes its thinking
+  projection, then builds the replacement. Old-model exact/caller facts cannot
+  become facts for the new identity. Sourced installation keeps fresh same-layer
+  inputs authoritative and retains only eligible complementary prior facts.
+- A custom client injection clears the previous rebuild configuration. A later
+  different-model request without a configuration returns the existing typed
+  `ConfigError::MissingConfig`; it never guesses a provider or replaces the custom
+  client. A request for the already consistent installed identity is a no-op.
+  A configuration-only Agent without a client can still change its configured
+  model before a client is installed.
+- One private publisher assigns a prepared model name, profile, client and
+  optional rebuild configuration. `PreparedAgentModelGeneration` freezes its
+  resolved profile before returning its target-bound receipt. Commit performs
+  field publication and the already prepared Context budget update; it never
+  calls client traits, parses configuration or resolves provider/model facts.
+  Dropping a receipt publishes nothing. Run snapshots continue to refresh facts
+  at the existing invocation safe point.
+- The `with_llm_config` and `with_sourced_llm_config` builders retain their `Self`
+  return type for callers that use that construction style. Failure is logged
+  without partial publication; fallible construction uses the setters or the
+  `ReactAgentBuilder::build` result.
+- Successful direct and prepared token-limit publications set the existing
+  explicit-limit marker. Model replacement preserves this caller choice; an
+  implicit budget is refreshed from the new model by the next run's existing
+  prepare phase, including reserved and protected-token accounting.
+
+Rejected alternatives were changing only the display name, adding a provider
+guess/rebind trait to every custom client, adding a per-request model wire field,
+or resolving facts inside commit. They respectively preserve the observed bug,
+expand an unrelated public contract, duplicate the model authority, or violate
+the existing infallible prepared-publication boundary.
+
+The affected owners are ReactAgent configuration/client installation, its
+target-bound prepared generation and builder, and thin SDK Session construction
+and getter adaptation. `AgentHandle::to_boxed_agent` keeps its documented
+conversion-time borrowed-string snapshots; consumers needing the current Session
+model read that same handle's live Agent instead. Focused verification must cover
+actual A/B HTTP requests, rollback/no-op/custom-client paths, sourced freshness,
+pure commit and explicit/implicit budgets. These checks do not establish native
+application acceptance, remote CI or mainline delivery.
+
 ### Let every provider or application resolve its own profile
 
 Rejected because it preserves the current authority split. Different consumers

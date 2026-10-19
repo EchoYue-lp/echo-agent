@@ -5,9 +5,17 @@ kind: audit
 boundary_ref: boundary.llm-provider-runtime
 lens: state_authority
 freshness: examined
-revision: 07e4270380c40df3f412f99c0aecb6145410cb2a
-finding_refs: [finding.model-fact-freshness-authority, finding.provider-capability-authority]
+revision: source:6e61249f5796e67d8daa2038c750f8452c9c6d41f5e14dcda791405fd2db5d06
+finding_refs: [finding.model-fact-freshness-authority, finding.provider-capability-authority, finding.runtime-token-limit-explicit-publication, finding.runtime-model-client-publication]
 challenges:
+  runtime-explicit-limit-publication:
+    revision: source:6e61249f5796e67d8daa2038c750f8452c9c6d41f5e14dcda791405fd2db5d06
+    source_refs: [src/agent/config.rs, src/agent/react/capabilities.rs, src/agent/snapshot.rs, src/agent/react/run/phases/prepare.rs]
+    evidence_refs: [evidence.compression-token-tail, evidence.model-facts-authority-verification]
+  runtime-model-frozen-publication:
+    revision: source:6e61249f5796e67d8daa2038c750f8452c9c6d41f5e14dcda791405fd2db5d06
+    source_refs: [src/agent/react/capabilities.rs, src/agent/react/mod.rs, src/agent/react/builder.rs, src/agent/react/tests.rs, src/channels.rs]
+    evidence_refs: [evidence.model-facts-authority-repair, evidence.model-facts-authority-verification]
   fresh-fact-precedence:
     revision: 07e4270380c40df3f412f99c0aecb6145410cb2a
     source_refs: [echo-core/src/llm/capabilities.rs, src/agent/react/mod.rs, src/agent/react/tests.rs]
@@ -94,3 +102,28 @@ v1→v2、exact v1→v2、caller 互补字段、empty exact、unknown provider/p
 
 未执行完整 workspace gate、17 项 feature matrix 或远端 CI；SDK continuity errors
 仍由 SDK/semantic governance 边界独立追踪。
+
+## Runtime publication challenges (2026-10-19)
+
+The two current challenges bind the framework candidate above. Historical
+challenge revisions and old test totals remain unchanged and historical.
+Independent final source rereview returned C0/I0/M0 after correcting one Important
+conditional caller: the channels configured factory now performs its original
+single build before Agent construction, resolves through the same preparation
+owner and invokes the pure publisher. The isolated channels feature compile
+passed. No public rebind API or channel product strategy was added.
+
+The explicit-limit challenge retains the direct/prepared success marker and
+busy/invalid/dropped non-publication policy, with actual compressor allowances
+before and after real turns. The model challenge covers real HTTP A/B, typed
+configuration refusal and rollback, no-op identity consistency, fresh sourced
+precedence/expiry/complement, custom-client stale-config removal and prepared
+profile resolution exclusively before commit. Matching existing prepared and
+configuration-only behavior is preserved. Details, actual current command
+receipts and bounded counts are in the existing verification Evidence.
+
+Only these framework publication Findings close here. Broad Behavior statuses,
+older provider/tokenizer frontiers, the SDK factory/getter adaptation, native task
+Stop, full engineering/feature gates, cold-history retention and exact-main CI
+are not promoted by this source review. The task-reader failure remains recorded;
+the official full strict check must separately validate actual Git history.

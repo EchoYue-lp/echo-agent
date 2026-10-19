@@ -1011,84 +1011,93 @@ impl ReactAgent {
     /// # }
     /// ```
     pub fn with_llm_config(mut self, config: LlmConfig) -> Self {
-        self.set_llm_config(config);
+        if let Err(error) = self.set_llm_config(config) {
+            tracing::warn!(error = %error, "Failed to install LLM configuration");
+        }
         self
     }
 
     /// Inject LLM configuration together with sourced model facts.
     pub fn with_sourced_llm_config(mut self, config: SourcedLlmConfig) -> Self {
-        self.set_sourced_llm_config(config);
+        if let Err(error) = self.set_sourced_llm_config(config) {
+            tracing::warn!(error = %error, "Failed to install sourced LLM configuration");
+        }
         self
     }
 
     /// Inject a custom LLM client.
     pub fn with_llm_client(mut self, client: Arc<dyn crate::llm::LlmClient>) -> Self {
-        self.config.model_name = client.model_name().to_string();
-        self.config.model_profile = Some(merge_model_profile_resolution(
-            self.config.model_profile.as_ref(),
-            client.model_profile_resolution(),
-        ));
-        self.llm_client = Some(client);
+        self.set_llm_client(client);
         self
     }
 
     /// Set the LLM configuration.
     ///
     /// Builds an LLM client from the config and sets it so that subsequent API
-    /// calls use the provided credentials and explicit protocol.
-    pub fn set_llm_config(&mut self, config: LlmConfig) {
-        self.set_sourced_llm_config(SourcedLlmConfig::new(config));
+    /// calls use the provided credentials and explicit protocol. Construction
+    /// failure leaves the installed model, client and facts unchanged.
+    pub fn set_llm_config(&mut self, config: LlmConfig) -> Result<()> {
+        self.set_sourced_llm_config(SourcedLlmConfig::new(config))
     }
 
     /// Set LLM configuration together with sourced model facts.
-    pub fn set_sourced_llm_config(&mut self, config: SourcedLlmConfig) {
-        self.config.model_name = config.config.model.clone();
-        self.config.model_profile = Some(merge_model_profile_resolution(
-            self.config.model_profile.as_ref(),
-            config.resolve_model_profile_at(std::time::SystemTime::now()),
-        ));
-        match config.build_client() {
-            Ok(client) => {
-                tracing::info!(
-                    model = %config.config.model,
-                    "LLM client built from LlmConfig, credential injection active"
-                );
-                self.install_llm_config(config.config, Arc::from(client));
-                return;
-            }
-            Err(e) => {
-                tracing::warn!(
-                    model = %config.config.model,
-                    error = %e,
-                    "Failed to build LLM client from explicit LlmConfig"
-                );
-            }
+    /// Fresh sourced facts are resolved before publication and take precedence
+    /// over eligible retained facts for the same identity.
+    pub fn set_sourced_llm_config(&mut self, config: SourcedLlmConfig) -> Result<()> {
+        if config.config.model.trim().is_empty() {
+            return Err(crate::error::ConfigError::MissingConfig(
+                config.config.model.clone(),
+                "model name must not be empty".to_string(),
+            )
+            .into());
         }
-        self.llm_config = Some(config.config);
+        let client: Arc<dyn crate::llm::LlmClient> = Arc::from(config.build_client()?);
+        let profile = self.prepare_llm_profile(client.as_ref());
+        tracing::info!(
+            model = %config.config.model,
+            "LLM client built from LlmConfig, credential injection active"
+        );
+        self.install_llm_config(
+            config.config.model.clone(),
+            profile,
+            client,
+            Some(config.config),
+        );
+        Ok(())
     }
 
+    /// Query external client code and resolve facts before a publication begins.
+    pub(crate) fn prepare_llm_profile(
+        &self,
+        client: &dyn crate::llm::LlmClient,
+    ) -> echo_core::llm::capabilities::ModelProfileResolution {
+        merge_model_profile_resolution(
+            self.config.model_profile.as_ref(),
+            client.model_profile_resolution(),
+        )
+    }
+
+    /// Publish frozen values only. Prepared generation commit also uses this
+    /// path, so no client trait query, parsing or provider lookup belongs here.
     pub(crate) fn install_llm_config(
         &mut self,
-        config: LlmConfig,
+        model_name: String,
+        profile: echo_core::llm::capabilities::ModelProfileResolution,
         client: Arc<dyn crate::llm::LlmClient>,
+        config: Option<LlmConfig>,
     ) {
-        self.config.model_name = config.model.clone();
-        self.config.model_profile = Some(merge_model_profile_resolution(
-            self.config.model_profile.as_ref(),
-            client.model_profile_resolution(),
-        ));
+        self.config.model_name = model_name;
+        self.config.model_profile = Some(profile);
         self.llm_client = Some(client);
-        self.llm_config = Some(config);
+        self.llm_config = config;
     }
 
-    /// Set a custom LLM client.
+    /// Set a custom LLM client, clearing any previous provider rebuild config.
+    /// Switching its model requires an explicit replacement client or config.
     pub fn set_llm_client(&mut self, client: Arc<dyn crate::llm::LlmClient>) {
-        self.config.model_name = client.model_name().to_string();
-        self.config.model_profile = Some(merge_model_profile_resolution(
-            self.config.model_profile.as_ref(),
-            client.model_profile_resolution(),
-        ));
-        self.llm_client = Some(client);
+        let model_name = client.model_name().to_string();
+        let profile = self.prepare_llm_profile(client.as_ref());
+        self.install_llm_config(model_name, profile, client, None);
     }
 
     /// Set the working directory for the agent.

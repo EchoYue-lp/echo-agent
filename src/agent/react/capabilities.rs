@@ -105,6 +105,8 @@ pub struct PreparedAgentModelGeneration {
     agent: tokio::sync::OwnedRwLockWriteGuard<ReactAgent>,
     llm_config: LlmConfig,
     llm_client: Arc<dyn LlmClient>,
+    model_name: String,
+    model_profile: echo_core::llm::capabilities::ModelProfileResolution,
     temperature: Option<f32>,
     max_tokens: Option<u32>,
     thinking: Option<ThinkingConfig>,
@@ -136,6 +138,8 @@ impl PreparedAgentModelGeneration {
             mut agent,
             llm_config,
             llm_client,
+            model_name,
+            model_profile,
             temperature,
             max_tokens,
             thinking,
@@ -143,11 +147,9 @@ impl PreparedAgentModelGeneration {
             token_limit,
         } = self;
         agent.commit_prepared_token_limit(token_limit);
-        agent.config.model_name = llm_config.model.clone();
+        agent.install_llm_config(model_name, model_profile, llm_client, Some(llm_config));
         agent.config.temperature = temperature;
         agent.config.max_tokens = max_tokens;
-        agent.llm_config = Some(llm_config);
-        agent.llm_client = Some(llm_client);
         agent.thinking = thinking;
         match critic {
             PreparedCriticUpdate::ReplaceOwned { owner, critic }
@@ -213,11 +215,15 @@ impl AgentHandle {
             )));
         }
         let agent = Arc::clone(self.inner()).write_owned().await;
+        let model_name = llm_config.model.clone();
+        let model_profile = agent.prepare_llm_profile(llm_client.as_ref());
         let token_limit = agent.prepare_token_limit_values(token_limit).await?;
         Ok(PreparedAgentModelGeneration {
             agent,
             llm_config,
             llm_client,
+            model_name,
+            model_profile,
             temperature,
             max_tokens,
             thinking,
@@ -629,15 +635,58 @@ impl ReactAgent {
 
     // ── Basic config ─────────────────────────────────────────────────────────
 
-    /// Set LLM model name at runtime
+    /// Switch the configured LLM model for subsequent invocations.
     ///
     /// # Parameters
     /// * `model_name` - New LLM model name
     ///
     /// # Description
-    /// This method allows dynamically switching the LLM model used by the Agent at runtime.
-    pub fn set_model(&mut self, model_name: &str) {
+    /// A configured client is rebuilt before publishing its model and facts.
+    /// Opaque custom clients require an explicit replacement configuration;
+    /// failed changes leave the installed generation unchanged.
+    pub fn set_model(&mut self, model_name: &str) -> Result<()> {
+        if model_name.trim().is_empty() {
+            return Err(crate::error::ConfigError::MissingConfig(
+                model_name.to_string(),
+                "model name must not be empty".to_string(),
+            )
+            .into());
+        }
+        let consistent_client = match self.llm_client.as_ref() {
+            Some(client) => {
+                client.model_name() == model_name
+                    && self
+                        .llm_config
+                        .as_ref()
+                        .is_none_or(|config| config.model == model_name)
+            }
+            None => self.llm_config.is_none(),
+        };
+        if self.config.model_name == model_name && consistent_client {
+            return Ok(());
+        }
+        if let Some(mut config) = self.llm_config.clone() {
+            config.model = model_name.to_string();
+            config.thinking_protocol = config
+                .resolve_model_profile_at(std::time::SystemTime::now())
+                .profile
+                .thinking_protocol;
+            let client: Arc<dyn LlmClient> = Arc::from(config.build_client()?);
+            let profile = self.prepare_llm_profile(client.as_ref());
+            self.install_llm_config(model_name.to_string(), profile, client, Some(config));
+            return Ok(());
+        }
+        if self.llm_client.is_some() {
+            return Err(crate::error::ConfigError::MissingConfig(
+                model_name.to_string(),
+                "runtime model switching requires the original LlmConfig; explicitly install a replacement client or configuration".to_string(),
+            ).into());
+        }
+        // A configuration-only Agent has no executing client to replace.
+        // Facts for the previous identity cannot describe the new model.
         self.config.model_name = model_name.to_string();
+        self.config.model_profile = None;
+        Ok(())
     }
 
     /// Set the temperature for LLM generation.

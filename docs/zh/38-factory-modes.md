@@ -133,6 +133,24 @@ FinalOnly 后，支持 `tool_choice=none` 的 provider 会收到显式控制；�
 resolver 不内置大规模模型表。快速变化的模型事实应由消费应用或 provider integration
 携带有界过期时间注册。参见 [ADR 0047](../adr/0047-model-facts-freshness-authority.md)。
 
+### 切换已安装模型
+
+`ReactAgent::set_model(name)`、`set_llm_config(config)` 和
+`set_sourced_llm_config(config)` 返回 `Result<()>`。切换模型先构造新的 concrete client，
+成功后一起发布模型名、保留配置与新 profile。同一个 Agent 的下一次 invocation 使用新
+client；已开始的 run 保留自己的 snapshot。endpoint、凭据、协议、显式采样参数与显式
+context limit 继续由调用方决定；隐式预算在下一次 prepare safe point 跟随新模型刷新。
+
+`set_llm_client`、`with_llm_client` 安装 opaque 自定义 client 时清除旧的重建配置。
+随后切换到其它模型需要显式提供替换 client 或配置，否则 `set_model` 返回现有
+`ConfigError::MissingConfig`，不修改当前状态。设置已经一致的模型是 no-op；空模型名与
+client 构造失败也不发布任何字段。`with_*llm_config` builder 保持返回 `Self`，安装失败
+仅记录错误；需要接收构造错误时使用 fallible setter 或 `ReactAgentBuilder::build`。
+
+Prepared model generation 在 prepare 中解析并冻结模型事实，commit 只发布已准备好的
+值；丢弃 receipt 保留旧 generation。`AgentHandle` 转换出的 boxed Agent 按既有合同
+保留转换时的字符串快照；查询当前模型应读取同一 live handle。
+
 ## Prompt Templates
 
 `PromptTemplateManager` 提供命名模板注册和变量替换，与模型能力、产品模式相互独立。

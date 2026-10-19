@@ -9,12 +9,13 @@ boundary_refs: [boundary.context-memory]
 behavior_refs: [behavior.context-memory-lifecycle]
 rule_refs: [rule.context-persistence-separation]
 evidence_refs: [evidence.agent-context-execution, evidence.persistence-observation, evidence.high-risk-audit-frontier, evidence.framework-concept-navigation, evidence.transcript-projection-settlement-repair, evidence.transcript-projection-settlement-verification, evidence.managed-import-generation-repair, evidence.checkpoint-plan-authority-repair, evidence.checkpoint-plan-authority-verification, evidence.memory-provenance-authority-repair, evidence.memory-provenance-authority-verification]
-finding_refs: [finding.transcript-projection-settlement, finding.transcript-generation-runtime-identity, finding.checkpoint-current-plan-orphan-authority, finding.pre-compaction-memory-trust-provenance]
+finding_refs: [finding.transcript-projection-settlement, finding.transcript-generation-runtime-identity, finding.checkpoint-current-plan-orphan-authority, finding.pre-compaction-memory-trust-provenance, finding.runtime-token-limit-explicit-publication]
 audit_refs: [audit.context-memory.data-durability, audit.transcript-generation-runtime-identity-rereview, audit.transcript-projection-settlement-rereview, audit.checkpoint-plan-authority-rereview, audit.memory-provenance-authority-rereview]
 related_map_refs: [map.agent-session-turn, map.observation-persistence-delivery, map.eval-evolution]
 scenarios:
   token-budgeted-recent-tail:
     status: mapped
+    finding_refs: [finding.runtime-token-limit-explicit-publication]
     source_refs: [echo-state/src/compression/compressor/sliding_window.rs, echo-state/src/compression/compressor/summary.rs, echo-state/src/compression/mod.rs, src/config.rs, src/agent/react/capabilities.rs, src/agent/react/run/phases/compact.rs, docs/adr/0081-token-budgeted-compression-tail.md]
     behavior_refs: [behavior.context-memory-lifecycle]
     rule_refs: [rule.context-persistence-separation]

@@ -451,6 +451,470 @@ fn test_llm_config(model: &str) -> crate::llm::LlmConfig {
     }
 }
 
+async fn model_publication_http_request(
+    socket: &mut tokio::net::TcpStream,
+) -> crate::error::Result<serde_json::Value> {
+    use tokio::io::AsyncReadExt;
+    let mut bytes = Vec::new();
+    let mut chunk = [0; 4096];
+    loop {
+        let count = socket.read(&mut chunk).await?;
+        if count == 0 || bytes.len() > 2_000_000 {
+            return Err(std::io::Error::other("incomplete model publication HTTP request").into());
+        }
+        bytes.extend_from_slice(chunk.get(..count).unwrap_or_default());
+        let Some(header_end) = bytes.windows(4).position(|value| value == b"\r\n\r\n") else {
+            continue;
+        };
+        let headers = String::from_utf8_lossy(bytes.get(..header_end).unwrap_or_default());
+        let length = headers
+            .lines()
+            .filter_map(|line| line.split_once(':'))
+            .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+            .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+            .ok_or_else(|| std::io::Error::other("missing model publication content length"))?;
+        let body_start = header_end.saturating_add(4);
+        let body_end = body_start.saturating_add(length);
+        if let Some(body) = bytes.get(body_start..body_end) {
+            return Ok(serde_json::from_slice(body)?);
+        }
+    }
+}
+
+async fn model_publication_http_server(
+    listener: tokio::net::TcpListener,
+) -> crate::error::Result<Vec<serde_json::Value>> {
+    use tokio::io::AsyncWriteExt;
+    let mut requests = Vec::new();
+    for _ in 0..2 {
+        let (mut socket, _) = listener.accept().await?;
+        let request = model_publication_http_request(&mut socket).await?;
+        // Exercise the concrete adapter's real streaming request, including
+        // its required semantic terminal, without a substitute LlmClient.
+        let delta = json!({"choices":[{"index":0,"delta":{"role":"assistant","content":"ok"},"finish_reason":null}]});
+        let stop = json!({"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]});
+        let body = format!("data: {delta}\n\ndata: {stop}\n\ndata: [DONE]\n\n");
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len(),
+        );
+        socket.write_all(response.as_bytes()).await?;
+        requests.push(request);
+    }
+    Ok(requests)
+}
+
+#[tokio::test]
+async fn runtime_model_publication_switches_actual_http() -> crate::error::Result<()> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let mut config = test_llm_config("model-a");
+    config.base_url = format!("http://{}/v1/chat/completions", listener.local_addr()?);
+    let server = tokio::spawn(async move {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            model_publication_http_server(listener),
+        )
+        .await
+        .map_err(|error| std::io::Error::other(error.to_string()))?
+    });
+    let mut agent = ReactAgent::new(
+        AgentConfig::new("model-a", "model-publication", "system")
+            .enable_tool(false)
+            .auto_project_rules(false)
+            .session_id("same-session")
+            .conversation_id("same-conversation"),
+    )
+    .with_llm_config(config);
+    assert_eq!(Agent::chat(&agent, "first request").await?, "ok");
+    // Compatible with the original infallible setter for the natural red
+    // observation; the real HTTP assertion still rejects a failed rebind.
+    let _ = agent.set_model("model-b");
+    assert_eq!(Agent::chat(&agent, "second request").await?, "ok");
+    let requests = server
+        .await
+        .map_err(|error| std::io::Error::other(error.to_string()))??;
+    let models: Vec<_> = requests
+        .iter()
+        .map(|request| request.get("model"))
+        .collect();
+    assert_eq!(models, [Some(&json!("model-a")), Some(&json!("model-b"))]);
+    let second = requests
+        .get(1)
+        .ok_or_else(|| std::io::Error::other("second model request missing"))?;
+    assert!(second.to_string().contains("first request"));
+    assert!(second.to_string().contains("second request"));
+    assert_eq!(agent.model_name(), "model-b");
+    assert_eq!(
+        agent.llm_client().map(|client| client.model_name()),
+        Some("model-b")
+    );
+    Ok(())
+}
+
+fn model_publication_state(agent: &ReactAgent) -> serde_json::Value {
+    json!({
+        "model": agent.model_name(),
+        "config": agent.llm_config(),
+        "profile": format!("{:?}", agent.config.model_profile),
+        "temperature": agent.config.get_temperature(),
+        "max_tokens": agent.config.get_max_tokens(),
+        "thinking": format!("{:?}", agent.thinking()),
+    })
+}
+
+#[test]
+fn runtime_model_publication_custom_client_rejects_rebind_without_stale_config()
+-> crate::error::Result<()> {
+    for builder_injection in [false, true] {
+        let mut agent = ReactAgent::new(AgentConfig::minimal("model-a", "test"));
+        agent.set_llm_config(test_llm_config("model-a"))?;
+        agent.set_temperature(Some(0.25));
+        agent.set_max_tokens(Some(1024));
+        let custom: Arc<dyn crate::llm::LlmClient> =
+            Arc::new(crate::testing::MockLlmClient::new().with_model_name("custom-model"));
+        if builder_injection {
+            agent = agent.with_llm_client(Arc::clone(&custom));
+        } else {
+            agent.set_llm_client(Arc::clone(&custom));
+        }
+        assert!(agent.llm_config().is_none());
+        let before = model_publication_state(&agent);
+        agent.set_model("custom-model")?;
+        let error = agent.set_model("model-b");
+        assert!(matches!(error, Err(crate::error::ReactError::Config(error))
+            if matches!(error.as_ref(), crate::error::ConfigError::MissingConfig(..))));
+        assert_eq!(model_publication_state(&agent), before);
+        assert!(
+            agent
+                .llm_client()
+                .is_some_and(|client| Arc::ptr_eq(client, &custom))
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn runtime_model_publication_noop_and_failed_construction_are_inert() -> crate::error::Result<()> {
+    let mut agent = ReactAgent::new(AgentConfig::minimal("model-a", "test"));
+    agent.set_llm_config(test_llm_config("model-a"))?;
+    let client = agent
+        .llm_client()
+        .cloned()
+        .ok_or_else(|| std::io::Error::other("configured client missing"))?;
+    let before = model_publication_state(&agent);
+    agent.set_model("model-a")?;
+    assert!(
+        agent
+            .llm_client()
+            .is_some_and(|value| Arc::ptr_eq(value, &client))
+    );
+    for name in ["", " \t\n"] {
+        assert!(
+            matches!(agent.set_model(name), Err(crate::error::ReactError::Config(error))
+            if matches!(error.as_ref(), crate::error::ConfigError::MissingConfig(..)))
+        );
+        assert_eq!(model_publication_state(&agent), before);
+    }
+    let mut invalid = test_llm_config("model-b");
+    invalid.api_key = "invalid\nheader".to_string();
+    assert!(agent.set_llm_config(invalid.clone()).is_err());
+    assert_eq!(model_publication_state(&agent), before);
+    assert!(
+        agent
+            .set_sourced_llm_config(crate::llm::SourcedLlmConfig::new(invalid))
+            .is_err()
+    );
+    assert_eq!(model_publication_state(&agent), before);
+    assert!(
+        agent
+            .llm_client()
+            .is_some_and(|value| Arc::ptr_eq(value, &client))
+    );
+
+    // A legacy inconsistent display/config pair must not short-circuit a
+    // requested rebind just because the display already says model-b.
+    agent.config.model_name = "model-b".to_string();
+    agent.set_model("model-b")?;
+    assert_eq!(
+        agent.llm_client().map(|value| value.model_name()),
+        Some("model-b")
+    );
+    assert!(
+        !agent
+            .llm_client()
+            .is_some_and(|value| Arc::ptr_eq(value, &client))
+    );
+    Ok(())
+}
+
+#[test]
+fn runtime_model_publication_self_builders_preserve_state_on_failure() -> crate::error::Result<()> {
+    for sourced in [false, true] {
+        let mut agent = ReactAgent::new(AgentConfig::minimal("model-a", "test"));
+        agent.set_llm_config(test_llm_config("model-a"))?;
+        let before = model_publication_state(&agent);
+        let mut invalid = test_llm_config("model-b");
+        invalid.api_key = "invalid\nheader".to_string();
+        assert!(
+            crate::agent::ReactAgentBuilder::new()
+                .llm_config(invalid.clone())
+                .build()
+                .is_err()
+        );
+        agent = if sourced {
+            agent.with_sourced_llm_config(crate::llm::SourcedLlmConfig::new(invalid))
+        } else {
+            agent.with_llm_config(invalid)
+        };
+        assert_eq!(model_publication_state(&agent), before);
+    }
+    Ok(())
+}
+
+#[test]
+fn runtime_model_publication_sourced_facts_keep_precedence_and_expiry() -> crate::error::Result<()>
+{
+    use echo_core::llm::capabilities::{
+        ModelFactConfidence, ModelFactMetadata, ModelFactSet, ModelFactSource, ModelProfile,
+        ModelProfileOverride,
+    };
+    let mut old = ModelProfile::from_provider_name("model-a", "test-provider");
+    old.context_window = Some(32_000);
+    old.prompt_suffix = Some("retained complementary instruction".to_string());
+    let mut agent = ReactAgent::new(AgentConfig::minimal("model-a", "test").model_profile(old));
+    let fact = |version: &str, window, expired: bool| {
+        ModelFactSet::new(
+            ModelFactMetadata::new(
+                ModelFactSource::CallerOverride,
+                "test:runtime-publication",
+                version,
+                SystemTime::UNIX_EPOCH,
+                expired.then_some(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1)),
+                ModelFactConfidence::VERIFIED,
+            ),
+            None,
+            ModelProfileOverride {
+                context_window: Some(window),
+                ..Default::default()
+            },
+        )
+    };
+    agent.set_sourced_llm_config(test_llm_config("model-a").with_model_override(fact(
+        "fresh-64k",
+        64_000,
+        false,
+    )))?;
+    let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+    assert_eq!(snapshot.config.token_limit, 64_000);
+    assert!(
+        agent
+            .config
+            .model_profile
+            .as_ref()
+            .is_some_and(|value| value.profile.prompt_suffix.as_deref()
+                == Some("retained complementary instruction"))
+    );
+    agent.set_sourced_llm_config(test_llm_config("model-a").with_model_override(fact(
+        "expired-8k",
+        8_000,
+        true,
+    )))?;
+    let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+    assert_eq!(snapshot.config.token_limit, 64_000);
+    assert!(
+        snapshot
+            .config
+            .ignored_model_facts
+            .iter()
+            .any(|value| value.version == "expired-8k")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn runtime_model_publication_rebind_refreshes_implicit_not_explicit_budget()
+-> crate::error::Result<()> {
+    for explicit in [false, true] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let mut config = test_llm_config("model-a");
+        config.base_url = format!("http://{}/v1/chat/completions", listener.local_addr()?);
+        let server = tokio::spawn(async move {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                model_publication_http_server(listener),
+            )
+            .await
+            .map_err(|error| std::io::Error::other(error.to_string()))?
+        });
+        let mut old = echo_core::llm::capabilities::ModelProfile::from_provider_name(
+            "model-a",
+            "test-provider",
+        );
+        old.context_window = Some(32_000);
+        let mut agent_config = AgentConfig::minimal("model-a", "test")
+            .auto_project_rules(false)
+            .enable_tool(false)
+            .model_profile(old);
+        if explicit {
+            agent_config = agent_config.token_limit(100_000);
+        }
+        let mut agent = ReactAgent::new(agent_config);
+        agent.set_llm_config(config.clone())?;
+        assert_eq!(Agent::chat(&agent, "before switch").await?, "ok");
+        agent.set_model("model-b")?;
+        assert_eq!(Agent::chat(&agent, "after switch").await?, "ok");
+        let requests = server
+            .await
+            .map_err(|error| std::io::Error::other(error.to_string()))??;
+        assert_eq!(
+            requests
+                .iter()
+                .filter_map(|value| value.get("model").and_then(|value| value.as_str()))
+                .collect::<Vec<_>>(),
+            ["model-a", "model-b"]
+        );
+        let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+        let expected = if explicit {
+            100_000
+        } else {
+            DEFAULT_TOKEN_LIMIT
+        };
+        assert_eq!(snapshot.config.token_limit, expected);
+        assert_eq!(
+            snapshot
+                .config
+                .token_budget
+                .as_ref()
+                .map(|budget| budget.total_window()),
+            Some(expected)
+        );
+        assert!(
+            agent
+                .config
+                .model_profile
+                .as_ref()
+                .is_some_and(|value| value.profile.model_name == "model-b"
+                    && value.profile.context_window != Some(32_000))
+        );
+        // The actual Context was updated by the second real turn's prepare.
+        // 90k of request overhead fits 128k's input allowance, but not 100k's.
+        assert_eq!(
+            agent
+                .memory
+                .context
+                .lock()
+                .await
+                .should_compress_with_overhead(90_000),
+            explicit
+        );
+        assert_eq!(
+            agent.llm_config().map(|value| (
+                &value.base_url,
+                &value.api_key,
+                value.api_protocol,
+                value.timeouts
+            )),
+            Some((
+                &config.base_url,
+                &config.api_key,
+                config.api_protocol,
+                config.timeouts
+            ))
+        );
+    }
+    Ok(())
+}
+
+struct ModelPublicationProfileClient {
+    inner: crate::testing::MockLlmClient,
+    profile: echo_core::llm::capabilities::ModelProfileResolution,
+    queries: Arc<AtomicUsize>,
+}
+
+impl crate::llm::LlmClient for ModelPublicationProfileClient {
+    fn chat(
+        &self,
+        request: crate::llm::ChatRequest,
+    ) -> futures::future::BoxFuture<'_, crate::error::Result<crate::llm::ChatResponse>> {
+        crate::llm::LlmClient::chat(&self.inner, request)
+    }
+    fn chat_stream(
+        &self,
+        request: crate::llm::ChatRequest,
+    ) -> futures::future::BoxFuture<
+        '_,
+        crate::error::Result<
+            futures::stream::BoxStream<'static, crate::error::Result<crate::llm::ChatChunk>>,
+        >,
+    > {
+        crate::llm::LlmClient::chat_stream(&self.inner, request)
+    }
+    fn model_name(&self) -> &str {
+        crate::llm::LlmClient::model_name(&self.inner)
+    }
+    fn model_profile_resolution(&self) -> echo_core::llm::capabilities::ModelProfileResolution {
+        self.queries.fetch_add(1, Ordering::SeqCst);
+        self.profile.clone()
+    }
+}
+
+#[tokio::test]
+async fn runtime_model_publication_prepared_commit_uses_only_frozen_profile()
+-> crate::error::Result<()> {
+    for commit in [false, true] {
+        let agent = ReactAgent::new(AgentConfig::minimal("model-a", "test"));
+        let before = model_publication_state(&agent);
+        let handle = AgentHandle::new(agent);
+        let queries = Arc::new(AtomicUsize::new(0));
+        let mut profile = echo_core::llm::capabilities::ModelProfile::from_provider_name(
+            "model-b",
+            "test-provider",
+        );
+        profile.context_window = Some(64_000);
+        let client: Arc<dyn crate::llm::LlmClient> = Arc::new(ModelPublicationProfileClient {
+            inner: crate::testing::MockLlmClient::new().with_model_name("model-b"),
+            profile: echo_core::llm::capabilities::ModelProfileResolution::from_explicit_profile(
+                profile,
+                SystemTime::now(),
+            ),
+            queries: Arc::clone(&queries),
+        });
+        let prepared = handle
+            .prepare_model_generation(
+                test_llm_config("model-b"),
+                client,
+                Some(0.25),
+                Some(1024),
+                None,
+                100_000,
+                super::PreparedCriticUpdate::Preserve,
+            )
+            .await?;
+        let after_prepare = queries.load(Ordering::SeqCst);
+        assert!(after_prepare > 0);
+        if commit {
+            prepared.commit();
+        } else {
+            drop(prepared);
+        }
+        assert_eq!(queries.load(Ordering::SeqCst), after_prepare);
+        if commit {
+            assert_eq!(
+                handle
+                    .read(|agent| agent.config.model_profile.as_ref().map(|value| (
+                        value.profile.model_name.clone(),
+                        value.profile.context_window
+                    )))
+                    .await,
+                Some(("model-b".to_string(), Some(64_000)))
+            );
+        } else {
+            assert_eq!(handle.read(model_publication_state).await, before);
+        }
+    }
+    Ok(())
+}
+
 #[cfg(feature = "subagent")]
 #[tokio::test]
 async fn react_agent_initializes_subagent_hook_executor() {
@@ -760,15 +1224,16 @@ async fn react_agent_context_stats() {
 // ── ReactAgent configuration tests ─────────────────────────────────────────────
 
 #[test]
-fn react_agent_set_model() {
+fn react_agent_set_model() -> crate::error::Result<()> {
     let config = AgentConfig::minimal("model1", "helper");
     let mut agent = ReactAgent::new(config);
 
     assert_eq!(agent.model_name(), "model1");
 
-    agent.set_model("model2");
+    agent.set_model("model2")?;
 
     assert_eq!(agent.model_name(), "model2");
+    Ok(())
 }
 
 #[tokio::test]

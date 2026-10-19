@@ -4,6 +4,8 @@ id: evidence.model-facts-authority-repair
 kind: evidence
 observed_at: 07e4270380c40df3f412f99c0aecb6145410cb2a
 source_refs:
+  - src/agent/react/capabilities.rs
+  - src/agent/react/tests.rs
   - echo-core/src/llm/capabilities.rs
   - echo-core/src/llm/mod.rs
   - echo-integration/src/providers/config.rs
@@ -20,7 +22,7 @@ source_refs:
   - src/agent/react/run/phases/prepare.rs
   - src/agent/snapshot.rs
   - docs/adr/0047-model-facts-freshness-authority.md
-supports: [behavior.llm-provider-execution, rule.provider-protocol-boundary]
+supports: [behavior.llm-provider-execution, rule.provider-protocol-boundary, finding.runtime-model-client-publication, finding.runtime-token-limit-explicit-publication]
 limitations:
   - provider元数据获取和持久化仍由provider adapter或应用负责，framework只解析typed facts
   - tokenizer fact 只保留在 resolution receipt；当前 runtime 仍使用 calibrated heuristic tokenizer，provider dispatch 留给 #100
@@ -43,3 +45,18 @@ ADR 0047记录DU-68分层、行业依据、兼容与回滚；core拥有fact cont
 ## 已知缺口
 
 SDK public inventory与多语言分类在并行集成分支统一生成；本切片不实现provider网络刷新任务、catalog下载、tokenizer calibration反馈或strict structured-output执行。
+
+## Runtime publication amendment (2026-10-19)
+
+ADR 0047 now extends the existing installation boundary rather than introducing
+a new model registry, request override or SDK state authority. The approved repair
+makes the existing model/config setters fallible, builds and resolves before one
+private publisher, clears stale configuration on custom injection, and freezes
+model resolution in target-bound preparation. Commit publishes frozen values;
+arbitrary client methods remain outside its infallible publication phase.
+Identity changes discard old exact/caller facts, while sourced same-identity
+freshness and complementary facts retain the resolver's existing precedence.
+The current candidate implements this boundary in ReactAgent installation, its
+prepared receipt and builder. The seven runtime-publication regressions, four
+explicit-limit regressions and matching existing prepared/configuration controls
+pass. Final independent source rereview and full delivery gates remain separate.

@@ -4,15 +4,22 @@ id: map.llm-provider-runtime
 kind: capability_map
 title: LLM Provider、Model Policy 与 Streaming
 risk: high
-observed_at: f1e9027246760661144786e9e35615cd46d580c6
+observed_at: source:6e61249f5796e67d8daa2038c750f8452c9c6d41f5e14dcda791405fd2db5d06
 boundary_refs: [boundary.llm-provider-runtime]
 behavior_refs: [behavior.llm-provider-execution]
 rule_refs: [rule.provider-protocol-boundary]
 evidence_refs: [evidence.provider-protocol-quality, evidence.high-risk-audit-frontier]
-finding_refs: [finding.structured-output-main-path, finding.structured-output-schema-validation-contract, finding.provider-capability-authority, finding.model-fact-freshness-authority, finding.nonstream-cancellation-parity, finding.sse-eof-framing-acceptance, finding.provider-stream-terminal-parity, finding.tokenizer-calibration-feedback-convergence]
+finding_refs: [finding.structured-output-main-path, finding.structured-output-schema-validation-contract, finding.provider-capability-authority, finding.model-fact-freshness-authority, finding.nonstream-cancellation-parity, finding.sse-eof-framing-acceptance, finding.provider-stream-terminal-parity, finding.tokenizer-calibration-feedback-convergence, finding.runtime-model-client-publication]
 audit_refs: [audit.llm-provider-runtime.contract-evidence, audit.llm-provider-runtime.failure-concurrency, audit.llm-provider-runtime.time-lifecycle]
 related_map_refs: [map.agent-session-turn, map.context-memory, map.protocol-surfaces, map.eval-evolution]
 scenarios:
+  runtime-model-publication:
+    status: mapped
+    source_refs: [src/agent/react/capabilities.rs, src/agent/react/mod.rs, src/agent/react/builder.rs, src/agent/react/tests.rs, src/agent/snapshot.rs, docs/adr/0047-model-facts-freshness-authority.md]
+    behavior_refs: [behavior.llm-provider-execution]
+    rule_refs: [rule.provider-protocol-boundary]
+    evidence_refs: [evidence.model-facts-authority-repair, evidence.model-facts-authority-verification]
+    finding_refs: [finding.runtime-model-client-publication]
   provider-neutral-request:
     status: mapped
     source_refs: [echo-core/src/llm/mod.rs, echo-core/src/llm/types.rs]

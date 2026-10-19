@@ -859,10 +859,8 @@ impl ReactAgentBuilder {
             .into());
         }
         // Validate an explicitly supplied provider contract before creating
-        // the agent. `ReactAgent::set_llm_config` keeps a non-fallible setter
-        // for compatibility, so without this check an invalid endpoint or
-        // protocol would be logged and the builder would still return an
-        // agent that cannot execute a turn.
+        // the agent, before installing stores, tools or other owned resources.
+        // The actual fallible installation below propagates any build failure.
         if let Some(llm_config) = self.llm_config.as_ref() {
             llm_config.build_client()?;
         }
@@ -980,7 +978,7 @@ impl ReactAgentBuilder {
 
         // Inject LLM config
         if let Some(llm_config) = self.llm_config {
-            agent.set_sourced_llm_config(llm_config);
+            agent.set_sourced_llm_config(llm_config)?;
         }
 
         // Register all custom tools
