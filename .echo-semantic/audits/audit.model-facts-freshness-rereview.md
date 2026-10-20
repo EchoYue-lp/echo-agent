@@ -8,6 +8,10 @@ freshness: examined
 revision: 382cb600b0c8c52d1f6866682c6553e0c3369409
 finding_refs: [finding.model-fact-freshness-authority, finding.provider-capability-authority, finding.runtime-token-limit-explicit-publication, finding.runtime-model-client-publication]
 challenges:
+  configured-builder-client-pair-complete-local-verification:
+    revision: ffe4c19acf6d33cd419f2237de3209b4e3015e80
+    source_refs: [src/agent/react/builder.rs, src/agent/react/mod.rs, src/agent/react/tests.rs, docs/adr/0047-model-facts-freshness-authority.md, docs/en/38-factory-modes.md, docs/zh/38-factory-modes.md, echo-agent-learning/examples/demo26_provider_factory.rs]
+    evidence_refs: [evidence.configured-client-construction]
   configured-builder-client-pair:
     revision: source:5f000f23fee488a6fecb1a972b155cd72ad206384c05f3802cdfec0d52c11872
     source_refs: [src/agent/react/builder.rs, src/agent/react/mod.rs, src/agent/react/tests.rs, docs/adr/0047-model-facts-freshness-authority.md, echo-agent-learning/examples/demo26_provider_factory.rs]
@@ -156,3 +160,28 @@ shared registry/tools/store injection, invalid-pair rejection and secret-safe
 diagnostics, old setter precedence and pair replacement, then actual same-Agent
 HTTP A/B consumption. Current source inspection is not executed verification or
 independent implementation review; neither is complete at this checkpoint.
+
+## Builder complete local challenge rereview
+
+The new named challenge binds actual public source ffe4c19acf6d33cd419f2237de3209b4e3015e80 /
+source:5f000f23fee488a6fecb1a972b155cd72ad206384c05f3802cdfec0d52c11872. The earlier awaiting-focused section
+records its prior static checkpoint. Main Audit revision/freshness, every old
+challenge and broad Behavior/Rule statuses retain their original qualifications.
+
+Independent implementation and exact-file necessity review passed C0/I0/M0;
+focused original receipts and complete23 receipts also independently passed
+C0/I0/M0 after checking original argv, all2,329 inputs, engineering1,764 inputs,
+profile/source guards, raw completeness, test-harness boundaries and resource
+limits. Bounded counterexamples cover loss of original Arc or rebuild config,
+second profile query/client build, initial budget drift, dropped registry/tools/
+store injection, old-setter precedence, stale config after opaque replacement,
+invalid-pair diagnostics and actual HTTP A/B consumption.
+
+Full05 has3,658pass/0fail/3 pre-existing external ignores/0filtered; isolated
+features only compile. The separate attempt01 resource/guard failure remains
+unknown as to Cargo natural exit and is not the CLI behavior before or a passed
+run. The ignored guard repair is not causal proof for historical SDK Host exit.
+This challenge closes only current local Builder source/engineering/rereview.
+CLI original17 after-consumption, newmain/seven CI checks, native Hook/Stop,
+final cold necessary refs and website mirrors remain separate; no global status
+upgrade, new SDK contract or publication is implied.

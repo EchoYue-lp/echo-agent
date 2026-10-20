@@ -580,3 +580,21 @@ configured-construction Evidence/Audit own this increment; their historical
 epochs and broader needs_review/frontier scope are preserved. Source/model
 maintenance does not establish focused runtime, full engineering/feature gates,
 CLI consumer after-state, SDK repinning, website mirrors or precise main CI.
+
+## Builder pair current local qualification
+
+The actual full validation source epoch is Git ffe4c19acf6d33cd419f2237de3209b4e3015e80, whose
+canonical nonsemantic digest remains source:5f000f23fee488a6fecb1a972b155cd72ad206384c05f3802cdfec0d52c11872. All 1,764
+engineering inputs and all 2,329 tracked inputs were identical across the final
+23 successful commands. Existing headers, lineage base, region/coverage/closure
+flags and historical source epochs remain unchanged.
+
+The six focused commands and original six full gates plus 17 independent feature
+checks passed; the existing configured-construction Evidence and named Audit
+challenge record actual receipts and independent C0/I0/M0 rereview. Full05 alone
+passed 3,658 tests with three unchanged external opt-in ignores; feature checks
+are compilation only and are not added to runtime totals. An earlier resource
+abort remains separately retained, not relabelled as success. This closes only
+local Builder qualification. CLI original17 after-state, framework exact main
+and seven CI checks, native Hook/Stop and accepted-main website mirrors remain
+separate. SDK pin356 and accepted cross-language scope remain unchanged.
