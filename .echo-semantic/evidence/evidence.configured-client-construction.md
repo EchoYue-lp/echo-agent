@@ -178,3 +178,92 @@ design C0/I0/M0 before implementation. Current runtime/source and exact four-pat
 necessity rereview are required before the normal checkpoint. Formal docs/ADR/
 examples/site have no changed public API or product behavior in this test-only
 increment; their already pending framework mirror obligations remain in force.
+
+## Final local engineering qualification
+
+The final local engineering run used Git
+`5eeb8d47e9158c449a1e6400892502e75202edab`, tree
+`7ee24682b21942ca1f6a818c1a9283342e0fe95b`, canonical source
+`source:4ad31ae30cca2dfe0d0b04d90dd656b2f3ddb3280337f5e4407e9fbe6fed8276`.
+Immediately before that run, fetching remote main succeeded at
+`f3fa0705f62fe813a5a86bc41cd673f82f915a61`; merging it returned
+Already up to date. The task branch was clean, conflict-free and contained main.
+All 1,764 non-semantic tracked inputs remained byte-identical throughout the
+run and this subsequent Evidence-only tail. Official source_digest still
+reproduces 4ad31; baseline therefore needs no digest or closure-field change.
+
+Every one of the six prescribed workspace gates and seventeen independent
+root-feature checks naturally exited0 on this same source snapshot:
+
+| Command | Exit |
+| --- | --- |
+| `cargo fmt --all` | 0 |
+| `cargo fmt --all -- --check` | 0 |
+| `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` | 0 |
+| `cargo clippy --workspace --lib --bins --all-features --locked -- -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic -D clippy::unreachable` | 0 |
+| `cargo test --workspace --all-targets --all-features --locked` | 0 |
+| `cargo check --workspace --lib --no-default-features --locked` | 0 |
+| `cargo check -p echo_agent --no-default-features --features acp --locked` | 0 |
+| `cargo check -p echo_agent --no-default-features --features a2a --locked` | 0 |
+| `cargo check -p echo_agent --no-default-features --features mcp --locked` | 0 |
+| `cargo check -p echo_agent --no-default-features --features lsp --locked` | 0 |
+| `cargo check -p echo_agent --no-default-features --features sqlite --locked` | 0 |
+| `cargo check -p echo_agent --no-default-features --features telemetry --locked` | 0 |
+| `cargo check -p echo_agent --no-default-features --features topology --locked` | 0 |
+| `cargo check -p echo_agent --no-default-features --features subagent --locked` | 0 |
+| `cargo check -p echo_agent --no-default-features --features web --locked` | 0 |
+| `cargo check -p echo_agent --no-default-features --features media --locked` | 0 |
+| `cargo check -p echo_agent --no-default-features --features data --locked` | 0 |
+| `cargo check -p echo_agent --no-default-features --features statistics --locked` | 0 |
+| `cargo check -p echo_agent --no-default-features --features channels --locked` | 0 |
+| `cargo check -p echo_agent --no-default-features --features git --locked` | 0 |
+| `cargo check -p echo_agent --no-default-features --features database --locked` | 0 |
+| `cargo check -p echo_agent --no-default-features --features rag --locked` | 0 |
+| `cargo check -p echo_agent --no-default-features --features chart --locked` | 0 |
+
+The complete test command executed 89 Cargo targets: 87 standard Rust test
+harnesses and two Criterion targets. Taking the final summary of each Cargo
+target yields 3,653 passed / 0 failed / 3 ignored / 0 filtered; two nested child/selfprobe
+summaries are deliberately excluded from that aggregate. The framework root
+library passed all 1,262 tests, including the three corrected original oracles.
+The old 382 full-run failure is retained as a separate epoch, not reclassified
+or replaced by the focused subset or by cleanup.
+
+The following three unchanged, pre-existing opt-in live tests were not executed
+and are not counted as coverage. Their complete source blobs match the fetched
+main snapshot; this task added no ignore or skip flag:
+
+- `lsp::manager::tests::live_installed_servers_initialize_on_real_project_fixture`: `echo-integration/src/lsp/manager.rs:1456`; opt-in live LSP smoke test; set ECHO_AGENT_LSP_SMOKE=1.
+- `research::clients::tests::live_open_scholarly_providers_return_results`: `echo-tools/src/research/clients.rs:979`; opt-in live smoke test; set ECHO_AGENT_PROVIDER_SMOKE=1.
+- `research::clients::tests::live_zotero_credentials_can_list_items`: `echo-tools/src/research/clients.rs:1005`; requires ZOTERO_API_KEY and ZOTERO_LIBRARY_ID.
+
+All 23 official receipts have exit0, null signal/error and no truncation; their
+seen/written byte counts and SHA-256 match the original logs. Every source guard
+is empty, no resource interruption occurred, and compiler-warning scans are
+empty. The peak owned target was 9,217,630,208 bytes (below 9GiB) and minimum free
+space 6,860,873,728 bytes (above 5GiB). Top-level Cargo commands ran sequentially with jobs=1,
+incremental=0, dev/test debug=0 and symbol stripping. This runner and the source
+profiles introduced no disabling of assertions, overflow checks or unwind, and
+introduced no RUSTFLAGS override or warning suppression. The receipt does not
+fully record inherited effective environment overrides, so no broader claim
+about their absence is made.
+
+The complete local proof is ignored
+`project-rules-test-oracles/full-result-proof.json`, 30,378 bytes/SHA-256
+`374aa9916319c8f8eb65c880a06d429fd896f51d9d0b1b6543ea87119ae13c87`.
+Its full test raw is 366,168 bytes/SHA-256
+`3ffcdbe83e9a3d6c3e2b708d00fac3a3b9b8b9caa91954c0cfd6f418fe5f28db`;
+`full-test-counts.json` retains each top-level harness and excluded nested
+summary, and `existing-ignored-tests-proof.json` records the original ignore
+annotations and matching main blobs. The raw/source/binary artifacts remain
+outside Git; these hashes identify them rather than substitute for originals.
+
+An independent engineering-proof review returned C0/I0/M0 for the receipts,
+top-level counts, source guards and frozen inputs recorded here.
+
+This tail closes local engineering verification only. It does not promote
+broad Behavior or Finding scope, relabel native Hook/Stop, qualify a refreshed
+SDK Host/contract or website mirror, or claim framework main and its exact CI
+already passed. Historical observations above keep their original revisions,
+source_refs, counts and qualifications. Main integration, precise main CI and
+the independently owned SDK/website delivery remain separate steps.
