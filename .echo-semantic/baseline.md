@@ -3,8 +3,8 @@ schema_version: 1
 id: baseline.repository
 kind: baseline
 source_snapshot:
-  base_revision: 6563d26570cc4a8d93c86b7e37443b0559476807
-  content_digest: 5d89e64c394894674208e32f5978a76c16e4c26081038a4378fe62dccf16908d
+  base_revision: f3fa0705f62fe813a5a86bc41cd673f82f915a61
+  content_digest: 4ad31ae30cca2dfe0d0b04d90dd656b2f3ddb3280337f5e4407e9fbe6fed8276
 inventory_closure: closed
 behavior_model_closure: closed
 map_refs:
@@ -522,3 +522,51 @@ source_snapshot.base_revision 使用已经发布的共同祖先 a634，仅承担
 The new content digest is the canonical digest of the frozen B source and maintained documents. The existing published lineage base remains unchanged. Historical Git observations above and their source digests retain their original epoch; no old Evidence/Audit revision is moved to this candidate. Current focused ownership tests and independent review are recorded by evidence.subagent-physical-settlement-repair and audit.subagent-physical-settlement-focused-review. This snapshot maintenance does not claim six merge gates, feature matrix, consumer qualification, main CI, or new global behavioral closure.
 
 The subsequent ACP close increment has canonical source digest 951cf5e91f3d0fb879bda5e1960e21750accb35acdc3246c14fb6a900b53225e. The preceding focused source digest 3fd9e1ed897ce9ee4088530ea89cde93193cea1eb1d5a1afcd612ab083e2deb7 remains recoverable in pushed commit 87223c8163f6b30479fbd44eadd09736db50bd5d. Full gates/consumer/main remain incomplete.
+
+## Compacted-context and canonical-root focused checkpoint
+
+Current canonical source digest is b2639597dfa94b7e16aa312e46db6585d9df7636d6340c004ae978f18711d0f1, computed by the unchanged installed
+0.5 source_digest function after the source/docs freeze. Published lineage base
+f3fa remains unchanged; actual machine preflight/change-evidence base is f990.
+The preceding f990 tree independently hashes to 6e61249f5796e67d8daa2038c750f8452c9c6d41f5e14dcda791405fd2db5d06, so its earlier model
+and token-limit evidence retains that historical source identity and scope.
+
+Two new, distinct framework Findings close only the retained-ordinal and
+canonical-root occurrence/value local focused invariants, with one bounded Evidence and two
+current challenges in the existing Context-memory Audit. Twelve distinct tests
+(ten new, two existing controls), the fixture-only tail rerun, focused Clippy and
+fmt are actual; no old suite total is used as new proof. Broad Behavior statuses,
+inventory/behavior closure values and historical challenges are unchanged.
+
+Raw/copied sources/binaries/PF stay ignored. Old task-mode historical SDK reads
+and 512-closure limits retain their existing disposition; a full historical
+strict-snapshot/change-evidence run at actual f990 base is separate from native
+Stop, cumulative f3fa qualification, full six gates/17 features, new SDK Host
+aggregate/schema3 acceptance, exact-main CI and required website mirror sync.
+F41/ADR0056 join the already planned F38/ADR0047 official website sync after exact
+framework main; examples have no changed source-specific call site and remain
+covered by the later required workspace all-target gate.
+
+## Configured-client construction focused extension
+
+The current canonical source digest is 1828e264adb8119b8b19c84ccc0e18b35067b6333f89c775e51856563290659e; actual preflight base is674f2b41.
+The previous source digest b263 remains attached to that exact Git checkpoint
+for its projection/root qualification. No earlier closure flags, broad Behavior
+status or historical test total is promoted. The new bounded Evidence records
+10 native tests (three new, seven existing) and one executable public Rustdoc,
+plus focused Clippy/fmt; two earlier fixture failures remain separately recorded.
+One Rust public constructor is not automatically a new SDK remote contract.
+Consumer sharing/Host pin, full6+17, exact main CI, website mirrors and native
+Stop remain their original separate obligations.
+
+## Project-rule test oracle alignment
+
+Current canonical source is 4ad31ae30cca2dfe0d0b04d90dd656b2f3ddb3280337f5e4407e9fbe6fed8276; actual preflight base is382cb600. Only
+the existing test source changed: legacy-plan fixtures isolate ambient rules,
+and reset preserves the full rendered payload with rules still enabled. The
+existing configured-client Evidence records this separate epoch, actual three
+workspace-union passes, rawfull05 failures and resource cut without adding a
+Finding or semantic owner. Previous constructor/projection/root qualifications
+remain at their real snapshots, with source1828 machine markers losslessly
+bound to382cb600. Broad statuses/closure flags and native Stop are unchanged;
+final complete23gates, exact main CI and SDK/website delivery remain pending.

@@ -88,6 +88,92 @@ References:
 - File and SQLite backends expose the same receipts. File uses atomic manifest
   replacement under its single-writer lease; SQLite uses immediate transactions.
 
+## Retained and derived model-context occurrences
+
+The original suffix/prefix cursor comparison duplicated retained messages when
+compression evicted a final response or rewrote an interior tool group. A model
+window may retain several separated transcript occurrences, add a synthetic
+summary, and still retain a later original fact. Giving that summary a new fact
+ordinal before the retained fact would break the existing ordered frontier.
+
+Considered alternatives were global content deduplication (which would swallow
+new same-text turns), allocating ordinals to every rewritten model message
+(which invents transcript events), and storing a second context-history ledger
+(which duplicates authority). The accepted extension keeps one checkpoint/cursor:
+
+- `projected` remains the strictly ordered fact ordinal/digest frontier.
+- Optional `context_only` positions/digests describe compression-derived active
+  occurrences interleaved with those facts. They have no transcript ordinal and
+  never acknowledge a new transcript event.
+- Explicit compression starts after original facts settle. Ordered alignment
+  retains unchanged occurrences, while unmatched transformed occurrences stay
+  model-context-only. Ordinary later appends still allocate fresh ordinals even
+  for repeated text. An empty active view retains the append frontier.
+- Full messages and these bindings settle through the existing checkpoint CAS.
+  Pending payloads validate their current model view against `cursor_after`;
+  `cursor_before` retains its original shape and lineage checks.
+
+Bound payloads use internal schema version 3. Earlier framework readers reject
+that version through their existing gate instead of silently discarding binding
+provenance. New readers retain the version 1/2 legacy path when bindings are
+absent, without claiming that old payloads prove context-transform provenance.
+A mislabeled version 1/2 payload carrying new bindings is rejected.
+
+Managed preparation stages ContextManager messages, projection scopes and
+accepted metrics, and defers `context_committed` observers. During Store I/O the
+public Context contains the coherent pre-view and its mutex is released, so
+read-only Store callbacks may reenter. Successful CAS publication installs the
+frozen view/bindings/version without another await, then accepts its observers.
+Errors and dropped futures restore the volatile footprint, invalidate runtime
+hydration and require authoritative reload before another managed mutation.
+They do not undo a possibly committed CAS or replay an external MemoryPromoter.
+A changed System/protected/summary message still requires persistence even when
+its visible fact bindings have not changed.
+
+This separation follows the existing ADR references and two additional primary
+observations: [Codex's compaction implementation](https://github.com/openai/codex/blob/89461ea6833832b0551ce24ee32205824d5c108d/codex-rs/core/src/compact.rs)
+constructs replacement history outside normal conversation-item recording, and
+[Claude Code's context description](https://code.claude.com/docs/en/how-claude-code-works)
+and [session storage](https://code.claude.com/docs/en/sessions) distinguish a
+reduced model window from the retained local transcript. The framework keeps
+its own Store/CAS design and does not adopt another product's protocol.
+
+The Rust aggregate checkpoint shape changes. Existing accepted SDK aggregate
+contracts need their canonical generator's normal compatibility report and an
+appropriate Host pin; newly introduced Rust fields/types are not automatically
+new language operations. The opaque checkpoint carrier must preserve complete
+version-3 values. No second Store, application policy or new remote DTO is added.
+Focused evidence and the independent canonical-root refresh invariant remain
+tracked separately from framework main and refreshed SDK consumer qualification.
+
+## Canonical root prompt during model-view restore
+
+A restored window can begin with a System summary or Global Objective before its
+canonical root prompt. Refreshing working-directory rules or setting the root
+prompt must use the existing `CanonicalContext.system_prompt` identity, rather
+than replacing the first System message. `ContextManager::update_system` is the
+shared owner for refresh, trait/inherent setters and skill injection. It matches
+the complete pure canonical System payload, reuses an already present desired
+root, and preserves independently owned System messages and projection scopes.
+Without canonical context, its standalone first-System contract remains intact.
+A real canonical message change notifies accepted observers once; equal payloads
+and metadata-only root reconciliation do not invent another accepted change.
+This independently discovered restore invariant has its own Finding and does
+not reopen the separately repaired append ordinal invariant.
+
+Root identity and root value are separate constraints. Live roots render the
+existing `current_system_prompt()` value, where a runtime override takes priority
+over the configured base. The shared private renderer keeps the original CoT,
+model-profile suffix and project-rule ordering. Updating the base prompt or
+injecting a skill does not clear an active override; `replace_system_prompt`
+remains the explicit clearing operation, and the borrowed trait getter continues
+to expose the base. Working-directory refresh uses the same effective renderer.
+Reset installs its final rendered root and canonical metadata together under
+the Context lock, clearing scopes through the existing `set_messages` path and
+accepting only that final view. Sync try-lock and async awaited-lock contracts
+are unchanged. This selection constraint is part of the same canonical-root
+Finding, with its own later natural before/after evidence.
+
 ## Consequences
 
 Consumers with only `ConversationStore` must add a compatible

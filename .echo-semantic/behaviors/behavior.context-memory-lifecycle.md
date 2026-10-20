@@ -9,10 +9,10 @@ primary_focus: data_durability
 focus: [state_authority, time_lifecycle, failure_concurrency, contract_evidence]
 boundary: boundary.context-memory
 observed_at: 6fd66621e0671028d6aa94c69933b63f38e299cd
-code_refs: [echo-state/src/compression/mod.rs, src/context/mod.rs, src/agent/snapshot.rs, src/agent/react/run/context.rs, src/agent/react/run/phases/compact.rs, src/agent/react/run/phases/tools.rs, src/agent/react/run/phases/finalize.rs, src/evolution/layer.rs, src/evolution/recall.rs, src/state/mod.rs, src/state/file.rs, src/state/sqlite.rs, echo-core/src/memory/conversation.rs, echo-core/src/memory/store.rs, echo-core/src/memory/types.rs]
+code_refs: [echo-state/src/compression/mod.rs, src/context/mod.rs, src/agent/snapshot.rs, src/agent/react/run/context.rs, src/agent/react/run/phases/compact.rs, src/agent/react/run/phases/tools.rs, src/agent/react/run/phases/finalize.rs, src/evolution/layer.rs, src/evolution/recall.rs, src/state/mod.rs, src/state/file.rs, src/state/sqlite.rs, echo-core/src/memory/conversation.rs, echo-core/src/memory/store.rs, echo-core/src/memory/types.rs, src/agent/config.rs, src/agent/react/capabilities.rs, src/agent/react/run/phases/prepare.rs]
 rule_refs: [rule.context-persistence-separation]
-evidence_refs: [evidence.agent-context-execution, evidence.persistence-observation, evidence.transcript-generation-runtime-identity-repair, evidence.transcript-generation-runtime-identity-verification, evidence.transcript-projection-settlement-repair, evidence.transcript-projection-settlement-verification, evidence.managed-import-generation-repair, evidence.checkpoint-plan-authority-repair, evidence.checkpoint-plan-authority-verification, evidence.memory-provenance-authority-repair, evidence.memory-provenance-authority-verification]
-finding_refs: [finding.transcript-projection-settlement, finding.transcript-generation-runtime-identity]
+evidence_refs: [evidence.agent-context-execution, evidence.persistence-observation, evidence.transcript-generation-runtime-identity-repair, evidence.transcript-generation-runtime-identity-verification, evidence.transcript-projection-settlement-repair, evidence.transcript-projection-settlement-verification, evidence.managed-import-generation-repair, evidence.checkpoint-plan-authority-repair, evidence.checkpoint-plan-authority-verification, evidence.memory-provenance-authority-repair, evidence.memory-provenance-authority-verification, evidence.compression-token-tail, evidence.compacted-context-projection-repair]
+finding_refs: [finding.transcript-projection-settlement, finding.transcript-generation-runtime-identity, finding.runtime-token-limit-explicit-publication, finding.compacted-transcript-retained-ordinals, finding.canonical-root-system-refresh]
 ---
 
 # Context、Memory 与 Checkpoint 生命周期
@@ -46,3 +46,25 @@ ContextManager、RuntimeStateStore、file backends、ConversationStore、Store�
 Transcript projection 失败结算已由 ADR 0056 与 Finding #106 的 framework outcome 闭合；当前仍需复核
 ContextAssembler 与默认路径的策略关系。旧 `AgentCheckpoint.current_plan` 的生产恢复与写回
 已退役；公开字段及 File/SQLite 读写保留，TaskRevisionService 为计划图唯一权威。
+
+## Runtime explicit-limit publication
+
+A successful runtime token-limit update is an explicit caller choice, including
+publication through a prepared token-limit or model-generation receipt. The next
+snapshot and Context prepare must retain it over model-window facts. Rejected or
+dropped preparation must not create an explicit override. Compression continues
+to subtract output/safety reservations and the actual protected context. The
+bounded repair and controls are tracked by the runtime explicit-limit Finding;
+this does not settle the unrelated ContextAssembler equivalence frontier.
+
+## Current bounded compaction and canonical-root repair
+
+The existing Context/RuntimeState/Conversation authorities now retain ordered
+fact identities across non-contiguous compression views and restore canonical
+root System messages without overwriting independent summaries/objectives.
+Two distinct Findings and the current repair Evidence bind source:b2639597dfa94b7e16aa312e46db6585d9df7636d6340c004ae978f18711d0f1 to
+actual focused tests and independent review. New bindings remain in one
+checkpoint/CAS, with internal schema3, explicit legacy limits, read-only Store
+reentry and cancellation/observer acceptance controls. Broad lifecycle status and
+old scenarios are not promoted; full gates, SDK pin/aggregate compatibility,
+website mirrors and main CI remain separate.

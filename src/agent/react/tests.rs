@@ -332,7 +332,10 @@ async fn assert_legacy_plan_is_not_republished(
     );
 
     let mut agent = ReactAgent::new(
+        // This fixture tests legacy plan metadata, not root identity across
+        // independently sourced ambient project-rule System messages.
         AgentConfig::new("test-model", "legacy-plan-agent", "system")
+            .auto_project_rules(false)
             .conversation_id("legacy-plan"),
     );
     agent.set_state_store(reopened.clone());
@@ -451,6 +454,610 @@ fn test_llm_config(model: &str) -> crate::llm::LlmConfig {
     }
 }
 
+async fn model_publication_http_request(
+    socket: &mut tokio::net::TcpStream,
+) -> crate::error::Result<serde_json::Value> {
+    use tokio::io::AsyncReadExt;
+    let mut bytes = Vec::new();
+    let mut chunk = [0; 4096];
+    loop {
+        let count = socket.read(&mut chunk).await?;
+        if count == 0 || bytes.len() > 2_000_000 {
+            return Err(std::io::Error::other("incomplete model publication HTTP request").into());
+        }
+        bytes.extend_from_slice(chunk.get(..count).unwrap_or_default());
+        let Some(header_end) = bytes.windows(4).position(|value| value == b"\r\n\r\n") else {
+            continue;
+        };
+        let headers = String::from_utf8_lossy(bytes.get(..header_end).unwrap_or_default());
+        let length = headers
+            .lines()
+            .filter_map(|line| line.split_once(':'))
+            .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+            .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+            .ok_or_else(|| std::io::Error::other("missing model publication content length"))?;
+        let body_start = header_end.saturating_add(4);
+        let body_end = body_start.saturating_add(length);
+        if let Some(body) = bytes.get(body_start..body_end) {
+            return Ok(serde_json::from_slice(body)?);
+        }
+    }
+}
+
+async fn model_publication_http_server(
+    listener: tokio::net::TcpListener,
+) -> crate::error::Result<Vec<serde_json::Value>> {
+    use tokio::io::AsyncWriteExt;
+    let mut requests = Vec::new();
+    for _ in 0..2 {
+        let (mut socket, _) = listener.accept().await?;
+        let request = model_publication_http_request(&mut socket).await?;
+        // Exercise the concrete adapter's real streaming request, including
+        // its required semantic terminal, without a substitute LlmClient.
+        let delta = json!({"choices":[{"index":0,"delta":{"role":"assistant","content":"ok"},"finish_reason":null}]});
+        let stop = json!({"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]});
+        let body = format!("data: {delta}\n\ndata: {stop}\n\ndata: [DONE]\n\n");
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len(),
+        );
+        socket.write_all(response.as_bytes()).await?;
+        requests.push(request);
+    }
+    Ok(requests)
+}
+
+#[tokio::test]
+async fn runtime_model_publication_switches_actual_http() -> crate::error::Result<()> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let mut config = test_llm_config("model-a");
+    config.base_url = format!("http://{}/v1/chat/completions", listener.local_addr()?);
+    let server = tokio::spawn(async move {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            model_publication_http_server(listener),
+        )
+        .await
+        .map_err(|error| std::io::Error::other(error.to_string()))?
+    });
+    let client: Arc<dyn crate::llm::LlmClient> = Arc::from(config.build_client()?);
+    let mut agent = ReactAgent::new_with_configured_llm_client(
+        AgentConfig::new("model-a", "model-publication", "system")
+            .enable_tool(false)
+            .auto_project_rules(false)
+            .session_id("same-session")
+            .conversation_id("same-conversation"),
+        client,
+        config,
+    )?;
+    assert_eq!(Agent::chat(&agent, "first request").await?, "ok");
+    // Compatible with the original infallible setter for the natural red
+    // observation; the real HTTP assertion still rejects a failed rebind.
+    let _ = agent.set_model("model-b");
+    assert_eq!(Agent::chat(&agent, "second request").await?, "ok");
+    let requests = server
+        .await
+        .map_err(|error| std::io::Error::other(error.to_string()))??;
+    let models: Vec<_> = requests
+        .iter()
+        .map(|request| request.get("model"))
+        .collect();
+    assert_eq!(models, [Some(&json!("model-a")), Some(&json!("model-b"))]);
+    let second = requests
+        .get(1)
+        .ok_or_else(|| std::io::Error::other("second model request missing"))?;
+    assert!(second.to_string().contains("first request"));
+    assert!(second.to_string().contains("second request"));
+    assert_eq!(agent.model_name(), "model-b");
+    assert_eq!(
+        agent.llm_client().map(|client| client.model_name()),
+        Some("model-b")
+    );
+    Ok(())
+}
+
+fn model_publication_state(agent: &ReactAgent) -> serde_json::Value {
+    json!({
+        "model": agent.model_name(),
+        "config": agent.llm_config(),
+        "profile": format!("{:?}", agent.config.model_profile),
+        "temperature": agent.config.get_temperature(),
+        "max_tokens": agent.config.get_max_tokens(),
+        "thinking": format!("{:?}", agent.thinking()),
+    })
+}
+
+#[test]
+fn runtime_model_publication_custom_client_rejects_rebind_without_stale_config()
+-> crate::error::Result<()> {
+    for builder_injection in [false, true] {
+        let config = test_llm_config("model-a");
+        let client: Arc<dyn crate::llm::LlmClient> = Arc::from(config.build_client()?);
+        let mut agent = ReactAgent::new_with_configured_llm_client(
+            AgentConfig::minimal("model-a", "test"),
+            client,
+            config,
+        )?;
+        agent.set_temperature(Some(0.25));
+        agent.set_max_tokens(Some(1024));
+        let custom: Arc<dyn crate::llm::LlmClient> =
+            Arc::new(crate::testing::MockLlmClient::new().with_model_name("custom-model"));
+        if builder_injection {
+            agent = agent.with_llm_client(Arc::clone(&custom));
+        } else {
+            agent.set_llm_client(Arc::clone(&custom));
+        }
+        assert!(agent.llm_config().is_none());
+        let before = model_publication_state(&agent);
+        agent.set_model("custom-model")?;
+        let error = agent.set_model("model-b");
+        assert!(matches!(error, Err(crate::error::ReactError::Config(error))
+            if matches!(error.as_ref(), crate::error::ConfigError::MissingConfig(..))));
+        assert_eq!(model_publication_state(&agent), before);
+        assert!(
+            agent
+                .llm_client()
+                .is_some_and(|client| Arc::ptr_eq(client, &custom))
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn runtime_model_publication_noop_and_failed_construction_are_inert() -> crate::error::Result<()> {
+    let mut agent = ReactAgent::new(AgentConfig::minimal("model-a", "test"));
+    agent.set_llm_config(test_llm_config("model-a"))?;
+    let client = agent
+        .llm_client()
+        .cloned()
+        .ok_or_else(|| std::io::Error::other("configured client missing"))?;
+    let before = model_publication_state(&agent);
+    agent.set_model("model-a")?;
+    assert!(
+        agent
+            .llm_client()
+            .is_some_and(|value| Arc::ptr_eq(value, &client))
+    );
+    for name in ["", " \t\n"] {
+        assert!(
+            matches!(agent.set_model(name), Err(crate::error::ReactError::Config(error))
+            if matches!(error.as_ref(), crate::error::ConfigError::MissingConfig(..)))
+        );
+        assert_eq!(model_publication_state(&agent), before);
+    }
+    let mut invalid = test_llm_config("model-b");
+    invalid.api_key = "invalid\nheader".to_string();
+    assert!(agent.set_llm_config(invalid.clone()).is_err());
+    assert_eq!(model_publication_state(&agent), before);
+    assert!(
+        agent
+            .set_sourced_llm_config(crate::llm::SourcedLlmConfig::new(invalid))
+            .is_err()
+    );
+    assert_eq!(model_publication_state(&agent), before);
+    assert!(
+        agent
+            .llm_client()
+            .is_some_and(|value| Arc::ptr_eq(value, &client))
+    );
+
+    // A legacy inconsistent display/config pair must not short-circuit a
+    // requested rebind just because the display already says model-b.
+    agent.config.model_name = "model-b".to_string();
+    agent.set_model("model-b")?;
+    assert_eq!(
+        agent.llm_client().map(|value| value.model_name()),
+        Some("model-b")
+    );
+    assert!(
+        !agent
+            .llm_client()
+            .is_some_and(|value| Arc::ptr_eq(value, &client))
+    );
+    Ok(())
+}
+
+#[test]
+fn runtime_model_publication_self_builders_preserve_state_on_failure() -> crate::error::Result<()> {
+    for sourced in [false, true] {
+        let mut agent = ReactAgent::new(AgentConfig::minimal("model-a", "test"));
+        agent.set_llm_config(test_llm_config("model-a"))?;
+        let before = model_publication_state(&agent);
+        let mut invalid = test_llm_config("model-b");
+        invalid.api_key = "invalid\nheader".to_string();
+        assert!(
+            crate::agent::ReactAgentBuilder::new()
+                .llm_config(invalid.clone())
+                .build()
+                .is_err()
+        );
+        agent = if sourced {
+            agent.with_sourced_llm_config(crate::llm::SourcedLlmConfig::new(invalid))
+        } else {
+            agent.with_llm_config(invalid)
+        };
+        assert_eq!(model_publication_state(&agent), before);
+    }
+    Ok(())
+}
+
+#[test]
+fn runtime_model_publication_sourced_facts_keep_precedence_and_expiry() -> crate::error::Result<()>
+{
+    use echo_core::llm::capabilities::{
+        ModelFactConfidence, ModelFactMetadata, ModelFactSet, ModelFactSource, ModelProfile,
+        ModelProfileOverride,
+    };
+    let mut old = ModelProfile::from_provider_name("model-a", "test-provider");
+    old.context_window = Some(32_000);
+    old.prompt_suffix = Some("retained complementary instruction".to_string());
+    let mut agent = ReactAgent::new(AgentConfig::minimal("model-a", "test").model_profile(old));
+    let fact = |version: &str, window, expired: bool| {
+        ModelFactSet::new(
+            ModelFactMetadata::new(
+                ModelFactSource::CallerOverride,
+                "test:runtime-publication",
+                version,
+                SystemTime::UNIX_EPOCH,
+                expired.then_some(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1)),
+                ModelFactConfidence::VERIFIED,
+            ),
+            None,
+            ModelProfileOverride {
+                context_window: Some(window),
+                ..Default::default()
+            },
+        )
+    };
+    agent.set_sourced_llm_config(test_llm_config("model-a").with_model_override(fact(
+        "fresh-64k",
+        64_000,
+        false,
+    )))?;
+    let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+    assert_eq!(snapshot.config.token_limit, 64_000);
+    assert!(
+        agent
+            .config
+            .model_profile
+            .as_ref()
+            .is_some_and(|value| value.profile.prompt_suffix.as_deref()
+                == Some("retained complementary instruction"))
+    );
+    agent.set_sourced_llm_config(test_llm_config("model-a").with_model_override(fact(
+        "expired-8k",
+        8_000,
+        true,
+    )))?;
+    let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+    assert_eq!(snapshot.config.token_limit, 64_000);
+    assert!(
+        snapshot
+            .config
+            .ignored_model_facts
+            .iter()
+            .any(|value| value.version == "expired-8k")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn runtime_model_publication_rebind_refreshes_implicit_not_explicit_budget()
+-> crate::error::Result<()> {
+    for explicit in [false, true] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let mut config = test_llm_config("model-a");
+        config.base_url = format!("http://{}/v1/chat/completions", listener.local_addr()?);
+        let server = tokio::spawn(async move {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                model_publication_http_server(listener),
+            )
+            .await
+            .map_err(|error| std::io::Error::other(error.to_string()))?
+        });
+        let mut old = echo_core::llm::capabilities::ModelProfile::from_provider_name(
+            "model-a",
+            "test-provider",
+        );
+        old.context_window = Some(32_000);
+        let mut agent_config = AgentConfig::minimal("model-a", "test")
+            .auto_project_rules(false)
+            .enable_tool(false)
+            .model_profile(old);
+        if explicit {
+            agent_config = agent_config.token_limit(100_000);
+        }
+        let client: Arc<dyn crate::llm::LlmClient> = Arc::from(config.build_client()?);
+        let mut agent =
+            ReactAgent::new_with_configured_llm_client(agent_config, client, config.clone())?;
+        assert_eq!(Agent::chat(&agent, "before switch").await?, "ok");
+        agent.set_model("model-b")?;
+        assert_eq!(Agent::chat(&agent, "after switch").await?, "ok");
+        let requests = server
+            .await
+            .map_err(|error| std::io::Error::other(error.to_string()))??;
+        assert_eq!(
+            requests
+                .iter()
+                .filter_map(|value| value.get("model").and_then(|value| value.as_str()))
+                .collect::<Vec<_>>(),
+            ["model-a", "model-b"]
+        );
+        let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+        let expected = if explicit {
+            100_000
+        } else {
+            DEFAULT_TOKEN_LIMIT
+        };
+        assert_eq!(snapshot.config.token_limit, expected);
+        assert_eq!(
+            snapshot
+                .config
+                .token_budget
+                .as_ref()
+                .map(|budget| budget.total_window()),
+            Some(expected)
+        );
+        assert!(
+            agent
+                .config
+                .model_profile
+                .as_ref()
+                .is_some_and(|value| value.profile.model_name == "model-b"
+                    && value.profile.context_window != Some(32_000))
+        );
+        // The actual Context was updated by the second real turn's prepare.
+        // 90k of request overhead fits 128k's input allowance, but not 100k's.
+        assert_eq!(
+            agent
+                .memory
+                .context
+                .lock()
+                .await
+                .should_compress_with_overhead(90_000),
+            explicit
+        );
+        assert_eq!(
+            agent.llm_config().map(|value| (
+                &value.base_url,
+                &value.api_key,
+                value.api_protocol,
+                value.timeouts
+            )),
+            Some((
+                &config.base_url,
+                &config.api_key,
+                config.api_protocol,
+                config.timeouts
+            ))
+        );
+    }
+    Ok(())
+}
+
+struct ModelPublicationProfileClient {
+    inner: crate::testing::MockLlmClient,
+    profile: echo_core::llm::capabilities::ModelProfileResolution,
+    queries: Arc<AtomicUsize>,
+}
+
+impl crate::llm::LlmClient for ModelPublicationProfileClient {
+    fn chat(
+        &self,
+        request: crate::llm::ChatRequest,
+    ) -> futures::future::BoxFuture<'_, crate::error::Result<crate::llm::ChatResponse>> {
+        crate::llm::LlmClient::chat(&self.inner, request)
+    }
+    fn chat_stream(
+        &self,
+        request: crate::llm::ChatRequest,
+    ) -> futures::future::BoxFuture<
+        '_,
+        crate::error::Result<
+            futures::stream::BoxStream<'static, crate::error::Result<crate::llm::ChatChunk>>,
+        >,
+    > {
+        crate::llm::LlmClient::chat_stream(&self.inner, request)
+    }
+    fn model_name(&self) -> &str {
+        crate::llm::LlmClient::model_name(&self.inner)
+    }
+    fn model_profile_resolution(&self) -> echo_core::llm::capabilities::ModelProfileResolution {
+        self.queries.fetch_add(1, Ordering::SeqCst);
+        self.profile.clone()
+    }
+}
+
+#[tokio::test]
+async fn configured_client_constructor_keeps_arc_config_and_initial_budget()
+-> crate::error::Result<()> {
+    for explicit in [false, true] {
+        let queries = Arc::new(AtomicUsize::new(0));
+        let mut profile = echo_core::llm::capabilities::ModelProfile::from_provider_name(
+            "model-a",
+            "test-provider",
+        );
+        profile.context_window = Some(64_000);
+        let client: Arc<dyn crate::llm::LlmClient> = Arc::new(ModelPublicationProfileClient {
+            inner: crate::testing::MockLlmClient::new().with_model_name("model-a"),
+            profile: echo_core::llm::capabilities::ModelProfileResolution::from_explicit_profile(
+                profile,
+                SystemTime::now(),
+            ),
+            queries: Arc::clone(&queries),
+        });
+        let original = test_llm_config("model-a");
+        let mut config = AgentConfig::minimal("model-a", "test")
+            .temperature(Some(0.25))
+            .max_tokens(Some(1024))
+            .auto_project_rules(false);
+        if explicit {
+            config = config.token_limit(100_000);
+        }
+        let mut agent = ReactAgent::new_with_configured_llm_client(
+            config,
+            Arc::clone(&client),
+            original.clone(),
+        )?;
+        // Count only construction: invocation safe points may query again.
+        assert_eq!(queries.load(Ordering::SeqCst), 1);
+        assert!(
+            agent
+                .llm_client()
+                .is_some_and(|value| Arc::ptr_eq(value, &client))
+        );
+        assert_eq!(
+            serde_json::to_value(agent.llm_config())?,
+            serde_json::to_value(Some(&original))?
+        );
+        assert_eq!(agent.config.token_limit_explicit, explicit);
+        assert_eq!(
+            agent.config.token_limit,
+            if explicit { 100_000 } else { 64_000 }
+        );
+        assert_eq!(agent.config.get_temperature(), Some(0.25));
+        assert_eq!(agent.config.get_max_tokens(), Some(1024));
+        assert!(agent.thinking().is_none());
+        // A compressible message distinguishes the actual initial windows.
+        // A system-only view has nothing compressible even with zero allowance.
+        {
+            let mut context = agent.memory.context.lock().await;
+            context.push(Message::user("budget probe".to_string()));
+            assert_eq!(context.should_compress_with_overhead(70_000), !explicit);
+        }
+        agent.set_model("model-a")?;
+        assert_eq!(queries.load(Ordering::SeqCst), 1);
+        assert!(
+            agent
+                .llm_client()
+                .is_some_and(|value| Arc::ptr_eq(value, &client))
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn configured_client_constructor_rejects_bad_pairs_without_query_or_secret()
+-> crate::error::Result<()> {
+    let sentinel = "configured-client-private-key-sentinel";
+    for (client_model, config_model) in [
+        ("", ""),
+        ("model-a", ""),
+        ("", "model-a"),
+        ("model-a", "model-b"),
+    ] {
+        let queries = Arc::new(AtomicUsize::new(0));
+        let client: Arc<dyn crate::llm::LlmClient> = Arc::new(ModelPublicationProfileClient {
+            inner: crate::testing::MockLlmClient::new().with_model_name(client_model),
+            profile: echo_core::llm::capabilities::ModelProfileResolution::from_explicit_profile(
+                echo_core::llm::capabilities::ModelProfile::from_provider_name(
+                    client_model,
+                    "test-provider",
+                ),
+                SystemTime::now(),
+            ),
+            queries: Arc::clone(&queries),
+        });
+        let mut original = test_llm_config(config_model);
+        original.api_key = sentinel.to_string();
+        let result = ReactAgent::new_with_configured_llm_client(
+            AgentConfig::minimal("model-a", "test"),
+            Arc::clone(&client),
+            original,
+        );
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => {
+                return Err(std::io::Error::other("invalid configured pair was accepted").into());
+            }
+        };
+        assert!(matches!(&error, crate::error::ReactError::Config(value)
+            if matches!(value.as_ref(), crate::error::ConfigError::ConfigFileError(..))));
+        assert!(!format!("{error:?} {error}").contains(sentinel));
+        assert_eq!(queries.load(Ordering::SeqCst), 0);
+        assert_eq!(Arc::strong_count(&client), 1);
+    }
+    // Existing public paths have different contracts: custom Arc loses rebuild
+    // config; config construction builds a distinct Arc. Neither is this seam.
+    let original = test_llm_config("model-a");
+    let client: Arc<dyn crate::llm::LlmClient> = Arc::from(original.build_client()?);
+    let opaque = ReactAgent::new(AgentConfig::minimal("model-a", "test"))
+        .with_llm_client(Arc::clone(&client));
+    assert!(opaque.llm_config().is_none());
+    assert!(
+        opaque
+            .llm_client()
+            .is_some_and(|value| Arc::ptr_eq(value, &client))
+    );
+    let rebuilt =
+        ReactAgent::new(AgentConfig::minimal("model-a", "test")).with_llm_config(original);
+    assert!(rebuilt.llm_config().is_some());
+    assert!(
+        rebuilt
+            .llm_client()
+            .is_some_and(|value| !Arc::ptr_eq(value, &client))
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn runtime_model_publication_prepared_commit_uses_only_frozen_profile()
+-> crate::error::Result<()> {
+    for commit in [false, true] {
+        let agent = ReactAgent::new(AgentConfig::minimal("model-a", "test"));
+        let before = model_publication_state(&agent);
+        let handle = AgentHandle::new(agent);
+        let queries = Arc::new(AtomicUsize::new(0));
+        let mut profile = echo_core::llm::capabilities::ModelProfile::from_provider_name(
+            "model-b",
+            "test-provider",
+        );
+        profile.context_window = Some(64_000);
+        let client: Arc<dyn crate::llm::LlmClient> = Arc::new(ModelPublicationProfileClient {
+            inner: crate::testing::MockLlmClient::new().with_model_name("model-b"),
+            profile: echo_core::llm::capabilities::ModelProfileResolution::from_explicit_profile(
+                profile,
+                SystemTime::now(),
+            ),
+            queries: Arc::clone(&queries),
+        });
+        let prepared = handle
+            .prepare_model_generation(
+                test_llm_config("model-b"),
+                client,
+                Some(0.25),
+                Some(1024),
+                None,
+                100_000,
+                super::PreparedCriticUpdate::Preserve,
+            )
+            .await?;
+        let after_prepare = queries.load(Ordering::SeqCst);
+        assert!(after_prepare > 0);
+        if commit {
+            prepared.commit();
+        } else {
+            drop(prepared);
+        }
+        assert_eq!(queries.load(Ordering::SeqCst), after_prepare);
+        if commit {
+            assert_eq!(
+                handle
+                    .read(|agent| agent.config.model_profile.as_ref().map(|value| (
+                        value.profile.model_name.clone(),
+                        value.profile.context_window
+                    )))
+                    .await,
+                Some(("model-b".to_string(), Some(64_000)))
+            );
+        } else {
+            assert_eq!(handle.read(model_publication_state).await, before);
+        }
+    }
+    Ok(())
+}
+
 #[cfg(feature = "subagent")]
 #[tokio::test]
 async fn react_agent_initializes_subagent_hook_executor() {
@@ -555,10 +1162,13 @@ async fn react_agent_reset_is_idempotent() {
 
 /// After reset() the system prompt content should remain unchanged
 #[tokio::test]
-async fn react_agent_reset_preserves_system_prompt() {
+async fn react_agent_reset_preserves_system_prompt() -> crate::error::Result<()> {
     let system = "This is a custom system prompt";
     let config = AgentConfig::new("test-model", "agent", system);
     let agent = ReactAgent::new(config);
+    // Keep project rules enabled: reset must preserve the complete initial
+    // harness payload, including feature-dependent rules, rather than raw base.
+    let original = agent.get_messages().await;
 
     agent
         .memory
@@ -570,8 +1180,20 @@ async fn react_agent_reset_preserves_system_prompt() {
 
     let messages = agent.memory.context.lock().await.messages().to_vec();
     assert_eq!(messages.len(), 1);
-    assert_eq!(messages[0].role, Role::System);
-    assert_eq!(messages[0].content.as_text_ref().unwrap_or(""), system);
+    assert_eq!(
+        serde_json::to_value(&messages)?,
+        serde_json::to_value(&original)?
+    );
+    let root = messages
+        .first()
+        .ok_or_else(|| std::io::Error::other("reset root missing"))?;
+    assert_eq!(root.role, Role::System);
+    assert!(
+        root.content
+            .as_text_ref()
+            .is_some_and(|text| text.contains(system))
+    );
+    Ok(())
 }
 
 // ── ReactAgent tool registration tests ─────────────────────────────────────────
@@ -760,15 +1382,16 @@ async fn react_agent_context_stats() {
 // ── ReactAgent configuration tests ─────────────────────────────────────────────
 
 #[test]
-fn react_agent_set_model() {
+fn react_agent_set_model() -> crate::error::Result<()> {
     let config = AgentConfig::minimal("model1", "helper");
     let mut agent = ReactAgent::new(config);
 
     assert_eq!(agent.model_name(), "model1");
 
-    agent.set_model("model2");
+    agent.set_model("model2")?;
 
     assert_eq!(agent.model_name(), "model2");
+    Ok(())
 }
 
 #[tokio::test]
@@ -781,8 +1404,8 @@ async fn react_agent_set_system_prompt() {
 
     // set_system_prompt stores a runtime override in mutable_system_prompt.
     // The system_prompt() getter returns the base config prompt (cannot return
-    // a reference into RwLock). The override is applied at turn-start via
-    // build_system_prompt().
+    // a reference into RwLock). The effective-root renderer consumes the
+    // override through current_system_prompt().
     agent.set_system_prompt("New system prompt");
 
     // Base prompt is unchanged (by design — getter returns config value)
@@ -3362,6 +3985,802 @@ async fn recall_injects_memories_into_current_user_message() -> Result<(), Strin
 }
 
 // ── save_transcript_projection ──────────────────────────────────────────────
+
+#[tokio::test]
+async fn managed_compaction_checkpoint_preserves_retained_transcript_ordinals()
+-> crate::error::Result<()> {
+    struct EvictFinal;
+
+    impl crate::compression::ContextCompressor for EvictFinal {
+        fn compress(
+            &self,
+            input: echo_core::compression::CompressionInput,
+        ) -> futures::future::BoxFuture<
+            '_,
+            crate::error::Result<echo_core::compression::CompressionOutput>,
+        > {
+            Box::pin(async move {
+                let mut messages = input.messages;
+                let evicted = messages.pop().into_iter().collect();
+                Ok(echo_core::compression::CompressionOutput {
+                    messages,
+                    evicted,
+                    checkpoint: None,
+                })
+            })
+        }
+    }
+
+    let root = tempfile::tempdir()?;
+    let conversation_root = root.path().join("conversation");
+    let runtime_root = root.path().join("runtime");
+    let scope = "managed-compaction-retained-ordinals";
+    let mut agent =
+        ReactAgent::new(AgentConfig::new("test-model", "agent", "system").conversation_id(scope));
+    agent.set_conversation_store(Arc::new(crate::memory::FileConversationStore::new(
+        &conversation_root,
+    )?));
+    agent.set_state_store(Arc::new(crate::state::FileRuntimeStateStore::new(
+        &runtime_root,
+    )?));
+    let original = [
+        Message::user("same user text".to_string()),
+        Message::assistant_with_tools(vec![crate::llm::types::ToolCall {
+            id: "retained-tool-call".to_string(),
+            call_type: "function".to_string(),
+            function: crate::llm::types::FunctionCall {
+                name: "read_file".to_string(),
+                arguments: "{}".to_string(),
+            },
+        }]),
+        Message::tool_result(
+            "retained-tool-call".to_string(),
+            "read_file".to_string(),
+            "retained tool result".to_string(),
+        ),
+        Message::assistant("same final text".to_string()),
+    ];
+    {
+        let mut context = agent.memory.context.lock().await;
+        for message in original.iter().cloned() {
+            context.push(message);
+        }
+    }
+    agent.force_checkpoint().await?;
+    let before = crate::memory::ConversationStore::get_messages(
+        &crate::memory::FileConversationStore::new(&conversation_root)?,
+        scope,
+    )
+    .await?;
+    assert_eq!(before.len(), 4);
+
+    let (stats, _) = agent.force_compress_with(&EvictFinal).await?;
+    assert_eq!(stats.evicted, 1);
+    agent.force_checkpoint().await?;
+    let after = crate::memory::ConversationStore::get_messages(
+        &crate::memory::FileConversationStore::new(&conversation_root)?,
+        scope,
+    )
+    .await?;
+    assert_eq!(
+        after, before,
+        "retained messages must not be appended again"
+    );
+
+    let state = crate::state::RuntimeStateStore::load_runtime_state(
+        &crate::state::FileRuntimeStateStore::new(&runtime_root)?,
+        scope,
+        scope,
+    )
+    .await?
+    .ok_or_else(|| crate::error::ReactError::Other("runtime state missing".to_string()))?;
+    let checkpoint = state
+        .checkpoint
+        .ok_or_else(|| crate::error::ReactError::Other("runtime checkpoint missing".to_string()))?;
+    let payload = checkpoint.restore_managed_runtime_payload()?;
+    assert_eq!(
+        serde_json::to_value(
+            payload
+                .messages
+                .into_iter()
+                .filter(|message| message.role != Role::System)
+                .collect::<Vec<_>>()
+        )?,
+        serde_json::to_value(original.iter().take(3).cloned().collect::<Vec<_>>())?,
+    );
+    let cursor = payload
+        .transcript_projection
+        .ok_or_else(|| crate::error::ReactError::Other("runtime cursor missing".to_string()))?;
+    assert_eq!(cursor.next_ordinal, 4);
+    assert_eq!(
+        cursor
+            .projected
+            .iter()
+            .map(|message| message.ordinal)
+            .collect::<Vec<_>>(),
+        vec![0, 1, 2]
+    );
+
+    // A new turn may repeat old text; only the retained window reuses ordinals.
+    {
+        let mut context = agent.memory.context.lock().await;
+        context.push(Message::user("same user text".to_string()));
+        context.push(Message::assistant("same final text".to_string()));
+    }
+    agent.force_checkpoint().await?;
+    let appended = crate::memory::ConversationStore::get_messages(
+        &crate::memory::FileConversationStore::new(&conversation_root)?,
+        scope,
+    )
+    .await?;
+    let ordinals = appended
+        .iter()
+        .map(|message| {
+            crate::memory::transcript_projection_meta(message)?
+                .map(|meta| meta.ordinal)
+                .ok_or_else(|| {
+                    crate::error::ReactError::Other("transcript ordinal missing".to_string())
+                })
+        })
+        .collect::<crate::error::Result<Vec<_>>>()?;
+    assert_eq!(ordinals, vec![0, 1, 2, 3, 4, 5]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn canonical_root_agent_refresh_and_setters_keep_derived_system_and_scope()
+-> crate::error::Result<()> {
+    let root = tempfile::tempdir()?;
+    // Isolate base/override selection and canonical identity from project-rule
+    // discovery, which has its own feature-dependent harness inputs.
+    let mut agent = ReactAgent::new(
+        AgentConfig::new("test-model", "root-agent", "original root").auto_project_rules(false),
+    );
+    {
+        let mut context = agent.memory.context.lock().await;
+        let mut messages = context.messages().to_vec();
+        messages.insert(0, Message::system("derived system objective".to_string()));
+        context.set_messages(messages);
+        context.apply_projection_scope(
+            "root-agent-test",
+            &[crate::compression::ContextProjection {
+                marker: "retained-root-scope".to_string(),
+                message: Some(Message::user("protected source".to_string())),
+            }],
+        );
+    }
+    crate::agent::Agent::set_system_prompt(&agent, "trait root");
+    let systems = agent
+        .get_messages()
+        .await
+        .into_iter()
+        .filter(|message| message.role == Role::System)
+        .filter_map(|message| message.content.as_text())
+        .collect::<Vec<_>>();
+    assert!(
+        systems
+            .iter()
+            .any(|text| text == "derived system objective")
+    );
+    assert!(systems.iter().any(|text| text == "trait root"));
+    agent.set_working_dir(Some(root.path().to_path_buf()));
+    let refreshed = agent.get_messages().await;
+    let current_after_directory = agent.current_system_prompt();
+    assert_eq!(current_after_directory, "trait root");
+    assert!(
+        refreshed.iter().any(|message| message.role == Role::System
+            && message.content.as_text_ref() == Some(current_after_directory.as_str())),
+        "working-directory refresh must retain the effective prompt override"
+    );
+    assert!(refreshed.iter().any(|message| message.role == Role::System
+        && message.content.as_text_ref() == Some("derived system objective")));
+    ReactAgent::set_system_prompt(&mut agent, "async root".to_string()).await;
+    let messages = agent.get_messages().await;
+    assert_eq!(crate::agent::Agent::system_prompt(&agent), "async root");
+    let current_after_base_setter = agent.current_system_prompt();
+    assert_eq!(current_after_base_setter, "trait root");
+    assert!(
+        messages.iter().any(|message| message.role == Role::System
+            && message.content.as_text_ref() == Some(current_after_base_setter.as_str())),
+        "base setter must render the same effective prompt as the current getter"
+    );
+    assert!(messages.iter().any(|message| message.role == Role::System
+        && message.content.as_text_ref() == Some("derived system objective")));
+    assert!(
+        agent
+            .memory
+            .context
+            .lock()
+            .await
+            .has_projection("retained-root-scope")
+    );
+    agent.replace_system_prompt("replacement root");
+    assert_eq!(agent.current_system_prompt(), "replacement root");
+    assert_eq!(
+        crate::agent::Agent::system_prompt(&agent),
+        "replacement root"
+    );
+    let replaced = agent.get_messages().await;
+    assert!(replaced.iter().any(|message| message.role == Role::System
+        && message.content.as_text_ref() == Some("replacement root")));
+    assert!(replaced.iter().any(|message| message.role == Role::System
+        && message.content.as_text_ref() == Some("derived system objective")));
+    assert!(
+        agent
+            .memory
+            .context
+            .lock()
+            .await
+            .has_projection("retained-root-scope")
+    );
+    agent.reset_messages().await;
+    let reset = agent.get_messages().await;
+    assert_eq!(reset.len(), 1);
+    assert_eq!(
+        reset
+            .first()
+            .and_then(|message| message.content.as_text_ref()),
+        Some("replacement root")
+    );
+    Ok(())
+}
+
+fn managed_compaction_agent(
+    root: &std::path::Path,
+    scope: &str,
+) -> crate::error::Result<ReactAgent> {
+    let mut agent =
+        ReactAgent::new(AgentConfig::new("test-model", "agent", "system").conversation_id(scope));
+    agent.set_conversation_store(Arc::new(crate::memory::FileConversationStore::new(
+        root.join("conversation"),
+    )?));
+    agent.set_state_store(Arc::new(crate::state::FileRuntimeStateStore::new(
+        root.join("runtime"),
+    )?));
+    Ok(agent)
+}
+
+async fn managed_compaction_transcript(
+    root: &std::path::Path,
+    scope: &str,
+) -> crate::error::Result<Vec<crate::memory::StoredMessage>> {
+    crate::memory::ConversationStore::get_messages(
+        &crate::memory::FileConversationStore::new(root.join("conversation"))?,
+        scope,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn managed_compaction_horizon_restart_and_empty_preserve_fact_frontier()
+-> crate::error::Result<()> {
+    struct Empty;
+    impl crate::compression::ContextCompressor for Empty {
+        fn compress(
+            &self,
+            input: echo_core::compression::CompressionInput,
+        ) -> futures::future::BoxFuture<
+            '_,
+            crate::error::Result<echo_core::compression::CompressionOutput>,
+        > {
+            Box::pin(async move {
+                Ok(echo_core::compression::CompressionOutput {
+                    messages: Vec::new(),
+                    evicted: input.messages,
+                    checkpoint: None,
+                })
+            })
+        }
+    }
+    let root = tempfile::tempdir()?;
+    let scope = "managed-horizon-restart";
+    let agent = managed_compaction_agent(root.path(), scope)?;
+    {
+        let mut context = agent.memory.context.lock().await;
+        context.push(Message::user("same text".to_string()));
+        context.push(Message::assistant_with_tools(vec![
+            crate::llm::types::ToolCall {
+                id: "horizon-call".to_string(),
+                call_type: "function".to_string(),
+                function: crate::llm::types::FunctionCall {
+                    name: "read_file".to_string(),
+                    arguments: "{}".to_string(),
+                },
+            },
+        ]));
+        context.push(Message::tool_result(
+            "horizon-call".to_string(),
+            "read_file".to_string(),
+            "old raw tool result".repeat(20),
+        ));
+        context.push(Message::assistant("old final".to_string()));
+        context.push(Message::user("same text".to_string()));
+        context.push(Message::assistant("current final".to_string()));
+    }
+    agent.force_checkpoint().await?;
+    let original = managed_compaction_transcript(root.path(), scope).await?;
+    assert_eq!(original.len(), 6);
+    let horizon = crate::compression::horizon::VisibilityHorizonCompressor::new(
+        crate::compression::horizon::VisibilityHorizonConfig {
+            active_window_turns: 0,
+            enable_global_objective: true,
+            global_objective: Some("persist model objective".to_string()),
+            ..Default::default()
+        },
+    );
+    agent.force_compress_with(&horizon).await?;
+    let model_view = serde_json::to_value(agent.get_messages().await)?;
+    assert!(model_view.to_string().contains("Horizon compact"));
+    assert!(model_view.to_string().contains("persist model objective"));
+    assert_eq!(
+        managed_compaction_transcript(root.path(), scope).await?,
+        original
+    );
+    let restored = managed_compaction_agent(root.path(), scope)?;
+    restored.resume_from_state_store().await?.ok_or_else(|| {
+        crate::error::ReactError::Other("compacted checkpoint missing".to_string())
+    })?;
+    assert_eq!(
+        serde_json::to_value(restored.get_messages().await)?,
+        model_view
+    );
+    restored.force_checkpoint().await?;
+    assert_eq!(
+        managed_compaction_transcript(root.path(), scope).await?,
+        original
+    );
+    let checkpoint = crate::state::RuntimeStateStore::get_checkpoint(
+        &crate::state::FileRuntimeStateStore::new(root.path().join("runtime"))?,
+        scope,
+    )
+    .await?
+    .ok_or_else(|| crate::error::ReactError::Other("runtime checkpoint missing".to_string()))?;
+    let bound = checkpoint
+        .restore_managed_runtime_payload()?
+        .transcript_projection
+        .ok_or_else(|| crate::error::ReactError::Other("projection cursor missing".to_string()))?;
+    assert_eq!(
+        bound
+            .projected
+            .iter()
+            .map(|item| item.ordinal)
+            .collect::<Vec<_>>(),
+        vec![0, 3, 4, 5]
+    );
+    assert_eq!(bound.context_only.as_ref().map(Vec::len), Some(2));
+    restored.force_compress_with(&Empty).await?;
+    restored.force_checkpoint().await?;
+    assert_eq!(
+        managed_compaction_transcript(root.path(), scope).await?,
+        original
+    );
+    {
+        let mut context = restored.memory.context.lock().await;
+        context.push(Message::user("same text".to_string()));
+        context.push(Message::assistant("current final".to_string()));
+    }
+    restored.force_checkpoint().await?;
+    let messages = managed_compaction_transcript(root.path(), scope).await?;
+    let ordinals = messages
+        .iter()
+        .map(|message| {
+            crate::memory::transcript_projection_meta(message)?
+                .map(|item| item.ordinal)
+                .ok_or_else(|| crate::error::ReactError::Other("missing fact ordinal".to_string()))
+        })
+        .collect::<crate::error::Result<Vec<_>>>()?;
+    assert_eq!(ordinals, vec![0, 1, 2, 3, 4, 5, 6, 7]);
+    Ok(())
+}
+
+struct CompactionRewrite;
+impl crate::compression::ContextCompressor for CompactionRewrite {
+    fn compress(
+        &self,
+        input: echo_core::compression::CompressionInput,
+    ) -> futures::future::BoxFuture<
+        '_,
+        crate::error::Result<echo_core::compression::CompressionOutput>,
+    > {
+        Box::pin(async move {
+            let first = input.messages.first().cloned().ok_or_else(|| {
+                crate::error::ReactError::Other("first input missing".to_string())
+            })?;
+            let last =
+                input.messages.last().cloned().ok_or_else(|| {
+                    crate::error::ReactError::Other("last input missing".to_string())
+                })?;
+            let evicted = input
+                .messages
+                .iter()
+                .skip(1)
+                .take(input.messages.len().saturating_sub(2))
+                .cloned()
+                .collect();
+            Ok(echo_core::compression::CompressionOutput {
+                messages: vec![
+                    first,
+                    Message::user("derived model-only view".to_string()),
+                    last,
+                ],
+                evicted,
+                checkpoint: None,
+            })
+        })
+    }
+}
+
+struct CompactionObserver(Arc<AtomicUsize>);
+impl crate::compression::ContextCompressor for CompactionObserver {
+    fn compress(
+        &self,
+        input: echo_core::compression::CompressionInput,
+    ) -> futures::future::BoxFuture<
+        '_,
+        crate::error::Result<echo_core::compression::CompressionOutput>,
+    > {
+        Box::pin(async move {
+            Ok(echo_core::compression::CompressionOutput {
+                messages: input.messages,
+                evicted: Vec::new(),
+                checkpoint: None,
+            })
+        })
+    }
+    fn context_committed(&self, _messages: &[Message]) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+struct CompactionPromotion {
+    calls: Arc<AtomicUsize>,
+    entered: Arc<tokio::sync::Notify>,
+    pending: bool,
+}
+impl crate::compression::MemoryPromoter for CompactionPromotion {
+    fn promote(
+        &self,
+        messages: &[Message],
+    ) -> futures::future::BoxFuture<
+        '_,
+        crate::error::Result<crate::compression::MemoryPromotionReceipt>,
+    > {
+        let count = messages.len();
+        Box::pin(async move {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.entered.notify_one();
+            if self.pending {
+                std::future::pending::<()>().await;
+            }
+            Ok(crate::compression::MemoryPromotionReceipt {
+                submitted: count,
+                promoted: count,
+                deduplicated: 0,
+            })
+        })
+    }
+}
+
+async fn seed_compaction_probe(
+    agent: &ReactAgent,
+    observations: Arc<AtomicUsize>,
+) -> crate::error::Result<serde_json::Value> {
+    let mut messages = agent.get_messages().await;
+    messages.extend([
+        Message::user("original user".to_string()),
+        Message::assistant("old middle".to_string()),
+        Message::assistant("retained final".to_string()),
+    ]);
+    {
+        let mut context = agent.memory.context.lock().await;
+        context.set_compressor(CompactionObserver(observations));
+        context.set_messages(messages);
+    }
+    agent.force_checkpoint().await?;
+    serde_json::to_value(agent.get_messages().await).map_err(Into::into)
+}
+
+#[tokio::test]
+async fn managed_compaction_cancelled_promotion_restores_tuple_without_replay()
+-> crate::error::Result<()> {
+    let root = tempfile::tempdir()?;
+    let agent = Arc::new(managed_compaction_agent(
+        root.path(),
+        "cancelled-compaction-promotion",
+    )?);
+    let observations = Arc::new(AtomicUsize::new(0));
+    let original = seed_compaction_probe(&agent, observations.clone()).await?;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let entered = Arc::new(tokio::sync::Notify::new());
+    agent
+        .memory
+        .context
+        .lock()
+        .await
+        .set_memory_promoter(Arc::new(CompactionPromotion {
+            calls: calls.clone(),
+            entered: entered.clone(),
+            pending: true,
+        }));
+    let running = {
+        let agent = agent.clone();
+        tokio::spawn(async move { agent.force_compress_with(&CompactionRewrite).await })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
+        .await
+        .map_err(|_| crate::error::ReactError::Other("promoter was not entered".to_string()))?;
+    running.abort();
+    assert!(running.await.is_err_and(|error| error.is_cancelled()));
+    assert_eq!(serde_json::to_value(agent.get_messages().await)?, original);
+    assert_eq!(
+        agent
+            .memory
+            .context
+            .lock()
+            .await
+            .compression_metrics()
+            .total_compressions,
+        0
+    );
+    assert_eq!(observations.load(Ordering::SeqCst), 1);
+    assert!(agent.force_checkpoint().await.is_err());
+    agent.resume_from_state_store().await?;
+    agent.force_checkpoint().await?;
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "recovery must not re-run promotion"
+    );
+    assert_eq!(serde_json::to_value(agent.get_messages().await)?, original);
+    Ok(())
+}
+
+type CompactionProbeFuture<'a, T> = futures::future::BoxFuture<'a, crate::error::Result<T>>;
+
+struct CompactionRuntimeProbe {
+    inner: crate::state::FileRuntimeStateStore,
+    agent: std::sync::Mutex<std::sync::Weak<ReactAgent>>,
+    seen: std::sync::Mutex<Vec<serde_json::Value>>,
+    target: AtomicBool,
+    cancel_after_commit: bool,
+    entered: tokio::sync::Notify,
+}
+
+impl crate::state::RuntimeStateStore for CompactionRuntimeProbe {
+    fn runtime_state_capability(&self) -> crate::state::RuntimeStateCapability {
+        crate::state::RuntimeStateCapability::RevisionedV1
+    }
+    fn persistence_call_capability(&self) -> crate::memory::PersistenceCallCapability {
+        crate::memory::PersistenceCallCapability::AbsoluteDeadlineV1
+    }
+    fn compare_and_save_checkpoint_with_context<'a>(
+        &'a self,
+        context: crate::memory::PersistenceCallContext,
+        request: crate::state::RuntimeCheckpointCasRequest,
+    ) -> CompactionProbeFuture<'a, crate::state::RuntimeCheckpointCasReceipt> {
+        Box::pin(async move {
+            let payload = request.checkpoint.restore_managed_runtime_payload()?;
+            let target = payload.pending_transcript_projection.is_none()
+                && payload
+                    .transcript_projection
+                    .as_ref()
+                    .and_then(|cursor| cursor.context_only.as_ref())
+                    .is_some_and(|view| !view.is_empty())
+                && self.target.swap(false, Ordering::SeqCst);
+            if target {
+                let agent = self
+                    .agent
+                    .lock()
+                    .map_err(|error| crate::error::ReactError::Other(error.to_string()))?
+                    .upgrade()
+                    .ok_or_else(|| {
+                        crate::error::ReactError::Other("callback agent missing".to_string())
+                    })?;
+                let messages =
+                    tokio::time::timeout(std::time::Duration::from_secs(5), agent.get_messages())
+                        .await
+                        .map_err(|_| {
+                            crate::error::ReactError::Other(
+                                "read-only Store callback deadlocked".to_string(),
+                            )
+                        })?;
+                self.seen
+                    .lock()
+                    .map_err(|error| crate::error::ReactError::Other(error.to_string()))?
+                    .push(serde_json::to_value(messages)?);
+            }
+            let receipt =
+                crate::state::RuntimeStateStore::compare_and_save_checkpoint_with_context(
+                    &self.inner,
+                    context,
+                    request,
+                )
+                .await?;
+            if target && self.cancel_after_commit {
+                self.entered.notify_one();
+                std::future::pending::<()>().await;
+            }
+            Ok(receipt)
+        })
+    }
+    fn get_checkpoint<'a>(
+        &'a self,
+        id: &'a str,
+    ) -> CompactionProbeFuture<'a, Option<crate::state::AgentCheckpoint>> {
+        crate::state::RuntimeStateStore::get_checkpoint(&self.inner, id)
+    }
+    fn save_checkpoint<'a>(
+        &'a self,
+        checkpoint: &'a crate::state::AgentCheckpoint,
+    ) -> CompactionProbeFuture<'a, ()> {
+        crate::state::RuntimeStateStore::save_checkpoint(&self.inner, checkpoint)
+    }
+    fn save_checkpoint_for_scope<'a>(
+        &'a self,
+        scope: &'a str,
+        checkpoint: &'a crate::state::AgentCheckpoint,
+    ) -> CompactionProbeFuture<'a, ()> {
+        crate::state::RuntimeStateStore::save_checkpoint_for_scope(&self.inner, scope, checkpoint)
+    }
+    fn runtime_state_ids<'a>(&'a self, scope: &'a str) -> CompactionProbeFuture<'a, Vec<String>> {
+        crate::state::RuntimeStateStore::runtime_state_ids(&self.inner, scope)
+    }
+    fn clear_runtime_state<'a>(
+        &'a self,
+        scope: &'a str,
+        id: &'a str,
+    ) -> CompactionProbeFuture<'a, crate::state::RuntimeStateClearReceipt> {
+        crate::state::RuntimeStateStore::clear_runtime_state(&self.inner, scope, id)
+    }
+    fn clear_runtime_state_scope<'a>(
+        &'a self,
+        scope: &'a str,
+    ) -> CompactionProbeFuture<'a, crate::state::RuntimeStateScopeClearReceipt> {
+        crate::state::RuntimeStateStore::clear_runtime_state_scope(&self.inner, scope)
+    }
+    fn clear_conversation<'a>(&'a self, id: &'a str) -> CompactionProbeFuture<'a, ()> {
+        crate::state::RuntimeStateStore::clear_conversation(&self.inner, id)
+    }
+    fn load_runtime_state_with_context<'a>(
+        &'a self,
+        context: crate::memory::PersistenceCallContext,
+        scope: &'a str,
+        id: &'a str,
+    ) -> CompactionProbeFuture<'a, Option<crate::state::ManagedRuntimeStateSnapshot>> {
+        crate::state::RuntimeStateStore::load_runtime_state_with_context(
+            &self.inner,
+            context,
+            scope,
+            id,
+        )
+    }
+    fn load_scope_authority_with_context<'a>(
+        &'a self,
+        context: crate::memory::PersistenceCallContext,
+        scope: &'a str,
+    ) -> CompactionProbeFuture<'a, Option<crate::state::RuntimeScopeAuthority>> {
+        crate::state::RuntimeStateStore::load_scope_authority_with_context(
+            &self.inner,
+            context,
+            scope,
+        )
+    }
+    fn acknowledge_transcript_projection_with_context<'a>(
+        &'a self,
+        context: crate::memory::PersistenceCallContext,
+        request: crate::state::RuntimeTranscriptAckRequest,
+    ) -> CompactionProbeFuture<'a, crate::state::RuntimeCheckpointCasReceipt> {
+        crate::state::RuntimeStateStore::acknowledge_transcript_projection_with_context(
+            &self.inner,
+            context,
+            request,
+        )
+    }
+}
+
+#[tokio::test]
+async fn managed_compaction_store_read_reentry_and_commit_response_cancellation()
+-> crate::error::Result<()> {
+    for cancel_after_commit in [false, true] {
+        let root = tempfile::tempdir()?;
+        let scope = "compaction-read-reentry";
+        let runtime = Arc::new(CompactionRuntimeProbe {
+            inner: crate::state::FileRuntimeStateStore::new(root.path().join("runtime"))?,
+            agent: std::sync::Mutex::new(std::sync::Weak::new()),
+            seen: std::sync::Mutex::new(Vec::new()),
+            target: AtomicBool::new(true),
+            cancel_after_commit,
+            entered: tokio::sync::Notify::new(),
+        });
+        let mut agent = managed_compaction_agent(root.path(), scope)?;
+        agent.set_state_store(runtime.clone());
+        let agent = Arc::new(agent);
+        *runtime
+            .agent
+            .lock()
+            .map_err(|error| crate::error::ReactError::Other(error.to_string()))? =
+            Arc::downgrade(&agent);
+        let observations = Arc::new(AtomicUsize::new(0));
+        let original = seed_compaction_probe(&agent, observations.clone()).await?;
+        let transcript = managed_compaction_transcript(root.path(), scope).await?;
+        let promotions = Arc::new(AtomicUsize::new(0));
+        agent
+            .memory
+            .context
+            .lock()
+            .await
+            .set_memory_promoter(Arc::new(CompactionPromotion {
+                calls: promotions.clone(),
+                entered: Arc::new(tokio::sync::Notify::new()),
+                pending: false,
+            }));
+        if cancel_after_commit {
+            let running = {
+                let agent = agent.clone();
+                tokio::spawn(async move { agent.force_compress_with(&CompactionRewrite).await })
+            };
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                runtime.entered.notified(),
+            )
+            .await
+            .map_err(|_| {
+                crate::error::ReactError::Other(
+                    "CAS did not reach commit-before-response cut".to_string(),
+                )
+            })?;
+            assert_eq!(serde_json::to_value(agent.get_messages().await)?, original);
+            running.abort();
+            assert!(running.await.is_err_and(|error| error.is_cancelled()));
+            assert_eq!(serde_json::to_value(agent.get_messages().await)?, original);
+            assert_eq!(observations.load(Ordering::SeqCst), 1);
+            assert!(agent.force_checkpoint().await.is_err());
+            agent.resume_from_state_store().await?;
+        } else {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                agent.force_compress_with(&CompactionRewrite),
+            )
+            .await
+            .map_err(|_| {
+                crate::error::ReactError::Other("compaction read reentry timed out".to_string())
+            })??;
+        }
+        assert_eq!(
+            *runtime
+                .seen
+                .lock()
+                .map_err(|error| crate::error::ReactError::Other(error.to_string()))?,
+            vec![original]
+        );
+        assert!(
+            serde_json::to_value(agent.get_messages().await)?
+                .to_string()
+                .contains("derived model-only view")
+        );
+        if !cancel_after_commit {
+            assert_eq!(
+                observations.load(Ordering::SeqCst),
+                2,
+                "the accepted transform publishes its observer exactly once"
+            );
+        }
+        // Resume can notify its restored view and refresh the canonical root.
+        // Those existing restoration notifications are not this cancelled
+        // transform publishing a candidate; its zero-publication cut is above.
+        agent.force_checkpoint().await?;
+        assert_eq!(
+            managed_compaction_transcript(root.path(), scope).await?,
+            transcript
+        );
+        assert_eq!(
+            promotions.load(Ordering::SeqCst),
+            1,
+            "Store recovery must not replay the promoter"
+        );
+    }
+    Ok(())
+}
 
 #[tokio::test]
 async fn conversation_store_without_runtime_state_is_rejected_before_run_side_effects()

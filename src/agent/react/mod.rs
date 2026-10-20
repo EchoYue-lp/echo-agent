@@ -396,6 +396,68 @@ impl ReactAgent {
         }
     }
 
+    /// Construct an agent with an already built client and its original config.
+    ///
+    /// Factories may share the same client across independent agents while
+    /// retaining the original configuration for later [`Self::set_model`]
+    /// changes. This constructor queries the client's model profile once and
+    /// initializes the ordinary Context budget from those frozen facts. It
+    /// neither rebuilds the client nor marks an implicit token limit explicit.
+    ///
+    /// The caller must supply the configuration originally used to build this
+    /// client. Only a nonempty matching model identity can be checked here;
+    /// arbitrary clients expose no endpoint or credential provenance. Retained
+    /// credentials stay in process. A later [`Self::set_llm_client`] clears the
+    /// configuration and keeps its existing opaque-client semantics.
+    ///
+    /// # Errors
+    /// Returns a configuration error for empty or mismatched client/config model
+    /// names, before constructing agent-owned subsystems. The error does not
+    /// include the supplied configuration or credentials.
+    ///
+    /// # Example
+    /// ```
+    /// use echo_agent::agent::{AgentConfig, ReactAgent};
+    /// use echo_agent::llm::{LlmApiProtocol, LlmClient, LlmConfig};
+    /// use std::sync::Arc;
+    /// # fn main() -> echo_agent::error::Result<()> {
+    /// let original = LlmConfig::for_provider(
+    ///     "local", "https://example.test/v1", "", "example-model",
+    ///     LlmApiProtocol::ChatCompletions,
+    /// )?;
+    /// let client: Arc<dyn LlmClient> = Arc::from(original.build_client()?);
+    /// let agent = ReactAgent::new_with_configured_llm_client(
+    ///     AgentConfig::minimal("example-model", "Help the user"),
+    ///     Arc::clone(&client), original,
+    /// )?;
+    /// assert!(agent.llm_client().is_some_and(|value| Arc::ptr_eq(value, &client)));
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn new_with_configured_llm_client(
+        mut config: AgentConfig,
+        client: Arc<dyn crate::llm::LlmClient>,
+        llm_config: LlmConfig,
+    ) -> Result<Self> {
+        let model_name = client.model_name().to_string();
+        if model_name.trim().is_empty()
+            || llm_config.model.trim().is_empty()
+            || model_name != llm_config.model
+        {
+            return Err(crate::error::ConfigError::ConfigFileError(
+                "configured client requires matching nonempty client/config model names"
+                    .to_string(),
+            )
+            .into());
+        }
+        let profile = Self::prepare_llm_profile_for_config(&config, client.as_ref());
+        config.model_name = model_name.clone();
+        config.model_profile = Some(profile.clone());
+        let mut agent = Self::new(config);
+        agent.install_llm_config(model_name, profile, client, Some(llm_config));
+        Ok(agent)
+    }
+
     #[cfg(feature = "subagent")]
     pub(crate) fn new_with_subagent_registry(
         config: AgentConfig,
@@ -826,6 +888,14 @@ impl ReactAgent {
     // ── Constructor helpers ───────────────────────────────────────────────────────
 
     fn build_system_prompt(config: &AgentConfig) -> String {
+        Self::render_system_prompt(config, &config.system_prompt)
+    }
+
+    fn current_rendered_system_prompt(&self) -> String {
+        Self::render_system_prompt(&self.config, &self.current_system_prompt())
+    }
+
+    fn render_system_prompt(config: &AgentConfig, base: &str) -> String {
         // ── Stable prefix: NEVER include per-request or per-session data ──
         // CWD, workspace info, timestamps, run_id, memory recall etc. belong
         // in the user message, not the system prompt. The system prefix is
@@ -833,13 +903,9 @@ impl ReactAgent {
         // prompt cache, OpenAI prefix cache) keys on — any change to it
         // invalidates the entire cache.
         let mut prompt = if config.enable_tool && config.enable_cot {
-            format!(
-                "{}\n\n{}",
-                config.system_prompt.trim_end(),
-                Self::COT_INSTRUCTION,
-            )
+            format!("{}\n\n{}", base.trim_end(), Self::COT_INSTRUCTION,)
         } else {
-            config.system_prompt.clone()
+            base.to_string()
         };
 
         if let Some(suffix) = config
@@ -1011,84 +1077,100 @@ impl ReactAgent {
     /// # }
     /// ```
     pub fn with_llm_config(mut self, config: LlmConfig) -> Self {
-        self.set_llm_config(config);
+        if let Err(error) = self.set_llm_config(config) {
+            tracing::warn!(error = %error, "Failed to install LLM configuration");
+        }
         self
     }
 
     /// Inject LLM configuration together with sourced model facts.
     pub fn with_sourced_llm_config(mut self, config: SourcedLlmConfig) -> Self {
-        self.set_sourced_llm_config(config);
+        if let Err(error) = self.set_sourced_llm_config(config) {
+            tracing::warn!(error = %error, "Failed to install sourced LLM configuration");
+        }
         self
     }
 
     /// Inject a custom LLM client.
     pub fn with_llm_client(mut self, client: Arc<dyn crate::llm::LlmClient>) -> Self {
-        self.config.model_name = client.model_name().to_string();
-        self.config.model_profile = Some(merge_model_profile_resolution(
-            self.config.model_profile.as_ref(),
-            client.model_profile_resolution(),
-        ));
-        self.llm_client = Some(client);
+        self.set_llm_client(client);
         self
     }
 
     /// Set the LLM configuration.
     ///
     /// Builds an LLM client from the config and sets it so that subsequent API
-    /// calls use the provided credentials and explicit protocol.
-    pub fn set_llm_config(&mut self, config: LlmConfig) {
-        self.set_sourced_llm_config(SourcedLlmConfig::new(config));
+    /// calls use the provided credentials and explicit protocol. Construction
+    /// failure leaves the installed model, client and facts unchanged.
+    pub fn set_llm_config(&mut self, config: LlmConfig) -> Result<()> {
+        self.set_sourced_llm_config(SourcedLlmConfig::new(config))
     }
 
     /// Set LLM configuration together with sourced model facts.
-    pub fn set_sourced_llm_config(&mut self, config: SourcedLlmConfig) {
-        self.config.model_name = config.config.model.clone();
-        self.config.model_profile = Some(merge_model_profile_resolution(
-            self.config.model_profile.as_ref(),
-            config.resolve_model_profile_at(std::time::SystemTime::now()),
-        ));
-        match config.build_client() {
-            Ok(client) => {
-                tracing::info!(
-                    model = %config.config.model,
-                    "LLM client built from LlmConfig, credential injection active"
-                );
-                self.install_llm_config(config.config, Arc::from(client));
-                return;
-            }
-            Err(e) => {
-                tracing::warn!(
-                    model = %config.config.model,
-                    error = %e,
-                    "Failed to build LLM client from explicit LlmConfig"
-                );
-            }
+    /// Fresh sourced facts are resolved before publication and take precedence
+    /// over eligible retained facts for the same identity.
+    pub fn set_sourced_llm_config(&mut self, config: SourcedLlmConfig) -> Result<()> {
+        if config.config.model.trim().is_empty() {
+            return Err(crate::error::ConfigError::MissingConfig(
+                config.config.model.clone(),
+                "model name must not be empty".to_string(),
+            )
+            .into());
         }
-        self.llm_config = Some(config.config);
+        let client: Arc<dyn crate::llm::LlmClient> = Arc::from(config.build_client()?);
+        let profile = self.prepare_llm_profile(client.as_ref());
+        tracing::info!(
+            model = %config.config.model,
+            "LLM client built from LlmConfig, credential injection active"
+        );
+        self.install_llm_config(
+            config.config.model.clone(),
+            profile,
+            client,
+            Some(config.config),
+        );
+        Ok(())
     }
 
+    /// Query external client code and resolve facts before a publication begins.
+    pub(crate) fn prepare_llm_profile(
+        &self,
+        client: &dyn crate::llm::LlmClient,
+    ) -> echo_core::llm::capabilities::ModelProfileResolution {
+        Self::prepare_llm_profile_for_config(&self.config, client)
+    }
+
+    fn prepare_llm_profile_for_config(
+        config: &AgentConfig,
+        client: &dyn crate::llm::LlmClient,
+    ) -> echo_core::llm::capabilities::ModelProfileResolution {
+        merge_model_profile_resolution(
+            config.model_profile.as_ref(),
+            client.model_profile_resolution(),
+        )
+    }
+
+    /// Publish frozen values only. Prepared generation commit also uses this
+    /// path, so no client trait query, parsing or provider lookup belongs here.
     pub(crate) fn install_llm_config(
         &mut self,
-        config: LlmConfig,
+        model_name: String,
+        profile: echo_core::llm::capabilities::ModelProfileResolution,
         client: Arc<dyn crate::llm::LlmClient>,
+        config: Option<LlmConfig>,
     ) {
-        self.config.model_name = config.model.clone();
-        self.config.model_profile = Some(merge_model_profile_resolution(
-            self.config.model_profile.as_ref(),
-            client.model_profile_resolution(),
-        ));
+        self.config.model_name = model_name;
+        self.config.model_profile = Some(profile);
         self.llm_client = Some(client);
-        self.llm_config = Some(config);
+        self.llm_config = config;
     }
 
-    /// Set a custom LLM client.
+    /// Set a custom LLM client, clearing any previous provider rebuild config.
+    /// Switching its model requires an explicit replacement client or config.
     pub fn set_llm_client(&mut self, client: Arc<dyn crate::llm::LlmClient>) {
-        self.config.model_name = client.model_name().to_string();
-        self.config.model_profile = Some(merge_model_profile_resolution(
-            self.config.model_profile.as_ref(),
-            client.model_profile_resolution(),
-        ));
-        self.llm_client = Some(client);
+        let model_name = client.model_name().to_string();
+        let profile = self.prepare_llm_profile(client.as_ref());
+        self.install_llm_config(model_name, profile, client, None);
     }
 
     /// Set the working directory for the agent.
@@ -1114,22 +1196,9 @@ impl ReactAgent {
     }
 
     fn refresh_root_system_prompt(&self) {
-        let system_prompt = Self::build_system_prompt(&self.config);
+        let system_prompt = self.current_rendered_system_prompt();
         if let Ok(mut ctx) = self.memory.context.try_lock() {
-            let mut messages = ctx.messages().to_vec();
-            if let Some(system) = messages
-                .iter_mut()
-                .find(|message| matches!(message.role, echo_core::llm::types::Role::System))
-            {
-                *system = echo_core::llm::types::Message::system(system_prompt.clone());
-            } else {
-                messages.insert(
-                    0,
-                    echo_core::llm::types::Message::system(system_prompt.clone()),
-                );
-            }
-            ctx.set_messages(messages);
-            ctx.set_canonical_system_prompt(Some(system_prompt));
+            ctx.update_system(system_prompt);
         } else {
             tracing::warn!(
                 "Could not acquire ContextManager lock to refresh working-dir system prompt; \
@@ -3397,8 +3466,8 @@ impl Agent for ReactAgent {
             .is_some()
         {
             // We can't return a reference to the RwLock contents directly,
-            // so fall back to config prompt. The override is picked up at
-            // the start of each new turn via build_system_prompt().
+            // so fall back to config prompt. The effective-root renderer
+            // consumes the override through current_system_prompt().
             // This method returns the "base" prompt for inspection.
             return &self.config.system_prompt;
         }
@@ -3737,19 +3806,10 @@ impl Agent for ReactAgent {
         *self
             .mutable_system_prompt
             .write()
-            .unwrap_or_else(|e| e.into_inner()) = Some(prompt.clone());
+            .unwrap_or_else(|e| e.into_inner()) = Some(prompt);
+        let rendered = self.current_rendered_system_prompt();
         if let Ok(mut context) = self.memory.context.try_lock() {
-            let mut messages = context.messages().to_vec();
-            if let Some(system) = messages
-                .iter_mut()
-                .find(|message| matches!(message.role, echo_core::llm::types::Role::System))
-            {
-                *system = echo_core::llm::types::Message::system(prompt.clone());
-            } else {
-                messages.insert(0, echo_core::llm::types::Message::system(prompt.clone()));
-            }
-            context.set_messages(messages);
-            context.set_canonical_system_prompt(Some(prompt));
+            context.update_system(rendered);
         }
     }
 

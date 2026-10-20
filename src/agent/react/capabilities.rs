@@ -105,6 +105,8 @@ pub struct PreparedAgentModelGeneration {
     agent: tokio::sync::OwnedRwLockWriteGuard<ReactAgent>,
     llm_config: LlmConfig,
     llm_client: Arc<dyn LlmClient>,
+    model_name: String,
+    model_profile: echo_core::llm::capabilities::ModelProfileResolution,
     temperature: Option<f32>,
     max_tokens: Option<u32>,
     thinking: Option<ThinkingConfig>,
@@ -120,6 +122,7 @@ pub struct PreparedAgentModelDeactivation {
 
 impl PreparedTokenLimit {
     /// Publish the token limit to the exact agent locked during preparation.
+    /// Subsequent runs retain this explicit limit over model-profile defaults.
     pub fn commit(self) {
         let Self { mut agent, values } = self;
         agent.commit_prepared_token_limit(values);
@@ -135,6 +138,8 @@ impl PreparedAgentModelGeneration {
             mut agent,
             llm_config,
             llm_client,
+            model_name,
+            model_profile,
             temperature,
             max_tokens,
             thinking,
@@ -142,11 +147,9 @@ impl PreparedAgentModelGeneration {
             token_limit,
         } = self;
         agent.commit_prepared_token_limit(token_limit);
-        agent.config.model_name = llm_config.model.clone();
+        agent.install_llm_config(model_name, model_profile, llm_client, Some(llm_config));
         agent.config.temperature = temperature;
         agent.config.max_tokens = max_tokens;
-        agent.llm_config = Some(llm_config);
-        agent.llm_client = Some(llm_client);
         agent.thinking = thinking;
         match critic {
             PreparedCriticUpdate::ReplaceOwned { owner, critic }
@@ -212,11 +215,15 @@ impl AgentHandle {
             )));
         }
         let agent = Arc::clone(self.inner()).write_owned().await;
+        let model_name = llm_config.model.clone();
+        let model_profile = agent.prepare_llm_profile(llm_client.as_ref());
         let token_limit = agent.prepare_token_limit_values(token_limit).await?;
         Ok(PreparedAgentModelGeneration {
             agent,
             llm_config,
             llm_client,
+            model_name,
+            model_profile,
             temperature,
             max_tokens,
             thinking,
@@ -376,12 +383,14 @@ impl ReactAgent {
         &self,
         compressor: &dyn ContextCompressor,
     ) -> Result<(ForceCompressStats, Option<CompressionCheckpoint>)> {
-        self.memory
-            .context
-            .lock()
-            .await
+        let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(self);
+        let mut prepared = snapshot.prepare_manual_context_compaction().await?;
+        let result = prepared
+            .context_mut()?
             .force_compress_with(compressor)
-            .await
+            .await?;
+        prepared.commit(Some(compressor)).await?;
+        Ok(result)
     }
 
     /// Force compress with PreCompact/PostCompact hooks fired around the operation.
@@ -410,13 +419,13 @@ impl ReactAgent {
     ) -> Result<(ForceCompressStats, Option<CompressionCheckpoint>)> {
         self.fire_lifecycle_hook(crate::skills::hooks::HookEvent::PreCompact, Some(matcher))
             .await;
-        let (stats, checkpoint) = self
-            .memory
-            .context
-            .lock()
-            .await
+        let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(self);
+        let mut prepared = snapshot.prepare_manual_context_compaction().await?;
+        let (stats, checkpoint) = prepared
+            .context_mut()?
             .force_compress_with_focus(focus_instructions, window)
             .await?;
+        prepared.commit(None).await?;
         self.fire_post_compact_hook(matcher, &stats).await;
         Ok((stats, checkpoint))
     }
@@ -474,13 +483,13 @@ impl ReactAgent {
     ) -> Result<(ForceCompressStats, Option<CompressionCheckpoint>)> {
         self.fire_lifecycle_hook(crate::skills::hooks::HookEvent::PreCompact, Some("manual"))
             .await;
-        let (stats, checkpoint) = self
-            .memory
-            .context
-            .lock()
-            .await
+        let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(self);
+        let mut prepared = snapshot.prepare_manual_context_compaction().await?;
+        let (stats, checkpoint) = prepared
+            .context_mut()?
             .force_compress_with_options(focus, 40, cancel)
             .await?;
+        prepared.commit(None).await?;
         let (protected_message_count, protected_context_tokens) = {
             let context = self.memory.context.lock().await;
             (
@@ -628,15 +637,58 @@ impl ReactAgent {
 
     // ── Basic config ─────────────────────────────────────────────────────────
 
-    /// Set LLM model name at runtime
+    /// Switch the configured LLM model for subsequent invocations.
     ///
     /// # Parameters
     /// * `model_name` - New LLM model name
     ///
     /// # Description
-    /// This method allows dynamically switching the LLM model used by the Agent at runtime.
-    pub fn set_model(&mut self, model_name: &str) {
+    /// A configured client is rebuilt before publishing its model and facts.
+    /// Opaque custom clients require an explicit replacement configuration;
+    /// failed changes leave the installed generation unchanged.
+    pub fn set_model(&mut self, model_name: &str) -> Result<()> {
+        if model_name.trim().is_empty() {
+            return Err(crate::error::ConfigError::MissingConfig(
+                model_name.to_string(),
+                "model name must not be empty".to_string(),
+            )
+            .into());
+        }
+        let consistent_client = match self.llm_client.as_ref() {
+            Some(client) => {
+                client.model_name() == model_name
+                    && self
+                        .llm_config
+                        .as_ref()
+                        .is_none_or(|config| config.model == model_name)
+            }
+            None => self.llm_config.is_none(),
+        };
+        if self.config.model_name == model_name && consistent_client {
+            return Ok(());
+        }
+        if let Some(mut config) = self.llm_config.clone() {
+            config.model = model_name.to_string();
+            config.thinking_protocol = config
+                .resolve_model_profile_at(std::time::SystemTime::now())
+                .profile
+                .thinking_protocol;
+            let client: Arc<dyn LlmClient> = Arc::from(config.build_client()?);
+            let profile = self.prepare_llm_profile(client.as_ref());
+            self.install_llm_config(model_name.to_string(), profile, client, Some(config));
+            return Ok(());
+        }
+        if self.llm_client.is_some() {
+            return Err(crate::error::ConfigError::MissingConfig(
+                model_name.to_string(),
+                "runtime model switching requires the original LlmConfig; explicitly install a replacement client or configuration".to_string(),
+            ).into());
+        }
+        // A configuration-only Agent has no executing client to replace.
+        // Facts for the previous identity cannot describe the new model.
         self.config.model_name = model_name.to_string();
+        self.config.model_profile = None;
+        Ok(())
     }
 
     /// Set the temperature for LLM generation.
@@ -685,12 +737,15 @@ impl ReactAgent {
         } = prepared;
         context.set_token_limit(token_limit, budget);
         self.config.token_limit = token_limit;
+        self.config.token_limit_explicit = true;
     }
 
     /// Set the token limit (context window budget) at runtime.
     ///
     /// This compatibility method remains non-blocking. Consumers that need a
     /// transactional multi-agent update should use the prepare/commit API.
+    /// A successful change remains explicit on subsequent runs, overriding
+    /// model-profile context-window defaults just like the config builder.
     pub fn set_token_limit(&mut self, token_limit: usize) -> crate::error::Result<()> {
         let mut context = self.memory.context.try_lock().map_err(|_| {
             crate::error::AgentError::ContextLimitExceeded(
@@ -704,6 +759,7 @@ impl ReactAgent {
         };
         context.set_token_limit(token_limit, budget);
         self.config.token_limit = token_limit;
+        self.config.token_limit_explicit = true;
         Ok(())
     }
 
@@ -821,10 +877,11 @@ impl ReactAgent {
         let has_injection = skill.system_prompt_injection().is_some();
         if let Some(injection) = skill.system_prompt_injection() {
             self.config.system_prompt.push_str(&injection);
+            let rendered = self.current_rendered_system_prompt();
             self.memory
                 .context
                 .try_lock()
-                .map(|mut ctx| ctx.update_system(self.config.system_prompt.clone()))
+                .map(|mut ctx| ctx.update_system(rendered))
                 .unwrap_or_else(|e| {
                     tracing::warn!("Failed to acquire context lock for skill injection: {}", e);
                 });
@@ -1994,24 +2051,18 @@ impl ReactAgent {
 
     // ── System Prompt ────────────────────────────────────────────────────────
 
-    /// Set the Agent's system prompt
+    /// Update the Agent's configured base system prompt.
     ///
-    /// # Parameters
-    /// * `prompt` - New system prompt
-    ///
-    /// # Description
-    /// This method updates the Agent's system prompt and synchronizes the update in the context manager.
-    /// The system prompt defines the Agent's role, behavior guidelines, and task instructions.
-    ///
-    /// # Note
-    /// Setting the system prompt overwrites all previous system prompt content.
-    /// If prompts were previously injected via skills, they will also be overwritten.
+    /// A runtime override retains its existing priority. The effective root is
+    /// rendered with the usual CoT, model-profile and project-rule layers.
+    /// Use `replace_system_prompt` to explicitly clear an active override.
     pub async fn set_system_prompt(&mut self, prompt: String) {
-        self.config.system_prompt = prompt.clone();
-        self.memory.context.lock().await.update_system(prompt);
+        self.config.system_prompt = prompt;
+        let rendered = self.current_rendered_system_prompt();
+        self.memory.context.lock().await.update_system(rendered);
         tracing::info!(
             agent = %self.config.agent_name,
-            "System prompt updated"
+            "Base system prompt updated"
         );
     }
 }
@@ -2023,6 +2074,111 @@ mod tests {
     use crate::agent::config::AgentConfig;
     use crate::llm::types::Message;
     use crate::trace::RunStore;
+
+    struct TokenLimitRecorder(Arc<std::sync::atomic::AtomicUsize>);
+
+    impl ContextCompressor for TokenLimitRecorder {
+        fn compress(
+            &self,
+            input: echo_core::compression::CompressionInput,
+        ) -> futures::future::BoxFuture<
+            '_,
+            crate::error::Result<echo_core::compression::CompressionOutput>,
+        > {
+            self.0
+                .store(input.token_limit, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async move {
+                Ok(echo_core::compression::CompressionOutput {
+                    messages: input.messages,
+                    evicted: Vec::new(),
+                    checkpoint: None,
+                })
+            })
+        }
+    }
+
+    fn token_limit_publication_agent() -> ReactAgent {
+        let mut profile = echo_core::llm::capabilities::ModelProfile::from_provider_name(
+            "budget-test-model",
+            "openai",
+        );
+        profile.context_window = Some(128_000);
+        let config = AgentConfig::new("budget-test-model", "helper", "protected system prompt")
+            .enable_tool(false)
+            .auto_project_rules(false)
+            .model_profile(profile);
+        ReactAgent::new(config).with_llm_client(Arc::new(
+            crate::testing::MockLlmClient::new()
+                .with_model_name("budget-test-model")
+                .with_response("first reply")
+                .with_response("second reply"),
+        ))
+    }
+
+    async fn assert_token_limit_publication_runs(
+        agent: &ReactAgent,
+        expected_window: usize,
+    ) -> crate::error::Result<()> {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let observed = Arc::new(AtomicUsize::new(usize::MAX));
+        agent
+            .set_compressor(TokenLimitRecorder(Arc::clone(&observed)))
+            .await;
+        for turn in [None, Some("first turn"), Some("second turn")] {
+            if let Some(text) = turn {
+                assert!(!crate::agent::Agent::chat(agent, text).await?.is_empty());
+            }
+            let protected = agent.memory.context.lock().await.protected_token_estimate();
+            agent.force_compress_context().await?;
+            // Observe the compressor's real allowance, including the exact
+            // protected context retained by this run, rather than just config.
+            assert_eq!(
+                observed.load(Ordering::SeqCst).saturating_add(protected),
+                expected_window
+                    .saturating_sub(expected_window / 10)
+                    .saturating_sub(expected_window / 10)
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn token_limit_publication_live_survives_real_turns() -> crate::error::Result<()> {
+        let mut agent = token_limit_publication_agent();
+        agent.set_token_limit(100_000)?;
+        assert_token_limit_publication_runs(&agent, 100_000).await
+    }
+
+    #[tokio::test]
+    async fn token_limit_publication_prepared_survives_real_turns() -> crate::error::Result<()> {
+        let handle = AgentHandle::new(token_limit_publication_agent());
+        handle.prepare_token_limit(100_000).await?.commit();
+        let agent = handle.inner().read().await;
+        assert_token_limit_publication_runs(&agent, 100_000).await
+    }
+
+    #[tokio::test]
+    async fn token_limit_publication_unset_uses_model_profile() -> crate::error::Result<()> {
+        assert_token_limit_publication_runs(&token_limit_publication_agent(), 128_000).await
+    }
+
+    #[tokio::test]
+    async fn token_limit_publication_rejected_or_dropped_preserves_profile()
+    -> crate::error::Result<()> {
+        let mut agent = token_limit_publication_agent();
+        let context = Arc::clone(&agent.memory.context);
+        let busy = context.lock().await;
+        assert!(agent.set_token_limit(100_000).is_err());
+        drop(busy);
+        assert!(agent.set_token_limit(0).is_err());
+        assert!(!agent.config.token_limit_explicit);
+        let handle = AgentHandle::new(agent);
+        assert!(handle.prepare_token_limit(0).await.is_err());
+        drop(handle.prepare_token_limit(100_000).await?);
+        let agent = handle.inner().read().await;
+        assert!(!agent.config.token_limit_explicit);
+        assert_token_limit_publication_runs(&agent, 128_000).await
+    }
 
     struct IdentifiedCallback {
         id: &'static str,

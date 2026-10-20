@@ -119,7 +119,7 @@
       ]
     },
     "graph-foreign-and-latest-observation-controls": {
-      "revision": "source:5d89e64c394894674208e32f5978a76c16e4c26081038a4378fe62dccf16908d",
+      "revision": "f3fa0705f62fe813a5a86bc41cd673f82f915a61",
       "source_refs": [
         "echo-orchestration/src/workflow/graph.rs",
         "echo-orchestration/src/workflow/node.rs",

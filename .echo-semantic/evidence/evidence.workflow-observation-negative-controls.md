@@ -2,7 +2,7 @@
 schema_version: 1
 id: evidence.workflow-observation-negative-controls
 kind: evidence
-observed_at: source:5d89e64c394894674208e32f5978a76c16e4c26081038a4378fe62dccf16908d
+observed_at: f3fa0705f62fe813a5a86bc41cd673f82f915a61
 source_refs:
 - echo-orchestration/src/workflow/graph.rs
 - echo-orchestration/src/workflow/node.rs

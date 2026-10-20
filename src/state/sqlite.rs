@@ -2706,6 +2706,7 @@ mod tests {
             projected,
         )?;
         let cursor_before = super::super::TranscriptProjectionCheckpoint {
+            context_only: None,
             generation_id: runtime_state_id.to_string(),
             next_ordinal: 0,
             projected: Vec::new(),
@@ -2721,6 +2722,7 @@ mod tests {
             })
             .collect::<Result<Vec<_>>>()?;
         let cursor_after = super::super::TranscriptProjectionCheckpoint {
+            context_only: None,
             generation_id: runtime_state_id.to_string(),
             next_ordinal: 1,
             projected,
@@ -2936,6 +2938,7 @@ mod tests {
         checkpoint.messages_json = AgentCheckpoint::serialize_payload(
             vec![message],
             Some(super::super::TranscriptProjectionCheckpoint {
+                context_only: None,
                 generation_id: id.to_string(),
                 next_ordinal: 1,
                 projected: vec![super::super::TranscriptProjectionMessage { ordinal: 0, digest }],
@@ -3540,6 +3543,7 @@ mod tests {
             &checkpoint_only.restore_messages()?
         )?);
         let cursor = super::super::TranscriptProjectionCheckpoint {
+            context_only: None,
             generation_id: "legacy-cursor".to_string(),
             next_ordinal: 0,
             projected: Vec::new(),

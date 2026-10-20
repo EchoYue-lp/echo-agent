@@ -129,7 +129,9 @@ impl AgentChannelHandler {
     pub fn from_config(config: AgentConfig, llm_config: LlmConfig) -> Result<Self> {
         let client: Arc<dyn LlmClient> = Arc::from(llm_config.build_client()?);
         let mut agent = ReactAgent::new(config);
-        agent.install_llm_config(llm_config, client);
+        let model_name = llm_config.model.clone();
+        let profile = agent.prepare_llm_profile(client.as_ref());
+        agent.install_llm_config(model_name, profile, client, Some(llm_config));
         Ok(Self::new(agent))
     }
 

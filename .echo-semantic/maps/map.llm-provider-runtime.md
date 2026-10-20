@@ -4,15 +4,22 @@ id: map.llm-provider-runtime
 kind: capability_map
 title: LLM Provider、Model Policy 与 Streaming
 risk: high
-observed_at: f1e9027246760661144786e9e35615cd46d580c6
+observed_at: f9906007599a9c9842474a65f4d8cb5a8a5228b8
 boundary_refs: [boundary.llm-provider-runtime]
 behavior_refs: [behavior.llm-provider-execution]
 rule_refs: [rule.provider-protocol-boundary]
-evidence_refs: [evidence.provider-protocol-quality, evidence.high-risk-audit-frontier]
-finding_refs: [finding.structured-output-main-path, finding.structured-output-schema-validation-contract, finding.provider-capability-authority, finding.model-fact-freshness-authority, finding.nonstream-cancellation-parity, finding.sse-eof-framing-acceptance, finding.provider-stream-terminal-parity, finding.tokenizer-calibration-feedback-convergence]
+evidence_refs: [evidence.provider-protocol-quality, evidence.high-risk-audit-frontier, evidence.configured-client-construction]
+finding_refs: [finding.structured-output-main-path, finding.structured-output-schema-validation-contract, finding.provider-capability-authority, finding.model-fact-freshness-authority, finding.nonstream-cancellation-parity, finding.sse-eof-framing-acceptance, finding.provider-stream-terminal-parity, finding.tokenizer-calibration-feedback-convergence, finding.runtime-model-client-publication]
 audit_refs: [audit.llm-provider-runtime.contract-evidence, audit.llm-provider-runtime.failure-concurrency, audit.llm-provider-runtime.time-lifecycle]
 related_map_refs: [map.agent-session-turn, map.context-memory, map.protocol-surfaces, map.eval-evolution]
 scenarios:
+  runtime-model-publication:
+    status: mapped
+    source_refs: [src/agent/react/capabilities.rs, src/agent/react/mod.rs, src/agent/react/builder.rs, src/agent/react/tests.rs, src/agent/snapshot.rs, docs/adr/0047-model-facts-freshness-authority.md]
+    behavior_refs: [behavior.llm-provider-execution]
+    rule_refs: [rule.provider-protocol-boundary]
+    evidence_refs: [evidence.model-facts-authority-repair, evidence.model-facts-authority-verification, evidence.configured-client-construction]
+    finding_refs: [finding.runtime-model-client-publication]
   provider-neutral-request:
     status: mapped
     source_refs: [echo-core/src/llm/mod.rs, echo-core/src/llm/types.rs]
@@ -90,3 +97,11 @@ Token/usage/thinking/structured result 是 provider-neutral projection；快速�
 ## 未展开项
 
 具体 provider 的完整 payload fixture 在下一阶段 audit 执行。
+
+## Configured-client construction extension
+
+The existing runtime-model scenario also includes the construction-only entry
+that preserves the original client Arc/config. evidence.configured-client-construction binds its new source
+and focused tests; the Map's earlier observation and other scenarios retain
+their historical qualification. No new live model authority or SDK operation is
+introduced, and existing Behavior statuses remain unchanged.

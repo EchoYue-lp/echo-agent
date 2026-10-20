@@ -194,9 +194,10 @@ impl ReactAgent {
 
     /// Reset message history, keeping only the system prompt to ensure each execution is independent
     pub(crate) async fn reset_messages(&self) {
+        let rendered = self.current_rendered_system_prompt();
         let mut ctx = self.memory.context.lock().await;
-        ctx.clear();
-        ctx.push(Message::system(self.current_system_prompt()));
+        ctx.set_canonical_system_prompt(Some(rendered.clone()));
+        ctx.set_messages(vec![Message::system(rendered)]);
         drop(ctx);
         // Fire SessionStart hook with matcher "clear"
         let start_result = self

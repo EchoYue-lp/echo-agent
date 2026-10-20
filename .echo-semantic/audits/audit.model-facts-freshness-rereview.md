@@ -5,9 +5,21 @@ kind: audit
 boundary_ref: boundary.llm-provider-runtime
 lens: state_authority
 freshness: examined
-revision: 07e4270380c40df3f412f99c0aecb6145410cb2a
-finding_refs: [finding.model-fact-freshness-authority, finding.provider-capability-authority]
+revision: 382cb600b0c8c52d1f6866682c6553e0c3369409
+finding_refs: [finding.model-fact-freshness-authority, finding.provider-capability-authority, finding.runtime-token-limit-explicit-publication, finding.runtime-model-client-publication]
 challenges:
+  configured-client-construction:
+    revision: 382cb600b0c8c52d1f6866682c6553e0c3369409
+    source_refs: [src/agent/react/mod.rs, src/agent/react/tests.rs, docs/adr/0047-model-facts-freshness-authority.md, docs/en/38-factory-modes.md, docs/zh/38-factory-modes.md]
+    evidence_refs: [evidence.configured-client-construction]
+  runtime-explicit-limit-publication:
+    revision: f9906007599a9c9842474a65f4d8cb5a8a5228b8
+    source_refs: [src/agent/config.rs, src/agent/react/capabilities.rs, src/agent/snapshot.rs, src/agent/react/run/phases/prepare.rs]
+    evidence_refs: [evidence.compression-token-tail, evidence.model-facts-authority-verification]
+  runtime-model-frozen-publication:
+    revision: f9906007599a9c9842474a65f4d8cb5a8a5228b8
+    source_refs: [src/agent/react/capabilities.rs, src/agent/react/mod.rs, src/agent/react/builder.rs, src/agent/react/tests.rs, src/channels.rs]
+    evidence_refs: [evidence.model-facts-authority-repair, evidence.model-facts-authority-verification]
   fresh-fact-precedence:
     revision: 07e4270380c40df3f412f99c0aecb6145410cb2a
     source_refs: [echo-core/src/llm/capabilities.rs, src/agent/react/mod.rs, src/agent/react/tests.rs]
@@ -94,3 +106,39 @@ v1→v2、exact v1→v2、caller 互补字段、empty exact、unknown provider/p
 
 未执行完整 workspace gate、17 项 feature matrix 或远端 CI；SDK continuity errors
 仍由 SDK/semantic governance 边界独立追踪。
+
+## Runtime publication challenges (2026-10-19)
+
+The two current challenges bind the framework candidate above. Historical
+challenge revisions and old test totals remain unchanged and historical.
+Independent final source rereview returned C0/I0/M0 after correcting one Important
+conditional caller: the channels configured factory now performs its original
+single build before Agent construction, resolves through the same preparation
+owner and invokes the pure publisher. The isolated channels feature compile
+passed. No public rebind API or channel product strategy was added.
+
+The explicit-limit challenge retains the direct/prepared success marker and
+busy/invalid/dropped non-publication policy, with actual compressor allowances
+before and after real turns. The model challenge covers real HTTP A/B, typed
+configuration refusal and rollback, no-op identity consistency, fresh sourced
+precedence/expiry/complement, custom-client stale-config removal and prepared
+profile resolution exclusively before commit. Matching existing prepared and
+configuration-only behavior is preserved. Details, actual current command
+receipts and bounded counts are in the existing verification Evidence.
+
+Only these framework publication Findings close here. Broad Behavior statuses,
+older provider/tokenizer frontiers, the SDK factory/getter adaptation, native task
+Stop, full engineering/feature gates, cold-history retention and exact-main CI
+are not promoted by this source review. The task-reader failure remains recorded;
+the official full strict check must separately validate actual Git history.
+
+## Configured-client constructor challenge
+
+Only the new construction challenge binds source:1828e264adb8119b8b19c84ccc0e18b35067b6333f89c775e51856563290659e. Existing publication
+challenges keep their actual f990 revisions and historical outcomes. The new
+entry reuses one merge/publisher, preserves original Arc/config and implicit
+initialization, rejects invalid pairs without secret-bearing diagnostics, and
+leaves opaque replacement semantics intact. evidence.configured-client-construction records actual focused
+consumption, including real HTTP and Rustdoc, and the separate fixture errors.
+Independent implementation/rereview and per-file necessity are still required
+before the normal milestone; full gates and new SDK/main remain separate.

@@ -9,9 +9,9 @@ primary_focus: contract_evidence
 focus: [failure_concurrency, time_lifecycle, trigger_input]
 observed_at: 2f4da65cd5b83daa07d6c0f36d47bb50fd259c91
 behavior_refs: [behavior.llm-provider-execution]
-code_refs: [echo-core/src/llm/mod.rs, echo-core/src/llm/capabilities.rs, echo-integration/src/providers/config.rs, echo-integration/src/providers/client.rs, echo-integration/src/providers/anthropic.rs, echo-integration/src/providers/responses.rs, docs/adr/0022-typed-llm-timeouts.md, docs/adr/0064-provider-stream-semantic-terminal.md]
-evidence_refs: [evidence.provider-protocol-quality, evidence.sse-eof-framing-acceptance-repair, evidence.sse-eof-framing-acceptance-verification, evidence.provider-stream-terminal-parity-repair, evidence.provider-stream-terminal-parity-verification]
-finding_refs: [finding.structured-output-main-path, finding.provider-capability-authority, finding.nonstream-cancellation-parity, finding.sse-eof-framing-acceptance, finding.provider-stream-terminal-parity]
+code_refs: [echo-core/src/llm/mod.rs, echo-core/src/llm/capabilities.rs, echo-integration/src/providers/config.rs, echo-integration/src/providers/client.rs, echo-integration/src/providers/anthropic.rs, echo-integration/src/providers/responses.rs, docs/adr/0022-typed-llm-timeouts.md, docs/adr/0064-provider-stream-semantic-terminal.md, src/agent/react/mod.rs, src/agent/react/capabilities.rs]
+evidence_refs: [evidence.provider-protocol-quality, evidence.sse-eof-framing-acceptance-repair, evidence.sse-eof-framing-acceptance-verification, evidence.provider-stream-terminal-parity-repair, evidence.provider-stream-terminal-parity-verification, evidence.model-facts-authority-repair, evidence.model-facts-authority-verification]
+finding_refs: [finding.structured-output-main-path, finding.provider-capability-authority, finding.nonstream-cancellation-parity, finding.sse-eof-framing-acceptance, finding.provider-stream-terminal-parity, finding.runtime-model-client-publication]
 ---
 
 # Provider Wire 与 Harness Policy 分离
@@ -39,3 +39,13 @@ LLM traits、provider configs/implementations、SSE tests 与 ADR 0022 提供部
 ## 裁决记录
 
 Provider capabilities、structured output 主路径和 non-stream cancellation 已形成待审 Finding。
+
+## Runtime installation invariant
+
+A successful model setter changes the concrete client used by the next invocation,
+not only its descriptive model name. Build/identity/profile work precedes one
+private frozen-value publisher; rejected changes and dropped preparation leave
+all installed fields unchanged. Opaque custom clients require explicit replacement
+configuration for a different model and cannot reuse stale provider credentials.
+Prepared commit performs no client trait queries or provider resolution. Existing
+borrowed-string wrapper snapshots are not a live Session model authority.

@@ -144,6 +144,41 @@ The resolver intentionally ships without a large model catalog. Fast-changing mo
 facts should be supplied by the consuming application or provider integration with
 a bounded expiration time. See [ADR 0047](../adr/0047-model-facts-freshness-authority.md).
 
+### Changing an installed model
+
+`ReactAgent::set_model(name)`, `set_llm_config(config)` and
+`set_sourced_llm_config(config)` return `Result<()>`. A successful model change
+rebuilds the configured concrete client before publishing its model, retained
+configuration and fresh profile together. The same Agent's next invocation uses
+that client; an existing run retains its own snapshot. Endpoint, credentials,
+protocol, explicit sampling and explicit context limits remain caller choices.
+An implicit context budget follows the new model at the next prepare safe point.
+
+Calling `set_llm_client` or `with_llm_client` installs an opaque custom client and
+clears any previous rebuild configuration. Switching it to a different model
+requires an explicit replacement client or configuration; `set_model` otherwise
+returns `ConfigError::MissingConfig` without changing state. Setting the already
+consistent model is a no-op. Empty names and failed client construction likewise
+leave the installed state unchanged. The `with_*llm_config` builders retain their
+`Self` result and log installation failures; use a fallible setter or
+`ReactAgentBuilder::build` when construction errors must be returned.
+
+Prepared model generation resolves and freezes model facts during preparation.
+Commit only publishes prepared values, and dropping the receipt keeps the old
+generation. A boxed Agent created from an `AgentHandle` retains its documented
+conversion-time string snapshots; read the live handle for the current model.
+
+Factories that already built a client can use
+`ReactAgent::new_with_configured_llm_client(agent_config, client, original_config)`.
+It retains the same Arc and the original rebuild configuration, resolves the
+profile once before ordinary Context initialization, and preserves implicit
+versus explicit budget choices. It does not rebuild the client. Supply the
+original validated configuration: only nonempty matching model identity can be
+checked for arbitrary clients, not endpoint or credential provenance. Invalid
+pairs return a typed configuration error without including supplied secrets.
+Apply custom extensions afterward; later opaque client injection clears this
+configuration. This Rust construction entry does not introduce a remote SDK API.
+
 ## Prompt Templates
 
 `PromptTemplateManager` performs named template registration and variable

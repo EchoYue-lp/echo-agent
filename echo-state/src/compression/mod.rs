@@ -225,7 +225,7 @@ fn fmt_tokens(n: usize) -> String {
 /// Tracks the total number of compression events, tokens saved, messages
 /// evicted, and which strategies were used over the lifetime of a
 /// [`ContextManager`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompressionMetrics {
     /// Total number of compression events triggered.
     pub total_compressions: u64,
@@ -292,6 +292,18 @@ impl CompressionMetrics {
             .entry(compressor_name.to_string())
             .or_insert(0) += 1;
     }
+}
+
+/// Opaque, transient footprint of a prepared context transform.
+///
+/// A persistence owner can stage a transform without publishing its accepted
+/// observers. This value is not a checkpoint or a second persistence authority.
+#[derive(Clone)]
+pub struct PreparedContextTransform {
+    messages: Vec<Message>,
+    projection_scopes: HashMap<String, HashSet<String>>,
+    metrics: CompressionMetrics,
+    defer_observers: bool,
 }
 
 /// Context manager: maintains full conversation history and automatically triggers compression when tokens exceed the limit.
@@ -367,6 +379,7 @@ pub struct ContextManager {
     budget: Option<TokenBudget>,
     /// Cumulative compression metrics for observability.
     metrics: CompressionMetrics,
+    defer_context_observers: bool,
     /// Optional visibility horizon compressor.
     /// When set, `prepare()` runs horizon compaction as a pre-processing pass
     /// before the main compressor, compacting tool traces beyond the active window.
@@ -570,7 +583,72 @@ impl ContextManager {
     pub fn set_messages(&mut self, messages: Vec<Message>) {
         self.messages = messages;
         self.projection_scopes.clear();
-        if let Some(compressor) = &self.compressor {
+        self.notify_context_committed(None);
+    }
+
+    /// Begin a transform whose acceptance will follow the owning checkpoint CAS.
+    /// Configuration and external memory-promotion effects are not rolled back.
+    pub fn prepare_context_transform(&mut self) -> Result<PreparedContextTransform> {
+        if self.defer_context_observers {
+            return Err(echo_core::error::ReactError::Other(
+                "a context transform is already prepared".to_string(),
+            ));
+        }
+        let previous = PreparedContextTransform {
+            messages: self.messages.clone(),
+            projection_scopes: self.projection_scopes.clone(),
+            metrics: self.metrics.clone(),
+            defer_observers: self.defer_context_observers,
+        };
+        self.defer_context_observers = true;
+        Ok(previous)
+    }
+
+    /// Silently exchange transform state, including metrics and projection scopes.
+    /// This synchronous operation invokes no observer and is safe during Drop.
+    pub fn exchange_context_transform(
+        &mut self,
+        mut state: PreparedContextTransform,
+    ) -> PreparedContextTransform {
+        std::mem::swap(&mut self.messages, &mut state.messages);
+        std::mem::swap(&mut self.projection_scopes, &mut state.projection_scopes);
+        std::mem::swap(&mut self.metrics, &mut state.metrics);
+        std::mem::swap(
+            &mut self.defer_context_observers,
+            &mut state.defer_observers,
+        );
+        state
+    }
+
+    /// Refuse to overwrite a concurrently changed public transform footprint.
+    pub fn matches_context_transform(&self, state: &PreparedContextTransform) -> Result<bool> {
+        Ok(
+            serde_json::to_value(&self.messages)? == serde_json::to_value(&state.messages)?
+                && self.projection_scopes == state.projection_scopes
+                && self.metrics == state.metrics
+                && self.defer_context_observers == state.defer_observers,
+        )
+    }
+
+    /// Publish one accepted transform and notify the existing observers once.
+    pub fn accept_context_transform(
+        &mut self,
+        state: PreparedContextTransform,
+        temporary: Option<&dyn ContextCompressor>,
+    ) {
+        self.exchange_context_transform(state);
+        self.defer_context_observers = false;
+        self.notify_context_committed(temporary);
+    }
+
+    fn notify_context_committed(&self, temporary: Option<&dyn ContextCompressor>) {
+        if self.defer_context_observers {
+            return;
+        }
+        if let Some(compressor) = self.compressor.as_deref() {
+            compressor.context_committed(&self.messages);
+        }
+        if let Some(compressor) = temporary {
             compressor.context_committed(&self.messages);
         }
     }
@@ -602,9 +680,7 @@ impl ContextManager {
     pub fn clear(&mut self) {
         self.messages.clear();
         self.projection_scopes.clear();
-        if let Some(compressor) = &self.compressor {
-            compressor.context_committed(&self.messages);
-        }
+        self.notify_context_committed(None);
     }
 
     /// Register a content marker that protects messages from compression.
@@ -1305,12 +1381,7 @@ impl ContextManager {
         self.metrics.record(&stats, name);
         // Installed observers follow every accepted context, including temporary
         // overrides and verifier fallback that replace an incremental summary.
-        if let Some(compressor) = self.compressor.as_deref() {
-            compressor.context_committed(&self.messages);
-        }
-        if let Some(compressor) = override_compressor {
-            compressor.context_committed(&self.messages);
-        }
+        self.notify_context_committed(override_compressor);
         Ok((stats, checkpoint))
     }
 
@@ -1325,14 +1396,75 @@ impl ContextManager {
             .await
     }
 
-    /// Update the system message content
+    /// Update the canonical root prompt without replacing other System messages.
     ///
-    /// Typically called when `add_skill()` injects extra system prompts:
-    /// finds the first message with role == "system" and replaces its content;
-    /// if no system message exists, inserts one at the head of the queue.
+    /// With canonical context, the previous pure `Message::system` payload is
+    /// the root anchor. Reuse an already present desired root and preserve
+    /// summaries/objectives and other independently owned System payloads.
+    /// Without canonical context, retain the standalone first-System contract.
     pub fn update_system(&mut self, new_system_prompt: String) {
-        if let Some(msg) = self.messages.iter_mut().find(|m| m.role == Role::System) {
-            msg.content = MessageContent::Text(new_system_prompt);
+        if self.canonical_context.is_some() {
+            let is_root = |message: &Message, prompt: &str| {
+                message.role == Role::System
+                    && message.content.as_text_ref() == Some(prompt)
+                    && message.tool_calls.is_none()
+                    && message.name.is_none()
+                    && message.tool_call_id.is_none()
+                    && message.reasoning_content.is_none()
+                    && message.reasoning_blocks.is_none()
+            };
+            let previous = self
+                .canonical_context
+                .as_ref()
+                .and_then(|context| context.system_prompt.clone());
+            let desired_exists = self
+                .messages
+                .iter()
+                .any(|message| is_root(message, &new_system_prompt));
+            let mut changed = false;
+            if desired_exists {
+                if let Some(previous) = previous
+                    .as_deref()
+                    .filter(|previous| *previous != new_system_prompt)
+                {
+                    let mut removed = false;
+                    self.messages.retain(|message| {
+                        if !removed && is_root(message, previous) {
+                            removed = true;
+                            false
+                        } else {
+                            true
+                        }
+                    });
+                    changed = removed;
+                }
+            } else if let Some(root) = self.messages.iter_mut().find(|message| {
+                previous
+                    .as_deref()
+                    .is_some_and(|previous| is_root(message, previous))
+            }) {
+                *root = Message::system(new_system_prompt.clone());
+                changed = true;
+            } else {
+                // Position zero is valid even for an empty buffer.
+                self.messages
+                    .insert(0, Message::system(new_system_prompt.clone()));
+                changed = true;
+            }
+            if let Some(canonical) = &mut self.canonical_context {
+                canonical.system_prompt = Some(new_system_prompt);
+            }
+            if changed {
+                self.notify_context_committed(None);
+            }
+            return;
+        }
+        if let Some(message) = self
+            .messages
+            .iter_mut()
+            .find(|message| message.role == Role::System)
+        {
+            message.content = MessageContent::Text(new_system_prompt);
         } else {
             self.messages.insert(0, Message::system(new_system_prompt));
         }
@@ -1722,9 +1854,7 @@ impl ContextManager {
                 echo_core::error::AgentError::Cancelled("context preparation".to_string()).into(),
             );
         }
-        if let Some(compressor) = &self.compressor {
-            compressor.context_committed(&self.messages);
-        }
+        self.notify_context_committed(None);
 
         if let Some(stats) = &mut compressed {
             stats.after_count = self.messages.len();
@@ -2041,6 +2171,7 @@ impl ContextManagerBuilder {
             max_messages: self.max_messages,
             budget: self.budget,
             metrics: CompressionMetrics::new(),
+            defer_context_observers: false,
             visibility_horizon: self.visibility_horizon,
             memory_promoter: self.memory_promoter,
             canonical_context: self.canonical_context,
@@ -2052,6 +2183,200 @@ impl ContextManagerBuilder {
 mod tests {
     use super::*;
     use crate::compression::compressor::SlidingWindowCompressor;
+    #[test]
+    fn canonical_root_update_preserves_independent_systems_and_existing_scope() -> Result<()> {
+        struct Observer(Arc<std::sync::atomic::AtomicUsize>);
+        impl ContextCompressor for Observer {
+            fn compress(
+                &self,
+                input: CompressionInput,
+            ) -> futures::future::BoxFuture<'_, Result<CompressionOutput>> {
+                Box::pin(async move {
+                    Ok(CompressionOutput {
+                        messages: input.messages,
+                        evicted: Vec::new(),
+                        checkpoint: None,
+                    })
+                })
+            }
+            fn context_committed(&self, _messages: &[Message]) {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut context = ContextManager::builder(1000)
+            .compressor(Observer(calls.clone()))
+            .canonical_context(CanonicalContext {
+                system_prompt: Some("old root".to_string()),
+                ..Default::default()
+            })
+            .build();
+        let objective = Message::system("independently owned objective".to_string());
+        let mut named = Message::system("old root".to_string());
+        named.name = Some("independent source".to_string());
+        context.set_messages(vec![
+            objective.clone(),
+            named.clone(),
+            Message::system("old root".to_string()),
+        ]);
+        context.apply_projection_scope(
+            "root-test",
+            &[ContextProjection {
+                marker: "retained".to_string(),
+                message: Some(Message::user("retained scope".to_string())),
+            }],
+        );
+        context.update_system("new root".to_string());
+        assert_eq!(
+            serde_json::to_value(
+                context
+                    .messages()
+                    .iter()
+                    .filter(|message| message.role == Role::System)
+                    .collect::<Vec<_>>()
+            )?,
+            serde_json::to_value([
+                objective.clone(),
+                named.clone(),
+                Message::system("new root".to_string())
+            ])?
+        );
+        assert!(context.has_projection("retained"));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        context.update_system("new root".to_string());
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "same canonical payload is not another accepted change"
+        );
+        // Desired root can already be present in a restored checkpoint. Remove
+        // only the exact old canonical occurrence, retaining unrelated metadata.
+        context.set_canonical_system_prompt(Some("old root".to_string()));
+        context.set_messages(vec![
+            objective.clone(),
+            named.clone(),
+            Message::system("old root".to_string()),
+            Message::system("new root".to_string()),
+        ]);
+        context.update_system("new root".to_string());
+        assert_eq!(
+            serde_json::to_value(context.messages())?,
+            serde_json::to_value([
+                objective.clone(),
+                named,
+                Message::system("new root".to_string())
+            ])?
+        );
+        context.set_canonical_system_prompt(Some("missing old root".to_string()));
+        let before = serde_json::to_value(context.messages())?;
+        let before_calls = calls.load(std::sync::atomic::Ordering::SeqCst);
+        context.update_system("new root".to_string());
+        assert_eq!(serde_json::to_value(context.messages())?, before);
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            before_calls
+        );
+        context.set_canonical_system_prompt(Some("absent root".to_string()));
+        context.set_messages(vec![objective.clone()]);
+        context.update_system("inserted root".to_string());
+        assert_eq!(
+            serde_json::to_value(context.messages())?,
+            serde_json::to_value([
+                Message::system("inserted root".to_string()),
+                objective.clone()
+            ])?
+        );
+        let mut standalone = ContextManager::builder(1000).build();
+        standalone.set_messages(vec![
+            objective,
+            Message::system("other standalone system".to_string()),
+        ]);
+        standalone.update_system("standalone first replacement".to_string());
+        assert_eq!(
+            standalone
+                .messages()
+                .first()
+                .and_then(|message| message.content.as_text_ref()),
+            Some("standalone first replacement")
+        );
+        assert_eq!(
+            standalone
+                .messages()
+                .get(1)
+                .and_then(|message| message.content.as_text_ref()),
+            Some("other standalone system")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn prepared_context_transform_stages_metrics_scopes_and_observers() -> Result<()> {
+        struct Observer(Arc<std::sync::atomic::AtomicUsize>);
+        impl ContextCompressor for Observer {
+            fn compress(
+                &self,
+                input: CompressionInput,
+            ) -> futures::future::BoxFuture<'_, Result<CompressionOutput>> {
+                Box::pin(async move {
+                    Ok(CompressionOutput {
+                        messages: input.messages,
+                        evicted: Vec::new(),
+                        checkpoint: None,
+                    })
+                })
+            }
+            fn context_committed(&self, _messages: &[Message]) {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        let observed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut context = ContextManager::builder(1000)
+            .compressor(Observer(observed.clone()))
+            .build();
+        context.set_messages(vec![
+            Message::user("old".to_string()),
+            Message::assistant("old answer".to_string()),
+            Message::user("current".to_string()),
+        ]);
+        context.apply_projection_scope(
+            "transform-test",
+            &[ContextProjection {
+                marker: "original".to_string(),
+                message: Some(Message::user("original injected view".to_string())),
+            }],
+        );
+        let before_messages = serde_json::to_value(context.messages())?;
+        let original = context.prepare_context_transform()?;
+        context
+            .force_compress_with(&SlidingWindowCompressor::new(1).with_recent_token_budget(10))
+            .await?;
+        context.apply_projection_scope(
+            "transform-test",
+            &[ContextProjection {
+                marker: "candidate".to_string(),
+                message: Some(Message::user("candidate injected view".to_string())),
+            }],
+        );
+        assert_eq!(observed.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let candidate_messages = serde_json::to_value(context.messages())?;
+        let candidate = context.exchange_context_transform(original.clone());
+        assert_eq!(serde_json::to_value(context.messages())?, before_messages);
+        assert_eq!(context.compression_metrics().total_compressions, 0);
+        assert!(context.has_projection("original"));
+        assert!(!context.has_projection("candidate"));
+        assert!(context.matches_context_transform(&original)?);
+        context.accept_context_transform(candidate, None);
+        assert_eq!(
+            serde_json::to_value(context.messages())?,
+            candidate_messages
+        );
+        assert_eq!(context.compression_metrics().total_compressions, 1);
+        assert!(!context.has_projection("original"));
+        assert!(context.has_projection("candidate"));
+        assert_eq!(observed.load(std::sync::atomic::Ordering::SeqCst), 2);
+        Ok(())
+    }
+
     use echo_core::error::Result;
     use futures::future::BoxFuture;
     use std::sync::atomic::{AtomicUsize, Ordering};

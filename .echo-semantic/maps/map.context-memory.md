@@ -8,20 +8,23 @@ observed_at: e5372b8ca3dc308ce8dde4a0092ea58b8d7dd21d
 boundary_refs: [boundary.context-memory]
 behavior_refs: [behavior.context-memory-lifecycle]
 rule_refs: [rule.context-persistence-separation]
-evidence_refs: [evidence.agent-context-execution, evidence.persistence-observation, evidence.high-risk-audit-frontier, evidence.framework-concept-navigation, evidence.transcript-projection-settlement-repair, evidence.transcript-projection-settlement-verification, evidence.managed-import-generation-repair, evidence.checkpoint-plan-authority-repair, evidence.checkpoint-plan-authority-verification, evidence.memory-provenance-authority-repair, evidence.memory-provenance-authority-verification]
-finding_refs: [finding.transcript-projection-settlement, finding.transcript-generation-runtime-identity, finding.checkpoint-current-plan-orphan-authority, finding.pre-compaction-memory-trust-provenance]
+evidence_refs: [evidence.agent-context-execution, evidence.persistence-observation, evidence.high-risk-audit-frontier, evidence.framework-concept-navigation, evidence.transcript-projection-settlement-repair, evidence.transcript-projection-settlement-verification, evidence.managed-import-generation-repair, evidence.checkpoint-plan-authority-repair, evidence.checkpoint-plan-authority-verification, evidence.memory-provenance-authority-repair, evidence.memory-provenance-authority-verification, evidence.compacted-context-projection-repair]
+finding_refs: [finding.transcript-projection-settlement, finding.transcript-generation-runtime-identity, finding.checkpoint-current-plan-orphan-authority, finding.pre-compaction-memory-trust-provenance, finding.runtime-token-limit-explicit-publication, finding.compacted-transcript-retained-ordinals, finding.canonical-root-system-refresh]
 audit_refs: [audit.context-memory.data-durability, audit.transcript-generation-runtime-identity-rereview, audit.transcript-projection-settlement-rereview, audit.checkpoint-plan-authority-rereview, audit.memory-provenance-authority-rereview]
 related_map_refs: [map.agent-session-turn, map.observation-persistence-delivery, map.eval-evolution]
 scenarios:
   token-budgeted-recent-tail:
     status: mapped
+    finding_refs: [finding.runtime-token-limit-explicit-publication]
     source_refs: [echo-state/src/compression/compressor/sliding_window.rs, echo-state/src/compression/compressor/summary.rs, echo-state/src/compression/mod.rs, src/config.rs, src/agent/react/capabilities.rs, src/agent/react/run/phases/compact.rs, docs/adr/0081-token-budgeted-compression-tail.md]
     behavior_refs: [behavior.context-memory-lifecycle]
     rule_refs: [rule.context-persistence-separation]
     evidence_refs: [evidence.compression-token-tail]
   active-context-and-compression:
     status: mapped
-    source_refs: [echo-state/src/compression/mod.rs, src/agent/react/run/context.rs]
+    source_refs: [echo-state/src/compression/mod.rs, src/agent/react/run/context.rs, src/agent/snapshot.rs, src/agent/react/mod.rs, src/agent/react/capabilities.rs]
+    evidence_refs: [evidence.compacted-context-projection-repair]
+    finding_refs: [finding.compacted-transcript-retained-ordinals, finding.canonical-root-system-refresh]
     behavior_refs: [behavior.context-memory-lifecycle]
     rule_refs: [rule.context-persistence-separation]
   checkpoint-transcript-memory-separation:
@@ -120,3 +123,15 @@ assembler alignment 仍保持 needs_review。#42 已合入framework main并关�
 ## 未展开项
 
 Evolution memory mutation 由 eval/evolution map 展开。
+
+## Current bounded compaction and canonical-root repair
+
+The existing Context/RuntimeState/Conversation authorities now retain ordered
+fact identities across non-contiguous compression views and restore canonical
+root System messages without overwriting independent summaries/objectives.
+Two distinct Findings and the current repair Evidence bind source:b2639597dfa94b7e16aa312e46db6585d9df7636d6340c004ae978f18711d0f1 to
+actual focused tests and independent review. New bindings remain in one
+checkpoint/CAS, with internal schema3, explicit legacy limits, read-only Store
+reentry and cancellation/observer acceptance controls. Broad lifecycle status and
+old scenarios are not promoted; full gates, SDK pin/aggregate compatibility,
+website mirrors and main CI remain separate.
