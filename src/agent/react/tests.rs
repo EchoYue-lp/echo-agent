@@ -1,5 +1,4 @@
 use super::{ReactAgent, merge_model_profile_resolution};
-#[cfg(feature = "subagent")]
 use crate::agent::ReactAgentBuilder;
 use crate::agent::config::{AgentConfig, DEFAULT_TOKEN_LIMIT};
 #[cfg(feature = "subagent")]
@@ -998,6 +997,259 @@ fn configured_client_constructor_rejects_bad_pairs_without_query_or_secret()
             .llm_client()
             .is_some_and(|value| !Arc::ptr_eq(value, &client))
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn configured_client_builder_keeps_arc_profile_budget_and_injections()
+-> crate::error::Result<()> {
+    for explicit in [false, true] {
+        let queries = Arc::new(AtomicUsize::new(0));
+        let mut profile = echo_core::llm::capabilities::ModelProfile::from_provider_name(
+            "model-a",
+            "test-provider",
+        );
+        profile.context_window = Some(64_000);
+        let client: Arc<dyn crate::llm::LlmClient> = Arc::new(ModelPublicationProfileClient {
+            inner: crate::testing::MockLlmClient::new().with_model_name("model-a"),
+            profile: echo_core::llm::capabilities::ModelProfileResolution::from_explicit_profile(
+                profile,
+                SystemTime::now(),
+            ),
+            queries: Arc::clone(&queries),
+        });
+        let mut original = test_llm_config("model-a");
+        original.api_key.clear();
+        let store: Arc<dyn crate::memory::Store> = Arc::new(crate::memory::InMemoryStore::new());
+        let mut builder = ReactAgentBuilder::new()
+            .configured_llm_client(Arc::clone(&client), original.clone())
+            .model("must-not-split-the-pair")
+            .name("paired-builder")
+            .system_prompt("paired system")
+            .session_id("paired-session")
+            .temperature(Some(0.25))
+            .max_tokens(Some(1024))
+            .tool(Box::new(MockTool::new("paired-tool")))
+            .with_memory_tools(Arc::clone(&store));
+        if explicit {
+            builder = builder.token_limit(100_000);
+        }
+        let mut agent = builder.build_strict()?;
+        assert_eq!(queries.load(Ordering::SeqCst), 1);
+        assert!(
+            agent
+                .llm_client()
+                .is_some_and(|value| Arc::ptr_eq(value, &client))
+        );
+        assert_eq!(
+            serde_json::to_value(agent.llm_config())?,
+            serde_json::to_value(Some(&original))?
+        );
+        assert_eq!(agent.model_name(), "model-a");
+        assert_eq!(agent.config.token_limit_explicit, explicit);
+        assert_eq!(
+            agent.config.token_limit,
+            if explicit { 100_000 } else { 64_000 }
+        );
+        assert_eq!(agent.config.get_temperature(), Some(0.25));
+        assert_eq!(agent.config.get_max_tokens(), Some(1024));
+        assert!(agent.tool_names().iter().any(|name| name == "paired-tool"));
+        assert!(
+            agent
+                .store()
+                .is_some_and(|value| Arc::ptr_eq(value, &store))
+        );
+        {
+            let mut context = agent.memory.context.lock().await;
+            context.push(Message::user("budget probe".to_string()));
+            assert_eq!(context.should_compress_with_overhead(70_000), !explicit);
+        }
+        agent.set_model("model-a")?;
+        assert_eq!(queries.load(Ordering::SeqCst), 1);
+        agent.set_llm_client(Arc::clone(&client));
+        assert!(agent.llm_config().is_none());
+        assert!(agent.set_model("model-b").is_err());
+        assert!(
+            agent
+                .llm_client()
+                .is_some_and(|value| Arc::ptr_eq(value, &client))
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn configured_client_builder_rejects_invalid_pairs_before_profile_query() -> crate::error::Result<()>
+{
+    for (client_model, config_model) in [
+        ("", ""),
+        ("model-a", ""),
+        ("", "model-a"),
+        ("model-a", "model-b"),
+    ] {
+        let queries = Arc::new(AtomicUsize::new(0));
+        let client: Arc<dyn crate::llm::LlmClient> = Arc::new(ModelPublicationProfileClient {
+            inner: crate::testing::MockLlmClient::new().with_model_name(client_model),
+            profile: echo_core::llm::capabilities::ModelProfileResolution::from_explicit_profile(
+                echo_core::llm::capabilities::ModelProfile::from_provider_name(
+                    client_model,
+                    "test-provider",
+                ),
+                SystemTime::now(),
+            ),
+            queries: Arc::clone(&queries),
+        });
+        let mut original = test_llm_config(config_model);
+        original.api_key = "builder-pair-secret-sentinel".to_string();
+        let error = match ReactAgentBuilder::new()
+            .configured_llm_client(Arc::clone(&client), original)
+            .build_strict()
+        {
+            Err(error) => error,
+            Ok(_) => return Err(std::io::Error::other("invalid Builder pair was accepted").into()),
+        };
+        assert!(matches!(&error, crate::error::ReactError::Config(value)
+            if matches!(value.as_ref(), crate::error::ConfigError::ConfigFileError(..))));
+        assert!(!format!("{error:?} {error}").contains("builder-pair-secret-sentinel"));
+        assert_eq!(queries.load(Ordering::SeqCst), 0);
+        assert_eq!(Arc::strong_count(&client), 1);
+    }
+    Ok(())
+}
+
+#[test]
+fn configured_client_builder_preserves_legacy_and_explicit_replacement_order()
+-> crate::error::Result<()> {
+    let original = test_llm_config("model-a");
+    let client: Arc<dyn crate::llm::LlmClient> = Arc::from(original.build_client()?);
+    let custom: Arc<dyn crate::llm::LlmClient> =
+        Arc::new(crate::testing::MockLlmClient::new().with_model_name("custom"));
+    let opaque = ReactAgentBuilder::new()
+        .configured_llm_client(Arc::clone(&client), original.clone())
+        .llm_client(Arc::clone(&custom))
+        .build_strict()?;
+    assert!(opaque.llm_config().is_none());
+    assert!(
+        opaque
+            .llm_client()
+            .is_some_and(|value| Arc::ptr_eq(value, &custom))
+    );
+    for sourced in [false, true] {
+        let builder =
+            ReactAgentBuilder::new().configured_llm_client(Arc::clone(&client), original.clone());
+        let replacement = if sourced {
+            builder.sourced_llm_config(crate::llm::SourcedLlmConfig::new(original.clone()))
+        } else {
+            builder.llm_config(original.clone())
+        }
+        .build_strict()?;
+        assert!(replacement.llm_config().is_some());
+        assert!(
+            replacement
+                .llm_client()
+                .is_some_and(|value| !Arc::ptr_eq(value, &client))
+        );
+    }
+    for config_first in [false, true] {
+        let builder = ReactAgentBuilder::new();
+        let legacy = if config_first {
+            builder
+                .llm_config(original.clone())
+                .llm_client(Arc::clone(&custom))
+        } else {
+            builder
+                .llm_client(Arc::clone(&custom))
+                .llm_config(original.clone())
+        }
+        .build_strict()?;
+        assert_eq!(legacy.model_name(), "model-a");
+        assert!(legacy.llm_config().is_some());
+        assert!(
+            legacy
+                .llm_client()
+                .is_some_and(|value| !Arc::ptr_eq(value, &custom))
+        );
+    }
+    let paired = ReactAgentBuilder::new()
+        .llm_client(custom)
+        .llm_config(test_llm_config("old-model"))
+        .configured_llm_client(Arc::clone(&client), original)
+        .build_strict()?;
+    assert!(
+        paired
+            .llm_client()
+            .is_some_and(|value| Arc::ptr_eq(value, &client))
+    );
+    assert_eq!(
+        paired.llm_config().map(|value| value.model.as_str()),
+        Some("model-a")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn configured_client_builder_switches_actual_http() -> crate::error::Result<()> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let mut original = test_llm_config("model-a");
+    original.base_url = format!("http://{}/v1/chat/completions", listener.local_addr()?);
+    let server = tokio::spawn(async move {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            model_publication_http_server(listener),
+        )
+        .await
+        .map_err(|error| std::io::Error::other(error.to_string()))?
+    });
+    let client: Arc<dyn crate::llm::LlmClient> = Arc::from(original.build_client()?);
+    let mut agent = ReactAgentBuilder::new()
+        .configured_llm_client(Arc::clone(&client), original)
+        .session_id("same-paired-session")
+        .conversation_id("same-paired-conversation")
+        .build_strict()?;
+    assert!(
+        agent
+            .llm_client()
+            .is_some_and(|value| Arc::ptr_eq(value, &client))
+    );
+    assert_eq!(Agent::chat(&agent, "first request").await?, "ok");
+    agent.set_model("model-b")?;
+    assert_eq!(Agent::chat(&agent, "second request").await?, "ok");
+    let requests = server
+        .await
+        .map_err(|error| std::io::Error::other(error.to_string()))??;
+    let models: Vec<_> = requests
+        .iter()
+        .map(|request| request.get("model"))
+        .collect();
+    assert_eq!(models, [Some(&json!("model-a")), Some(&json!("model-b"))]);
+    let second = requests
+        .get(1)
+        .ok_or_else(|| std::io::Error::other("second model request missing"))?;
+    assert!(second.to_string().contains("first request"));
+    assert!(second.to_string().contains("second request"));
+    Ok(())
+}
+
+#[cfg(feature = "subagent")]
+#[test]
+fn configured_client_builder_preserves_shared_subagent_registry() -> crate::error::Result<()> {
+    let original = test_llm_config("model-a");
+    let client: Arc<dyn crate::llm::LlmClient> = Arc::from(original.build_client()?);
+    let registry = Arc::new(SubagentRegistry::new());
+    let agent = ReactAgentBuilder::new()
+        .configured_llm_client(Arc::clone(&client), original)
+        .subagent_registry(Arc::clone(&registry))
+        .enable_tools()
+        .enable_subagent()
+        .register_agent_dispatch_tool()
+        .build_strict()?;
+    assert!(Arc::ptr_eq(agent.subagent_registry(), &registry));
+    assert!(
+        agent
+            .llm_client()
+            .is_some_and(|value| Arc::ptr_eq(value, &client))
+    );
+    assert!(agent.tool_names().iter().any(|name| name == "agent_tool"));
     Ok(())
 }
 

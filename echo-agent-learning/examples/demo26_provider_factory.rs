@@ -4,6 +4,7 @@
 //! model selects its own wire protocol and input capabilities.
 
 use echo_agent::prelude::*;
+use std::sync::Arc;
 
 fn main() -> echo_agent::error::Result<()> {
     let provider_id = "company-gateway";
@@ -39,7 +40,7 @@ fn main() -> echo_agent::error::Result<()> {
     ]);
 
     for config in [text_model, vision_model, audio_video_model] {
-        let client = config.build_client()?;
+        let client: Arc<dyn LlmClient> = Arc::from(config.build_client()?);
         println!(
             "provider={} model={} protocol={:?} capabilities={:?}",
             config.provider_name.as_deref().unwrap_or("custom"),
@@ -47,6 +48,17 @@ fn main() -> echo_agent::error::Result<()> {
             config.api_protocol,
             config.input_modalities,
         );
+        // Retain the prepared client/config through the full Builder path.
+        // Construction performs no model request.
+        let agent = ReactAgentBuilder::new()
+            .configured_llm_client(Arc::clone(&client), config)
+            .build_strict()?;
+        assert!(
+            agent
+                .llm_client()
+                .is_some_and(|value| Arc::ptr_eq(value, &client))
+        );
+        assert!(agent.llm_config().is_some());
     }
 
     Ok(())

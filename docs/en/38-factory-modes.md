@@ -179,6 +179,21 @@ pairs return a typed configuration error without including supplied secrets.
 Apply custom extensions afterward; later opaque client injection clears this
 configuration. This Rust construction entry does not introduce a remote SDK API.
 
+Use `ReactAgentBuilder::configured_llm_client(client, original_config)` when the
+factory also needs the full Builder injection path, including a shared Subagent
+registry, tools and stores. It uses the same identity validation, single profile
+preparation and frozen publisher as direct construction; no client is rebuilt.
+`build` and `build_strict` report invalid pairs before constructing Agent-owned
+subsystems. The pair's model remains authoritative over a later `model(...)`.
+
+The explicit pair replaces earlier client/config inputs. A later `llm_client`,
+`llm_config` or `sourced_llm_config` replaces the pair, so an opaque replacement
+does not inherit its rebuild configuration. Without this new entry, ordinary
+client/config combinations retain their existing behavior: config construction
+wins over client injection regardless of setter order. Later runtime opaque
+injection still clears rebuild configuration. `demo26_provider_factory` compiles
+and exercises this construction path without making model requests.
+
 ## Prompt Templates
 
 `PromptTemplateManager` performs named template registration and variable

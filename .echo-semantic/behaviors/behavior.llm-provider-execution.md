@@ -54,3 +54,17 @@ stale rebuild configuration. Prepared commit cannot call arbitrary client traits
 parse configuration or resolve facts; ordinary run snapshots retain their own
 freshness safe point. The runtime-publication Finding tracks the actual HTTP
 counterexample and its repair independently from historical freshness Findings.
+
+## Explicit configured Builder construction
+
+The Builder now exposes the same original-client/original-config construction
+mechanism as the direct constructor. It prepares one validated profile before
+Context creation, retains the exact Arc, and preserves full Builder subsystem
+injection. Its private pair input is consumed during construction; the live
+Agent remains the only client/config authority. Ordinary setter chains keep
+config-wins behavior; later ordinary setters discard an explicit pair, and
+runtime opaque replacement still clears rebuild configuration.
+
+The bounded source cut and qualification limits are recorded by
+evidence.configured-client-construction. This addition does not promote this
+broad needs_review Behavior, provider frontiers, SDK pin or language contracts.

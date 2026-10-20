@@ -439,6 +439,22 @@ impl ReactAgent {
         client: Arc<dyn crate::llm::LlmClient>,
         llm_config: LlmConfig,
     ) -> Result<Self> {
+        let (model_name, profile) =
+            Self::prepare_configured_llm_client(&config, client.as_ref(), &llm_config)?;
+        config.model_name = model_name.clone();
+        config.model_profile = Some(profile.clone());
+        let mut agent = Self::new(config);
+        agent.install_llm_config(model_name, profile, client, Some(llm_config));
+        Ok(agent)
+    }
+
+    /// Shared construction preparation for direct and full Builder paths.
+    /// Client queries happen before either path creates owned subsystems.
+    fn prepare_configured_llm_client(
+        config: &AgentConfig,
+        client: &dyn crate::llm::LlmClient,
+        llm_config: &LlmConfig,
+    ) -> Result<(String, echo_core::llm::capabilities::ModelProfileResolution)> {
         let model_name = client.model_name().to_string();
         if model_name.trim().is_empty()
             || llm_config.model.trim().is_empty()
@@ -450,12 +466,8 @@ impl ReactAgent {
             )
             .into());
         }
-        let profile = Self::prepare_llm_profile_for_config(&config, client.as_ref());
-        config.model_name = model_name.clone();
-        config.model_profile = Some(profile.clone());
-        let mut agent = Self::new(config);
-        agent.install_llm_config(model_name, profile, client, Some(llm_config));
-        Ok(agent)
+        let profile = Self::prepare_llm_profile_for_config(config, client);
+        Ok((model_name, profile))
     }
 
     #[cfg(feature = "subagent")]

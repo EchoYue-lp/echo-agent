@@ -28,6 +28,9 @@ pub struct ReactAgentBuilder {
     system_prompt: String,
     llm_client: Option<Arc<dyn LlmClient>>,
     llm_config: Option<SourcedLlmConfig>,
+    // Explicit construction input, consumed before the Agent is exposed. The
+    // installed Agent remains the only runtime client/config authority.
+    configured_llm_client: Option<(Arc<dyn LlmClient>, LlmConfig)>,
     tools: Vec<Box<dyn Tool>>,
     task_revision_service: Option<Arc<crate::tasks::TaskRevisionService>>,
     enable_builtin_tools: bool,
@@ -115,6 +118,7 @@ impl ReactAgentBuilder {
             system_prompt: crate::config::DEFAULT_AGENT_SYSTEM_PROMPT.to_string(),
             llm_client: None,
             llm_config: None,
+            configured_llm_client: None,
             tools: Vec::new(),
             task_revision_service: None,
             enable_builtin_tools: false,
@@ -239,6 +243,7 @@ impl ReactAgentBuilder {
     /// - Use a custom LLM implementation
     /// - Share an LLM client instance
     pub fn llm_client(mut self, client: Arc<dyn LlmClient>) -> Self {
+        self.configured_llm_client = None;
         self.model = client.model_name().to_string();
         self.llm_client = Some(client);
         self
@@ -248,6 +253,7 @@ impl ReactAgentBuilder {
     ///
     /// For dynamically configuring API endpoint, keys, etc., without using environment variables.
     pub fn llm_config(mut self, config: LlmConfig) -> Self {
+        self.configured_llm_client = None;
         self.model = config.model.clone();
         self.llm_config = Some(SourcedLlmConfig::new(config));
         self
@@ -255,8 +261,33 @@ impl ReactAgentBuilder {
 
     /// Set LLM configuration together with sourced model facts.
     pub fn sourced_llm_config(mut self, config: SourcedLlmConfig) -> Self {
+        self.configured_llm_client = None;
         self.model = config.config.model.clone();
         self.llm_config = Some(config);
+        self
+    }
+
+    /// Supply an already built client and its original rebuild configuration.
+    ///
+    /// Like [`ReactAgent::new_with_configured_llm_client`], this retains the
+    /// exact Arc without rebuilding it and resolves its profile once before
+    /// Context initialization. The caller supplies the original validated
+    /// configuration; [`Self::build`] rejects empty or mismatched model names
+    /// without including configuration or credentials in the error.
+    ///
+    /// This replaces previous client/config inputs. A later [`Self::llm_client`],
+    /// [`Self::llm_config`] or [`Self::sourced_llm_config`] replaces this pair.
+    /// Ordinary client/config combinations keep their existing config-wins
+    /// behavior. The pair's model remains authoritative over [`Self::model`].
+    pub fn configured_llm_client(
+        mut self,
+        client: Arc<dyn LlmClient>,
+        original_config: LlmConfig,
+    ) -> Self {
+        self.model = original_config.model.clone();
+        self.llm_client = None;
+        self.llm_config = None;
+        self.configured_llm_client = Some((client, original_config));
         self
     }
 
@@ -944,6 +975,21 @@ impl ReactAgentBuilder {
             *config.working_dir.lock().unwrap_or_else(|e| e.into_inner()) =
                 Some(working_dir.clone());
         }
+        // Freeze the same validated pair used by direct construction before
+        // creating Context or other owned subsystems. No client is rebuilt.
+        let configured_llm_client = self
+            .configured_llm_client
+            .map(|(client, original_config)| -> Result<_> {
+                let (model_name, profile) = ReactAgent::prepare_configured_llm_client(
+                    &config,
+                    client.as_ref(),
+                    &original_config,
+                )?;
+                config.model_name = model_name.clone();
+                config.model_profile = Some(profile.clone());
+                Ok((client, original_config, model_name, profile))
+            })
+            .transpose()?;
         if config.token_budget_config.enabled {
             config.token_budget_config.build(config.token_limit)?;
         }
@@ -972,13 +1018,16 @@ impl ReactAgentBuilder {
             crate::tasks::register_task_tools(&mut agent, service);
         }
 
-        if let Some(llm_client) = self.llm_client {
-            agent.set_llm_client(llm_client);
-        }
-
-        // Inject LLM config
-        if let Some(llm_config) = self.llm_config {
-            agent.set_sourced_llm_config(llm_config)?;
+        if let Some((client, original_config, model_name, profile)) = configured_llm_client {
+            agent.install_llm_config(model_name, profile, client, Some(original_config));
+        } else {
+            if let Some(llm_client) = self.llm_client {
+                agent.set_llm_client(llm_client);
+            }
+            // Preserve the existing config-wins behavior for ordinary inputs.
+            if let Some(llm_config) = self.llm_config {
+                agent.set_sourced_llm_config(llm_config)?;
+            }
         }
 
         // Register all custom tools
@@ -1081,7 +1130,10 @@ impl ReactAgentBuilder {
     /// quick-start/preset entry points use this strict form so an agent cannot
     /// be created without an invocation-capable LLM dependency.
     pub fn build_strict(self) -> Result<ReactAgent> {
-        if self.llm_client.is_none() && self.llm_config.is_none() {
+        if self.llm_client.is_none()
+            && self.llm_config.is_none()
+            && self.configured_llm_client.is_none()
+        {
             return Err(crate::error::ConfigError::MissingConfig(
                 "llm_client".to_string(),
                 "inject an LlmClient or LlmConfig before using build_strict".to_string(),

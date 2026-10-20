@@ -4,7 +4,7 @@ id: baseline.repository
 kind: baseline
 source_snapshot:
   base_revision: f3fa0705f62fe813a5a86bc41cd673f82f915a61
-  content_digest: 4ad31ae30cca2dfe0d0b04d90dd656b2f3ddb3280337f5e4407e9fbe6fed8276
+  content_digest: 5f000f23fee488a6fecb1a972b155cd72ad206384c05f3802cdfec0d52c11872
 inventory_closure: closed
 behavior_model_closure: closed
 map_refs:
@@ -570,3 +570,13 @@ Finding or semantic owner. Previous constructor/projection/root qualifications
 remain at their real snapshots, with source1828 machine markers losslessly
 bound to382cb600. Broad statuses/closure flags and native Stop are unchanged;
 final complete23gates, exact main CI and SDK/website delivery remain pending.
+
+## Explicit Builder pair source increment
+
+The content digest now binds source:5f000f23fee488a6fecb1a972b155cd72ad206384c05f3802cdfec0d52c11872, the bounded Builder
+construction increment on published356. The published lineage base and existing
+region/coverage/closure dispositions are unchanged. Existing model Behavior and
+configured-construction Evidence/Audit own this increment; their historical
+epochs and broader needs_review/frontier scope are preserved. Source/model
+maintenance does not establish focused runtime, full engineering/feature gates,
+CLI consumer after-state, SDK repinning, website mirrors or precise main CI.

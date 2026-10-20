@@ -8,6 +8,8 @@ source_refs:
   - docs/en/38-factory-modes.md
   - docs/zh/38-factory-modes.md
   - src/agent/react/mod.rs
+  - src/agent/react/builder.rs
+  - echo-agent-learning/examples/demo26_provider_factory.rs
   - src/agent/react/tests.rs
   - src/intent/classifier.rs
 supports: [behavior.llm-provider-execution, rule.provider-protocol-boundary]
@@ -267,3 +269,49 @@ SDK Host/contract or website mirror, or claim framework main and its exact CI
 already passed. Historical observations above keep their original revisions,
 source_refs, counts and qualifications. Main integration, precise main CI and
 the independently owned SDK/website delivery remain separate steps.
+
+## Builder known-pair increment: scope and counterexample
+
+The following increment binds source:5f000f23fee488a6fecb1a972b155cd72ad206384c05f3802cdfec0d52c11872 on framework base
+3560812caede84998a1f6f26d7bf3fa81ea0486c. Earlier constructor receipts and
+observations above keep their original execution epochs. No old receipt counts
+as current Builder qualification.
+
+The real consumer counterexample is the CLI original complete core harness:
+1,630 passed, 17 failed and nine pre-existing ignored, with exit101. The 17
+failures require retained configured state. That raw was 170,665 bytes/SHA-256
+bc2c9ab9b33de8fd610f790413f6d2d90cd919fbf3c7670d23b6ed9d776d3ddb; the
+CLI owner preserves its actual executable and original output outside Git. This
+framework task does not substitute an absent-new-API compile failure as before.
+The parent CLI full command stopped at this failing core harness, so later
+harnesses and remaining commands were not executed.
+
+Source inspection follows all three configured CLI factory paths: configuration
+injection constructs a client, then opaque installation of the original shared
+Arc intentionally clears the config. Removing opaque installation would lose
+the original Arc instead. Existing framework Builder config-wins construction
+and the direct paired constructor are distinct: the latter cannot replace the
+full Builder's supplied Subagent registry and other subsystem injections.
+
+`ReactAgentBuilder::configured_llm_client` fills only that initial-construction
+seam. Both entries share the existing identity check/profile merge and pure
+publisher. Pair preparation precedes owned Agent/Context creation; pair build
+does not call build_client or the opaque setter, and initialization preserves
+implicit versus explicit token-limit policy. Old ordinary setters retain their
+config-wins precedence; explicit pair and later ordinary setters replace one
+another without retaining stale pair input. Original credentials remain private
+in-process state; arbitrary endpoint/credential association is not provable.
+
+Focused engineering tests, source review and consumer-after qualification are
+not yet established by this source-only increment. Exact commands, receipts and
+limits will be appended after execution. The first local cold-budget guard
+refused before launching Cargo (target remained absent); a later authorized
+format-only command exited0 and changed only the new tests/example formatting.
+No compile/runtime success follows from formatting. The original 9GiB target cap
+and 5GiB free floor, raw failures and scope boundaries are retained.
+
+Only one new public Rust Builder method is added. It is inventory telemetry, not
+a newly accepted remote operation. SDK's qualified direct-constructor path and
+exact framework pin356 remain unchanged. Framework six gates, 17 feature checks,
+CLI original 17 assertions and complete eight gates, website synchronization and
+precise main CI remain separate acceptance work.

@@ -8,6 +8,10 @@ freshness: examined
 revision: 382cb600b0c8c52d1f6866682c6553e0c3369409
 finding_refs: [finding.model-fact-freshness-authority, finding.provider-capability-authority, finding.runtime-token-limit-explicit-publication, finding.runtime-model-client-publication]
 challenges:
+  configured-builder-client-pair:
+    revision: source:5f000f23fee488a6fecb1a972b155cd72ad206384c05f3802cdfec0d52c11872
+    source_refs: [src/agent/react/builder.rs, src/agent/react/mod.rs, src/agent/react/tests.rs, docs/adr/0047-model-facts-freshness-authority.md, echo-agent-learning/examples/demo26_provider_factory.rs]
+    evidence_refs: [evidence.configured-client-construction]
   configured-client-construction:
     revision: 382cb600b0c8c52d1f6866682c6553e0c3369409
     source_refs: [src/agent/react/mod.rs, src/agent/react/tests.rs, docs/adr/0047-model-facts-freshness-authority.md, docs/en/38-factory-modes.md, docs/zh/38-factory-modes.md]
@@ -142,3 +146,13 @@ leaves opaque replacement semantics intact. evidence.configured-client-construct
 consumption, including real HTTP and Rustdoc, and the separate fixture errors.
 Independent implementation/rereview and per-file necessity are still required
 before the normal milestone; full gates and new SDK/main remain separate.
+
+## Builder pair challenge awaiting focused qualification
+
+The new challenge alone binds the explicit configured Builder increment. The
+Audit main revision/freshness and all historical challenges stay unchanged.
+Check original Arc retention, one pre-Context profile read, real initial budgets,
+shared registry/tools/store injection, invalid-pair rejection and secret-safe
+diagnostics, old setter precedence and pair replacement, then actual same-Agent
+HTTP A/B consumption. Current source inspection is not executed verification or
+independent implementation review; neither is complete at this checkpoint.

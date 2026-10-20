@@ -191,7 +191,7 @@ A factory can prepare one client and share its Arc across independent Agents.
 Opaque `with_llm_client` deliberately clears rebuild configuration, while
 `set_llm_config` builds a new client. Neither expresses this validated pair.
 `ReactAgent::new_with_configured_llm_client(config, client, llm_config)` is the
-single construction-only entry for the original client and its original config.
+direct construction-only entry for the original client and its original config.
 It checks nonempty matching client/config model names, resolves the client facts
 once through the existing merge authority, freezes them in AgentConfig, then
 uses ordinary construction and the existing pure publisher. No second client
@@ -204,6 +204,33 @@ full prepared-generation seeding (marks the budget explicit and publishes other
 settings), and a live paired setter (adds mutation semantics while initial
 Context already exists). The construction-only entry meets the factory need
 with one public API and one private shared profile-preparation helper.
+
+The subsequent Builder consumer counterexample exposed the same construction
+need in factories that also inject shared Subagent registries and other Builder
+subsystems. Building from config then calling opaque `set_llm_client` deliberately
+clears the rebuild config; omitting that call instead loses the original shared
+Arc. `ReactAgentBuilder::configured_llm_client(client, original_config)` therefore
+exposes the same construction mechanism through the complete Builder path.
+Both entries share identity validation and one profile preparation before normal
+Context initialization, then use the existing pure publisher. The pair path
+never invokes `build_client`, prepared model generation or a live paired setter.
+
+The Builder pair is private construction input consumed by `build`; no second
+runtime authority is added. It replaces ordinary client/config inputs. Any later
+ordinary client/config setter discards the pair; ordinary setters do not clear
+one another's legacy fields, retaining config-wins behavior for old chains.
+A later `model` call does not split an explicit pair. `build_strict` accepts it.
+Model identity, implicit versus explicit budgets and sampling retain the direct
+constructor contract. Shared registries and all remaining Builder injections
+continue through their original path. An invalid pair fails before Agent-owned
+subsystems exist, with the same credential-safe typed error.
+
+Rejected alternatives remain rebuilding a client, silently reinterpreting old
+setter chains, replacing the full Builder with direct construction, or creating
+a live mutation/async Handle conversion merely to seed initial state. The new
+Rust method is inventory telemetry, not an accepted cross-language operation.
+The already qualified SDK Host uses direct construction and keeps its own exact
+framework pin; CLI consumption and later framework main CI are separate gates.
 
 [OpenAI Agents' provider](https://github.com/openai/openai-agents-python/blob/9abc9182d06dbd28330af888306031269d57a175/src/agents/models/openai_provider.py)
 retains a supplied client rather than inferring connection options;
