@@ -160,6 +160,17 @@ Prepared model generation 在 prepare 中解析并冻结模型事实，commit �
 无效 pair 返回既有 typed 配置错误，不回显配置或凭据。应在应用 custom extensions
 之前构造，后续 opaque client 注入仍清除配置；这个 Rust 构造入口不新增 SDK 远程 API。
 
+工厂还需要共享 Subagent registry、tools、store 等完整 Builder 注入时，使用
+`ReactAgentBuilder::configured_llm_client(client, original_config)`。它复用直接构造器
+的身份校验、一次 profile 准备和纯 publisher，不重建 client。`build` 与 `build_strict`
+在创建 Agent 所有资源前返回无效 pair 错误；后续 `model(...)` 不拆开 pair 的模型身份。
+
+显式 pair 替换此前的 client/config 输入；后续 `llm_client`、`llm_config` 或
+`sourced_llm_config` 替换 pair，opaque 替换不会继承旧重建配置。未使用新入口的普通
+client/config 组合保留既有行为：不论 setter 顺序，最终配置构造覆盖 client 注入。
+运行时后续 opaque 注入仍清除配置。既有 `demo26_provider_factory` 示例通过此路径
+验证构造，不发出模型请求，并由 all-target 编译链路检查。
+
 ## Prompt Templates
 
 `PromptTemplateManager` 提供命名模板注册和变量替换，与模型能力、产品模式相互独立。

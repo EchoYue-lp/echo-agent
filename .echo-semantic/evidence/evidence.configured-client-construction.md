@@ -8,6 +8,8 @@ source_refs:
   - docs/en/38-factory-modes.md
   - docs/zh/38-factory-modes.md
   - src/agent/react/mod.rs
+  - src/agent/react/builder.rs
+  - echo-agent-learning/examples/demo26_provider_factory.rs
   - src/agent/react/tests.rs
   - src/intent/classifier.rs
 supports: [behavior.llm-provider-execution, rule.provider-protocol-boundary]
@@ -267,3 +269,145 @@ SDK Host/contract or website mirror, or claim framework main and its exact CI
 already passed. Historical observations above keep their original revisions,
 source_refs, counts and qualifications. Main integration, precise main CI and
 the independently owned SDK/website delivery remain separate steps.
+
+## Builder known-pair increment: scope and counterexample
+
+The following increment binds source:5f000f23fee488a6fecb1a972b155cd72ad206384c05f3802cdfec0d52c11872 on framework base
+3560812caede84998a1f6f26d7bf3fa81ea0486c. Earlier constructor receipts and
+observations above keep their original execution epochs. No old receipt counts
+as current Builder qualification.
+
+The real consumer counterexample is the CLI original complete core harness:
+1,630 passed, 17 failed and nine pre-existing ignored, with exit101. The 17
+failures require retained configured state. That raw was 170,665 bytes/SHA-256
+bc2c9ab9b33de8fd610f790413f6d2d90cd919fbf3c7670d23b6ed9d776d3ddb; the
+CLI owner preserves its actual executable and original output outside Git. This
+framework task does not substitute an absent-new-API compile failure as before.
+The parent CLI full command stopped at this failing core harness, so later
+harnesses and remaining commands were not executed.
+
+Source inspection follows all three configured CLI factory paths: configuration
+injection constructs a client, then opaque installation of the original shared
+Arc intentionally clears the config. Removing opaque installation would lose
+the original Arc instead. Existing framework Builder config-wins construction
+and the direct paired constructor are distinct: the latter cannot replace the
+full Builder's supplied Subagent registry and other subsystem injections.
+
+`ReactAgentBuilder::configured_llm_client` fills only that initial-construction
+seam. Both entries share the existing identity check/profile merge and pure
+publisher. Pair preparation precedes owned Agent/Context creation; pair build
+does not call build_client or the opaque setter, and initialization preserves
+implicit versus explicit token-limit policy. Old ordinary setters retain their
+config-wins precedence; explicit pair and later ordinary setters replace one
+another without retaining stale pair input. Original credentials remain private
+in-process state; arbitrary endpoint/credential association is not provable.
+
+Focused engineering tests, source review and consumer-after qualification are
+not yet established by this source-only increment. Exact commands, receipts and
+limits will be appended after execution. The first local cold-budget guard
+refused before launching Cargo (target remained absent); a later authorized
+format-only command exited0 and changed only the new tests/example formatting.
+No compile/runtime success follows from formatting. The original 9GiB target cap
+and 5GiB free floor, raw failures and scope boundaries are retained.
+
+Only one new public Rust Builder method is added. It is inventory telemetry, not
+a newly accepted remote operation. SDK's qualified direct-constructor path and
+exact framework pin356 remain unchanged. Framework six gates, 17 feature checks,
+CLI original 17 assertions and complete eight gates, website synchronization and
+precise main CI remain separate acceptance work.
+
+## Current Builder focused and complete local verification
+
+This section supersedes only the earlier static-only Builder pending
+qualification above. Its actual full-gate Git source is
+ffe4c19acf6d33cd419f2237de3209b4e3015e80, source:5f000f23fee488a6fecb1a972b155cd72ad206384c05f3802cdfec0d52c11872. The earlier
+focused commands used precommit HEAD356 plus the exact candidate bytes later
+committed as ffe4c19acf6d33cd419f2237de3209b4e3015e80; they did not run the old clean356
+source. All six focused input snapshots match those public candidate bytes.
+The historical header, prior command_results and earlier constructor/oracle
+epochs retain their original scope; they are not borrowed as new qualification.
+
+The six actual focused commands each exited0: configured-client selection
+7 passed/0 failed/0 ignored/1,053 filtered; original Builder selection
+11/0/0/1,049 filtered; original runtime-publication selection 7/0/0/1,053
+filtered; original demo26 example compilation; root lib/tests Clippy with
+-D warnings; fmt check. These selections are not added to a distinct-test total.
+The cases include empty-key Mock pair retention, exactly one profile query,
+actual initial budgets, tool/store/shared-registry injection, invalid pairs and
+credential-safe error text, legacy ordering/replacement, opaque clearing, and
+real same-Agent HTTP A then B. Example compilation is not standalone example
+main execution. Original focused proof is local 21,370 bytes/SHA-256
+a84f532944f928be6787d513aee5a18ff18a5afdd9518a536cd92dc662bf3fa0.
+
+The original 23-command plan then completed on actual HEAD
+ffe4c19acf6d33cd419f2237de3209b4e3015e80: fmt, fmt check, workspace all-target/all-feature
+Clippy -D warnings, lib/bin panic Clippy, workspace all-target/all-feature tests,
+workspace lib no-default compile and 17 isolated root feature compiles in the
+original acp/a2a/mcp/lsp/sqlite/telemetry/topology/subagent/web/media/data/
+statistics/channels/git/database/rag/chart order. All commands retained their
+original argv and locked flags where applicable, natural0, no warning/signal/
+truncation, no source drift and no resource interruption in the successful set.
+Each command freezes the same 2,329 tracked inputs, including 1,764
+nonsemantic engineering inputs. The 17 features and no-default check are
+compilation evidence, not additional runtime test counts.
+
+Full05 attempt02 ran from 10:39:43.081Z to 10:45:24.181Z on 2026-10-20: one
+original full command, 89 Cargo targets, 87 Rust harnesses and two custom bench
+targets without Rust summaries. Per-target final Rust summaries give
+3,658 passed/0 failed/3 ignored/0 filtered; two nested child/selfprobe summaries
+are retained but excluded. The root library passed all 1,267 cases. The executed
+root binary echo_agent-e9892b36b5462ff0 is 344,900,864 bytes, mode0755, SHA-256
+a9d1f355386452d983645890bfc9b35105c1face4d6d719165f47f24a42df00e.
+All 89 executed files retain individual identities in local evidence.
+
+The three actual ignores are unchanged from accepted356 and not counted as
+live external coverage: LSP live_installed_servers_initialize_on_real_project_fixture
+requires ECHO_AGENT_LSP_SMOKE=1; scholarly live_open_scholarly_providers_return_results
+requires ECHO_AGENT_PROVIDER_SMOKE=1; Zotero live_zotero_credentials_can_list_items
+requires ZOTERO_API_KEY and ZOTERO_LIBRARY_ID. No new ignore/selector/skip was added.
+
+The profile is the actual framework default optimization, not SDK/CLI opt1:
+jobs1, incremental0, dev/test debug0 and strip=symbols. No new optimization,
+assertion, overflow, unwind or RUSTFLAGS override was introduced; the existing
+tracked macOS -A linker_messages remains. Cargo recorded rustc1.99.0 on
+aarch64-apple-darwin. Successful23 sampled peak target8,064,487,424B is below
+the original9GiB cap; sampled minimum free10,213,281,792B is above5GiB. Focused
+validation used a tighter5GiB target cap with the same5GiB free floor.
+
+Original full05 attempt01 is a distinct incomplete compilation run: the first
+floor breach sampled free5,111,451,648B below5GiB, target5,978,898,432B. No harness
+started. The guard's termination liveness probe then raised EPERM; wrapper exit1
+is known, Cargo natural exit is unknown, and original Node/final-guard receipts
+were not written. Its 12,674-byte raw/SHA-256
+a1b6271d19b899564dea0ab36ed65127fa06120f395c8a475d872a63027b0c61
+and explicitly post-hoc source/process observations remain retained. The
+ignored runner was independently repaired for fact retention/finalization:
+first four successful gates used c5ff6a0b..., successful05attempt02 and remaining18
+used6cee3f08.... Command/profile/source/bounds never changed. This utility repair
+is not a framework production fix or a historical SDK Host-exit causal repair.
+
+Local originals are under .echo-semantic/local/configured-builder-client-pair/:
+full23-final-result-proof.json74,210B/SHA-256
+b6bc2e86a0d581021d2823198b314f6f3a734b3af60bb875494cb7040de4bfd9;
+full05attempt02 raw368,369B/SHA-256
+15e482b7d51272596426d60360c5a5e42609744c8c6b78c77b3275abac6444d9;
+per-harness counts60,484B/b8df928482812639ed01777a766dce950bcfb1d1b5dabd9e3c24e3ec6e080db8;
+89 executable identities62,878B/48bca203cf41f0af4b33278af07adc9a990766d2b9868054c4d86d1c44d07210.
+These hashes identify locally retained originals, not replacements for them or
+publicly hosted logs. Independent source, focused/complete receipt and exact
+file-necessity rereviews returned C0/I0/M0.
+
+Canonical strict/base356/change-evidence qualification uses the fixed c0bc
+checker and a byte-identical real frozen worktree; it is not native Hook/Stop.
+The installed native task check's774 errors and direct legacy-checker/v2-PF
+incompatibility are retained separately; the actual native v2 preflight is not
+deleted/downgraded and checker source is unchanged. No native PASS follows.
+
+ffe4c19acf6d33cd419f2237de3209b4e3015e80 is the sole newly necessary source epoch. The
+proposed annotated ref evidence/framework-source-observation/ffe4c19acf6d33cd419f2237de3209b4e3015e80
+is not created at this candidate stage. Retention before squash/branch deletion
+must allow cold retrieval of this actual validation source; current task-branch
+reachability alone is not final retention. This Rust Builder API remains
+telemetry-only for SDK inventory. SDK pin356/accepted languages remain unchanged;
+CLI original17 and its complete matrix after-state, framework newmain/seven CI
+checks, final cold refs, accepted-main website mirror and release are not claimed.

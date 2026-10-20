@@ -54,3 +54,33 @@ stale rebuild configuration. Prepared commit cannot call arbitrary client traits
 parse configuration or resolve facts; ordinary run snapshots retain their own
 freshness safe point. The runtime-publication Finding tracks the actual HTTP
 counterexample and its repair independently from historical freshness Findings.
+
+## Explicit configured Builder construction
+
+The Builder now exposes the same original-client/original-config construction
+mechanism as the direct constructor. It prepares one validated profile before
+Context creation, retains the exact Arc, and preserves full Builder subsystem
+injection. Its private pair input is consumed during construction; the live
+Agent remains the only client/config authority. Ordinary setter chains keep
+config-wins behavior; later ordinary setters discard an explicit pair, and
+runtime opaque replacement still clears rebuild configuration.
+
+The bounded source cut and qualification limits are recorded by
+evidence.configured-client-construction. This addition does not promote this
+broad needs_review Behavior, provider frontiers, SDK pin or language contracts.
+
+## Builder local verification at the recorded source epoch
+
+At Git ffe4c19acf6d33cd419f2237de3209b4e3015e80 / source:5f000f23fee488a6fecb1a972b155cd72ad206384c05f3802cdfec0d52c11872, native
+configured-client tests, full Builder controls, original model-publication
+controls and the complete local six+17 gate set passed. The selected focused
+counts are separate observations; the one full all-feature workspace command
+provides the runtime total. Independent source, file-necessity and complete
+receipt rereviews returned C0/I0/M0. The existing configured-construction
+Evidence contains the exact counts, original failures and qualifications.
+
+This is bounded initial-construction evidence: exact Arc/config retention, one
+pre-Context profile resolution, initial implicit/explicit budget behavior, full
+injection preservation and later opaque replacement. The Behavior remains
+needs_review with its historical header; no provider-wide frontier, CLI
+consumer-after, new main/CI or remote SDK contract is promoted.
