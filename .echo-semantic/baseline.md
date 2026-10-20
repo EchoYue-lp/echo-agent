@@ -4,7 +4,7 @@ id: baseline.repository
 kind: baseline
 source_snapshot:
   base_revision: f3fa0705f62fe813a5a86bc41cd673f82f915a61
-  content_digest: 5f000f23fee488a6fecb1a972b155cd72ad206384c05f3802cdfec0d52c11872
+  content_digest: 6eb59d7e3a91d9c297c0f1e8e43a5f44e5c62d872d96f600f410514fee8fb773
 inventory_closure: closed
 behavior_model_closure: closed
 map_refs:
@@ -598,3 +598,26 @@ abort remains separately retained, not relabelled as success. This closes only
 local Builder qualification. CLI original17 after-state, framework exact main
 and seven CI checks, native Hook/Stop and accepted-main website mirrors remain
 separate. SDK pin356 and accepted cross-language scope remain unchanged.
+
+## Docker interruption-facts local increment
+
+The current content digest is source:6eb59d7e3a91d9c297c0f1e8e43a5f44e5c62d872d96f600f410514fee8fb773. It includes the
+bounded Docker formatter/test repair and the existing ADR 0002 validation update.
+The Docker source bytes remain b81e0073381ec1e4fcb921401f72c4c0e8f5a7f8b7d8f9fbc765d4b8b619a57d.
+Local runtime receipts were produced at HEAD 1d740858c788d0c53603c937ff17c5ed8966d6d8 plus
+recorded working changes: clean-main original case passed with 334 filtered;
+the controlled four-path test failed before the formatter repair and passed
+after it; the existing Docker module passed 29 tests. The code-only after
+snapshot was source:76a05591b29b1e43910329e1f5de88430d46dbf7a009e3ef2962b98f22601766;
+the later ADR bytes are not relabelled as an executed runtime snapshot.
+
+Existing cleanup-owner Evidence records the exact overlapping test counts and
+independent local rereview. Original main run 39415055057 had six successful jobs
+and one failed foundations job; its actual runtime error remains unknown because
+the original assertion omitted it. This local increment does not accept that
+main, establish the original CI cause, close a new Finding, reopen historical
+Finding #47, or promote broad Behavior/coverage/closure status. Full six-gate and
+successor exact-main CI acceptance remain pending. No feature/cfg/public
+signature changed, so the old Builder 17-feature qualification stays at its
+original epoch. Native Hook/Stop and accepted-main website mirroring remain
+separate; SDK pin356 and accepted cross-language scope are unchanged.
