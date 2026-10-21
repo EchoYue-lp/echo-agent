@@ -6,7 +6,7 @@ boundary_ref: boundary.protocol-surfaces
 lens: state_authority
 freshness: examined
 revision: f1e9027246760661144786e9e35615cd46d580c6
-finding_refs: [finding.a2a-terminal-authority, finding.a2a-task-id-admission-authority, finding.turn-driver-entry-coverage, finding.channel-attachment-projection, finding.turn-terminal-commit-projection-order]
+finding_refs: [finding.a2a-terminal-authority, finding.a2a-task-id-admission-authority, finding.turn-driver-entry-coverage, finding.channel-attachment-projection, finding.turn-terminal-commit-projection-order, finding.sdk-gap-ack-replay-watermark]
 challenges:
   surface-authority-matrix:
     revision: f1e9027246760661144786e9e35615cd46d580c6
@@ -19,6 +19,10 @@ challenges:
   channel-turn-and-attachments:
     revision: f1e9027246760661144786e9e35615cd46d580c6
     source_refs: [src/channels.rs, echo-integration/src/channels/types.rs, echo-integration/src/channels/session.rs]
+    evidence_refs: [evidence.provider-protocol-quality]
+  sdk-gap-watermark-external-owner-routing:
+    revision: 1d740858c788d0c53603c937ff17c5ed8966d6d8
+    source_refs: [docs/adr/0051-extract-sdk-repository.md]
     evidence_refs: [evidence.provider-protocol-quality]
 ---
 
@@ -47,3 +51,17 @@ A2A TaskState 可保留为 wire projection，但内部 terminal/attempt 必须�
 ## 未检查项
 
 未校验外部最新 A2A 规范，未做真实网络/SSE/媒体或应用 Channel adapter验收。
+
+## 具名后继：SDK gap watermark 的 owner-routing
+
+新challenge revision仅指F main1d的ADR0051 ownership源码；不是SDK09f的业务源码版本。
+旧顶revision/freshness、三个原challenges及正文全部保历史含义，time-lifecycle的stale不改。
+
+反证问题是：提取后是否遗漏同一个ACK watermark缺陷的外仓闭合，或用无关SDK/CI成绩替代。
+本仓provider-protocol-quality两个具名角色逐项路由固定SDK09f同名Finding、repair、verification、
+独立rereview与最终语言/mainCI/冷恢复；单变量snapshot2/live2反例对应严格越过watermark义务，
+metadata-only main不改变工程来源。外部Issue120于2026-10-20T11:38:41Z closed。
+
+本具名复核限owner/来源/证据对应；SDK原三链及独立业务审查继续持有实现判断，
+framework没有重跑SDK或增加第二实现。四个A2A、广域审查及native/未知边界不升级。
+候选正式采用时仍须自己的F引用/canonical检查和独立复审，此准备不宣称那些门禁已通过。
