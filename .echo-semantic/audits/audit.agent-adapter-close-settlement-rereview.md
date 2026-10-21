@@ -20,6 +20,10 @@ challenges:
     revision: 733d352fc719f922b21bab1cd46206139564367f
     source_refs: [src/acp/adapter.rs, src/acp/session.rs, echo-integration/src/channels/manager.rs, echo-integration/src/channels/session.rs]
     evidence_refs: [evidence.agent-adapter-close-settlement-repair, evidence.agent-adapter-close-settlement-verification]
+  acp-original-driver-custody:
+    revision: source:42398e4e4b01b53bb11e712ec1d303efbb6c71c14aaec4d39291e7736406159b
+    source_refs: [src/acp/runtime.rs, tests/acp_agent_adapter.rs, docs/adr/0066-agent-adapter-close-ownership.md]
+    evidence_refs: [evidence.agent-adapter-close-settlement-repair, evidence.agent-adapter-close-settlement-verification]
 ---
 
 # Agent adapter close settlement 独立复审
@@ -66,3 +70,21 @@ strict semantic snapshot/change-evidence 全部通过。
 
 未执行真实第三方 MCP/IM provider、SDK Host、EKO、三语言 SDK 或 website 验收；它们不属于
 framework Finding #36 的完成边界。远端 PR/main CI 与 post-merge strict 由 delivery 阶段补充。
+
+
+## ACP original-driver custody 后继有界复审
+
+本增量不重标原733d revision、freshness、旧challenges和#36历史resolved资格。
+新增challenge检查“保留Runentry但原driver随另一官方task Err被drop”的反例：
+map仍唯一，短同步锁支持cold Drop exactptr回滚且不跨await/usercallback；注册立即
+建coldowner后二次fence，firstpoll一次spawn；observerloss仅cancel，originaldrive
+真实receipt才settle和release；startedowner异常仅原typed unknown/lease保留，join
+错误保持错误，无新terminal。runningremove保entry，未启动rollback与标准/SDK
+setup-failure一致；Weak回map且entry不存task，完成后释放无新强环。
+
+source静态、原same2实际red→green及15/31 lifecycle有限收据独审均C0/I0/M0。
+同两入口已真实达到originalproducer释放/join→originalreceipt→Agentclose1；
+新3controls实际通过，abort只privateowner.started/abort故障注入。原producer独立
+Tokio任务首次调度时点未单独证，原raw source firstpoll已证；不为此新增状态/barrier。
+全六/17、policy5、SDK12/三语及mainCI/cold不在本结论；SDK最初otheractor Err
+仍UNKNOWN。旧history/结论不冲销，也不把本有限通过外推为全Goal闭合。

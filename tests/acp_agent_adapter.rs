@@ -12,13 +12,16 @@ use echo_agent::error::AgentFailure;
 use echo_agent::error::{ReactError, Result};
 use echo_agent::llm::types::{ContentPart, Message, MessageContent};
 use echo_agent::tools::{ToolFailure, ToolFailureCategory, ToolResult, ToolStreamEvent};
-use futures::future::BoxFuture;
+use futures::FutureExt as _;
+use futures::future::{BoxFuture, Shared};
 use futures::stream::{self, BoxStream, StreamExt};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tokio::sync::Notify;
+
+type OriginalProducerJoin = Shared<BoxFuture<'static, std::result::Result<(), String>>>;
 
 struct RecordingAgent {
     id: usize,
@@ -42,7 +45,10 @@ impl RecordingAgent {
 struct TurnGate {
     started: AtomicUsize,
     cancelled: AtomicUsize,
+    close_calls: AtomicUsize,
+    producer_join: Mutex<Option<OriginalProducerJoin>>,
     started_notify: Notify,
+    cancelled_notify: Notify,
     release: Notify,
 }
 
@@ -59,6 +65,22 @@ impl TurnGate {
         })
         .await
         .map_err(|_| client_error("timed out waiting for concurrent ACP Prompts"))
+    }
+
+    async fn wait_cancelled(&self) -> agent_client_protocol::Result<()> {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let notified = self.cancelled_notify.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                if self.cancelled.load(Ordering::Acquire) > 0 {
+                    return;
+                }
+                notified.await;
+            }
+        })
+        .await
+        .map_err(|_| client_error("original producer did not observe cancellation"))
     }
 }
 
@@ -83,6 +105,7 @@ impl Agent for RecordingAgent {
 
     fn close<'a>(&'a self) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
+            self.gate.close_calls.fetch_add(1, Ordering::AcqRel);
             self.closed.store(true, Ordering::Release);
             Ok(())
         })
@@ -117,6 +140,42 @@ impl Agent for RecordingAgent {
             }
             if message == "ordinary-setup-error" {
                 return Err(ReactError::Other("ordinary setup failure".to_string()));
+            }
+            if message == "held-receipt-after-actor-error" {
+                let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+                let gate = self.gate.clone();
+                let producer = tokio::spawn(async move {
+                    cancel.cancelled().await;
+                    gate.cancelled.fetch_add(1, Ordering::AcqRel);
+                    gate.cancelled_notify.notify_waiters();
+                    gate.release.notified().await;
+                    let _ = sender.send(Ok(AgentEvent::Cancelled)).await;
+                });
+                // Both observers await this same original JoinHandle. Dropping
+                // the raw stream cannot replace or restart its held producer.
+                let producer_join =
+                    async move { producer.await.map_err(|error| error.to_string()) }
+                        .boxed()
+                        .shared();
+                *self
+                    .gate
+                    .producer_join
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()) = Some(producer_join.clone());
+                let events = async_stream::stream! {
+                    self.gate.started.fetch_add(1, Ordering::AcqRel);
+                    self.gate.started_notify.notify_waiters();
+                    let terminal = receiver.recv().await;
+                    match producer_join.await {
+                        Ok(()) => {
+                            if let Some(terminal) = terminal {
+                                yield terminal;
+                            }
+                        }
+                        Err(error) => yield Err(ReactError::Other(error)),
+                    }
+                };
+                return Ok(Box::pin(events) as BoxStream<'a, Result<AgentEvent>>);
             }
             if message == "not-settled-after-cancel" {
                 let events = async_stream::stream! {
@@ -762,6 +821,179 @@ async fn shared_run_error_isolation_keeps_connection_and_original_owner()
 async fn cancelled_stream_run_error_isolation_drains_original_source_before_responding()
 -> agent_client_protocol::Result<()> {
     run_error_isolation_case(false, true).await
+}
+
+async fn actor_failure_keeps_original_driver_case(
+    shared_start: bool,
+) -> agent_client_protocol::Result<()> {
+    let factory = TestFactory::new();
+    let gate = factory.gate.clone();
+    let captured = CapturedRunRuntime::default();
+    let client_runtime = captured.clone();
+    let observed_entry = Arc::new(OnceLock::new());
+    let client_entry = observed_entry.clone();
+    let actor_error_polled = Arc::new(AtomicBool::new(false));
+    let client_actor_error = actor_error_polled.clone();
+    let connection_done = Arc::new(Notify::new());
+    let client_connection_done = connection_done.clone();
+    let adapter = AcpAgentAdapter::with_config(
+        factory.session_factory(),
+        AcpAdapterConfig {
+            shutdown_timeout: Duration::from_millis(50),
+            ..AcpAdapterConfig::default()
+        },
+    )
+    .map_err(Error::into_internal_error)?
+    .with_profile(captured.clone());
+    let (server, client) = Channel::duplex();
+    let (close_owner, server_future) = adapter.connect_retaining_close_owner(server);
+    let client_gate = gate.clone();
+    let client_future = Client
+        .builder()
+        .connect_with(client, async move |connection| {
+            connection
+                .send_request(v1::InitializeRequest::new(ProtocolVersion::V1))
+                .block_task()
+                .await?;
+            let session_id = connection
+                .send_request(v1::NewSessionRequest::new(
+                    absolute_test_path("actor-failure-held-receipt")
+                        .map_err(Error::into_internal_error)?,
+                ))
+                .block_task()
+                .await?
+                .session_id;
+            let services = client_runtime
+                .services
+                .get()
+                .cloned()
+                .ok_or_else(|| client_error("server services missing"))?;
+            let session = services
+                .sessions()
+                .get(&session_id)
+                .await
+                .ok_or_else(|| client_error("original Session missing"))?;
+            let server_connection = client_runtime
+                .connection
+                .get()
+                .ok_or_else(|| client_error("server connection missing"))?;
+            let pending_prompt = if shared_start {
+                // Same entry and official spawn used by the independent SDK profile.
+                let mut spec =
+                    extension_spec(&session, None).map_err(Error::into_internal_error)?;
+                spec.turn.input = echo_agent::runtime::TurnInput::Text(
+                    "held-receipt-after-actor-error".to_string(),
+                );
+                let (entry, task) = services
+                    .prepare_run(spec)
+                    .await
+                    .map_err(Error::into_internal_error)?;
+                let _ = client_entry.set(entry);
+                server_connection.spawn(task)?;
+                None
+            } else {
+                Some(connection.send_request(v1::PromptRequest::new(
+                    session_id.clone(),
+                    vec![v1::ContentBlock::Text(v1::TextContent::new(
+                        "held-receipt-after-actor-error",
+                    ))],
+                )))
+            };
+            client_gate.wait_started(1).await?;
+            let run_id = format!("{session_id}:turn:1");
+            let entry = services
+                .run(&run_id)
+                .await
+                .ok_or_else(|| client_error("started original Run missing"))?;
+            assert!(entry.receipt().is_none());
+            assert!(session.begin_turn().is_err());
+            let _ = client_entry.set(entry);
+            // The original raw stream was polled before this unrelated task
+            // fails. Do not use EOF or elapsed time to trigger the failure.
+            server_connection.spawn(async move {
+                client_actor_error.store(true, Ordering::Release);
+                Err(client_error("injected other ACP task failure"))
+            })?;
+            client_connection_done.notified().await;
+            drop(pending_prompt);
+            Ok(())
+        });
+    let server_future = async move {
+        let result = server_future.await;
+        connection_done.notify_one();
+        result
+    };
+    let (server_result, _client_result) = tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::join!(server_future, client_future)
+    })
+    .await
+    .map_err(|_| client_error("controlled ACP actor failure did not return"))?;
+    assert!(actor_error_polled.load(Ordering::Acquire));
+    assert!(server_result.is_err());
+    let entry = observed_entry
+        .get()
+        .cloned()
+        .ok_or_else(|| client_error("original Run was not captured"))?;
+    let services = captured
+        .services
+        .get()
+        .ok_or_else(|| client_error("retained services missing"))?;
+    let session = services
+        .sessions()
+        .get(&entry.session_id)
+        .await
+        .ok_or_else(|| client_error("retained Session missing"))?;
+    assert!(entry.receipt().is_none(), "held producer has no receipt");
+    gate.wait_cancelled().await?;
+    assert_eq!(gate.started.load(Ordering::Acquire), 1);
+    assert_eq!(gate.cancelled.load(Ordering::Acquire), 1);
+    assert_eq!(gate.close_calls.load(Ordering::Acquire), 0);
+    let session_admission_retained = session.begin_turn().is_err();
+    let original_slot_held = session.wait_until_idle().now_or_never().is_none();
+    let producer_join = gate
+        .producer_join
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone()
+        .ok_or_else(|| client_error("original producer JoinHandle missing"))?;
+    gate.release.notify_one();
+    tokio::time::timeout(Duration::from_secs(2), producer_join)
+        .await
+        .map_err(|_| client_error("original producer did not finish after release"))?
+        .map_err(|error| client_error(&error))?;
+    let receipt = tokio::time::timeout(Duration::from_secs(2), entry.wait_receipt())
+        .await
+        .map_err(|_| client_error("original driver lost before publishing its real receipt"))?;
+    assert!(session_admission_retained);
+    assert!(
+        original_slot_held,
+        "original active slot must survive actor loss"
+    );
+    assert_eq!(receipt.turn_id.as_str(), entry.run_id);
+    assert_eq!(receipt.outcome, echo_agent::runtime::TurnOutcome::Cancelled);
+    let published = entry
+        .receipt()
+        .ok_or_else(|| client_error("original Run did not retain its receipt"))?;
+    assert!(Arc::ptr_eq(&receipt, &published));
+    assert_eq!(gate.started.load(Ordering::Acquire), 1);
+    assert_eq!(gate.cancelled.load(Ordering::Acquire), 1);
+    close_owner.close().await?;
+    assert_eq!(gate.close_calls.load(Ordering::Acquire), 1);
+    close_owner.close().await?;
+    assert_eq!(gate.close_calls.load(Ordering::Acquire), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn standard_actor_failure_keeps_original_driver_until_receipt()
+-> agent_client_protocol::Result<()> {
+    actor_failure_keeps_original_driver_case(false).await
+}
+
+#[tokio::test]
+async fn shared_actor_failure_keeps_original_driver_until_receipt()
+-> agent_client_protocol::Result<()> {
+    actor_failure_keeps_original_driver_case(true).await
 }
 
 #[test]

@@ -93,3 +93,31 @@ consumes the adapter. Dropping a manual handle after admission forfeits retry
 ownership and violates this contract. A2A remains outside this Evidence.
 Integration gates, independent rereview, and mainline delivery are separate
 obligations.
+
+
+## 2026-10-21 ACP original-driver custody 修复切片
+
+工作树源码身份为实际 HEAD `ebc69a56e6d0d5ff3a3d7c25e1cd2e25d578a1d5`
+加当前未提交差异；canonical 非semantic摘要 `source:5634d776bec790f8ee601f9b9339d0b3e51fc209b1e99f3aff47337f5e58a193`，
+2329文件 mode/byte fence 为 `decb8ab5e8700149eef630078ab4088a11af1c0eb3a5e30ac3c85ec6a9844e6b`
+（后者不是 canonical source digest）。runtime文件SHA-256
+`c13554f88cbbf1fa054a91669fac0a220c53cb70a72b2a2f7e74b47a2edf4c89`，
+两入口测试 `f353c7294a209eeb6af37cf0063dd5e9a85b9e85d538bf6802a216d5d63d3cbe`，
+ADR0066 `7ff6491285a2c21ddd1d61c096d170182e79b715b2ce61c8d0a1915e0b8314f1`。
+这些是工程候选文件身份，不是假称修复已在 HEAD 或公开提交中。
+
+原 `prepare_run` 把唯一 driver future 交官方 connection task actor。另一个 task Err
+能销毁它，而 retained services/Run entry 无法自行取得尚未发布的 receipt。修复仍由
+既有 prepare_run 接纳：注册后立即建立 cold resource owner并复核admission fence；
+首次 observer poll 单次 spawn 原 AgentTurnDriver，observer Drop只取消，不abort。
+RunDriverOwner 保原entry/lease并Weak引用唯一map；cold Drop按exactptr同步回滚，
+started panic/abort只把原lease移交既有RunEntry的not_settled知识。realreceipt才settle
+并释放lease；running remove_run只revokes并保close可见，cold setup failure随后drop
+原task完成回滚。私有map短StdMutex段不跨await或用户回调，没有第二registry/Run状态。
+
+标准入口、SDK式shared入口共用同机制，标准/SDK调用和公共签名不改。cold回滚、
+异常owner loss以及完成后weak释放的实际新controls见原 verification Evidence追加；
+异常control仅private owner.started/abort注入，不冒充完整Agent panic现场。
+源码与同两项结果独立复审C0/I0/M0；runtime15与adapter31只为各自focused集合，
+全六/17、政策、SDK managed12、精确main/CI/cold均待后继资格。无新增ADR/API、
+示例调用或官网合同变化；既有ADR0066同步机制，examples由后续all-target门禁覆盖。

@@ -90,6 +90,23 @@ cargo check --workspace --lib --no-default-features --locked
 
 等价快捷方式:`./scripts/verify.sh`(同一组命令,本地门禁入口)。
 
+
+### framework 精确依赖诊断基线
+
+用户明确接受本 framework Cargo.lock SHA-256
+`7607c1458036adc04e64858215e21d45f7f8ae1ffa992ad82fba97e7a72aa528`
+的49组精确 crate/version/source `warning[duplicate]` 合同。唯一当前机器权威为
+[精确基线](.cargo/cargo-deny-duplicate-baseline.json)，通过
+`scripts/check-cargo-deny-baseline.py` 执行并比较官方 cargo-deny 四类检查；保留
+`multiple-versions = "warn"`、完整原始输出及自然退出码，所有原命令仍须真实退出0。
+此项接受来自 framework 本次独立人类裁决，不能由 SDK 例外自动继承；duplicate
+诊断不是编译 warning。其它工具类别、其它 warning/error、新增或缺失组、版本或来源
+变化、损坏/不完整输出一律阻断，不按49条数量放行，不添加 ignore 或改为 allow。
+锁图、framework revision、manifest/features、检查范围、工具版本或策略变化须 fresh
+扫描和独立复审，不自动改基线。旧扫描 natural0/严格 caller1 原件保留，不能重标为
+新门禁成功；本次采用机器门禁后须重新真实执行既有 policy5。Rust、编译、audit、
+advisory、license、source、配置及其它工具的零警告/零失败约束均不变。
+
 ### 条件矩阵(仅触及对应风险面时)
 
 修改 `Cargo.toml`、feature 定义、`#[cfg(...)]` 分支、可选依赖或跨 crate 公共 API 时,额外逐个编译根 crate 的独立 feature:

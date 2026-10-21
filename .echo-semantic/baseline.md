@@ -4,7 +4,7 @@ id: baseline.repository
 kind: baseline
 source_snapshot:
   base_revision: f3fa0705f62fe813a5a86bc41cd673f82f915a61
-  content_digest: 6eb59d7e3a91d9c297c0f1e8e43a5f44e5c62d872d96f600f410514fee8fb773
+  content_digest: 42398e4e4b01b53bb11e712ec1d303efbb6c71c14aaec4d39291e7736406159b
 inventory_closure: closed
 behavior_model_closure: closed
 map_refs:
@@ -646,3 +646,54 @@ remote-only cold recovery, CLI full8 and native Hook/Stop remain separate
 acceptance steps. No extra 17-feature conditional was triggered here; SDK pin356
 and accepted language contracts stay unchanged. ADR0002 website mirrors follow
 the final accepted framework main.
+
+
+## webpki certificate-verification patch candidate
+
+The current content digest is `source:d66f9839e00eabaa99925e07aef98bc65412f24111d3d6c4af065d1234931913`,
+for actual main `ebc69a56e6d0d5ff3a3d7c25e1cd2e25d578a1d5` plus the bounded lock patch.
+Only the locked rustls-webpki version/checksum changes from 0.103.14 to the
+published 0.103.16 security fix. The other 2,328 tracked inputs and all Docker
+source bytes retain their main identities before this metadata update; existing
+Evidence owns the source/registry/advisory proof. No global closure/status is
+promoted, and earlier qualified epochs keep their original gates.
+
+Original exact-main run 39530385802 finished six engineering jobs successfully
+and failed dependency-policy with RUSTSEC-2026-0382; the later attribution/deny
+steps did not execute. The preceding main1d Docker failure's concrete error stays
+UNKNOWN; new ebc Linux regression passes retain only their actual scope.
+Fresh official audit, bundled attribution/deny, current six workspace gates and
+successor exact-main CI/cold acceptance are pending. This lock-only patch changes
+no manifest/feature/cfg/public signature, so no extra 17-feature matrix is
+triggered and old feature results are not current-source evidence. SDK pin356,
+accepted language scope and the user's three deferred dependencies are unchanged.
+
+
+## Accepted exact framework duplicate contract: policy automation candidate
+
+The human independently accepted this framework lock7607's exact49 duplicate
+version/source groups. The machine baseline is the only current group authority;
+original cargo-deny natural0/raw49 and strict caller1 remain unchanged. The new
+checker and13 offline controls do not replace fresh policy5 after adoption.
+Current ACP ownership regression source and subsequent fixes are separate from
+the old D66 engineering qualification; this candidate snapshot is not a new
+whole-source FULL6/main/CI/cold PASS. Historical headers, closure statuses and
+old pending observations remain historical. The source digest below is a
+hypothetical policy-overlay preparation cut, not a runtime verification epoch.
+
+Hypothetical policy-overlay digest: `source:757ec6f8c019d7d2b2d6eb991aa80e8d24cf973ba7752a3f911cb6a6465c6a4e`.
+
+
+## Current bounded checkpoint after actual new4b policy verification
+
+Current source snapshot remains the exact42398e4e engineering cut. Same Rust
+runtime/test/ADR and lock bytes preserve the original2RED→2GREEN and15/31 focused
+epochs; they are not relabeled as a combined full6 result. Original policy5 was
+actually rerun against official4b/tree5230: both audits and original8-unit/view
+passed, and online cargo-deny returned natural0 with all4 checks complete plus
+only exact49 groups/107 version-source identities. The existing dependency
+Evidence owns the detailed receipts; its precise actual policy5 rereview passed C0/I0/M0.
+The earlier13 checker tests passed on this same source cut; no offline proposal
+was adopted. All original network/transport/strict/resource failures retain
+their original provenance. Full6, SDK consumer12, exact-main CI and cold-source
+delivery remain pending. No broad Behavior/Finding/closure status is promoted.

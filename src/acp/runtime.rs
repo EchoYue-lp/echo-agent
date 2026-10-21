@@ -34,7 +34,7 @@ use echo_state::journal::EventJournal;
 use futures::future::BoxFuture;
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{Arc, Mutex as StdMutex, Weak};
 use std::time::Duration;
 use tokio::sync::{Notify, RwLock};
 
@@ -392,15 +392,19 @@ impl RunEntry {
     }
 }
 
+type RunEntries = StdMutex<HashMap<String, Arc<RunEntry>>>;
+
 /// Registry of runs for one connection: the single Run authority.
 #[derive(Default)]
 pub(crate) struct RunRegistry {
-    runs: RwLock<HashMap<String, Arc<RunEntry>>>,
+    // All map operations are short and contain no await/user code. A prepared
+    // future must also be able to roll back its exact registration from Drop.
+    runs: Arc<RunEntries>,
 }
 
 impl RunRegistry {
     async fn register(&self, entry: Arc<RunEntry>) -> Result<()> {
-        let mut runs = self.runs.write().await;
+        let mut runs = self.runs.lock().unwrap_or_else(|error| error.into_inner());
         if runs.contains_key(&entry.run_id) {
             return Err(ReactError::Other(format!(
                 "run id {} is already registered",
@@ -412,31 +416,36 @@ impl RunRegistry {
     }
 
     pub async fn get(&self, run_id: &str) -> Option<Arc<RunEntry>> {
-        self.runs.read().await.get(run_id).cloned()
+        self.runs
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(run_id)
+            .cloned()
     }
 
     pub async fn remove(&self, run_id: &str) -> Option<Arc<RunEntry>> {
-        let mut runs = self.runs.write().await;
+        let mut runs = self.runs.lock().unwrap_or_else(|error| error.into_inner());
         if let Some(entry) = runs.get(run_id)
-            && entry
-                .unsettled_lease
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .is_some()
+            && entry.is_running()
         {
-            // Revocation/transport teardown is not physical settlement. Keep
-            // uncertain admission reachable through this original registry.
+            // A cold owner's Drop rolls back its own registration. Once the
+            // driver started, revocation cannot erase its close obligation.
             return Some(entry.clone());
         }
         runs.remove(run_id)
     }
 
     /// Cancel every live run and wait (bounded) for their settlements.
-    /// Entries whose driver task was aborted settle through the abort path;
-    /// waiting runs resolve as soon as their receipt exists or the entry is
-    /// dropped with the connection.
+    /// Only an original driver receipt removes a started Run. An abnormal
+    /// task loss retains nonterminal observer knowledge and the original lease.
     async fn cancel_and_wait(&self, wait: Duration) -> usize {
-        let entries: Vec<Arc<RunEntry>> = self.runs.read().await.values().cloned().collect();
+        let entries: Vec<Arc<RunEntry>> = self
+            .runs
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .values()
+            .cloned()
+            .collect();
         for entry in &entries {
             entry.cancel();
         }
@@ -446,21 +455,93 @@ impl RunRegistry {
                 let entry = entry.clone();
                 async move {
                     if entry.is_running() {
-                        // Races with the driver task: either the receipt lands
-                        // here or the connection teardown aborts the task.
                         let _ = entry.wait_receipt().await;
                     }
                 }
             })),
         )
         .await;
-        let mut runs = self.runs.write().await;
+        let mut runs = self.runs.lock().unwrap_or_else(|error| error.into_inner());
         runs.retain(|_, entry| entry.is_running());
         runs.len()
     }
 
     async fn run_count(&self) -> usize {
-        self.runs.read().await.len()
+        self.runs
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .len()
+    }
+}
+
+// Resource custody only. RunLifecycle remains the sole result/receipt state.
+// The registry holds the entry, not this task or its JoinHandle, and this owner
+// has only a weak link back to the map, so no strong ownership cycle is formed.
+struct RunDriverOwner {
+    entry: Arc<RunEntry>,
+    registry: Weak<RunEntries>,
+    lease: Option<ActiveTurnLease>,
+    started: bool,
+}
+
+impl RunDriverOwner {
+    fn observe_error(&mut self, error: agent_client_protocol::Error) {
+        if let Some(lease) = self.lease.take() {
+            self.entry.observe_driver_error(lease, error);
+        }
+    }
+
+    fn settle(&mut self, receipt: TurnReceipt) {
+        self.entry.settle(receipt);
+        drop(self.lease.take());
+    }
+}
+
+impl Drop for RunDriverOwner {
+    fn drop(&mut self) {
+        if self.lease.is_none() {
+            return;
+        }
+        self.entry.cancel();
+        if !self.started {
+            // No Agent code ran. Roll back only this exact prepared entry;
+            // neither a replacement with the same id nor another Run is ours.
+            self.entry.revoke();
+            if let Some(registry) = self.registry.upgrade() {
+                let mut runs = registry.lock().unwrap_or_else(|error| error.into_inner());
+                if runs
+                    .get(&self.entry.run_id)
+                    .is_some_and(|entry| Arc::ptr_eq(entry, &self.entry))
+                {
+                    runs.remove(&self.entry.run_id);
+                }
+            }
+            return;
+        }
+        // Panic/runtime abort cannot stand in for original physical completion.
+        // Retain the same lease in RunEntry and expose an observation only.
+        self.observe_error(agent_client_protocol::Error::internal_error().data(
+            serde_json::json!({
+                "observation": "not_settled",
+                "run_id": self.entry.run_id,
+                "reason": "original ACP driver task ended before its receipt",
+            }),
+        ));
+    }
+}
+
+struct RunDriverWaitCancellation {
+    cancel: crate::agent::CancellationToken,
+    armed: bool,
+}
+
+impl Drop for RunDriverWaitCancellation {
+    fn drop(&mut self) {
+        if self.armed {
+            // Dropping a connection observer requests cancellation; the same
+            // independently owned driver must keep polling through cleanup.
+            self.cancel.cancel();
+        }
     }
 }
 
@@ -626,16 +707,16 @@ impl AcpConnectionServices {
     ) -> Option<crate::agent::CancellationToken> {
         self.runs
             .runs
-            .read()
-            .await
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
             .values()
             .find(|entry| entry.session_id.to_string() == session_id && entry.is_running())
             .map(|entry| entry.cancellation())
     }
 
     /// Remove a prepared run when a later setup or connection spawn fails.
-    /// Dropping the returned task future releases the Session lease; this
-    /// method removes only the shared Run registration.
+    /// Revocation cancels the same Run. Dropping an unstarted task rolls back
+    /// its registration and lease; a started Run remains until a real receipt.
     pub async fn remove_run(&self, run_id: &str) -> Option<Arc<RunEntry>> {
         let entry = self.runs.remove(run_id).await;
         if let Some(entry) = &entry {
@@ -659,10 +740,11 @@ impl AcpConnectionServices {
         )
     }
 
-    /// Register one run and return the driver task for the caller to spawn
-    /// on the connection. Registration reserves the run id; the driver only
-    /// starts once the spawned task runs. A duplicate run id is a caller
-    /// bug and fails without touching the Session's run slot.
+    /// Register one run and return its observer task for the caller to spawn
+    /// on the connection. First poll starts the original driver on an owned
+    /// Tokio task; losing the connection observer cannot destroy that driver.
+    /// Dropping an unpolled task rolls back its exact registration and lease.
+    /// A duplicate run id fails without touching the Session's run slot.
     /// Run-level driver errors are recorded on [`RunEntry::wait_result`];
     /// the task completes successfully after recording them because an official
     /// ACP spawned-task error shuts down the entire connection. Receipt-only
@@ -707,9 +789,14 @@ impl AcpConnectionServices {
             spec.active.turn.cancellation(),
         ));
         self.runs.register(entry.clone()).await?;
+        let mut owner = RunDriverOwner {
+            entry: entry.clone(),
+            registry: Arc::downgrade(&self.runs.runs),
+            lease: Some(spec.active),
+            started: false,
+        };
         if !self.admission_open() {
-            let _ = self.runs.remove(&entry.run_id).await;
-            entry.cancel();
+            // The cold owner synchronously rolls back this exact registration.
             return Err(ReactError::Other("ACP Host is shutting down".to_string()));
         }
 
@@ -719,58 +806,79 @@ impl AcpConnectionServices {
             observers: spec.observers,
         });
         let agent = spec.session.agent.clone();
-        let drive_entry = entry.clone();
-        let lease = spec.active;
         let task: BoxFuture<'static, agent_client_protocol::Result<()>> = Box::pin(async move {
-            let receipt = if drive_entry.is_revoked() {
-                match TurnReceipt::cancelled(drive_entry.run_id.clone()) {
-                    Ok(receipt) => receipt,
-                    Err(error) => {
-                        return Err(
-                            agent_client_protocol::Error::internal_error().data(error.to_string())
-                        );
-                    }
-                }
-            } else {
-                match AgentTurnDriver
-                    .drive(agent.as_ref(), turn, sink.as_ref())
-                    .await
-                {
-                    Ok(receipt) => receipt,
-                    Err(error) => {
-                        let data = match error {
-                            ReactError::ExecutionNotSettled {
-                                run_id,
-                                execution_id,
-                            } => {
-                                let mut details = serde_json::Map::from_iter([
-                                    (
-                                        "observation".to_string(),
-                                        serde_json::Value::String("not_settled".to_string()),
-                                    ),
-                                    ("run_id".to_string(), serde_json::Value::String(run_id)),
-                                ]);
-                                if let Some(execution_id) = execution_id {
-                                    details.insert(
-                                        "execution_id".to_string(),
-                                        serde_json::Value::String(execution_id),
-                                    );
-                                }
-                                serde_json::Value::Object(details)
-                            }
-                            error => serde_json::Value::String(error.to_string()),
-                        };
-                        drive_entry.observe_driver_error(
-                            lease,
-                            agent_client_protocol::Error::internal_error().data(data),
-                        );
-                        return Ok(());
-                    }
-                }
+            let runtime = tokio::runtime::Handle::try_current().map_err(|error| {
+                agent_client_protocol::Error::internal_error().data(format!(
+                    "ACP Run driver requires an active Tokio runtime: {error}"
+                ))
+            })?;
+            let mut wait_cancel = RunDriverWaitCancellation {
+                cancel: owner.entry.cancellation(),
+                armed: true,
             };
-            drive_entry.settle(receipt);
-            drop(lease);
-            Ok(())
+            // Spawn once, only when the accepted observer is first polled.
+            // The original owner is built before spawn, so a never-polled
+            // execution task still performs the exact cold rollback in Drop.
+            let driver = runtime.spawn(async move {
+                owner.started = true;
+                let receipt = if owner.entry.is_revoked() {
+                    match TurnReceipt::cancelled(owner.entry.run_id.clone()) {
+                        Ok(receipt) => receipt,
+                        Err(error) => {
+                            return Err(agent_client_protocol::Error::internal_error()
+                                .data(error.to_string()));
+                        }
+                    }
+                } else {
+                    match AgentTurnDriver
+                        .drive(agent.as_ref(), turn, sink.as_ref())
+                        .await
+                    {
+                        Ok(receipt) => receipt,
+                        Err(error) => {
+                            let data = match error {
+                                ReactError::ExecutionNotSettled {
+                                    run_id,
+                                    execution_id,
+                                } => {
+                                    let mut details = serde_json::Map::from_iter([
+                                        (
+                                            "observation".to_string(),
+                                            serde_json::Value::String("not_settled".to_string()),
+                                        ),
+                                        ("run_id".to_string(), serde_json::Value::String(run_id)),
+                                    ]);
+                                    if let Some(execution_id) = execution_id {
+                                        details.insert(
+                                            "execution_id".to_string(),
+                                            serde_json::Value::String(execution_id),
+                                        );
+                                    }
+                                    serde_json::Value::Object(details)
+                                }
+                                error => serde_json::Value::String(error.to_string()),
+                            };
+                            owner.observe_error(
+                                agent_client_protocol::Error::internal_error().data(data),
+                            );
+                            return Ok(());
+                        }
+                    }
+                };
+                owner.settle(receipt);
+                Ok(())
+            });
+            let joined = driver.await;
+            wait_cancel.armed = false;
+            joined.map_err(|error| {
+                // RunDriverOwner already retained nonterminal loss on the
+                // original entry. This genuine task failure remains an error.
+                agent_client_protocol::Error::internal_error().data(format!(
+                    "ACP original driver task failed (panic={}, cancelled={}): {error}",
+                    error.is_panic(),
+                    error.is_cancelled(),
+                ))
+            })?
         });
         Ok((entry, task))
     }
@@ -1013,7 +1121,7 @@ mod turn_identity_tests {
     use crate::llm::types::Message;
     use crate::runtime::{TurnMode, TurnOutcome};
     use crate::tools::{ExternalRunContext, NestedDelegationPolicy, SubagentLineage};
-    use futures::{StreamExt, stream::BoxStream};
+    use futures::{FutureExt as _, StreamExt, stream::BoxStream};
 
     #[derive(Clone, Default)]
     struct CapturingAgent {
@@ -1158,6 +1266,127 @@ mod turn_identity_tests {
             journal: None,
             observers: Vec::new(),
         })
+    }
+
+    #[tokio::test]
+    async fn unpolled_run_driver_drop_rolls_back_registration_and_original_lease() -> Result<()> {
+        for revoke_first in [false, true] {
+            let agent = CapturingAgent::default();
+            let (services, session) = prepared_session(agent.clone()).await?;
+            let original = spec(session.clone(), TurnMode::Chat, false, None)?;
+            let (entry, task) = services.prepare_run(original).await?;
+            let weak_entry = Arc::downgrade(&entry);
+            assert!(session.wait_until_idle().now_or_never().is_none());
+            if revoke_first {
+                let removed = services.remove_run(&entry.run_id).await;
+                assert!(removed.is_some_and(|value| Arc::ptr_eq(&value, &entry)));
+            }
+            drop(task);
+            assert!(services.run(&entry.run_id).await.is_none());
+            assert!(entry.cancellation().is_cancelled());
+            assert!(entry.receipt().is_none());
+            assert!(session.wait_until_idle().now_or_never().is_some());
+            assert!(
+                agent
+                    .calls
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .is_empty()
+            );
+            drop(session.begin_turn()?);
+            drop(entry);
+            assert!(weak_entry.upgrade().is_none());
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn aborted_started_driver_owner_retains_observation_and_original_lease() -> Result<()> {
+        let (services, session) = prepared_session(CapturingAgent::default()).await?;
+        let original = spec(session.clone(), TurnMode::Chat, false, None)?;
+        let entry = Arc::new(RunEntry::new(
+            original.run_id,
+            session.context.session_id.clone(),
+            original.stream_id,
+            Arc::new(EventLedger::new(AcpLedgerLimits::default(), None)),
+            original.active.turn.cancellation(),
+        ));
+        services.runs.register(entry.clone()).await?;
+        let mut owner = RunDriverOwner {
+            entry: entry.clone(),
+            registry: Arc::downgrade(&services.runs.runs),
+            lease: Some(original.active),
+            started: false,
+        };
+        let (started, observed) = tokio::sync::oneshot::channel();
+        // Inject loss at the private resource-owner boundary, not a fake
+        // Agent terminal. The real two-entry integration tests drive Agents.
+        let task = tokio::spawn(async move {
+            owner.started = true;
+            let _ = started.send(());
+            std::future::pending::<()>().await;
+            drop(owner);
+        });
+        observed
+            .await
+            .map_err(|error| ReactError::Other(error.to_string()))?;
+        task.abort();
+        assert!(task.await.is_err());
+        let error = entry.wait_result().await.err().ok_or_else(|| {
+            ReactError::Other("aborted driver owner manufactured a receipt".to_string())
+        })?;
+        assert_eq!(
+            error.data,
+            Some(serde_json::json!({
+                "observation": "not_settled",
+                "run_id": entry.run_id,
+                "reason": "original ACP driver task ended before its receipt",
+            }))
+        );
+        assert!(entry.receipt().is_none());
+        assert!(entry.cancellation().is_cancelled());
+        assert!(session.wait_until_idle().now_or_never().is_none());
+        let _ = services.remove_run(&entry.run_id).await;
+        assert!(services.run(&entry.run_id).await.is_some());
+        assert_eq!(
+            services
+                .cancel_and_wait_runs_report(Duration::from_millis(1))
+                .await,
+            1
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn completed_run_driver_releases_entry_without_a_registry_cycle() -> Result<()> {
+        let agent = CapturingAgent::default();
+        let (services, session) = prepared_session(agent.clone()).await?;
+        let weak_services = Arc::downgrade(&services);
+        let original = spec(session.clone(), TurnMode::Chat, false, None)?;
+        let (entry, task) = services.prepare_run(original).await?;
+        let weak_entry = Arc::downgrade(&entry);
+        task.await
+            .map_err(|error| ReactError::Other(error.to_string()))?;
+        let receipt = entry.receipt().ok_or_else(|| {
+            ReactError::Other("original completed driver did not publish receipt".to_string())
+        })?;
+        assert_eq!(receipt.outcome, TurnOutcome::Completed);
+        assert_eq!(
+            agent
+                .calls
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .len(),
+            1
+        );
+        assert!(session.wait_until_idle().now_or_never().is_some());
+        let removed = services.remove_run(&entry.run_id).await;
+        assert!(removed.is_some_and(|value| Arc::ptr_eq(&value, &entry)));
+        drop(entry);
+        assert!(weak_entry.upgrade().is_none());
+        drop(services);
+        assert!(weak_services.upgrade().is_none());
+        Ok(())
     }
 
     async fn assert_identity(mode: TurnMode, structured: bool) -> Result<()> {

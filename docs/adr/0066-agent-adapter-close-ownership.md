@@ -60,6 +60,31 @@ owner until work settles, and await the resource close result.
   succeeds; dropping it after admission forfeits retry ownership and violates
   this API contract. An early drop before connection starts fails closed. The
   framework receipt remains the only driven Turn terminal.
+- ACP Run driver custody must outlive the official connection's task actor.
+  That actor owns the futures accepted by `connection.spawn`; an unrelated
+  actor/task error can drop them while the close callback is still waiting.
+  Retaining `AcpAdapterCloseHandle` alone previously kept the Run entry but
+  could lose the only driver capable of publishing its receipt. The shared
+  `prepare_run` entry now returns an observer of the same independently owned
+  driver task, with its public signature and standard/profile callers unchanged.
+  First polling the observer starts that driver exactly once. Dropping the
+  observer requests original Run cancellation and detaches its join observation;
+  it does not abort the original driver or restart the Agent. That driver keeps
+  its original Agent, sink and Session lease through raw producer cleanup and
+  publishes only the existing `AgentTurnDriver` receipt.
+  A cold future dropped before its execution task is polled cancels and rolls
+  back only its exact registration and Session lease, without an Agent call or
+  terminal. The single Run map uses short synchronous critical sections so
+  this rollback is synchronous and cancel-safe; no await or user callback runs
+  under the map lock. Revocation of an already started Run retains its entry
+  for close until a real receipt exists. Panic/runtime abort of the owned task
+  records nonterminal `not_settled` knowledge and retains the original lease;
+  it does not turn task loss into a Cancelled/Failed receipt. A join error still
+  reaches its observer as an error. The resource owner holds only a weak link
+  back to the registry map, and the entry stores no task handle, so custody adds
+  no registry-to-task ownership edge or strong registry/task cycle. Runtime
+  destruction and destruction of the last retained
+  parent still cannot prove physical settlement or promise automatic recovery.
 - Headless starts an owned task and synchronously exposes `HeadlessRunHandle`
   through `start_headless`. The handle owns cancellation, result observation,
   and retry of the same Agent after a failed close. The `run_headless`
@@ -129,5 +154,13 @@ cancelled close retry, child-token isolation, early guard-future abort,
 forced producer abort, provider failure settlement, Headless waiter
 cancellation, pre-poll runtime shutdown, start-time cancellation
 classification, retry phase validation, and retained Headless close retry.
+The ACP driver-custody regression uses the real official connection in both
+standard Prompt and profile `prepare_run` paths: after the original source is
+polled, an unrelated official task errors while that source remains held;
+releasing and joining the same producer must let the original driver publish
+its real receipt before Agent close. Cold registration rollback, abnormal task
+loss retaining observation/lease, and completed-owner release have separate
+controls. These are verification obligations; a source change alone does not
+claim they passed or identify the first actor error in an external failure.
 A2A remains unverified and outside this ADR. Full workspace and independent review are required before
 the corresponding semantic Finding can be resolved on main.

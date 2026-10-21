@@ -104,6 +104,26 @@ jobs:
           python -B -m unittest discover -s scripts/tests -p 'test_vendored_media_audit_lock.py'
           python -B scripts/generate-vendored-media-audit-lock.py --output "$RUNNER_TEMP/media-registry-origin.lock"
           cargo audit --deny warnings --file "$RUNNER_TEMP/media-registry-origin.lock"
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
         with:
-          arguments: --workspace --all-features --locked
+          tool: cargo-deny@0.20.2
+      - name: Test the exact dependency diagnostic gate
+        run: python -B -m unittest discover -s scripts/tests -p 'test_cargo_deny_baseline.py'
+      - name: Check all cargo-deny policies and exact accepted duplicates
+        id: deny_baseline
+        run: |
+          python -B scripts/check-cargo-deny-baseline.py --capture \
+            --root "$GITHUB_WORKSPACE" \
+            --baseline .cargo/cargo-deny-duplicate-baseline.json \
+            --raw "$RUNNER_TEMP/cargo-deny.raw.log" \
+            --receipt "$RUNNER_TEMP/cargo-deny.receipt.json"
+      - name: Preserve the original scanner output and natural exit
+        if: ${{ always() && steps.deny_baseline.outcome != 'skipped' }}
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: cargo-deny-original-${{ github.sha }}
+          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}/cargo-deny.raw.log
+            ${{ runner.temp }}/cargo-deny.receipt.json
