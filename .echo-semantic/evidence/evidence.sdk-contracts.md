@@ -477,3 +477,21 @@ Manifest schema v2新增identity级`sdk_scope`。非intrinsic route或具名intr
 ## 已知缺口
 
 机械闭合、91个合同artifact byte-stability、Rust scope测试和三语言source/Host gate覆盖当前生成物；TypeScript 157、Python 177测试与Java真实Host连接成功。当前TLS依赖修复只刷新source provenance，public API、operation catalog、extension schema、fixtures和三语言route均未变化。当前证据支持已声明external contract完整，不支持“所有Rust public identity均在三语言可用”的总体声明。1,443个deferred identity仍需按capability判断；SDK gap generation已闭合，gap ACK后的replay watermark仍由`finding.sdk-gap-ack-replay-watermark`独立追踪。
+
+## 原观察切点与后继owner指针（2026-10-20）
+
+上方“当前”数量/结果与“gap ACK后watermark仍追踪”保留原
+observed_at c5f7688212d45d5bdcdbf60342605e8bfb176cae 的as-of含义，
+不是SDK09f执行结果；原header/source_refs/supports/limitations不变。
+
+同一watermark缺陷已由独立SDK精main09f闭合，三链/最终交付对应见本仓
+provider-protocol-quality两个角色段及state-authority的具名owner-routing challenge。
+[SDK同名Finding](https://github.com/EchoYue-lp/echo-agent-sdk/blob/09f670fbbde98bc44a7c710c6419a6ea0d7d469c/.echo-semantic/findings/finding.sdk-gap-ack-replay-watermark.md)
+与[Issue120闭合评论](https://github.com/EchoYue-lp/echo-agent/issues/120#issuecomment-6289991562)
+是公开入口。外仓源码不进入F机器source_refs；不重写历史96/91/5等计数，四个A2A保持开放。
+
+2026-10-21本候选编制时，F9c5的ACP driver custody修复/后继门禁与SDK新10处WIP、
+固定framework356的新14项验证属于不同切片，SDK managed12后继重验尚未完成；
+这些是编制as-of限制，不随本文采用自动取得资格。09f平台/三语言各12场景只保
+其历史资格，不作新SDK cut或新F源验收；后继结果由其独立受控证据承接。
+原managed first otheractor Err具体cause仍UNKNOWN，不由watermark账本结算推断。

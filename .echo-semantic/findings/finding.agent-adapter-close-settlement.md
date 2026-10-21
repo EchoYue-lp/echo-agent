@@ -48,3 +48,16 @@ start 前登记 handler，取消或失败后保留同一 owner；ReactAgent clos
 active/queued Turn terminal 后再关闭 MCP；preparation 或 producer 异常 Drop 会形成 persistent
 close debt，不能释放 MCP；driven stream start 前的 typed cancellation 仍结算为 Cancelled。
 A2A 由独立 Findings 持有，不属于 #36 的完成边界。
+
+
+## 2026-10-21 ACP original-driver custody 的有界后继 challenge
+
+本对象原 resolved、#36 与旧资格保持各自历史范围，不重开外部 #36，也不声称本次
+反例就是旧 #36 的历史根因。后继实现反例显示：保留 close handle/Run entry 仍可能
+丢失 receipt 前的唯一 driver；同一官方 task actor 中另一任务 Err 会 drop 原 driver。
+标准 Prompt 和 shared prepare_run 两条真实入口均已复现 red101（0pass/2fail），
+原生产3cd修为c135后相同测试 green0（2pass/0fail/29filtered）。原 Evidence repair/
+verification 与同 owner Audit 的新 challenge 保存此有限修复。
+当前仅具名 focused 资格；后继全量/政策/精确main/消费者未完成，不把本段算作新
+resolved 或广域 closed。SDK managed12 首个 other-actor Err 仍 UNKNOWN，其重验
+独立；framework #120 水位 Issue 的既有关闭不在本切片改动。

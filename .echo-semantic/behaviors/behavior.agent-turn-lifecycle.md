@@ -55,3 +55,14 @@ Headless便利观察返回经私有owner投影保原HeadlessRunHandle，内部st
 ## 同原live source的晚结算
 
 观察知识不是首业务失败。同一已绑定run/execution/source在最新观察之后给出原显式terminal并真EOF，原driver可以清其观察并只结算原input/receipt一次，保首真实取消或业务错误及canonical序列。单EOF、normalizer合成terminal、wrong-generation或sink观察不是该来源的物理证明；无source则仍Unknown，不重调Agent。默认取消投影等原source实际闭合，不用token生成能消观察的假凭证。此局部已有真实红绿及独立复审；相关Scheduler/Workflow后继与最终交付仍开放。
+
+
+## ACP driver custody 的当前有界增量
+
+ADR0066 下，prepare_run 返回的 connection task 只观察原独立 driver；首次 poll
+仅启动一次。丢 observer 只取消同一 token，不 abort 原 driver、重调 Agent 或制造
+第二 Run 终态。原 driver 持同 Agent/sink/active lease 到原 raw producer 物理结束和
+真实 TurnReceipt；cold unpolled Drop 只按 exact entry pointer 回滚注册/lease。
+started task 异常终止保原 lease 与 typed not_settled 观察，无 receipt则不准假关闭；
+weak registry 链避免新增强所有权环。实现与有限运行记录由原 close repair/verification
+Evidence 与 Audit 新 challenge 承接；本 Behavior needs_review 和历史观察头不提升。
