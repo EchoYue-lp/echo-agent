@@ -143,8 +143,11 @@ def capture(root: Path, baseline: dict, raw_path: Path, receipt_path: Path, conf
         raise ValueError('human decision pending; capture forbidden')
     if raw_path.exists() or receipt_path.exists():
         raise ValueError('refusing to overwrite raw or receipt')
+    # Keep the strict raw grammar deterministic despite an ambient colored CI terminal.
+    child_env = os.environ.copy()
+    child_env['CARGO_TERM_COLOR'] = 'never'
     version = subprocess.run(['cargo', 'deny', '--version'], cwd=root, stdout=subprocess.PIPE,
-                             stderr=subprocess.STDOUT, check=False)
+                             stderr=subprocess.STDOUT, check=False, env=child_env)
     if version.returncode != 0 or version.stdout.decode().strip() != baseline['tool_version']:
         raise ValueError('unexpected cargo-deny version')
     command = list(baseline['command'])
@@ -155,7 +158,7 @@ def capture(root: Path, baseline: dict, raw_path: Path, receipt_path: Path, conf
                'signal': None, 'errorCode': None, 'truncated': False}
     try:
         with raw_path.open('xb') as output:
-            result = subprocess.run(command, cwd=root, stdout=output, stderr=subprocess.STDOUT, check=False)
+            result = subprocess.run(command, cwd=root, stdout=output, stderr=subprocess.STDOUT, check=False, env=child_env)
             output.flush()
             os.fsync(output.fileno())
         receipt['exitCode'] = result.returncode

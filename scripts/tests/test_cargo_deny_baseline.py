@@ -3,6 +3,9 @@ from __future__ import annotations
 
 import copy
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 import re
 import shutil
@@ -213,6 +216,53 @@ class ExactBaselineTests(unittest.TestCase):
     def test_fake_capture_preserves_signal_not_success(self):
         self.fake_capture(-2)
 
+
+    def test_capture_plain_child_rendering_preserves_ambient_parent_color(self):
+        baseline = copy.deepcopy(self.baseline)
+        baseline['authorization'] = 'ACCEPTED_BY_HUMAN'  # fixture only
+        fixture = self.root / 'literal.raw'
+        fixture.write_bytes(self.raw)
+        renderer = self.root / 'fake_cargo_renderer.py'
+        renderer.write_text("""import json, os, pathlib, sys
+root = pathlib.Path.cwd()
+trace = root / 'render-env.jsonl'
+with trace.open('a') as output:
+    output.write(json.dumps({'argv': sys.argv[1:],
+                             'color': os.environ.get('CARGO_TERM_COLOR')}) + '\\n')
+if sys.argv[1:] == ['deny', '--version']:
+    sys.stdout.buffer.write(b'cargo-deny 0.20.2\\n')
+else:
+    raw = (root / 'literal.raw').read_bytes()
+    if os.environ.get('CARGO_TERM_COLOR') == 'always':
+        raw = raw.replace(b' ok', b' \\x1b[32mok\\x1b[0m')
+    sys.stdout.buffer.write(raw)
+""")
+        real_run = subprocess.run
+        calls = []
+
+        def render_in_real_python_child(command, **kwargs):
+            calls.append(command)
+            self.assertIn(command, [['cargo', 'deny', '--version'], baseline['command']])
+            return real_run([sys.executable, '-B', str(renderer), *command[1:]], **kwargs)
+
+        raw_path = self.root / 'ambient-color.raw'
+        receipt_path = self.root / 'ambient-color.receipt.json'
+        with patch.dict(os.environ, {'CARGO_TERM_COLOR': 'always'}):
+            with patch.object(checker.subprocess, 'run', side_effect=render_in_real_python_child):
+                result = checker.capture(self.root, baseline, raw_path, receipt_path)
+            self.assertEqual(os.environ['CARGO_TERM_COLOR'], 'always')
+        self.assertTrue(result['matches_exact_baseline'])
+        self.assertEqual(checker.exact_groups(raw_path.read_bytes()), checker.exact_groups(self.raw))
+        self.assertEqual(raw_path.read_bytes(), self.raw)
+        receipt = json.loads(receipt_path.read_text())
+        self.assertEqual(receipt['command'], baseline['command'])
+        self.assertEqual(receipt['exitCode'], 0)
+        self.assertEqual(receipt['rawSha256'], checker.digest(self.raw))
+        self.assertEqual(receipt['bytesSeen'], len(self.raw))
+        self.assertEqual(calls, [['cargo', 'deny', '--version'], baseline['command']])
+        trace = [json.loads(line) for line in (self.root / 'render-env.jsonl').read_text().splitlines()]
+        self.assertEqual([entry['color'] for entry in trace], ['never', 'never'])
+        self.assertEqual([entry['argv'] for entry in trace], [call[1:] for call in calls])
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
