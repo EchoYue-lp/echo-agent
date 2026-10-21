@@ -621,3 +621,28 @@ successor exact-main CI acceptance remain pending. No feature/cfg/public
 signature changed, so the old Builder 17-feature qualification stays at its
 original epoch. Native Hook/Stop and accepted-main website mirroring remain
 separate; SDK pin356 and accepted cross-language scope are unchanged.
+
+
+## Docker interruption-facts complete local qualification
+
+Actual published source `7ded20c7c6f8e2ad4f8d54458f0c2afc003bd8c0` passed the original
+six workspace gates on engineering digest
+`source:6eb59d7e3a91d9c297c0f1e8e43a5f44e5c62d872d96f600f410514fee8fb773`.
+All 2,329 tracked / 1,764 engineering inputs stayed identical across the six
+commands; the single all-feature runtime passed 3,659 tests, failed zero and
+retained three unchanged external opt-in ignores with zero filtered tests.
+Actual 89 Cargo targets comprise 87 outer Rust harnesses and two custom benches
+without Rust summaries; two nested/selfprobe summaries are excluded, and
+focused/feature runs are not added. Independent full-six rereview returned
+C0/I0/M0 on the actual source, Node/guard/raw, executable and resource evidence.
+The existing effect-cleanup Evidence and single Audit challenge retain those
+bounded qualifications; earlier pending sections and their epochs remain intact.
+
+This metadata increment leaves the content digest, lineage base, regions,
+closure flags, broad Behavior states and historical resolved Finding #47 intact.
+Original main1d CI remains six successful jobs plus one failed foundations job,
+whose concrete runtime error is UNKNOWN. Successor exact-main seven CI jobs,
+remote-only cold recovery, CLI full8 and native Hook/Stop remain separate
+acceptance steps. No extra 17-feature conditional was triggered here; SDK pin356
+and accepted language contracts stay unchanged. ADR0002 website mirrors follow
+the final accepted framework main.
