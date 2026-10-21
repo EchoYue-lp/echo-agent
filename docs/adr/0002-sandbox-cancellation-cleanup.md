@@ -183,6 +183,10 @@ uses named cleanup; and non-zero/timeout/cancel facts survive a simultaneous
 non-zero cleanup failure. Additional faults cover hung info/create/rm stages,
 cleanup retry, first-failure global cleanup continuation, reserved extra args,
 and bounded high-volume output for normal/timeout/cancel terminals.
+Four deterministic helper cases also inject client-cleanup or output-drain
+failure after timeout or cancellation. Both interruption flags and the secondary
+failure cause must remain visible; an interrupted client's cleanup failure cannot
+erase the owner's primary terminal facts.
 
 A fake kubectl executable verifies successful and non-zero completion, timeout,
 cancellation, blocked/failed stdin, leader-exit with an inherited output pipe,

@@ -1206,14 +1206,22 @@ fn docker_interrupted_terminal(
             result.enforce_output_limit(u64::try_from(max_output_bytes).unwrap_or(u64::MAX));
             Ok(result)
         }
-        (client_cleanup, output) => docker_client_failure(
-            match interruption {
+        (client_cleanup, output) => {
+            let primary = match interruption {
                 DockerInterruption::TimedOut => "docker execution timed out",
                 DockerInterruption::Cancelled => "docker execution was cancelled",
-            },
-            client_cleanup,
-            output,
-        ),
+            };
+            // Cleanup and pipe failures must retain the owner's interruption facts.
+            docker_client_failure(
+                &format!(
+                    "{primary}; timed_out={}, cancelled={}",
+                    matches!(interruption, DockerInterruption::TimedOut),
+                    matches!(interruption, DockerInterruption::Cancelled)
+                ),
+                client_cleanup,
+                output,
+            )
+        }
     }
 }
 
@@ -1788,7 +1796,10 @@ exit 64
             .await
             .err()
             .ok_or("timeout with cleanup failure unexpectedly succeeded")?;
-        assert!(timeout_error.to_string().contains("timed_out=true"));
+        assert!(
+            timeout_error.to_string().contains("timed_out=true"),
+            "unexpected timeout terminal: {timeout_error:?}"
+        );
         assert!(timeout_error.to_string().contains("cleanup"));
 
         let cancelled = FakeDocker::new("cancel-cleanup-fail")?;
@@ -1816,6 +1827,54 @@ exit 64
             .map_err(|error| format!("cancel trigger failed: {error}"))?;
         assert!(cancel_error.to_string().contains("cancelled=true"));
         assert!(cancel_error.to_string().contains("cleanup"));
+        Ok(())
+    }
+
+    #[test]
+    fn interrupted_terminal_secondary_failures_preserve_primary_facts()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let mut missing_facts = Vec::new();
+        for interruption in [DockerInterruption::TimedOut, DockerInterruption::Cancelled] {
+            for failed_stage in ["client cleanup", "output drain"] {
+                let cleanup = if failed_stage == "client cleanup" {
+                    Err("forced client cleanup failure".to_string())
+                } else {
+                    Ok(())
+                };
+                let output = if failed_stage == "output drain" {
+                    Err("forced output drain failure".to_string())
+                } else {
+                    Ok((DockerPipeCapture::default(), DockerPipeCapture::default()))
+                };
+                let error = docker_interrupted_terminal(
+                    interruption,
+                    Duration::ZERO,
+                    cleanup,
+                    output,
+                    1_024,
+                )
+                .err()
+                .ok_or("interrupted execution with a secondary failure unexpectedly succeeded")?;
+                let message = error.to_string();
+                let expected = [
+                    format!(
+                        "timed_out={}",
+                        matches!(interruption, DockerInterruption::TimedOut)
+                    ),
+                    format!(
+                        "cancelled={}",
+                        matches!(interruption, DockerInterruption::Cancelled)
+                    ),
+                    format!("forced {failed_stage} failure"),
+                ];
+                for fact in expected {
+                    if !message.contains(&fact) {
+                        missing_facts.push(format!("missing {fact}: {message}"));
+                    }
+                }
+            }
+        }
+        assert!(missing_facts.is_empty(), "{missing_facts:#?}");
         Ok(())
     }
 

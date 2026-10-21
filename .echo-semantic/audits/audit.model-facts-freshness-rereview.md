@@ -13,7 +13,7 @@ challenges:
     source_refs: [src/agent/react/builder.rs, src/agent/react/mod.rs, src/agent/react/tests.rs, docs/adr/0047-model-facts-freshness-authority.md, docs/en/38-factory-modes.md, docs/zh/38-factory-modes.md, echo-agent-learning/examples/demo26_provider_factory.rs]
     evidence_refs: [evidence.configured-client-construction]
   configured-builder-client-pair:
-    revision: source:5f000f23fee488a6fecb1a972b155cd72ad206384c05f3802cdfec0d52c11872
+    revision: ffe4c19acf6d33cd419f2237de3209b4e3015e80
     source_refs: [src/agent/react/builder.rs, src/agent/react/mod.rs, src/agent/react/tests.rs, docs/adr/0047-model-facts-freshness-authority.md, echo-agent-learning/examples/demo26_provider_factory.rs]
     evidence_refs: [evidence.configured-client-construction]
   configured-client-construction:

@@ -8,6 +8,10 @@ freshness: examined
 revision: 07e4270380c40df3f412f99c0aecb6145410cb2a
 finding_refs: [finding.effect-cleanup-owner]
 challenges:
+  docker-interrupted-terminal-secondary-facts:
+    revision: 7ded20c7c6f8e2ad4f8d54458f0c2afc003bd8c0
+    source_refs: [echo-execution/src/sandbox/docker.rs, docs/adr/0002-sandbox-cancellation-cleanup.md]
+    evidence_refs: [evidence.effect-cleanup-owner-verification]
   artifact-pending-and-path-identity:
     revision: 07e4270380c40df3f412f99c0aecb6145410cb2a
     source_refs: [echo-core/src/tools/artifact.rs, src/agent/react/run/pipeline.rs, docs/adr/0072-resource-cleanup-ownership.md]
@@ -62,3 +66,35 @@ ADR 0072 明确本地路径操作的身份检查是安全点，不是对不协�
 ## 未检查项
 
 reviewer 未重跑测试；真实 Docker/K8s 集群、PR/CI 与远端 main 验收另行执行。
+
+
+## Docker interruption facts at the complete local verification epoch
+
+The bounded challenge binds actual published source
+`7ded20c7c6f8e2ad4f8d54458f0c2afc003bd8c0` /
+`source:6eb59d7e3a91d9c297c0f1e8e43a5f44e5c62d872d96f600f410514fee8fb773`.
+It checks the existing interruption enum remains authoritative when client cleanup
+or output drain fails: timeout/cancel flags and the secondary error cause survive,
+without a second result authority or fabricated unknown output counts. The four
+controlled cases failed before the formatter repair and passed after it; the
+original macOS case passed before (334 filtered) and after, and the Docker module
+passed29. Original main1d CI remains six successful jobs plus one failed job;
+the actual underlying error was not printed and remains UNKNOWN.
+
+The exact7ded engineering tree passed all original six local workspace gates,
+including3,659 passed /0 failed /3 existing external opt-in ignored /0 filtered
+runtime tests. Actual89 Cargo targets include87 outer Rust harnesses and two
+custom benches without Rust summaries; two nested/selfprobe summaries are
+excluded. Focused selections and old feature configurations are not added to
+this runtime total. All2,329 inputs /1,764 engineering inputs were frozen across
+the original six commands; original framework default profiles, strict lints,
+assertion/overflow/unwind behavior and9GiB/5GiB resource limits were retained.
+No17-feature conditional was triggered by this private formatter/test/doc change.
+
+Independent full-six source/runtime rereview completed C0/I0/M0 after checking
+all six original Node/guard/raw receipts, all2,329 /1,764 input identities, the
+actual outer-harness and executable identities, profiles and resource guards.
+Historical Audit header/freshness, prior challenges and resolved Finding#47 are
+unchanged; no new Finding, broad Behavior promotion or newmain/CI/native/CLI
+acceptance is asserted. SDK pin356 and accepted language contracts stay unchanged.
+ADR0002 en/zh website mirrors follow the final accepted frameworkmain.
