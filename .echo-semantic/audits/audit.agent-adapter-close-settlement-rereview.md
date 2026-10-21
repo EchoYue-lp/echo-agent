@@ -21,7 +21,7 @@ challenges:
     source_refs: [src/acp/adapter.rs, src/acp/session.rs, echo-integration/src/channels/manager.rs, echo-integration/src/channels/session.rs]
     evidence_refs: [evidence.agent-adapter-close-settlement-repair, evidence.agent-adapter-close-settlement-verification]
   acp-original-driver-custody:
-    revision: source:42398e4e4b01b53bb11e712ec1d303efbb6c71c14aaec4d39291e7736406159b
+    revision: 9c5b7043f040bfc12f326008dce2285502b5c62c
     source_refs: [src/acp/runtime.rs, tests/acp_agent_adapter.rs, docs/adr/0066-agent-adapter-close-ownership.md]
     evidence_refs: [evidence.agent-adapter-close-settlement-repair, evidence.agent-adapter-close-settlement-verification]
 ---

@@ -161,3 +161,30 @@ ignored中的optional offline候选：正式helper/原CI默认在线argv、49组
 31adapter是原源码epoch的有限资格，所有Rust、锁与本次扫描脚本字节保持；
 后继完整全6、SDK12/consumer、精确main/7CI/cold仍待实际门禁。
 独立 reviewer 已按本次actual5原raw/receipt及源冻结复核，C0/I0/M0；复审只覆盖上述精确本机政策切片，不代全6或main/consumer验收。
+
+
+## 精main6849的彩色producer输出反例（2026-10-21，候选未采用）
+
+原main `6849bfcab74d9a55d4f70987adcd13835bb9789d`、PR196的原始push CI
+run39577189494中，dependency-policy job119145531777真实失败，不能视为已交付。
+前置原两audit均扫描679个依赖、加载1348条公告，原8项和新增13项Python单元通过。
+原capture上传的自然receipt为cargo-deny0.20.2、原online四检查argv、exit0、无signal或截断，
+原raw730217B、SHA256 `939cc1f28a7f1538b61cbae9ce8f1243196f1ef1d5e812354d2a05bd891fdf25`。
+原artifact12334845897 ZIP47575B、SHA256
+`ba79055c4c139f19b30442070bbdd644d43d5b0b688327347a63202d27facd9a`与上传日志一致。
+CI环境CARGO_TERM_COLOR=always，实际summary的ok含SGR颜色，header也带颜色。
+严格exact_groups先拒绝非纯SUMMARY，尚未进入49组比较；自然scanner0不等风险gate0。
+原CI未输出DB commit，1348公告不能冒充已核4b快照；原失败和旧网络/资源失败均保留。
+
+候选仅在原capture producer边界复制父环境，对版本探测和原scanner子进程设置
+CARGO_TERM_COLOR=never。父环境不变，default online argv、四检查、strict parser、
+机器49组107身份与原receipt结构不变，不剥离或重写raw，不新增CLI模式、ignore或CI例外。
+新反例通过原capture调用两个真实Python渲染子进程，父环境always会使旧helper的真实
+输出含ANSI并触发同一SUMMARY错误；新helper产生原fixture精确字节，保自然exit与
+身份验证，且两个child的实测环境均never、parent仍always。原helper配同一新测试为
+14项中的13通过/1error、自然exit1；候选helper配完全相同测试为14通过/自然exit0。
+这是纯Python反例，不是真实cargo-deny扫描或CI重跑；不得据此宣称新policy5、FULL6、
+main七CI或SDK消费者通过。正式采用、实际扫描及后继main资格另行受控。
+
+公共API、示例和网站行为均不变；仅执行边界的文本渲染输入规范化，现有严格parser
+与依赖风险合同继续持有权威，因此不新增示例/ADR/Rule或第二个状态权威。
