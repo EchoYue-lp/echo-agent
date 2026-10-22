@@ -2662,7 +2662,7 @@ impl SubagentExecutor {
                 Err(error) => {
                     Self::record_first_cause(&first_cause, error);
                     cancel.cancel();
-                    while raw_stream.next().await.is_some() {}
+                    Self::drain_source_stream(&mut raw_stream, &first_cause).await;
                     if let Some(error) = source_observation
                         .lock()
                         .unwrap_or_else(|p| p.into_inner())
@@ -2884,8 +2884,9 @@ impl SubagentExecutor {
         }
         drop(stream);
         // Envelope EOF only proves terminal projection. The original stream
-        // may still own a producer/finally; consume that source to its real EOF.
-        while raw_stream.next().await.is_some() {}
+        // may still own a producer/finally; consume that source to its real EOF
+        // and keep any cleanup failure it reports on the way out.
+        Self::drain_source_stream(&mut raw_stream, &first_cause).await;
         if let Some(error) = source_observation
             .lock()
             .unwrap_or_else(|p| p.into_inner())
@@ -2948,6 +2949,36 @@ impl SubagentExecutor {
 
     fn take_first_cause(cause: &Arc<Mutex<Option<ReactError>>>) -> Option<ReactError> {
         cause.lock().unwrap_or_else(|p| p.into_inner()).take()
+    }
+
+    /// Consume the untouched original producer stream down to its physical EOF.
+    ///
+    /// The envelope projection stops at the first terminal event, but the raw
+    /// stream keeps owning producer/finally cleanup after that point. Those
+    /// tail items therefore decide whether the producer actually settled, and
+    /// discarding their errors reported `FinalAnswer -> cleanup error -> EOF`
+    /// as success.
+    ///
+    /// Every ordinary tail error goes through the single first-cause slot:
+    /// an earlier terminal/error/cancellation keeps precedence, while a tail
+    /// error that is the only failure becomes the cause. `ExecutionNotSettled`
+    /// is deliberately left to `source_observation`, which owns its identity
+    /// and precedence; folding it into this slot would flatten an unsettled
+    /// execution receipt into an ordinary cleanup failure.
+    ///
+    /// Both drain sites (attachment failure and post-terminal tail) share this
+    /// function so the cleanup-error contract cannot diverge between them.
+    async fn drain_source_stream<S>(source: &mut S, first_cause: &Arc<Mutex<Option<ReactError>>>)
+    where
+        S: futures::Stream<Item = Result<AgentEvent>> + Unpin,
+    {
+        while let Some(item) = source.next().await {
+            if let Err(error) = item
+                && !matches!(error, ReactError::ExecutionNotSettled { .. })
+            {
+                Self::record_first_cause(first_cause, error);
+            }
+        }
     }
 
     async fn await_stream_settlement<F>(
@@ -4211,6 +4242,232 @@ mod tests {
                 drops.load(Ordering::SeqCst),
                 0,
                 "foreign physical authority remains unknown; its original invocation guard cannot be released"
+            );
+        }
+        Ok(())
+    }
+
+    /// Original-stream shapes whose interesting behavior lives *after* the
+    /// terminal projection. `envelope_event_stream` stops at the first
+    /// terminal event, so the trailing items below are only reachable through
+    /// the executor's drain of the untouched raw producer stream.
+    #[derive(Clone, Copy)]
+    enum TailCleanupSequence {
+        AnswerOnly,
+        AnswerThenCleanupError,
+        EarlyFailureThenCleanupError,
+        AnswerThenTwoCleanupErrors,
+    }
+
+    struct TailCleanupAgent {
+        sequence: TailCleanupSequence,
+    }
+
+    impl TailCleanupAgent {
+        fn events(&self) -> Vec<Result<AgentEvent>> {
+            match self.sequence {
+                TailCleanupSequence::AnswerOnly => {
+                    vec![Ok(AgentEvent::FinalAnswer("done".to_string()))]
+                }
+                TailCleanupSequence::AnswerThenCleanupError => vec![
+                    Ok(AgentEvent::FinalAnswer("done".to_string())),
+                    Err(ReactError::Other("cleanup close failed".to_string())),
+                ],
+                TailCleanupSequence::EarlyFailureThenCleanupError => vec![
+                    Ok(AgentEvent::Error {
+                        source: "fixture".to_string(),
+                        message: "fixture terminal failure".to_string(),
+                        failure: echo_core::error::AgentFailure::message(
+                            "fixture",
+                            "fixture terminal failure",
+                        ),
+                    }),
+                    Err(ReactError::Other("cleanup close failed".to_string())),
+                ],
+                TailCleanupSequence::AnswerThenTwoCleanupErrors => vec![
+                    Ok(AgentEvent::FinalAnswer("done".to_string())),
+                    Err(ReactError::Other("first tail cleanup failure".to_string())),
+                    Err(ReactError::Other("second tail cleanup failure".to_string())),
+                ],
+            }
+        }
+    }
+
+    impl Agent for TailCleanupAgent {
+        fn name(&self) -> &str {
+            "tail-cleanup"
+        }
+
+        fn model_name(&self) -> &str {
+            "test"
+        }
+
+        fn system_prompt(&self) -> &str {
+            ""
+        }
+
+        fn execute<'a>(&'a self, _task: &'a str) -> futures::future::BoxFuture<'a, Result<String>> {
+            Box::pin(async { Ok("done".to_string()) })
+        }
+
+        fn execute_stream<'a>(
+            &'a self,
+            _task: &'a str,
+        ) -> futures::future::BoxFuture<
+            'a,
+            Result<futures::stream::BoxStream<'a, Result<AgentEvent>>>,
+        > {
+            let events = self.events();
+            Box::pin(async move {
+                Ok(Box::pin(futures::stream::iter(events))
+                    as futures::stream::BoxStream<'a, Result<AgentEvent>>)
+            })
+        }
+
+        fn execute_stream_with_invocation_context<'a>(
+            &'a self,
+            _task: &'a str,
+            _cancel: CancellationToken,
+            _invocation: AgentInvocationContext,
+        ) -> futures::future::BoxFuture<
+            'a,
+            Result<futures::stream::BoxStream<'a, Result<AgentEvent>>>,
+        > {
+            // Expose the live source directly, like `ReactAgent`/`MockAgent`.
+            // The trait default projects the source and stops forwarding items
+            // after the terminal projection, which would hide this tail before
+            // the executor drain could observe it.
+            let events = self.events();
+            Box::pin(async move {
+                Ok(Box::pin(futures::stream::iter(events))
+                    as futures::stream::BoxStream<'a, Result<AgentEvent>>)
+            })
+        }
+    }
+
+    async fn tail_cleanup_dispatch(
+        mode: ExecutionMode,
+        sequence: TailCleanupSequence,
+    ) -> Result<SubagentResult> {
+        let (registry, executor) = make_executor().await;
+        registry
+            .register(
+                SubagentDefinition::new("tail-cleanup", "Tail cleanup fixture"),
+                Box::new(TailCleanupAgent { sequence }),
+            )
+            .await;
+        executor
+            .dispatch(DispatchRequest {
+                agent_name: "tail-cleanup".to_string(),
+                task: "emit a terminal projection and then tail cleanup".to_string(),
+                mode_override: Some(mode),
+                cancel: CancellationToken::new(),
+                parent_agent: "parent".to_string(),
+                parent_context: None,
+                delegation_policy: DispatchRequest::policy_from_depth(0),
+                runtime_context: None,
+                message: None,
+                prompt_payload: None,
+                prompt_context: None,
+                constraints: Vec::new(),
+                background: false,
+            })
+            .await
+    }
+
+    #[tokio::test]
+    async fn final_answer_tail_cleanup_error_fails_dispatch_in_every_mode() -> Result<()> {
+        for mode in [
+            ExecutionMode::Sync,
+            ExecutionMode::Fork,
+            ExecutionMode::Teammate,
+        ] {
+            let result =
+                tail_cleanup_dispatch(mode.clone(), TailCleanupSequence::AnswerThenCleanupError)
+                    .await;
+            let error = result.err().ok_or_else(|| {
+                ReactError::Other(format!(
+                    "{mode:?} reported FinalAnswer -> cleanup error -> EOF as success"
+                ))
+            })?;
+            assert!(
+                error.to_string().contains("cleanup close failed"),
+                "{mode:?} lost the only tail failure cause: {error}"
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn final_answer_tail_without_error_still_completes_in_every_mode() -> Result<()> {
+        for mode in [
+            ExecutionMode::Sync,
+            ExecutionMode::Fork,
+            ExecutionMode::Teammate,
+        ] {
+            let result =
+                tail_cleanup_dispatch(mode.clone(), TailCleanupSequence::AnswerOnly).await?;
+            assert_eq!(result.outcome.status, SubagentStatus::Completed);
+            assert_eq!(result.output, "done");
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn earlier_terminal_failure_keeps_precedence_over_tail_cleanup_error_in_every_mode()
+    -> Result<()> {
+        for mode in [
+            ExecutionMode::Sync,
+            ExecutionMode::Fork,
+            ExecutionMode::Teammate,
+        ] {
+            let result = tail_cleanup_dispatch(
+                mode.clone(),
+                TailCleanupSequence::EarlyFailureThenCleanupError,
+            )
+            .await;
+            let error = result.err().ok_or_else(|| {
+                ReactError::Other(format!("{mode:?} hid the earlier terminal failure"))
+            })?;
+            let message = error.to_string();
+            assert!(
+                message.contains("fixture terminal failure"),
+                "{mode:?} tail cleanup replaced the earlier root cause: {error}"
+            );
+            assert!(
+                !message.contains("cleanup close failed"),
+                "{mode:?} surfaced the cleanup error instead of the earlier root cause: {error}"
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn tail_cleanup_error_precedence_keeps_the_first_cleanup_failure_in_every_mode()
+    -> Result<()> {
+        for mode in [
+            ExecutionMode::Sync,
+            ExecutionMode::Fork,
+            ExecutionMode::Teammate,
+        ] {
+            let result = tail_cleanup_dispatch(
+                mode.clone(),
+                TailCleanupSequence::AnswerThenTwoCleanupErrors,
+            )
+            .await;
+            let error = result.err().ok_or_else(|| {
+                ReactError::Other(format!(
+                    "{mode:?} reported two tail cleanup errors as success"
+                ))
+            })?;
+            let message = error.to_string();
+            assert!(
+                message.contains("first tail cleanup failure"),
+                "{mode:?} did not keep the first tail cleanup cause: {error}"
+            );
+            assert!(
+                !message.contains("second tail cleanup failure"),
+                "{mode:?} let a later tail error replace the first: {error}"
             );
         }
         Ok(())
