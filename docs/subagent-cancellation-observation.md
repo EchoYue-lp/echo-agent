@@ -96,6 +96,16 @@ cancel terminal until that source closes; if an observation occurred, a later
 original terminal is required. No-source setup uncertainty stays unknown. This
 adds no new wire event, replay operation, registry or deadline.
 
+The default `Agent` cancellation and invocation adapters distinguish a projected
+`FinalAnswer` from a failure cause. A first ordinary cleanup error after that
+answer remains visible while the same original source continues draining to
+physical EOF; later ordinary errors cannot replace an earlier error or
+cancellation. This applies to text execute, structured chat's legacy text
+fallback, and supported structured execute producers, including nested default
+adapters. `ExecutionNotSettled` keeps its original run/execution identity and
+independent observation state; an ordinary cleanup error cannot clear it or
+manufacture a terminal confirmation.
+
 ## Scheduler callback ownership
 
 New scheduled/manual admissions persist a protected physical-settlement payload in the original occurrence journal. Dropping a run_once/drain waiter detaches only observation; the same admitted callback owner continues its original work and result projection. Cancellation does not requeue or drop it. Typed observation leaves its original occurrence/attempt nonterminal and does not update last_run or produce a Failed delivery. A protected started occurrence cannot be automatically replayed after owner loss or reopen; known ordinary result/error still settles through the existing ledger. join/shutdown distinguishes loop exit from protected unresolved work.

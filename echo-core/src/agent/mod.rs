@@ -1526,6 +1526,10 @@ fn retaining_source_stream<'a>(
         let _invocation = invocation;
         let mut cancel_requested = false;
         let mut business_observed = false;
+        // A final answer projects the business result but is not a failure
+        // cause. Preserve the first later cleanup error while still draining
+        // the same original source, without replacing an earlier failure.
+        let mut failure_observed = false;
         let mut source_observation_pending = false;
         loop {
             let next = if cancel_requested || business_observed {
@@ -1556,11 +1560,13 @@ fn retaining_source_stream<'a>(
                         // by the original drainer, not replayed as another
                         // canonical business terminal by the normalizer.
                         business_observed = true;
+                        failure_observed |= matches!(event, AgentEvent::Cancelled | AgentEvent::Error { .. });
                         yield item;
                     }
                 }
-                Err(_) if !cancel_requested && !business_observed => {
+                Err(_) if !cancel_requested && !failure_observed => {
                     business_observed = true;
+                    failure_observed = true;
                     yield item;
                 }
                 Ok(_) if !cancel_requested && !business_observed => yield item,
@@ -1760,6 +1766,181 @@ mod invocation_retaining_stream_tests {
             resource_guards: vec![InvocationResourceGuard::new(DropCounter(Arc::clone(drops)))],
             ..AgentInvocationContext::default()
         }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum DefaultStreamEntry {
+        Text,
+        ChatMessage,
+        ExecuteMessage,
+    }
+
+    struct DefaultTailAgent {
+        items: std::sync::Mutex<Vec<Result<AgentEvent>>>,
+    }
+
+    impl Agent for DefaultTailAgent {
+        fn name(&self) -> &str {
+            "default-tail"
+        }
+
+        fn model_name(&self) -> &str {
+            "test"
+        }
+
+        fn system_prompt(&self) -> &str {
+            "test"
+        }
+
+        fn execute<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<String>> {
+            Box::pin(async { Ok("unused".into()) })
+        }
+
+        fn execute_stream<'a>(
+            &'a self,
+            _: &'a str,
+        ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+            Box::pin(async move {
+                let items = std::mem::take(
+                    &mut *self
+                        .items
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()),
+                );
+                Ok(futures::stream::iter(items).boxed())
+            })
+        }
+
+        fn execute_stream_message_with_cancel<'a>(
+            &'a self,
+            _: Message,
+            cancel: CancellationToken,
+        ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+            // Supply only the supported legacy producer. All invocation methods,
+            // including structured chat's text fallback, remain trait defaults.
+            self.execute_stream_with_cancel("structured execute", cancel)
+        }
+    }
+
+    async fn default_tail_events(
+        entry: DefaultStreamEntry,
+        items: Vec<Result<AgentEvent>>,
+    ) -> Result<Vec<Result<AgentEvent>>> {
+        let agent = DefaultTailAgent {
+            items: std::sync::Mutex::new(items),
+        };
+        let cancel = CancellationToken::new();
+        let stream = match entry {
+            DefaultStreamEntry::Text => {
+                agent
+                    .execute_stream_with_invocation_context(
+                        "text",
+                        cancel,
+                        AgentInvocationContext::default(),
+                    )
+                    .await?
+            }
+            DefaultStreamEntry::ChatMessage => {
+                agent
+                    .chat_stream_message_with_invocation_context(
+                        Message::user("chat".to_string()),
+                        cancel,
+                        AgentInvocationContext::default(),
+                    )
+                    .await?
+            }
+            DefaultStreamEntry::ExecuteMessage => {
+                agent
+                    .execute_stream_message_with_invocation_context(
+                        Message::user("execute".to_string()),
+                        cancel,
+                        AgentInvocationContext::default(),
+                    )
+                    .await?
+            }
+        };
+        Ok(stream.collect().await)
+    }
+
+    #[tokio::test]
+    async fn default_invocation_entries_preserve_first_tail_cleanup_failure() -> Result<()> {
+        for entry in [
+            DefaultStreamEntry::Text,
+            DefaultStreamEntry::ChatMessage,
+            DefaultStreamEntry::ExecuteMessage,
+        ] {
+            let events = default_tail_events(
+                entry,
+                vec![
+                    Ok(AgentEvent::FinalAnswer("done".into())),
+                    Err(ReactError::Other("first cleanup failure".into())),
+                    Err(ReactError::Other("later cleanup failure".into())),
+                ],
+            )
+            .await?;
+            assert!(
+                matches!(events.as_slice(), [Ok(AgentEvent::FinalAnswer(answer)), Err(ReactError::Other(error))]
+                    if answer == "done" && error == "first cleanup failure"),
+                "{entry:?} must retain the first cleanup failure after its final answer: {events:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn default_invocation_entries_keep_prior_failure_and_cancellation() -> Result<()> {
+        for entry in [
+            DefaultStreamEntry::Text,
+            DefaultStreamEntry::ChatMessage,
+            DefaultStreamEntry::ExecuteMessage,
+        ] {
+            for first in [
+                Err(ReactError::Other("original failure".into())),
+                Ok(AgentEvent::error_message("producer", "original failure")),
+                Ok(AgentEvent::Cancelled),
+            ] {
+                let expected = format!("{first:?}");
+                let events = default_tail_events(
+                    entry,
+                    vec![
+                        first,
+                        Err(ReactError::Other("later cleanup failure".into())),
+                    ],
+                )
+                .await?;
+                assert_eq!(events.len(), 1, "{entry:?}: {events:?}");
+                assert_eq!(format!("{:?}", events.first()), format!("Some({expected})"));
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn default_invocation_entries_keep_unsettled_identity_and_tail_failure() -> Result<()> {
+        for entry in [
+            DefaultStreamEntry::Text,
+            DefaultStreamEntry::ChatMessage,
+            DefaultStreamEntry::ExecuteMessage,
+        ] {
+            let events = default_tail_events(
+                entry,
+                vec![
+                    Ok(AgentEvent::FinalAnswer("done".into())),
+                    Err(ReactError::ExecutionNotSettled {
+                        run_id: "original-run".into(),
+                        execution_id: Some("original-attempt".into()),
+                    }),
+                    Err(ReactError::Other("cleanup failure".into())),
+                ],
+            )
+            .await?;
+            assert!(
+                matches!(events.as_slice(), [Ok(AgentEvent::FinalAnswer(_)), Err(ReactError::ExecutionNotSettled { run_id, execution_id: Some(execution_id) }), Err(ReactError::Other(error))]
+                    if run_id == "original-run" && execution_id == "original-attempt" && error == "cleanup failure"),
+                "{entry:?} lost original observation or cleanup cause: {events:?}"
+            );
+        }
+        Ok(())
     }
 
     #[tokio::test]

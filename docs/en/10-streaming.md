@@ -22,14 +22,15 @@ Streaming solves:
 
 ## Event Types
 
-`execute_stream()` returns `BoxStream<'_, Result<AgentEvent>>` containing:
+The following is a simplified view of the main event payloads; identity metadata
+and other lifecycle variants are omitted. `execute_stream()` returns `BoxStream<'_, Result<AgentEvent>>` containing:
 
 ```rust
 pub enum AgentEvent {
     Token(String),                               // LLM token fragment (reasoning / final answer)
-    ToolCall { name: String, args: Value },      // LLM decided to call a tool
-    ToolResult { name: String, output: String }, // tool finished, returning result
-    FinalAnswer(String),                         // final answer generated, stream ends
+    ToolCall { invocation: ToolInvocation },     // LLM decided to call a tool
+    ToolResult { name: String, result: ToolResult }, // tool finished, returning result
+    FinalAnswer(String),                         // final answer generated; cleanup can follow
 }
 ```
 
@@ -51,25 +52,37 @@ async fn main() -> Result<()> {
 
     let mut stream = agent.execute_stream("Calculate (3 + 4) * 5 and explain each step").await?;
 
+    let mut first_error = None;
     while let Some(event) = stream.next().await {
-        match event? {
-            AgentEvent::Token(token) => {
+        match event {
+            Ok(AgentEvent::Token(token)) => {
                 print!("{}", token);
                 std::io::Write::flush(&mut std::io::stdout()).ok();
             }
-            AgentEvent::ToolCall { name, args } => {
-                println!("\n[Tool call] {} {:?}", name, args);
+            Ok(AgentEvent::ToolCall { invocation, .. }) => {
+                println!("\n[Tool call] {} {:?}", invocation.name, invocation.args);
             }
-            AgentEvent::ToolResult { name, output } => {
-                println!("[Tool result] {} -> {}", name, output);
+            Ok(AgentEvent::ToolResult { name, result, .. }) => {
+                println!("[Tool result] {} -> {}", name, result.output);
             }
-            AgentEvent::FinalAnswer(answer) => {
+            Ok(AgentEvent::FinalAnswer(answer)) => {
                 println!("\n[Final answer] {}", answer);
-                break;
             }
+            Err(error) => {
+                // Report each observation, but retain the first error value.
+                // Continue polling this same source through cleanup and EOF.
+                eprintln!("[Stream error / observation] {error}");
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+            Ok(event) => println!("[Lifecycle] {event:?}"),
         }
     }
-    Ok(())
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
 }
 ```
 
@@ -102,7 +115,10 @@ let answer: String = agent.execute("Hello").await?;
 // Streaming: receive events in real time
 let mut stream = agent.execute_stream("Hello").await?;
 while let Some(event) = stream.next().await {
-    // handle Token / ToolCall / ToolResult / FinalAnswer
+    match event {
+        Ok(event) => println!("{event:?}"),
+        Err(error) => eprintln!("[Stream error / observation] {error}"),
+    }
 }
 ```
 
@@ -121,15 +137,37 @@ async fn chat_sse(task: String) -> Sse<impl futures::Stream<Item = Result<axum::
     let mut agent = ReactAgent::new(/* config */);
 
     let event_stream = async_stream::stream! {
-        if let Ok(mut agent_stream) = agent.execute_stream(&task).await {
-            while let Some(event) = agent_stream.next().await {
-                let data = match event {
-                    Ok(AgentEvent::Token(t))             => format!("{{\"type\":\"token\",\"data\":\"{}\"}}", t),
-                    Ok(AgentEvent::ToolCall { name, .. }) => format!("{{\"type\":\"tool_call\",\"name\":\"{}\"}}", name),
-                    Ok(AgentEvent::FinalAnswer(a))        => format!("{{\"type\":\"done\",\"data\":\"{}\"}}", a),
-                    _ => continue,
-                };
-                yield Ok(axum::response::sse::Event::default().data(data));
+        match agent.execute_stream(&task).await {
+            Ok(mut agent_stream) => {
+                while let Some(event) = agent_stream.next().await {
+                    let data = match event {
+                        Ok(AgentEvent::Token(text)) => serde_json::json!({
+                            "type": "token", "data": text,
+                        }),
+                        Ok(AgentEvent::ToolCall { invocation, .. }) => serde_json::json!({
+                            "type": "tool_call", "name": invocation.name,
+                        }),
+                        Ok(AgentEvent::FinalAnswer(answer)) => serde_json::json!({
+                            "type": "answer", "data": answer,
+                        }),
+                        Err(error) => {
+                            // Emitting an error does not end or replace the original producer.
+                            serde_json::json!({
+                                "type": "stream_error_or_observation", "message": error.to_string(),
+                            })
+                        }
+                        Ok(event) => serde_json::json!({
+                            "type": "lifecycle", "event": event,
+                        }),
+                    };
+                    yield Ok(axum::response::sse::Event::default().data(data.to_string()));
+                }
+            }
+            Err(error) => {
+                let data = serde_json::json!({
+                    "type": "setup_error_or_observation", "message": error.to_string(),
+                });
+                yield Ok(axum::response::sse::Event::default().data(data.to_string()));
             }
         }
     };
@@ -143,8 +181,14 @@ async fn chat_sse(task: String) -> Sse<impl futures::Stream<Item = Result<axum::
 ## Notes
 
 1. **Tool execution is not streamed**: `execute_tool()` is still blocking — a `ToolResult` event fires only after the tool completes, because tools themselves don't produce incremental output
-2. **`FinalAnswer` is a sentinel**: Once received, the stream is logically complete — break out of the loop
-3. **Error handling**: Every event in the stream is `Result<AgentEvent>` — handle LLM or tool errors that may occur mid-stream
+2. **`FinalAnswer` is a business result**: Keep consuming the same source to physical EOF; producer cleanup can still fail after the answer. The default cancellation and invocation adapters preserve its first ordinary cleanup error while retaining the original source.
+3. **Error handling**: Every event is `Result<AgentEvent>`. Preserve the first failure or cancellation cause while draining; a later cleanup failure must not replace it. `ExecutionNotSettled` retains its original run/execution identity and remains a separate nonterminal observation. EOF alone does not clear that observation.
+
+The examples above render every stream error or observation and continue the same
+source to EOF. Returning the first error preserves its original value; it does
+not turn `ExecutionNotSettled` into a terminal failure or certify physical
+settlement. Applications that persist execution status should consume the
+canonical `AgentTurnDriver` receipt instead of inferring it from these UI events.
 
 See: `echo-agent-learning/examples/demo10_streaming.rs`
 

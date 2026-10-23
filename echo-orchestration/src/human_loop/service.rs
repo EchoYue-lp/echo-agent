@@ -12,6 +12,7 @@
 //!
 //! ```text
 //! check() → check_with_permissions()
+//!   0. 受保护路径检查 → 在所有权限模式之前拒绝，包括 Bypass
 //!   1. BypassPermissions → Allow
 //!   2. Plan 模式 → 按 permissions 过滤
 //!   3. 规则匹配 → Allow/Deny/Ask
@@ -20,8 +21,12 @@
 //!   6. 模式分发:
 //!      - Auto → Classifier
 //!      - Default → RequestHandler
-//!   7. 缓存写入（带 scope 的审批）
+//!   7. 结果后处理（拒绝跟踪、审计）
 //! ```
+//!
+//! handler 改写输入时，先复检受保护路径，再签发 receipt 与缓存批准。
+//! Agent 的 PermissionStage 同样检查 Hook 改写后的实际输入；PreToolUse 或
+//! PermissionRequest 的 Allow 不能覆盖受保护路径拒绝。
 //!
 //! ## 使用示例
 //!
@@ -108,13 +113,16 @@ impl Default for PermissionServiceConfig {
 /// 权限服务 - 统一的权限检查入口
 ///
 /// 审批管线：
+/// 0. 受保护路径检查 → 在所有权限模式之前拒绝，包括 Bypass
 /// 1. BypassPermissions → Allow
 /// 2. Plan 模式 → 按 permissions 过滤
 /// 3. 规则匹配 → Allow/Deny/Ask
 /// 4. 缓存检查 → 命中则 AutoApprove
 /// 5. DenialTracker → 连续拒绝则升级
 /// 6. 模式分发 → Classifier / Handler
-/// 7. 缓存写入（带 scope 的审批）
+/// 7. 结果后处理（拒绝跟踪、审计）
+///
+/// handler 改写输入先复检受保护路径，再签发 receipt 与缓存批准。
 pub struct PermissionService {
     /// 配置
     config: RwLock<PermissionServiceConfig>,
@@ -575,13 +583,16 @@ impl PermissionService {
     /// 带权限类型的检查
     ///
     /// 审批管线：
+    /// 0. 受保护路径检查 → 在所有权限模式之前拒绝，包括 Bypass
     /// 1. BypassPermissions → Allow
     /// 2. Plan 模式 → 按 permissions 过滤
     /// 3. 规则匹配 → Allow/Deny/Ask
     /// 4. 缓存检查 → 命中则 AutoApprove
     /// 5. DenialTracker → 连续拒绝则升级
     /// 6. 模式分发（Classifier / Handler）
-    /// 7. 结果后处理（缓存写入、拒绝跟踪、modified args）
+    /// 7. 结果后处理（拒绝跟踪、审计）
+    ///
+    /// handler 改写输入先复检受保护路径，再签发 receipt 与缓存批准。
     pub async fn check_with_permissions(
         &self,
         tool_name: &str,

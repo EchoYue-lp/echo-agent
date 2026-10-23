@@ -128,12 +128,24 @@ async fn demo_agent_text_stream() -> echo_agent::error::Result<()> {
         .execute_stream("列举三个 Rust 语言最显著的特点，每点一句话。")
         .await?;
     let mut final_answer = String::new();
+    let mut first_error = None;
 
     print!("  🤖 Agent: ");
     std::io::stdout().flush().ok();
 
     while let Some(event_result) = event_stream.next().await {
-        match event_result? {
+        let event = match event_result {
+            Ok(event) => event,
+            Err(error) => {
+                // 保留原始错误值，并继续持有同一 source 到清理 EOF。
+                eprintln!("  ⚠️ 流错误 / 观察: {error}");
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+                continue;
+            }
+        };
+        match event {
             AgentEvent::Token(token) => {
                 print!("{}", token);
                 std::io::stdout().flush().ok();
@@ -142,14 +154,20 @@ async fn demo_agent_text_stream() -> echo_agent::error::Result<()> {
                 final_answer = answer;
                 println!();
             }
-            AgentEvent::ToolResult { name, result, .. } if !result.success => {
-                return Err(echo_agent::error::ReactError::Other(format!(
+            AgentEvent::ToolResult { name, result, .. }
+                if !result.success && first_error.is_none() =>
+            {
+                first_error = Some(echo_agent::error::ReactError::Other(format!(
                     "demo10 验收失败：文本流式执行中工具 `{name}` 出错: {}",
                     result.error.unwrap_or(result.output)
                 )));
             }
             _ => {}
         }
+    }
+
+    if let Some(error) = first_error {
+        return Err(error);
     }
 
     if final_answer.trim().is_empty() {
@@ -181,9 +199,20 @@ async fn demo_agent_tool_stream() -> echo_agent::error::Result<()> {
 
     let mut event_stream = agent.execute_stream(task).await?;
     let mut final_answer = String::new();
+    let mut first_error = None;
 
     while let Some(event_result) = event_stream.next().await {
-        match event_result? {
+        let event = match event_result {
+            Ok(event) => event,
+            Err(error) => {
+                eprintln!("  ⚠️ 流错误 / 观察: {error}");
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+                continue;
+            }
+        };
+        match event {
             AgentEvent::ThinkStart => {
                 println!("  💭 开始推理...");
             }
@@ -209,10 +238,10 @@ async fn demo_agent_tool_stream() -> echo_agent::error::Result<()> {
                 );
             }
             AgentEvent::ToolResult { name, result, .. } => {
-                if !result.success {
-                    return Err(echo_agent::error::ReactError::Other(format!(
+                if !result.success && first_error.is_none() {
+                    first_error = Some(echo_agent::error::ReactError::Other(format!(
                         "demo10 验收失败：工具流式执行中 `{name}` 出错: {}",
-                        result.error.unwrap_or(result.output)
+                        result.error.unwrap_or_else(|| result.output.clone())
                     )));
                 }
                 println!("  📤 工具结果: [{name}] → {}", truncate(&result.output, 60));
@@ -226,6 +255,10 @@ async fn demo_agent_tool_stream() -> echo_agent::error::Result<()> {
             }
             _ => {}
         }
+    }
+
+    if let Some(error) = first_error {
+        return Err(error);
     }
 
     if final_answer.trim().is_empty() {
