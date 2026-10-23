@@ -94,7 +94,7 @@ cargo check --workspace --lib --no-default-features --locked
 ### framework 精确依赖诊断基线
 
 用户明确接受本 framework Cargo.lock SHA-256
-`7607c1458036adc04e64858215e21d45f7f8ae1ffa992ad82fba97e7a72aa528`
+`f76fe10e64ec3faf062ff5bc7a66d6cd82f82cf95e989c824f40fe6f244d234c`
 的49组精确 crate/version/source `warning[duplicate]` 合同。唯一当前机器权威为
 [精确基线](.cargo/cargo-deny-duplicate-baseline.json)，通过
 `scripts/check-cargo-deny-baseline.py` 执行并比较官方 cargo-deny 四类检查；保留

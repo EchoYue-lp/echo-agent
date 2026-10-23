@@ -2,7 +2,7 @@
   "schema_version": 1,
   "authorization": "ACCEPTED_BY_HUMAN",
   "repository": "EchoYue-lp/echo-agent",
-  "lock_sha256": "7607c1458036adc04e64858215e21d45f7f8ae1ffa992ad82fba97e7a72aa528",
+  "lock_sha256": "f76fe10e64ec3faf062ff5bc7a66d6cd82f82cf95e989c824f40fe6f244d234c",
   "policy_sha256": "d2847230cc85ea94f95f616d258ec212d8aa487397b91d0f65e393ee97e38db9",
   "tool_version": "cargo-deny 0.20.2",
   "command": [
@@ -692,5 +692,5 @@
       ]
     }
   ],
-  "current_lock_validation": "PENDING_FRESH_POLICY5_AFTER_MACHINE_GATE_ADOPTION; original scanner natural0 plus49warnings, original strict caller1 preserved"
+  "current_lock_validation": "2026-10-23 Tokio 1.53.1 -> 1.53.3 only; all other 678 package blocks and dependency edges unchanged. Fresh official audit actual/canonical-origin exit0 (RustSec84d943a6,1351 advisories); cargo-deny0.20.2 four checks and same49 exact groups natural0; original network rejection preserved. Runtime workspace and exact main CI require their own patched-lock receipts."
 }

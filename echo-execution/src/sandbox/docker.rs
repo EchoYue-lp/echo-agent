@@ -1435,8 +1435,6 @@ mod tests {
     #[cfg(unix)]
     impl FakeDocker {
         fn new(mode: &str) -> std::result::Result<Self, Box<dyn std::error::Error>> {
-            use std::os::unix::fs::PermissionsExt;
-
             let directory = std::env::temp_dir().join(format!(
                 "echo-fake-docker-{}",
                 uuid::Uuid::new_v4().simple()
@@ -1444,78 +1442,14 @@ mod tests {
             std::fs::create_dir_all(&directory)?;
             let program = directory.join("docker");
             let log = directory.join("docker.log");
-            let script = format!(
-                r#"#!/bin/sh
-LOG="$0.log"
-printf '%s\n' "$1" >> "$LOG"
-hang_forever() {{
-  while :; do :; done
-}}
-case "$1" in
-  info)
-    if [ "{mode}" = "hung-info" ]; then hang_forever; fi
-    exit 0
-    ;;
-  create)
-    case "{mode}" in
-      hung-create) hang_forever ;;
-      create-empty) exit 0 ;;
-      create-bad) printf 'not-a-container-id\n'; exit 0 ;;
-      create-delayed-bad) sleep 0.2; printf 'not-a-container-id\n'; exit 0 ;;
-      *) printf '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n'; exit 0 ;;
-    esac
-    ;;
-  start)
-    case "{mode}" in
-      normal|cleanup-fail) printf 'completed\n'; exit 0 ;;
-      nonzero-cleanup-fail) printf 'command failed\n' >&2; exit 17 ;;
-      large-normal) yes x | head -c 262144; exit 0 ;;
-      large-timeout|large-cancel)
-        yes x | head -c 65536
-        printf 'large-ready\n' >> "$LOG"
-        exec yes x
-        ;;
-      timeout|cancel|timeout-cleanup-fail|cancel-cleanup-fail|abort|blocked-stdin) exec sleep 10 ;;
-    esac
-    ;;
-  rm)
-    case "{mode}" in
-      hung-rm) hang_forever ;;
-      global-first-fail)
-        if [ "$3" = "first-container" ]; then
-          printf 'forced first cleanup failure\n' >&2
-          exit 24
-        fi
-        exit 0
-        ;;
-      cleanup-fail|*-cleanup-fail)
-        printf 'forced cleanup failure\n' >&2
-        exit 23
-        ;;
-      *) exit 0 ;;
-    esac
-    ;;
-  ps)
-    if [ "{mode}" = "global-first-fail" ]; then
-      printf 'first-container\nsecond-container\n'
-    elif [ "{mode}" = "global-truncated" ]; then
-      printf 'first-container\n'
-      yes a | tr -d '\n' | head -c 70000
-    fi
-    exit 0
-    ;;
-esac
-exit 64
-"#
-            );
-            // Publish the executable only after the complete script is written. Linux runners can
-            // otherwise report ETXTBSY when execve races with the final write on the temp volume.
-            let script_path = directory.join("docker.script");
-            std::fs::write(&script_path, script)?;
-            let mut permissions = std::fs::metadata(&script_path)?.permissions();
-            permissions.set_mode(0o700);
-            std::fs::set_permissions(&script_path, permissions)?;
-            std::fs::rename(&script_path, &program)?;
+            // Execute a checked-in inode that no test opens for writing. Closing and
+            // renaming a freshly written script does not close writable descriptors
+            // inherited by other concurrently forked children on Linux (ETXTBSY).
+            // Per-test behavior and logs stay behind this unique symlink's path.
+            std::fs::write(directory.join("docker.mode"), format!("{mode}\n"))?;
+            let fixture =
+                Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-docker.sh");
+            std::os::unix::fs::symlink(fixture, &program)?;
             Ok(Self {
                 directory,
                 program,
@@ -1550,6 +1484,33 @@ exit 64
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.directory);
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn fake_docker_uses_immutable_executable_with_isolated_mode_and_log()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let normal = FakeDocker::new("normal")?;
+        let failing = FakeDocker::new("nonzero-cleanup-fail")?;
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-docker.sh");
+        for fake in [&normal, &failing] {
+            assert!(
+                std::fs::symlink_metadata(&fake.program)?
+                    .file_type()
+                    .is_symlink()
+            );
+            assert_eq!(std::fs::read_link(&fake.program)?, fixture);
+        }
+
+        let normal_start = Command::new(&normal.program).arg("start").output().await?;
+        let failing_start = Command::new(&failing.program).arg("start").output().await?;
+        assert!(normal_start.status.success());
+        assert_eq!(normal_start.stdout, b"completed\n");
+        assert_eq!(failing_start.status.code(), Some(17));
+        assert_eq!(failing_start.stderr, b"command failed\n");
+        assert_eq!(normal.operations()?, ["start"]);
+        assert_eq!(failing.operations()?, ["start"]);
+        Ok(())
     }
 
     #[cfg(unix)]
