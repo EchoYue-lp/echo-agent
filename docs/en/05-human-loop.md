@@ -24,12 +24,12 @@ echo-agent supports three intervention scenarios:
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│              PermissionService 7-Stage Pipeline                     │
+│                 PermissionService Pipeline                          │
 │                                                                     │
+│  0. ProtectedPathChecker → protected paths denied before any mode    │
 │  1. BypassPermissions → Allow (if not disabled by admin)            │
 │  2. Plan mode → filter by permissions (read-only)                   │
 │  3. RuleRegistry → deny-first evaluation (Allow/Deny/Ask)           │
-│  3.5. ProtectedPathChecker → .git/.env/.ssh always protected        │
 │  4. SessionApprovalCache (with TTL) → cache hit = AutoApprove       │
 │  5. DenialTracker → consecutive/total denial fallback               │
 │  6. Mode dispatch:                                                  │
@@ -51,7 +51,7 @@ echo-agent supports three intervention scenarios:
 | `Plan` | Read-only mode, Write/Execute/Sensitive denied |
 | `Auto` | AI Classifier makes decisions automatically |
 | `AcceptEdits` | File edits auto-approved, others need confirmation |
-| `BypassPermissions` | Skip all checks (can be disabled by admin) |
+| `BypassPermissions` | Skip later policy checks after protected-path validation (can be disabled by admin) |
 | `DontAsk` | Matched allow rules pass, unmatched silently denied |
 | `Bubble` | Sub-agent permissions escalate to parent |
 
@@ -111,7 +111,15 @@ Three cache scopes:
 
 ## Protected Path Checker
 
-Prevents Agent from operating on critical system paths. Enforced in all modes (including Bypass).
+Prevents Agent from operating on critical system paths. `PermissionService`
+checks protected paths before Bypass, Plan mode, rules, and cached approval, so
+the check applies in every mode.
+
+The Agent also checks the effective input after a `PreToolUse` rewrite and
+rechecks any `PermissionRequest` rewrite before honoring Hook approval. The
+permission service rechecks input rewritten by the approval handler before
+issuing an approval receipt or caching the approval. These paths use the same
+protected-path checker; Hook approval cannot override its denial.
 
 Default protected patterns: `.git`, `.env`, `.env.*`, `.ssh`, `.claude`, `.vscode`, shell configs, SSH keys.
 
@@ -165,11 +173,6 @@ for entry in recent {
 ```
 
 ### Audit Entry Fields
-
-`PermissionService` owns the protected-path check. The Agent applies the same
-check to the effective tool input before honoring an Allow from either
-`PreToolUse` or `PermissionRequest`; Hook approval cannot override a protected
-path denial.
 
 | Field | Description |
 |-------|-------------|
@@ -330,6 +333,8 @@ impl HumanLoopProvider for SlackApprovalProvider {
 ```
 Agent about to execute tool "delete_file"
     │
+    ├─ 0. Protected path (.git/.env/.ssh)? → Deny before any mode
+    │
     ├─ 1. BypassPermissions? → Allow (if not disabled)
     │
     ├─ 2. Plan mode? → Deny writes/executes
@@ -338,8 +343,6 @@ Agent about to execute tool "delete_file"
     │       ├─ Deny rule matches → Deny
     │       ├─ Ask rule matches → Ask
     │       └─ Allow rule matches → Allow
-    │
-    ├─ 3.5. Protected path (.git/.env/.ssh)? → Deny
     │
     ├─ 4. Approval cache hit (with TTL)? → Allow
     │
@@ -353,6 +356,12 @@ Agent about to execute tool "delete_file"
     │
     └─ 7. Post-process: cache write, denial tracking, audit
 ```
+
+This is the `PermissionService` policy sequence. The Agent first applies
+`PreToolUse` rewrites and checks their effective input before honoring a Hook
+Allow. A `PermissionRequest` rewrite is checked again before Hook approval.
+At every handler branch above, rewritten input is checked before issuing an
+approval receipt or caching approval; a protected-path denial stops that branch.
 
 ---
 

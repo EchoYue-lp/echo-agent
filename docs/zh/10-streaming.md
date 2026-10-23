@@ -22,14 +22,15 @@
 
 ## 事件类型
 
+以下仅简化展示主要事件 payload，省略身份 metadata 和其它生命周期变体。
 `execute_stream()` 返回 `BoxStream<'_, Result<AgentEvent>>`，包含以下事件：
 
 ```rust
 pub enum AgentEvent {
     Token(String),                              // LLM 输出的 Token 片段（推理过程 / 最终回答）
-    ToolCall { name: String, args: Value },     // LLM 决定调用某个工具
-    ToolResult { name: String, output: String },// 工具执行完毕，返回结果
-    FinalAnswer(String),                        // 最终答案已生成，流结束
+    ToolCall { invocation: ToolInvocation },    // LLM 决定调用某个工具
+    ToolResult { name: String, result: ToolResult }, // 工具执行完毕，返回结果
+    FinalAnswer(String),                        // 最终答案已生成，之后仍可能清理
 }
 ```
 
@@ -52,25 +53,36 @@ async fn main() -> Result<()> {
     // 流式执行
     let mut stream = agent.execute_stream("计算 (3 + 4) * 5 并解释步骤").await?;
 
+    let mut first_error = None;
     while let Some(event) = stream.next().await {
-        match event? {
-            AgentEvent::Token(token) => {
+        match event {
+            Ok(AgentEvent::Token(token)) => {
                 print!("{}", token);          // 实时打印推理/回答文本
                 std::io::Write::flush(&mut std::io::stdout()).ok();
             }
-            AgentEvent::ToolCall { name, args } => {
-                println!("\n[调用工具] {} {:?}", name, args);
+            Ok(AgentEvent::ToolCall { invocation, .. }) => {
+                println!("\n[调用工具] {} {:?}", invocation.name, invocation.args);
             }
-            AgentEvent::ToolResult { name, output } => {
-                println!("[工具结果] {} -> {}", name, output);
+            Ok(AgentEvent::ToolResult { name, result, .. }) => {
+                println!("[工具结果] {} -> {}", name, result.output);
             }
-            AgentEvent::FinalAnswer(answer) => {
+            Ok(AgentEvent::FinalAnswer(answer)) => {
                 println!("\n[最终答案] {}", answer);
-                break;
             }
+            Err(error) => {
+                // 展示每条观察，保留首个错误原值；继续消费同一 source 的清理与 EOF。
+                eprintln!("[流错误 / 观察] {error}");
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+            Ok(event) => println!("[生命周期] {event:?}"),
         }
     }
-    Ok(())
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
 }
 ```
 
@@ -103,7 +115,10 @@ let answer: String = agent.execute("你好").await?;
 // 流式：实时接收事件
 let mut stream = agent.execute_stream("你好").await?;
 while let Some(event) = stream.next().await {
-    // 处理 Token/ToolCall/ToolResult/FinalAnswer
+    match event {
+        Ok(event) => println!("{event:?}"),
+        Err(error) => eprintln!("[流错误 / 观察] {error}"),
+    }
 }
 ```
 
@@ -124,15 +139,37 @@ async fn chat_stream(
     let mut agent = ReactAgent::new(/* config */);
 
     let event_stream = async_stream::stream! {
-        if let Ok(mut agent_stream) = agent.execute_stream(&task).await {
-            while let Some(event) = agent_stream.next().await {
-                let data = match event {
-                    Ok(AgentEvent::Token(t))            => format!("{{\"type\":\"token\",\"data\":\"{}\"}}", t),
-                    Ok(AgentEvent::ToolCall { name, .. }) => format!("{{\"type\":\"tool_call\",\"name\":\"{}\"}}", name),
-                    Ok(AgentEvent::FinalAnswer(a))       => format!("{{\"type\":\"done\",\"data\":\"{}\"}}", a),
-                    _ => continue,
-                };
-                yield Ok(axum::response::sse::Event::default().data(data));
+        match agent.execute_stream(&task).await {
+            Ok(mut agent_stream) => {
+                while let Some(event) = agent_stream.next().await {
+                    let data = match event {
+                        Ok(AgentEvent::Token(text)) => serde_json::json!({
+                            "type": "token", "data": text,
+                        }),
+                        Ok(AgentEvent::ToolCall { invocation, .. }) => serde_json::json!({
+                            "type": "tool_call", "name": invocation.name,
+                        }),
+                        Ok(AgentEvent::FinalAnswer(answer)) => serde_json::json!({
+                            "type": "answer", "data": answer,
+                        }),
+                        Err(error) => {
+                            // 发送错误给接收方，同时继续消费同一原始 producer。
+                            serde_json::json!({
+                                "type": "stream_error_or_observation", "message": error.to_string(),
+                            })
+                        }
+                        Ok(event) => serde_json::json!({
+                            "type": "lifecycle", "event": event,
+                        }),
+                    };
+                    yield Ok(axum::response::sse::Event::default().data(data.to_string()));
+                }
+            }
+            Err(error) => {
+                let data = serde_json::json!({
+                    "type": "setup_error_or_observation", "message": error.to_string(),
+                });
+                yield Ok(axum::response::sse::Event::default().data(data.to_string()));
             }
         }
     };
@@ -146,8 +183,12 @@ async fn chat_stream(
 ## 注意事项
 
 1. **工具执行不是流式的**：工具（`execute_tool()`）仍然是阻塞完成后才返回 `ToolResult` 事件，因为工具执行本身不产生增量输出
-2. **`FinalAnswer` 是信号**：收到 `FinalAnswer` 事件后，流理论上已结束，建议 `break` 退出循环
-3. **错误处理**：流中的每个事件都是 `Result<AgentEvent>`，需要处理中途发生的 LLM 或工具错误
+2. **`FinalAnswer` 是业务结果**：继续消费同一原始 source 到物理 EOF；答案之后的生产者清理仍可能失败。默认取消和 invocation 适配器保留首个普通清理错误，同时继续持有并 drain 原始 source。
+3. **错误处理**：每个事件都是 `Result<AgentEvent>`。drain 时保留最早的失败或取消首因，后续清理错误不能覆盖它。`ExecutionNotSettled` 保留原始 run/execution 身份，是独立的非终态观察；仅有 EOF 不能清除该观察。
+
+以上示例展示每个流错误或观察，并继续消费同一 source 到 EOF。返回首个错误时保留其
+原始值，不把 `ExecutionNotSettled` 变成终态失败，也不据此证明物理结算。需要持久化
+执行状态的应用应消费规范化 `AgentTurnDriver` receipt，而非从这些 UI 事件推断。
 
 对应示例：`echo-agent-learning/examples/demo10_streaming.rs`
 

@@ -24,12 +24,12 @@ echo-agent 支持三种介入场景：
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│              PermissionService 7 阶段管线                             │
+│                    PermissionService 管线                           │
 │                                                                     │
+│  0. ProtectedPathChecker → 先拒绝受保护路径，再进入权限模式             │
 │  1. BypassPermissions → Allow（若未被管理员禁用）                      │
 │  2. Plan 模式 → 按 permissions 过滤（只读）                           │
 │  3. RuleRegistry → deny-first 评估 (Allow/Deny/Ask)                 │
-│  3.5. ProtectedPathChecker → .git/.env/.ssh 始终受保护               │
 │  4. SessionApprovalCache（带 TTL）→ 缓存命中 = AutoApprove           │
 │  5. DenialTracker → 连续/总拒绝数超限回退                             │
 │  6. 模式分发：                                                       │
@@ -51,7 +51,7 @@ echo-agent 支持三种介入场景：
 | `Plan` | 只读模式，禁止 Write/Execute/Sensitive |
 | `Auto` | AI Classifier 自动决策 |
 | `AcceptEdits` | 文件编辑自动通过，其他需确认 |
-| `BypassPermissions` | 跳过所有检查（可被管理员禁用） |
+| `BypassPermissions` | 通过受保护路径检查后跳过后续策略检查（可被管理员禁用） |
 | `DontAsk` | 匹配 allow 规则的直接通过，未匹配的静默拒绝 |
 | `Bubble` | 子 Agent 权限上溯到父级处理 |
 
@@ -111,7 +111,13 @@ let cache = SessionApprovalCache::new();
 
 ## 受保护路径检查器
 
-阻止 Agent 操作关键系统路径。所有模式下均生效（包括 Bypass）。
+阻止 Agent 操作关键系统路径。`PermissionService` 在 Bypass、Plan 模式、规则与
+审批缓存之前检查受保护路径，因此所有模式均受此约束。
+
+Agent 对 `PreToolUse` 改写后的实际输入执行检查；`PermissionRequest` 再次改写
+输入时，在接受 Hook 批准前重新检查。审批 handler 改写输入时，权限服务也会在
+签发 approval receipt 或缓存批准前复检。这些路径使用同一个受保护路径检查器，
+Hook 批准不能覆盖其拒绝。
 
 默认受保护模式：`.git`、`.env`、`.env.*`、`.ssh`、`.claude`、`.vscode`、shell 配置文件、SSH 密钥。
 
@@ -165,10 +171,6 @@ for entry in recent {
 ```
 
 ### 审计条目字段
-
-受保护路径检查由 `PermissionService` 持有。Agent 在接受 `PreToolUse` 或
-`PermissionRequest` 的 Allow 前，对最终工具输入执行同一项检查；Hook 批准不能
-覆盖受保护路径的拒绝。
 
 | 字段 | 说明 |
 |------|------|
@@ -329,6 +331,8 @@ impl HumanLoopProvider for SlackApprovalProvider {
 ```
 Agent 准备执行工具 "delete_file"
     │
+    ├─ 0. 受保护路径 (.git/.env/.ssh)? → 在所有权限模式之前 Deny
+    │
     ├─ 1. BypassPermissions? → Allow（若未被禁用）
     │
     ├─ 2. Plan 模式? → 拒绝写入/执行操作
@@ -337,8 +341,6 @@ Agent 准备执行工具 "delete_file"
     │       ├─ Deny 规则匹配 → Deny
     │       ├─ Ask 规则匹配 → Ask
     │       └─ Allow 规则匹配 → Allow
-    │
-    ├─ 3.5. 受保护路径 (.git/.env/.ssh)? → Deny
     │
     ├─ 4. 审批缓存命中（带 TTL）? → Allow
     │
@@ -352,6 +354,11 @@ Agent 准备执行工具 "delete_file"
     │
     └─ 7. 后处理：缓存写入、拒绝跟踪、审计记录
 ```
+
+这是 `PermissionService` 的策略顺序。Agent 先应用 `PreToolUse` 改写，并在接受
+Hook Allow 前检查实际输入。`PermissionRequest` 再次改写输入时，在 Hook 批准前
+重新检查。上图每条进入 handler 的分支都在签发 approval receipt 或缓存批准前
+复检改写输入；受保护路径拒绝会终止该分支。
 
 ---
 
