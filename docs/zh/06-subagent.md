@@ -113,6 +113,33 @@ println!("{}", result);
 
 ## Subagent 执行流程
 
+### Invocation 工具范围
+
+非空 `SubagentContext.allowed_tools` 是实际 invocation 的硬上界，与 Fresh
+或对话历史继承无关。Sync、Fork、Teammate 和具体 Team member 同时在模型 schema
+与原工具执行 pipeline 中落实该范围。`None` 和 `Some([])` 继续表示没有附加白名单；
+非空上界在新角色中零匹配时，仍然禁用该角色全部工具。
+
+`agent_tool` 沿原 context 传递调用方 `ToolContext` 的硬 **available** 集合，
+不把共享注册表或较小的首轮 visible 集合当作祖先许可。后代只能收窄；更换角色、
+Fresh 模式或工具搜索激活都不能恢复祖先排除的工具。越界的缓存调用在创建 child
+前拒绝。没有这类 context 的独立 framework 调用保持原行为；层数配置与运行政策
+继续由应用负责，见 [ADR 0094](../adr/0094-subagent-tool-boundary-inheritance.md)。
+
+程序调用可在 `AgentInvocationContext.allowed_tools: Option<HashSet<String>>`
+携带同一个非空正向上界。Agent 取得原执行锁之后，才与当时的注册目录求交；排队
+期间新注册的工具不能扩大该 invocation。`visible_tools` 仅选择硬范围内首轮显示的
+schema；`allowed_tools` 缺省或空集合仍表示无附加白名单。穷尽 Rust invocation
+字面量需要补该可选字段，或使用 `..Default::default()`。
+
+每次具体 Subagent invocation 还携带请求中已确定的**目标 actor**委派 policy。
+Executor 只复制该值，不再次推进层数；真实派发边独占 `child_policy`。显式不能
+委派或已到上限的 actor，通过原 available/eligible 资格统一排除模型 schema、
+搜索和真实执行中的 `agent_tool`。`None` 保留框架原 fallback，具体层数政策由应用
+选择。独立 focused 批次已通过真实模型请求和 ToolContext 中的目标 policy 回归，
+包含通用 maximum 4 对照；该框架结果不代表应用 GUI 配置、run 恢复或完整 feature
+矩阵已经验收。
+
 所有路径都会先调用配置的 `SubagentPromptCompiler`：
 
 - 具体 Subagent 的工具面完成后调用 `compile_system`，能力说明来自实际注册定义、description

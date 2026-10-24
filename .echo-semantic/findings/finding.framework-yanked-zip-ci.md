@@ -3,7 +3,7 @@ schema_version: 1
 id: finding.framework-yanked-zip-ci
 kind: finding
 type: implementation_bug
-status: open
+status: resolved
 severity: high
 primary_focus: contract_evidence
 focus:
@@ -53,3 +53,27 @@ The source-adoption review found official scanners skip path/Git packages. This 
 ## Current qualification and tracker
 
 [GitHub Issue188](https://github.com/EchoYue-lp/echo-agent/issues/188) is the unique external tracker. Earlier processing paragraphs describe development checkpoints. Current exact7110 code has all6+17 local gates0, Rust3622/0/3 existing opt-in ignored (children not double-counted), unchanged1763 source inputs and independent source/coverage review0. Evidence/Audit carry the bounded receipts. Status remains open until the exact new main dependency-policy/CI and delivery are confirmed; no old PR181 Finding is rewritten.
+
+
+## Post-merge qualification and local settlement (2026-10-24)
+
+The pending-main statements above are historical checkpoints, not new execution
+claims. PR190 was squash-merged as
+`9886502c83d6b1f6fa9212eb221db0e5874deaee`, an ancestor of the independently
+queried exact remote main `51726454985fd6f064b21a7e9c539e22d494c987`.
+[Run39984523075](https://github.com/EchoYue-lp/echo-agent/actions/runs/39984523075)
+completed successfully on that exact main, including dependency-policy and all
+seven jobs. The existing repair/verification Evidence and rereview Audit carry
+the separately bounded source relationship and CI qualification.
+
+Independent post-merge review returned PASS, C0/I0/M0; the existing Audit
+records the real reviewer and bounded source/CI scope. The original repair,
+verification and rereview references remain the single three-link chain. This
+Finding is locally `resolved` for the ZIP dependency-CI restoration; the local
+contribution is committed only after final review and normal semantic checks.
+It does not settle unrelated consumer/publication or history obligations. The external
+[Issue188](https://github.com/EchoYue-lp/echo-agent/issues/188) remains open and
+is not changed by this local contribution. The unrelated
+`finding.framework-historical-source-observation-retention` / Issue189 stays
+open: seven original trees are unavailable for an unknown reason. No risk
+acceptance, old-object recovery, consumer acceptance or publication is inferred.

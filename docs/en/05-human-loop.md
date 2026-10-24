@@ -43,6 +43,34 @@ echo-agent supports three intervention scenarios:
 
 ---
 
+## Explicit hook approval
+
+An Ask or RequireApproval from PreToolUse or PermissionRequest requires a
+fresh handler response for that invocation. A later hook Allow, ordinary allow
+rule, cached approval or full-auto mode cannot replace that interaction.
+Deny and protected-path checks still prevent execution. Missing service,
+disabled human-loop or a NullHandler fails explicitly; ordinary calls without
+this intent keep their existing permission behavior.
+DontAsk with no matching rule still denies before calling the handler; a
+matching Allow cannot skip the fresh interaction of an explicit request.
+
+`PermissionService::request_approval_with_context` exposes the same mechanism
+to Rust callers using the existing input, permissions, mode override,
+PermissionInvocationContext and textual suggestions. It shares handler
+post-processing: user argument changes are checked again, approved scope is
+recorded and the receipt matches the final input. Text suggestions remain
+descriptive custom responses and do not grant persistent approval. Another
+explicit Ask ignores earlier grants; subsequent ordinary calls can still use
+the approved scope.
+
+The snapshot retains request/session/agent identity and cancellation ownership.
+Timeout or Deferred is not approval. This does not add a default deadline,
+change cancellation error types, or introduce another queue/store. The new
+Rust method does not automatically extend the independently accepted language
+SDK contract. See [ADR 0091](../adr/0091-explicit-hook-approval-intent.md).
+
+---
+
 ## Permission Modes
 
 | Mode | Behavior |

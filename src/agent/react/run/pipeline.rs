@@ -381,6 +381,9 @@ impl PipelineStage for PermissionStage {
                 return Ok(());
             }
         }
+        // Keep the explicit interaction requirement across both hook events.
+        // An empty list still means RequireApproval, not ordinary permission.
+        let mut approval_suggestions: Option<Vec<String>> = None;
         if let Some(decision) = ctx.permission_decision.take() {
             snapshot
                 .record_permission_decision(&ctx.tool_name, &decision, "pre_tool_use_hook")
@@ -394,7 +397,12 @@ impl PipelineStage for PermissionStage {
                     ctx.block(crate::tools::ToolFailureCategory::Permanent, reason);
                     return Ok(());
                 }
-                PermissionDecision::Ask { .. } | PermissionDecision::RequireApproval => {}
+                PermissionDecision::Ask { suggestions } => {
+                    approval_suggestions = Some(suggestions);
+                }
+                PermissionDecision::RequireApproval => {
+                    approval_suggestions = Some(Vec::new());
+                }
             }
         }
 
@@ -450,36 +458,46 @@ impl PipelineStage for PermissionStage {
                 .record_permission_decision(&ctx.tool_name, &decision, "permission_request_hook")
                 .await;
             match decision {
-                PermissionDecision::Allow => {
+                PermissionDecision::Allow if approval_suggestions.is_none() => {
                     ctx.issue_approval_receipt()?;
                     return Ok(());
                 }
+                PermissionDecision::Allow => {}
                 PermissionDecision::Deny { reason } => {
                     ctx.block(crate::tools::ToolFailureCategory::Permanent, reason);
                     return Ok(());
                 }
-                PermissionDecision::Ask { .. } | PermissionDecision::RequireApproval => {}
+                PermissionDecision::Ask { suggestions } => {
+                    approval_suggestions
+                        .get_or_insert_with(Vec::new)
+                        .extend(suggestions);
+                }
+                PermissionDecision::RequireApproval => {
+                    approval_suggestions.get_or_insert_with(Vec::new);
+                }
             }
         }
 
         #[cfg(feature = "human-loop")]
         let approval_check = snapshot
-            .check_tool_approval_with_receipt(
+            .check_tool_approval_with_intent(
                 &ctx.call_id,
                 &ctx.tool_name,
                 &ctx.input,
                 ctx.permission_mode_override,
+                approval_suggestions.as_deref(),
             )
             .await
             .map_err(|error| ReactError::Other(error.to_string()))?;
 
         #[cfg(not(feature = "human-loop"))]
         let approval_check = snapshot
-            .check_tool_approval_with_receipt(
+            .check_tool_approval_with_intent(
                 &ctx.call_id,
                 &ctx.tool_name,
                 &ctx.input,
                 ctx.permission_mode_override,
+                approval_suggestions.as_deref(),
             )
             .await
             .map_err(|_| ReactError::Other("Permission check failed".into()))?;
@@ -2234,6 +2252,576 @@ mod tests {
         }
     }
 
+    struct HookApprovalProbe {
+        executions: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Tool for HookApprovalProbe {
+        fn name(&self) -> &str {
+            "hook_approval_probe"
+        }
+
+        fn description(&self) -> &str {
+            "counts actual execution after hook approval"
+        }
+
+        fn parameters(&self) -> Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        fn permissions(&self) -> Vec<echo_core::tools::permission::ToolPermission> {
+            vec![echo_core::tools::permission::ToolPermission::Read]
+        }
+
+        fn execute<'a>(
+            &'a self,
+            _parameters: ToolParameters,
+        ) -> futures::future::BoxFuture<'a, Result<ToolResult>> {
+            Box::pin(async move {
+                self.executions
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(ToolResult::success("executed"))
+            })
+        }
+    }
+
+    async fn install_explicit_approval_hook(
+        agent: &crate::agent::ReactAgent,
+        event: crate::skills::hooks::HookEvent,
+        decision: PermissionDecision,
+    ) {
+        agent.hook_registry().write().await.set_programmatic_hook(
+            "explicit-approval",
+            &[event],
+            Arc::new(move |_| {
+                let decision = decision.clone();
+                Box::pin(async move {
+                    echo_core::hooks::HookResult {
+                        permission_decision: Some(decision),
+                        ..Default::default()
+                    }
+                })
+            }),
+        );
+    }
+
+    #[cfg(feature = "human-loop")]
+    struct ObservedApprovalProvider {
+        requests: mpsc::UnboundedSender<(
+            crate::human_loop::HumanLoopRequest,
+            tokio::sync::oneshot::Sender<crate::human_loop::HumanLoopResponse>,
+        )>,
+    }
+
+    #[cfg(feature = "human-loop")]
+    impl crate::human_loop::HumanLoopProvider for ObservedApprovalProvider {
+        fn request(
+            &self,
+            request: crate::human_loop::HumanLoopRequest,
+        ) -> futures::future::BoxFuture<'_, Result<crate::human_loop::HumanLoopResponse>> {
+            Box::pin(async move {
+                let (answer, response) = tokio::sync::oneshot::channel();
+                self.requests
+                    .send((request, answer))
+                    .map_err(|_| ReactError::Other("approval observer disappeared".into()))?;
+                response
+                    .await
+                    .map_err(|_| ReactError::Other("approval responder disappeared".into()))
+            })
+        }
+    }
+
+    #[cfg(feature = "human-loop")]
+    #[tokio::test]
+    async fn explicit_hook_approval_survives_automatic_allow_on_the_main_path() -> Result<()> {
+        use crate::human_loop::{ApprovalScope, HumanLoopResponse, PermissionService};
+        use crate::skills::hooks::HookEvent;
+        use echo_core::tools::permission::{PermissionRule, RuleMatcher, RuleSource};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        for event in [HookEvent::PreToolUse, HookEvent::PermissionRequest] {
+            for require_only in [false, true] {
+                for policy in ["read", "allow-rule", "cache", "full-auto"] {
+                    let executions = Arc::new(AtomicUsize::new(0));
+                    let (requests, mut observed) = mpsc::unbounded_channel();
+                    let service = Arc::new(
+                        PermissionService::from_provider(Arc::new(ObservedApprovalProvider {
+                            requests,
+                        }))
+                        .with_mode(if policy == "full-auto" {
+                            PermissionMode::BypassPermissions
+                        } else {
+                            PermissionMode::Default
+                        }),
+                    );
+                    if policy == "allow-rule" {
+                        service
+                            .add_rule(PermissionRule::allow(
+                                RuleMatcher::Pattern {
+                                    pattern: "hook_approval_probe".into(),
+                                },
+                                RuleSource::Session,
+                            ))
+                            .await;
+                    }
+                    let input = serde_json::json!({});
+                    if policy == "cache" {
+                        service.record_approval(
+                            "probe-agent:probe-conversation",
+                            "hook_approval_probe",
+                            &input,
+                            ApprovalScope::SessionTool,
+                        );
+                    }
+                    let agent = crate::agent::ReactAgentBuilder::new()
+                        .model("test-model")
+                        .name("probe-agent")
+                        .conversation_id("probe-conversation")
+                        .permission_service(service)
+                        .tool(Box::new(HookApprovalProbe {
+                            executions: executions.clone(),
+                        }))
+                        .build()?;
+                    install_explicit_approval_hook(
+                        &agent,
+                        event,
+                        if require_only {
+                            PermissionDecision::RequireApproval
+                        } else {
+                            PermissionDecision::Ask {
+                                suggestions: vec!["review first 中文".into()],
+                            }
+                        },
+                    )
+                    .await;
+                    if event == HookEvent::PreToolUse {
+                        agent.hook_registry().write().await.set_programmatic_hook(
+                            "later-allow",
+                            &[HookEvent::PermissionRequest],
+                            Arc::new(|_| Box::pin(async { echo_core::hooks::HookResult::allow() })),
+                        );
+                    }
+                    let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+                    let params = ToolParameters::new();
+                    let call = snapshot.execute_tool_with_policy(
+                        "forced-probe".into(),
+                        "hook_approval_probe",
+                        &params,
+                        &input,
+                        None,
+                    );
+                    let respond = async {
+                        let (request, answer) = tokio::time::timeout(
+                            std::time::Duration::from_secs(2),
+                            observed.recv(),
+                        )
+                        .await
+                        .map_err(|_| ReactError::Other(format!("hook approval skipped: {policy}")))?
+                        .ok_or_else(|| ReactError::Other("approval channel closed".into()))?;
+                        assert_eq!(executions.load(Ordering::SeqCst), 0);
+                        assert_eq!(request.request_id.as_deref(), Some("forced-probe"));
+                        assert_eq!(request.session_id.as_deref(), Some("probe-conversation"));
+                        assert_eq!(request.agent_name.as_deref(), Some("probe-agent"));
+                        if !require_only {
+                            assert!(
+                                request
+                                    .suggestions
+                                    .iter()
+                                    .any(|s| s.label == "review first 中文")
+                            );
+                        }
+                        answer
+                            .send(HumanLoopResponse::Approved)
+                            .map_err(|_| ReactError::Other("approval wait ended early".into()))?;
+                        Ok::<_, ReactError>(())
+                    };
+                    let (outcome, answered) = tokio::join!(call, respond);
+                    answered?;
+                    assert!(outcome.is_ok(), "approved probe failed: {policy}");
+                    assert_eq!(executions.load(Ordering::SeqCst), 1);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "human-loop")]
+    #[tokio::test]
+    async fn explicit_hook_approval_settles_provider_responses_without_unapproved_effects()
+    -> Result<()> {
+        use crate::human_loop::{
+            ApprovalScope, HumanLoopResponse, PermissionService, SuggestedAction,
+        };
+        use crate::skills::hooks::HookEvent;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        for response in [
+            HumanLoopResponse::Approved,
+            HumanLoopResponse::ApprovedWithScope {
+                scope: ApprovalScope::SessionTool,
+            },
+            HumanLoopResponse::ModifiedArgs {
+                args: serde_json::json!({"reviewed":true}),
+                scope: ApprovalScope::Once,
+            },
+            HumanLoopResponse::Rejected {
+                reason: Some("no".into()),
+            },
+            HumanLoopResponse::Timeout,
+            HumanLoopResponse::Deferred,
+        ] {
+            let allowed = matches!(
+                &response,
+                HumanLoopResponse::Approved
+                    | HumanLoopResponse::ApprovedWithScope { .. }
+                    | HumanLoopResponse::ModifiedArgs { .. }
+            );
+            let executions = Arc::new(AtomicUsize::new(0));
+            let (requests, mut observed) = mpsc::unbounded_channel();
+            let agent = crate::agent::ReactAgentBuilder::new()
+                .model("test-model")
+                .permission_service(Arc::new(PermissionService::from_provider(Arc::new(
+                    ObservedApprovalProvider { requests },
+                ))))
+                .tool(Box::new(HookApprovalProbe {
+                    executions: executions.clone(),
+                }))
+                .build()?;
+            for (event, label) in [
+                (HookEvent::PreToolUse, "first 中文"),
+                (HookEvent::PermissionRequest, "second emoji 🔎"),
+            ] {
+                agent.hook_registry().write().await.set_programmatic_hook(
+                    label,
+                    &[event],
+                    Arc::new(move |_| {
+                        Box::pin(
+                            async move { echo_core::hooks::HookResult::ask(vec![label.into()]) },
+                        )
+                    }),
+                );
+            }
+            let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+            let params = ToolParameters::new();
+            let input = serde_json::json!({});
+            let run = snapshot.execute_tool_with_policy(
+                "response-probe".into(),
+                "hook_approval_probe",
+                &params,
+                &input,
+                None,
+            );
+            let answer = async {
+                let (request, answer) =
+                    tokio::time::timeout(std::time::Duration::from_secs(2), observed.recv())
+                        .await
+                        .map_err(|_| ReactError::Other("provider never entered".into()))?
+                        .ok_or_else(|| ReactError::Other("provider channel closed".into()))?;
+                assert_eq!(executions.load(Ordering::SeqCst), 0);
+                let labels: Vec<_> = request
+                    .suggestions
+                    .iter()
+                    .filter_map(|s| {
+                        matches!(&s.action, SuggestedAction::Custom { .. })
+                            .then_some(s.label.as_str())
+                    })
+                    .collect();
+                assert_eq!(labels, vec!["first 中文", "second emoji 🔎"]);
+                answer
+                    .send(response)
+                    .map_err(|_| ReactError::Other("provider wait ended".into()))?;
+                Ok::<_, ReactError>(())
+            };
+            let (result, answered) = tokio::join!(run, answer);
+            answered?;
+            assert_eq!(result.is_ok(), allowed);
+            assert_eq!(executions.load(Ordering::SeqCst), usize::from(allowed));
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "human-loop")]
+    #[tokio::test]
+    async fn explicit_hook_approval_cancel_waits_until_provider_is_observably_pending() -> Result<()>
+    {
+        use crate::human_loop::PermissionService;
+        use crate::skills::hooks::HookEvent;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let executions = Arc::new(AtomicUsize::new(0));
+        let (requests, mut observed) = mpsc::unbounded_channel();
+        let agent = crate::agent::ReactAgentBuilder::new()
+            .model("test-model")
+            .permission_service(Arc::new(PermissionService::from_provider(Arc::new(
+                ObservedApprovalProvider { requests },
+            ))))
+            .tool(Box::new(HookApprovalProbe {
+                executions: executions.clone(),
+            }))
+            .build()?;
+        install_explicit_approval_hook(
+            &agent,
+            HookEvent::PreToolUse,
+            PermissionDecision::RequireApproval,
+        )
+        .await;
+        let cancel = crate::agent::CancellationToken::new();
+        let invocation = echo_core::agent::AgentInvocationContext {
+            cancel: Some(cancel.clone()),
+            ..Default::default()
+        };
+        let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent_with_invocation(
+            &agent,
+            &invocation,
+        );
+        let params = ToolParameters::new();
+        let input = serde_json::json!({});
+        let run = snapshot.execute_tool_with_policy(
+            "cancel-probe".into(),
+            "hook_approval_probe",
+            &params,
+            &input,
+            None,
+        );
+        let cancel_after_entry = async {
+            let (_request, _answer) =
+                tokio::time::timeout(std::time::Duration::from_secs(2), observed.recv())
+                    .await
+                    .map_err(|_| ReactError::Other("provider did not enter before cancel".into()))?
+                    .ok_or_else(|| ReactError::Other("provider channel closed".into()))?;
+            assert_eq!(executions.load(Ordering::SeqCst), 0);
+            cancel.cancel();
+            Ok::<_, ReactError>(())
+        };
+        let (outcome, cancelled) = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            tokio::join!(run, cancel_after_entry)
+        })
+        .await
+        .map_err(|_| ReactError::Other("pending approval did not settle on cancellation".into()))?;
+        cancelled?;
+        assert!(outcome.is_err());
+        assert_eq!(executions.load(Ordering::SeqCst), 0);
+        Ok(())
+    }
+
+    #[cfg(feature = "human-loop")]
+    #[tokio::test]
+    async fn explicit_hook_approval_null_handler_and_deny_never_execute() -> Result<()> {
+        use crate::human_loop::PermissionService;
+        use crate::skills::hooks::HookEvent;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        for deny in [false, true] {
+            let executions = Arc::new(AtomicUsize::new(0));
+            let agent = crate::agent::ReactAgentBuilder::new()
+                .model("test-model")
+                .permission_service(Arc::new(
+                    PermissionService::new().with_mode(PermissionMode::BypassPermissions),
+                ))
+                .tool(Box::new(HookApprovalProbe {
+                    executions: executions.clone(),
+                }))
+                .build()?;
+            install_explicit_approval_hook(
+                &agent,
+                HookEvent::PreToolUse,
+                PermissionDecision::RequireApproval,
+            )
+            .await;
+            if deny {
+                agent.hook_registry().write().await.set_programmatic_hook(
+                    "deny-request",
+                    &[HookEvent::PermissionRequest],
+                    Arc::new(|_| {
+                        Box::pin(async {
+                            echo_core::hooks::HookResult::deny("explicit veto".into())
+                        })
+                    }),
+                );
+            }
+            let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+            let result = snapshot
+                .execute_tool_with_policy(
+                    "unavailable-probe".into(),
+                    "hook_approval_probe",
+                    &ToolParameters::new(),
+                    &serde_json::json!({}),
+                    None,
+                )
+                .await;
+            assert!(result.is_err());
+            assert_eq!(executions.load(Ordering::SeqCst), 0);
+            if deny {
+                let failure = result
+                    .err()
+                    .ok_or_else(|| ReactError::Other("veto did not fail".into()))?;
+                assert!(failure.error.to_string().contains("explicit veto"));
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn explicit_hook_approval_without_service_never_executes() -> Result<()> {
+        use crate::skills::hooks::HookEvent;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        for event in [HookEvent::PreToolUse, HookEvent::PermissionRequest] {
+            for decision in [
+                PermissionDecision::RequireApproval,
+                PermissionDecision::Ask {
+                    suggestions: vec![],
+                },
+            ] {
+                let executions = Arc::new(AtomicUsize::new(0));
+                let agent = crate::agent::ReactAgentBuilder::new()
+                    .model("test-model")
+                    .tool(Box::new(HookApprovalProbe {
+                        executions: executions.clone(),
+                    }))
+                    .build()?;
+                install_explicit_approval_hook(&agent, event, decision).await;
+                let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+                let outcome = snapshot
+                    .execute_tool_with_policy(
+                        "no-approval-service".into(),
+                        "hook_approval_probe",
+                        &ToolParameters::new(),
+                        &serde_json::json!({}),
+                        None,
+                    )
+                    .await;
+                assert!(
+                    outcome.is_err(),
+                    "explicit approval silently passed without a service"
+                );
+                assert_eq!(executions.load(Ordering::SeqCst), 0);
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "human-loop")]
+    #[tokio::test]
+    async fn explicit_hook_dont_ask_preserves_denial_and_requires_fresh_matched_approval()
+    -> Result<()> {
+        use crate::human_loop::{
+            PermissionRequest, PermissionRequestHandler, PermissionResponse, PermissionService,
+        };
+        use echo_core::tools::permission::{PermissionRule, RuleMatcher, RuleSource};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct CountHandler(Arc<AtomicUsize>);
+        #[async_trait::async_trait]
+        impl PermissionRequestHandler for CountHandler {
+            async fn handle(&self, _request: PermissionRequest) -> Result<PermissionResponse> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(PermissionResponse::allowed())
+            }
+        }
+        for matched in [false, true] {
+            let executions = Arc::new(AtomicUsize::new(0));
+            let approvals = Arc::new(AtomicUsize::new(0));
+            let service = Arc::new(
+                PermissionService::new()
+                    .with_mode(PermissionMode::DontAsk)
+                    .with_request_handler(Arc::new(CountHandler(approvals.clone()))),
+            );
+            if matched {
+                service
+                    .add_rule(PermissionRule::allow(
+                        RuleMatcher::Pattern {
+                            pattern: "hook_approval_probe".into(),
+                        },
+                        RuleSource::Session,
+                    ))
+                    .await;
+            }
+            let agent = crate::agent::ReactAgentBuilder::new()
+                .model("test-model")
+                .permission_service(service)
+                .tool(Box::new(HookApprovalProbe {
+                    executions: executions.clone(),
+                }))
+                .build()?;
+            install_explicit_approval_hook(
+                &agent,
+                crate::skills::hooks::HookEvent::PreToolUse,
+                PermissionDecision::RequireApproval,
+            )
+            .await;
+            let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+            let outcome = snapshot
+                .execute_tool_with_policy(
+                    "dont-ask-probe".into(),
+                    "hook_approval_probe",
+                    &ToolParameters::new(),
+                    &serde_json::json!({}),
+                    None,
+                )
+                .await;
+            assert_eq!(outcome.is_ok(), matched);
+            assert_eq!(approvals.load(Ordering::SeqCst), usize::from(matched));
+            assert_eq!(executions.load(Ordering::SeqCst), usize::from(matched));
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "human-loop")]
+    #[tokio::test]
+    async fn explicit_hook_need_more_info_never_executes() -> Result<()> {
+        use crate::human_loop::{
+            PermissionRequest, PermissionRequestHandler, PermissionResponse,
+            PermissionResponseDecision, PermissionService,
+        };
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct MoreInfoHandler;
+        #[async_trait::async_trait]
+        impl PermissionRequestHandler for MoreInfoHandler {
+            async fn handle(&self, _request: PermissionRequest) -> Result<PermissionResponse> {
+                Ok(PermissionResponse {
+                    decision: PermissionResponseDecision::NeedMoreInfo {
+                        question: "clarify before approval".into(),
+                    },
+                    rule_updates: Vec::new(),
+                    feedback: None,
+                    updated_input: None,
+                    approval_scope: None,
+                })
+            }
+        }
+        let executions = Arc::new(AtomicUsize::new(0));
+        let agent = crate::agent::ReactAgentBuilder::new()
+            .model("test-model")
+            .permission_service(Arc::new(
+                PermissionService::new().with_request_handler(Arc::new(MoreInfoHandler)),
+            ))
+            .tool(Box::new(HookApprovalProbe {
+                executions: executions.clone(),
+            }))
+            .build()?;
+        install_explicit_approval_hook(
+            &agent,
+            crate::skills::hooks::HookEvent::PermissionRequest,
+            PermissionDecision::RequireApproval,
+        )
+        .await;
+        let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+        let outcome = snapshot
+            .execute_tool_with_policy(
+                "more-info-probe".into(),
+                "hook_approval_probe",
+                &ToolParameters::new(),
+                &serde_json::json!({}),
+                None,
+            )
+            .await;
+        assert!(outcome.is_err());
+        assert_eq!(executions.load(Ordering::SeqCst), 0);
+        Ok(())
+    }
+
     #[tokio::test]
     async fn permission_hooks_trace_real_allow_and_deny_on_the_main_path() -> Result<()> {
         use crate::skills::hooks::{HookAction, HookEvent, HookRule, HooksDefinition};
@@ -2709,9 +3297,17 @@ mod tests {
             let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
             let mut ctx = completed_context(String::new());
             ctx.result = None;
+            let requires_approval = decision.requires_approval();
             ctx.permission_decision = Some(decision);
 
-            PermissionStage.run(&mut ctx, &snapshot).await?;
+            let outcome = PermissionStage.run(&mut ctx, &snapshot).await;
+            if requires_approval {
+                // This trace-only fixture has no approval service. The new
+                // behavioral probes separately require a real provider entry.
+                assert!(outcome.is_err());
+            } else {
+                outcome?;
+            }
 
             assert_eq!(ctx.blocked, blocked);
             let run = store

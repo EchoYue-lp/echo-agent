@@ -449,6 +449,12 @@ pub struct AgentInvocationContext {
     /// These exclusions are combined with agent-level defaults when the run
     /// snapshot is created. They never mutate the shared tool registry.
     pub disabled_tools: Option<std::collections::HashSet<String>>,
+    /// Nonempty hard upper bound retained until this invocation takes its
+    /// execution snapshot. Intersect the then-current tool catalog with this
+    /// set; a previously computed exclusion list cannot cover later registrations.
+    /// `None` and an empty set preserve the historical unrestricted behavior.
+    /// A nonempty set with zero registered matches still allows no tool.
+    pub allowed_tools: Option<std::collections::HashSet<String>>,
     /// Initial tool names whose schemas are visible to the model.
     /// `None` keeps the complete eligible tool surface visible.
     pub visible_tools: Option<std::collections::HashSet<String>>,
@@ -510,6 +516,13 @@ impl std::fmt::Debug for AgentInvocationContext {
                 "visible_tools",
                 &self
                     .visible_tools
+                    .as_ref()
+                    .map(std::collections::HashSet::len),
+            )
+            .field(
+                "allowed_tools",
+                &self
+                    .allowed_tools
                     .as_ref()
                     .map(std::collections::HashSet::len),
             )

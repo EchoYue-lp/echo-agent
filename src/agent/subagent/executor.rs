@@ -113,21 +113,32 @@ impl DispatchRequest {
     }
 }
 
-fn invocation_disabled_tools(
-    tool_names: Vec<String>,
+fn apply_subagent_invocation_scope(
+    invocation: &mut AgentInvocationContext,
+    agent: &dyn Agent,
     allowed_tools: Option<&[String]>,
-) -> Option<HashSet<String>> {
-    let allowed_tools = allowed_tools.filter(|tools| !tools.is_empty())?;
-    let allowed = allowed_tools
-        .iter()
-        .map(String::as_str)
-        .collect::<HashSet<_>>();
-    Some(
-        tool_names
+    target_policy: NestedDelegationPolicy,
+) {
+    // The request already names this exact actor. Advancing child_policy here
+    // would count the same dispatch edge again; copying parent runtime policy
+    // would let a child masquerade as its parent on the next dispatch.
+    invocation
+        .runtime
+        .get_or_insert_with(echo_core::tools::ExternalRunContext::default)
+        .delegation_policy = Some(target_policy);
+    // Keep the positive bound until the original Agent takes its snapshot
+    // after acquiring the execution lock. A deny complement of today's names
+    // cannot exclude tools registered while this invocation waits in the queue.
+    invocation.allowed_tools = allowed_tools
+        .filter(|tools| !tools.is_empty())
+        .map(|tools| tools.iter().cloned().collect());
+    invocation.visible_tools = invocation.allowed_tools.as_ref().map(|allowed| {
+        agent
+            .tool_names()
             .into_iter()
-            .filter(|tool| !allowed.contains(tool.as_str()))
-            .collect(),
-    )
+            .filter(|name| allowed.contains(name))
+            .collect()
+    });
 }
 
 fn effective_capabilities(
@@ -2210,11 +2221,19 @@ impl SubagentExecutor {
             .runtime_context
             .as_ref()
             .and_then(|ctx| ctx.run_id.clone());
-        let invocation = AgentInvocationContext {
+        let mut invocation = AgentInvocationContext {
             runtime: req.runtime_context.clone(),
             working_dir: agent_arc.working_dir(),
             ..AgentInvocationContext::default()
         };
+        apply_subagent_invocation_scope(
+            &mut invocation,
+            agent_arc.as_ref(),
+            req.parent_context
+                .as_ref()
+                .and_then(|context| context.allowed_tools.as_deref()),
+            req.delegation_policy,
+        );
 
         let observation_run_id = event_run_id.clone().unwrap_or_else(|| handle_id.clone());
         let observation_execution_id = event_execution_id.clone();
@@ -2345,7 +2364,7 @@ impl SubagentExecutor {
         let inherited_history = req
             .parent_context
             .clone()
-            .filter(|context| !context.messages.is_empty() || context.parent_goal.is_some());
+            .filter(SubagentContext::has_content);
         let control_scope_id = format!(
             "team-control:{}:{}",
             run_id,
@@ -3061,11 +3080,19 @@ impl SubagentExecutor {
             .runtime_context
             .as_ref()
             .and_then(|ctx| ctx.run_id.clone());
-        let invocation = AgentInvocationContext {
+        let mut invocation = AgentInvocationContext {
             runtime: req.runtime_context.clone(),
             working_dir: agent_arc.working_dir(),
             ..AgentInvocationContext::default()
         };
+        apply_subagent_invocation_scope(
+            &mut invocation,
+            agent_arc.as_ref(),
+            req.parent_context
+                .as_ref()
+                .and_then(|context| context.allowed_tools.as_deref()),
+            req.delegation_policy,
+        );
 
         let cause = Arc::new(Mutex::new(None));
         let deadline = (timeout_secs > 0)
@@ -3239,6 +3266,7 @@ impl SubagentExecutor {
             .as_ref()
             .and_then(|context| context.allowed_tools.clone())
             .filter(|allowed| !allowed.is_empty());
+        let invocation_target_policy = req.delegation_policy;
 
         let observation_run_id = req
             .runtime_context
@@ -3330,27 +3358,30 @@ impl SubagentExecutor {
                 capability_override: capability_override.as_ref(),
                 payload: prompt_payload.as_ref(),
             });
-            let disabled_tools = invocation_disabled_tools(
-                agent_arc.tool_names(),
-                invocation_allowed_tools.as_deref(),
-            );
             let effective_working_dir = isolation_handle
                 .as_ref()
                 .map(|handle| handle.path.clone())
                 .or_else(|| agent_arc.working_dir());
-            let invocation = AgentInvocationContext {
+            let mut invocation = AgentInvocationContext {
                 runtime: runtime_context.clone(),
                 runtime_state_id: None,
                 transcript_generation_id: None,
                 working_dir: effective_working_dir,
                 cancel: None,
-                disabled_tools,
+                disabled_tools: None,
+                allowed_tools: None,
                 visible_tools: None,
                 run_budget: None,
                 history: None,
                 resource_guards: Vec::new(),
                 input_lifecycle: None,
             };
+            apply_subagent_invocation_scope(
+                &mut invocation,
+                agent_arc.as_ref(),
+                invocation_allowed_tools.as_deref(),
+                invocation_target_policy,
+            );
             event_publisher.emit(SubagentEvent::DispatchIsolationObserved {
                 parent: parent_agent.clone(),
                 agent: agent_name.clone(),
@@ -3799,19 +3830,96 @@ mod tests {
 
     #[test]
     fn invocation_allowlist_hides_every_unlisted_tool() {
-        let tools = vec![
-            "read_file".to_string(),
-            "write_file".to_string(),
-            "shell".to_string(),
-        ];
+        let agent = MockAgent::new("no-registered-tools");
+        let mut invocation = AgentInvocationContext::default();
         let allowed = vec!["read_file".to_string()];
-        let disabled = invocation_disabled_tools(tools.clone(), Some(&allowed)).unwrap_or_default();
-        assert_eq!(
-            disabled,
-            HashSet::from(["write_file".to_string(), "shell".to_string()])
+        apply_subagent_invocation_scope(
+            &mut invocation,
+            &agent,
+            Some(&allowed),
+            DispatchRequest::policy_from_depth(0),
         );
-        assert!(invocation_disabled_tools(tools.clone(), None).is_none());
-        assert!(invocation_disabled_tools(tools, Some(&[])).is_none());
+        assert_eq!(
+            invocation.allowed_tools,
+            Some(HashSet::from(["read_file".to_string()]))
+        );
+        assert_eq!(invocation.visible_tools, Some(HashSet::new()));
+        apply_subagent_invocation_scope(
+            &mut invocation,
+            &agent,
+            None,
+            DispatchRequest::policy_from_depth(0),
+        );
+        assert!(invocation.allowed_tools.is_none());
+        assert!(invocation.visible_tools.is_none());
+        apply_subagent_invocation_scope(
+            &mut invocation,
+            &agent,
+            Some(&[]),
+            DispatchRequest::policy_from_depth(0),
+        );
+        assert!(invocation.allowed_tools.is_none());
+        assert!(invocation.visible_tools.is_none());
+    }
+
+    #[tokio::test]
+    async fn legacy_empty_scope_keeps_all_mode_invocations_unrestricted() -> Result<()> {
+        for mode in [
+            ExecutionMode::Sync,
+            ExecutionMode::Fork,
+            ExecutionMode::Teammate,
+        ] {
+            for allowed_tools in [None, Some(Vec::new())] {
+                let registry = Arc::new(SubagentRegistry::new());
+                let agent = MockAgent::new("legacy-scope").with_response("complete");
+                registry
+                    .register(
+                        SubagentDefinition::new("legacy-scope", "legacy"),
+                        Box::new(agent.clone()),
+                    )
+                    .await;
+                let executor = SubagentExecutor::new(registry, SubagentExecutorConfig::default());
+                let context = allowed_tools.map(|tools| SubagentContext {
+                    allowed_tools: Some(tools),
+                    ..SubagentContext::empty()
+                });
+                executor
+                    .dispatch(DispatchRequest {
+                        agent_name: "legacy-scope".into(),
+                        task: "legacy independent consumer".into(),
+                        mode_override: Some(mode.clone()),
+                        cancel: CancellationToken::new(),
+                        parent_agent: "parent".into(),
+                        parent_context: context,
+                        delegation_policy: DispatchRequest::policy_from_depth(0),
+                        runtime_context: None,
+                        message: None,
+                        prompt_payload: None,
+                        prompt_context: None,
+                        constraints: Vec::new(),
+                        background: false,
+                    })
+                    .await?;
+                let invocations = agent.invocation_contexts();
+                let invocation = invocations
+                    .first()
+                    .ok_or_else(|| ReactError::Other("legacy invocation missing".into()))?;
+                assert!(invocation.disabled_tools.is_none());
+                assert!(invocation.allowed_tools.is_none());
+                assert!(invocation.visible_tools.is_none());
+                let runtime = invocation
+                    .runtime
+                    .as_ref()
+                    .ok_or_else(|| ReactError::Other("target policy runtime missing".into()))?;
+                assert_eq!(
+                    runtime.delegation_policy,
+                    Some(DispatchRequest::policy_from_depth(0))
+                );
+                assert!(runtime.run_id.is_none());
+                assert!(runtime.conversation_id.is_none());
+            }
+        }
+        Ok(())
     }
 
     struct DelegateFailedDispatch;

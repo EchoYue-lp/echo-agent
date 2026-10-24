@@ -12,6 +12,7 @@ boundary_refs:
 code_refs:
 - src/agent/subagent/registry.rs
 - src/agent/subagent/executor.rs
+- src/agent/subagent/context.rs
 - src/agent/subagent/control.rs
 - src/agent/subagent/events.rs
 - docs/adr/0033-subagent-factory-singleflight-publication.md
@@ -23,6 +24,8 @@ behavior_refs:
 rule_refs:
 - rule.task-subagent-authority
 evidence_refs:
+- evidence.subagent-depth-target-policy
+- evidence.subagent-tool-boundary-inheritance
 - evidence.task-subagent-workflow
 - evidence.subagent-factory-singleflight-repair
 - evidence.subagent-factory-singleflight-verification

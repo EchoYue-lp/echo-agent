@@ -136,6 +136,42 @@ Every path first calls the configured `SubagentPromptCompiler`:
 assistant final messages; system prompts, tool calls/results, reasoning, and
 runtime projections are excluded.
 
+### Invocation tool scope
+
+A nonempty `SubagentContext.allowed_tools` is a hard upper bound for the
+actual invocation, independent of Fresh or inherited conversation context.
+Sync, Fork, Teammate and concrete Team members apply it to both model-visible
+schemas and the original tool execution pipeline. `None` and `Some([])` keep
+the historical no-additional-whitelist meaning; a nonempty bound with zero
+matches in a new role still excludes all that role's tools.
+
+`agent_tool` carries the invoking `ToolContext`'s hard **available** catalog
+through the original context. It does not infer permission from shared
+registered tools or from the smaller first-turn visible set. Descendants can
+only narrow this bound; a role change, Fresh mode or tool-search activation
+cannot recover an excluded tool. A cached call outside the hard scope is
+rejected before creating a child. Independent framework calls without such a
+context retain their existing behavior. Applications continue to own depth
+settings and run policy; see [ADR 0094](../adr/0094-subagent-tool-boundary-inheritance.md).
+
+Programmatic callers can carry the same nonempty positive upper bound in
+`AgentInvocationContext.allowed_tools: Option<HashSet<String>>`. The Agent
+intersects it with the current registered catalog after acquiring its original
+execution lock. Tools added while a turn waits cannot widen that invocation.
+`visible_tools` only selects initial schemas within the hard scope; an absent
+or empty `allowed_tools` set adds no whitelist. Exhaustive Rust invocation
+literals must supply the new optional field or use `..Default::default()`.
+
+Every concrete Subagent invocation also carries the request's **target actor**
+delegation policy. The executor copies it without advancing another level;
+the real dispatch edge owns `child_policy`. An explicitly nondelegating or
+exhausted actor excludes `agent_tool` from the original available/eligible
+catalog, model schemas, search and actual execution. `None` keeps the generic
+framework fallback; applications choose their own depth policy. A separate
+focused batch exercised these target-policy paths in real model requests and
+tool contexts, including the generic maximum 4 control. This framework result
+does not qualify application GUI configuration, run recovery or full features.
+
 ```
 main_agent.execute("...")
     │

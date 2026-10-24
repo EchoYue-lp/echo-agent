@@ -10,6 +10,26 @@ Hooks allow custom behavior to be injected at key points in the agent lifecycle.
 
 ---
 
+## Explicit approval decisions
+
+PreToolUse and PermissionRequest may return Ask or RequireApproval. The tool
+pipeline preserves that requirement across both events, including the original
+suggestion text. A later PermissionRequest Allow cannot clear an earlier Ask;
+Deny still blocks. Ordinary allow rules, approval cache and full-auto mode do
+not approve an invocation that explicitly requires fresh interaction.
+
+The pipeline calls the existing PermissionService through
+`request_approval_with_context`, retaining the same request identity, context,
+cancellation wait and final-input receipt processing. Missing service,
+disabled human-loop or an unavailable real handler fails rather than silently
+executing the tool. Ordinary calls keep their existing behavior. Suggestions
+are descriptive custom responses, not inferred persistent grants.
+
+Timeout, Deferred and rejected responses do not execute the tool. This change
+does not add a default deadline, change cancellation error types, or introduce
+another HITL queue/store. See [HumanLoop](05-human-loop.md#explicit-hook-approval)
+and [ADR 0091](../adr/0091-explicit-hook-approval-intent.md).
+
 ## Skills Hooks
 
 The primary hook system. Hooks are configured in YAML via host application or

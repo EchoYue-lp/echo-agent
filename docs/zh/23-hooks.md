@@ -10,6 +10,14 @@ Hooks 允许在 Agent 生命周期的关键节点注入自定义行为。框架�
 
 ---
 
+## 明确审批决定
+
+PreToolUse 与 PermissionRequest 可返回 Ask/RequireApproval。工具 pipeline 在两类事件之间保留该交互要求及原始建议文本；后续 PermissionRequest Allow 不能清空此前 Ask，Deny 仍先拒绝。普通 allow 规则、审批缓存及 full-auto 均不能替代本次明确要求的新交互。
+
+pipeline 经 `PermissionService::request_approval_with_context` 复用同一套请求身份、context、取消等待和最终输入 receipt 后处理。无 service、关闭 human-loop 或没有真实 handler 时明确失败，不静默执行工具；普通调用保持原行为。建议只是 Custom 说明，不能从文案推断持久授权。
+
+Timeout、Deferred、Rejected 均不执行工具。本次不新增默认 deadline、不统一取消错误类型，也不另建 HITL 队列/store。见 [HumanLoop](05-human-loop.md#hook-明确要求审批) 与 [ADR 0091](../adr/0091-explicit-hook-approval-intent.md)。
+
 ## Skills Hooks
 
 主 Hook 系统。通过宿主 application 或 Plugin 的 YAML 配置，由 `HookRegistry` 统一分发执行。

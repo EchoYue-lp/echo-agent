@@ -77,3 +77,53 @@ At public7110a27e7b0e9841dcfa0d4cca1cdbc053d96177/treec4633e8d344e98096d619a3490
 Full tests have89 result blocks: raw3624pass/0fail/3ignored, including the same two echo_state file_lease_child_process singleton results. Excluding their duplicate count gives3622 main passes/0fail/3 existing opt-in live tests (LSP, scholarly providers and credentialed Zotero). Python origin guards8/0 and focused media2/0 are separate scopes, not added to the Rust total. Ignored raw index full23-actual-summary1.json binds every command, log SHA/bytes and source guard; full05-results-analysis1.json records the row/child context.
 
 Peak target use was7896854528B; minimum available disk21954043904B. The official own-target cargo clean then exited0 (14547files/7.2GiB), target absent,2317 Git-visible sources and status unchanged; raw, immutable source/tooling and archives retained. The first process precheck failed closed on unrelated macOS ps non-UTF8 argument bytes before clean; the corrected bytes PID/comm-only check passed, not retroactively the first one. Exact mainCI's original online audit/deny and real SDK/CLI delivery remain pending, so the task Finding stays open.
+
+
+## Post-merge source and exact-main CI qualification (2026-10-24)
+
+This increment preserves `observed_at: 7110a27e7b0e9841dcfa0d4cca1cdbc053d96177`
+and the original full6+17 execution, source digest, result totals, failed
+iterations, cache/network limitations and cleanup records above. There is no
+literal `after_revision` field to rewrite. Earlier “mainCI pending” statements
+refer to their original execution epoch; the new remote qualification follows.
+No Rust command or scanner was rerun locally for this documentation increment.
+
+[PR190](https://github.com/EchoYue-lp/echo-agent/pull/190) is merged with squash
+commit `9886502c83d6b1f6fa9212eb221db0e5874deaee`. A fresh local Git comparison
+of 7110 to that squash finds exactly29 `.echo-semantic/` changes and no other
+tracked difference. Thus the tested production/manifest/lock/vendor bytes were
+adopted even though the pre-squash candidate is not a main ancestor. The squash
+is an ancestor of exact remote main
+`51726454985fd6f064b21a7e9c539e22d494c987`, confirmed by a read-only GitHub GET
+and local ancestry check; no refs were fetched or moved.
+
+The later main is not byte-identical to 7110. Its ZIP repair manifests, complete
+vendor tree, media compatibility tests, origin-view generator/guards and ADR0089
+are unchanged. Its lock additionally updates rustls-webpki0.103.14→0.103.16 and
+tokio1.53.1→1.53.3; its dependency-policy workflow uses the separately accepted
+exact duplicate diagnostic gate. The main/current c3b lock SHA-256 is
+`f76fe10e64ec3faf062ff5bc7a66d6cd82f82cf95e989c824f40fe6f244d234c`, with exactly
+one ZIP package, version9.0.3. These facts do not transfer the old local test
+epoch to the later runtime or lock.
+
+[Run39984523075](https://github.com/EchoYue-lp/echo-agent/actions/runs/39984523075)
+is completed/success, push/main, head
+`51726454985fd6f064b21a7e9c539e22d494c987`. Its seven jobs all completed with
+success on that same SHA: linux-quality, linux test (tools), linux test
+(foundations), windows-check, linux test (framework), linux test (learning), and
+dependency-policy. This is remote CI evidence under that main's actual workflow,
+not a local rerun or a claim that all prior gate commands remained identical.
+The closeout base `c3b56b4ee8a73565e6a2a621b9a7ddfb644ed3aa` differs from that
+main only in `AGENTS.md` and `docs/adr/0090-a2a-lsp-retirement-contract.md`;
+its runtime, manifests, lock, vendor, tests and CI workflow are identical.
+
+The read-only candidate ledger and its PASS0 review were checked by actual file
+SHA, but do not replace independent review of these formal-object changes.
+Fresh API originals and exact Git differences are retained only in this
+worktree's ignored `.echo-semantic/local/zip-ci-post-merge/`; original input
+ledger/CI/review receipts remain in the supplied reconciliation backup. The
+existing `audit.framework-yanked-zip-source-review` owns the bounded post-merge
+rereview. Actual SDK/CLI consumer delivery, registry publication, a complete
+imported-code security audit, and Issue189's seven missing historical trees
+remain outside this qualification. Issue188 is still open externally. No Cargo
+artifacts were created; `cargo clean` is not applicable.

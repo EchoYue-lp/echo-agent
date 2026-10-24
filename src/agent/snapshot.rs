@@ -527,7 +527,31 @@ impl ToolRuntime {
         invocation_disabled_tools: Option<&std::collections::HashSet<String>>,
         invocation_visible_tools: Option<&std::collections::HashSet<String>>,
     ) -> Self {
+        Self::from_agent_with_tool_scope(
+            agent,
+            model_profile,
+            invocation_disabled_tools,
+            invocation_visible_tools,
+            None,
+            None,
+        )
+    }
+
+    fn from_agent_with_tool_scope(
+        agent: &super::ReactAgent,
+        model_profile: Option<&echo_core::llm::capabilities::ModelProfileResolution>,
+        invocation_disabled_tools: Option<&std::collections::HashSet<String>>,
+        invocation_visible_tools: Option<&std::collections::HashSet<String>>,
+        invocation_allowed_tools: Option<&std::collections::HashSet<String>>,
+        delegation_policy: Option<echo_core::tools::NestedDelegationPolicy>,
+    ) -> Self {
+        let invocation_allowed_tools =
+            invocation_allowed_tools.filter(|allowed| !allowed.is_empty());
         let mut disabled_tools = agent.tools.tool_visibility.disabled_names();
+        let delegation_blocked = delegation_policy.is_some_and(|policy| !policy.can_delegate());
+        if delegation_blocked {
+            disabled_tools.insert("agent_tool".to_string());
+        }
         if let Some(resolution) = model_profile.or(agent.config.model_profile.as_ref()) {
             disabled_tools.extend(resolution.profile.excluded_tools.iter().cloned());
         }
@@ -555,10 +579,31 @@ impl ToolRuntime {
                     false
                 }
             };
-        let visibility = invocation_visible_tools.map(|initial| {
-            let available = tool_manager
-                .get_openai_tools()
+        // The positive hard scope survives queueing. Resolve it against this
+        // current catalog, independently of the initial schema visibility.
+        // Explicit nondelegating policy needs the same available/eligible
+        // authority even without deferred schemas. Tool search must not fall
+        // back to the shared registry and rediscover the excluded dispatcher.
+        let explicit_visibility =
+            invocation_visible_tools.is_some() || invocation_allowed_tools.is_some();
+        let visibility = (explicit_visibility || delegation_blocked).then(|| {
+            let current_tools = tool_manager.get_openai_tools();
+            if let Some(allowed) = invocation_allowed_tools {
+                // Keep the original unavailable diagnostic for names known at
+                // admission. The positive bound below also covers later names.
+                disabled_tools.extend(
+                    current_tools
+                        .iter()
+                        .map(|tool| tool.function.name.clone())
+                        .filter(|name| !allowed.contains(name)),
+                );
+            }
+            let available = current_tools
                 .into_iter()
+                .filter(|tool| {
+                    invocation_allowed_tools
+                        .is_none_or(|allowed| allowed.contains(&tool.function.name))
+                })
                 .filter(|tool| !disabled_tools.contains(&tool.function.name))
                 .filter(|tool| {
                     !(plan_mode || agent.config.readonly_tools)
@@ -580,8 +625,16 @@ impl ToolRuntime {
                 })
                 .cloned()
                 .collect();
-            let mut initial = initial.clone();
-            initial.insert("tool_search".to_string());
+            let mut initial = invocation_visible_tools
+                .cloned()
+                .unwrap_or_else(|| available.clone());
+            if explicit_visibility {
+                initial.insert("tool_search".to_string());
+            } else {
+                // Preserve NoDeferred schemas while a forced search still
+                // receives this qualified catalog instead of a fallback.
+                initial.remove("tool_search");
+            }
             std::sync::Arc::new(echo_core::tools::ToolVisibilityState::with_available(
                 available, eligible, initial,
             ))
@@ -1807,6 +1860,13 @@ impl AgentRunSnapshot {
             config.run_budget = run_budget.clone();
         }
         let runtime = invocation.and_then(|context| context.runtime.as_ref());
+        // Select once with the original precedence: an explicit invocation,
+        // including one with no runtime policy, never falls back to legacy.
+        let external_delegation_policy = if invocation.is_some() {
+            runtime.and_then(|context| context.delegation_policy)
+        } else {
+            legacy.and_then(|context| context.delegation_policy)
+        };
         if let Some(conversation_id) = runtime.and_then(|context| context.conversation_id.clone()) {
             config.conversation_id = Some(conversation_id.clone());
         } else if invocation.is_none()
@@ -1821,11 +1881,13 @@ impl AgentRunSnapshot {
         let transcript_generation_id = invocation
             .and_then(|context| context.transcript_generation_id.clone())
             .or_else(|| config.runtime_state_id.clone());
-        let tools = ToolRuntime::from_agent(
+        let tools = ToolRuntime::from_agent_with_tool_scope(
             agent,
             model_profile.as_ref(),
             invocation.and_then(|context| context.disabled_tools.as_ref()),
             invocation.and_then(|context| context.visible_tools.as_ref()),
+            invocation.and_then(|context| context.allowed_tools.as_ref()),
+            external_delegation_policy,
         );
         let skill_activation = agent.tools.skill_registry.activation_handle();
         config.plan_mode = tools.is_plan_mode();
@@ -1896,11 +1958,7 @@ impl AgentRunSnapshot {
             } else {
                 legacy.and_then(|context| context.trace_sink.clone())
             },
-            external_delegation_policy: if invocation.is_some() {
-                runtime.and_then(|context| context.delegation_policy)
-            } else {
-                legacy.and_then(|context| context.delegation_policy)
-            },
+            external_delegation_policy,
             subagent_lineage: if invocation.is_some() {
                 runtime.and_then(|context| context.subagent_lineage.clone())
             } else {
@@ -2473,6 +2531,31 @@ impl AgentRunSnapshot {
         Option<echo_orchestration::human_loop::PermissionCheck>,
         echo_core::error::ReactError,
     > {
+        self.check_tool_approval_with_intent(
+            request_id,
+            tool_name,
+            input,
+            permission_mode_override,
+            None,
+        )
+        .await
+    }
+
+    /// `Some` retains an explicit interaction requirement, including an empty
+    /// suggestion list for RequireApproval. Identity and cancellation retain
+    /// the same owner as ordinary permission checks.
+    #[cfg(feature = "human-loop")]
+    pub(crate) async fn check_tool_approval_with_intent(
+        &self,
+        request_id: &str,
+        tool_name: &str,
+        input: &serde_json::Value,
+        permission_mode_override: Option<echo_core::tools::permission::PermissionMode>,
+        approval_suggestions: Option<&[String]>,
+    ) -> std::result::Result<
+        Option<echo_orchestration::human_loop::PermissionCheck>,
+        echo_core::error::ReactError,
+    > {
         if let Some(ref service) = self.permission_service {
             let pending = {
                 let mut rules = self.pending_permission_rules.lock().await;
@@ -2549,13 +2632,30 @@ impl AgentRunSnapshot {
                 },
                 classifier: classifier_context,
             };
-            let check = service.check_with_permissions_result_in_mode_and_context(
-                tool_name,
-                input,
-                &permissions,
-                permission_mode_override,
-                Some(&permission_context),
-            );
+            let check = async {
+                if let Some(suggestions) = approval_suggestions {
+                    service
+                        .request_approval_with_context(
+                            tool_name,
+                            input,
+                            &permissions,
+                            permission_mode_override,
+                            Some(&permission_context),
+                            suggestions,
+                        )
+                        .await
+                } else {
+                    service
+                        .check_with_permissions_result_in_mode_and_context(
+                            tool_name,
+                            input,
+                            &permissions,
+                            permission_mode_override,
+                            Some(&permission_context),
+                        )
+                        .await
+                }
+            };
             tokio::pin!(check);
             let decision = if let Some(cancel) = self.cancel_token.as_ref() {
                 tokio::select! {
@@ -2595,6 +2695,10 @@ impl AgentRunSnapshot {
                     )))
                 }
             }
+        } else if approval_suggestions.is_some() {
+            Err(echo_core::error::ReactError::Other(format!(
+                "Tool '{tool_name}' explicitly requires approval but no PermissionService is configured"
+            )))
         } else {
             Ok(None)
         }
@@ -2612,6 +2716,26 @@ impl AgentRunSnapshot {
         Option<echo_orchestration::human_loop::PermissionCheck>,
         echo_core::error::ReactError,
     > {
+        Ok(None)
+    }
+
+    #[cfg(not(feature = "human-loop"))]
+    pub(crate) async fn check_tool_approval_with_intent(
+        &self,
+        _request_id: &str,
+        tool_name: &str,
+        _input: &serde_json::Value,
+        _permission_mode_override: Option<echo_core::tools::permission::PermissionMode>,
+        approval_suggestions: Option<&[String]>,
+    ) -> std::result::Result<
+        Option<echo_orchestration::human_loop::PermissionCheck>,
+        echo_core::error::ReactError,
+    > {
+        if approval_suggestions.is_some() {
+            return Err(echo_core::error::ReactError::Other(format!(
+                "Tool '{tool_name}' explicitly requires approval but the human-loop feature is disabled"
+            )));
+        }
         Ok(None)
     }
 
@@ -3839,6 +3963,7 @@ mod transcript_filter_tests {
             working_dir: Some(std::path::PathBuf::from("/tmp/worktree-atomic")),
             cancel: None,
             disabled_tools: None,
+            allowed_tools: None,
             visible_tools: None,
             run_budget: None,
             history: None,
@@ -4657,6 +4782,251 @@ mod transcript_filter_tests {
         assert_eq!(activated, vec!["custom"]);
         assert!(tool_names(&snapshot).contains(&"custom".to_string()));
         assert!(agent.tool_names().contains(&"custom".to_string()));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn inherited_hard_scope_cannot_be_promoted_by_tool_search() -> Result<()> {
+        let agent = crate::agent::ReactAgentBuilder::new()
+            .model("test-model")
+            .tool(Box::new(NamedTool("read_file")))
+            .tool(Box::new(NamedTool("write_file")))
+            .build()?;
+        let invocation = echo_core::agent::AgentInvocationContext {
+            allowed_tools: Some(HashSet::from(["read_file".into(), "tool_search".into()])),
+            visible_tools: Some(HashSet::from(["read_file".into(), "tool_search".into()])),
+            ..Default::default()
+        };
+        let snapshot = AgentRunSnapshot::from_agent_with_invocation(&agent, &invocation);
+        let visibility = snapshot
+            .tools
+            .visibility
+            .as_ref()
+            .ok_or_else(|| crate::error::ReactError::Other("visibility missing".into()))?;
+        assert!(
+            !visibility
+                .available_names()
+                .iter()
+                .any(|name| name == "write_file")
+        );
+        assert!(
+            visibility
+                .extend_eligibility_and_activate(["write_file".into()])
+                .is_empty()
+        );
+        let search = snapshot
+            .tools
+            .tool_manager
+            .get_tool("tool_search")
+            .ok_or_else(|| crate::error::ReactError::Other("tool_search missing".into()))?;
+        search
+            .execute_with_context(
+                [("query".into(), serde_json::json!("write_file"))]
+                    .into_iter()
+                    .collect(),
+                &echo_core::tools::ToolContext {
+                    tool_visibility: Some(Arc::clone(visibility)),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        assert!(!visibility.is_eligible("write_file"));
+        assert!(!visibility.is_visible("write_file"));
+        assert!(
+            !tool_names(&snapshot)
+                .iter()
+                .any(|name| name == "write_file")
+        );
+        assert!(agent.tool_names().iter().any(|name| name == "write_file"));
+        Ok(())
+    }
+
+    #[test]
+    fn hard_tool_scope_does_not_confuse_initial_visibility_with_permission() -> Result<()> {
+        let agent = crate::agent::ReactAgentBuilder::new()
+            .model("test-model")
+            .tool(Box::new(NamedTool("read_file")))
+            .tool(Box::new(NamedTool("write_file")))
+            .build()?;
+        let invocation = echo_core::agent::AgentInvocationContext {
+            allowed_tools: Some(HashSet::from(["read_file".into(), "tool_search".into()])),
+            visible_tools: Some(HashSet::from(["tool_search".into()])),
+            ..Default::default()
+        };
+        let snapshot = AgentRunSnapshot::from_agent_with_invocation(&agent, &invocation);
+        let visibility = snapshot
+            .tools
+            .visibility
+            .as_ref()
+            .ok_or_else(|| crate::error::ReactError::Other("visibility missing".into()))?;
+        assert!(visibility.is_eligible("read_file"));
+        assert!(!visibility.is_visible("read_file"));
+        assert_eq!(visibility.activate(["read_file".into()]), vec!["read_file"]);
+        assert!(!visibility.is_eligible("write_file"));
+        assert!(snapshot.tools.disabled_tools.contains("write_file"));
+        let initial_all = AgentRunSnapshot::from_agent_with_invocation(
+            &agent,
+            &echo_core::agent::AgentInvocationContext {
+                allowed_tools: invocation.allowed_tools,
+                ..Default::default()
+            },
+        );
+        assert!(
+            tool_names(&initial_all)
+                .iter()
+                .any(|name| name == "read_file")
+        );
+        assert!(
+            !tool_names(&initial_all)
+                .iter()
+                .any(|name| name == "write_file")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn empty_hard_tool_scope_retains_legacy_no_extra_whitelist() -> Result<()> {
+        let agent = crate::agent::ReactAgentBuilder::new()
+            .model("test-model")
+            .tool(Box::new(NamedTool("read_file")))
+            .build()?;
+        let plain = AgentRunSnapshot::from_agent_with_invocation(
+            &agent,
+            &echo_core::agent::AgentInvocationContext::default(),
+        );
+        let empty = AgentRunSnapshot::from_agent_with_invocation(
+            &agent,
+            &echo_core::agent::AgentInvocationContext {
+                allowed_tools: Some(HashSet::new()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(tool_names(&plain), tool_names(&empty));
+        assert!(empty.tools.visibility.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn nondelegating_policy_qualifies_search_even_without_initial_visibility() -> Result<()> {
+        let agent = crate::agent::ReactAgentBuilder::new()
+            .model("test-model")
+            .tool(Box::new(NamedTool("agent_tool")))
+            .tool(Box::new(NamedTool("read_file")))
+            .build()?;
+        let stopped = echo_core::tools::NestedDelegationPolicy {
+            can_spawn_subagents: false,
+            delegate_depth: 0,
+            max_delegate_depth: 3,
+        };
+        for allowed_tools in [None, Some(HashSet::from(["agent_tool".to_string()]))] {
+            let scope_only_dispatch = allowed_tools.is_some();
+            let snapshot = AgentRunSnapshot::from_agent_with_invocation(
+                &agent,
+                &echo_core::agent::AgentInvocationContext {
+                    runtime: Some(echo_core::tools::ExternalRunContext {
+                        delegation_policy: Some(stopped),
+                        ..Default::default()
+                    }),
+                    allowed_tools,
+                    visible_tools: None,
+                    ..Default::default()
+                },
+            );
+            assert_eq!(snapshot.external_delegation_policy, Some(stopped));
+            assert!(snapshot.tools.disabled_tools.contains("agent_tool"));
+            assert!(
+                !tool_names(&snapshot)
+                    .iter()
+                    .any(|name| name == "agent_tool")
+            );
+            let visibility = snapshot.tools.visibility.as_ref().ok_or_else(|| {
+                crate::error::ReactError::Other("policy availability missing".into())
+            })?;
+            assert!(
+                !visibility
+                    .available_names()
+                    .iter()
+                    .any(|name| name == "agent_tool")
+            );
+            assert!(!visibility.is_eligible("agent_tool"));
+            assert!(
+                visibility
+                    .extend_eligibility_and_activate(["agent_tool".into()])
+                    .is_empty()
+            );
+            if scope_only_dispatch {
+                assert!(visibility.available_names().is_empty());
+                assert!(tool_names(&snapshot).is_empty());
+            } else {
+                assert!(
+                    !tool_names(&snapshot)
+                        .iter()
+                        .any(|name| name == "tool_search")
+                );
+            }
+            let search = snapshot
+                .tools
+                .tool_manager
+                .get_tool("tool_search")
+                .ok_or_else(|| crate::error::ReactError::Other("search missing".into()))?;
+            let result = search
+                .execute_with_context(
+                    [("query".into(), serde_json::json!("agent_tool"))]
+                        .into_iter()
+                        .collect(),
+                    &echo_core::tools::ToolContext {
+                        tool_visibility: Some(Arc::clone(visibility)),
+                        delegation_policy: Some(stopped),
+                        ..Default::default()
+                    },
+                )
+                .await?;
+            assert!(
+                result
+                    .metadata
+                    .get("matched_tools")
+                    .is_none_or(|names| !names.split(',').any(|name| name == "agent_tool"))
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn policy_snapshot_preserves_explicit_invocation_and_legacy_precedence() -> Result<()> {
+        let agent = crate::agent::ReactAgentBuilder::new()
+            .model("test-model")
+            .tool(Box::new(NamedTool("agent_tool")))
+            .build()?;
+        let stopped = echo_core::tools::NestedDelegationPolicy {
+            can_spawn_subagents: true,
+            delegate_depth: 1,
+            max_delegate_depth: 1,
+        };
+        let legacy = crate::agent::react::LegacyExternalContextSnapshot {
+            delegation_policy: Some(stopped),
+            ..Default::default()
+        };
+        let legacy_snapshot = AgentRunSnapshot::from_agent_with_legacy_context(&agent, &legacy);
+        assert_eq!(legacy_snapshot.external_delegation_policy, Some(stopped));
+        assert!(
+            !tool_names(&legacy_snapshot)
+                .iter()
+                .any(|name| name == "agent_tool")
+        );
+        let explicit = echo_core::agent::AgentInvocationContext::default();
+        let explicit_none =
+            AgentRunSnapshot::from_agent_source(&agent, Some(&explicit), Some(&legacy));
+        assert!(explicit_none.external_delegation_policy.is_none());
+        assert!(explicit_none.tools.visibility.is_none());
+        assert!(
+            tool_names(&explicit_none)
+                .iter()
+                .any(|name| name == "agent_tool")
+        );
+        let plain = AgentRunSnapshot::from_agent(&agent);
+        assert!(plain.external_delegation_policy.is_none());
+        assert!(plain.tools.visibility.is_none());
+        assert!(tool_names(&plain).iter().any(|name| name == "agent_tool"));
         Ok(())
     }
 

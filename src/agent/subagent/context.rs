@@ -123,7 +123,8 @@ pub struct SubagentContext {
     // ── Scoped Context Fields (Step 6) ──────────────────────────────────────
     /// Parent's overall goal (for context)
     pub parent_goal: Option<String>,
-    /// Allowed tools for this subagent (overrides inheritance)
+    /// Nonempty hard tool upper bound for this invocation and its descendants.
+    /// `None` and `Some([])` retain the historical no-additional-whitelist meaning.
     pub allowed_tools: Option<Vec<String>>,
 }
 
@@ -210,6 +211,35 @@ impl SubagentContext {
             || self.parent_goal.is_some()
             || self.allowed_tools.is_some()
     }
+
+    /// Carry a known parent hard scope independently of transcript inheritance.
+    /// Never encode an empty hard intersection as the legacy unrestricted value.
+    pub(crate) fn inherit_tool_scope(&mut self, inherited: &[String]) -> Result<(), String> {
+        if inherited.is_empty() {
+            return Err("Subagent inherited tool scope is empty".to_string());
+        }
+        let mut tools = match self
+            .allowed_tools
+            .as_deref()
+            .filter(|tools| !tools.is_empty())
+        {
+            Some(current) => inherited
+                .iter()
+                .filter(|name| current.contains(name))
+                .cloned()
+                .collect::<Vec<_>>(),
+            None => inherited.to_vec(),
+        };
+        if tools.is_empty() {
+            return Err("Subagent tool scopes have no common permitted tool".to_string());
+        }
+        tools.sort();
+        tools.dedup();
+        self.tool_definitions
+            .retain(|tool| tools.contains(&tool.function.name));
+        self.allowed_tools = Some(tools);
+        Ok(())
+    }
 }
 
 fn latest_user_request(messages: &[Message]) -> Option<String> {
@@ -231,6 +261,24 @@ fn latest_user_request(messages: &[Message]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inherited_tool_scope_is_monotonic_and_empty_intersection_rejects() -> Result<(), String> {
+        let mut context = SubagentContext::empty();
+        context.allowed_tools = Some(Vec::new());
+        context.inherit_tool_scope(&["read_file".into(), "agent_tool".into()])?;
+        assert_eq!(
+            context.allowed_tools,
+            Some(vec!["agent_tool".into(), "read_file".into()])
+        );
+        context.inherit_tool_scope(&["read_file".into()])?;
+        let before = context.allowed_tools.clone();
+        assert!(context.inherit_tool_scope(&["write_file".into()]).is_err());
+        assert_eq!(context.allowed_tools, before);
+        assert!(context.inherit_tool_scope(&[]).is_err());
+        assert_eq!(context.allowed_tools, before);
+        Ok(())
+    }
 
     #[test]
     fn test_sync_default_no_inheritance() {
