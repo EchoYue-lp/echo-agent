@@ -8,6 +8,12 @@
 
 **框架服务所有复用方,不是某个应用的私有库。** 任何"能放框架、也能放应用"的功能,动手前必须先回答分层问题(见下)。
 
+### 已批准的 EKO 产品边界与具名能力退役
+
+用户于 2026-10-24 确认:EKO 只保留 GUI 主入口,继续保留 IM 收发和 cron 后台触发,退役独立 TUI、REPL、CLI/JSONL 产品入口,不再扩张待退役入口的能力对等目标。GUI 内置终端、Agent shell、桌面启动所需最小系统参数、构建命令和独立 SDK Host stdio 不属于该退役范围。GUI、IM、cron 继续复用共享 Agent、Task/Subagent、工具、HITL、记忆和恢复权威;共享逻辑先按真实 owner 归位,不得按 `src/cli` 目录名连带删除 IM/调度或终端能力。
+
+EKO 仍是本地个人产品,用户直接操作终端/MCP 与 Agent 自动执行的权限边界不变;应用继续文件持久化、不启用 SQLite。框架的合理存储实现与其它 public API 不因 EKO 的产品取舍而删除。以上是已批准目标,当前入口、feature 和实现仍存在,本批规则/ADR不等于运行退役已经完成。
+
 ## 统一术语:只有 Subagent,没有 Worker(强制)
 
 产品模型、领域模型、运行时模型和代码术语中都只有 `Subagent`,没有 `Worker` 概念。标准关系是 `TaskRun → PlanTask → SubagentRun`。类型、trait、字段、函数、事件、注释、文档和 UI 文案均使用 subagent 命名;后续迭代中触及遗留 `worker` 命名必须随手迁移。仅第三方协议固定 wire name 可在最小适配边界保留,内部立即转换。
@@ -49,6 +55,10 @@ CI 对 lib/bins 强制 `-D clippy::unwrap_used -D clippy::expect_used -D clippy:
 ### 删除框架代码的判定(强制)
 
 删任何 pub API 前,先 grep **整个仓库**确认无构造点/调用点,再判断它是不是 trait 的多实现之一 / 合理对外选项——**是的话,即使当前无调用也保留**(它是框架的能力菜单,不是死代码)。"echo-agent-cli 没用"不构成删除理由。拿不准时保留。被新实现明确取代且覆盖全部能力的旧机制才可删。
+
+**具名退役例外仅限 A2A 与 LSP。** 用户明确批准从 framework/SDK/EKO 主线退役这两类能力,须按 [ADR 0090](docs/adr/0090-a2a-lsp-retirement-contract.md) 对账 feature、公开 facade、工具、插件/配置、实际消费者、accepted 身份/路由、示例、文档、条件矩阵与官网。ACP、MCP、channels、Subagent、其它合理工具/存储 API 继续保留,不得用此例外扩张删除范围,也不得保留宣告成功的空壳能力。
+
+**撤销 API 必须消费者先去依赖,新增 API 仍由框架先交付。** A2A/LSP API 仍存在时,先让 EKO 与 SDK 主线解除依赖并通过适用验证,再物理删除框架实现;EKO CI 跟踪 framework main,每个中间主线必须保持受支持消费者可构建。SDK Host 的精确 framework pin 与顶层 gitlink 独立,不为指针整齐强迫升级 pin。保留 `chore/Echoyue/full-capabilities-baseline` 分支、`pre-retirement-2026-10-24` tag、必要历史 refs 和现有用户数据;不回写固定 tag。Exa 本机独立提交 `4343f0b736beb5c8606e31146528a2fe8be80510` 不在本轮推送/合并范围。
 
 ## 关键决策:动手前先查"是不是已经有了"(强制)
 
@@ -137,7 +147,10 @@ done
 
 ## 磁盘与清理
 
-默认保留 `target/` 增量缓存。仅在:可用磁盘低于约 50 GiB、两个 workspace 的 target 合计超约 60 GiB、缓存损坏或用户要求时 `cargo clean`。
+- 用户于 2026-10-24 明确要求:**每个编译/测试批次实际结束后及时 `cargo clean` 自有准确 target**,替代此前默认保留增量缓存的策略。相邻验证命令可组成同一批次,先保存必要日志、真实退出状态及需保留的 Host/制品到 target 外(原始日志放本仓 ignored `.echo-semantic/local/<task-id>/`),确认该 target 无活动 cargo/rustc/Host 或其它制品读取者后再清理;不得先删再声称证据或制品可恢复。
+- 同机最多两条 focused Rust 构建/测试并发,完整 all-feature/GUI/语言矩阵同一时间只运行一套;每条 Rust 构建 `jobs <= 2`,dev/test debuginfo 关闭。每个 worktree 使用自有独立 target,禁止与其它聊天或 primary 共用 `CARGO_TARGET_DIR`。
+- 构建批次及清理前后记录 `df`/`du`。在准确 workspace/manifest 下执行 `cargo clean`,使用自定义 target 时显式指定准确目录,记录命令与实际出口;清理失败必须处理或明确保留,不能报成已释放空间。可用空间低于 **5 GiB** 时停止新的重构建,先处理已验证且无活动进程使用的自有可重建缓存。
+- 纯文档/只读任务未产生 Cargo 产物时明确报告不适用,不为形式重跑已通过的同源构建或清理无关目录。不清其它聊天或 primary 缓存;工作树、分支、未提交/未跟踪源码、stash、保留 tag 和原件的维护清理按独立授权及协调归属执行,不得借 `cargo clean` 扩大范围。
 
 ## 提交方式
 
