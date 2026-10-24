@@ -6,7 +6,7 @@
 //! Run: cargo run -p echo-agent-learning --example demo70_scheduler
 
 use echo_agent::scheduler::{
-    CronTask, CronTaskStatus, CronTaskStore, OccurrenceFireFn, SchedulerRunner,
+    CronTask, CronTaskEdit, CronTaskStatus, CronTaskStore, OccurrenceFireFn, SchedulerRunner,
 };
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -78,8 +78,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ── 6. Manually trigger a task via run_once() ─────────────────────
     println!("▶️  Manual trigger (run_once):");
-    let result = runner.run_once(&daily.id).await?;
-    println!("   Result: {}\n", result);
+    let expected = runner
+        .list_tasks()
+        .await
+        .into_iter()
+        .find(|task| task.id == daily.id)
+        .ok_or_else(|| std::io::Error::other("daily task missing"))?;
+    runner
+        .edit_task(
+            expected,
+            CronTaskEdit {
+                name: "daily-backup".into(),
+                cron_expr: "0 2 * * *".into(),
+                prompt: "Run nightly database backup and report its result".into(),
+            },
+        )
+        .await?;
+    let receipt = runner.run_once_with_receipt(&daily.id).await?;
+    println!(
+        "   Occurrence: {} / attempt {}",
+        receipt.occurrence.occurrence_id, receipt.attempt_id
+    );
+    println!("   Result: {}\n", receipt.result);
+    let page = runner.read_occurrence_history(None, None)?;
+    println!(
+        "   History: {} events through {}, more: {}",
+        page.events.len(),
+        page.snapshot_end_sequence,
+        page.next_cursor.is_some()
+    );
 
     // ── 7. list_tasks(), set_status(), remove_task() ──────────────────
     println!("📋 All tasks:");

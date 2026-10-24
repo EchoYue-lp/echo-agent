@@ -885,6 +885,11 @@ impl<E: JournalEvent> EventJournal<E> for FileEventJournal<E> {
             .state
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        if let Some(reason) = &state.poison {
+            return Err(ReactError::Other(format!(
+                "{context}: replay refused because the handle is poisoned: {reason}; reopen the journal to recover"
+            )));
+        }
         let last_sequence = state.next_sequence.saturating_sub(1);
         if after_sequence >= last_sequence {
             return Ok(Vec::new());
@@ -1650,6 +1655,66 @@ mod tests {
         assert_eq!(committed.record.sequence, 1);
         drop(reopened);
         std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn poisoned_history_refuses_live_pages_and_reopens_original_facts() -> TestResult {
+        let root = temp_root();
+        let path = root.join("events.jsonl");
+        let journal = FileEventJournal::<String>::open(&path, FileDurability::SyncData)
+            .test_context("open history authority")?;
+        let identity = journal.journal_identity().clone();
+        *journal
+            .append_fault
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(AppendFault::FullWriteInvalidData);
+        *journal
+            .reconcile_read_fault
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = true;
+        let prepared = batch(vec!["one".to_string(), "two".to_string()])?;
+        let id = prepared.batch_id().to_string();
+        let Err(error) = journal.append_batch(prepared) else {
+            return Err(test_failure("unknown append unexpectedly confirmed"));
+        };
+        assert!(matches!(
+            &error,
+            JournalBatchAppendError::OutcomeUnknown { .. }
+        ));
+        let retained = error
+            .into_prepared()
+            .test_context("retain original unknown batch")?;
+        let Err(error) = journal.replay_after(0, 1) else {
+            return Err(test_failure(
+                "poisoned authority returned a trusted history page",
+            ));
+        };
+        assert!(error.to_string().contains("poisoned"));
+        drop(journal);
+        let reopened = FileEventJournal::<String>::open(&path, FileDurability::SyncData)
+            .test_context("verified original reopen")?;
+        assert_eq!(reopened.journal_identity(), &identity);
+        let lookup = reopened
+            .lookup_batch(&retained)
+            .test_context("lookup original batch")?;
+        assert!(matches!(lookup, JournalBatchLookup::AlreadyCommitted(_)));
+        let first = reopened
+            .replay_after(0, 1)
+            .test_context("bounded first page")?;
+        let record = first.first().test_context("first original fact")?;
+        assert_eq!(record.batch_id(), id);
+        assert_eq!(record.sequence, 1);
+        assert_eq!(record.event.as_str(), "one");
+        let second = reopened
+            .replay_after(1, 1)
+            .test_context("bounded second page")?;
+        assert_eq!(
+            second.first().map(|record| record.event.as_str()),
+            Some("two")
+        );
+        drop(reopened);
+        std::fs::remove_dir_all(root).test_context("remove history fixture")?;
+        Ok(())
     }
 
     #[test]

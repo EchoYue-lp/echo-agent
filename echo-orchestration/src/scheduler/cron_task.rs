@@ -58,6 +58,62 @@ pub enum CronTaskStatus {
     Disabled,
 }
 
+/// Editable definition fields. Status and execution summaries have separate owners.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CronTaskEdit {
+    pub name: String,
+    pub cron_expr: String,
+    pub prompt: String,
+}
+
+/// An edit never permits a blind retry after an ambiguous backend outcome.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum SchedulerEditError {
+    InvalidCron,
+    NotFound,
+    DefinitionConflict,
+    RevisionExhausted,
+    Closed,
+    AuthorityUnavailable(echo_core::error::ReactError),
+    NotCommitted(echo_core::error::ReactError),
+    CommitOutcomeUnknown(echo_core::error::ReactError),
+}
+
+impl std::fmt::Display for SchedulerEditError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidCron => f.write_str("invalid cron expression"),
+            Self::NotFound => f.write_str("cron task not found"),
+            Self::DefinitionConflict => f.write_str("cron task definition changed"),
+            Self::RevisionExhausted => f.write_str("cron task control revision exhausted"),
+            Self::Closed => f.write_str("scheduler is closed"),
+            Self::AuthorityUnavailable(error) => write!(f, "cron authority unavailable: {error}"),
+            Self::NotCommitted(error) => write!(f, "cron edit was not committed: {error}"),
+            Self::CommitOutcomeUnknown(error) => write!(
+                f,
+                "cron edit outcome unknown; do not retry blindly: {error}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SchedulerEditError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::AuthorityUnavailable(error)
+            | Self::NotCommitted(error)
+            | Self::CommitOutcomeUnknown(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+pub(super) enum LastRunUpdate {
+    Applied(Box<CronTask>),
+    Superseded,
+}
+
 impl CronTask {
     /// Create a new enabled cron task.
     pub fn new(name: &str, cron_expr: &str, prompt: &str) -> Self {
@@ -503,6 +559,74 @@ impl CronTaskStore {
         Ok(task)
     }
 
+    /// Edit a standalone store. A live runner's existing permit excludes this path.
+    pub async fn edit(
+        &self,
+        expected: &CronTask,
+        edit: CronTaskEdit,
+    ) -> Result<CronTask, SchedulerEditError> {
+        self.edit_inner(expected, edit, None).await
+    }
+
+    pub(super) async fn edit_owned(
+        &self,
+        expected: &CronTask,
+        edit: CronTaskEdit,
+        owner: &SchedulerMutationOwner,
+    ) -> Result<CronTask, SchedulerEditError> {
+        self.edit_inner(expected, edit, Some(owner)).await
+    }
+
+    async fn edit_inner(
+        &self,
+        expected: &CronTask,
+        edit: CronTaskEdit,
+        owner: Option<&SchedulerMutationOwner>,
+    ) -> Result<CronTask, SchedulerEditError> {
+        let _guard = self.mutation_lock.lock().await;
+        self.check_mutation_owner(owner)
+            .map_err(SchedulerEditError::AuthorityUnavailable)?;
+        self.check_authority()
+            .map_err(SchedulerEditError::AuthorityUnavailable)?;
+        let mut tasks = self
+            .load_all()
+            .await
+            .map_err(SchedulerEditError::NotCommitted)?;
+        let current = tasks
+            .iter_mut()
+            .find(|task| task.id == expected.id)
+            .ok_or(SchedulerEditError::NotFound)?;
+        if !current.same_definition(expected) {
+            return Err(SchedulerEditError::DefinitionConflict);
+        }
+        let mut updated = current.clone();
+        updated.name = edit.name;
+        updated.cron_expr = edit.cron_expr;
+        updated.prompt = edit.prompt;
+        if updated == *current {
+            return Ok(current.clone());
+        }
+        if !updated.validate_cron() {
+            return Err(SchedulerEditError::InvalidCron);
+        }
+        updated.control_revision = current
+            .control_revision
+            .checked_add(1)
+            .ok_or(SchedulerEditError::RevisionExhausted)?;
+        updated.definition_id = uuid::Uuid::new_v4().to_string();
+        updated.last_run_at = None;
+        updated.last_result = None;
+        *current = updated.clone();
+        self.save_all_unlocked(&tasks).await.map_err(|error| {
+            if self.is_authority_poisoned() {
+                SchedulerEditError::CommitOutcomeUnknown(error)
+            } else {
+                SchedulerEditError::NotCommitted(error)
+            }
+        })?;
+        Ok(updated)
+    }
+
     /// Remove a task by ID and persist. Returns true if found.
     pub async fn remove(&self, id: &str) -> echo_core::error::Result<bool> {
         Ok(self.remove_with_snapshot(id, None).await?.is_some())
@@ -580,9 +704,12 @@ impl CronTaskStore {
         let task = self.get(id).await?.ok_or_else(|| {
             echo_core::error::ReactError::Other(format!("Cron task '{id}' not found"))
         })?;
-        self.update_last_run_for_task(&task, result, None)
-            .await
-            .map(|_| ())
+        match self.update_last_run_for_task(&task, result, None).await? {
+            LastRunUpdate::Applied(_) => Ok(()),
+            LastRunUpdate::Superseded => Err(echo_core::error::ReactError::Other(format!(
+                "Cron task '{id}' definition is no longer current"
+            ))),
+        }
     }
 
     /// Update last-run information only for the captured task definition.
@@ -595,8 +722,8 @@ impl CronTaskStore {
         expected: &CronTask,
         result: &str,
         owner: Option<&SchedulerMutationOwner>,
-    ) -> echo_core::error::Result<CronTask> {
-        let id = unique_id(&expected.id)?;
+    ) -> echo_core::error::Result<LastRunUpdate> {
+        unique_id(&expected.id)?;
         let _guard = self.mutation_lock.lock().await;
         self.check_mutation_owner(owner)?;
         let mut tasks = self.load_all().await?;
@@ -610,12 +737,10 @@ impl CronTaskStore {
             }
         });
         let Some(updated) = updated else {
-            return Err(echo_core::error::ReactError::Other(format!(
-                "Cron task '{id}' definition is no longer current"
-            )));
+            return Ok(LastRunUpdate::Superseded);
         };
         self.save_all_unlocked(&tasks).await?;
-        Ok(updated)
+        Ok(LastRunUpdate::Applied(Box::new(updated)))
     }
 
     /// Get a task by its unique ID.
@@ -1194,6 +1319,117 @@ mod tests {
         let store = CronTaskStore::new().with_path(path);
         assert!(store.load_all().await.is_err());
         std::fs::remove_dir_all(&temp).map_err(|error| error.to_string())?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod management_edit_tests {
+    use super::*;
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    fn edit(name: &str) -> CronTaskEdit {
+        CronTaskEdit {
+            name: name.into(),
+            cron_expr: "*/5 * * * *".into(),
+            prompt: "更新 中文 👋".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn edit_cas_preserves_current_status_and_is_noop_without_changes() -> TestResult {
+        let root = tempfile::tempdir()?;
+        let path = root.path().join("tasks.json");
+        let store = CronTaskStore::new().with_path(path.clone());
+        let expected = store
+            .add(CronTask::new("old", "*/5 * * * *", "old"))
+            .await?;
+        store
+            .set_status(&expected.id, CronTaskStatus::Disabled)
+            .await?;
+        store
+            .update_last_run(&expected.id, "latest old summary")
+            .await?;
+        let updated = store.edit(&expected, edit("新定义")).await?;
+        assert_eq!(updated.id, expected.id);
+        assert_eq!(updated.created_at, expected.created_at);
+        assert_eq!(updated.status, CronTaskStatus::Disabled);
+        assert_eq!(updated.control_revision, 2);
+        assert_ne!(updated.definition_id, expected.definition_id);
+        assert_eq!(updated.last_result, None);
+        assert_eq!(updated.last_run_at, None);
+        let bytes = std::fs::read(&path)?;
+        let noop = store.edit(&updated, edit("新定义")).await?;
+        assert_eq!(noop, updated);
+        assert_eq!(std::fs::read(&path)?, bytes);
+        assert!(matches!(
+            store.edit(&expected, edit("stale")).await,
+            Err(SchedulerEditError::DefinitionConflict)
+        ));
+        assert_eq!(std::fs::read(&path)?, bytes);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn invalid_and_exhausted_edits_do_not_write_partial_definitions() -> TestResult {
+        let root = tempfile::tempdir()?;
+        let path = root.path().join("tasks.json");
+        let store = CronTaskStore::new().with_path(path.clone());
+        let mut task = CronTask::new("max", "*/5 * * * *", "old");
+        task.control_revision = u64::MAX;
+        let expected = store.add(task).await?;
+        let bytes = std::fs::read(&path)?;
+        assert!(matches!(
+            store.edit(&expected, edit("changed")).await,
+            Err(SchedulerEditError::RevisionExhausted)
+        ));
+        let mut invalid = edit("invalid");
+        invalid.cron_expr = "not a cron".into();
+        assert!(matches!(
+            store.edit(&expected, invalid).await,
+            Err(SchedulerEditError::InvalidCron)
+        ));
+        assert_eq!(std::fs::read(&path)?, bytes);
+        assert_eq!(store.get(&expected.id).await?, Some(expected));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn legacy_definition_cas_uses_creation_identity_without_copying_status() -> TestResult {
+        let root = tempfile::tempdir()?;
+        let path = root.path().join("tasks.json");
+        let expected = CronTask::new("legacy", "*/5 * * * *", "old");
+        let mut current = expected.clone();
+        current.status = CronTaskStatus::Disabled;
+        current.control_revision = 9;
+        std::fs::write(&path, serde_json::to_vec(&[current])?)?;
+        let store = CronTaskStore::new().with_path(path);
+        let updated = store.edit(&expected, edit("legacy changed")).await?;
+        assert_eq!(updated.created_at, expected.created_at);
+        assert_eq!(updated.status, CronTaskStatus::Disabled);
+        assert_eq!(updated.control_revision, 10);
+        assert!(!updated.definition_id.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unknown_edit_commit_retains_poison_and_forbids_blind_retry() -> TestResult {
+        let root = tempfile::tempdir()?;
+        let store = CronTaskStore::new().with_path(root.path().join("tasks.json"));
+        let expected = store
+            .add(CronTask::new("old", "*/5 * * * *", "old"))
+            .await?;
+        store.inject_file_after_replace_reconcile_read_fault();
+        assert!(matches!(
+            store.edit(&expected, edit("maybe committed")).await,
+            Err(SchedulerEditError::CommitOutcomeUnknown(_))
+        ));
+        assert!(store.is_authority_poisoned());
+        assert!(matches!(
+            store.edit(&expected, edit("must not retry")).await,
+            Err(SchedulerEditError::AuthorityUnavailable(_))
+        ));
         Ok(())
     }
 }

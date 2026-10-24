@@ -130,10 +130,10 @@ scheduler 模块提供 cron 触发器。定时 callback 可以启动后台 Futur
 
 已提交的 scheduler occurrence 复用 framework `DeliveryLedger` 持久记录 claim、
 attempt、owner loss 恢复和 terminal settlement。Runner 启动后会在首个周期 tick 前
-drain pending FIFO。已接纳但未持久结算的 callback 会先记为 `OutcomeUnknown`，随后以
-同一个 occurrence ID 和新的 attempt ID 重投；callback 明确返回错误时形成已知
-`Failed` 结算，通用 scheduler 不自动重试业务失败。同一进程中 callback owner 被
-drop 或 abort 时，也会在下一次 drain 通过 `OutcomeUnknown` 进入相同恢复路径。
+drain pending FIFO。旧的未受保护 callback 在 owner 丢失后仍沿原 `OutcomeUnknown` 恢复路径处理；
+受 `PhysicalSettlementV1` 保护的 EffectStarted 不因观察者消失就自动重放。
+callback 明确返回错误时形成已知
+`Failed` 结算，通用 scheduler 不自动重试业务失败。物理完成与观察者返回 `ExecutionNotSettled` 是不同事实；本管理接口不新增崩溃重试政策。
 
 `CronTaskStore` 每次 add 都分配不可变 `definition_id`，status control 则持久递增
 `control_revision`。因此 remove 后重新 add exact task clone 仍是新 definition；旧 incarnation
@@ -153,7 +153,25 @@ File-backed task store 使用完整 definition 文件名共置 journal。Store-b
 `CronTaskStore` 在构造 runner 前必须通过 `with_path()` 提供稳定且 backend-specific 的
 anchor；Store trait 没有可由 framework 安全猜测的可移植 backend identity。
 
-该合同是 callback at-least-once delivery，不是 external effect exactly-once。副作用
-成功后、terminal settlement 前发生 crash 时 callback 可能再次执行。Cron polling
-本身也仍是 approximate：runner 离线期间错过的 schedule 不会在没有明确 misfire
-policy 时自动补跑。
+旧的未保护历史保留 callback at-least-once delivery：副作用成功后、terminal settlement
+前发生 crash 时，该 legacy callback 可能再次执行。当前受保护的 `EffectStarted`
+occurrence 在物理结算未知时不会自动重放。两条路径都不承诺 external effect
+exactly-once。Cron polling 本身也仍是 approximate：runner 离线期间错过的 schedule
+不会在没有明确 misfire policy 时自动补跑。
+
+### 编辑与观察同一次 occurrence
+
+`edit_task(expected, CronTaskEdit { name, cron_expr, prompt })` 沿原Store/control
+owner执行，保留ID、创建时间与最新status；实际变更产生新definition和checked
+control revision，无变化不写入。陈旧definition返回冲突，不把陈旧status回写。
+已开始的callback继续使用旧快照；定义被替换/删除仅使摘要投影成为no-op，真实持久化错误仍上报。
+
+`run_once_with_receipt(id)` 与 `run_once` 走同一个原始执行路径。回执包含occurrence、
+attempt、未经解析的callback字符串及原terminal journal receipt。类型化错误分别保留
+callback、物理未结算、投影和提交边界及已知身份。未知观察不授权再次执行任务。
+
+`read_occurrence_history(cursor, limit)` 只读原journal的typed事件；`None`采用默认128，
+显式limit为1..=512。cursor固定journal generation、retained floor与首屏snapshot上界。
+读页不claim、不重放callback、不创建TaskRun；必须显式继续加载，未读页和热投影淘汰
+不代表完成。poisoned file journal须沿原verified reopen恢复后才提供可信历史页。
+应用run/artifact链接只能由应用真实owner提供，不解析callback文案。精确失败边界见[ADR0093](../adr/0093-cron-management-receipts.md)。
