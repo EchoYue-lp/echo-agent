@@ -125,6 +125,16 @@ Integrator 注入 prepared plugin owner。
 
 `scripts/` 和 `README.md` 是插件资源，不会自动执行；Skill 或 Hook 可以显式引用脚本。
 
+## 冻结的构建能力诊断
+
+当前 build 未启用 `lsp` 时，成功冻结的 `lsp.yaml` 会产生通用 preparation Warning，携带 `component() == "lsp"`、插件身份和来源路径。这只说明构建能力边界，不是应用退役政策，也不证明文本是有效 LSP YAML；变量替换、冻结文本和原有 hash 仍由 prepare 拥有。
+
+Invalid UTF-8 与读失败保留 Error。错误文件种类、metadata 失败、失效/循环链接也产生带 LSP 组件与路径的结构化诊断；真实缺失仍是合法 optional 状态。非普通文件只分类、不读取，避免将 FIFO 作为文本打开。组件 Error 不丢弃健康 Skill/Hook/MCP，也不使整代准备结果失效。
+
+应用须读取完整 `PreparedPluginSet::diagnostics()`，不能只消费 apply receipt 的 Warning 投影。诊断随同一 identity/generation 冻结；cache hit 返回同一 Arc，不重新探测或追加重复项，文件变化只在 invalidate 后重捕获。wire/rollback 仍不读取包文件。
+
+启用 `lsp` 时保持原行为。此中间桥接不新增 public API、不物理删除框架 LSP，也不改 SDK accepted/pin。应用可将通用组件诊断映射为自己的产品说明，无需调用 LSP 专属文档 accessor 或重新读取文件。见 [ADR 0090](../adr/0090-a2a-lsp-retirement-contract.md)。
+
 ## 框架与应用分层
 
 通用框架负责清单解析、Skills、MCP、作用域与生命周期、Hooks、Subagent 定义和 LSP 适配输出。embedding application 只发现并转换产品专属的 `monitors.yaml`、`themes/` 和 `output-styles/`；应用 integration 不重复拥有依赖排序、组件所有权或重载语义。

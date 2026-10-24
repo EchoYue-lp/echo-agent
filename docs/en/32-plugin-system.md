@@ -129,6 +129,33 @@ The remaining components are discovered from fixed root locations:
 
 `scripts/` and `README.md` are package resources rather than automatically executed components. Skills and Hooks may reference scripts explicitly.
 
+## Frozen build-capability diagnostics
+
+When this build does not enable `lsp`, a successfully frozen `lsp.yaml`
+produces a generic preparation Warning with `component() == "lsp"`, the
+plugin ID and source path. This reports the build capability boundary, not an
+application retirement policy or proof that the text is valid LSP YAML.
+Variable substitution, frozen document content and its existing hash remain
+owned by preparation.
+
+Invalid UTF-8 and read failures retain Error severity. Wrong filesystem kinds,
+metadata failures and broken/looping symlinks also receive structured LSP/path
+diagnostics; true absence stays optional. Non-regular inputs are classified
+without reading them, so a FIFO is not opened as a text file. Component errors
+do not discard healthy Skill/Hook/MCP siblings or poison the entire generation.
+
+Read the complete `PreparedPluginSet::diagnostics()` collection, not only the
+Warning projection in an apply receipt. The diagnostics are frozen with that
+set's identity/generation. Cache hits return the same Arc without probing or
+appending again; changed files are captured only after invalidation. Applying
+or rolling back a prepared set still performs no package reads.
+
+Enabling `lsp` keeps the prior behavior. This intermediate diagnostic bridge
+adds no public API and does not remove framework LSP implementation or change
+SDK acceptance/pinning. Applications can map generic component diagnostics to
+their own product messages without calling LSP-specific document accessors or
+rereading files. See [ADR 0090](../adr/0090-a2a-lsp-retirement-contract.md).
+
 ## Framework and application boundary
 
 The reusable framework owns manifest parsing, Skills, MCP, plugin scopes/lifecycle, Hooks, Subagent definitions, and LSP adapter output. An embedding application discovers and converts only its product-specific `monitors.yaml`, `themes/`, and `output-styles/` files. The application integration does not duplicate dependency ordering, component ownership, or reload semantics.

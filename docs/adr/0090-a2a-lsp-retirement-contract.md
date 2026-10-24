@@ -245,3 +245,57 @@ promptly clean each finished build batch's idle, task-owned target under the
 concurrency and disk limits above. Rule synchronization and cross-repository
 acceptance remain required before the shared product-boundary-contract outcome
 can be called complete. This ADR does not independently complete that Plan.
+
+## Consumer decoupling: frozen build diagnostics
+
+The original documentation contribution above did not remove runtime code.
+Plan04 `plan:b6ef1ac6-0745-438d-a3ff-75bb8cdbbcc5`, SHA-256
+`336f74dfd00de9b75f84d7101cb9d419f462a6a300bbff416db500f7d77bb070`,
+adds a narrow follow-up from framework
+`c3b56b4ee8a73565e6a2a621b9a7ddfb644ed3aa`: expose unsupported-build LSP
+declarations through the already public generic preparation diagnostics.
+No new public type, field, accessor, decoder or state authority is added.
+
+Only the no-LSP build path changes. Successful UTF-8 document freezing keeps
+the existing substitution/hash and adds a component/plugin/path Warning that
+the build cannot apply LSP. It does not validate YAML or contain EKO product
+policy. Invalid UTF-8/read failures stay Error. Wrong filesystem kinds,
+metadata errors and broken links must not disappear into generic component
+strings or optional NotFound. True absence is not an error, and known
+non-regular files are never read as text. Healthy retained components remain
+independent and a component error does not invalidate the whole set.
+
+The original prepare/cache owner captures the diagnostic before constructing
+the immutable set. Cached sets are returned unchanged; consumers, wiring and
+rollback do not probe the package again. The existing feature-on LSP behavior,
+document/hash identity inputs and other components remain. Core resolver
+public data shapes and generic non-LSP inspection rules are unchanged.
+
+This bridge lets EKO consume `PreparedPluginSet::diagnostics()` instead of
+`lsp_document()` or other LSP-specific metadata. Error diagnostics cannot be
+recovered from the Warning-only apply-receipt projection, so applications must
+consume the complete collection. EKO owns its retirement wording; framework
+messages only describe the build capability. EKO switching and acceptance
+follow this framework contribution, and physical framework deletion remains
+later. The SDK's original framework pin and exact 269/23 retirement boundary
+are not changed by the bridge.
+
+Focused red/green, feature-on controls, independent review and normal semantic
+validation are required for this contribution. Runtime evidence is recorded
+when actually executed; this record does not announce Plan04, both consumers,
+the full matrix, main CI or publication complete. Existing examples need no
+new API migration because the public preparation interface is unchanged;
+website source mirroring belongs to the coordinator.
+
+Local focused evidence for this bridge: the six old-API regression tests first
+produced four behavioral failures and two passing controls on the unchanged
+production base. The final candidate passed eight default regressions, all 28
+prepared-module tests with `mcp`, and all 22 with `mcp,lsp` (58 executions,
+zero failures). Both corresponding package-lib Clippy runs with `-D warnings`
+exited 0. These use real temporary filesystem inputs, a mock LLM and the
+existing local/mock MCP controls; they do not exercise a real language server
+or downstream EKO/SDK acceptance. An initial candidate test failure came from
+an empty Hook fixture and was corrected to the existing active-rule fixture
+without weakening the assertion or changing production behavior. Raw results
+and both cleanup receipts remain workspace-only in
+`.echo-semantic/local/lsp-frozen-diagnostics/`, outside the cleaned target.
