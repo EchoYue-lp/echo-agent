@@ -58,6 +58,16 @@ Run terminal 或 OS 进程清理证明。callback 可在释放外部 registry gu
 metadata，同步等待自身 mutation/close 不属于支持目标。SDK wire 与语言合同在独立
 SDK 仓库维护和验证，不由这些新 Rust API 自动扩大。
 
+### 观察传输事实与替换已结算的 adapter
+
+`start()` 成功只表示原 transport owner 已启动，`health_check()` 可能只检查 token／task，均不能证明连接成功。内置 `ChannelPlugin::transport_status()` 返回最新值 watch，第三方 plugin 默认可返回 `None`（Unknown）。QQ 仅在 READY／RESUMED、飞书长连接仅在真实 WS 握手、webhook 仅在本机 bind 成功时给 Ready。`LocalWebhookListener` 只证明本机监听，不代表平台可达或消息投递；错误先脱敏，发送 API 接受与连接状态、对方已读各是不同事实。
+
+owned `ChannelHandle::transport_status().await` 从原 adapter 捕获 `{ mutation_epoch, receiver }`。控制操作后与 `management_snapshot().await` 的当前 epoch 核对，丢弃旧 epoch 观察；每次内置 start 换独立源。页面关闭或 drop watch 不停止服务，watch 关闭也不是成功停机收据。源已关闭时即使最后保留 Ready 也投影 Unknown，不改变原 handler／stop 事实。借用 trait 调用在 handle 生命周期锁忙时返回 None；需要完整控制观察时使用 owned 方法。
+
+`management_snapshot()` 另外投影原 `handler_attached`、`active_invocations`、`shutdown_settled`。transport Stopped 但 handler close 失败仍未结算。`replace_stopped_plugin(new_plugin).await` 只接受已明确 stop、无 handler／活动 invocation、且 id／label／完整 capabilities 相同的原 entry。它 checked 递增原 epoch、使旧 stop 收据失效，仅替换 adapter；新 start 仍走原生命周期。stop／close 失败、旧 epoch 或计数耗尽都保留旧 entry；配置 revision 和控制串行仍归应用。
+
+stop 等原 adapter 实际 task join，取消等待者不会丢 join owner。heartbeat 归同一原连接任务，webhook graceful shutdown 等已准入请求；pending handler 可令 stop 继续等待。webhook path 保留 Axum 0.7.9 的 capture／wildcard（如 `/events/:tenant`、`/events/*tail`），仅在构造前用同一已锁 matchit 0.7.3 parser 拒绝非法语法。QQ HELLO 的心跳间隔为 0 时返回明确协议错误，不为正间隔另设业务阈值。观察层不另建重试，也不强制退出。详见 [ADR 0092](../adr/0092-channel-control-observations.md)。这些 Rust API 不自动扩大独立 SDK 合同；本地 fixture 不代表真实平台验收。
+
 ### 1. 添加依赖
 
 ```toml

@@ -16,6 +16,11 @@
 //! - Guards
 //! - Permission policies
 //!
+//! Transport observations and stopped-adapter replacement are re-exported from
+//! the original integration entry. A start/health result is not a readiness or
+//! physical-shutdown receipt; see `ChannelHandle::management_snapshot` and
+//! `ChannelHandle::transport_status` for their separate facts.
+//!
 //! # Quick Start
 //!
 //! ```rust,no_run

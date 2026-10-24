@@ -65,6 +65,16 @@ guard is released; recursively awaiting mutation or close of their own entry is
 unsupported. These are framework APIs; SDK wire and language contracts are owned
 and verified separately by the SDK repository.
 
+### Observing transport facts and applying a stopped adapter
+
+`start()` accepts the original transport owner; `health_check()` may only check a token or task. Neither proves a connection. Built-in `ChannelPlugin::transport_status()` returns a latest-value watch, while external plugins may return `None` (Unknown). QQ becomes Ready only at READY/RESUMED, Feishu long connection at its actual WS handshake, and webhook at successful local bind. `LocalWebhookListener` proves only local listening, not platform reachability or message delivery. Errors are redacted; API send acceptance is separate from connection state and recipient read receipts.
+
+Owned `ChannelHandle::transport_status().await` captures `{ mutation_epoch, receiver }` from the original adapter. Compare its epoch with `management_snapshot().await` after controls, and discard old-epoch updates. Each built-in start uses a new source. Closing a page/dropping a watch does not stop the service; watch closure does not prove successful shutdown. A closed source projects Unknown even when its last stored value was Ready; stop/handler facts stay independent. Borrowed trait access on a busy handle returns None because it cannot await the lifecycle lock; owned observation is preferred.
+
+`management_snapshot()` separately exposes original `handler_attached`, `active_invocations` and `shutdown_settled` facts. Transport Stopped with failed handler close is still unsettled. `replace_stopped_plugin(new_plugin).await` accepts only an explicitly stopped original entry with no handler/invocations and the same id, label and capabilities. It advances the original checked epoch, invalidates the old stop receipt and replaces only that adapter. The new start uses the same original lifecycle path. Failed stop/close or exhausted/stale epoch retains the old entry; applications continue to own configuration revision checks and serialized controls.
+
+Stop retains the actual adapter task handles across waiter cancellation. Heartbeats run within the same connection task, and webhook graceful shutdown waits admitted requests; pending handlers may keep stop pending. Webhook paths retain Axum 0.7.9 capture/wildcard support (for example `/events/:tenant` and `/events/*tail`); the same locked matchit 0.7.3 parser rejects only invalid routes before construction. QQ HELLO with heartbeat interval 0 returns an explicit protocol error; positive intervals are not assigned a new product threshold. No observer creates a retry loop or forces shutdown. See [ADR 0092](../adr/0092-channel-control-observations.md). These Rust APIs do not automatically extend SDK wire/language contracts; real platform acceptance remains separate from local fixtures.
+
 ### 1. Add Dependencies
 
 ```toml

@@ -20,6 +20,7 @@ use super::api::{
 use super::long_poll::WsClient;
 use super::webhook;
 use async_trait::async_trait;
+use echo_core::agent::CancellationToken;
 use echo_core::error::{ChannelError, ReactError, Result};
 use std::fmt;
 use std::sync::Arc;
@@ -174,6 +175,9 @@ pub struct FeishuChannel {
     send_tx: Option<DeliverySender>,
     send_handle: Option<JoinHandle<()>>,
     task_handle: Option<JoinHandle<()>>,
+    transport_cancel: CancellationToken,
+    transport: TransportStatus,
+    shutdown_failed: bool,
     /// 消息 ID -> (卡片消息 ID, 创建时间)（用于更新运行中的卡片，带 TTL 防泄漏）
     running_cards: Arc<dashmap::DashMap<String, (String, std::time::Instant)>>,
 }
@@ -193,6 +197,9 @@ impl FeishuChannel {
             send_tx: None,
             send_handle: None,
             task_handle: None,
+            transport_cancel: CancellationToken::new(),
+            transport: TransportStatus::new(ChannelTransportPhase::Stopped),
+            shutdown_failed: false,
             running_cards: Arc::new(dashmap::DashMap::new()),
         })
     }
@@ -240,6 +247,8 @@ impl ChannelPlugin for FeishuChannel {
                 "Feishu channel is already started".to_string(),
             ))));
         }
+        self.transport_cancel = CancellationToken::new();
+        self.transport = TransportStatus::new(ChannelTransportPhase::Connecting);
         info!("Starting Feishu channel...");
 
         // 1. 初始化 Token 管理器
@@ -251,7 +260,17 @@ impl ChannelPlugin for FeishuChannel {
         self.token_manager = Some(token_manager.clone());
 
         // 验证配置（获取 token）
-        token_manager.get_token().await?;
+        if let Err(error) = token_manager.get_token().await {
+            self.transport.publish(
+                ChannelTransportPhase::Failed,
+                None,
+                Some(crate::redaction::text_with_secrets(
+                    &error.to_string(),
+                    [self.config.app_secret.as_str()],
+                )),
+            );
+            return Err(error);
+        }
 
         // 2. 启动消息发送任务
         let (send_tx, mut send_rx) = mpsc::channel::<DeliveryRequest>(256);
@@ -304,15 +323,31 @@ impl ChannelPlugin for FeishuChannel {
                     self.config.ws_domain.clone(),
                 );
 
+                let transport = self.transport.clone();
+                let cancellation = self.transport_cancel.clone();
+                let secret = self.config.app_secret.clone();
                 let task_handle = tokio::spawn(async move {
+                    let mut observation = transport.task_guard();
                     let mut client = WsClient::new(config);
                     // WsClient::run() 内部已有完整的重连逻辑，无需外层 loop
-                    if let Err(e) = client.run(wrapper_handler.clone()).await {
+                    if let Err(e) = client
+                        .run_observed(wrapper_handler.clone(), transport.clone(), cancellation)
+                        .await
+                    {
+                        transport.publish(
+                            ChannelTransportPhase::Failed,
+                            None,
+                            Some(crate::redaction::text_with_secrets(
+                                &e.to_string(),
+                                [secret.as_str()],
+                            )),
+                        );
                         warn!(
                             "Feishu WebSocket: fatal error: {}",
-                            crate::redaction::text(&e.to_string())
+                            crate::redaction::text_with_secrets(&e.to_string(), [secret.as_str()])
                         );
                     }
+                    observation.finish();
                 });
                 self.task_handle = Some(task_handle);
                 info!("Feishu channel started (long poll mode)");
@@ -328,21 +363,36 @@ impl ChannelPlugin for FeishuChannel {
                 let token = verification_token.clone();
                 let skey = signing_key.clone();
 
+                let transport = self.transport.clone();
+                let cancellation = self.transport_cancel.clone();
+                let secret = self.config.app_secret.clone();
                 let task_handle = tokio::spawn(async move {
+                    let mut observation = transport.task_guard();
                     if let Err(e) = webhook::run_webhook_server(
                         bind_addr,
                         webhook_path,
                         wrapper_handler,
                         token,
                         skey,
+                        transport.clone(),
+                        cancellation,
                     )
                     .await
                     {
+                        transport.publish(
+                            ChannelTransportPhase::Failed,
+                            None,
+                            Some(crate::redaction::text_with_secrets(
+                                &e.to_string(),
+                                [secret.as_str()],
+                            )),
+                        );
                         warn!(
                             "Feishu webhook server error: {}",
-                            crate::redaction::text(&e.to_string())
+                            crate::redaction::text_with_secrets(&e.to_string(), [secret.as_str()])
                         );
                     }
+                    observation.finish();
                 });
                 self.task_handle = Some(task_handle);
                 info!("Feishu channel started (webhook on {})", bind);
@@ -355,17 +405,36 @@ impl ChannelPlugin for FeishuChannel {
     async fn stop(&mut self) -> Result<()> {
         info!("Stopping Feishu channel...");
 
-        if let Some(handle) = self.task_handle.take() {
-            handle.abort();
-            let _ = handle.await;
+        self.transport_cancel.cancel();
+        // Retain join ownership until the actual original task completes, even
+        // if the caller drops this stop future and retries later.
+        if let Some(handle) = self.task_handle.as_mut() {
+            self.shutdown_failed |= handle.await.is_err();
+            self.task_handle = None;
         }
-
         self.send_tx = None;
-        if let Some(handle) = self.send_handle.take() {
+        if let Some(handle) = self.send_handle.as_mut() {
             handle.abort();
-            let _ = handle.await;
+            if let Err(error) = handle.await {
+                self.shutdown_failed |= !error.is_cancelled();
+            }
+            self.send_handle = None;
         }
         self.token_manager = None;
+        if std::mem::take(&mut self.shutdown_failed) {
+            self.transport.publish(
+                ChannelTransportPhase::Failed,
+                None,
+                Some("Feishu transport task failed during shutdown".into()),
+            );
+            return Err(ReactError::Channel(Box::new(
+                ChannelError::ConnectionError(
+                    "Feishu transport task failed during shutdown".into(),
+                ),
+            )));
+        }
+        self.transport
+            .publish(ChannelTransportPhase::Stopped, None, None);
         info!("Feishu channel stopped");
         Ok(())
     }
@@ -386,6 +455,10 @@ impl ChannelPlugin for FeishuChannel {
             self.running_cards.clone(),
         )
         .await
+    }
+
+    fn transport_status(&self) -> Option<tokio::sync::watch::Receiver<ChannelTransportSnapshot>> {
+        Some(self.transport.subscribe())
     }
 
     async fn health_check(&self) -> Result<()> {
@@ -495,6 +568,255 @@ impl MessageHandler for FeishuMessageHandler {
 mod config_tests {
     use super::*;
     use crate::channels::types::ChannelDeliveryFence;
+
+    #[tokio::test]
+    async fn stopped_health_is_not_readiness_and_dropping_observer_has_no_side_effect() -> Result<()>
+    {
+        let mut channel = FeishuChannel::new(FeishuConfig::new_long_poll(
+            "fixture-app".into(),
+            "fixture-secret".into(),
+        ))?;
+        let receiver = channel
+            .transport_status()
+            .ok_or_else(|| ReactError::Other("missing built-in observation".into()))?;
+        assert_eq!(receiver.borrow().phase, ChannelTransportPhase::Stopped);
+        drop(receiver);
+        channel.health_check().await?;
+        assert_eq!(
+            channel
+                .transport_status()
+                .ok_or_else(|| ReactError::Other("missing observation".into()))?
+                .borrow()
+                .phase,
+            ChannelTransportPhase::Stopped
+        );
+        channel.stop().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancelled_stop_waiter_retains_the_original_transport_join()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let mut channel = FeishuChannel::new(FeishuConfig::new_long_poll(
+            "fixture-app".into(),
+            "fixture-secret".into(),
+        ))?;
+        let release = Arc::new(tokio::sync::Notify::new());
+        let task_release = release.clone();
+        channel.task_handle = Some(tokio::spawn(async move {
+            task_release.notified().await;
+        }));
+        let cancellation = channel.transport_cancel.clone();
+        let channel = Arc::new(tokio::sync::Mutex::new(channel));
+        let stopping = channel.clone();
+        let stop = tokio::spawn(async move { stopping.lock().await.stop().await });
+        tokio::time::timeout(std::time::Duration::from_secs(2), cancellation.cancelled()).await?;
+        stop.abort();
+        let stopped_waiter = stop.await;
+        assert!(stopped_waiter.is_err());
+        assert!(channel.lock().await.task_handle.is_some());
+        release.notify_one();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            channel.lock().await.stop(),
+        )
+        .await??;
+        let locked = channel.lock().await;
+        assert!(locked.task_handle.is_none());
+        assert_eq!(
+            locked.transport.subscribe().borrow().phase,
+            ChannelTransportPhase::Stopped
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn completed_abnormal_join_is_removed_and_stop_retry_does_not_repoll_it() -> Result<()> {
+        let mut channel = FeishuChannel::new(FeishuConfig::new_long_poll(
+            "fixture-app".into(),
+            "fixture-secret".into(),
+        ))?;
+        let task = tokio::spawn(std::future::pending::<()>());
+        task.abort();
+        channel.task_handle = Some(task);
+        assert!(channel.stop().await.is_err());
+        assert!(channel.task_handle.is_none());
+        assert_eq!(
+            channel.transport.subscribe().borrow().phase,
+            ChannelTransportPhase::Failed
+        );
+        // This second physical stop has no old JoinHandle to poll again.
+        channel.stop().await?;
+        assert_eq!(
+            channel.transport.subscribe().borrow().phase,
+            ChannelTransportPhase::Stopped
+        );
+        Ok(())
+    }
+
+    struct GatedWebhookHandler {
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+        completed: Arc<std::sync::atomic::AtomicBool>,
+        closes: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl MessageHandler for GatedWebhookHandler {
+        async fn handle(&self, _message: InboundMessage) -> Result<OutboundMessage> {
+            Err(ReactError::Other(
+                "fixture uses the production streaming wrapper".into(),
+            ))
+        }
+        async fn handle_stream<'a>(
+            &'a self,
+            _message: InboundMessage,
+        ) -> Result<futures::stream::BoxStream<'a, Result<OutboundMessage>>> {
+            self.entered.notify_one();
+            self.release.notified().await;
+            self.completed
+                .store(true, std::sync::atomic::Ordering::Release);
+            // Do not send an IM reply from this fixture. The real webhook
+            // wrapper still executes its original handle/reply/HTTP receipt.
+            Ok(Box::pin(futures::stream::empty()))
+        }
+        async fn reply(&self, _message: OutboundMessage) -> Result<()> {
+            Ok(())
+        }
+        async fn close(&self) -> Result<()> {
+            if !self.completed.load(std::sync::atomic::Ordering::Acquire) {
+                return Err(ReactError::Other(
+                    "handler closed before its admitted HTTP request settled".into(),
+                ));
+            }
+            self.closes
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn webhook_stop_waiter_cancellation_preserves_pending_request_join_and_original_handler_close()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        use crate::channels::ChannelManager;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::time::Duration;
+        use tokio::sync::Notify;
+        use tokio::time::timeout;
+        let token_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let token_address = token_listener.local_addr()?;
+        let token_shutdown = CancellationToken::new();
+        let token_cancel = token_shutdown.clone();
+        // Only this loopback fixture receives token/reaction API requests.
+        let api = axum::Router::new().fallback(|| async {
+            axum::Json(
+                serde_json::json!({"code":0,"tenant_access_token":"fixture-token","expire":7200}),
+            )
+        });
+        let token_server = tokio::spawn(async move {
+            axum::serve(token_listener, api)
+                .with_graceful_shutdown(token_cancel.cancelled_owned())
+                .await
+        });
+        let reserved = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let webhook_address = reserved.local_addr()?;
+        drop(reserved);
+        let config = FeishuConfig::new_webhook(
+            "fixture-app".into(),
+            "fixture-secret".into(),
+            webhook_address.to_string(),
+            "/events/:tenant".into(),
+            None,
+        )
+        .with_domain(
+            format!("http://{token_address}"),
+            format!("http://{token_address}"),
+        );
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let completed = Arc::new(AtomicBool::new(false));
+        let closes = Arc::new(AtomicUsize::new(0));
+        let plugin = FeishuChannel::new(config)?;
+        // Observe the exact source installed by start through the same handle.
+        let mut manager = ChannelManager::new();
+        manager.register(Box::new(plugin))?;
+        let channel = manager.get_owned("feishu").ok_or("missing Feishu entry")?;
+        channel
+            .start(Arc::new(GatedWebhookHandler {
+                entered: entered.clone(),
+                release: release.clone(),
+                completed: completed.clone(),
+                closes: closes.clone(),
+            }))
+            .await?;
+        let observation = channel.transport_status().await;
+        let mut receiver = observation
+            .receiver
+            .ok_or("missing Feishu transport source")?;
+        timeout(Duration::from_secs(2), async {
+            loop {
+                if receiver.borrow().phase != ChannelTransportPhase::Connecting {
+                    break;
+                }
+                receiver.changed().await?;
+            }
+            Ok::<_, tokio::sync::watch::error::RecvError>(())
+        })
+        .await??;
+        assert_eq!(
+            receiver.borrow().evidence,
+            Some(ChannelTransportEvidence::LocalWebhookListener)
+        );
+        let request = tokio::spawn(async move {
+            reqwest::Client::new().post(format!("http://{webhook_address}/events/fixture"))
+                .json(&serde_json::json!({"header":{"event_type":"im.message.receive_v1"},
+                    "event":{"sender":{"sender_id":{"open_id":"fixture-sender"}},"message":{
+                        "message_id":"fixture-message","message_type":"text","chat_id":"fixture-chat",
+                        "chat_type":"p2p","content":"{\"text\":\"pending\"}"}}}))
+                .send().await
+        });
+        timeout(Duration::from_secs(2), entered.notified()).await?;
+        let mut stopping = channel.stop();
+        // Poll the real stop future through transport cancellation into its
+        // pending join, rather than inferring that boundary from a sleep.
+        assert!(futures::poll!(stopping.as_mut()).is_pending());
+        assert_eq!(closes.load(Ordering::Acquire), 0);
+        assert!(!completed.load(Ordering::Acquire));
+        drop(stopping);
+        // Original handler and the saved transport JoinHandle must still own
+        // the pending request after the observer/stop waiter disappears.
+        let snapshot = channel.management_snapshot().await;
+        assert!(snapshot.handler_attached);
+        assert!(!snapshot.shutdown_settled);
+        assert_eq!(closes.load(Ordering::Acquire), 0);
+        // Retry before releasing the request: a lost handle would let this
+        // advance into an early handler close instead of the original join.
+        let mut retry = channel.stop();
+        assert!(futures::poll!(retry.as_mut()).is_pending());
+        // Allow scheduled cancellation/join work to progress while admission is
+        // already proven and the HTTP handler is still gated. A discarded old
+        // join must not let retry reach close during this bounded observation.
+        assert!(
+            timeout(Duration::from_millis(25), retry.as_mut())
+                .await
+                .is_err()
+        );
+        assert_eq!(closes.load(Ordering::Acquire), 0);
+        assert!(!completed.load(Ordering::Acquire));
+        release.notify_one();
+        let response = timeout(Duration::from_secs(2), request).await???;
+        assert!(response.status().is_success());
+        timeout(Duration::from_secs(2), retry).await??;
+        let settled = channel.management_snapshot().await;
+        assert!(settled.shutdown_settled);
+        assert!(!settled.handler_attached);
+        assert_eq!(settled.transport.phase, ChannelTransportPhase::Stopped);
+        assert!(completed.load(Ordering::Acquire));
+        assert_eq!(closes.load(Ordering::Acquire), 1);
+        token_shutdown.cancel();
+        timeout(Duration::from_secs(2), token_server).await???;
+        Ok(())
+    }
 
     #[test]
     fn debug_does_not_expose_webhook_credentials() {

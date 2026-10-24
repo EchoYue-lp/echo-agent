@@ -4,6 +4,7 @@ use super::super::super::types::*;
 use super::super::{DeliveryRequest, DeliverySender};
 use super::api::*;
 use async_trait::async_trait;
+use echo_core::agent::CancellationToken;
 use echo_core::error::ChannelError;
 use echo_core::error::ReactError;
 use echo_core::error::Result;
@@ -54,6 +55,9 @@ pub struct QqChannel {
     send_tx: Option<DeliverySender>,
     send_handle: Option<JoinHandle<()>>,
     gateway_handle: Option<JoinHandle<()>>,
+    gateway_cancel: CancellationToken,
+    transport: TransportStatus,
+    shutdown_failed: bool,
 }
 
 impl QqChannel {
@@ -71,6 +75,9 @@ impl QqChannel {
             send_tx: None,
             send_handle: None,
             gateway_handle: None,
+            gateway_cancel: CancellationToken::new(),
+            transport: TransportStatus::new(ChannelTransportPhase::Stopped),
+            shutdown_failed: false,
         })
     }
 }
@@ -100,6 +107,8 @@ impl ChannelPlugin for QqChannel {
                 "QQ Bot channel is already started".to_string(),
             ))));
         }
+        self.gateway_cancel = CancellationToken::new();
+        self.transport = TransportStatus::new(ChannelTransportPhase::Connecting);
         info!("Starting QQ Bot channel...");
 
         // 1. Initialize token manager
@@ -152,33 +161,81 @@ impl ChannelPlugin for QqChannel {
 
         // 5. Start Gateway connection loop (with exponential backoff reconnect)
         let http_for_gw = self.http.clone();
+        let cancellation = self.gateway_cancel.clone();
+        let transport = self.transport.clone();
+        let client_secret = self.config.client_secret.clone();
         let gateway_handle = tokio::spawn(async move {
+            let mut observation = transport.task_guard();
             let mut reconnect_delay: u64 = 1;
             const MAX_DELAY: u64 = 60;
             // If connection exceeds this threshold it is considered stable; reset backoff delay
             const STABLE_THRESHOLD_SECS: u64 = 60;
 
             loop {
-                let token = match token_manager_clone2.get_token().await {
+                if cancellation.is_cancelled() {
+                    break;
+                }
+                transport.publish(ChannelTransportPhase::Connecting, None, None);
+                let token_result = tokio::select! {
+                    biased;
+                    () = cancellation.cancelled() => break,
+                    result = token_manager_clone2.get_token() => result,
+                };
+                let token = match token_result {
                     Ok(t) => t,
                     Err(e) => {
                         warn!(
                             "QQ Gateway: failed to get token: {}",
-                            crate::redaction::text(&e.to_string())
+                            crate::redaction::text_with_secrets(
+                                &e.to_string(),
+                                [client_secret.as_str()]
+                            )
                         );
-                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                        transport.publish(
+                            ChannelTransportPhase::Disconnected,
+                            None,
+                            Some(crate::redaction::text_with_secrets(
+                                &e.to_string(),
+                                [client_secret.as_str()],
+                            )),
+                        );
+                        tokio::select! {
+                            biased;
+                            () = cancellation.cancelled() => break,
+                            () = tokio::time::sleep(std::time::Duration::from_secs(5)) => {},
+                        }
                         continue;
                     }
                 };
 
-                let ws_url = match get_gateway_url(&http_for_gw, &token).await {
+                let url_result = tokio::select! {
+                    biased;
+                    () = cancellation.cancelled() => break,
+                    result = get_gateway_url(&http_for_gw, &token) => result,
+                };
+                let ws_url = match url_result {
                     Ok(u) => u,
                     Err(e) => {
                         warn!(
                             "QQ Gateway: failed to get gateway URL: {}",
-                            crate::redaction::text(&e.to_string())
+                            crate::redaction::text_with_secrets(
+                                &e.to_string(),
+                                [client_secret.as_str(), token.as_str()]
+                            )
                         );
-                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                        transport.publish(
+                            ChannelTransportPhase::Disconnected,
+                            None,
+                            Some(crate::redaction::text_with_secrets(
+                                &e.to_string(),
+                                [client_secret.as_str(), token.as_str()],
+                            )),
+                        );
+                        tokio::select! {
+                            biased;
+                            () = cancellation.cancelled() => break,
+                            () = tokio::time::sleep(std::time::Duration::from_secs(5)) => {},
+                        }
                         continue;
                     }
                 };
@@ -186,19 +243,40 @@ impl ChannelPlugin for QqChannel {
                 info!("QQ Gateway: connecting...");
                 let connected_at = std::time::Instant::now();
 
-                match super::gateway::connect_to_gateway(ws_url, wrapper.clone(), token.clone())
-                    .await
+                match super::gateway::connect_to_gateway(
+                    ws_url,
+                    wrapper.clone(),
+                    token.clone(),
+                    cancellation.clone(),
+                    transport.clone(),
+                )
+                .await
                 {
                     Ok(()) => {
+                        if cancellation.is_cancelled() {
+                            break;
+                        }
+                        transport.publish(ChannelTransportPhase::Disconnected, None, None);
                         warn!(
                             "QQ Gateway: connection closed, reconnecting in {}s...",
                             reconnect_delay
                         );
                     }
                     Err(e) => {
+                        transport.publish(
+                            ChannelTransportPhase::Disconnected,
+                            None,
+                            Some(crate::redaction::text_with_secrets(
+                                &e.to_string(),
+                                [client_secret.as_str(), token.as_str()],
+                            )),
+                        );
                         warn!(
                             "QQ Gateway: connection error: {:?}, reconnecting in {}s...",
-                            crate::redaction::text(&e.to_string()),
+                            crate::redaction::text_with_secrets(
+                                &e.to_string(),
+                                [client_secret.as_str(), token.as_str()]
+                            ),
                             reconnect_delay
                         );
                     }
@@ -211,8 +289,13 @@ impl ChannelPlugin for QqChannel {
                     reconnect_delay = (reconnect_delay * 2).min(MAX_DELAY);
                 }
 
-                tokio::time::sleep(std::time::Duration::from_secs(reconnect_delay)).await;
+                tokio::select! {
+                    biased;
+                    () = cancellation.cancelled() => break,
+                    () = tokio::time::sleep(std::time::Duration::from_secs(reconnect_delay)) => {},
+                }
             }
+            observation.finish();
         });
 
         self.gateway_handle = Some(gateway_handle);
@@ -224,17 +307,34 @@ impl ChannelPlugin for QqChannel {
     async fn stop(&mut self) -> Result<()> {
         info!("Stopping QQ Bot channel...");
 
-        if let Some(handle) = self.gateway_handle.take() {
-            handle.abort();
-            let _ = handle.await;
+        self.gateway_cancel.cancel();
+        // Keep the original handles in the adapter across a cancelled stop
+        // waiter. Its heartbeat is driven in the same original gateway task.
+        if let Some(handle) = self.gateway_handle.as_mut() {
+            self.shutdown_failed |= handle.await.is_err();
+            self.gateway_handle = None;
         }
-
         self.send_tx = None;
-        if let Some(handle) = self.send_handle.take() {
+        if let Some(handle) = self.send_handle.as_mut() {
             handle.abort();
-            let _ = handle.await;
+            if let Err(error) = handle.await {
+                self.shutdown_failed |= !error.is_cancelled();
+            }
+            self.send_handle = None;
         }
         self.token_manager = None;
+        if std::mem::take(&mut self.shutdown_failed) {
+            self.transport.publish(
+                ChannelTransportPhase::Failed,
+                None,
+                Some("QQ transport task failed during shutdown".into()),
+            );
+            return Err(ReactError::Channel(Box::new(
+                ChannelError::ConnectionError("QQ transport task failed during shutdown".into()),
+            )));
+        }
+        self.transport
+            .publish(ChannelTransportPhase::Stopped, None, None);
         info!("QQ Bot channel stopped");
         Ok(())
     }
@@ -256,6 +356,10 @@ impl ChannelPlugin for QqChannel {
             msg.reply_to.as_deref(),
         )
         .await
+    }
+
+    fn transport_status(&self) -> Option<tokio::sync::watch::Receiver<ChannelTransportSnapshot>> {
+        Some(self.transport.subscribe())
     }
 
     async fn health_check(&self) -> Result<()> {
@@ -298,6 +402,82 @@ impl MessageHandler for QqMessageHandler {
 mod config_tests {
     use super::*;
     use crate::channels::types::ChannelDeliveryFence;
+
+    #[tokio::test]
+    async fn stopped_health_is_not_readiness_and_dropping_observer_has_no_side_effect() -> Result<()>
+    {
+        let mut channel = QqChannel::new(QqConfig::new("fixture-app", "fixture-secret"))?;
+        let receiver = channel
+            .transport_status()
+            .ok_or_else(|| ReactError::Other("missing built-in observation".into()))?;
+        assert_eq!(receiver.borrow().phase, ChannelTransportPhase::Stopped);
+        drop(receiver);
+        channel.health_check().await?;
+        assert_eq!(
+            channel
+                .transport_status()
+                .ok_or_else(|| ReactError::Other("missing observation".into()))?
+                .borrow()
+                .phase,
+            ChannelTransportPhase::Stopped
+        );
+        channel.stop().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancelled_stop_waiter_retains_the_original_transport_join()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let mut channel = QqChannel::new(QqConfig::new("fixture-app", "fixture-secret"))?;
+        let release = Arc::new(tokio::sync::Notify::new());
+        let task_release = release.clone();
+        channel.gateway_handle = Some(tokio::spawn(async move {
+            task_release.notified().await;
+        }));
+        let cancellation = channel.gateway_cancel.clone();
+        let channel = Arc::new(tokio::sync::Mutex::new(channel));
+        let stopping = channel.clone();
+        let stop = tokio::spawn(async move { stopping.lock().await.stop().await });
+        tokio::time::timeout(std::time::Duration::from_secs(2), cancellation.cancelled()).await?;
+        stop.abort();
+        let stopped_waiter = stop.await;
+        assert!(stopped_waiter.is_err());
+        assert!(channel.lock().await.gateway_handle.is_some());
+        release.notify_one();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            channel.lock().await.stop(),
+        )
+        .await??;
+        let locked = channel.lock().await;
+        assert!(locked.gateway_handle.is_none());
+        assert_eq!(
+            locked.transport.subscribe().borrow().phase,
+            ChannelTransportPhase::Stopped
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn completed_abnormal_join_is_removed_and_stop_retry_does_not_repoll_it() -> Result<()> {
+        let mut channel = QqChannel::new(QqConfig::new("fixture-app", "fixture-secret"))?;
+        let task = tokio::spawn(std::future::pending::<()>());
+        task.abort();
+        channel.gateway_handle = Some(task);
+        assert!(channel.stop().await.is_err());
+        assert!(channel.gateway_handle.is_none());
+        assert_eq!(
+            channel.transport.subscribe().borrow().phase,
+            ChannelTransportPhase::Failed
+        );
+        // This second physical stop has no old JoinHandle to poll again.
+        channel.stop().await?;
+        assert_eq!(
+            channel.transport.subscribe().borrow().phase,
+            ChannelTransportPhase::Stopped
+        );
+        Ok(())
+    }
 
     #[test]
     fn debug_does_not_expose_client_secret() {

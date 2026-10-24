@@ -14,6 +14,7 @@ use super::api::{ClientConfig, get_ws_endpoint, http_client};
 use super::proto::*;
 use crate::redaction::{text as redact_text, text_with_secrets, url as redact_url};
 use dashmap::DashMap;
+use echo_core::agent::CancellationToken;
 use echo_core::error::{ChannelError, Result};
 use futures::SinkExt;
 use futures::StreamExt;
@@ -119,6 +120,8 @@ pub struct WsClient {
     event_locks: Arc<DashMap<String, Arc<Mutex<()>>>>,
     /// Running flag
     running: Arc<Mutex<bool>>,
+    transport: Option<TransportStatus>,
+    cancellation: CancellationToken,
 }
 
 impl WsClient {
@@ -132,6 +135,30 @@ impl WsClient {
             processed_events: Arc::new(DashMap::new()),
             event_locks: Arc::new(DashMap::new()),
             running: Arc::new(Mutex::new(false)),
+            transport: None,
+            cancellation: CancellationToken::new(),
+        }
+    }
+
+    pub(super) async fn run_observed(
+        &mut self,
+        handler: Arc<dyn MessageHandler>,
+        transport: TransportStatus,
+        cancellation: CancellationToken,
+    ) -> Result<()> {
+        self.transport = Some(transport);
+        self.cancellation = cancellation;
+        self.run(handler).await
+    }
+
+    fn observe(
+        &self,
+        phase: ChannelTransportPhase,
+        evidence: Option<ChannelTransportEvidence>,
+        error: Option<String>,
+    ) {
+        if let Some(transport) = &self.transport {
+            transport.publish(phase, evidence, error);
         }
     }
 
@@ -143,17 +170,33 @@ impl WsClient {
         let mut attempts_since_stable: u32 = 0;
 
         loop {
+            if self.cancellation.is_cancelled() {
+                break;
+            }
+            self.observe(ChannelTransportPhase::Connecting, None, None);
             let connected_at = Instant::now();
             let connect_result = self.connect(handler.clone()).await;
 
+            if self.cancellation.is_cancelled() {
+                break;
+            }
             match connect_result {
                 Ok(()) => {
+                    self.observe(ChannelTransportPhase::Disconnected, None, None);
                     info!("Feishu WebSocket: connection closed normally");
                 }
                 Err(e) => {
+                    self.observe(
+                        ChannelTransportPhase::Disconnected,
+                        None,
+                        Some(text_with_secrets(
+                            &e.to_string(),
+                            [self.config.app_secret.as_str()],
+                        )),
+                    );
                     warn!(
                         "Feishu WebSocket: connection error: {}",
-                        redact_text(&e.to_string())
+                        text_with_secrets(&e.to_string(), [self.config.app_secret.as_str()])
                     );
                 }
             }
@@ -174,7 +217,7 @@ impl WsClient {
                 backoff_secs = 1;
                 attempts_since_stable = 0;
             } else {
-                attempts_since_stable += 1;
+                attempts_since_stable = attempts_since_stable.saturating_add(1);
             }
 
             // Reconnect logic
@@ -185,12 +228,21 @@ impl WsClient {
                         "Feishu WebSocket: failed to reconnect after {} attempts",
                         self.config.reconnect_count
                     );
+                    self.observe(
+                        ChannelTransportPhase::Failed,
+                        None,
+                        Some("Feishu WebSocket reconnect attempts exhausted".into()),
+                    );
                     break;
                 }
             }
 
             // Exponential backoff wait
-            self.do_backoff_sleep(backoff_secs).await;
+            tokio::select! {
+                biased;
+                () = self.cancellation.cancelled() => break,
+                () = self.do_backoff_sleep(backoff_secs) => {},
+            }
 
             // Update backoff delay (exponential growth, capped at MAX_BACKOFF_SECS)
             backoff_secs = (backoff_secs * 2).min(MAX_BACKOFF_SECS);
@@ -223,13 +275,17 @@ impl WsClient {
     /// Establish connection and process messages
     async fn connect(&mut self, handler: Arc<dyn MessageHandler>) -> Result<()> {
         // 1. Get WebSocket URL
-        let (ws_url, service_id_str, client_config) = get_ws_endpoint(
+        let endpoint = get_ws_endpoint(
             &self.http,
             &self.config.domain,
             &self.config.app_id,
             &self.config.app_secret,
-        )
-        .await?;
+        );
+        let (ws_url, service_id_str, client_config) = tokio::select! {
+            biased;
+            () = self.cancellation.cancelled() => return Ok(()),
+            result = endpoint => result?,
+        };
 
         if let Some(config) = client_config {
             self.config.update_from_server(&config);
@@ -249,10 +305,18 @@ impl WsClient {
         info!("Feishu WebSocket: connecting to {}", redact_url(&ws_url));
 
         // 2. Establish WebSocket connection, split read/write halves
-        let (ws_stream, _) = connect_async(&ws_url).await.map_err(|e| {
+        let connected = tokio::select! {
+            biased;
+            () = self.cancellation.cancelled() => return Ok(()),
+            result = connect_async(&ws_url) => result,
+        };
+        let (ws_stream, _) = connected.map_err(|e| {
             ChannelError::ConnectionError(format!(
                 "WebSocket connect failed: {}",
-                redact_text(&e.to_string())
+                text_with_secrets(
+                    &e.to_string(),
+                    [self.config.app_secret.as_str(), ws_url.as_str()]
+                )
             ))
         })?;
 
@@ -262,16 +326,21 @@ impl WsClient {
             self.service_id
         );
 
+        self.observe(
+            ChannelTransportPhase::Ready,
+            Some(ChannelTransportEvidence::FeishuWebSocketHandshake),
+            None,
+        );
         let (write, read) = ws_stream.split();
         let ws_sink: SharedSink = Arc::new(Mutex::new(write));
 
-        // 3. Start heartbeat task (actually sends ping frames)
+        // 3. Drive heartbeat in the same original connection task.
         let ping_interval = self.config.ping_interval;
         let service_id = self.service_id;
         let running = self.running.clone();
         let sink_for_ping = ws_sink.clone();
 
-        let ping_task = tokio::spawn(async move {
+        let ping = async move {
             loop {
                 tokio::time::sleep(ping_interval).await;
                 if !*running.lock().await {
@@ -288,12 +357,17 @@ impl WsClient {
                 }
                 debug!("Feishu WebSocket: ping sent");
             }
-        });
+        };
 
-        // 4. Message processing loop
-        let result = self.message_loop(read, ws_sink, handler).await;
-        ping_task.abort();
-        result
+        // The heartbeat and message future belong to this same transport task.
+        // Cancelling or unwinding it cannot detach a child heartbeat task.
+        let cancellation = self.cancellation.clone();
+        tokio::select! {
+            biased;
+            () = cancellation.cancelled() => Ok(()),
+            result = self.message_loop(read, ws_sink, handler) => result,
+            () = ping => Err(ChannelError::ConnectionError("Feishu heartbeat ended before the connection".into()).into()),
+        }
     }
 
     /// Message processing loop
@@ -833,6 +907,93 @@ mod tests {
         async fn reply(&self, _msg: OutboundMessage) -> echo_core::error::Result<()> {
             Ok(())
         }
+    }
+
+    #[tokio::test]
+    async fn local_ws_handshake_is_the_readiness_boundary_and_stop_closes_original_socket()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::channels::types::{
+            ChannelTransportEvidence, ChannelTransportPhase, TransportStatus,
+        };
+        use echo_core::agent::CancellationToken;
+        use futures::StreamExt;
+        use std::time::Duration;
+        let ws_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let ws_address = ws_listener.local_addr()?;
+        let http_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let http_address = http_listener.local_addr()?;
+        let accepted = Arc::new(tokio::sync::Notify::new());
+        let handshake = Arc::new(tokio::sync::Notify::new());
+        let server_accepted = accepted.clone();
+        let server_handshake = handshake.clone();
+        let server = tokio::spawn(async move {
+            let (socket, _) = ws_listener.accept().await?;
+            server_accepted.notify_one();
+            server_handshake.notified().await;
+            let mut websocket = tokio_tungstenite::accept_async(socket).await?;
+            while let Some(frame) = websocket.next().await {
+                if frame.is_err() {
+                    break;
+                }
+            }
+            Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
+        });
+        let endpoint_cancel = CancellationToken::new();
+        let endpoint_shutdown = endpoint_cancel.clone();
+        let body = json!({"code":0,"msg":"ok","data":{"URL":format!("ws://{ws_address}/?device_id=fixture&service_id=1")}});
+        let app = axum::Router::new().route(
+            super::super::api::WS_ENDPOINT_PATH,
+            axum::routing::post(move || {
+                let body = body.clone();
+                async move { axum::Json(body) }
+            }),
+        );
+        let endpoint = tokio::spawn(async move {
+            axum::serve(http_listener, app)
+                .with_graceful_shutdown(endpoint_shutdown.cancelled_owned())
+                .await
+        });
+        let mut config = WsClientConfig::new(
+            "fixture-app".into(),
+            "fixture-secret".into(),
+            format!("http://{http_address}"),
+        );
+        config.auto_reconnect = false;
+        let mut client = WsClient::new(config);
+        let transport = TransportStatus::new(ChannelTransportPhase::Connecting);
+        let mut receiver = transport.subscribe();
+        let cancellation = CancellationToken::new();
+        client.cancellation = cancellation.clone();
+        client.transport = Some(transport);
+        let task = tokio::spawn(async move {
+            client
+                .run(Arc::new(CountingHandler {
+                    calls: Arc::new(AtomicUsize::new(0)),
+                }))
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), accepted.notified()).await?;
+        // run() published Connecting after this receiver was created. Mark that
+        // proven pre-handshake version seen before awaiting the handshake fact.
+        assert_eq!(
+            receiver.borrow_and_update().phase,
+            ChannelTransportPhase::Connecting
+        );
+        handshake.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), receiver.changed()).await??;
+        assert_eq!(receiver.borrow().phase, ChannelTransportPhase::Ready);
+        assert_eq!(
+            receiver.borrow().evidence,
+            Some(ChannelTransportEvidence::FeishuWebSocketHandshake)
+        );
+        cancellation.cancel();
+        tokio::time::timeout(Duration::from_secs(2), task).await???;
+        endpoint_cancel.cancel();
+        tokio::time::timeout(Duration::from_secs(2), endpoint).await???;
+        tokio::time::timeout(Duration::from_secs(2), server)
+            .await??
+            .map_err(|error| error.to_string())?;
+        Ok(())
     }
 
     #[tokio::test]
