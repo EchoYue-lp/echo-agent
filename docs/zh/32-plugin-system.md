@@ -160,6 +160,30 @@ Invalid UTF-8 与读失败保留 Error。错误文件种类、metadata 失败、
 generation 序号在同一进程的所有 Integrator 间统一分配，因此两个独立 Integrator 为同一 Agent
 准备的新旧快照仍有可比较的顺序。
 
+### 选择性 prepared 内容身份
+
+`PreparedPlugin::content_identity() -> &str` 返回该插件同次 prepare 输入的 SHA-256，覆盖
+manifest（真实可选 version 与依赖）、有效配置/变量、已发现 Skill 身份文档、Hook/MCP
+声明及冻结的 Subagent 文档。对象键和 manifest 依赖顺序规范化，相对来源路径与内容共同
+参与摘要。同输入重准备或进程内 generation 变化不改变内容身份；未声明 version 继续保持
+None，摘要不冒充版本号或 latest。
+
+`PreparedPluginSet::dependency_closure(id) -> Result<Vec<&PreparedPlugin>, String>` 从本次
+不可变且适用的 Set 选择已启用的根及传递依赖，按稳定的依赖优先顺序返回。缺失/禁用依赖、
+不满足或非法版本条件、环仍由原 registry 在 prepare 时检查；Set 不适用或根未准备时明确
+返回错误。无关插件改变不改变所选成员的内容身份，必要依赖改变会改变对应成员身份。
+读取旧 Set 的闭包不授予发布旧代或继续持有外部资源的资格。
+
+完整 `PreparedPluginSet::identity()` 继续为整批 publication 提供聚合身份，不能代替某任务
+选择的闭包。本次编码改为聚合规范化的单插件身份，不承诺历史摘要字符串跨版本兼容；
+generation、publication target、rollback receipt、取消和清理 owner 的职责均不改变。
+
+摘要只覆盖框架实际冻结的输入，不是完整包归档：已发现 SKILL.md 身份文档不等于整个
+scripts/references 目录；Hook 命令、MCP 连接声明不固定外部实现或服务。产品声明与显式输入
+仍由 embedding application 承接。见 [ADR 0096](../adr/0096-selective-prepared-plugin-identity.md)。
+既有 `demo56_plugin_system` 已在实际 prepared 产物上选择闭包，再以同一 integrator 进入
+coordinator publication，继续纳入 workspace examples 的编译/测试链，不新增演示目标或依赖。
+
 每个 `ReactAgent` 仍拥有唯一 publication target，但 Host 通过 `PluginCoordinator` 驱动完整
 生命周期。用 durable registry 与 integrator 构造 coordinator 后，调用
 `coordinator.reconcile(&mut agent)` 收敛当前意图，或使用 `enable`、`reload`、`disable`、

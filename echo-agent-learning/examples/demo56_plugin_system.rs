@@ -62,7 +62,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let plugin_id = registry.install(&InstallSource::Local(source), PluginScope::Local)?;
     let mut agent = ReactAgentBuilder::new().model("plugin-demo").build()?;
-    let mut coordinator = PluginCoordinator::new(registry, PluginIntegrator::new());
+    let integrator = PluginIntegrator::new();
+    let prepared = integrator.prepare(&mut registry).await;
+    for plugin in prepared.dependency_closure(&plugin_id)? {
+        println!(
+            "Selected plugin {} content SHA-256 {}",
+            plugin.id(),
+            plugin.content_identity()
+        );
+    }
+    // The same integrator/cache feeds real publication; selecting a closure does
+    // not create a second registry or retain external resources for an old set.
+    let mut coordinator = PluginCoordinator::new(registry, integrator);
     let receipt = coordinator.reconcile(&mut agent).await?;
     println!(
         "Published operation {} at generation {}",

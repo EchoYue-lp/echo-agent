@@ -167,6 +167,19 @@ ToolResult::success("output")
     .with_truncated(true)
 ```
 
+### 远端失败与重试权威
+
+`ToolError::RemoteFailure` 承载工具身份、安全诊断、可选 HTTP 状态和既有
+`ToolFailure`，保留类别、恢复、副作用和 retry-after 事实；`SearchProvider::search`
+与普通 `ExecutionFailed` 构造方式不变。超时、取消继续使用已有变体；无法分类的旧错误
+沿原保守分类处理，不通过错误文案决定重试。
+
+provider 不新增失败重试。DDG 仍保留 HTML→Instant Answer 原策略，一次逻辑尝试
+可以包含两次 HTTP 请求。只有 ToolManager 执行有限重试，保留有效 Retry-After，
+通过原 context 取消等待；server 最低等待超过现有30秒上限时返回原失败，不提前请求。
+SDK direct 只投影事实，不自动继承该重试循环，也不因此接受新的错误值。
+源码、消费者与实际资格边界见 [ADR0095](../adr/0095-structured-tool-remote-failures.md)。
+
 ### ToolResultKind
 
 ```rust

@@ -167,6 +167,25 @@ ToolResult::success("output")
     .with_truncated(true)
 ```
 
+### Remote failures and retry ownership
+
+`ToolError::RemoteFailure` carries tool identity, a safe diagnostic, optional
+HTTP status and the existing `ToolFailure`. It keeps category, recovery,
+side-effect and retry-after facts while leaving `SearchProvider::search` and
+ordinary `ExecutionFailed` constructors unchanged. Timeout/cancellation retain
+their existing variants. Unknown legacy errors use the original conservative
+classification; error text is not a retry policy.
+
+Web providers do not add their own failure retries. DDG still has its existing
+HTML-to-Instant-Answer strategy fallback, so one logical attempt may make two
+HTTP requests. ToolManager alone performs bounded retries, preserves valid
+Retry-After hints and cancels waiting through the original context. A server
+minimum above the existing 30-second limit returns the original failure instead
+of retrying early. The SDK direct path projects facts without inheriting this
+retry loop or automatically accepting a new error value. See
+[ADR0095](../adr/0095-structured-tool-remote-failures.md) for source, consumer and
+qualification boundaries.
+
 ### ToolResultKind
 
 ```rust

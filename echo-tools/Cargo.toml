@@ -29,7 +29,7 @@ files = [
     "dep:tree-sitter-java",
 ]
 artifact = []
-web = ["dep:scraper", "dep:html2text", "dep:url", "dep:async-trait"]
+web = ["dep:scraper", "dep:html2text", "dep:url", "dep:async-trait", "dep:httpdate"]
 media = ["dep:lopdf", "dep:calamine", "dep:docx-rs", "dep:encoding_rs", "dep:rust_xlsxwriter", "dep:chrono", "dep:html2text"]
 chart = []
 data = ["dep:polars"]
@@ -54,6 +54,7 @@ regex = "1"
 tokio = { version = "1", features = ["process", "time", "rt", "macros", "sync", "fs", "io-util"] }
 reqwest = { version = "0.12", features = ["json", "stream"] }
 async-trait = { version = "0.1", optional = true }
+httpdate = { version = "1.0.3", optional = true }
 
 # Feature-gated dependencies
 scraper = { version = "0.27", optional = true }
@@ -83,6 +84,7 @@ libc = "0.2"
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
+echo_execution = { version = "0.2.0", path = "../echo-execution" }
 tempfile = "3"
 chrono = "0.4"
 

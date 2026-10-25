@@ -3012,19 +3012,41 @@ impl AgentRunSnapshot {
         let notice = format!(
             "\n\n[Output truncated: ~{estimated_tokens} tokens total, {max_tokens} token budget]\n\n"
         );
-        let notice_tokens = tokenizer.count_tokens(&notice);
-        let available_tokens = max_tokens.saturating_sub(notice_tokens);
-        let available_chars = available_tokens.saturating_mul(4);
-        let head_chars = available_chars.saturating_mul(7) / 10;
-        let tail_chars = available_chars.saturating_sub(head_chars);
-        let head: String = output.chars().take(head_chars).collect();
-        let tail_reversed: String = output.chars().rev().take(tail_chars).collect();
-        let tail: String = tail_reversed.chars().rev().collect();
-        let truncated_output = if available_tokens == 0 {
-            format!("[Output truncated: ~{estimated_tokens} tokens total]")
+        let notice = if tokenizer.count_tokens(&notice) <= max_tokens {
+            notice
+        } else if tokenizer.count_tokens("[Output truncated]") <= max_tokens {
+            "[Output truncated]".to_string()
+        } else if tokenizer.count_tokens("…") <= max_tokens {
+            "…".to_string()
         } else {
+            String::new()
+        };
+        let available_tokens = max_tokens.saturating_sub(tokenizer.count_tokens(&notice));
+        let render = |retained_chars: usize| {
+            let head_chars = retained_chars.saturating_mul(7) / 10;
+            let tail_chars = retained_chars.saturating_sub(head_chars);
+            let head: String = output.chars().take(head_chars).collect();
+            let tail_reversed: String = output.chars().rev().take(tail_chars).collect();
+            let tail: String = tail_reversed.chars().rev().collect();
             format!("{head}{notice}{tail}")
         };
+        // The character bound limits candidate size, not token accounting.
+        // Count the entire projection, including its notice, so non-ASCII
+        // text and tiny budgets cannot exceed the original tokenizer's cap.
+        let mut low = 0_usize;
+        let mut high = output
+            .chars()
+            .take(available_tokens.saturating_mul(4))
+            .count();
+        while low < high {
+            let middle = low.saturating_add(high.saturating_sub(low).saturating_add(1) / 2);
+            if tokenizer.count_tokens(&render(middle)) <= max_tokens {
+                low = middle;
+            } else {
+                high = middle.saturating_sub(1);
+            }
+        }
+        let truncated_output = render(low);
         let mut metadata = std::collections::HashMap::new();
         metadata.insert(
             "output_handling".to_string(),

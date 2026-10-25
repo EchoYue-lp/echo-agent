@@ -181,6 +181,38 @@ become visible only after registry mutation or explicit invalidation. See [ADR 0
 Generation ordinals are allocated across all integrators in the process, so independent integrators
 can publish successive snapshots to the same Agent without resetting their order.
 
+### Selective prepared identities
+
+`PreparedPlugin::content_identity() -> &str` returns a SHA-256 for that plugin's
+same-prepare manifest (including its real optional version and dependencies), effective
+configuration/variables, discovered Skill identity documents, Hook/MCP declarations and frozen
+Subagent documents. Object keys and manifest dependency order are canonicalized; relative
+component paths and contents participate. Repreparation and process-local generation counters
+do not change this identity when the inputs are equal. An absent version remains absent: the
+digest is neither a fabricated version nor `latest`.
+
+`PreparedPluginSet::dependency_closure(id) -> Result<Vec<&PreparedPlugin>, String>` returns the
+enabled root and its transitive dependencies in stable dependency-first order. It selects only
+from that immutable applicable set. Original registry preparation still rejects missing or
+disabled dependencies, unsatisfied/invalid version constraints and cycles. An inapplicable set
+or a root not prepared in that set returns an error. Changing an unrelated plugin does not
+change the selected members' identities; changing a necessary dependency does. Inspecting an
+old set does not grant permission to publish it or keep its external resources alive.
+
+The complete `PreparedPluginSet::identity()` remains the aggregate identity for publication,
+not a substitute for this selected closure. Its encoding now aggregates the canonical plugin
+identities; previous hash strings are not a cross-release compatibility promise. Generation,
+publication targets, rollback receipts, cancellation and cleanup ownership are unchanged.
+
+The identity covers the inputs actually frozen by the framework, not an entire package:
+discovered `SKILL.md` identity documents do not freeze every `scripts/` or `references/` file;
+Hook commands and MCP connection declarations do not freeze external implementations or
+services. Product-specific declarations and inputs remain the embedding application's
+responsibility. See [ADR 0096](../adr/0096-selective-prepared-plugin-identity.md).
+The existing `demo56_plugin_system` example selects the actual prepared closure before using
+the same integrator for real coordinator publication. It remains in the workspace examples
+compile/test chain; no separate demonstration target or dependency is added.
+
 Each `ReactAgent` still owns one publication target, but hosts drive complete lifecycle
 transitions through `PluginCoordinator`. Construct it with the durable registry and integrator,
 then call `coordinator.reconcile(&mut agent)` for current intent or the typed `enable`, `reload`,

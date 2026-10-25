@@ -304,16 +304,19 @@ network error 进入既有 retry policy。
 
 ### 工具输出落盘与截断
 
-所有工具结果统一经过输出预算阶段。达到 1 MiB 的输出会先写入受管 spill 文件，
-模型只接收预览、完整文件路径和 `read_file` 回读提示。即使没有配置
-`max_tool_output_tokens`，超大输出仍会落盘。
+ReAct 工具结果统一经过输出预算阶段。启用 artifact 存储时，达到配置的字节阈值
+（框架默认 1 MiB）或超过 `max_tool_output_tokens` 的输出会先持久化。模型只接收预览、
+精确 artifact 路径、SHA-256 和 `read_artifact` 分页读取提示。即使没有配置
+`max_tool_output_tokens`，按字节阈值触发的 spill 仍然生效。
 
-配置 working directory 时，spill 文件写到
-`<working_dir>/.echo-agent/spill`，确保受工作目录约束的文件工具可以回读；未配置时
-回退系统临时目录。每次创建新 spill 时会尽力清理一小时前的旧文件。
+artifact 根目录和保留策略由 `tool_output_artifacts` 配置拥有。框架默认使用系统
+临时目录下的 `echo_agent_artifacts/tool-logs`，最大保留一小时；应用可以提供自己的
+受管根和保留策略。传入 `None` 禁用 artifact 持久化；仅配置 working directory
+不会将它变成 artifact 根或完整输出的读取权威。
 
-未达到 spill 阈值但超过 `max_tool_output_tokens` 的结果使用 UTF-8 安全的 head+tail
-视图，按 70/30 分配保留字符：
+持久化禁用或失败时，超预算输出使用 UTF-8 安全的 head+tail 视图，按 70/30 分配
+保留字符。原 `HeuristicTokenizer` 对“头部＋截断通知＋尾部”整体计数，ASCII、中文、
+emoji 混合输出也不能超过同一个 estimated-token 上限：
 
 ```
 完整输出: [────────────────────────────────────────] 10KB
@@ -321,6 +324,9 @@ network error 进入既有 retry policy。
                               ↑ 省略中间部分
 ```
 
-spill 创建失败时，框架使用保守的 fallback token 预算截断，不会把完整超大结果直接
-塞回模型。`ToolResult.truncated` 和 metadata 记录输出处理方式；spill 成功时，完整引用由
-类型化的 `ToolResult.artifact` descriptor 承载。
+预算很小时使用短通知或省略号；零 token 预算返回空的模型文本，但仍通过
+`ToolResult.truncated` 和 metadata 记录截断。这是估算 token 上限，不是 provider
+计费 token 保证。spill 失败且没有显式 token 配置时，继续采用既有的 8,000-token
+fallback。失败的 spill 不产生可恢复 artifact，被省略内容不能声称可通过
+`read_artifact` 恢复。spill 成功时，完整引用由类型化的 `ToolResult.artifact` descriptor
+承载；消费者不得从展示文字或 metadata 重建该引用。

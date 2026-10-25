@@ -81,8 +81,12 @@ impl PluginVariables {
         result = result.replace("${ECHO_PLUGIN_DATA}", &self.plugin_data.to_string_lossy());
         result = result.replace("${ECHO_PROJECT_DIR}", &self.project_dir.to_string_lossy());
 
-        // User config variables: ${user_config.KEY}
-        for (key, value) in &self.user_config {
+        // Keep the existing single pass deterministic even when a value contains
+        // another user-config placeholder. This is not recursive expansion: later
+        // keys may consume earlier inserted values, never restart the pass.
+        let mut ordered_config = self.user_config.iter().collect::<Vec<_>>();
+        ordered_config.sort_by(|left, right| left.0.cmp(right.0));
+        for (key, value) in ordered_config {
             let placeholder = format!("${{user_config.{key}}}");
             result = result.replace(&placeholder, value);
         }
@@ -190,6 +194,31 @@ mod tests {
         let input = "connect to ${user_config.api_endpoint}";
         let result = vars.substitute(input);
         assert_eq!(result, "connect to http://localhost:9090");
+    }
+
+    #[test]
+    fn user_config_cross_references_keep_stable_key_order_and_single_pass() {
+        for keys in [["alpha", "beta", "gamma"], ["gamma", "beta", "alpha"]] {
+            let mut config = HashMap::new();
+            for key in keys {
+                let value = match key {
+                    "alpha" => "${user_config.beta}",
+                    "beta" => "resolved",
+                    _ => "${user_config.alpha}",
+                };
+                config.insert(key.to_string(), value.to_string());
+            }
+            let variables = PluginVariables::new(
+                PathBuf::from("/tmp/plugin"),
+                PathBuf::from("/tmp/data"),
+                PathBuf::from("/tmp/project"),
+            )
+            .with_user_config(config);
+            assert_eq!(
+                variables.substitute("${user_config.alpha}|${user_config.gamma}"),
+                "resolved|${user_config.alpha}"
+            );
+        }
     }
 
     #[test]

@@ -103,13 +103,18 @@ cargo check --workspace --lib --no-default-features --locked
 
 ### framework 精确依赖诊断基线
 
-用户明确接受本 framework Cargo.lock SHA-256
-`4cdd98547fe19f58fb8d7fe0fe5c54b6342bf0b2f007f9d2591b47a993ad21d1`
-的49组精确 crate/version/source `warning[duplicate]` 合同。唯一当前机器权威为
+framework 既有独立人类裁决接受的是49组、107个精确 crate/version/source
+`warning[duplicate]` 身份；历史校验锁为
+`4cdd98547fe19f58fb8d7fe0fe5c54b6342bf0b2f007f9d2591b47a993ad21d1`。
+当前具名 **Tool＋Domain（679包）** 工作线的校验锁为
+`a6c5630b41c2240dec5a90de65962678b3d3eccfc7e872e237408aac774ddf78`。
+这是协调者在原四类官方扫描与独立精确对账通过后，对同一原接受集作的验证绑定维护，
+并非用户另行接受新 SHA 或新增风险；不扩张原49组/107身份、策略、工具、scope 或忽略集合。
+唯一当前机器权威为
 [精确基线](.cargo/cargo-deny-duplicate-baseline.json)，通过
 `scripts/check-cargo-deny-baseline.py` 执行并比较官方 cargo-deny 四类检查；保留
 `multiple-versions = "warn"`、完整原始输出及自然退出码，所有原命令仍须真实退出0。
-此项接受来自 framework 本次独立人类裁决，不能由 SDK 例外自动继承；duplicate
+原49组/107身份的接受来自 framework 既有独立人类裁决，不能由 SDK 例外自动继承；duplicate
 诊断不是编译 warning。其它工具类别、其它 warning/error、新增或缺失组、版本或来源
 变化、损坏/不完整输出一律阻断，不按49条数量放行，不添加 ignore 或改为 allow。
 锁图、framework revision、manifest/features、检查范围、工具版本或策略变化须 fresh

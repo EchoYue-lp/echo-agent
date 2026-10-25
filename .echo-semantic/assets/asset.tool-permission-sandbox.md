@@ -25,6 +25,7 @@ code_refs:
 - echo-execution/src/sandbox/local.rs
 - echo-tools/src/git_worktree.rs
 - echo-tools/src/git.rs
+- echo-tools/src/http_body.rs
 consumer_refs:
 - src/agent/react/subsystems/tool_exec.rs
 - echo-tools/src/lib.rs
@@ -92,3 +93,9 @@ Hook Allow protected-path、readonly custom Tool 与 #47 精确资源 cleanup �
 ## 现有GitTool分支切换具体闭合
 
 只新增GitBranchTool switch原根缺陷的源码/四场景消费，nativeGit维持唯一repo事实。实际原CLI2/Tool3fail→same4pass与最后保护oracle/源码独审支持具体localresolved。此模型当前observed定位046674保存的a193原source文件/新场景，其他旧正文与对象状态全部保留；不把原DB/RAG verified平移为全部Git，也不扩大原permission/cleanup闭合。最终snapshot/remoteCI及SDKpublishedpin消费者独立。
+
+## Web远端失败的本次定向映射
+
+`echo-tools/src/http_body.rs` 是已有HTTP适配与共享body读取边界；本次在原typed reqwest/HTTP状态与header仍存在时保留远端失败事实，不通过错误文本猜测。Web provider继续不拥有失败重试；既有ToolFailure承载恢复事实，原ToolManager保持唯一有限重试、等待取消及物理收束权威。DDG原策略回退、分页位置和各reader原大小/编码范围保持；不据此扩展research等其它消费者的验收。
+
+当前Tool＋Domain679包候选的976项选定Rust测试、格式、focused Clippy、featureless/web与demo41/demo56编译已实际通过；三个旧行为对照及首轮新测试返回分支误判的真实失败原件保留。本地原件与精确source epoch见`.echo-semantic/local/framework-tool-domain/batch-return.json`、`source-epoch3.json`及独立增量审查；64预算组合属于一条回归，不另计64测试。该映射不改变本资产原needs_review、observed_at或旧未知项，不表示全资产、完整feature矩阵、SDK Host、新accepted、native或main交付完成。

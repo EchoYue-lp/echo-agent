@@ -87,13 +87,46 @@ impl TryFrom<&ReactError> for AgentFailure {
                     None,
                 ),
             },
-            ReactError::Tool(_) => (
-                AgentFailureCategory::Tool,
-                AgentTerminalKind::Failed,
-                false,
-                "tool",
-                None,
-            ),
+            ReactError::Tool(inner) => match inner.as_ref() {
+                ToolError::RemoteFailure {
+                    http_status,
+                    failure,
+                    ..
+                } => (
+                    AgentFailureCategory::Tool,
+                    match failure.category {
+                        crate::tools::ToolFailureCategory::Timeout => AgentTerminalKind::TimedOut,
+                        crate::tools::ToolFailureCategory::Cancelled => {
+                            AgentTerminalKind::Cancelled
+                        }
+                        _ => AgentTerminalKind::Failed,
+                    },
+                    failure.allows_automatic_retry(),
+                    "tool_remote",
+                    *http_status,
+                ),
+                ToolError::Timeout(_) => (
+                    AgentFailureCategory::Tool,
+                    AgentTerminalKind::TimedOut,
+                    true,
+                    "tool_timeout",
+                    None,
+                ),
+                ToolError::Cancelled(_) => (
+                    AgentFailureCategory::Tool,
+                    AgentTerminalKind::Cancelled,
+                    false,
+                    "tool_cancelled",
+                    None,
+                ),
+                _ => (
+                    AgentFailureCategory::Tool,
+                    AgentTerminalKind::Failed,
+                    false,
+                    "tool",
+                    None,
+                ),
+            },
             ReactError::Parse(_) => (
                 AgentFailureCategory::Parse,
                 AgentTerminalKind::Failed,
@@ -506,6 +539,16 @@ pub enum ToolError {
         /// Error message
         message: String,
     },
+    /// A remote operation failed while its owner still had structured facts.
+    /// HTTP adapters normalize their own types here; core does not depend on
+    /// a client or infer recovery by parsing the diagnostic message.
+    #[error("Tool '{tool}' remote operation failed: {message}")]
+    RemoteFailure {
+        tool: String,
+        message: String,
+        http_status: Option<u16>,
+        failure: Box<crate::tools::ToolFailure>,
+    },
     /// Execution timed out
     #[error("Tool '{0}' execution timed out")]
     Timeout(String),
@@ -809,6 +852,34 @@ impl From<reqwest::Error> for ReactError {
 
 /// Convenience Result alias
 pub type Result<T> = std::result::Result<T, ReactError>;
+
+#[cfg(test)]
+mod remote_tool_projection_tests {
+    use super::*;
+    use crate::tools::{ToolFailure, ToolFailureCategory};
+
+    #[test]
+    fn remote_tool_terminal_projection_preserves_domain_status_and_cause() -> Result<()> {
+        for (category, terminal) in [
+            (ToolFailureCategory::Transient, AgentTerminalKind::Failed),
+            (ToolFailureCategory::Timeout, AgentTerminalKind::TimedOut),
+            (ToolFailureCategory::Cancelled, AgentTerminalKind::Cancelled),
+        ] {
+            let error = ToolError::RemoteFailure {
+                tool: "web_search".to_string(),
+                message: "fixture".to_string(),
+                http_status: Some(429),
+                failure: Box::new(ToolFailure::new(category)),
+            }
+            .into();
+            let projected = AgentFailure::try_from(&error)?;
+            assert_eq!(projected.category, AgentFailureCategory::Tool);
+            assert_eq!(projected.terminal_kind, terminal);
+            assert_eq!(projected.http_status, Some(429));
+        }
+        Ok(())
+    }
+}
 
 #[cfg(test)]
 mod agent_failure_tests {

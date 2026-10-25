@@ -12,10 +12,9 @@
 //!
 //! Visit <https://tavily.com/> to register and get an API Key.
 
-use super::utils::truncate_chars;
 use super::{SearchProvider, SearchResult};
 use async_trait::async_trait;
-use echo_core::error::{Result, ToolError};
+use echo_core::error::Result;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -92,6 +91,18 @@ impl SearchProvider for TavilyProvider {
     }
 
     async fn search(&self, query: &str, max_results: usize) -> Result<Vec<SearchResult>> {
+        self.search_endpoint(query, max_results, "https://api.tavily.com/search")
+            .await
+    }
+}
+
+impl TavilyProvider {
+    async fn search_endpoint(
+        &self,
+        query: &str,
+        max_results: usize,
+        endpoint: &str,
+    ) -> Result<Vec<SearchResult>> {
         let request = TavilyRequest {
             api_key: self.api_key.clone(),
             query: query.to_string(),
@@ -101,48 +112,15 @@ impl SearchProvider for TavilyProvider {
 
         let response = self
             .client
-            .post("https://api.tavily.com/search")
+            .post(endpoint)
             .header("Content-Type", "application/json")
             .json(&request)
             .send()
             .await
-            .map_err(|e| ToolError::ExecutionFailed {
-                tool: "web_search".into(),
-                message: format!("Tavily request failed: {}", e),
-            })?;
+            .map_err(|error| crate::http_body::request_error("web_search", error, None))?;
 
-        let status = response.status();
-        if status.as_u16() == 401 {
-            return Err(ToolError::ExecutionFailed {
-                tool: "web_search".into(),
-                message: "Tavily API Key is invalid or expired".into(),
-            }
-            .into());
-        }
-        if status.as_u16() == 429 {
-            return Err(ToolError::ExecutionFailed {
-                tool: "web_search".into(),
-                message: "Tavily API rate limit exceeded".into(),
-            }
-            .into());
-        }
-        if !status.is_success() {
-            let body = crate::http_body::read_bounded_text(
-                response,
-                crate::http_body::MAX_API_RESPONSE_BYTES,
-                "web_search",
-                None,
-            )
-            .await?;
-            return Err(ToolError::ExecutionFailed {
-                tool: "web_search".into(),
-                message: format!(
-                    "Tavily returned error ({}): {}",
-                    status,
-                    truncate_chars(&body, 200)
-                ),
-            }
-            .into());
+        if !response.status().is_success() {
+            return Err(crate::http_body::response_error("web_search", &response));
         }
 
         let tavily_resp: TavilyResponse = crate::http_body::read_bounded_json(
@@ -176,6 +154,42 @@ impl SearchProvider for TavilyProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn actual_http_rate_limit_keeps_hint_and_invalid_json_stops() -> Result<()> {
+        use crate::http_body::test_http::{client, response, server};
+        use echo_core::tools::{ToolFailure, ToolFailureCategory};
+        for (status, body, expected) in [
+            (429, "secret", ToolFailureCategory::Transient),
+            (200, "{invalid", ToolFailureCategory::Permanent),
+        ] {
+            let (endpoint, serving) = server(vec![response(status, "Retry-After: 2\r\n", body)])?;
+            let provider = TavilyProvider {
+                client: client()?,
+                api_key: "fixture-key".to_string(),
+            };
+            let error = provider
+                .search_endpoint("query", 5, &endpoint)
+                .await
+                .err()
+                .ok_or_else(|| {
+                    echo_core::error::ReactError::Other("bad response returned success".to_string())
+                })?;
+            let failure = ToolFailure::from_error(&error, false);
+            assert_eq!(failure.category, expected);
+            assert_eq!(
+                failure.retry_after_ms,
+                if status == 429 { Some(2_000) } else { None }
+            );
+            assert!(!error.to_string().contains("fixture-key"));
+            assert!(!error.to_string().contains("{invalid"));
+            let requests = serving.join().map_err(|_| {
+                echo_core::error::ReactError::Other("HTTP fixture panicked".to_string())
+            })??;
+            assert_eq!(requests.len(), 1);
+        }
+        Ok(())
+    }
 
     #[test]
     fn test_tavily_request_serialization() -> std::result::Result<(), String> {

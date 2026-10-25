@@ -175,12 +175,20 @@ impl ToolFailure {
                 ) {
                     failure.category = ToolFailureCategory::PartialSideEffect;
                 }
-                return failure.with_side_effect(ToolSideEffect::Possible);
+                let side_effect = if failure.side_effect == ToolSideEffect::Confirmed {
+                    ToolSideEffect::Confirmed
+                } else {
+                    ToolSideEffect::Possible
+                };
+                return failure.with_side_effect(side_effect);
             }
             failure
         };
         match error {
             ReactError::Tool(tool_error) => match tool_error.as_ref() {
+                ToolError::RemoteFailure { failure, .. } => {
+                    possible_side_effect(failure.as_ref().clone())
+                }
                 ToolError::MissingParameter(_)
                 | ToolError::InvalidParameter { .. }
                 | ToolError::InvalidPath { .. }
@@ -198,6 +206,14 @@ impl ToolFailure {
                     possible_side_effect(Self::new(ToolFailureCategory::Permanent))
                 }
             },
+            ReactError::Agent(agent_error)
+                if matches!(
+                    agent_error.as_ref(),
+                    crate::error::AgentError::Cancelled(_) | crate::error::AgentError::Interrupted
+                ) =>
+            {
+                possible_side_effect(Self::new(ToolFailureCategory::Cancelled))
+            }
             ReactError::Sandbox(sandbox_error) => match sandbox_error.as_ref() {
                 SandboxError::Unavailable(_) | SandboxError::StartFailed(_) => {
                     Self::new(ToolFailureCategory::Unavailable)
@@ -2027,6 +2043,61 @@ mod tool_context_tests {
         assert_eq!(failure.side_effect, ToolSideEffect::Possible);
         assert_eq!(failure.recovery, ToolRecoveryAction::VerifyThenRetry);
         assert!(!failure.allows_automatic_retry());
+    }
+}
+
+#[cfg(test)]
+mod remote_failure_tests {
+    use super::*;
+
+    #[test]
+    fn remote_failure_preserves_facts_and_only_narrows_effect_recovery() {
+        let expected = ToolFailure::new(ToolFailureCategory::Transient)
+            .retryable()
+            .with_retry_after(1_234)
+            .with_postcondition("read response");
+        let error = ReactError::from(ToolError::RemoteFailure {
+            tool: "web_search".to_string(),
+            message: "rate limited".to_string(),
+            http_status: Some(429),
+            failure: Box::new(expected.clone()),
+        });
+        assert_eq!(ToolFailure::from_error(&error, false), expected);
+        let narrowed = ToolFailure::from_error(&error, true);
+        assert_eq!(narrowed.side_effect, ToolSideEffect::Possible);
+        assert_eq!(narrowed.retry_after_ms, Some(1_234));
+        assert!(!narrowed.allows_automatic_retry());
+
+        let confirmed = ReactError::from(ToolError::RemoteFailure {
+            tool: "remote_write".to_string(),
+            message: "response lost after commit".to_string(),
+            http_status: None,
+            failure: Box::new(expected.with_side_effect(ToolSideEffect::Confirmed)),
+        });
+        let narrowed = ToolFailure::from_error(&confirmed, true);
+        assert_eq!(narrowed.side_effect, ToolSideEffect::Confirmed);
+        assert!(!narrowed.allows_automatic_retry());
+    }
+
+    #[test]
+    fn agent_cancellation_keeps_cancelled_category_and_legacy_errors_stay_permanent() {
+        for error in [
+            ReactError::from(crate::error::AgentError::Cancelled("stopped".to_string())),
+            ReactError::from(crate::error::AgentError::Interrupted),
+        ] {
+            let failure = ToolFailure::from_error(&error, false);
+            assert_eq!(failure.category, ToolFailureCategory::Cancelled);
+            assert_eq!(failure.recovery, ToolRecoveryAction::Stop);
+            assert!(!failure.allows_automatic_retry());
+        }
+        let legacy = ReactError::from(ToolError::ExecutionFailed {
+            tool: "web_search".to_string(),
+            message: "HTTP429 words are not a typed cause".to_string(),
+        });
+        assert_eq!(
+            ToolFailure::from_error(&legacy, false).category,
+            ToolFailureCategory::Permanent
+        );
     }
 }
 

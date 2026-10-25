@@ -174,15 +174,29 @@ impl Tool for WebSearchTool {
                     page_info.apply_to(&mut result);
                     Ok(result)
                 }
-                Err(error) => Ok(ToolResult::error(format!(
-                    "Search provider '{}' failed: {error}",
-                    self.provider.name()
-                ))
-                .with_failure(
-                    ToolFailure::new(ToolFailureCategory::Transient)
-                        .retryable()
-                        .with_retry_after(1_000),
-                )),
+                Err(error @ echo_core::error::ReactError::ExecutionNotSettled { .. }) => Err(error),
+                Err(error) => {
+                    let failure = ToolFailure::from_error(&error, false);
+                    let status = match &error {
+                        echo_core::error::ReactError::Tool(tool_error) => match tool_error.as_ref()
+                        {
+                            ToolError::RemoteFailure { http_status, .. } => *http_status,
+                            _ => None,
+                        },
+                        _ => None,
+                    };
+                    let mut result = ToolResult::error(format!(
+                        "Search provider '{}' failed: {error}",
+                        self.provider.name()
+                    ))
+                    .with_failure(failure);
+                    if let Some(status) = status {
+                        result
+                            .metadata
+                            .insert("http_status".to_string(), status.to_string());
+                    }
+                    Ok(result)
+                }
             }
         })
     }
@@ -255,9 +269,11 @@ mod tests {
         async fn search(&self, _query: &str, _max_results: usize) -> Result<Vec<SearchResult>> {
             let call = self.call_count.fetch_add(1, Ordering::SeqCst);
             if call < self.fail_count {
-                Err(echo_core::error::ToolError::ExecutionFailed {
+                Err(echo_core::error::ToolError::RemoteFailure {
                     tool: "mock".to_string(),
                     message: format!("Simulated failure #{}", call + 1),
+                    http_status: Some(503),
+                    failure: Box::new(ToolFailure::new(ToolFailureCategory::Transient)),
                 }
                 .into())
             } else {
@@ -289,14 +305,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn transient_failure_is_returned_to_the_central_retry_policy() {
+    async fn transient_failure_is_returned_to_the_central_retry_policy() -> Result<()> {
         let (provider, counter) = FailNTimesProvider::new(2);
         let tool = WebSearchTool::new(Box::new(provider));
 
         let mut params = std::collections::HashMap::new();
         params.insert("query".to_string(), serde_json::json!("test"));
 
-        let result = tool.execute(params).await.unwrap();
+        let result = tool.execute(params).await?;
         assert!(!result.success);
         assert_eq!(counter.load(Ordering::SeqCst), 1);
         assert!(
@@ -305,20 +321,92 @@ mod tests {
                 .as_ref()
                 .is_some_and(ToolFailure::allows_automatic_retry)
         );
+        Ok(())
     }
 
     #[tokio::test]
-    async fn provider_failure_is_classified_as_transient() {
+    async fn unclassified_provider_failure_keeps_original_permanent_policy() -> Result<()> {
         let tool = WebSearchTool::new(Box::new(AlwaysFailProvider));
 
         let mut params = std::collections::HashMap::new();
         params.insert("query".to_string(), serde_json::json!("test"));
 
-        let result = tool.execute(params).await.unwrap();
+        let result = tool.execute(params).await?;
         assert!(!result.success);
         assert_eq!(
             result.failure.map(|failure| failure.category),
-            Some(ToolFailureCategory::Transient)
+            Some(ToolFailureCategory::Permanent)
         );
+        Ok(())
+    }
+
+    struct RemoteFailureProvider {
+        failure: ToolFailure,
+    }
+
+    #[async_trait::async_trait]
+    impl SearchProvider for RemoteFailureProvider {
+        fn name(&self) -> &str {
+            "fixture-name-is-not-a-classifier"
+        }
+
+        async fn search(&self, _query: &str, _max_results: usize) -> Result<Vec<SearchResult>> {
+            Err(ToolError::RemoteFailure {
+                tool: "web_search".to_string(),
+                message: "diagnostic HTTP401 words do not classify this error".to_string(),
+                http_status: Some(429),
+                failure: Box::new(self.failure.clone()),
+            }
+            .into())
+        }
+    }
+
+    #[tokio::test]
+    async fn direct_search_preserves_complete_remote_failure_and_status() -> Result<()> {
+        for category in [
+            ToolFailureCategory::Permanent,
+            ToolFailureCategory::Transient,
+            ToolFailureCategory::Cancelled,
+        ] {
+            let expected = ToolFailure::new(category)
+                .with_retry_after(1_234)
+                .with_postcondition("retain original cause");
+            let tool = WebSearchTool::new(Box::new(RemoteFailureProvider {
+                failure: expected.clone(),
+            }));
+            let result = tool
+                .execute(std::collections::HashMap::from([(
+                    "query".to_string(),
+                    serde_json::json!("query"),
+                )]))
+                .await?;
+            assert!(!result.success);
+            assert_eq!(result.failure, Some(expected));
+            assert_eq!(
+                result.metadata.get("http_status").map(String::as_str),
+                Some("429")
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cursor_rejection_keeps_the_original_fetch_boundary() -> Result<()> {
+        for (cursor, expected_calls) in [("", 0), ("not-a-cursor", 1)] {
+            let (provider, calls) = FailNTimesProvider::new(0);
+            let tool = WebSearchTool::new(Box::new(provider));
+            let result = tool
+                .execute(std::collections::HashMap::from([
+                    ("query".to_string(), serde_json::json!("query")),
+                    ("cursor".to_string(), serde_json::json!(cursor)),
+                ]))
+                .await?;
+            assert_eq!(
+                result.failure.as_ref().map(|failure| failure.category),
+                Some(ToolFailureCategory::InvalidArguments)
+            );
+            assert_eq!(calls.load(Ordering::SeqCst), expected_calls);
+        }
+        Ok(())
     }
 }

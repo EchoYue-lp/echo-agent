@@ -2252,6 +2252,72 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "web")]
+    #[tokio::test]
+    async fn react_tool_pipeline_preserves_web_remote_failure_for_the_caller() -> Result<()> {
+        use echo_core::tools::{ToolFailure, ToolFailureCategory};
+        use echo_tools::web::providers::{SearchProvider, SearchResult};
+
+        struct AuthenticationFailure;
+        #[async_trait]
+        impl SearchProvider for AuthenticationFailure {
+            fn name(&self) -> &str {
+                "typed-authentication-fixture"
+            }
+            async fn search(&self, _query: &str, _max_results: usize) -> Result<Vec<SearchResult>> {
+                Err(echo_core::error::ToolError::RemoteFailure {
+                    tool: "web_search".to_string(),
+                    message: "authentication failed".to_string(),
+                    http_status: Some(401),
+                    failure: Box::new(ToolFailure::new(ToolFailureCategory::Permanent)),
+                }
+                .into())
+            }
+        }
+
+        let config = crate::agent::AgentConfig::new("test-model", "remote-projection", "test")
+            .permission_mode(PermissionMode::BypassPermissions);
+        let mut agent = crate::agent::ReactAgent::new(config);
+        agent.add_tool(Box::new(echo_tools::web::WebSearchTool::new(Box::new(
+            AuthenticationFailure,
+        ))));
+        let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+        let input = serde_json::json!({"query":"fixture"});
+        let params = ToolParameters::from([("query".to_string(), serde_json::json!("fixture"))]);
+        let failure = snapshot
+            .execute_tool_with_policy(
+                "remote-projection".to_string(),
+                "web_search",
+                &params,
+                &input,
+                None,
+            )
+            .await
+            .err()
+            .ok_or_else(|| {
+                ReactError::Other("failed Web tool returned pipeline success".to_string())
+            })?;
+        let outcome = failure.result.as_ref().ok_or_else(|| {
+            ReactError::Other("pipeline lost its failed Web ToolResult".to_string())
+        })?;
+        assert!(!outcome.success);
+        assert_eq!(
+            outcome.failure.as_ref().map(|failure| failure.category),
+            Some(ToolFailureCategory::Permanent)
+        );
+        assert_eq!(
+            outcome.metadata.get("http_status").map(String::as_str),
+            Some("401")
+        );
+        assert!(
+            outcome
+                .error
+                .as_deref()
+                .is_some_and(|message| message.contains("authentication failed"))
+        );
+        Ok(())
+    }
+
     struct HookApprovalProbe {
         executions: Arc<std::sync::atomic::AtomicUsize>,
     }
@@ -3656,6 +3722,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn truncation_stage_fallback_honors_token_budget_for_unicode_and_tiny_limits()
+    -> Result<()> {
+        use echo_core::tokenizer::{HeuristicTokenizer, Tokenizer};
+
+        let unavailable_root =
+            tempfile::NamedTempFile::new().map_err(|error| ReactError::Other(error.to_string()))?;
+        for spill_fails in [false, true] {
+            for input in [
+                "plain ASCII output ".repeat(2_000),
+                "中文结果".repeat(2_500),
+                "🙂🚀".repeat(5_000),
+                "ASCII中文🙂".repeat(2_000),
+            ] {
+                for max_tokens in [0, 1, 2, 4, 10, 20, 64, 4_000] {
+                    let artifacts = spill_fails.then(|| {
+                        echo_core::tools::artifact::ToolOutputArtifactConfig::new(
+                            unavailable_root.path().join("artifacts"),
+                            "test",
+                        )
+                    });
+                    let config = crate::agent::AgentConfig::new("test-model", "test-agent", "test")
+                        .max_tool_output_tokens(max_tokens)
+                        .tool_output_artifacts(artifacts);
+                    let agent = crate::agent::ReactAgent::new(config);
+                    let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+                    let mut ctx = completed_context(input.clone());
+
+                    TruncationStage.run(&mut ctx, &snapshot).await?;
+
+                    let output = ctx.output.as_deref().ok_or_else(|| {
+                        ReactError::Other("truncation stage produced no output".to_string())
+                    })?;
+                    assert!(
+                        HeuristicTokenizer.count_tokens(output) <= max_tokens,
+                        "fallback exceeded {max_tokens} tokens with spill_fails={spill_fails}"
+                    );
+                    let result = ctx.result.as_ref().ok_or_else(|| {
+                        ReactError::Other("truncation stage lost tool result".to_string())
+                    })?;
+                    assert!(result.truncated);
+                    assert!(result.artifact.is_none());
+                    assert_eq!(
+                        result.metadata.get("output_handling").map(String::as_str),
+                        Some(if spill_fails {
+                            "spill_failed_truncated"
+                        } else {
+                            "truncated"
+                        })
+                    );
+                    assert_eq!(result.metadata.contains_key("spill_error"), spill_fails);
+                    assert_eq!(metadata_u64(result, "original_bytes"), input.len() as u64);
+                    assert_eq!(metadata_u64(result, "returned_bytes"), output.len() as u64);
+                    assert_eq!(
+                        metadata_usize(result, "estimated_tokens"),
+                        HeuristicTokenizer.count_tokens(&input)
+                    );
+                    if max_tokens == 0 {
+                        assert!(output.is_empty());
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn truncation_stage_records_inline_output_metrics() -> Result<()> {
         let agent = crate::agent::ReactAgentBuilder::new()
             .model("test-model")
@@ -3683,6 +3815,8 @@ mod tests {
 
     #[tokio::test]
     async fn truncation_stage_falls_back_when_spill_directory_is_unwritable() -> Result<()> {
+        use echo_core::tokenizer::{HeuristicTokenizer, Tokenizer};
+
         let working_dir_file =
             tempfile::NamedTempFile::new().map_err(|error| ReactError::Other(error.to_string()))?;
         let agent = crate::agent::ReactAgentBuilder::new()
@@ -3713,6 +3847,12 @@ mod tests {
                 .as_deref()
                 .is_some_and(|output| output.contains("Output truncated"))
         );
+        assert!(
+            ctx.output
+                .as_deref()
+                .is_some_and(|output| HeuristicTokenizer.count_tokens(output) <= 8_000)
+        );
+        assert!(result.artifact.is_none());
         Ok(())
     }
 

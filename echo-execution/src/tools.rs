@@ -20,6 +20,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 const TOOL_RESULT_CACHE_TTL: Duration = Duration::from_secs(60);
 const TOOL_RESULT_CACHE_CAPACITY: usize = 256;
+const MAX_TOOL_RETRY_DELAY_MS: u64 = 30_000;
 
 fn cancelled_error(tool_name: &str) -> ReactError {
     ReactError::Agent(Box::new(AgentError::Cancelled(format!(
@@ -215,7 +216,7 @@ fn retry_delay_ms(configured_ms: u64, retry_after_ms: Option<u64>, attempt: u32)
     let base = configured_ms
         .saturating_mul(1_u64 << exponent)
         .max(retry_after_ms.unwrap_or(0))
-        .min(30_000);
+        .min(MAX_TOOL_RETRY_DELAY_MS);
     if base == 0 {
         return 0;
     }
@@ -227,7 +228,7 @@ fn retry_delay_ms(configured_ms: u64, retry_after_ms: Option<u64>, attempt: u32)
     }
     let jitter_cap = base.saturating_div(4).max(1);
     base.saturating_add(hasher.finish() % jitter_cap)
-        .min(30_000)
+        .min(MAX_TOOL_RETRY_DELAY_MS)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -1200,10 +1201,12 @@ impl ToolManager {
                 }
                 Ok(result)
                     if attempt < max_retries
-                        && result
-                            .failure
-                            .as_ref()
-                            .is_some_and(ToolFailure::allows_automatic_retry) =>
+                        && result.failure.as_ref().is_some_and(|failure| {
+                            failure.allows_automatic_retry()
+                                && failure
+                                    .retry_after_ms
+                                    .is_none_or(|delay| delay <= MAX_TOOL_RETRY_DELAY_MS)
+                        }) =>
                 {
                     next_retry_after_ms = result
                         .failure
@@ -1214,7 +1217,12 @@ impl ToolManager {
                 Err(error @ ReactError::ExecutionNotSettled { .. }) => return Err(error),
                 Err(error) if attempt < max_retries => {
                     let failure = ToolFailure::from_error(&error, !is_read);
-                    if failure.allows_automatic_retry() {
+                    if failure.allows_automatic_retry()
+                        && failure
+                            .retry_after_ms
+                            .is_none_or(|delay| delay <= MAX_TOOL_RETRY_DELAY_MS)
+                    {
+                        next_retry_after_ms = failure.retry_after_ms;
                         last_err = Some(error);
                     } else {
                         return Err(error);
@@ -1503,10 +1511,12 @@ impl ToolManager {
                 Ok(result)
                     if attempt < max_retries
                         && !output_forwarded
-                        && result
-                            .failure
-                            .as_ref()
-                            .is_some_and(ToolFailure::allows_automatic_retry) =>
+                        && result.failure.as_ref().is_some_and(|failure| {
+                            failure.allows_automatic_retry()
+                                && failure
+                                    .retry_after_ms
+                                    .is_none_or(|delay| delay <= MAX_TOOL_RETRY_DELAY_MS)
+                        }) =>
                 {
                     next_retry_after_ms = result
                         .failure
@@ -1517,7 +1527,12 @@ impl ToolManager {
                 Err(error @ ReactError::ExecutionNotSettled { .. }) => return Err(error),
                 Err(error) if attempt < max_retries && !output_forwarded => {
                     let failure = ToolFailure::from_error(&error, !is_read);
-                    if failure.allows_automatic_retry() {
+                    if failure.allows_automatic_retry()
+                        && failure
+                            .retry_after_ms
+                            .is_none_or(|delay| delay <= MAX_TOOL_RETRY_DELAY_MS)
+                    {
+                        next_retry_after_ms = failure.retry_after_ms;
                         last_err = Some(error);
                     } else {
                         return Err(error);
@@ -4318,5 +4333,177 @@ mod execute_with_context_tests {
             Some(Path::new("/wt/a")),
             "session A must still see /wt/a after session B used the same ToolManager"
         );
+    }
+}
+
+#[cfg(test)]
+mod remote_failure_retry_tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+    use std::time::Instant;
+
+    struct RemoteRetryTool {
+        as_result: bool,
+        hint: u64,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl Tool for RemoteRetryTool {
+        fn name(&self) -> &str {
+            "remote_retry_fixture"
+        }
+        fn description(&self) -> &str {
+            "one typed remote failure then success"
+        }
+        fn parameters(&self) -> Value {
+            json!({"type":"object"})
+        }
+        fn risk_level(&self) -> ToolRiskLevel {
+            ToolRiskLevel::ReadOnly
+        }
+        fn capabilities(&self) -> ToolCapabilities {
+            ToolCapabilities::read_only(Vec::new())
+        }
+        fn execute(
+            &self,
+            _parameters: ToolParameters,
+        ) -> futures::future::BoxFuture<'_, Result<ToolResult>> {
+            Box::pin(async move {
+                if self.calls.fetch_add(1, Ordering::SeqCst) > 0 {
+                    return Ok(ToolResult::success("done"));
+                }
+                let failure = ToolFailure::new(echo_core::tools::ToolFailureCategory::Transient)
+                    .with_retry_after(self.hint);
+                if self.as_result {
+                    Ok(ToolResult::error("remote failure").with_failure(failure))
+                } else {
+                    Err(ToolError::RemoteFailure {
+                        tool: self.name().to_string(),
+                        message: "remote failure".to_string(),
+                        http_status: Some(429),
+                        failure: Box::new(failure),
+                    }
+                    .into())
+                }
+            })
+        }
+    }
+
+    fn manager(as_result: bool, hint: u64) -> (ToolManager, Arc<AtomicUsize>) {
+        let manager = ToolManager::new_with_config(ToolExecutionConfig {
+            timeout_ms: 0,
+            retry_on_fail: true,
+            max_retries: 1,
+            retry_delay_ms: 0,
+            max_concurrency: None,
+            max_read_concurrency: None,
+        });
+        let calls = Arc::new(AtomicUsize::new(0));
+        manager.register(Box::new(RemoteRetryTool {
+            as_result,
+            hint,
+            calls: Arc::clone(&calls),
+        }));
+        (manager, calls)
+    }
+
+    #[tokio::test]
+    async fn typed_results_and_errors_both_retain_retry_lower_bound() -> Result<()> {
+        for as_result in [false, true] {
+            for streaming in [false, true] {
+                let (manager, calls) = manager(as_result, 30);
+                let start = Instant::now();
+                let result = if streaming {
+                    manager
+                        .execute_tool_stream_with_context(
+                            "remote_retry_fixture",
+                            ToolParameters::new(),
+                            &ToolContext::default(),
+                            None,
+                        )
+                        .await?
+                } else {
+                    manager
+                        .execute_tool("remote_retry_fixture", ToolParameters::new())
+                        .await?
+                };
+                assert!(result.success);
+                assert_eq!(calls.load(Ordering::SeqCst), 2);
+                assert!(start.elapsed() >= Duration::from_millis(30));
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn retry_hint_above_existing_cap_returns_without_early_replay() -> Result<()> {
+        for as_result in [false, true] {
+            for streaming in [false, true] {
+                let (manager, calls) = manager(as_result, 30_001);
+                let execution = async {
+                    if streaming {
+                        manager
+                            .execute_tool_stream_with_context(
+                                "remote_retry_fixture",
+                                ToolParameters::new(),
+                                &ToolContext::default(),
+                                None,
+                            )
+                            .await
+                    } else {
+                        manager
+                            .execute_tool("remote_retry_fixture", ToolParameters::new())
+                            .await
+                    }
+                };
+                let outcome = tokio::time::timeout(Duration::from_millis(100), execution)
+                    .await
+                    .map_err(|_| {
+                        ReactError::Other(
+                            "manager attempted an unfulfillable bounded retry".to_string(),
+                        )
+                    })?;
+                let failure = match outcome {
+                    Ok(result) => result
+                        .failure
+                        .ok_or_else(|| ReactError::Other("failure lost".to_string()))?,
+                    Err(error) => ToolFailure::from_error(&error, false),
+                };
+                assert_eq!(failure.retry_after_ms, Some(30_001));
+                assert_eq!(calls.load(Ordering::SeqCst), 1);
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn remote_retry_wait_can_be_cancelled_without_another_attempt() -> Result<()> {
+        let (manager, calls) = manager(false, 1_000);
+        let cancellation = Arc::new(echo_core::agent::CancellationToken::new());
+        let context = ToolContext {
+            cancel: Some(Arc::clone(&cancellation)),
+            ..ToolContext::default()
+        };
+        let execution = tokio::spawn(async move {
+            manager
+                .execute_tool_with_context("remote_retry_fixture", ToolParameters::new(), &context)
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while calls.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .map_err(|_| ReactError::Other("first remote attempt did not start".to_string()))?;
+        cancellation.cancel();
+        let outcome = execution
+            .await
+            .map_err(|error| ReactError::Other(error.to_string()))?;
+        assert!(
+            matches!(outcome, Err(ReactError::Agent(ref error)) if matches!(error.as_ref(), AgentError::Cancelled(_)))
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        Ok(())
     }
 }

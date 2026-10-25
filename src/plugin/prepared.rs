@@ -1,6 +1,6 @@
 use super::{PluginRegistry, PluginVariables};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -100,6 +100,8 @@ impl PreparedPluginDocument {
 #[derive(Debug, Clone)]
 pub struct PreparedPlugin {
     id: String,
+    content_identity: String,
+    dependencies: Vec<String>,
     variables: PluginVariables,
     skills: Vec<PreparedPluginSkill>,
     hooks: Option<echo_execution::skills::hooks::HooksDefinition>,
@@ -112,6 +114,13 @@ pub struct PreparedPlugin {
 impl PreparedPlugin {
     pub fn id(&self) -> &str {
         &self.id
+    }
+
+    /// SHA-256 of this plugin's same-prepare manifest, effective configuration,
+    /// variables and frozen component inputs. This is not a whole-package archive
+    /// or proof that external Hook/MCP implementations are unchanged.
+    pub fn content_identity(&self) -> &str {
+        &self.content_identity
     }
 
     pub fn root(&self) -> &Path {
@@ -169,6 +178,50 @@ impl PreparedPluginSet {
 
     pub fn plugins(&self) -> &[PreparedPlugin] {
         &self.plugins
+    }
+
+    /// Return this enabled root and its transitive dependencies, dependencies
+    /// first in stable order, from this immutable applicable generation only.
+    /// The original registry resolver validates presence, enabled state, version
+    /// constraints and cycles during prepare; this method only selects that graph.
+    pub fn dependency_closure(&self, plugin_id: &str) -> Result<Vec<&PreparedPlugin>, String> {
+        if !self.applicable {
+            return Err(format!(
+                "plugin '{plugin_id}' has no closure in an inapplicable prepared generation"
+            ));
+        }
+        let root = self
+            .plugins
+            .iter()
+            .find(|plugin| plugin.id() == plugin_id)
+            .ok_or_else(|| {
+                format!("plugin '{plugin_id}' is not enabled or prepared in this generation")
+            })?;
+        let mut selected = BTreeSet::new();
+        let mut pending = vec![root];
+        while let Some(plugin) = pending.pop() {
+            if !selected.insert(plugin.id()) {
+                continue;
+            }
+            for dependency in &plugin.dependencies {
+                let prepared = self
+                    .plugins
+                    .iter()
+                    .find(|candidate| candidate.id() == dependency.as_str())
+                    .ok_or_else(|| {
+                        format!(
+                            "prepared plugin '{}' is missing dependency '{dependency}'",
+                            plugin.id()
+                        )
+                    })?;
+                pending.push(prepared);
+            }
+        }
+        Ok(self
+            .plugins
+            .iter()
+            .filter(|plugin| selected.contains(plugin.id()))
+            .collect())
     }
 
     pub fn diagnostics(&self) -> &[PluginPreparationDiagnostic] {
@@ -648,10 +701,27 @@ impl PluginIntegrator {
         };
 
         for plugin_id in ordered {
-            hash_field(&mut identity, "plugin-id", plugin_id.as_bytes());
+            let mut plugin_identity = Sha256::new();
+            hash_field(&mut plugin_identity, "prepared-plugin-format", b"1");
+            let mut dependencies = Vec::new();
+            hash_field(&mut plugin_identity, "plugin-id", plugin_id.as_bytes());
             if let Some(entry) = registry.get(&plugin_id) {
-                match serde_json::to_vec(&entry.manifest) {
-                    Ok(serialized) => hash_field(&mut identity, "manifest", &serialized),
+                dependencies = entry
+                    .manifest
+                    .dependencies
+                    .iter()
+                    .map(|dependency| dependency.name().to_string())
+                    .collect();
+                dependencies.sort();
+                dependencies.dedup();
+                let mut manifest = entry.manifest.clone();
+                manifest.dependencies.sort_by(|left, right| {
+                    left.name()
+                        .cmp(right.name())
+                        .then_with(|| left.version_constraint().cmp(&right.version_constraint()))
+                });
+                match canonical_json_bytes(&manifest) {
+                    Ok(serialized) => hash_field(&mut plugin_identity, "manifest", &serialized),
                     Err(error) => {
                         applicable = false;
                         diagnostics.push(error_diagnostic(
@@ -667,8 +737,8 @@ impl PluginIntegrator {
                     .iter()
                     .map(|(key, value)| (key.clone(), value.clone()))
                     .collect::<BTreeMap<_, _>>();
-                match serde_json::to_vec(&ordered_config) {
-                    Ok(serialized) => hash_field(&mut identity, "user-config", &serialized),
+                match canonical_json_bytes(&ordered_config) {
+                    Ok(serialized) => hash_field(&mut plugin_identity, "user-config", &serialized),
                     Err(error) => {
                         applicable = false;
                         diagnostics.push(error_diagnostic(
@@ -694,7 +764,7 @@ impl PluginIntegrator {
                     continue;
                 }
             };
-            hash_variables(&mut identity, &variables);
+            hash_variables(&mut plugin_identity, &variables);
             if let Err(error) = tokio::fs::create_dir_all(&variables.plugin_data).await {
                 applicable = false;
                 diagnostics.push(error_diagnostic(
@@ -745,9 +815,11 @@ impl PluginIntegrator {
                                 continue;
                             };
                             if let Some(inputs) = loader.get_prepared_identity_documents(&name) {
+                                let mut inputs = inputs.iter().collect::<Vec<_>>();
+                                inputs.sort_by(|left, right| left.0.cmp(&right.0));
                                 for (path, contents) in inputs {
                                     hash_document(
-                                        &mut identity,
+                                        &mut plugin_identity,
                                         "skill",
                                         &variables.plugin_root,
                                         path,
@@ -786,7 +858,7 @@ impl PluginIntegrator {
                     {
                         Some(contents) => {
                             hash_document(
-                                &mut identity,
+                                &mut plugin_identity,
                                 "hooks",
                                 &variables.plugin_root,
                                 &path,
@@ -822,7 +894,7 @@ impl PluginIntegrator {
                     match read_text(&path, &variables, &plugin_id, "mcp", &mut diagnostics).await {
                         Some(contents) => {
                             hash_document(
-                                &mut identity,
+                                &mut plugin_identity,
                                 "mcp",
                                 &variables.plugin_root,
                                 &path,
@@ -868,7 +940,7 @@ impl PluginIntegrator {
                     read_text(&path, &variables, &plugin_id, "mcp", &mut diagnostics).await
             {
                 hash_document(
-                    &mut identity,
+                    &mut plugin_identity,
                     "mcp",
                     &variables.plugin_root,
                     &path,
@@ -890,7 +962,7 @@ impl PluginIntegrator {
                         .await
                 {
                     hash_document(
-                        &mut identity,
+                        &mut plugin_identity,
                         "subagent",
                         &variables.plugin_root,
                         document.source_path(),
@@ -917,7 +989,7 @@ impl PluginIntegrator {
             };
             if let Some(document) = lsp_document.as_ref() {
                 hash_document(
-                    &mut identity,
+                    &mut plugin_identity,
                     "lsp",
                     &variables.plugin_root,
                     document.source_path(),
@@ -933,8 +1005,17 @@ impl PluginIntegrator {
                 ));
             }
 
+            let content_identity = format!("{:x}", plugin_identity.finalize());
+            hash_field(&mut identity, "plugin-id", plugin_id.as_bytes());
+            hash_field(
+                &mut identity,
+                "plugin-content-v1",
+                content_identity.as_bytes(),
+            );
             plugins.push(PreparedPlugin {
                 id: plugin_id,
+                content_identity,
+                dependencies,
                 variables,
                 skills,
                 hooks,
@@ -1300,6 +1381,28 @@ fn validate_prepared_hooks(
         error_diagnostic(Some(plugin_id), "hooks", Some(path.to_path_buf()), message)
     }));
     None
+}
+
+// Object insertion order is not plugin semantics, including nested configuration
+// values. Preserve array order except the manifest dependency declarations, whose
+// validated graph is unordered and is sorted before calling this function.
+fn canonical_json_bytes(value: &impl serde::Serialize) -> Result<Vec<u8>, serde_json::Error> {
+    fn ordered(value: serde_json::Value) -> serde_json::Value {
+        match value {
+            serde_json::Value::Object(object) => {
+                let fields = object
+                    .into_iter()
+                    .map(|(key, value)| (key, ordered(value)))
+                    .collect::<BTreeMap<_, _>>();
+                serde_json::Value::Object(fields.into_iter().collect())
+            }
+            serde_json::Value::Array(values) => {
+                serde_json::Value::Array(values.into_iter().map(ordered).collect())
+            }
+            scalar => scalar,
+        }
+    }
+    serde_json::to_vec(&ordered(serde_json::to_value(value)?))
 }
 
 fn hash_field(hasher: &mut Sha256, tag: &str, contents: &[u8]) {
@@ -1955,6 +2058,16 @@ mod tests {
         let first = integrator.prepare(&mut first_registry).await;
         let second = integrator.prepare(&mut second_registry).await;
         assert_eq!(first.identity(), second.identity());
+        assert_eq!(
+            first
+                .dependency_closure("equivalent.test")?
+                .first()
+                .map(|plugin| plugin.content_identity()),
+            second
+                .dependency_closure("equivalent.test")?
+                .first()
+                .map(|plugin| plugin.content_identity())
+        );
         assert_ne!(first.generation(), second.generation());
         Ok(())
     }
@@ -2005,11 +2118,26 @@ mod tests {
             ("lsp.yaml", "languages:\n  rust: {}\n"),
         ];
         let mut previous_identity = first.identity().to_string();
+        let mut previous_plugin_identity = first
+            .plugins()
+            .iter()
+            .find(|plugin| plugin.id() == "consumer.test")
+            .ok_or_else(|| missing("prepared consumer missing"))?
+            .content_identity()
+            .to_string();
         for (relative, contents) in mutations {
             std::fs::write(root.join(relative), contents)?;
             integrator.invalidate(&registry);
             let changed = integrator.prepare(&mut registry).await;
             assert_ne!(changed.identity(), previous_identity, "{relative}");
+            let plugin_identity = changed
+                .plugins()
+                .iter()
+                .find(|plugin| plugin.id() == "consumer.test")
+                .ok_or_else(|| missing("changed consumer missing"))?
+                .content_identity();
+            assert_ne!(plugin_identity, previous_plugin_identity, "{relative}");
+            previous_plugin_identity = plugin_identity.to_string();
             previous_identity = changed.identity().to_string();
         }
 
@@ -2036,6 +2164,307 @@ mod tests {
         registry.scan_scopes(&[PluginScope::Local])?;
         let changed_manifest = integrator.prepare(&mut registry).await;
         assert_ne!(changed_manifest.identity(), changed_config.identity());
+        Ok(())
+    }
+
+    fn closure_identities(
+        prepared: &PreparedPluginSet,
+        root: &str,
+    ) -> Result<Vec<(String, String)>, String> {
+        Ok(prepared
+            .dependency_closure(root)?
+            .into_iter()
+            .map(|plugin| {
+                (
+                    plugin.id().to_string(),
+                    plugin.content_identity().to_string(),
+                )
+            })
+            .collect())
+    }
+
+    #[tokio::test]
+    async fn selective_identity_tracks_transitive_dependencies_but_not_unrelated_plugins()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temporary = tempfile::tempdir()?;
+        let mut registry = registry(temporary.path());
+        for (name, dependencies) in [
+            ("base.test", serde_json::json!([])),
+            ("middle.test", serde_json::json!(["base.test"])),
+            ("root.test", serde_json::json!(["middle.test"])),
+            ("unrelated.test", serde_json::json!([])),
+        ] {
+            let source = create_plugin(temporary.path(), name, dependencies)?;
+            registry.install(&InstallSource::Local(source), PluginScope::Local)?;
+        }
+        let integrator = PluginIntegrator::new();
+        let first = integrator.prepare(&mut registry).await;
+        let original = closure_identities(&first, "root.test")?;
+        assert_eq!(
+            original
+                .iter()
+                .map(|(id, _)| id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["base.test", "middle.test", "root.test"]
+        );
+        assert!(first.dependency_closure("missing.test").is_err());
+        let unrelated = registry
+            .get("unrelated.test")
+            .ok_or_else(|| missing("unrelated plugin missing"))?
+            .root
+            .clone();
+        std::fs::write(unrelated.join("agents/reviewer.md"), "Unrelated change.")?;
+        integrator.invalidate(&registry);
+        let changed_unrelated = integrator.prepare(&mut registry).await;
+        assert_ne!(first.identity(), changed_unrelated.identity());
+        assert_eq!(
+            original,
+            closure_identities(&changed_unrelated, "root.test")?
+        );
+        let base = registry
+            .get("base.test")
+            .ok_or_else(|| missing("base plugin missing"))?
+            .root
+            .clone();
+        std::fs::write(
+            base.join("agents/reviewer.md"),
+            "Necessary dependency changed.",
+        )?;
+        integrator.invalidate(&registry);
+        let changed_dependency = integrator.prepare(&mut registry).await;
+        let changed = closure_identities(&changed_dependency, "root.test")?;
+        assert_ne!(original, changed);
+        assert_eq!(
+            original.last(),
+            changed.last(),
+            "root own identity must not absorb dependency content"
+        );
+        // An old prepared generation reads no live files when selecting its closure.
+        std::fs::remove_dir_all(base)?;
+        assert_eq!(original, closure_identities(&first, "root.test")?);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn selective_identity_canonicalizes_manifest_order_and_preserves_absent_version()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut identities = Vec::new();
+        for reversed in [false, true] {
+            let temporary = tempfile::tempdir()?;
+            let mut registry = registry(temporary.path());
+            for name in ["a.test", "b.test"] {
+                let source = create_plugin(temporary.path(), name, serde_json::json!([]))?;
+                registry.install(&InstallSource::Local(source), PluginScope::Local)?;
+            }
+            let mut dependencies = vec![
+                serde_json::json!({"name":"a.test","version":">=1.0.0"}),
+                serde_json::json!({"name":"a.test","version":"<2.0.0"}),
+                serde_json::json!("b.test"),
+            ];
+            if reversed {
+                dependencies.reverse();
+            }
+            let dependencies = serde_json::Value::Array(dependencies);
+            let source = create_plugin(temporary.path(), "root.test", dependencies)?;
+            let path = source.join("plugin.json");
+            let mut manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+            manifest
+                .as_object_mut()
+                .ok_or_else(|| missing("manifest is not object"))?
+                .remove("version");
+            // Two actual configurable fields exercise manifest HashMaps and effective variables.
+            let config = manifest
+                .get_mut("config")
+                .and_then(serde_json::Value::as_object_mut)
+                .ok_or_else(|| missing("config is not object"))?;
+            let endpoint = config
+                .get("endpoint")
+                .cloned()
+                .ok_or_else(|| missing("endpoint missing"))?;
+            config.insert("mirror".to_string(), endpoint);
+            config
+                .get_mut("endpoint")
+                .and_then(serde_json::Value::as_object_mut)
+                .ok_or_else(|| missing("endpoint configuration missing"))?
+                .insert(
+                    "default".to_string(),
+                    serde_json::Value::String("${user_config.mirror}".to_string()),
+                );
+            std::fs::write(
+                source.join("skills/example/SKILL.md"),
+                "---\nname: example\ndescription: Example\n---\nResolved ${user_config.endpoint}.\n",
+            )?;
+            std::fs::write(path, serde_json::to_vec(&manifest)?)?;
+            registry.install(&InstallSource::Local(source), PluginScope::Local)?;
+            assert!(
+                registry
+                    .get("root.test")
+                    .ok_or_else(|| missing("root missing"))?
+                    .manifest
+                    .version
+                    .is_none()
+            );
+            let integrator = PluginIntegrator::new();
+            let prepared = integrator.prepare(&mut registry).await;
+            let original = closure_identities(&prepared, "root.test")?;
+            integrator.invalidate(&registry);
+            let repeated = integrator.prepare(&mut registry).await;
+            assert_eq!(original, closure_identities(&repeated, "root.test")?);
+            let restarted = PluginIntegrator::new().prepare(&mut registry).await;
+            assert_eq!(original, closure_identities(&restarted, "root.test")?);
+            assert_ne!(prepared.generation(), restarted.generation());
+            for candidate in [&prepared, &repeated, &restarted] {
+                let plugin = candidate
+                    .plugins()
+                    .iter()
+                    .find(|plugin| plugin.id() == "root.test")
+                    .ok_or_else(|| missing("prepared root missing"))?;
+                let skill = plugin
+                    .skills()
+                    .first()
+                    .ok_or_else(|| missing("prepared Skill missing"))?;
+                assert_eq!(
+                    skill.document().instructions().trim(),
+                    "Resolved https://example.com."
+                );
+            }
+            identities.push(original);
+        }
+        assert_eq!(identities.first(), identities.last());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn selective_closure_reuses_original_registry_dependency_refusals()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for (case, dependencies, base_dependencies, enabled, expected) in [
+            (
+                "missing",
+                serde_json::json!(["base.test"]),
+                None,
+                true,
+                "not installed",
+            ),
+            (
+                "disabled",
+                serde_json::json!(["base.test"]),
+                Some(serde_json::json!([])),
+                false,
+                "disabled",
+            ),
+            (
+                "version",
+                serde_json::json!([{"name":"base.test","version":">=2.0.0"}]),
+                Some(serde_json::json!([])),
+                true,
+                "requires",
+            ),
+            (
+                "invalid",
+                serde_json::json!([{"name":"base.test","version":">=broken"}]),
+                Some(serde_json::json!([])),
+                true,
+                "version check failed",
+            ),
+            (
+                "cycle",
+                serde_json::json!(["base.test"]),
+                Some(serde_json::json!(["root.test"])),
+                true,
+                "Circular",
+            ),
+        ] {
+            let temporary = tempfile::tempdir()?;
+            let plugins = temporary.path().join(".echo-agent/plugins.local");
+            if let Some(base_dependencies) = base_dependencies {
+                let base = create_plugin(&plugins, "base.test", base_dependencies)?;
+                let path = base.join("plugin.json");
+                let mut manifest: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(&path)?)?;
+                manifest
+                    .as_object_mut()
+                    .ok_or_else(|| missing("manifest is not object"))?
+                    .insert(
+                        "defaultEnabled".to_string(),
+                        serde_json::Value::Bool(enabled),
+                    );
+                std::fs::write(path, serde_json::to_vec(&manifest)?)?;
+            }
+            create_plugin(&plugins, "root.test", dependencies)?;
+            let mut registry = registry(temporary.path());
+            registry.scan_scopes(&[PluginScope::Local])?;
+            let prepared = PluginIntegrator::new().prepare(&mut registry).await;
+            assert!(
+                !prepared.is_applicable(),
+                "{case}: {:?}",
+                prepared.diagnostics()
+            );
+            assert!(prepared.dependency_closure("root.test").is_err(), "{case}");
+            assert!(
+                prepared
+                    .diagnostics()
+                    .iter()
+                    .any(|diagnostic| diagnostic.component() == "dependencies"
+                        && diagnostic.message().contains(expected)),
+                "{case}: {:?}",
+                prepared.diagnostics()
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn selective_identity_does_not_claim_unread_skill_scripts_or_live_package_files()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temporary = tempfile::tempdir()?;
+        let source = create_plugin(temporary.path(), "boundary.test", serde_json::json!([]))?;
+        let mut registry = registry(temporary.path());
+        registry.install(&InstallSource::Local(source), PluginScope::Local)?;
+        let root = registry
+            .get("boundary.test")
+            .ok_or_else(|| missing("boundary plugin missing"))?
+            .root
+            .clone();
+        let integrator = PluginIntegrator::new();
+        let first = integrator.prepare(&mut registry).await;
+        std::fs::create_dir_all(root.join("skills/example/scripts"))?;
+        std::fs::write(
+            root.join("skills/example/scripts/helper.sh"),
+            "echo changed external implementation",
+        )?;
+        integrator.invalidate(&registry);
+        let changed_script = integrator.prepare(&mut registry).await;
+        assert_eq!(
+            closure_identities(&first, "boundary.test")?,
+            closure_identities(&changed_script, "boundary.test")?
+        );
+        std::fs::write(
+            root.join("skills/example/SKILL.md"),
+            "---\nname: example\ndescription: Example\n---\nChanged method.\n",
+        )?;
+        integrator.invalidate(&registry);
+        let changed_document = integrator.prepare(&mut registry).await;
+        assert_ne!(
+            closure_identities(&first, "boundary.test")?,
+            closure_identities(&changed_document, "boundary.test")?
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn selective_identity_canonicalizes_nested_json_object_insertion_order()
+    -> Result<(), serde_json::Error> {
+        let left = serde_json::json!({"outer":{"z":1,"a":2},"list":["first","second"]});
+        let right = serde_json::from_str::<serde_json::Value>(
+            r#"{"list":["first","second"],"outer":{"a":2,"z":1}}"#,
+        )?;
+        assert_eq!(canonical_json_bytes(&left)?, canonical_json_bytes(&right)?);
+        assert_ne!(
+            canonical_json_bytes(&left)?,
+            canonical_json_bytes(
+                &serde_json::json!({"outer":{"z":1,"a":2},"list":["second","first"]})
+            )?
+        );
         Ok(())
     }
 
