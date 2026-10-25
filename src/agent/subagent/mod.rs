@@ -18,6 +18,9 @@ pub mod team;
 pub mod types;
 pub mod usage;
 
+#[cfg(test)]
+mod registration_tests;
+
 // Re-export the most commonly used types
 pub use builder::SubagentBuilder;
 pub use context::{ContextInheritance, SubagentContext};
@@ -48,7 +51,10 @@ pub use prompt::{
     SubagentSystemPromptInput, SubagentTaskContext, ToolCapability, ToolCapabilitySnapshot,
     compiled_current_message, filter_history, remove_duplicate_current_message, with_compiled_task,
 };
-pub use registry::{AgentFactory, FnAgentFactory, SubagentRegistry};
+pub use registry::{
+    AgentFactory, FnAgentFactory, SubagentRegistration, SubagentRegistrationAdmission,
+    SubagentRegistry,
+};
 pub use team::{
     Team, TeamAgent, TeamAgentBuilder, TeamConfig, TeamDispatchController, TeamDispatchRequest,
     TeamExecutionResult, TeamMember, TeamRole, TeamRuntime, TeamRuntimeHandle,

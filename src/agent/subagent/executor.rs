@@ -28,7 +28,7 @@ use super::prompt::{
     CompiledSubagentInvocation, ContextTransferPolicy, SubagentInvocation, SubagentPromptCompiler,
     SubagentTaskContext, ToolCapabilitySnapshot,
 };
-use super::registry::SubagentRegistry;
+use super::registry::{SubagentRegistration, SubagentRegistry};
 use super::types::{
     ExecutionMode, ObservedIsolation, SubagentArtifact, SubagentEvidence, SubagentEvidenceSource,
     SubagentOutcome, SubagentResult, SubagentStatus,
@@ -567,6 +567,13 @@ pub struct SubagentExecutor {
     team_runtimes: Arc<Mutex<TeamRuntimeIndex>>,
 }
 
+// Only the original dispatcher creates the admitted form. Tool callers may
+// select a record early for routing, but cannot bypass its host validation.
+struct DispatchRegistration {
+    registration: SubagentRegistration,
+    admitted: bool,
+}
+
 const TEAM_RUNTIME_RETENTION: usize = 64;
 
 #[derive(Default)]
@@ -816,6 +823,29 @@ impl SubagentAttemptControlHandle {
             .map_err(SubagentExecutor::control_react_error)?;
         bind_task_dispatch_context(&mut request, &context)?;
         self.executor.dispatch_attempt(request, identity).await
+    }
+
+    async fn dispatch_registered(
+        &self,
+        mut request: DispatchRequest,
+        context: TaskSubagentContext,
+        registration: SubagentRegistration,
+    ) -> Result<SubagentResult> {
+        let identity = self
+            .identity_from_context(&context)
+            .map_err(SubagentExecutor::control_react_error)?;
+        bind_task_dispatch_context(&mut request, &context)?;
+        let (request, admission) = self.executor.admit_attempt(request, identity)?;
+        self.executor
+            .dispatch_owned(
+                request,
+                Some(admission),
+                Some(DispatchRegistration {
+                    registration,
+                    admitted: false,
+                }),
+            )
+            .await
     }
 
     /// Project an interrupt that has already passed durable TaskClaim checks.
@@ -1156,19 +1186,67 @@ impl SubagentExecutor {
         *self.shared_admission.write().await = Some(admission);
     }
 
+    fn retain_invocation_resources(
+        &self,
+        req: &DispatchRequest,
+    ) -> Result<Option<SubagentPhysicalResources>> {
+        let guards = req
+            .runtime_context
+            .as_ref()
+            .map(|context| context.resource_guards.clone())
+            .unwrap_or_default();
+        if guards.is_empty() {
+            return Ok(None);
+        }
+        let lease = self
+            .local_fork_admission
+            .keyed()
+            .issue(format!("subagent-resources:{}", uuid::Uuid::new_v4()))
+            .map_err(|error| ReactError::Other(error.to_string()))?;
+        Ok(Some(SubagentPhysicalResources {
+            lease: Some(lease),
+            isolation: None,
+            resource_guards: guards,
+            uncertain: true,
+        }))
+    }
+
     /// Main dispatch entry point.
     ///
     /// Routes to the appropriate mode based on the definition or override.
     /// Uses a loop for retry/delegation instead of recursion to prevent stack overflow.
     pub async fn dispatch(&self, mut req: DispatchRequest) -> Result<SubagentResult> {
         req.cancel = req.cancel.child_token();
-        self.dispatch_owned(req, None).await
+        self.dispatch_owned(req, None, None).await
+    }
+
+    /// Dispatch a previously selected record through the normal host policy.
+    ///
+    /// This preserves a tool's definition-based routing and actual executable
+    /// as one selection. Foreign-registry or differently named records fail
+    /// before construction. Retries select and admit their actual target anew.
+    pub async fn dispatch_registered(
+        &self,
+        mut req: DispatchRequest,
+        registration: SubagentRegistration,
+    ) -> Result<SubagentResult> {
+        req.cancel = req.cancel.child_token();
+        self.dispatch_owned(
+            req,
+            None,
+            Some(DispatchRegistration {
+                registration,
+                admitted: false,
+            }),
+        )
+        .await
     }
 
     async fn dispatch_owned(
         &self,
         req: DispatchRequest,
         admission: Option<super::control::SubagentAttemptAdmission>,
+        registration: Option<DispatchRegistration>,
     ) -> Result<SubagentResult> {
         struct CancelObservation(CancellationToken);
         impl Drop for CancelObservation {
@@ -1202,7 +1280,7 @@ impl SubagentExecutor {
             let binding = admission
                 .as_ref()
                 .map(|admission| admission.binding.clone());
-            let result = owner.dispatch_inner(req, binding).await;
+            let result = owner.dispatch_inner(req, binding, registration).await;
             if let Some(admission) = admission {
                 let status = match &result {
                     Ok(result) => result.outcome.status,
@@ -1256,7 +1334,7 @@ impl SubagentExecutor {
         req: DispatchRequest,
         admission: super::control::SubagentAttemptAdmission,
     ) -> Result<SubagentResult> {
-        self.dispatch_owned(req, Some(admission)).await
+        self.dispatch_owned(req, Some(admission), None).await
     }
 
     /// Deliver a live instruction to one exact active attempt.
@@ -1506,6 +1584,7 @@ impl SubagentExecutor {
         &self,
         mut req: DispatchRequest,
         control: Option<SubagentAttemptBinding>,
+        registration: Option<DispatchRegistration>,
     ) -> futures::future::BoxFuture<'_, Result<SubagentResult>> {
         Box::pin(async move {
             let mut retry_count: u32 = 0;
@@ -1518,14 +1597,24 @@ impl SubagentExecutor {
             // authority before any accepted dispatch can settle or fail setup.
             self.enrich_dispatch_context(&mut req);
             let event_publisher = self.event_publisher(&req)?;
-            let initial_registration = self.registry.get(&req.agent_name).await;
+            let mut initial_registration = match registration {
+                Some(registration) => Some(registration),
+                None => self
+                    .registry
+                    .resolve_registration(&req.agent_name)
+                    .await
+                    .map(|registration| DispatchRegistration {
+                        registration,
+                        admitted: false,
+                    }),
+            };
             let initial_mode = req
                 .mode_override
                 .clone()
                 .or_else(|| {
                     initial_registration
                         .as_ref()
-                        .map(|registered| registered.definition.execution_mode.clone())
+                        .map(|registered| registered.registration.definition.execution_mode.clone())
                 })
                 .unwrap_or(ExecutionMode::Sync);
             let runtime = req.runtime_context.as_ref();
@@ -1583,9 +1672,22 @@ impl SubagentExecutor {
                     return Err(error);
                 }
 
-                // Look up definition
-                let registered = match self.registry.get(&req.agent_name).await {
-                    Some(registered) => registered,
+                // The first record may come from agent_tool's routing. Every
+                // retry/retarget resolves once again; strategies never perform
+                // a second name lookup for definition or executable.
+                let selected = match initial_registration.take() {
+                    Some(selected) => Some(selected),
+                    None => self
+                        .registry
+                        .resolve_registration(&req.agent_name)
+                        .await
+                        .map(|registration| DispatchRegistration {
+                            registration,
+                            admitted: false,
+                        }),
+                };
+                let selected = match selected {
+                    Some(selected) => selected,
                     None => {
                         let error =
                             ReactError::Other(format!("Subagent '{}' not found", req.agent_name));
@@ -1593,6 +1695,13 @@ impl SubagentExecutor {
                         return Err(error);
                     }
                 };
+                let registered = selected.registration;
+                if !selected.admitted
+                    && let Err(error) = self.registry.admit_registration(&registered, &req).await
+                {
+                    Self::emit_pre_execution_failure(&event_publisher, &req, &error)?;
+                    return Err(error);
+                }
 
                 let mode = req
                     .mode_override
@@ -1676,23 +1785,8 @@ impl SubagentExecutor {
                 // invocation resources, without consuming a Fork process slot.
                 // A typed observation (or unwind) cannot release those guards.
                 // Fork retains the same bundle in its existing physical slot.
-                let guards = req
-                    .runtime_context
-                    .as_ref()
-                    .map(|context| context.resource_guards.clone())
-                    .unwrap_or_default();
-                let mut resources = if !matches!(mode, ExecutionMode::Fork) && !guards.is_empty() {
-                    let lease = self
-                        .local_fork_admission
-                        .keyed()
-                        .issue(format!("subagent-resources:{}", uuid::Uuid::new_v4()))
-                        .map_err(|error| ReactError::Other(error.to_string()))?;
-                    Some(SubagentPhysicalResources {
-                        lease: Some(lease),
-                        isolation: None,
-                        resource_guards: guards,
-                        uncertain: true,
-                    })
+                let mut resources = if !matches!(mode, ExecutionMode::Fork) {
+                    self.retain_invocation_resources(&req)?
                 } else {
                     None
                 };
@@ -1700,12 +1794,22 @@ impl SubagentExecutor {
                 let start = Instant::now();
                 let result = match mode {
                     ExecutionMode::Sync => {
-                        self.dispatch_sync(&req, control.clone(), event_publisher.clone())
-                            .await
+                        self.dispatch_sync(
+                            &req,
+                            &registered,
+                            control.clone(),
+                            event_publisher.clone(),
+                        )
+                        .await
                     }
                     ExecutionMode::Fork => {
-                        self.dispatch_fork(&req, control.clone(), event_publisher.clone())
-                            .await
+                        self.dispatch_fork(
+                            &req,
+                            &registered,
+                            control.clone(),
+                            event_publisher.clone(),
+                        )
+                        .await
                     }
                     ExecutionMode::Teammate => {
                         // Teammate mode: spawn independently, then await result
@@ -1715,6 +1819,8 @@ impl SubagentExecutor {
                                 control.clone(),
                                 event_publisher.clone(),
                                 false,
+                                &registered,
+                                None,
                             )
                             .await
                         {
@@ -1722,7 +1828,10 @@ impl SubagentExecutor {
                             Err(e) => Err(e),
                         }
                     }
-                    ExecutionMode::Team => self.dispatch_team(&req, event_publisher.clone()).await,
+                    ExecutionMode::Team => {
+                        self.dispatch_team(&req, &registered, event_publisher.clone())
+                            .await
+                    }
                 };
 
                 if let Some(resources) = resources.as_mut() {
@@ -2071,18 +2180,29 @@ impl SubagentExecutor {
     /// teammate-only streaming path.
     pub async fn dispatch_background(
         &self,
-        mut req: DispatchRequest,
+        req: DispatchRequest,
     ) -> Result<BackgroundSubagentHandle> {
-        // Fail fast if the target role is missing (same as sync dispatch).
-        if self.registry.get(&req.agent_name).await.is_none() {
-            return Err(ReactError::Other(format!(
-                "Subagent '{}' not found",
-                req.agent_name
-            )));
-        }
+        let registration = self
+            .registry
+            .resolve_registration(&req.agent_name)
+            .await
+            .ok_or_else(|| ReactError::Other(format!("Subagent '{}' not found", req.agent_name)))?;
+        self.dispatch_background_registered(req, registration).await
+    }
 
+    /// Background variant of [`Self::dispatch_registered`].
+    /// Host refusal is returned before a background handle or work is created.
+    pub async fn dispatch_background_registered(
+        &self,
+        mut req: DispatchRequest,
+        registration: SubagentRegistration,
+    ) -> Result<BackgroundSubagentHandle> {
         let execution_id = Self::ensure_background_execution_id(&mut req);
         req.background = true;
+        self.enrich_dispatch_context(&mut req);
+        self.registry
+            .admit_registration(&registration, &req)
+            .await?;
         let observation_run_id = req
             .runtime_context
             .as_ref()
@@ -2094,7 +2214,17 @@ impl SubagentExecutor {
         let spawned = self.clone_for_spawn();
 
         let join_handle = tokio::spawn(async move {
-            let result = spawned.dispatch(req).await;
+            req.cancel = req.cancel.child_token();
+            let result = spawned
+                .dispatch_owned(
+                    req,
+                    None,
+                    Some(DispatchRegistration {
+                        registration,
+                        admitted: true,
+                    }),
+                )
+                .await;
             if let Err(error) = &result {
                 warn!(agent = %agent_name, error = %error, "background subagent dispatch failed");
             }
@@ -2116,14 +2246,20 @@ impl SubagentExecutor {
         req: DispatchRequest,
         identity: SubagentAttemptIdentity,
     ) -> Result<BackgroundSubagentHandle> {
-        if self.registry.get(&req.agent_name).await.is_none() {
-            return Err(ReactError::Other(format!(
-                "Subagent '{}' not found",
-                req.agent_name
-            )));
-        }
+        let registration = self
+            .registry
+            .resolve_registration(&req.agent_name)
+            .await
+            .ok_or_else(|| ReactError::Other(format!("Subagent '{}' not found", req.agent_name)))?;
         let (mut req, admission) = self.admit_attempt(req, identity)?;
         req.background = true;
+        self.enrich_dispatch_context(&mut req);
+        if let Err(error) = self.registry.admit_registration(&registration, &req).await {
+            // No child was constructed: settle the original exact-attempt
+            // reservation instead of leaving a refused background claim live.
+            admission.settle(subagent_status_from_error(&error)?);
+            return Err(error);
+        }
         let execution_id = admission.binding.identity().execution_id.clone();
         let observation_run_id = req
             .runtime_context
@@ -2136,7 +2272,16 @@ impl SubagentExecutor {
         let spawned = self.clone_for_spawn();
 
         let join_handle = tokio::spawn(async move {
-            let result = spawned.dispatch_admitted_attempt(req, admission).await;
+            let result = spawned
+                .dispatch_owned(
+                    req,
+                    Some(admission),
+                    Some(DispatchRegistration {
+                        registration,
+                        admitted: true,
+                    }),
+                )
+                .await;
             if let Err(error) = &result {
                 warn!(agent = %agent_name, error = %error, "controlled background subagent dispatch failed");
             }
@@ -2154,6 +2299,9 @@ impl SubagentExecutor {
 
     /// Dispatch a teammate, returning a handle for async polling.
     pub async fn dispatch_teammate(&self, mut req: DispatchRequest) -> Result<TeammateHandle> {
+        // This explicit entry always selects Teammate. Expose the actual mode
+        // to host admission rather than a caller's otherwise ignored override.
+        req.mode_override = Some(ExecutionMode::Teammate);
         self.enrich_dispatch_context(&mut req);
         let event_publisher = self.event_publisher(&req)?;
         let runtime = req.runtime_context.as_ref();
@@ -2168,10 +2316,33 @@ impl SubagentExecutor {
             message_id: runtime.and_then(|context| context.message_id.clone()),
             background: req.background,
         })?;
-        match self
-            .dispatch_teammate_with_control(req.clone(), None, event_publisher.clone(), true)
+        let result = async {
+            let registration = self
+                .registry
+                .resolve_registration(&req.agent_name)
+                .await
+                .ok_or_else(|| {
+                    ReactError::Other(format!("Subagent '{}' not found", req.agent_name))
+                })?;
+            self.registry
+                .admit_registration(&registration, &req)
+                .await?;
+            // This public handle entry bypasses dispatch_inner's borrowed-
+            // resource bundle. Reuse that same keyed retainer, then move it
+            // into the existing Teammate physical task; no second process slot.
+            let resources = self.retain_invocation_resources(&req)?;
+            self.dispatch_teammate_with_control(
+                req.clone(),
+                None,
+                event_publisher.clone(),
+                true,
+                &registration,
+                resources,
+            )
             .await
-        {
+        }
+        .await;
+        match result {
             Ok(handle) => Ok(handle),
             Err(error) => {
                 Self::emit_pre_execution_failure(&event_publisher, &req, &error)?;
@@ -2186,13 +2357,18 @@ impl SubagentExecutor {
         control: Option<SubagentAttemptBinding>,
         event_publisher: SubagentEventPublisher,
         settle_in_handle: bool,
+        registered: &SubagentRegistration,
+        mut resources: Option<SubagentPhysicalResources>,
     ) -> Result<TeammateHandle> {
-        let registered =
-            self.registry.get(&req.agent_name).await.ok_or_else(|| {
-                ReactError::Other(format!("Subagent '{}' not found", req.agent_name))
-            })?;
-
-        let agent_arc = self.isolated_dispatch_agent(&req.agent_name).await?;
+        let agent_arc = match registered.agent_for_dispatch().await {
+            Ok(agent) => agent,
+            Err(error) => {
+                if let Some(resources) = resources.as_mut() {
+                    resources.uncertain = matches!(&error, ReactError::ExecutionNotSettled { .. });
+                }
+                return Err(error);
+            }
+        };
 
         let child_token = req.cancel.child_token();
         let handle_cancel = child_token.clone();
@@ -2271,6 +2447,13 @@ impl SubagentExecutor {
                 )))),
             )
             .await;
+            if let Some(resources) = resources.as_mut() {
+                // Agent's default invocation wrapper cannot retain a context
+                // when stream setup itself returns unknown. The original keyed
+                // debt owner must keep the last guard in that case (or unwind).
+                resources.uncertain =
+                    matches!(&result, Err(ReactError::ExecutionNotSettled { .. }));
+            }
             if settle_in_handle {
                 match &mut result {
                     Ok(value) => {
@@ -2329,12 +2512,9 @@ impl SubagentExecutor {
     async fn dispatch_team(
         &self,
         req: &DispatchRequest,
+        registered: &SubagentRegistration,
         event_publisher: SubagentEventPublisher,
     ) -> Result<SubagentResult> {
-        let registered =
-            self.registry.get(&req.agent_name).await.ok_or_else(|| {
-                ReactError::Other(format!("Subagent '{}' not found", req.agent_name))
-            })?;
         let spec = registered.definition.team.clone().ok_or_else(|| {
             ReactError::Other("Team mode requested but definition has no TeamSpec".to_string())
         })?;
@@ -2365,6 +2545,17 @@ impl SubagentExecutor {
             .parent_context
             .clone()
             .filter(SubagentContext::has_content);
+        // Retained Team runtime handles outlive this invocation. Their stored
+        // dispatch closure must not keep a completed parent's physical lease
+        // alive forever. Actual members upgrade while this original call is
+        // alive, then carry real guard clones into their original resources.
+        let team_resource_guards = req
+            .runtime_context
+            .as_ref()
+            .map(|runtime| runtime.resource_guards.clone())
+            .filter(|guards| !guards.is_empty())
+            .map(Arc::new);
+        let member_resource_guards = team_resource_guards.as_ref().map(Arc::downgrade);
         let control_scope_id = format!(
             "team-control:{}:{}",
             run_id,
@@ -2424,16 +2615,29 @@ impl SubagentExecutor {
             }
             let constraints = team_constraints.clone();
             let parent_event_id = team_parent_event_id.clone();
+            let member_resource_guards = member_resource_guards.clone();
             Box::pin(async move {
-                let member = executor.registry.get(&agent_name).await.ok_or_else(|| {
-                    ReactError::Other(format!("Team Subagent '{agent_name}' not registered"))
-                })?;
+                let member = executor
+                    .registry
+                    .resolve_registration(&agent_name)
+                    .await
+                    .ok_or_else(|| {
+                        ReactError::Other(format!("Team Subagent '{agent_name}' not registered"))
+                    })?;
                 if member.definition.execution_mode == ExecutionMode::Team {
                     return Err(ReactError::Other(format!(
                         "nested Team mode is not supported for '{agent_name}'"
                     )));
                 }
                 let mut runtime_context = context.runtime_context();
+                if let Some(guards) = member_resource_guards {
+                    let guards = guards.upgrade().ok_or_else(|| ReactError::Other(
+                        "Team invocation resource source has settled; refusing an unretained member".to_string(),
+                    ))?;
+                    runtime_context
+                        .resource_guards
+                        .extend(guards.iter().cloned());
+                }
                 runtime_context.subagent_lineage =
                     runtime_context.subagent_lineage.map(|mut lineage| {
                         lineage.agent_name = Some(agent_name.clone());
@@ -2442,7 +2646,7 @@ impl SubagentExecutor {
                         lineage
                     });
                 attempt_control
-                    .dispatch(
+                    .dispatch_registered(
                         DispatchRequest {
                             agent_name,
                             task,
@@ -2459,6 +2663,7 @@ impl SubagentExecutor {
                             background: false,
                         },
                         context,
+                        member,
                     )
                     .await
             })
@@ -2946,19 +3151,6 @@ impl SubagentExecutor {
         Ok(result)
     }
 
-    async fn isolated_dispatch_agent(&self, agent_name: &str) -> Result<Arc<dyn Agent>> {
-        let agent = match self.registry.create_fresh_agent(agent_name).await? {
-            Some(agent) => agent,
-            None => self.registry.get_agent(agent_name).await.ok_or_else(|| {
-                ReactError::Other(format!(
-                    "Subagent '{}' not found or not instantiated",
-                    agent_name
-                ))
-            })?,
-        };
-        Ok(agent)
-    }
-
     fn record_first_cause(cause: &Arc<Mutex<Option<ReactError>>>, error: ReactError) {
         let mut cause = cause.lock().unwrap_or_else(|p| p.into_inner());
         if cause.is_none() {
@@ -3047,28 +3239,26 @@ impl SubagentExecutor {
     async fn dispatch_sync(
         &self,
         req: &DispatchRequest,
+        registered: &SubagentRegistration,
         control: Option<SubagentAttemptBinding>,
         event_publisher: SubagentEventPublisher,
     ) -> Result<SubagentResult> {
-        let agent_arc = self.isolated_dispatch_agent(&req.agent_name).await?;
+        let agent_arc = registered.agent_for_dispatch().await?;
 
         // Per-subagent override (0 = executor default). Sync now enforces a
         // timeout too (previously it blocked the parent indefinitely) — one
         // config (AgentConfig.subagent_timeout_secs) governs all three modes.
-        let timeout_secs = match self.registry.get(&req.agent_name).await {
-            Some(r) if r.definition.timeout_secs > 0 => r.definition.timeout_secs,
-            _ => self.config.default_timeout_secs,
+        let timeout_secs = if registered.definition.timeout_secs > 0 {
+            registered.definition.timeout_secs
+        } else {
+            self.config.default_timeout_secs
         };
 
         let start = Instant::now();
-        let inherit_history = match self.registry.get(&req.agent_name).await {
-            Some(r) => r.definition.inherit_history,
-            None => None,
-        };
         let compiled = self.compile_invocation(
             req,
             ExecutionMode::Sync,
-            inherit_history,
+            registered.definition.inherit_history,
             agent_arc.as_ref(),
         );
         let execution_cancel = req.cancel.child_token();
@@ -3133,13 +3323,10 @@ impl SubagentExecutor {
     async fn dispatch_fork(
         &self,
         req: &DispatchRequest,
+        registered: &SubagentRegistration,
         control: Option<SubagentAttemptBinding>,
         event_publisher: SubagentEventPublisher,
     ) -> Result<SubagentResult> {
-        let registered =
-            self.registry.get(&req.agent_name).await.ok_or_else(|| {
-                ReactError::Other(format!("Subagent '{}' not found", req.agent_name))
-            })?;
         let timeout_secs = if registered.definition.timeout_secs > 0 {
             registered.definition.timeout_secs
         } else {
@@ -3187,7 +3374,7 @@ impl SubagentExecutor {
                     req.agent_name, timeout_secs
                 )))));
             }
-            agent = self.isolated_dispatch_agent(&req.agent_name) => agent?,
+            agent = registered.agent_for_dispatch() => agent?,
         };
 
         let agent_name = req.agent_name.clone();
@@ -8151,5 +8338,317 @@ mod tests {
             !wt_factory.labels.lock().unwrap().is_empty(),
             "worktree factory should have been invoked"
         );
+    }
+
+    fn guarded_team_definition(member: &str) -> SubagentDefinition {
+        super::super::builder::SubagentBuilder::new("guarded-team")
+            .team(super::super::team::TeamSpec {
+                strategy: super::super::team::TeamStrategy::Pipeline(vec![member.to_string()]),
+                manager: String::new(),
+                subagents: Vec::new(),
+                config: super::super::team::TeamConfig::default(),
+            })
+            .build()
+    }
+
+    struct RequireActualTeamGuard(Arc<AtomicUsize>);
+
+    #[async_trait::async_trait]
+    impl super::super::registry::SubagentRegistrationAdmission for RequireActualTeamGuard {
+        async fn admit(
+            &self,
+            _registration: &super::super::registry::SubagentRegistration,
+            request: &DispatchRequest,
+        ) -> Result<()> {
+            if !request.runtime_context.as_ref().is_some_and(|runtime| {
+                runtime
+                    .resource_guards
+                    .iter()
+                    .any(|guard| guard.retains::<DispatchGuardDrop>())
+            }) {
+                return Err(ReactError::Other(
+                    "actual Team member lost its original physical guard".to_string(),
+                ));
+            }
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn team_admission_and_member_invocation_keep_guards_without_retained_runtime_leak()
+    -> Result<()> {
+        let (registry, executor) = make_executor().await;
+        let member = MockAgent::new("guarded-member").with_response("done");
+        registry
+            .register(
+                SubagentDefinition::new("guarded-member", "actual member"),
+                Box::new(member.clone()),
+            )
+            .await;
+        registry
+            .register(
+                guarded_team_definition("guarded-member"),
+                Box::new(MockAgent::new("guarded-team")),
+            )
+            .await;
+        let checks = Arc::new(AtomicUsize::new(0));
+        registry
+            .set_registration_admission(Some(Arc::new(RequireActualTeamGuard(checks.clone()))))
+            .await;
+        let drops = Arc::new(AtomicUsize::new(0));
+        let mut request = unknown_request(ExecutionMode::Team, CancellationToken::new());
+        request.agent_name = "guarded-team".to_string();
+        request.runtime_context = Some(echo_core::tools::ExternalRunContext {
+            run_id: Some("guarded-team-run".to_string()),
+            resource_guards: vec![InvocationResourceGuard::new(DispatchGuardDrop(
+                drops.clone(),
+            ))],
+            ..echo_core::tools::ExternalRunContext::default()
+        });
+        executor.dispatch(request).await?;
+        assert_eq!(checks.load(Ordering::SeqCst), 2);
+        let contexts = member.take_invocation_contexts();
+        assert!(
+            contexts
+                .first()
+                .and_then(|context| context.runtime.as_ref())
+                .is_some_and(|runtime| runtime
+                    .resource_guards
+                    .iter()
+                    .any(|guard| guard.retains::<DispatchGuardDrop>()))
+        );
+        assert_eq!(executor.team_runtime_handles("guarded-team-run").len(), 1);
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        drop(contexts);
+        assert_eq!(
+            drops.load(Ordering::SeqCst),
+            1,
+            "retained completed Team runtime leaked invocation lease"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn team_caller_drop_keeps_guard_until_original_member_physical_eof() -> Result<()> {
+        let (registry, executor) = make_executor().await;
+        let dropped = Arc::new(AtomicBool::new(false));
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        registry
+            .register(
+                SubagentDefinition::new("held-team-member", "original producer"),
+                Box::new(NonCooperativeTeamAgent {
+                    dropped: dropped.clone(),
+                    started: started.clone(),
+                    release: release.clone(),
+                }),
+            )
+            .await;
+        registry
+            .register(
+                guarded_team_definition("held-team-member"),
+                Box::new(MockAgent::new("guarded-team")),
+            )
+            .await;
+        let drops = Arc::new(AtomicUsize::new(0));
+        let mut request = unknown_request(ExecutionMode::Team, CancellationToken::new());
+        request.agent_name = "guarded-team".to_string();
+        request.runtime_context = Some(echo_core::tools::ExternalRunContext {
+            resource_guards: vec![InvocationResourceGuard::new(DispatchGuardDrop(
+                drops.clone(),
+            ))],
+            ..echo_core::tools::ExternalRunContext::default()
+        });
+        let caller = tokio::spawn(async move { executor.dispatch(request).await });
+        tokio::time::timeout(Duration::from_secs(3), started.notified())
+            .await
+            .map_err(|error| ReactError::Other(error.to_string()))?;
+        caller.abort();
+        assert!(caller.await.is_err_and(|error| error.is_cancelled()));
+        assert!(!dropped.load(Ordering::SeqCst));
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        release.notify_one();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !dropped.load(Ordering::SeqCst) || drops.load(Ordering::SeqCst) != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .map_err(|error| {
+            ReactError::Other(format!(
+                "original Team cleanup did not release guard: {error}"
+            ))
+        })?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn team_unknown_member_settlement_retains_original_invocation_guard() -> Result<()> {
+        let (registry, executor) = make_executor().await;
+        registry
+            .register(
+                SubagentDefinition::new("unknown-cleanup", "unknown producer"),
+                Box::new(UnknownCleanupAgent {
+                    setup: true,
+                    panic_setup: false,
+                }),
+            )
+            .await;
+        registry
+            .register(
+                guarded_team_definition("unknown-cleanup"),
+                Box::new(MockAgent::new("guarded-team")),
+            )
+            .await;
+        let drops = Arc::new(AtomicUsize::new(0));
+        let mut request = unknown_request(ExecutionMode::Team, CancellationToken::new());
+        request.agent_name = "guarded-team".to_string();
+        request.runtime_context = Some(echo_core::tools::ExternalRunContext {
+            resource_guards: vec![InvocationResourceGuard::new(DispatchGuardDrop(
+                drops.clone(),
+            ))],
+            ..echo_core::tools::ExternalRunContext::default()
+        });
+        let result = executor.dispatch(request).await;
+        assert!(matches!(
+            result,
+            Err(ReactError::ExecutionNotSettled { .. })
+        ));
+        assert_eq!(
+            drops.load(Ordering::SeqCst),
+            0,
+            "unknown Team producer released physical guard"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn direct_teammate_setup_unknown_retains_last_invocation_guard_in_original_keyed_owner()
+    -> Result<()> {
+        let registry = Arc::new(SubagentRegistry::new());
+        registry
+            .register(
+                SubagentDefinition::new("unknown-cleanup", "direct setup unknown"),
+                Box::new(UnknownCleanupAgent {
+                    setup: true,
+                    panic_setup: false,
+                }),
+            )
+            .await;
+        let executor = SubagentExecutor::new(
+            registry,
+            SubagentExecutorConfig {
+                max_concurrent_forks: 1,
+                ..SubagentExecutorConfig::default()
+            },
+        );
+        let drops = Arc::new(AtomicUsize::new(0));
+        let mut request = unknown_request(ExecutionMode::Sync, CancellationToken::new());
+        request.runtime_context = Some(echo_core::tools::ExternalRunContext {
+            resource_guards: vec![InvocationResourceGuard::new(DispatchGuardDrop(
+                drops.clone(),
+            ))],
+            ..echo_core::tools::ExternalRunContext::default()
+        });
+        // This is deliberately the public handle API, not dispatch(mode=Teammate).
+        // The default Agent wrapper returns during setup, before it can build
+        // an invocation-retaining stream, leaving this the last guard owner.
+        let result = executor.dispatch_teammate(request).await?.join().await;
+        assert!(
+            matches!(result, Err(ReactError::ExecutionNotSettled { run_id, execution_id: Some(execution_id) })
+            if run_id == "unknown-original" && execution_id == "unknown-attempt")
+        );
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        assert_eq!(executor.local_fork_admission.active_count(), 1);
+        // Borrowed-resource retention does not consume a second process slot.
+        let probe = executor
+            .local_fork_admission
+            .issue("direct-teammate-capacity-probe")
+            .map_err(|error| ReactError::Other(error.to_string()))?;
+        drop(probe);
+        assert_eq!(executor.local_fork_admission.active_count(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn direct_teammate_original_eof_releases_guard_after_normal_join_or_observer_drop()
+    -> Result<()> {
+        for observer_drop in [false, true] {
+            let (registry, executor) = make_executor().await;
+            let barrier = Arc::new(StreamSettlementBarrier::default());
+            let release_terminal = Arc::new(tokio::sync::Notify::new());
+            let terminal_seen = Arc::new(tokio::sync::Notify::new());
+            let cancelled_seen = Arc::new(tokio::sync::Notify::new());
+            let executions = Arc::new(AtomicUsize::new(0));
+            let directory = tempfile::tempdir()?;
+            let effect = directory.path().join("direct-original-source.txt");
+            registry
+                .register(
+                    SubagentDefinition::new("direct-held", "original direct producer"),
+                    Box::new(LiveObservationAgent {
+                        barrier: barrier.clone(),
+                        release_terminal: release_terminal.clone(),
+                        terminal_seen: terminal_seen.clone(),
+                        cancelled_seen: cancelled_seen.clone(),
+                        effect: effect.clone(),
+                        cancelled: observer_drop,
+                        executions: executions.clone(),
+                    }),
+                )
+                .await;
+            let drops = Arc::new(AtomicUsize::new(0));
+            let mut request = unknown_request(ExecutionMode::Sync, CancellationToken::new());
+            request.agent_name = "direct-held".to_string();
+            request.runtime_context = Some(echo_core::tools::ExternalRunContext {
+                run_id: Some("direct-original-source".to_string()),
+                resource_guards: vec![InvocationResourceGuard::new(DispatchGuardDrop(
+                    drops.clone(),
+                ))],
+                ..echo_core::tools::ExternalRunContext::default()
+            });
+            let mut handle = Some(executor.dispatch_teammate(request).await?);
+            tokio::time::timeout(Duration::from_secs(3), barrier.started.notified())
+                .await
+                .map_err(|error| ReactError::Other(error.to_string()))?;
+            assert_eq!(executor.local_fork_admission.active_count(), 1);
+            assert_eq!(drops.load(Ordering::SeqCst), 0);
+            if observer_drop {
+                drop(handle.take());
+                tokio::time::timeout(Duration::from_secs(3), cancelled_seen.notified())
+                    .await
+                    .map_err(|error| ReactError::Other(error.to_string()))?;
+                assert!(!barrier.physical_stopped.load(Ordering::SeqCst));
+                assert_eq!(drops.load(Ordering::SeqCst), 0);
+            }
+            release_terminal.notify_one();
+            tokio::time::timeout(Duration::from_secs(3), terminal_seen.notified())
+                .await
+                .map_err(|error| ReactError::Other(error.to_string()))?;
+            // A valid terminal projection is still not physical cleanup.
+            assert!(!barrier.physical_stopped.load(Ordering::SeqCst));
+            assert_eq!(drops.load(Ordering::SeqCst), 0);
+            assert_eq!(executor.local_fork_admission.active_count(), 1);
+            barrier.release_cleanup.notify_one();
+            if let Some(handle) = handle {
+                let result = handle.join().await?;
+                assert_eq!(result.outcome.status, SubagentStatus::Completed);
+            }
+            tokio::time::timeout(Duration::from_secs(3), async {
+                while !barrier.physical_stopped.load(Ordering::SeqCst)
+                    || drops.load(Ordering::SeqCst) != 1
+                {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .map_err(|error| {
+                ReactError::Other(format!("direct original cleanup did not settle: {error}"))
+            })?;
+            assert_eq!(executor.local_fork_admission.active_count(), 0);
+            assert_eq!(executions.load(Ordering::SeqCst), 1);
+            assert_eq!(tokio::fs::read(&effect).await?, b"same-source-closed");
+        }
+        Ok(())
     }
 }

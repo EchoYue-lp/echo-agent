@@ -67,6 +67,51 @@ that history remains real messages rather than prompt text.
 
 ## Usage
 
+### Host admission of the actual registration
+
+The registry can apply a fallible host check before a Subagent's user factory,
+model or background work starts. It checks the exact definition/executable
+record that the original dispatcher will consume; lifecycle hooks remain
+observational. Install the callback before publishing the registry:
+
+```rust,ignore
+#[async_trait::async_trait]
+impl SubagentRegistrationAdmission for HostAdmission {
+    async fn admit(
+        &self,
+        registration: &SubagentRegistration,
+        request: &DispatchRequest,
+    ) -> echo_agent::error::Result<()> {
+        self.check_actual_role(registration.definition(), request.runtime_context.as_ref())
+    }
+}
+registry.set_registration_admission(Some(Arc::new(host_admission))).await;
+```
+
+The callback receives the original invocation's run context and resource
+guards. Application-specific provider/version rules belong in that callback;
+the framework does not infer a persistent version from a name or revision.
+No callback preserves dynamic registration and normal General self-extension.
+
+`resolve_registration(name)` does not instantiate an Agent. If a caller needs
+definition-based routing, pass that same handle to `dispatch_registered` or
+`dispatch_background_registered`; both still apply host admission and reject
+foreign-registry/target handles. Ordinary by-name dispatch also resolves and
+checks once. Sync, Fork, Teammate, Team members, retries and alternate targets
+consume their actual selected record. An admitted background first attempt
+is not checked a second time after spawning; its retries are checked anew.
+
+Concurrent replacement/removal only changes later selections. In-flight work
+uses its original factory or pre-built Agent and never fills a replacement
+record's cache. `revision()` is diagnostic within one registry and
+`is_same_registration` compares actual process-local records. Neither is a
+durable plugin content/version identity. Raw `get_agent`/`create_fresh_agent`
+are construction APIs, not substitutes for policy-bearing dispatch. See
+[ADR 0097](../adr/0097-subagent-registration-admission.md) and the executable
+`demo50_subagent_communication` for a concrete host callback.
+
+### Compose and execute Agents
+
 ```rust
 use echo_agent::prelude::*;
 use echo_agent::tools::others::math::{AddTool, MultiplyTool};

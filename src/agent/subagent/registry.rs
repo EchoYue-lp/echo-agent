@@ -7,8 +7,8 @@ use crate::error::Result;
 use echo_core::agent::Agent;
 use futures::future::BoxFuture;
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Weak};
 use tokio::sync::{OnceCell, RwLock};
 use tracing::{debug, info, warn};
 
@@ -20,6 +20,91 @@ struct RegistryEntry {
     agent: Arc<OnceCell<Arc<dyn Agent>>>,
     factory: Option<Arc<dyn AgentFactory>>,
     revision: u64,
+}
+
+/// An immutable selection of one registry record, before any user factory runs.
+///
+/// Clones keep the same definition, factory and original cache cell together.
+/// Replacing or removing its name only affects later selections. This handle
+/// is process-local; neither its revision nor its identity is a persisted
+/// plugin/content version.
+#[derive(Clone)]
+pub struct SubagentRegistration {
+    pub(super) definition: SubagentDefinition,
+    agent: Arc<OnceCell<Arc<dyn Agent>>>,
+    factory: Option<Arc<dyn AgentFactory>>,
+    revision: u64,
+    owner: Weak<RwLock<RegistryState>>,
+}
+
+impl SubagentRegistration {
+    /// Definition paired with the executable selected from the same record.
+    pub fn definition(&self) -> &SubagentDefinition {
+        &self.definition
+    }
+
+    /// Diagnostic revision within this registry, not a durable content identity.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// Whether dispatch will construct a fresh instance from this record.
+    pub fn is_factory_backed(&self) -> bool {
+        self.factory.is_some()
+    }
+
+    /// Whether this record already contains a shared instance.
+    pub fn has_instance(&self) -> bool {
+        self.agent.get().is_some()
+    }
+
+    /// Compare actual process-local records, including their registry owner.
+    pub fn is_same_registration(&self, other: &Self) -> bool {
+        self.owner.ptr_eq(&other.owner) && Arc::ptr_eq(&self.agent, &other.agent)
+    }
+
+    pub(super) async fn agent_for_dispatch(&self) -> Result<Arc<dyn Agent>> {
+        // Dispatch always prefers a fresh instance, exactly as before. The
+        // original record's cell is only used for pre-built registrations;
+        // no result is published back under a name that may now be replaced.
+        match &self.factory {
+            Some(factory) => factory.create().await.map(Arc::<dyn Agent>::from),
+            None => self.agent.get().cloned().ok_or_else(|| {
+                crate::error::ReactError::Other(format!(
+                    "Subagent '{}' not instantiated and has no factory",
+                    self.definition.name
+                ))
+            }),
+        }
+    }
+}
+
+impl std::fmt::Debug for SubagentRegistration {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SubagentRegistration")
+            .field("definition", &self.definition)
+            .field("revision", &self.revision)
+            .field("is_factory_backed", &self.is_factory_backed())
+            .field("has_instance", &self.has_instance())
+            .finish()
+    }
+}
+
+/// Fallible host validation of the exact record a dispatcher will consume.
+///
+/// This is separate from observational lifecycle hooks. A rejection prevents
+/// user factories, model execution and background work from starting. Hosts
+/// interpret their own invocation facts from the original request; no product
+/// policy or durable version is inferred by the framework.
+#[async_trait::async_trait]
+pub trait SubagentRegistrationAdmission: Send + Sync {
+    /// Validate the selected definition/executable pair before consumption.
+    async fn admit(
+        &self,
+        registration: &SubagentRegistration,
+        request: &super::executor::DispatchRequest,
+    ) -> Result<()>;
 }
 
 #[derive(Default)]
@@ -103,6 +188,7 @@ pub struct SubagentRegistry {
     state: Arc<RwLock<RegistryState>>,
     executable_catalog: Arc<std::sync::RwLock<Vec<SubagentDefinition>>>,
     catalog_revision: Arc<AtomicU64>,
+    registration_admission: Arc<RwLock<Option<Arc<dyn SubagentRegistrationAdmission>>>>,
     #[cfg(test)]
     factory_publication_pause: Arc<RwLock<Option<FactoryPublicationPause>>>,
     /// Event bus for lifecycle events.
@@ -125,6 +211,7 @@ impl SubagentRegistry {
             state: Arc::new(RwLock::new(RegistryState::default())),
             executable_catalog: Arc::new(std::sync::RwLock::new(Vec::new())),
             catalog_revision: Arc::new(AtomicU64::new(0)),
+            registration_admission: Arc::new(RwLock::new(None)),
             #[cfg(test)]
             factory_publication_pause: Arc::new(RwLock::new(None)),
             event_bus: SubagentEventBus::new(),
@@ -138,6 +225,7 @@ impl SubagentRegistry {
             state: Arc::new(RwLock::new(RegistryState::default())),
             executable_catalog: Arc::new(std::sync::RwLock::new(Vec::new())),
             catalog_revision: Arc::new(AtomicU64::new(0)),
+            registration_admission: Arc::new(RwLock::new(None)),
             #[cfg(test)]
             factory_publication_pause: Arc::new(RwLock::new(None)),
             event_bus,
@@ -384,6 +472,79 @@ impl SubagentRegistry {
 
     // ── Lookup ────────────────────────────────────────────────────────────
 
+    /// Install optional host validation for all dispatchers on this registry.
+    ///
+    /// Configure before publishing the registry to callers. Replacing this
+    /// callback affects subsequent admissions; it does not revoke in-flight
+    /// records. No policy preserves the original dynamic-registration behavior.
+    pub async fn set_registration_admission(
+        &self,
+        admission: Option<Arc<dyn SubagentRegistrationAdmission>>,
+    ) {
+        *self.registration_admission.write().await = admission;
+    }
+
+    /// Select definition and executable once without invoking a lazy factory.
+    ///
+    /// The returned record is accepted only by dispatchers of this registry
+    /// (or its clones). No registry lock survives this method's return.
+    pub async fn resolve_registration(&self, name: &str) -> Option<SubagentRegistration> {
+        let state = self.state.read().await;
+        let entry = state.entries.get(name)?;
+        Some(SubagentRegistration {
+            definition: entry.definition.clone(),
+            agent: Arc::clone(&entry.agent),
+            factory: entry.factory.clone(),
+            revision: entry.revision,
+            owner: Arc::downgrade(&self.state),
+        })
+    }
+
+    pub(super) async fn admit_registration(
+        &self,
+        registration: &SubagentRegistration,
+        request: &super::executor::DispatchRequest,
+    ) -> Result<()> {
+        // This local correctness check prevents a validated handle from one
+        // registry being executed under another registry's host authority.
+        if !registration.owner.ptr_eq(&Arc::downgrade(&self.state))
+            || registration.definition.name != request.agent_name
+        {
+            return Err(crate::error::ReactError::Other(format!(
+                "Subagent '{}' registration does not belong to this dispatch registry/target",
+                request.agent_name
+            )));
+        }
+        if !registration.has_instance() && !registration.is_factory_backed() {
+            return Err(crate::error::ReactError::Other(format!(
+                "Subagent '{}' has no executable registration",
+                request.agent_name
+            )));
+        }
+        if request.delegation_policy.delegate_depth > request.delegation_policy.max_delegate_depth {
+            return Err(crate::error::ReactError::Other(format!(
+                "Delegation depth exceeded (max {}): agent '{}'",
+                request.delegation_policy.max_delegate_depth, request.agent_name
+            )));
+        }
+        let admission = self.registration_admission.read().await.clone();
+        if let Some(admission) = admission {
+            // Release configuration and record locks before host async code.
+            // Cancellation must not let a waiting policy start a factory later.
+            tokio::select! {
+                biased;
+                _ = request.cancel.cancelled() => return Err(crate::error::ReactError::Agent(Box::new(crate::error::AgentError::Interrupted))),
+                result = admission.admit(registration, request) => result?,
+            }
+        }
+        if request.cancel.is_cancelled() {
+            return Err(crate::error::ReactError::Agent(Box::new(
+                crate::error::AgentError::Interrupted,
+            )));
+        }
+        Ok(())
+    }
+
     /// Look up a registered subagent. Returns None if not found.
     pub async fn get(&self, name: &str) -> Option<RegisteredSubagent> {
         let state = self.state.read().await;
@@ -524,6 +685,7 @@ impl Clone for SubagentRegistry {
             state: self.state.clone(),
             executable_catalog: self.executable_catalog.clone(),
             catalog_revision: self.catalog_revision.clone(),
+            registration_admission: self.registration_admission.clone(),
             #[cfg(test)]
             factory_publication_pause: self.factory_publication_pause.clone(),
             event_bus: self.event_bus.clone(),

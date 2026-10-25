@@ -63,6 +63,46 @@ math_agent.execute("计算 7 * 8")
 
 ## 使用方式
 
+### 核准实际注册记录的宿主准入
+
+原 registry 支持可失败的宿主检查，在用户 factory、模型或后台子执行开始前核准
+真正待消费的 definition／executable 配对。它与返回 `()` 的生命周期观察 hook
+分开。在向调用方发布 registry 前配置：
+
+```rust,ignore
+#[async_trait::async_trait]
+impl SubagentRegistrationAdmission for HostAdmission {
+    async fn admit(
+        &self,
+        registration: &SubagentRegistration,
+        request: &DispatchRequest,
+    ) -> echo_agent::error::Result<()> {
+        self.check_actual_role(registration.definition(), request.runtime_context.as_ref())
+    }
+}
+registry.set_registration_admission(Some(Arc::new(host_admission))).await;
+```
+
+回调直接取得原 invocation 的 run context 和 resource guards。应用自行解释
+provider、内容版本与任务绑定，框架不从名字或 revision 推断持久版本。不配置策略时，
+仍允许原动态注册和普通 General 自扩展，不新增 GUI 权限或 HITL 闸。
+
+`resolve_registration(name)` 不构造 Agent。需要按 definition 决定路由时，
+将同一 handle 传入 `dispatch_registered` 或 `dispatch_background_registered`；
+它们仍核准宿主策略，并拒绝其它 registry／目标的 handle。原按名字派发入口也统一
+解析和核准一次。Sync、Fork、Teammate、Team 的实际成员以及重试／转派都消费自己
+真正选中的记录。后台首轮在 spawn／返回 handle 前核准，进入原 owner 后不重复
+核准这一轮；后继重试重新核准新记录。
+
+同名替换或移除只影响后续选择。在途调用继续使用原 factory／实例，不将结果填入
+替换记录的缓存。`revision()` 只作单 registry 内的诊断，
+`is_same_registration` 比较实际进程内记录；两者均不表示持久插件内容或版本。
+原 `get_agent`／`create_fresh_agent` 是原始构造接口，不能替代带准入的派发。
+详见 [ADR 0097](../adr/0097-subagent-registration-admission.md) 和可执行示例
+`demo50_subagent_communication`。
+
+### 组合并执行 Agent
+
 ```rust
 use echo_agent::prelude::*;
 use echo_agent::tools::others::math::{AddTool, MultiplyTool};

@@ -296,16 +296,18 @@ impl AgentDispatchTool {
             // Execution mode: keep caller's choice, but force Fork when the
             // target role declares worktree/workspace isolation (those paths
             // only exist on dispatch_fork today).
-            let registered = executor.registry().get(agent_name).await.ok_or_else(|| {
-                ToolError::ExecutionFailed {
+            let registered = executor
+                .registry()
+                .resolve_registration(agent_name)
+                .await
+                .ok_or_else(|| ToolError::ExecutionFailed {
                     tool: "agent_tool".to_string(),
                     message: format!("Subagent '{agent_name}' is not registered"),
-                }
-            })?;
+                })?;
             let mut exec_mode = mode_override
                 .clone()
-                .unwrap_or_else(|| registered.definition.execution_mode.clone());
-            let def = &registered.definition;
+                .unwrap_or_else(|| registered.definition().execution_mode.clone());
+            let def = registered.definition();
             let isolation_forces_fork = def.isolation.is_some();
             if isolation_forces_fork {
                 exec_mode = ExecutionMode::Fork;
@@ -385,7 +387,10 @@ impl AgentDispatchTool {
             };
 
             if run_background {
-                match executor.dispatch_background(req).await {
+                match executor
+                    .dispatch_background_registered(req, registered)
+                    .await
+                {
                     Ok(handle) => {
                         let execution_id = handle.execution_id.clone();
                         let started_agent_name = handle.agent_name.clone();
@@ -434,7 +439,7 @@ impl AgentDispatchTool {
                     }
                 }
             } else {
-                match executor.dispatch(req).await {
+                match executor.dispatch_registered(req, registered).await {
                     Ok(result) => {
                         info!(target_agent = %agent_name, "Subagent completed successfully");
                         debug!(

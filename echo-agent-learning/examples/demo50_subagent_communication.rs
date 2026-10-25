@@ -16,17 +16,43 @@
 //! ```
 
 use echo_agent::agent::{Agent, AgentEvent, AgentSteerError, AgentSteerReceipt, CancellationToken};
-use echo_agent::error::Result;
+use echo_agent::error::{ReactError, Result};
 use echo_agent::llm::types::Message;
 use echo_agent::subagent::{
     DispatchRequest, SubagentAttemptIdentity, SubagentDefinition, SubagentEvent, SubagentExecutor,
-    SubagentExecutorConfig, SubagentRegistry, default_uplink_sink,
+    SubagentExecutorConfig, SubagentRegistration, SubagentRegistrationAdmission, SubagentRegistry,
+    default_uplink_sink,
 };
 use echo_agent::tools::{SubagentUplinkKind, SubagentUplinkMessage, SubagentUplinkTarget};
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 use std::sync::{Arc, Mutex};
 use tokio::sync::Notify;
+
+/// 宿主校核实际记录与原控制身份；不是 SubagentStart 观察 hook。
+struct CommunicationAdmission;
+
+#[async_trait::async_trait]
+impl SubagentRegistrationAdmission for CommunicationAdmission {
+    async fn admit(
+        &self,
+        registration: &SubagentRegistration,
+        request: &DispatchRequest,
+    ) -> Result<()> {
+        let execution_id = request
+            .runtime_context
+            .as_ref()
+            .and_then(|context| context.execution_id.as_deref());
+        if registration.definition().name != "subagent"
+            || execution_id != Some("run-1:task-b:1:attempt:1:claim-x")
+        {
+            return Err(ReactError::Other(
+                "通信示例的实际角色或attempt身份不一致".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
 
 /// 可转向的阻塞 Subagent:stream 首个 poll 等待 release,steer 输入被记录。
 struct SteerableSubagent {
@@ -112,6 +138,9 @@ async fn main() {
     println!("=== demo50: 子智能体上行通信(uplink + 共享控制面) ===\n");
 
     let registry = Arc::new(SubagentRegistry::new());
+    registry
+        .set_registration_admission(Some(Arc::new(CommunicationAdmission)))
+        .await;
 
     let release = Arc::new(Notify::new());
     let steered = Arc::new(Mutex::new(Vec::new()));
