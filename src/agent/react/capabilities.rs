@@ -22,7 +22,7 @@ use crate::mcp::McpServerEntry;
 use crate::mcp::{McpClient, McpConfigFile, McpServerConfig, McpServerId, McpTargetChange};
 use crate::skills::external::SkillDescriptor;
 use crate::skills::external::activate_tool::ActivateSkillTool;
-use crate::skills::external::loader::{DiscoveryScope, SkillLoader};
+use crate::skills::external::loader::{DiscoveryScope, SkillFileSource, SkillLoader};
 use crate::skills::external::resource_tool::ReadSkillResourceTool;
 use crate::skills::external::run_script_tool::RunSkillScriptTool;
 use crate::skills::{Skill, SkillInfo};
@@ -36,22 +36,22 @@ use tracing::{info, warn};
 const SKILL_CATALOG_PROJECTION: &str = "echo-agent:skill-catalog";
 
 enum SkillRegistration {
-    Filesystem(SkillDescriptor),
-    Prepared(crate::skills::external::SkillDocument),
+    Filesystem(SkillDescriptor, SkillFileSource),
+    Prepared(crate::skills::external::SkillDocument, SkillFileSource),
 }
 
 impl SkillRegistration {
     fn descriptor(&self) -> &SkillDescriptor {
         match self {
-            Self::Filesystem(descriptor) => descriptor,
-            Self::Prepared(document) => document.descriptor(),
+            Self::Filesystem(descriptor, _) => descriptor,
+            Self::Prepared(document, _) => document.descriptor(),
         }
     }
 
     fn set_registration_source(&mut self, source: &str) {
         match self {
-            Self::Filesystem(descriptor) => descriptor.source = Some(source.to_string()),
-            Self::Prepared(document) => document.set_registration_source(source),
+            Self::Filesystem(descriptor, _) => descriptor.source = Some(source.to_string()),
+            Self::Prepared(document, _) => document.set_registration_source(source),
         }
     }
 }
@@ -920,18 +920,102 @@ impl ReactAgent {
     ///
     /// The LLM can then decide which skills to activate on demand.
     pub async fn discover_skills(&mut self, scopes: &[DiscoveryScope]) -> Result<Vec<String>> {
-        self.discover_skills_inner(scopes, None).await
+        self.discover_skills_inner(scopes, None, None, None).await
+    }
+
+    /// Discover project/explicit directories in a bound target namespace.
+    /// User scope retains local I/O; its commands never inherit this executor.
+    /// Ordinary `load_skills_from_dir` remains a local directory API.
+    pub async fn discover_skills_with_source(
+        &mut self,
+        scopes: &[DiscoveryScope],
+        file_system: Arc<dyn echo_core::tools::filesystem::FileSystem>,
+        executor: Option<Arc<dyn crate::sandbox::SandboxExecutor>>,
+    ) -> Result<Vec<String>> {
+        self.discover_skills_inner(
+            scopes,
+            None,
+            Some(SkillFileSource::new(file_system, executor)),
+            None,
+        )
+        .await
+    }
+
+    /// Discover bound project/Custom Skills while retaining the caller's
+    /// existing local executor for User scopes. Each descriptor captures its
+    /// admitted source in the original registry; this creates no new executor.
+    pub async fn discover_skills_with_sources(
+        &mut self,
+        scopes: &[DiscoveryScope],
+        file_system: Arc<dyn echo_core::tools::filesystem::FileSystem>,
+        executor: Option<Arc<dyn crate::sandbox::SandboxExecutor>>,
+        local_executor: Option<Arc<dyn crate::sandbox::SandboxExecutor>>,
+    ) -> Result<Vec<String>> {
+        self.discover_skills_inner(
+            scopes,
+            None,
+            Some(SkillFileSource::new(file_system, executor)),
+            Some(SkillFileSource::local(local_executor)),
+        )
+        .await
+    }
+
+    /// Set the definition-time origin used by ordinary Skill registration.
+    /// Project discovery can still supply its own explicit target source.
+    /// This reuses the caller's resources; later host executor replacement
+    /// cannot move already-registered Skills to another environment.
+    pub fn set_default_skill_source(&mut self, source: SkillFileSource) {
+        self.tools.default_skill_source = Some(source);
+    }
+
+    /// Clone the effective definition source, without consulting a GUI current
+    /// project or creating an executor.
+    pub fn default_skill_source(&self) -> SkillFileSource {
+        self.local_skill_source()
+    }
+
+    fn local_skill_source(&self) -> SkillFileSource {
+        if let Some(source) = &self.tools.default_skill_source {
+            return source.clone();
+        }
+        #[cfg(feature = "files")]
+        if self
+            .config
+            .file_system
+            .as_ref()
+            .is_some_and(|files| !files.paths_are_native())
+        {
+            // A host's target executor must not receive a user/global file.
+            return SkillFileSource::local(None);
+        }
+        SkillFileSource::local(self.tools.sandbox_manager.clone())
     }
 
     async fn discover_skills_inner(
         &mut self,
         scopes: &[DiscoveryScope],
         plugin: Option<(&str, &crate::plugin::PluginVariables)>,
+        explicit_source: Option<SkillFileSource>,
+        explicit_local_source: Option<SkillFileSource>,
     ) -> Result<Vec<String>> {
         let mut loader = match &self.skill_load_policy {
             Some(policy) => SkillLoader::new().with_policy(policy.clone()),
             None => SkillLoader::new(),
         };
+        let local_source = explicit_local_source.unwrap_or_else(|| self.local_skill_source());
+        loader = loader.with_local_sandbox(local_source.sandbox());
+        #[cfg(feature = "files")]
+        if let Some(file_system) = &self.config.file_system {
+            loader = loader.with_project_source(SkillFileSource::new(
+                file_system.clone(),
+                self.tools.sandbox_manager.clone(),
+            ));
+        }
+        if let Some(source) = explicit_source {
+            loader = loader
+                .with_project_source(source.clone())
+                .with_custom_source(source);
+        }
         if let Some((_, variables)) = plugin {
             loader = loader.with_plugin_variables(variables.clone());
         }
@@ -951,7 +1035,13 @@ impl ReactAgent {
 
         let registrations = descriptors
             .into_iter()
-            .map(SkillRegistration::Filesystem)
+            .map(|descriptor| {
+                let source = loader
+                    .get_file_source(&descriptor.name)
+                    .cloned()
+                    .unwrap_or_default();
+                SkillRegistration::Filesystem(descriptor, source)
+            })
             .collect();
         self.register_skill_descriptors(registrations, plugin, true)
             .await
@@ -1044,22 +1134,34 @@ impl ReactAgent {
                         &skill_dir,
                         hooks_def.clone(),
                     );
+                    let file_source = match &registration {
+                        SkillRegistration::Filesystem(_, source) => source,
+                        SkillRegistration::Prepared(_, source) => source,
+                    };
+                    hook_reg.bind_source_executor(
+                        &crate::skills::hooks::HookSource::Skill(
+                            registration.descriptor().name.clone(),
+                        ),
+                        &skill_dir,
+                        file_source.sandbox(),
+                        !file_source.is_local(),
+                    );
                 }
 
                 let name = registration.descriptor().name.clone();
                 names.push(name.clone());
                 match registration {
-                    SkillRegistration::Prepared(document) => {
+                    SkillRegistration::Prepared(document, source) => {
                         self.tools
                             .skill_registry
-                            .register_prepared(document.clone());
-                        reg.register_prepared(document);
+                            .register_prepared_with_source(document.clone(), source.clone());
+                        reg.register_prepared_with_source(document, source);
                     }
-                    SkillRegistration::Filesystem(descriptor) => {
+                    SkillRegistration::Filesystem(descriptor, source) => {
                         self.tools
                             .skill_registry
-                            .register_descriptor(descriptor.clone());
-                        reg.register_descriptor(descriptor);
+                            .register_descriptor_with_source(descriptor.clone(), source.clone());
+                        reg.register_descriptor_with_source(descriptor, source);
                     }
                 }
                 if let Some((source, variables)) = plugin {
@@ -1181,7 +1283,18 @@ impl ReactAgent {
     /// Register or replace one file-backed descriptor across the catalog and
     /// progressive tool definition views.
     pub async fn register_skill_descriptor(&mut self, descriptor: SkillDescriptor) -> Result<()> {
-        self.replace_skill_registration(SkillRegistration::Filesystem(descriptor))
+        self.register_skill_descriptor_with_source(descriptor, self.local_skill_source())
+            .await
+    }
+
+    /// Admit an existing descriptor with the caller's original file/execution
+    /// source, preserving the same catalog, policy and activation authority.
+    pub async fn register_skill_descriptor_with_source(
+        &mut self,
+        descriptor: SkillDescriptor,
+        source: SkillFileSource,
+    ) -> Result<()> {
+        self.replace_skill_registration(SkillRegistration::Filesystem(descriptor, source))
             .await
     }
 
@@ -1191,7 +1304,17 @@ impl ReactAgent {
         &mut self,
         document: crate::skills::external::SkillDocument,
     ) -> Result<()> {
-        self.replace_skill_registration(SkillRegistration::Prepared(document))
+        self.register_prepared_skill_with_source(document, self.local_skill_source())
+            .await
+    }
+
+    /// Admit a prepared document without discarding its resource/script origin.
+    pub async fn register_prepared_skill_with_source(
+        &mut self,
+        document: crate::skills::external::SkillDocument,
+        source: SkillFileSource,
+    ) -> Result<()> {
+        self.replace_skill_registration(SkillRegistration::Prepared(document, source))
             .await
     }
 
@@ -1212,7 +1335,9 @@ impl ReactAgent {
     ) -> Result<Vec<String>> {
         let registrations = skills
             .iter()
-            .map(|skill| SkillRegistration::Prepared(skill.document().clone()))
+            .map(|skill| {
+                SkillRegistration::Prepared(skill.document().clone(), self.local_skill_source())
+            })
             .collect();
         self.register_skill_descriptors(registrations, Some((source, variables)), true)
             .await
@@ -1325,7 +1450,13 @@ impl ReactAgent {
         let names = self
             .skill_descriptors()
             .into_iter()
-            .filter(|descriptor| descriptor.location.starts_with(&skills_dir))
+            .filter(|descriptor| {
+                self.tools
+                    .skill_registry
+                    .file_source(&descriptor.name)
+                    .is_local()
+                    && descriptor.location.starts_with(&skills_dir)
+            })
             .map(|descriptor| descriptor.name)
             .collect::<Vec<_>>();
         self.unregister_skill_names(&names).await;
@@ -1353,6 +1484,8 @@ impl ReactAgent {
         self.discover_skills_inner(
             &[DiscoveryScope::Custom(skills_dir.into())],
             Some((source, variables)),
+            None,
+            None,
         )
         .await
     }
@@ -2616,6 +2749,68 @@ mod tests {
         );
         assert!(agent.tools.tool_manager.list_tools().contains(&exposed));
         assert_mcp_projections(&agent, "context", true).await;
+        Ok(())
+    }
+    #[tokio::test]
+    async fn default_skill_source_survives_host_executor_changes_and_original_registration_paths()
+    -> Result<()> {
+        let local: Arc<dyn crate::sandbox::SandboxExecutor> =
+            Arc::new(crate::sandbox::SandboxManager::local_sandbox());
+        let host: Arc<dyn crate::sandbox::SandboxExecutor> =
+            Arc::new(crate::sandbox::SandboxManager::local_sandbox());
+        let mut agent = ReactAgent::new(
+            AgentConfig::new("source-test", "source-test", "")
+                .enable_tool(false)
+                .auto_project_rules(false),
+        );
+        agent.set_default_skill_source(SkillFileSource::local(Some(local.clone())));
+        agent.set_sandbox_executor(host.clone());
+        let directory = tempfile::tempdir()?;
+        for (name, prepared) in [("local-prepared", true), ("local-descriptor", false)] {
+            let document = crate::skills::external::SkillDocument::parse_at(
+                &format!("---\nname: {name}\ndescription: source capture\n---\nlocal body\n"),
+                directory.path().join(name).join("SKILL.md"),
+            )?;
+            if prepared {
+                agent.register_prepared_skill(document).await?;
+            } else {
+                agent
+                    .register_skill_descriptor(document.descriptor().clone())
+                    .await?;
+            }
+        }
+        agent.set_sandbox_executor(host);
+        let default = agent.default_skill_source().sandbox().ok_or_else(|| {
+            crate::error::ReactError::Other("default source lost executor".into())
+        })?;
+        assert!(Arc::ptr_eq(&default, &local));
+        for name in ["local-prepared", "local-descriptor"] {
+            let recorded = agent
+                .tools
+                .skill_registry
+                .file_source(name)
+                .sandbox()
+                .ok_or_else(|| {
+                    crate::error::ReactError::Other("primary source lost executor".into())
+                })?;
+            assert!(Arc::ptr_eq(&recorded, &local));
+            let progressive = agent
+                .tools
+                .progressive_skill_registry
+                .as_ref()
+                .ok_or_else(|| {
+                    crate::error::ReactError::Other("missing progressive registry".into())
+                })?;
+            let recorded = progressive
+                .read()
+                .await
+                .file_source(name)
+                .sandbox()
+                .ok_or_else(|| {
+                    crate::error::ReactError::Other("progressive source lost executor".into())
+                })?;
+            assert!(Arc::ptr_eq(&recorded, &local));
+        }
         Ok(())
     }
 }

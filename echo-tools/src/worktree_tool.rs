@@ -13,6 +13,7 @@ use echo_core::error::{Result, ToolError};
 use echo_core::tools::permission::ToolPermission;
 use echo_core::tools::{Tool, ToolContext, ToolParameters, ToolResult, ToolRiskLevel};
 
+use crate::git::LocationGitTool;
 use crate::git_worktree::{
     WorktreeConfig, create_worktree_with_context, list_worktrees_with_context,
     merge_worktree_with_context, remove_worktree_with_context,
@@ -281,6 +282,17 @@ impl Tool for ListWorktreesTool {
         parameters: ToolParameters,
         context: &'a ToolContext,
     ) -> BoxFuture<'a, Result<ToolResult>> {
+        self.execute_at(parameters, context, None)
+    }
+}
+
+impl crate::git::LocationGitTool for ListWorktreesTool {
+    fn execute_at<'a>(
+        &'a self,
+        parameters: ToolParameters,
+        context: &'a ToolContext,
+        backend: Option<&'a crate::git::GitBackend>,
+    ) -> BoxFuture<'a, Result<ToolResult>> {
         Box::pin(async move {
             let requested_repo_path = parameters
                 .get("repo_path")
@@ -288,9 +300,8 @@ impl Tool for ListWorktreesTool {
                 .unwrap_or(".");
             let repo_path = context.resolve_path(Path::new(requested_repo_path));
 
-            let worktrees = list_worktrees_with_context(&repo_path, context)
-                .await
-                .map_err(|error| worktree_tool_error("list_worktrees", error))?;
+            let worktrees =
+                crate::git_worktree::list_worktrees_at(&repo_path, context, backend).await?;
 
             if worktrees.is_empty() {
                 return Ok(ToolResult::success(

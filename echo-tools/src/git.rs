@@ -61,19 +61,7 @@ impl Tool for GitStatusTool {
         parameters: ToolParameters,
         ctx: &'a ToolContext,
     ) -> BoxFuture<'a, Result<ToolResult>> {
-        Box::pin(async move {
-            let repo_path = parameters
-                .get("repo_path")
-                .and_then(Value::as_str)
-                .unwrap_or(".");
-            let repo_path = effective_repo_path(repo_path, ctx);
-            let output = run_git(&repo_path, &["status", "--short"], ctx).await?;
-            if output.is_empty() {
-                Ok(ToolResult::success("Working directory clean, no changes"))
-            } else {
-                Ok(ToolResult::success(format!("Git status:\n{output}")))
-            }
-        })
+        self.execute_at(parameters, ctx, None)
     }
 }
 
@@ -135,65 +123,9 @@ impl Tool for GitDiffTool {
     fn execute_with_context<'a>(
         &'a self,
         parameters: ToolParameters,
-        ctx: &'a echo_core::tools::ToolContext,
+        ctx: &'a ToolContext,
     ) -> BoxFuture<'a, Result<ToolResult>> {
-        Box::pin(async move {
-            let repo_path = parameters
-                .get("repo_path")
-                .and_then(|v| v.as_str())
-                .unwrap_or(".");
-            let repo_path = effective_repo_path(repo_path, ctx);
-            let page_request = match PageRequest::from_parameters(&parameters, 10, 50) {
-                Ok(request) => request,
-                Err(error) => return Ok(ToolResult::invalid_arguments(error.to_string())),
-            };
-
-            let mut args = vec!["diff"];
-            let staged = parameters
-                .get("staged")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            if staged {
-                args.push("--staged");
-            }
-
-            let target = parameters.get("target").and_then(|v| v.as_str());
-            let file_path = parameters.get("file_path").and_then(|v| v.as_str());
-
-            if let Some(t) = target {
-                if t.starts_with('-') {
-                    return Ok(ToolResult::invalid_arguments(
-                        "target must be a branch or commit name, not an option",
-                    ));
-                }
-                args.push(t);
-            }
-            if let Some(fp) = file_path {
-                args.push("--");
-                args.push(fp);
-            }
-
-            let output = run_git(&repo_path, &args, ctx).await?;
-            let chunks = crate::diff_pagination::split_unified_diff(&output);
-            let query = serde_json::json!({
-                "repo_path": repo_path,
-                "staged": staged,
-                "target": target,
-                "file_path": file_path,
-            });
-            let (page, page_info) = match page_request.paginate(chunks, &query) {
-                Ok(page) => page,
-                Err(error) => return Ok(ToolResult::invalid_arguments(error.to_string())),
-            };
-            let output = if page.is_empty() {
-                "No differences".to_string()
-            } else {
-                format!("```diff\n{}\n```", page.join("\n"))
-            };
-            let mut result = ToolResult::success(output);
-            page_info.apply_to(&mut result);
-            Ok(result)
-        })
+        self.execute_at(parameters, ctx, None)
     }
 }
 
@@ -249,52 +181,9 @@ impl Tool for GitLogTool {
     fn execute_with_context<'a>(
         &'a self,
         parameters: ToolParameters,
-        ctx: &'a echo_core::tools::ToolContext,
+        ctx: &'a ToolContext,
     ) -> BoxFuture<'a, Result<ToolResult>> {
-        Box::pin(async move {
-            let repo_path = parameters
-                .get("repo_path")
-                .and_then(|v| v.as_str())
-                .unwrap_or(".");
-            let repo_path = effective_repo_path(repo_path, ctx);
-
-            let count = parameters
-                .get("count")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(20);
-            let oneline = parameters
-                .get("oneline")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(true);
-
-            let mut args: Vec<&str> = vec!["log"];
-            if oneline {
-                args.push("--oneline");
-            }
-            let count_str = count.to_string();
-            args.extend_from_slice(&["-n", &count_str]);
-
-            let author = parameters.get("author").and_then(|v| v.as_str());
-            let since = parameters.get("since").and_then(|v| v.as_str());
-            let mut extra_args: Vec<String> = Vec::new();
-            if let Some(a) = author {
-                extra_args.push(format!("--author={}", a));
-            }
-            if let Some(s) = since {
-                extra_args.push(format!("--since={}", s));
-            }
-            let extra_strs: Vec<&str> = extra_args.iter().map(|s| s.as_str()).collect();
-            args.extend(&extra_strs);
-
-            let output = run_git(&repo_path, &args, ctx).await?;
-            if output.is_empty() {
-                Ok(ToolResult::success(
-                    "Repository has no commit history".to_string(),
-                ))
-            } else {
-                Ok(ToolResult::success(format!("Commit history:\n{}", output)))
-            }
-        })
+        self.execute_at(parameters, ctx, None)
     }
 }
 
@@ -356,52 +245,9 @@ impl Tool for GitBlameTool {
     fn execute_with_context<'a>(
         &'a self,
         parameters: ToolParameters,
-        ctx: &'a echo_core::tools::ToolContext,
+        ctx: &'a ToolContext,
     ) -> BoxFuture<'a, Result<ToolResult>> {
-        Box::pin(async move {
-            let file_path = parameters
-                .get("file_path")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| ToolError::MissingParameter("file_path".to_string()))?;
-            let repo_path = parameters
-                .get("repo_path")
-                .and_then(|v| v.as_str())
-                .unwrap_or(".");
-            let repo_path = effective_repo_path(repo_path, ctx);
-            let page_request = match PageRequest::from_parameters(&parameters, 100, 300) {
-                Ok(request) => request,
-                Err(error) => return Ok(ToolResult::invalid_arguments(error.to_string())),
-            };
-
-            let mut args: Vec<String> = vec!["blame".to_string()];
-            if let (Some(start), Some(end)) = (
-                parameters.get("start_line").and_then(|v| v.as_u64()),
-                parameters.get("end_line").and_then(|v| v.as_u64()),
-            ) {
-                args.push("-L".to_string());
-                args.push(format!("{},{}", start, end));
-            }
-            // Add -- separator before user-supplied file path to prevent argument injection
-            args.push("--".to_string());
-            args.push(file_path.to_string());
-
-            let str_args: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-            let output = run_git(&repo_path, &str_args, ctx).await?;
-            let lines = output.lines().map(str::to_string).collect();
-            let query = serde_json::json!({
-                "repo_path": repo_path,
-                "file_path": file_path,
-                "start_line": parameters.get("start_line"),
-                "end_line": parameters.get("end_line"),
-            });
-            let (page, page_info) = match page_request.paginate(lines, &query) {
-                Ok(page) => page,
-                Err(error) => return Ok(ToolResult::invalid_arguments(error.to_string())),
-            };
-            let mut result = ToolResult::success(page.join("\n"));
-            page_info.apply_to(&mut result);
-            Ok(result)
-        })
+        self.execute_at(parameters, ctx, None)
     }
 }
 
@@ -457,49 +303,9 @@ impl Tool for GitBranchTool {
     fn execute_with_context<'a>(
         &'a self,
         parameters: ToolParameters,
-        ctx: &'a echo_core::tools::ToolContext,
+        ctx: &'a ToolContext,
     ) -> BoxFuture<'a, Result<ToolResult>> {
-        Box::pin(async move {
-            let repo_path = parameters
-                .get("repo_path")
-                .and_then(|v| v.as_str())
-                .unwrap_or(".");
-            let repo_path = effective_repo_path(repo_path, ctx);
-
-            let action;
-            let args: Vec<String>;
-
-            if let Some(name) = parameters.get("name").and_then(|v| v.as_str()) {
-                // -- separator: branch names starting with - are treated as names, not options
-                args = vec!["branch".to_string(), "--".to_string(), name.to_string()];
-                action = format!("Create branch '{}'", name);
-            } else if let Some(target) = parameters.get("switch").and_then(|v| v.as_str()) {
-                if target.trim().is_empty() || target.starts_with('-') {
-                    return Ok(ToolResult::invalid_arguments(
-                        "switch target must be a non-empty branch name, not an option",
-                    ));
-                }
-                // checkout -- selects paths and can overwrite a same-named dirty file.
-                // Use the repository's existing branch-only switch pattern without force.
-                args = vec!["switch".to_string(), "--".to_string(), target.to_string()];
-                action = format!("Switch to branch '{}'", target);
-            } else if let Some(target) = parameters.get("delete").and_then(|v| v.as_str()) {
-                args = vec![
-                    "branch".to_string(),
-                    "-d".to_string(),
-                    "--".to_string(),
-                    target.to_string(),
-                ];
-                action = format!("Delete branch '{}'", target);
-            } else {
-                args = vec!["branch".to_string(), "-a".to_string()];
-                action = "List all branches".to_string();
-            }
-
-            let str_args: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-            let output = run_git(&repo_path, &str_args, ctx).await?;
-            Ok(ToolResult::success(format!("{}:\n{}", action, output)))
-        })
+        self.execute_at(parameters, ctx, None)
     }
 }
 
@@ -548,39 +354,9 @@ impl Tool for GitCommitTool {
     fn execute_with_context<'a>(
         &'a self,
         parameters: ToolParameters,
-        ctx: &'a echo_core::tools::ToolContext,
+        ctx: &'a ToolContext,
     ) -> BoxFuture<'a, Result<ToolResult>> {
-        Box::pin(async move {
-            let repo_path = parameters
-                .get("repo_path")
-                .and_then(|v| v.as_str())
-                .unwrap_or(".");
-            let repo_path = effective_repo_path(repo_path, ctx);
-            let message = parameters
-                .get("message")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| ToolError::MissingParameter("message".to_string()))?;
-
-            // If file list is specified, run git add first
-            if let Some(files) = parameters.get("files").and_then(|v| v.as_array()) {
-                for f_val in files {
-                    if let Some(f) = f_val.as_str() {
-                        // `--` separates paths from options so a filename
-                        // starting with `-` (e.g. `--upload-pack=...`) can't be
-                        // interpreted as a git flag (P1-2 argument injection).
-                        let add_args = ["add", "--", f];
-                        run_git(&repo_path, &add_args, ctx).await?;
-                    }
-                }
-            }
-
-            let commit_args = ["commit", "-m", message];
-            let output = run_git(&repo_path, &commit_args, ctx).await?;
-            Ok(ToolResult::success(format!(
-                "Commit succeeded:\n{}",
-                output
-            )))
-        })
+        self.execute_at(parameters, ctx, None)
     }
 }
 
@@ -611,7 +387,12 @@ fn effective_repo_path(user_repo_path: &str, ctx: &echo_core::tools::ToolContext
     user_repo_path.to_string()
 }
 
-async fn run_git(repo_path: &str, args: &[&str], context: &ToolContext) -> Result<String> {
+pub(crate) async fn run_git(
+    repo_path: &str,
+    args: &[&str],
+    context: &ToolContext,
+    backend: Option<&GitBackend>,
+) -> Result<String> {
     // Validate repo_path: reject path traversal and ensure the path exists
     let path = Path::new(repo_path);
     if path
@@ -624,6 +405,86 @@ async fn run_git(repo_path: &str, args: &[&str], context: &ToolContext) -> Resul
                 "Invalid repo_path: path traversal not allowed: {}",
                 repo_path
             ),
+        }
+        .into());
+    }
+    // Explicit LocalFileSystem injection preserves the old native default when
+    // no sandbox is configured; a non-native provider can never use that path.
+    let backend = backend.filter(|backend| {
+        !backend.file_system.paths_are_native()
+            || backend
+                .executor
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_some()
+    });
+    if let Some(backend) = backend {
+        let file_system = backend.file_system.clone();
+        let directory = path.to_path_buf();
+        let guards = context.resource_guards.clone();
+        let directory = tokio::task::spawn_blocking(move || {
+            let _guards = guards;
+            let directory = if directory == Path::new(".") {
+                file_system.current_dir()?
+            } else {
+                directory
+            };
+            if !file_system.is_dir(&directory)? {
+                return Err(ToolError::ExecutionFailed {
+                    tool: "git".into(),
+                    message: format!(
+                        "repo_path does not exist or is not a directory: {}",
+                        directory.display()
+                    ),
+                }
+                .into());
+            }
+            Ok::<_, echo_core::error::ReactError>(directory)
+        })
+        .await
+        .map_err(|error| ToolError::ExecutionFailed {
+            tool: "git".into(),
+            message: format!("Git target preparation failed: {error}"),
+        })??;
+        let executor = backend.executor.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()
+            .ok_or_else(|| ToolError::ExecutionFailed { tool: "git".into(), message: "Target-bound Git requires the matching SandboxExecutor; local fallback is disabled".into() })?;
+        let command = echo_core::sandbox::SandboxCommand::program(
+            "git",
+            args.iter().map(|value| (*value).to_string()).collect(),
+        )
+        .with_working_dir(directory)
+        .with_timeout(GIT_TIMEOUT)
+        .with_env("GIT_TERMINAL_PROMPT", "0")
+        .with_env("GCM_INTERACTIVE", "Never")
+        .with_resource_guards(context.resource_guards.clone())
+        .with_cancel(context.cancel.clone());
+        let output = executor
+            .execute_with_limits_and_cancel(
+                command,
+                echo_core::sandbox::ResourceLimits {
+                    cpu_time_secs: Some(60),
+                    max_output_bytes: Some(MAX_GIT_OUTPUT_BYTES as u64),
+                    ..Default::default()
+                },
+                context.cancel.clone(),
+            )
+            .await?;
+        if output.cancelled {
+            return Err(ToolError::Cancelled("git".into()).into());
+        }
+        if output.timed_out {
+            return Err(ToolError::Timeout("git".into()).into());
+        }
+        if output.success() {
+            let mut text = output.stdout.trim().to_string();
+            if output.output_truncated {
+                text.push_str("\n[git output truncated at 1 MiB]");
+            }
+            return Ok(text);
+        }
+        return Err(ToolError::ExecutionFailed {
+            tool: "git".into(),
+            message: output.stderr.trim().to_string(),
         }
         .into());
     }
@@ -662,6 +523,418 @@ async fn run_git(repo_path: &str, args: &[&str], context: &ToolContext) -> Resul
             message: stderr.trim().to_string(),
         }
         .into())
+    }
+}
+
+/// Thin registration adapter: the original schemas and command algorithms stay
+/// in their original tools, including their public local unit constructors.
+pub(crate) struct GitBackend {
+    pub(crate) file_system: std::sync::Arc<dyn echo_core::tools::filesystem::FileSystem>,
+    executor: std::sync::Mutex<Option<std::sync::Arc<dyn echo_core::sandbox::SandboxExecutor>>>,
+}
+
+pub(crate) trait LocationGitTool: Tool {
+    fn execute_at<'a>(
+        &'a self,
+        parameters: ToolParameters,
+        ctx: &'a ToolContext,
+        backend: Option<&'a GitBackend>,
+    ) -> BoxFuture<'a, Result<ToolResult>>;
+}
+
+struct BoundGitTool<T> {
+    inner: T,
+    backend: GitBackend,
+}
+
+pub(crate) fn bind_file_system<T: LocationGitTool + 'static>(
+    tool: T,
+    file_system: Option<std::sync::Arc<dyn echo_core::tools::filesystem::FileSystem>>,
+) -> Box<dyn Tool> {
+    match file_system {
+        Some(file_system) => Box::new(BoundGitTool {
+            inner: tool,
+            backend: GitBackend {
+                file_system,
+                executor: std::sync::Mutex::new(None),
+            },
+        }),
+        None => Box::new(tool),
+    }
+}
+
+impl<T: LocationGitTool> Tool for BoundGitTool<T> {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+    fn description(&self) -> &str {
+        if !self.backend.file_system.paths_are_native()
+            && matches!(self.inner.name(), "enter_worktree" | "exit_worktree")
+        {
+            return "Unavailable for this target: managed worktree mutation requires retained no-follow directory identity. No native fallback, reservation, merge or removal is performed.";
+        }
+        self.inner.description()
+    }
+    fn parameters(&self) -> Value {
+        self.inner.parameters()
+    }
+    fn permissions(&self) -> Vec<ToolPermission> {
+        self.inner.permissions()
+    }
+    fn risk_level(&self) -> ToolRiskLevel {
+        self.inner.risk_level()
+    }
+    fn capabilities(&self) -> echo_core::tools::ToolCapabilities {
+        self.inner.capabilities()
+    }
+    fn allows_parallel_batch_execution(&self) -> bool {
+        self.inner.allows_parallel_batch_execution()
+    }
+    fn set_sandbox(
+        &self,
+        executor: std::sync::Arc<dyn echo_core::sandbox::SandboxExecutor>,
+    ) -> bool {
+        *self
+            .backend
+            .executor
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(executor);
+        true
+    }
+    fn execute_with_context<'a>(
+        &'a self,
+        parameters: ToolParameters,
+        ctx: &'a ToolContext,
+    ) -> BoxFuture<'a, Result<ToolResult>> {
+        self.inner.execute_at(parameters, ctx, Some(&self.backend))
+    }
+}
+
+impl LocationGitTool for GitStatusTool {
+    fn execute_at<'a>(
+        &'a self,
+        parameters: ToolParameters,
+        ctx: &'a ToolContext,
+        backend: Option<&'a GitBackend>,
+    ) -> BoxFuture<'a, Result<ToolResult>> {
+        Box::pin(async move {
+            let repo_path = parameters
+                .get("repo_path")
+                .and_then(Value::as_str)
+                .unwrap_or(".");
+            let repo_path = effective_repo_path(repo_path, ctx);
+            let output = run_git(&repo_path, &["status", "--short"], ctx, backend).await?;
+            if output.is_empty() {
+                Ok(ToolResult::success("Working directory clean, no changes"))
+            } else {
+                Ok(ToolResult::success(format!("Git status:\n{output}")))
+            }
+        })
+    }
+}
+
+impl LocationGitTool for GitDiffTool {
+    fn execute_at<'a>(
+        &'a self,
+        parameters: ToolParameters,
+        ctx: &'a ToolContext,
+        backend: Option<&'a GitBackend>,
+    ) -> BoxFuture<'a, Result<ToolResult>> {
+        Box::pin(async move {
+            let repo_path = parameters
+                .get("repo_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or(".");
+            let repo_path = effective_repo_path(repo_path, ctx);
+            let page_request = match PageRequest::from_parameters(&parameters, 10, 50) {
+                Ok(request) => request,
+                Err(error) => return Ok(ToolResult::invalid_arguments(error.to_string())),
+            };
+
+            let mut args = vec!["diff"];
+            let staged = parameters
+                .get("staged")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if staged {
+                args.push("--staged");
+            }
+
+            let target = parameters.get("target").and_then(|v| v.as_str());
+            let file_path = parameters.get("file_path").and_then(|v| v.as_str());
+
+            if let Some(t) = target {
+                if t.starts_with('-') {
+                    return Ok(ToolResult::invalid_arguments(
+                        "target must be a branch or commit name, not an option",
+                    ));
+                }
+                args.push(t);
+            }
+            if let Some(fp) = file_path {
+                args.push("--");
+                args.push(fp);
+            }
+
+            let output = run_git(&repo_path, &args, ctx, backend).await?;
+            let chunks = crate::diff_pagination::split_unified_diff(&output);
+            let query = serde_json::json!({
+                "repo_path": repo_path,
+                "staged": staged,
+                "target": target,
+                "file_path": file_path,
+            });
+            let (page, page_info) = match page_request.paginate(chunks, &query) {
+                Ok(page) => page,
+                Err(error) => return Ok(ToolResult::invalid_arguments(error.to_string())),
+            };
+            let output = if page.is_empty() {
+                "No differences".to_string()
+            } else {
+                format!("```diff\n{}\n```", page.join("\n"))
+            };
+            let mut result = ToolResult::success(output);
+            page_info.apply_to(&mut result);
+            Ok(result)
+        })
+    }
+}
+
+impl LocationGitTool for GitLogTool {
+    fn execute_at<'a>(
+        &'a self,
+        parameters: ToolParameters,
+        ctx: &'a ToolContext,
+        backend: Option<&'a GitBackend>,
+    ) -> BoxFuture<'a, Result<ToolResult>> {
+        Box::pin(async move {
+            let repo_path = parameters
+                .get("repo_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or(".");
+            let repo_path = effective_repo_path(repo_path, ctx);
+
+            let count = parameters
+                .get("count")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(20);
+            let oneline = parameters
+                .get("oneline")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+
+            let mut args: Vec<&str> = vec!["log"];
+            if oneline {
+                args.push("--oneline");
+            }
+            let count_str = count.to_string();
+            args.extend_from_slice(&["-n", &count_str]);
+
+            let author = parameters.get("author").and_then(|v| v.as_str());
+            let since = parameters.get("since").and_then(|v| v.as_str());
+            let mut extra_args: Vec<String> = Vec::new();
+            if let Some(a) = author {
+                extra_args.push(format!("--author={}", a));
+            }
+            if let Some(s) = since {
+                extra_args.push(format!("--since={}", s));
+            }
+            let extra_strs: Vec<&str> = extra_args.iter().map(|s| s.as_str()).collect();
+            args.extend(&extra_strs);
+
+            let output = run_git(&repo_path, &args, ctx, backend).await?;
+            if output.is_empty() {
+                Ok(ToolResult::success(
+                    "Repository has no commit history".to_string(),
+                ))
+            } else {
+                Ok(ToolResult::success(format!("Commit history:\n{}", output)))
+            }
+        })
+    }
+}
+
+impl LocationGitTool for GitBlameTool {
+    fn execute_at<'a>(
+        &'a self,
+        parameters: ToolParameters,
+        ctx: &'a ToolContext,
+        backend: Option<&'a GitBackend>,
+    ) -> BoxFuture<'a, Result<ToolResult>> {
+        Box::pin(async move {
+            let file_path = parameters
+                .get("file_path")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| ToolError::MissingParameter("file_path".to_string()))?;
+            let repo_path = parameters
+                .get("repo_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or(".");
+            let repo_path = effective_repo_path(repo_path, ctx);
+            let page_request = match PageRequest::from_parameters(&parameters, 100, 300) {
+                Ok(request) => request,
+                Err(error) => return Ok(ToolResult::invalid_arguments(error.to_string())),
+            };
+
+            let mut args: Vec<String> = vec!["blame".to_string()];
+            if let (Some(start), Some(end)) = (
+                parameters.get("start_line").and_then(|v| v.as_u64()),
+                parameters.get("end_line").and_then(|v| v.as_u64()),
+            ) {
+                args.push("-L".to_string());
+                args.push(format!("{},{}", start, end));
+            }
+            // Add -- separator before user-supplied file path to prevent argument injection
+            args.push("--".to_string());
+            args.push(file_path.to_string());
+
+            let str_args: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+            let output = run_git(&repo_path, &str_args, ctx, backend).await?;
+            let lines = output.lines().map(str::to_string).collect();
+            let query = serde_json::json!({
+                "repo_path": repo_path,
+                "file_path": file_path,
+                "start_line": parameters.get("start_line"),
+                "end_line": parameters.get("end_line"),
+            });
+            let (page, page_info) = match page_request.paginate(lines, &query) {
+                Ok(page) => page,
+                Err(error) => return Ok(ToolResult::invalid_arguments(error.to_string())),
+            };
+            let mut result = ToolResult::success(page.join("\n"));
+            page_info.apply_to(&mut result);
+            Ok(result)
+        })
+    }
+}
+
+impl LocationGitTool for GitBranchTool {
+    fn execute_at<'a>(
+        &'a self,
+        parameters: ToolParameters,
+        ctx: &'a ToolContext,
+        backend: Option<&'a GitBackend>,
+    ) -> BoxFuture<'a, Result<ToolResult>> {
+        Box::pin(async move {
+            let repo_path = parameters
+                .get("repo_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or(".");
+            let repo_path = effective_repo_path(repo_path, ctx);
+
+            let action;
+            let args: Vec<String>;
+
+            if let Some(name) = parameters.get("name").and_then(|v| v.as_str()) {
+                // -- separator: branch names starting with - are treated as names, not options
+                args = vec!["branch".to_string(), "--".to_string(), name.to_string()];
+                action = format!("Create branch '{}'", name);
+            } else if let Some(target) = parameters.get("switch").and_then(|v| v.as_str()) {
+                if target.trim().is_empty() || target.starts_with('-') {
+                    return Ok(ToolResult::invalid_arguments(
+                        "switch target must be a non-empty branch name, not an option",
+                    ));
+                }
+                // checkout -- selects paths and can overwrite a same-named dirty file.
+                // Use the repository's existing branch-only switch pattern without force.
+                args = vec!["switch".to_string(), "--".to_string(), target.to_string()];
+                action = format!("Switch to branch '{}'", target);
+            } else if let Some(target) = parameters.get("delete").and_then(|v| v.as_str()) {
+                args = vec![
+                    "branch".to_string(),
+                    "-d".to_string(),
+                    "--".to_string(),
+                    target.to_string(),
+                ];
+                action = format!("Delete branch '{}'", target);
+            } else {
+                args = vec!["branch".to_string(), "-a".to_string()];
+                action = "List all branches".to_string();
+            }
+
+            let str_args: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+            let output = run_git(&repo_path, &str_args, ctx, backend).await?;
+            Ok(ToolResult::success(format!("{}:\n{}", action, output)))
+        })
+    }
+}
+
+impl LocationGitTool for GitCommitTool {
+    fn execute_at<'a>(
+        &'a self,
+        parameters: ToolParameters,
+        ctx: &'a ToolContext,
+        backend: Option<&'a GitBackend>,
+    ) -> BoxFuture<'a, Result<ToolResult>> {
+        Box::pin(async move {
+            let repo_path = parameters
+                .get("repo_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or(".");
+            let repo_path = effective_repo_path(repo_path, ctx);
+            let message = parameters
+                .get("message")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| ToolError::MissingParameter("message".to_string()))?;
+
+            // If file list is specified, run git add first
+            if let Some(files) = parameters.get("files").and_then(|v| v.as_array()) {
+                for f_val in files {
+                    if let Some(f) = f_val.as_str() {
+                        // `--` separates paths from options so a filename
+                        // starting with `-` (e.g. `--upload-pack=...`) can't be
+                        // interpreted as a git flag (P1-2 argument injection).
+                        let add_args = ["add", "--", f];
+                        run_git(&repo_path, &add_args, ctx, backend).await?;
+                    }
+                }
+            }
+
+            let commit_args = ["commit", "-m", message];
+            let output = run_git(&repo_path, &commit_args, ctx, backend).await?;
+            Ok(ToolResult::success(format!(
+                "Commit succeeded:\n{}",
+                output
+            )))
+        })
+    }
+}
+
+impl LocationGitTool for crate::worktree_tool::EnterWorktreeTool {
+    fn execute_at<'a>(
+        &'a self,
+        parameters: ToolParameters,
+        ctx: &'a ToolContext,
+        backend: Option<&'a GitBackend>,
+    ) -> BoxFuture<'a, Result<ToolResult>> {
+        if backend.is_some_and(|backend| !backend.file_system.paths_are_native()) {
+            return Box::pin(async move {
+                Ok(ToolResult::failure(
+                    echo_core::tools::ToolFailureCategory::Unavailable,
+                    "The selected target cannot provide the retained no-follow directory identity required by managed worktree mutation; unsupported before reservation, merge, or removal. Native fallback is disabled",
+                ))
+            });
+        }
+        self.execute_with_context(parameters, ctx)
+    }
+}
+
+impl LocationGitTool for crate::worktree_tool::ExitWorktreeTool {
+    fn execute_at<'a>(
+        &'a self,
+        parameters: ToolParameters,
+        ctx: &'a ToolContext,
+        backend: Option<&'a GitBackend>,
+    ) -> BoxFuture<'a, Result<ToolResult>> {
+        if backend.is_some_and(|backend| !backend.file_system.paths_are_native()) {
+            return Box::pin(async move {
+                Ok(ToolResult::failure(
+                    echo_core::tools::ToolFailureCategory::Unavailable,
+                    "The selected target cannot provide the retained no-follow directory identity required by managed worktree mutation; unsupported before reservation, merge, or removal. Native fallback is disabled",
+                ))
+            });
+        }
+        self.execute_with_context(parameters, ctx)
     }
 }
 

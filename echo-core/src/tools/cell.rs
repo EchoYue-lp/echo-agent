@@ -55,7 +55,7 @@ pub struct CommandCellOwner {
 ///
 /// The caller (e.g. `ShellTool`) is responsible for security validation
 /// before calling [`CommandCellRegistry::launch`].
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct CommandCellRequest {
     /// Shell command line to execute (via `sh -c`).
     pub command: String,
@@ -67,6 +67,11 @@ pub struct CommandCellRequest {
     /// The foreground shell had a sandbox executor, so the cell runtime must
     /// not silently downgrade this launch to direct host execution.
     pub require_sandbox: bool,
+    /// Actual invocation backend. A shared registry must not replace it with
+    /// another host's configured default executor.
+    pub executor: Option<Arc<dyn crate::sandbox::SandboxExecutor>>,
+    /// Retained by the original physical cell supervisor through final drain.
+    pub resource_guards: Vec<super::InvocationResourceGuard>,
     /// Optional lifetime cancellation supplied by a registry caller. A normal
     /// foreground Turn token should not be used because cells may outlive the
     /// Turn; products with pause/resume semantics should stop cells explicitly
@@ -78,6 +83,29 @@ pub struct CommandCellRequest {
     pub output_artifacts: Option<ToolOutputArtifactConfig>,
     /// Stable artifact identity paired with `output_artifacts`.
     pub artifact_identity: Option<ToolOutputArtifactIdentity>,
+}
+
+impl fmt::Debug for CommandCellRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CommandCellRequest")
+            .field("command", &self.command)
+            .field("working_dir", &self.working_dir)
+            .field("timeout_secs", &self.timeout_secs)
+            .field("require_sandbox", &self.require_sandbox)
+            .field(
+                "executor",
+                &self.executor.as_ref().map(|executor| executor.name()),
+            )
+            .field("resource_guards", &self.resource_guards)
+            .field(
+                "cancel",
+                &self.cancel.as_ref().map(|_| "<CancellationToken>"),
+            )
+            .field("owner", &self.owner)
+            .field("output_artifacts", &self.output_artifacts)
+            .field("artifact_identity", &self.artifact_identity)
+            .finish()
+    }
 }
 
 /// Lifecycle phase of a command cell.

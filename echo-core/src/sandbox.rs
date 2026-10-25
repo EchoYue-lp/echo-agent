@@ -198,7 +198,7 @@ impl std::fmt::Display for IsolationLevel {
 }
 
 /// Sandbox execution command
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct SandboxCommand {
     /// Command type
     pub kind: CommandKind,
@@ -213,6 +213,32 @@ pub struct SandboxCommand {
     pub timeout: Duration,
     /// Standard input
     pub stdin: Option<String>,
+    /// Runtime-only ownership, retained by the original physical backend task
+    /// before it spawns work that can outlive the observing future.
+    #[serde(skip)]
+    pub resource_guards: Vec<crate::tools::InvocationResourceGuard>,
+    /// Runtime-only cooperative stop request. Cancellation is not a receipt
+    /// that the backend or remote effects have stopped.
+    #[serde(skip)]
+    pub cancel: Option<Arc<CancellationToken>>,
+}
+
+impl std::fmt::Debug for SandboxCommand {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SandboxCommand")
+            .field("kind", &self.kind)
+            .field("minimum_isolation", &self.minimum_isolation)
+            .field("working_dir", &self.working_dir)
+            .field("env_keys", &self.env.keys().collect::<Vec<_>>())
+            .field("timeout", &self.timeout)
+            .field("stdin", &self.stdin.as_ref().map(|_| "<input>"))
+            .field("resource_guard_count", &self.resource_guards.len())
+            .field(
+                "cancel",
+                &self.cancel.as_ref().map(|_| "<CancellationToken>"),
+            )
+            .finish()
+    }
 }
 
 /// Command type
@@ -236,6 +262,8 @@ impl SandboxCommand {
             env: HashMap::new(),
             timeout: Duration::from_secs(30),
             stdin: None,
+            resource_guards: Vec::new(),
+            cancel: None,
         }
     }
 
@@ -251,6 +279,8 @@ impl SandboxCommand {
             env: HashMap::new(),
             timeout: Duration::from_secs(30),
             stdin: None,
+            resource_guards: Vec::new(),
+            cancel: None,
         }
     }
 
@@ -266,12 +296,27 @@ impl SandboxCommand {
             env: HashMap::new(),
             timeout: Duration::from_secs(30),
             stdin: None,
+            resource_guards: Vec::new(),
+            cancel: None,
         }
     }
 
     /// Set working directory
     pub fn with_working_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.working_dir = Some(dir.into());
+        self
+    }
+
+    pub fn with_resource_guards(
+        mut self,
+        guards: Vec<crate::tools::InvocationResourceGuard>,
+    ) -> Self {
+        self.resource_guards = guards;
+        self
+    }
+
+    pub fn with_cancel(mut self, cancel: Option<Arc<CancellationToken>>) -> Self {
+        self.cancel = cancel;
         self
     }
 

@@ -76,6 +76,7 @@ fn apply_sandbox_policy(cmd: &mut SandboxCommand, policy: &SkillSandboxPolicy) {
     if let Some(t) = policy.timeout_secs {
         cmd.timeout = std::time::Duration::from_secs(t);
     }
+    cmd.minimum_isolation = policy.isolation;
 }
 
 /// Build ResourceLimits from a SkillSandboxPolicy for `execute_with_limits`.
@@ -110,6 +111,243 @@ impl RunSkillScriptTool {
     pub fn with_timeout(mut self, secs: u64) -> Self {
         self.timeout_secs = secs;
         self
+    }
+    fn execute_in_context<'a>(
+        &'a self,
+        parameters: ToolParameters,
+        context: Option<&'a echo_core::tools::ToolContext>,
+    ) -> BoxFuture<'a, Result<ToolResult>> {
+        Box::pin(async move {
+            let skill_name = parameters
+                .get("skill_name")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| ToolError::MissingParameter("skill_name".to_string()))?
+                .to_string();
+
+            let script_path = parameters
+                .get("script")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| ToolError::MissingParameter("script".to_string()))?
+                .to_string();
+
+            let args_str = parameters
+                .get("args")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+
+            let script_relative_path = Path::new(&script_path);
+            if script_relative_path.is_absolute()
+                || script_relative_path
+                    .components()
+                    .any(|component| matches!(component, std::path::Component::ParentDir))
+            {
+                return Ok(ToolResult::error(
+                    "Script path must be a relative path inside the activated skill directory",
+                ));
+            }
+
+            let registry = self.registry.read().await;
+
+            if !registry.is_activated(&skill_name) {
+                return Ok(ToolResult::error(format!(
+                    "Skill '{}' has not been activated. Call activate_skill first.",
+                    skill_name
+                )));
+            }
+
+            let descriptor = match registry.get_descriptor(&skill_name) {
+                Some(d) => d.clone(),
+                None => {
+                    return Ok(ToolResult::error(format!(
+                        "Skill '{}' not found in catalog",
+                        skill_name
+                    )));
+                }
+            };
+            let source = registry
+                .file_source_with_fallback(&skill_name, self.sandbox.clone())
+                .for_invocation(context);
+            drop(registry);
+
+            if !descriptor.permits_tool(self.name()) {
+                return Ok(ToolResult::error(format!(
+                    "Skill '{}' does not permit tool '{}'; allowed-tools: {}",
+                    skill_name,
+                    self.name(),
+                    descriptor.allowed_tools.join(", ")
+                )));
+            }
+
+            let skill_dir = match descriptor.location.parent() {
+                Some(d) => d.to_path_buf(),
+                None => {
+                    return Ok(ToolResult::error(format!(
+                        "Cannot determine skill directory for '{}'",
+                        skill_name
+                    )));
+                }
+            };
+
+            let canonical_skill_dir = source.canonicalize(&skill_dir).await?;
+            let full_script_path = canonical_skill_dir.join(script_relative_path);
+            let canonical_script_path = source.canonicalize(&full_script_path).await?;
+
+            if !canonical_script_path.starts_with(&canonical_skill_dir) {
+                return Ok(ToolResult::error(
+                    "Resolved script path escapes the skill directory",
+                ));
+            }
+
+            if !source.is_file(&canonical_script_path).await? {
+                return Ok(ToolResult::error(format!(
+                    "Script not found: {} (in skill '{}')",
+                    script_path, skill_name
+                )));
+            }
+
+            // Validate arguments before interpreter probing can start a target
+            // process; malformed input must not execute even a version probe.
+            let user_args = shlex::split(&args_str).ok_or_else(|| ToolError::InvalidParameter {
+                name: "args".to_string(),
+                message: "Malformed script arguments: unmatched quotes or escapes".to_string(),
+            })?;
+
+            // A registered origin is authoritative even when its executor is
+            // absent; a host default may belong to an entirely different target.
+            let executor = source.sandbox();
+            if source.requires_executor() && executor.is_none() {
+                return Err(ToolError::ExecutionFailed {
+                    tool: self.name().to_string(),
+                    message: "This Skill's file source requires a matching script executor"
+                        .to_string(),
+                }
+                .into());
+            }
+            let invocation = if source.requires_executor() {
+                let manager = executor
+                    .as_deref()
+                    .ok_or_else(|| ToolError::ExecutionFailed {
+                        tool: self.name().to_string(),
+                        message: "Skill script executor is unavailable".to_string(),
+                    })?;
+                resolve_interpreter_in_target(
+                    &script_path,
+                    &canonical_skill_dir,
+                    manager,
+                    descriptor.sandbox.as_ref(),
+                    self.timeout_secs,
+                    context,
+                )
+                .await?
+            } else {
+                resolve_interpreter(&script_path)
+            };
+
+            // Build argument list: [prefix_args...] <script_path> [user_args...]
+            let mut all_args: Vec<String> = invocation.prefix_args.to_vec();
+            all_args.push(canonical_script_path.display().to_string());
+            all_args.extend(user_args);
+
+            let timeout = std::time::Duration::from_secs(self.timeout_secs);
+
+            // -- Sandbox execution path --
+            if let Some(ref manager) = executor {
+                let mut sandbox_cmd = SandboxCommand::program(&invocation.program, all_args)
+                    .with_working_dir(&canonical_skill_dir)
+                    .with_timeout(timeout);
+                sandbox_cmd.resource_guards = context
+                    .map(|ctx| ctx.resource_guards.clone())
+                    .unwrap_or_default();
+                sandbox_cmd.cancel = context.and_then(|ctx| ctx.cancel.clone());
+
+                // Apply SkillSandboxPolicy from descriptor (if declared).
+                // Network / path restrictions go through ResourceLimits +
+                // execute_with_limits for OS-level enforcement.
+                let execution_result = if let Some(ref policy) = descriptor.sandbox
+                    && policy.is_constraining()
+                {
+                    apply_sandbox_policy(&mut sandbox_cmd, policy);
+                    manager
+                        .execute_with_limits_and_cancel(
+                            sandbox_cmd,
+                            sandbox_limits_from_policy(policy),
+                            context.and_then(|ctx| ctx.cancel.clone()),
+                        )
+                        .await
+                } else {
+                    // Supplying unrestricted limits would overwrite the
+                    // executor's existing local configuration (e.g. network).
+                    manager.execute(sandbox_cmd).await
+                };
+
+                return match execution_result {
+                    Ok(result) => format_execution_result(
+                        &skill_name,
+                        &script_path,
+                        result.exit_code,
+                        &result.stdout,
+                        &result.stderr,
+                        &result.sandbox_type,
+                    ),
+                    Err(error) => Err(error),
+                };
+            }
+
+            // -- Fallback: direct process execution (no sandbox) --
+            if descriptor
+                .sandbox
+                .as_ref()
+                .is_some_and(SkillSandboxPolicy::is_constraining)
+            {
+                return Err(ToolError::ExecutionFailed {
+                    tool: self.name().to_string(),
+                    message: "Skill sandbox constraints require a matching executor".to_string(),
+                }
+                .into());
+            }
+            let mut cmd = tokio::process::Command::new(&invocation.program);
+            for arg in &all_args {
+                cmd.arg(arg);
+            }
+            cmd.current_dir(&canonical_skill_dir);
+            cmd.kill_on_drop(true);
+
+            // Use minimal environment to avoid leaking sensitive variables
+            let env = minimal_env(
+                &canonical_skill_dir.display().to_string(),
+                "", // no session_id needed for script execution
+                std::collections::HashMap::new(),
+            );
+            cmd.env_clear();
+            for (k, v) in env {
+                cmd.env(k, v);
+            }
+
+            match tokio::time::timeout(timeout, cmd.output()).await {
+                Ok(Ok(output)) => {
+                    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+                    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+                    format_execution_result(
+                        &skill_name,
+                        &script_path,
+                        output.status.code().unwrap_or(-1),
+                        &stdout,
+                        &stderr,
+                        "direct",
+                    )
+                }
+                Ok(Err(e)) => Ok(ToolResult::error(format!(
+                    "Failed to execute '{}' in skill '{}': {}. \
+                     Ensure the interpreter is installed and on PATH.",
+                    script_path, skill_name, e
+                ))),
+                Err(_) => Ok(ToolResult::error(format!(
+                    "Script '{}' in skill '{}' timed out after {}s",
+                    script_path, skill_name, self.timeout_secs
+                ))),
+            }
+        })
     }
 }
 
@@ -156,207 +394,100 @@ impl Tool for RunSkillScriptTool {
     }
 
     fn execute(&self, parameters: ToolParameters) -> BoxFuture<'_, Result<ToolResult>> {
-        Box::pin(async move {
-            let skill_name = parameters
-                .get("skill_name")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| ToolError::MissingParameter("skill_name".to_string()))?
-                .to_string();
+        self.execute_in_context(parameters, None)
+    }
 
-            let script_path = parameters
-                .get("script")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| ToolError::MissingParameter("script".to_string()))?
-                .to_string();
-
-            let args_str = parameters
-                .get("args")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-
-            let script_relative_path = Path::new(&script_path);
-            if script_relative_path.is_absolute()
-                || script_relative_path
-                    .components()
-                    .any(|component| matches!(component, std::path::Component::ParentDir))
-            {
-                return Ok(ToolResult::error(
-                    "Script path must be a relative path inside the activated skill directory",
-                ));
-            }
-
-            let registry = self.registry.read().await;
-
-            if !registry.is_activated(&skill_name) {
-                return Ok(ToolResult::error(format!(
-                    "Skill '{}' has not been activated. Call activate_skill first.",
-                    skill_name
-                )));
-            }
-
-            let descriptor = match registry.get_descriptor(&skill_name) {
-                Some(d) => d,
-                None => {
-                    return Ok(ToolResult::error(format!(
-                        "Skill '{}' not found in catalog",
-                        skill_name
-                    )));
-                }
-            };
-
-            if !descriptor.permits_tool(self.name()) {
-                return Ok(ToolResult::error(format!(
-                    "Skill '{}' does not permit tool '{}'; allowed-tools: {}",
-                    skill_name,
-                    self.name(),
-                    descriptor.allowed_tools.join(", ")
-                )));
-            }
-
-            let skill_dir = match descriptor.location.parent() {
-                Some(d) => d.to_path_buf(),
-                None => {
-                    return Ok(ToolResult::error(format!(
-                        "Cannot determine skill directory for '{}'",
-                        skill_name
-                    )));
-                }
-            };
-
-            let canonical_skill_dir = match skill_dir.canonicalize() {
-                Ok(path) => path,
-                Err(e) => {
-                    return Ok(ToolResult::error(format!(
-                        "Cannot canonicalize skill directory for '{}': {}",
-                        skill_name, e
-                    )));
-                }
-            };
-            let full_script_path = canonical_skill_dir.join(script_relative_path);
-            let canonical_script_path = match full_script_path.canonicalize() {
-                Ok(path) => path,
-                Err(e) => {
-                    return Ok(ToolResult::error(format!(
-                        "Cannot canonicalize script '{}': {}",
-                        script_path, e
-                    )));
-                }
-            };
-
-            if !canonical_script_path.starts_with(&canonical_skill_dir) {
-                return Ok(ToolResult::error(
-                    "Resolved script path escapes the skill directory",
-                ));
-            }
-
-            if !canonical_script_path.exists() {
-                return Ok(ToolResult::error(format!(
-                    "Script not found: {} (in skill '{}')",
-                    script_path, skill_name
-                )));
-            }
-
-            // Resolve interpreter from script extension
-            let invocation = resolve_interpreter(&script_path);
-
-            // Build argument list: [prefix_args...] <script_path> [user_args...]
-            let mut all_args: Vec<String> = invocation.prefix_args.to_vec();
-            all_args.push(canonical_script_path.display().to_string());
-            if !args_str.is_empty() {
-                let parsed =
-                    shlex::split(&args_str).ok_or_else(|| ToolError::InvalidParameter {
-                        name: "args".to_string(),
-                        message: "Malformed script arguments: unmatched quotes or escapes"
-                            .to_string(),
-                    })?;
-                all_args.extend(parsed);
-            }
-
-            let timeout = std::time::Duration::from_secs(self.timeout_secs);
-
-            // -- Sandbox execution path --
-            if let Some(ref manager) = self.sandbox {
-                let mut sandbox_cmd = SandboxCommand::program(&invocation.program, all_args)
-                    .with_working_dir(&canonical_skill_dir)
-                    .with_timeout(timeout);
-
-                // Apply SkillSandboxPolicy from descriptor (if declared).
-                // Network / path restrictions go through ResourceLimits +
-                // execute_with_limits for OS-level enforcement.
-                let execution_result = if let Some(ref policy) = descriptor.sandbox
-                    && policy.is_constraining()
-                {
-                    apply_sandbox_policy(&mut sandbox_cmd, policy);
-                    let limits = sandbox_limits_from_policy(policy);
-                    manager.execute_with_limits(sandbox_cmd, limits).await
-                } else {
-                    manager.execute(sandbox_cmd).await
-                };
-
-                return match execution_result {
-                    Ok(result) => format_execution_result(
-                        &skill_name,
-                        &script_path,
-                        result.exit_code,
-                        &result.stdout,
-                        &result.stderr,
-                        &result.sandbox_type,
-                    ),
-                    Err(e) => Ok(ToolResult::error(format!(
-                        "Sandbox execution failed for '{}' in skill '{}': {}",
-                        script_path, skill_name, e
-                    ))),
-                };
-            }
-
-            // -- Fallback: direct process execution (no sandbox) --
-            let mut cmd = tokio::process::Command::new(&invocation.program);
-            for arg in &all_args {
-                cmd.arg(arg);
-            }
-            cmd.current_dir(&canonical_skill_dir);
-            cmd.kill_on_drop(true);
-
-            // Use minimal environment to avoid leaking sensitive variables
-            let env = minimal_env(
-                &canonical_skill_dir.display().to_string(),
-                "", // no session_id needed for script execution
-                std::collections::HashMap::new(),
-            );
-            cmd.env_clear();
-            for (k, v) in env {
-                cmd.env(k, v);
-            }
-
-            match tokio::time::timeout(timeout, cmd.output()).await {
-                Ok(Ok(output)) => {
-                    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-                    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-                    format_execution_result(
-                        &skill_name,
-                        &script_path,
-                        output.status.code().unwrap_or(-1),
-                        &stdout,
-                        &stderr,
-                        "direct",
-                    )
-                }
-                Ok(Err(e)) => Ok(ToolResult::error(format!(
-                    "Failed to execute '{}' in skill '{}': {}. \
-                     Ensure the interpreter is installed and on PATH.",
-                    script_path, skill_name, e
-                ))),
-                Err(_) => Ok(ToolResult::error(format!(
-                    "Script '{}' in skill '{}' timed out after {}s",
-                    script_path, skill_name, self.timeout_secs
-                ))),
-            }
-        })
+    fn execute_with_context<'a>(
+        &'a self,
+        parameters: ToolParameters,
+        context: &'a echo_core::tools::ToolContext,
+    ) -> BoxFuture<'a, Result<ToolResult>> {
+        self.execute_in_context(parameters, Some(context))
     }
 }
 
 // -- Interpreter Resolution --
+
+/// Probe interpreters through the same executor that will run the script.
+/// Local PATH and host OS detection cannot establish a target's runtimes.
+async fn resolve_interpreter_in_target(
+    script_path: &str,
+    skill_dir: &Path,
+    executor: &dyn SandboxExecutor,
+    policy: Option<&SkillSandboxPolicy>,
+    timeout_secs: u64,
+    context: Option<&echo_core::tools::ToolContext>,
+) -> Result<Invocation> {
+    let extension = script_path
+        .rsplit('.')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let candidates = match extension.as_str() {
+        "py" => vec![
+            Invocation::new("uv", vec!["run", "--script"]),
+            Invocation::simple("python3"),
+            Invocation::simple("python"),
+            Invocation::new("py", vec!["-3"]),
+        ],
+        "ts" | "mts" | "tsx" => vec![
+            Invocation::simple("bun"),
+            Invocation::new("deno", vec!["run", "--allow-read", "--allow-env"]),
+            Invocation::new("npx", vec!["tsx"]),
+        ],
+        "js" | "mjs" | "cjs" => vec![Invocation::simple("node")],
+        "ps1" => vec![
+            Invocation::new("pwsh", vec!["-NoProfile", "-NonInteractive", "-File"]),
+            Invocation::new("powershell", vec!["-NoProfile", "-NonInteractive", "-File"]),
+        ],
+        "rb" => vec![Invocation::simple("ruby")],
+        "pl" => vec![Invocation::simple("perl")],
+        "php" => vec![Invocation::simple("php")],
+        "r" => vec![Invocation::simple("Rscript")],
+        _ => vec![Invocation::simple("bash"), Invocation::simple("sh")],
+    };
+    for candidate in candidates {
+        let mut command =
+            SandboxCommand::program(&candidate.program, vec!["--version".to_string()])
+                .with_working_dir(skill_dir)
+                .with_timeout(std::time::Duration::from_secs(timeout_secs));
+        command.resource_guards = context
+            .map(|ctx| ctx.resource_guards.clone())
+            .unwrap_or_default();
+        command.cancel = context.and_then(|ctx| ctx.cancel.clone());
+        // Probing and actual execution inherit the same configured default;
+        // only a declared constraining policy supplies explicit overrides.
+        let result = if let Some(policy) = policy.filter(|policy| policy.is_constraining()) {
+            apply_sandbox_policy(&mut command, policy);
+            executor
+                .execute_with_limits_and_cancel(
+                    command,
+                    sandbox_limits_from_policy(policy),
+                    context.and_then(|ctx| ctx.cancel.clone()),
+                )
+                .await?
+        } else {
+            executor.execute(command).await?
+        };
+        // An executor error propagates above without probing another program
+        // or falling back to a local process when settlement may be unknown.
+        if result.success() {
+            return Ok(candidate);
+        }
+        if result.timed_out || result.cancelled {
+            return Err(ToolError::ExecutionFailed {
+                tool: "run_skill_script".to_string(),
+                message: "Target interpreter probe did not settle successfully".to_string(),
+            }
+            .into());
+        }
+    }
+    Err(ToolError::ExecutionFailed {
+        tool: "run_skill_script".to_string(),
+        message: format!("No interpreter for '{script_path}' is available in the Skill's target"),
+    }
+    .into())
+}
 
 /// Resolved invocation: how to run a script file.
 struct Invocation {

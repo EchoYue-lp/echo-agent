@@ -34,6 +34,9 @@ pub struct ReactAgentBuilder {
     tools: Vec<Box<dyn Tool>>,
     task_revision_service: Option<Arc<crate::tasks::TaskRevisionService>>,
     enable_builtin_tools: bool,
+    #[cfg(feature = "files")]
+    file_system: Option<Arc<dyn echo_core::tools::filesystem::FileSystem>>,
+    auto_project_rules: bool,
     readonly_tools: bool,
     enable_memory: bool,
     command_cells: Option<Arc<dyn echo_core::tools::cell::CommandCellRegistry>>,
@@ -122,6 +125,9 @@ impl ReactAgentBuilder {
             tools: Vec::new(),
             task_revision_service: None,
             enable_builtin_tools: false,
+            #[cfg(feature = "files")]
+            file_system: None,
+            auto_project_rules: true,
             readonly_tools: false,
             enable_memory: false,
             command_cells: None,
@@ -296,6 +302,24 @@ impl ReactAgentBuilder {
     /// Enable built-in tools (via the `enable_tool` flag)
     pub fn enable_tools(mut self) -> Self {
         self.enable_builtin_tools = true;
+        self
+    }
+
+    /// Bind the original standard file tools to one immutable target.
+    #[cfg(feature = "files")]
+    pub fn file_system(
+        mut self,
+        file_system: Arc<dyn echo_core::tools::filesystem::FileSystem>,
+    ) -> Self {
+        self.file_system = Some(file_system);
+        self
+    }
+
+    /// Select the existing automatic project-rule loader. Applications with
+    /// their own provider-aware InstructionProvider disable this local loader
+    /// and inject the original resolved rules in their pre-model phase.
+    pub fn auto_project_rules(mut self, enabled: bool) -> Self {
+        self.auto_project_rules = enabled;
         self
     }
 
@@ -911,6 +935,7 @@ impl ReactAgentBuilder {
             });
         let mut config = AgentConfig::new(&self.model, &self.name, &self.system_prompt)
             .enable_tool(self.enable_builtin_tools)
+            .auto_project_rules(self.auto_project_rules)
             .readonly_tools(self.readonly_tools)
             .enable_memory(self.enable_memory)
             .enable_human_in_loop(self.enable_human_in_loop)
@@ -927,6 +952,10 @@ impl ReactAgentBuilder {
         #[cfg(feature = "subagent")]
         {
             config.register_subagent_message_tools = self.register_subagent_message_tools;
+        }
+        #[cfg(feature = "files")]
+        if let Some(file_system) = self.file_system.clone() {
+            config = config.file_system(file_system);
         }
         if let Some(cells) = self.command_cells.clone() {
             config = config.command_cells(cells);

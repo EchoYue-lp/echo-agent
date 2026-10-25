@@ -7,23 +7,36 @@ use futures::future::BoxFuture;
 use regex::Regex;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
-use tokio::fs;
 
 // ── CodeSearchTool ──────────────────────────────────────────────────────────
 
 /// Search for named code symbols across the project.
+#[derive(Clone)]
 pub struct CodeSearchTool {
     base_dir: Option<PathBuf>,
+    file_system: std::sync::Arc<dyn echo_core::tools::filesystem::FileSystem>,
 }
 
 impl CodeSearchTool {
+    pub fn with_file_system(
+        mut self,
+        file_system: std::sync::Arc<dyn echo_core::tools::filesystem::FileSystem>,
+    ) -> Self {
+        self.file_system = file_system;
+        self
+    }
+
     pub fn new() -> Self {
-        Self { base_dir: None }
+        Self {
+            base_dir: None,
+            file_system: std::sync::Arc::new(super::LocalFileSystem),
+        }
     }
 
     pub fn with_base_dir(base: impl Into<PathBuf>) -> Self {
         Self {
             base_dir: Some(base.into()),
+            file_system: std::sync::Arc::new(super::LocalFileSystem),
         }
     }
 }
@@ -92,7 +105,11 @@ impl Tool for CodeSearchTool {
         parameters: ToolParameters,
         ctx: &'a echo_core::tools::ToolContext,
     ) -> BoxFuture<'a, Result<ToolResult>> {
-        Box::pin(async move {
+        let this = self.clone();
+        let ctx = ctx.clone();
+        super::run_file_operation("code_search", &ctx.clone(), move || {
+            let file_system = this.file_system.as_ref();
+            let cancel = ctx.cancel.as_deref();
             let query = parameters
                 .get("query")
                 .and_then(|v| v.as_str())
@@ -132,13 +149,14 @@ impl Tool for CodeSearchTool {
 
             // Resolve search path
             let search_path = super::resolve_path(
+                this.file_system.as_ref(),
                 "code_search",
                 path_str,
-                &self.base_dir,
+                &this.base_dir,
                 ctx.working_dir.as_deref(),
             )?;
 
-            if !search_path.exists() {
+            if !file_system.exists(&search_path)? {
                 return Err(ToolError::ExecutionFailed {
                     tool: "code_search".to_string(),
                     message: format!("Path does not exist: {}", search_path.display()),
@@ -147,8 +165,14 @@ impl Tool for CodeSearchTool {
             }
 
             let file_filter = glob_pattern.map(glob_to_regex).transpose()?;
-            let mut results =
-                search_symbols(&search_path, query, symbol_type, file_filter.as_ref()).await?;
+            let mut results = search_symbols(
+                file_system,
+                cancel,
+                &search_path,
+                query,
+                symbol_type,
+                file_filter.as_ref(),
+            )?;
             results.sort_by(|left, right| {
                 left.file
                     .cmp(&right.file)
@@ -227,12 +251,15 @@ struct SymbolResult {
 }
 
 /// Search for symbols in the given path.
-async fn search_symbols(
+fn search_symbols(
+    file_system: &dyn echo_core::tools::filesystem::FileSystem,
+    cancel: Option<&echo_core::agent::CancellationToken>,
     path: &Path,
     symbol_pattern: &str,
     symbol_type: &str,
     file_filter: Option<&Regex>,
 ) -> Result<Vec<SymbolResult>> {
+    super::check_file_cancel(cancel, "code_search")?;
     let mut results = Vec::new();
 
     // Build symbol pattern regex
@@ -248,31 +275,42 @@ async fn search_symbols(
     })?;
 
     // Walk directory
-    search_directory(path, &symbol_regex, symbol_type, file_filter, &mut results).await?;
+    search_directory(
+        file_system,
+        cancel,
+        path,
+        &symbol_regex,
+        symbol_type,
+        file_filter,
+        &mut results,
+    )?;
 
     Ok(results)
 }
 
 /// Recursively search directory for symbols
-async fn search_directory(
+fn search_directory(
+    file_system: &dyn echo_core::tools::filesystem::FileSystem,
+    cancel: Option<&echo_core::agent::CancellationToken>,
     dir: &Path,
     symbol_regex: &Regex,
     symbol_type: &str,
     file_filter: Option<&Regex>,
     results: &mut Vec<SymbolResult>,
 ) -> Result<()> {
+    super::check_file_cancel(cancel, "code_search")?;
     let mut stack = vec![dir.to_path_buf()];
 
     while let Some(current_dir) = stack.pop() {
-        let mut entries = match fs::read_dir(&current_dir).await {
+        super::check_file_cancel(cancel, "code_search")?;
+        let entries = match file_system.read_dir(&current_dir) {
             Ok(e) => e,
-            Err(_) => continue, // Skip unreadable directories
+            Err(echo_core::error::ReactError::Io(_)) => continue, // Skip unreadable directories
+            Err(error) => return Err(error),
         };
 
-        while let Some(entry) = match entries.next_entry().await {
-            Ok(Some(e)) => Some(e),
-            _ => None,
-        } {
+        for entry in entries {
+            super::check_file_cancel(cancel, "code_search")?;
             let path = entry.path();
 
             // Skip hidden directories and common build artifacts
@@ -286,9 +324,9 @@ async fn search_directory(
                 continue;
             }
 
-            if path.is_dir() {
+            if file_system.is_dir(&path)? {
                 stack.push(path);
-            } else if path.is_file() {
+            } else if file_system.is_file(&path)? {
                 // Check file filter
                 if let Some(filter) = file_filter {
                     let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
@@ -298,7 +336,14 @@ async fn search_directory(
                 }
 
                 // Search file for symbols
-                search_file(&path, symbol_regex, symbol_type, results).await?;
+                search_file(
+                    file_system,
+                    cancel,
+                    &path,
+                    symbol_regex,
+                    symbol_type,
+                    results,
+                )?;
             }
         }
     }
@@ -307,12 +352,15 @@ async fn search_directory(
 }
 
 /// Search a single file for symbol definitions
-async fn search_file(
+fn search_file(
+    file_system: &dyn echo_core::tools::filesystem::FileSystem,
+    cancel: Option<&echo_core::agent::CancellationToken>,
     file: &Path,
     symbol_regex: &Regex,
     symbol_type: &str,
     results: &mut Vec<SymbolResult>,
 ) -> Result<()> {
+    super::check_file_cancel(cancel, "code_search")?;
     // Detect language from extension
     let extension = file.extension().and_then(|e| e.to_str()).unwrap_or("");
 
@@ -322,9 +370,10 @@ async fn search_file(
     }
 
     // Read file
-    let content = match fs::read_to_string(file).await {
+    let content = match file_system.read_to_string(file) {
         Ok(c) => c,
-        Err(_) => return Ok(()), // Skip unreadable files
+        Err(echo_core::error::ReactError::Io(_)) => return Ok(()),
+        Err(error) => return Err(error), // Skip unreadable files
     };
 
     // Search for each pattern
@@ -339,6 +388,7 @@ async fn search_file(
         };
 
         for (line_num, line) in content.lines().enumerate() {
+            super::check_file_cancel(cancel, "code_search")?;
             if let Some(captures) = regex.captures(line)
                 && let Some(name_match) = captures.name("name")
             {
@@ -465,6 +515,7 @@ fn glob_to_regex(glob: &str) -> Result<Regex> {
 mod tests {
     use super::*;
     use echo_core::tools::ToolContext;
+    use tokio::fs;
 
     #[tokio::test]
     async fn searches_symbol_definitions_instead_of_text_mentions()

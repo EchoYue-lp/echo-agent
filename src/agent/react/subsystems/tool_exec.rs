@@ -36,6 +36,10 @@ pub(crate) struct ToolExecutionSubsystem {
     #[cfg(feature = "subagent")]
     pub(crate) subagent_executor: Arc<crate::agent::subagent::SubagentExecutor>,
     pub(crate) skill_registry: SkillRegistry,
+    /// Definition-time origin for registrations without an explicit source.
+    /// Public SkillFileSource constructors carry configuration Arcs, not an
+    /// invocation lease; registered Skills capture their own immutable clone.
+    pub(crate) default_skill_source: Option<crate::skills::external::loader::SkillFileSource>,
     pub(crate) progressive_skill_registry: Option<SharedRegistry>,
     pub(crate) hook_registry: Arc<tokio::sync::RwLock<HookRegistry>>,
     #[cfg(feature = "mcp")]

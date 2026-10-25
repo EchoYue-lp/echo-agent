@@ -28,6 +28,8 @@ pub struct AgentConfig {
     pub(crate) allowed_tools: Vec<String>,
     /// Whether to allow registering and calling business tools (e.g., math, weather, etc.)
     pub(crate) enable_tool: bool,
+    #[cfg(feature = "files")]
+    pub(crate) file_system: Option<Arc<dyn echo_core::tools::filesystem::FileSystem>>,
     /// Restrict custom registration, invocation visibility, and execution to
     /// read-only capabilities.
     pub(crate) readonly_tools: bool,
@@ -177,6 +179,8 @@ impl AgentConfig {
             model_profile: None,
             allowed_tools: Vec::new(),
             enable_tool: false,
+            #[cfg(feature = "files")]
+            file_system: None,
             readonly_tools: false,
             command_cells: None,
             enable_human_in_loop: false,
@@ -306,6 +310,15 @@ impl AgentConfig {
     /// immediately) and the `wait` / `stop_cell` / `list_cells` tools are
     /// registered. Share one registry across a parent agent and its subagents
     /// so they all observe the same cells.
+    #[cfg(feature = "files")]
+    pub fn file_system(
+        mut self,
+        file_system: Arc<dyn echo_core::tools::filesystem::FileSystem>,
+    ) -> Self {
+        self.file_system = Some(file_system);
+        self
+    }
+
     pub fn command_cells(
         mut self,
         cells: std::sync::Arc<dyn echo_core::tools::cell::CommandCellRegistry>,

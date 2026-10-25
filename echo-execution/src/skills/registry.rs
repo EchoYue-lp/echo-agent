@@ -17,7 +17,10 @@ use tracing::warn;
 
 use crate::skills::SkillInfo;
 use crate::skills::external::SkillDocument;
-use crate::skills::external::prompt_exec::{PromptContext, SkillSource, process_skill_content};
+use crate::skills::external::loader::SkillFileSource;
+use crate::skills::external::prompt_exec::{
+    PromptContext, SkillSource, process_skill_content_with_executor_requirement,
+};
 use crate::skills::external::types::{
     SkillContent, SkillDescriptor, SkillResourceEntry, SkillResourceKind, SkillSandboxPolicy,
 };
@@ -393,6 +396,9 @@ pub struct SkillRegistry {
     /// Non-plugin discovery intentionally remains lazy and filesystem-backed.
     prepared_documents: HashMap<String, SkillDocument>,
 
+    /// Definition data tied to each Skill, never to the current selected project.
+    file_sources: HashMap<String, SkillFileSource>,
+
     /// Shared runtime activation authority.
     activation: SkillActivationHandle,
 
@@ -417,6 +423,7 @@ impl SkillRegistry {
         Self {
             descriptors: HashMap::new(),
             prepared_documents: HashMap::new(),
+            file_sources: HashMap::new(),
             activation: SkillActivationHandle::new(),
             code_skills: HashMap::new(),
             sandbox: None,
@@ -447,7 +454,36 @@ impl SkillRegistry {
     /// Register a discovered file-based skill descriptor.
     pub fn register_descriptor(&mut self, descriptor: SkillDescriptor) {
         self.prepared_documents.remove(&descriptor.name);
+        self.file_sources.remove(&descriptor.name);
         self.insert_descriptor(descriptor);
+    }
+
+    /// Register a descriptor and retain the exact source used by discovery.
+    pub fn register_descriptor_with_source(
+        &mut self,
+        descriptor: SkillDescriptor,
+        source: SkillFileSource,
+    ) {
+        let name = descriptor.name.clone();
+        self.register_descriptor(descriptor);
+        self.file_sources.insert(name, source);
+    }
+
+    /// Resolve source definition data without falling back to a host's current
+    /// project for a Skill that was explicitly registered from another source.
+    pub fn file_source(&self, name: &str) -> SkillFileSource {
+        self.file_source_with_fallback(name, None)
+    }
+
+    pub(crate) fn file_source_with_fallback(
+        &self,
+        name: &str,
+        fallback: Option<Arc<dyn SandboxExecutor>>,
+    ) -> SkillFileSource {
+        self.file_sources
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| SkillFileSource::local(fallback.or_else(|| self.sandbox.clone())))
     }
 
     fn insert_descriptor(&mut self, descriptor: SkillDescriptor) {
@@ -561,8 +597,20 @@ impl SkillRegistry {
     pub fn register_prepared(&mut self, document: SkillDocument) {
         let descriptor = document.descriptor().clone();
         let name = descriptor.name.clone();
+        self.file_sources.remove(&name);
         self.prepared_documents.insert(name, document);
         self.insert_descriptor(descriptor);
+    }
+
+    /// Prepared instructions stay frozen; resources and scripts retain origin.
+    pub fn register_prepared_with_source(
+        &mut self,
+        document: SkillDocument,
+        source: SkillFileSource,
+    ) {
+        let name = document.descriptor().name.clone();
+        self.register_prepared(document);
+        self.file_sources.insert(name, source);
     }
 
     /// Remove one file-based descriptor and all of its activation metadata.
@@ -580,6 +628,7 @@ impl SkillRegistry {
             }
         }
         self.prepared_documents.remove(name);
+        self.file_sources.remove(name);
         self.plugin_variables.remove(name);
         if removed_descriptor.is_some() {
             self.activation.retire(name);
@@ -758,6 +807,28 @@ impl SkillRegistry {
         args: &[String],
         source: SkillSource,
     ) -> echo_core::error::Result<SkillContent> {
+        self.activate_with_args_inner(name, args, source, None)
+            .await
+    }
+
+    pub(crate) async fn activate_in_context(
+        &self,
+        name: &str,
+        args: &[String],
+        source: SkillSource,
+        context: &echo_core::tools::ToolContext,
+    ) -> echo_core::error::Result<SkillContent> {
+        self.activate_with_args_inner(name, args, source, Some(context))
+            .await
+    }
+
+    async fn activate_with_args_inner(
+        &self,
+        name: &str,
+        args: &[String],
+        source: SkillSource,
+        context: Option<&echo_core::tools::ToolContext>,
+    ) -> echo_core::error::Result<SkillContent> {
         self.validate_activation_dependencies(name)?;
         if !self.descriptors.contains_key(name) {
             return Err(echo_core::error::ReactError::Other(format!(
@@ -805,11 +876,18 @@ impl SkillRegistry {
                     Arc::clone(&flight),
                 );
                 let result = self
-                    .compute_activation(name, args, source, &flight)
-                    .await
-                    .map_err(|error| error.to_string());
+                    .compute_activation(name, args, source, &flight, context)
+                    .await;
+                if let Err(echo_core::error::ReactError::Tool(error)) = &result
+                    && let echo_core::error::ToolError::RemoteFailure { failure, .. } = error.as_ref()
+                    && failure.side_effect != echo_core::tools::ToolSideEffect::None
+                {
+                    // Reuse the original poisoned activation claim: an unknown
+                    // remote effect must not become an automatic command replay.
+                    self.activation.poison(name, &flight);
+                }
                 guard.complete();
-                result
+                result.map_err(|error| error.to_string())
             })
             .await
             .clone();
@@ -825,12 +903,16 @@ impl SkillRegistry {
         args: &[String],
         source: SkillSource,
         flight: &Arc<ActivationFlight>,
+        invocation_context: Option<&echo_core::tools::ToolContext>,
     ) -> echo_core::error::Result<SkillContent> {
-        let deps_activated = self.activate_dependencies(name, source).await?;
+        let deps_activated = self
+            .activate_dependencies(name, source, invocation_context)
+            .await?;
         let descriptor = self.descriptors.get(name).cloned().ok_or_else(|| {
             echo_core::error::ReactError::Other(format!("Skill '{name}' not found in catalog"))
         })?;
         let location = descriptor.location.clone();
+        let file_source = self.file_source(name).for_invocation(invocation_context);
         let skill_dir = location
             .parent()
             .map(std::path::Path::to_path_buf)
@@ -843,7 +925,8 @@ impl SkillRegistry {
         let document = match self.prepared_documents.get(name) {
             Some(document) => document.clone(),
             None => {
-                let raw_content = tokio::fs::read_to_string(&location)
+                let raw_content = file_source
+                    .read_to_string(&location)
                     .await
                     .map_err(|error| {
                         echo_core::error::ReactError::Other(format!(
@@ -864,11 +947,20 @@ impl SkillRegistry {
             arguments: args.to_vec(),
             shell: descriptor.shell.clone(),
             source,
-            sandbox: self.sandbox.clone(),
+            sandbox: file_source.sandbox(),
+            resource_guards: invocation_context
+                .map(|ctx| ctx.resource_guards.clone())
+                .unwrap_or_default(),
+            cancel: invocation_context.and_then(|ctx| ctx.cancel.clone()),
             ..Default::default()
         };
-        let instructions = process_skill_content(&raw_instructions, &context).await;
-        let resources = enumerate_resources(&skill_dir).await;
+        let instructions = process_skill_content_with_executor_requirement(
+            &raw_instructions,
+            &context,
+            file_source.requires_executor(),
+        )
+        .await?;
+        let resources = enumerate_resources(&skill_dir, &file_source).await?;
         let instructions = if deps_activated.is_empty() {
             instructions
         } else {
@@ -938,6 +1030,7 @@ impl SkillRegistry {
         &self,
         name: &str,
         source: SkillSource,
+        context: Option<&echo_core::tools::ToolContext>,
     ) -> echo_core::error::Result<Vec<String>> {
         let deps = self
             .descriptors
@@ -962,7 +1055,7 @@ impl SkillRegistry {
                 continue;
             }
             // Recursive activation (deps of deps)
-            match Box::pin(self.activate_with_args(dep, &[], source)).await {
+            match Box::pin(self.activate_with_args_inner(dep, &[], source, context)).await {
                 Ok(_) => activated.push(dep.clone()),
                 Err(e) => {
                     warn!(
@@ -1090,8 +1183,14 @@ impl SkillRegistry {
             let document = match self.prepared_documents.get(&desc.name) {
                 Some(document) => document.clone(),
                 None => {
-                    let Ok(content) = std::fs::read_to_string(&skill_file) else {
-                        continue;
+                    let source = self.file_source(&desc.name);
+                    let content = match source.read_to_string_blocking(&skill_file) {
+                        Ok(content) => content,
+                        Err(error) => {
+                            warn!(skill = %desc.name, path = %skill_file.display(), %error,
+                                "Cannot read methodology Skill from its registered source");
+                            continue;
+                        }
                     };
                     let Ok(document) = SkillDocument::parse_at(&content, &skill_file) else {
                         continue;
@@ -1136,8 +1235,16 @@ pub fn shared_registry(registry: SkillRegistry) -> SharedRegistry {
 }
 
 /// Enumerate resource files in `scripts/`, `references/`, `assets/` under a skill dir.
-async fn enumerate_resources(skill_dir: &std::path::Path) -> Vec<SkillResourceEntry> {
+async fn enumerate_resources(
+    skill_dir: &std::path::Path,
+    source: &SkillFileSource,
+) -> echo_core::error::Result<Vec<SkillResourceEntry>> {
     let mut resources = Vec::new();
+    // In-memory prepared documents need not have a physical resource folder.
+    // A provider failure still propagates, rather than trying a local alias.
+    if !source.is_dir(skill_dir).await? {
+        return Ok(resources);
+    }
 
     let dirs = [
         ("scripts", SkillResourceKind::Script),
@@ -1147,13 +1254,13 @@ async fn enumerate_resources(skill_dir: &std::path::Path) -> Vec<SkillResourceEn
 
     for (dir_name, kind) in &dirs {
         let dir_path = skill_dir.join(dir_name);
-        if !dir_path.is_dir() {
+        if !source.is_dir(&dir_path).await? {
             continue;
         }
-        if let Ok(mut entries) = tokio::fs::read_dir(&dir_path).await {
-            while let Ok(Some(entry)) = entries.next_entry().await {
+        {
+            for entry in source.read_dir(&dir_path).await? {
                 let path = entry.path();
-                if path.is_file()
+                if source.is_file(&path).await?
                     && let Some(file_name) = path.file_name().and_then(|n| n.to_str())
                 {
                     resources.push(SkillResourceEntry {
@@ -1166,10 +1273,10 @@ async fn enumerate_resources(skill_dir: &std::path::Path) -> Vec<SkillResourceEn
     }
 
     // Also enumerate top-level text resources that are not SKILL.md.
-    if let Ok(mut entries) = tokio::fs::read_dir(skill_dir).await {
-        while let Ok(Some(entry)) = entries.next_entry().await {
+    {
+        for entry in source.read_dir(skill_dir).await? {
             let path = entry.path();
-            if path.is_file()
+            if source.is_file(&path).await?
                 && let Some(name) = path.file_name().and_then(|n| n.to_str())
                 && name != "SKILL.md"
                 && (name.ends_with(".md")
@@ -1187,7 +1294,7 @@ async fn enumerate_resources(skill_dir: &std::path::Path) -> Vec<SkillResourceEn
     }
 
     resources.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
-    resources
+    Ok(resources)
 }
 
 // -- Tests --

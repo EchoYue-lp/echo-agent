@@ -22,18 +22,32 @@ const MOVE_TO: &str = "*** Move to: ";
 const END_OF_FILE: &str = "*** End of File";
 
 /// Apply a multi-file patch relative to the active workspace.
+#[derive(Clone)]
 pub struct ApplyPatchTool {
     base_dir: Option<PathBuf>,
+    file_system: std::sync::Arc<dyn echo_core::tools::filesystem::FileSystem>,
 }
 
 impl ApplyPatchTool {
+    pub fn with_file_system(
+        mut self,
+        file_system: std::sync::Arc<dyn echo_core::tools::filesystem::FileSystem>,
+    ) -> Self {
+        self.file_system = file_system;
+        self
+    }
+
     pub fn new() -> Self {
-        Self { base_dir: None }
+        Self {
+            base_dir: None,
+            file_system: std::sync::Arc::new(super::LocalFileSystem),
+        }
     }
 
     pub fn with_base_dir(base: impl Into<PathBuf>) -> Self {
         Self {
             base_dir: Some(base.into()),
+            file_system: std::sync::Arc::new(super::LocalFileSystem),
         }
     }
 }
@@ -98,10 +112,19 @@ impl Tool for ApplyPatchTool {
                 .get("dry_run")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
+            let file_system = self.file_system.clone();
             let base_dir = self.base_dir.clone();
             let working_dir = ctx.working_dir.clone();
+            let guards = ctx.resource_guards.clone();
             tokio::task::spawn_blocking(move || {
-                execute_patch(&patch, dry_run, base_dir.as_deref(), working_dir.as_deref())
+                let _guards = guards;
+                execute_patch(
+                    file_system.as_ref(),
+                    &patch,
+                    dry_run,
+                    base_dir.as_deref(),
+                    working_dir.as_deref(),
+                )
             })
             .await
             .map_err(|error| ToolError::ExecutionFailed {
@@ -402,7 +425,36 @@ struct PatchPlan {
     changed_files: usize,
 }
 
+#[derive(Debug)]
+enum PatchPreparationError {
+    Validation(String),
+    Backend(echo_core::error::ReactError),
+}
+impl From<String> for PatchPreparationError {
+    fn from(message: String) -> Self {
+        Self::Validation(message)
+    }
+}
+impl std::fmt::Display for PatchPreparationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Validation(message) => message.fmt(f),
+            Self::Backend(error) => error.fmt(f),
+        }
+    }
+}
+fn preparation_io_error(
+    error: echo_core::error::ReactError,
+    local: impl FnOnce(&std::io::Error) -> String,
+) -> PatchPreparationError {
+    match error {
+        echo_core::error::ReactError::Io(error) => PatchPreparationError::Validation(local(&error)),
+        error => PatchPreparationError::Backend(error),
+    }
+}
+
 fn execute_patch(
+    file_system: &dyn echo_core::tools::filesystem::FileSystem,
     patch: &str,
     dry_run: bool,
     base_dir: Option<&Path>,
@@ -412,35 +464,109 @@ fn execute_patch(
         Ok(actions) => actions,
         Err(error) => return Ok(ToolResult::invalid_arguments(error)),
     };
-    let root = match resolve_root(base_dir, working_dir) {
+    let root = match resolve_root(file_system, base_dir, working_dir) {
         Ok(root) => root,
-        Err(error) => return Ok(ToolResult::invalid_arguments(error)),
+        Err(PatchPreparationError::Validation(message)) => {
+            return Ok(ToolResult::invalid_arguments(message));
+        }
+        Err(PatchPreparationError::Backend(error)) => return Err(error),
     };
-    let plan = match build_plan(actions, &root) {
+    let plan = match build_plan(file_system, actions, &root) {
         Ok(plan) => plan,
-        Err(error) => return Ok(ToolResult::invalid_arguments(error)),
+        Err(PatchPreparationError::Validation(message)) => {
+            return Ok(ToolResult::invalid_arguments(message));
+        }
+        Err(PatchPreparationError::Backend(error)) => return Err(error),
     };
     if dry_run {
         return Ok(patch_result(&plan, true, Vec::new()));
     }
 
-    let checkpoints = match create_checkpoints(&plan.mutations) {
+    let checkpoints = match create_checkpoints(file_system, &plan.mutations) {
         Ok(checkpoints) => checkpoints,
         Err(error) => {
-            return Ok(ToolResult::failure(ToolFailureCategory::Permanent, error));
+            if !matches!(error, echo_core::error::ReactError::Io(_)) {
+                return Err(error);
+            }
+            return Ok(ToolResult::failure(
+                ToolFailureCategory::Permanent,
+                error.to_string(),
+            ));
         }
     };
-    match commit_plan(&plan.mutations, &root) {
+    match commit_plan(file_system, &plan.mutations, &root) {
         Ok(()) => Ok(patch_result(&plan, false, checkpoints)),
         Err(failure) => {
-            let changed = confirmed_mutation_paths(&plan.mutations, &failure.attempted_paths);
-            let mut result = if failure.rollback_errors.is_empty() && changed.is_empty() {
-                ToolResult::failure(
-                    ToolFailureCategory::Permanent,
-                    format!(
-                        "Patch failed and all applied changes were rolled back: {}",
+            if let Some(provider_failure) = failure.provider_failure.clone()
+                && provider_failure.side_effect != ToolSideEffect::None
+            {
+                // A lost write response is not proof of failure or cancellation.
+                // Preserve any already-confirmed prefix, without inventing an
+                // effect for the failed/unknown operation itself.
+                let mut result = ToolResult::error(failure.error).with_failure(*provider_failure);
+                for path in failure
+                    .attempted_paths
+                    .iter()
+                    .take(failure.attempted_paths.len().saturating_sub(1))
+                {
+                    result = result.with_effect(echo_core::tools::ToolEffect::FileEdit {
+                        path: path.display().to_string(),
+                    });
+                }
+                if !failure.attempted_paths.is_empty() {
+                    result = result.with_meta(
+                        "unsettled_paths",
+                        serde_json::to_string(&failure.attempted_paths).map_err(|error| {
+                            ToolError::ExecutionFailed {
+                                tool: "apply_patch".to_string(),
+                                message: error.to_string(),
+                            }
+                        })?,
+                    );
+                }
+                return Ok(result);
+            }
+            let changed = match confirmed_mutation_paths(
+                file_system,
+                &plan.mutations,
+                &failure.attempted_paths,
+            ) {
+                Ok(changed) => changed,
+                Err(error) => {
+                    // Failure to observe rollback is not proof that an already
+                    // attempted mutation did not happen. Never auto-retry it.
+                    return Ok(ToolResult::error(format!(
+                        "Patch failed ({}); rollback state could not be verified: {error}",
                         failure.error
-                    ),
+                    ))
+                    .with_failure(
+                        ToolFailure::new(ToolFailureCategory::PartialSideEffect)
+                            .with_side_effect(ToolSideEffect::Possible)
+                            .with_postcondition(
+                                "Inspect the attempted patch paths before retrying",
+                            ),
+                    )
+                    .with_meta(
+                        "unsettled_paths",
+                        serde_json::to_string(&failure.attempted_paths).map_err(|error| {
+                            ToolError::ExecutionFailed {
+                                tool: "apply_patch".into(),
+                                message: error.to_string(),
+                            }
+                        })?,
+                    ));
+                }
+            };
+            let mut result = if failure.rollback_errors.is_empty() && changed.is_empty() {
+                ToolResult::error(format!(
+                    "Patch failed and all applied changes were rolled back: {}",
+                    failure.error
+                ))
+                .with_failure(
+                    failure
+                        .provider_failure
+                        .map(|failure| *failure)
+                        .unwrap_or_else(|| ToolFailure::new(ToolFailureCategory::Permanent)),
                 )
             } else {
                 let detail = if failure.rollback_errors.is_empty() {
@@ -468,45 +594,67 @@ fn execute_patch(
     }
 }
 
-fn confirmed_mutation_paths(mutations: &[PlannedMutation], attempted: &[PathBuf]) -> Vec<String> {
+fn confirmed_mutation_paths(
+    file_system: &dyn echo_core::tools::filesystem::FileSystem,
+    mutations: &[PlannedMutation],
+    attempted: &[PathBuf],
+) -> Result<Vec<String>> {
     let attempted = attempted.iter().cloned().collect::<HashSet<_>>();
     let mut seen = HashSet::new();
-    mutations
-        .iter()
-        .filter(|mutation| attempted.contains(mutation.path()))
-        .filter(|mutation| seen.insert(mutation.path().to_path_buf()))
-        .filter(|mutation| match mutation.original() {
-            None => mutation.path().exists(),
-            Some(before) => match std::fs::read(mutation.path()) {
+    let mut changed = Vec::new();
+    for mutation in mutations {
+        if !attempted.contains(mutation.path()) || !seen.insert(mutation.path().to_path_buf()) {
+            continue;
+        }
+        let differs = match mutation.original() {
+            None => file_system.exists(mutation.path())?,
+            Some(before) => match file_system.read(mutation.path()) {
                 Ok(current) => current != before,
-                Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+                Err(echo_core::error::ReactError::Io(error)) => {
+                    error.kind() == std::io::ErrorKind::NotFound
+                }
+                Err(error) => return Err(error),
             },
-        })
-        .map(|mutation| mutation.path().display().to_string())
-        .collect()
+        };
+        if differs {
+            changed.push(mutation.path().display().to_string());
+        }
+    }
+    Ok(changed)
 }
 
 fn resolve_root(
+    file_system: &dyn echo_core::tools::filesystem::FileSystem,
     base_dir: Option<&Path>,
     working_dir: Option<&Path>,
-) -> std::result::Result<PathBuf, String> {
+) -> std::result::Result<PathBuf, PatchPreparationError> {
     let root = match base_dir.or(working_dir) {
         Some(root) => root.to_path_buf(),
-        None => std::env::current_dir()
-            .map_err(|error| format!("cannot resolve current directory: {error}"))?,
+        None => file_system.current_dir().map_err(|error| {
+            preparation_io_error(error, |error| {
+                format!("cannot resolve current directory: {error}")
+            })
+        })?,
     };
-    let canonical = std::fs::canonicalize(&root)
-        .map_err(|error| format!("cannot resolve patch root '{}': {error}", root.display()))?;
-    if !canonical.is_dir() {
-        return Err(format!(
-            "patch root is not a directory: {}",
-            canonical.display()
-        ));
+    let canonical = file_system.canonicalize(&root).map_err(|error| {
+        preparation_io_error(error, |error| {
+            format!("cannot resolve patch root '{}': {error}", root.display())
+        })
+    })?;
+    if !file_system
+        .is_dir(&canonical)
+        .map_err(|error| preparation_io_error(error, |error| error.to_string()))?
+    {
+        return Err(format!("patch root is not a directory: {}", canonical.display()).into());
     }
     Ok(canonical)
 }
 
-fn resolve_action_path(root: &Path, path: &str) -> std::result::Result<PathBuf, String> {
+fn resolve_action_path(
+    file_system: &dyn echo_core::tools::filesystem::FileSystem,
+    root: &Path,
+    path: &str,
+) -> std::result::Result<PathBuf, PatchPreparationError> {
     validate_patch_path_text(path)?;
     let relative = Path::new(path)
         .components()
@@ -519,22 +667,26 @@ fn resolve_action_path(root: &Path, path: &str) -> std::result::Result<PathBuf, 
     let candidate = root.join(relative);
     let mut ancestor = candidate.clone();
     let mut suffix = Vec::<OsString>::new();
-    while !ancestor.exists() {
+    while !file_system
+        .exists(&ancestor)
+        .map_err(|error| preparation_io_error(error, |error| error.to_string()))?
+    {
         let Some(name) = ancestor.file_name() else {
-            return Err(format!("cannot resolve patch path '{path}'"));
+            return Err(format!("cannot resolve patch path '{path}'").into());
         };
         suffix.push(name.to_os_string());
         let Some(parent) = ancestor.parent() else {
-            return Err(format!("cannot resolve patch path '{path}'"));
+            return Err(format!("cannot resolve patch path '{path}'").into());
         };
         ancestor = parent.to_path_buf();
     }
-    let canonical_ancestor = std::fs::canonicalize(&ancestor)
-        .map_err(|error| format!("cannot resolve patch path '{path}': {error}"))?;
+    let canonical_ancestor = file_system.canonicalize(&ancestor).map_err(|error| {
+        preparation_io_error(error, |error| {
+            format!("cannot resolve patch path '{path}': {error}")
+        })
+    })?;
     if !canonical_ancestor.starts_with(root) {
-        return Err(format!(
-            "patch path '{path}' resolves outside the patch root"
-        ));
+        return Err(format!("patch path '{path}' resolves outside the patch root").into());
     }
     let mut resolved = canonical_ancestor;
     for component in suffix.into_iter().rev() {
@@ -543,7 +695,11 @@ fn resolve_action_path(root: &Path, path: &str) -> std::result::Result<PathBuf, 
     Ok(resolved)
 }
 
-fn build_plan(actions: Vec<PatchAction>, root: &Path) -> std::result::Result<PatchPlan, String> {
+fn build_plan(
+    file_system: &dyn echo_core::tools::filesystem::FileSystem,
+    actions: Vec<PatchAction>,
+    root: &Path,
+) -> std::result::Result<PatchPlan, PatchPreparationError> {
     let mut claimed = HashSet::new();
     let mut mutations = Vec::new();
     let mut unified_diff = String::new();
@@ -552,12 +708,16 @@ fn build_plan(actions: Vec<PatchAction>, root: &Path) -> std::result::Result<Pat
     for action in actions {
         match action {
             PatchAction::Add { path, contents } => {
-                let target = resolve_action_path(root, &path)?;
+                let target = resolve_action_path(file_system, root, &path)?;
                 claim_path(&mut claimed, &target, &path)?;
-                if target.exists() {
+                if file_system
+                    .exists(&target)
+                    .map_err(|error| preparation_io_error(error, |error| error.to_string()))?
+                {
                     return Err(format!(
                         "cannot add '{path}': target already exists; use an update action"
-                    ));
+                    )
+                    .into());
                 }
                 append_diff(&mut unified_diff, "/dev/null", &path, "", &contents);
                 mutations.push(PlannedMutation::Write {
@@ -567,9 +727,9 @@ fn build_plan(actions: Vec<PatchAction>, root: &Path) -> std::result::Result<Pat
                 });
             }
             PatchAction::Delete { path } => {
-                let target = resolve_action_path(root, &path)?;
+                let target = resolve_action_path(file_system, root, &path)?;
                 claim_path(&mut claimed, &target, &path)?;
-                let before = read_existing_file(&target, &path)?;
+                let before = read_existing_file(file_system, &target, &path)?;
                 let before_text = decode_text(&before, &path)?;
                 append_diff(&mut unified_diff, &path, "/dev/null", &before_text, "");
                 mutations.push(PlannedMutation::Delete {
@@ -582,19 +742,23 @@ fn build_plan(actions: Vec<PatchAction>, root: &Path) -> std::result::Result<Pat
                 move_to,
                 chunks,
             } => {
-                let source = resolve_action_path(root, &path)?;
+                let source = resolve_action_path(file_system, root, &path)?;
                 claim_path(&mut claimed, &source, &path)?;
-                let before = read_existing_file(&source, &path)?;
+                let before = read_existing_file(file_system, &source, &path)?;
                 let before_text = decode_text(&before, &path)?;
                 let after_text = apply_chunks(&path, &before_text, &chunks)?;
                 match move_to {
                     Some(destination_text) => {
-                        let destination = resolve_action_path(root, &destination_text)?;
+                        let destination =
+                            resolve_action_path(file_system, root, &destination_text)?;
                         claim_path(&mut claimed, &destination, &destination_text)?;
-                        if destination.exists() {
+                        if file_system.exists(&destination).map_err(|error| {
+                            preparation_io_error(error, |error| error.to_string())
+                        })? {
                             return Err(format!(
                                 "cannot move '{path}' to '{destination_text}': destination exists"
-                            ));
+                            )
+                            .into());
                         }
                         append_diff(
                             &mut unified_diff,
@@ -615,7 +779,7 @@ fn build_plan(actions: Vec<PatchAction>, root: &Path) -> std::result::Result<Pat
                     }
                     None => {
                         if before_text == after_text {
-                            return Err(format!("update for '{path}' makes no changes"));
+                            return Err(format!("update for '{path}' makes no changes").into());
                         }
                         append_diff(&mut unified_diff, &path, &path, &before_text, &after_text);
                         mutations.push(PlannedMutation::Write {
@@ -649,13 +813,20 @@ fn claim_path(
     }
 }
 
-fn read_existing_file(path: &Path, display: &str) -> std::result::Result<Vec<u8>, String> {
-    let metadata =
-        std::fs::metadata(path).map_err(|error| format!("cannot access '{display}': {error}"))?;
+fn read_existing_file(
+    file_system: &dyn echo_core::tools::filesystem::FileSystem,
+    path: &Path,
+    display: &str,
+) -> std::result::Result<Vec<u8>, PatchPreparationError> {
+    let metadata = file_system.metadata(path).map_err(|error| {
+        preparation_io_error(error, |error| format!("cannot access '{display}': {error}"))
+    })?;
     if !metadata.is_file() {
-        return Err(format!("patch target is not a regular file: '{display}'"));
+        return Err(format!("patch target is not a regular file: '{display}'").into());
     }
-    std::fs::read(path).map_err(|error| format!("cannot read '{display}': {error}"))
+    file_system.read(path).map_err(|error| {
+        preparation_io_error(error, |error| format!("cannot read '{display}': {error}"))
+    })
 }
 
 fn decode_text(bytes: &[u8], display: &str) -> std::result::Result<String, String> {
@@ -788,8 +959,9 @@ fn append_diff(target: &mut String, old_path: &str, new_path: &str, old: &str, n
 }
 
 fn create_checkpoints(
+    file_system: &dyn echo_core::tools::filesystem::FileSystem,
     mutations: &[PlannedMutation],
-) -> std::result::Result<Vec<(String, String)>, String> {
+) -> Result<Vec<(String, String)>> {
     let mut seen = HashSet::new();
     let mut checkpoints = Vec::new();
     for mutation in mutations {
@@ -797,8 +969,7 @@ fn create_checkpoints(
         if mutation.original().is_none() || !seen.insert(path.to_path_buf()) {
             continue;
         }
-        if let Some(checkpoint) = crate::git_checkpoint::create_checkpoint(path)? {
-            crate::git_checkpoint::cleanup_old_checkpoints(path, 10);
+        if let Some(checkpoint) = file_system.checkpoint(path)? {
             checkpoints.push((path.display().to_string(), checkpoint));
         }
     }
@@ -809,17 +980,25 @@ struct CommitFailure {
     error: String,
     rollback_errors: Vec<String>,
     attempted_paths: Vec<PathBuf>,
+    provider_failure: Option<Box<ToolFailure>>,
 }
 
 fn commit_plan(
+    file_system: &dyn echo_core::tools::filesystem::FileSystem,
     mutations: &[PlannedMutation],
     root: &Path,
 ) -> std::result::Result<(), CommitFailure> {
-    if let Err(error) = verify_originals_unchanged(mutations) {
+    if let Err(error) = verify_originals_unchanged(file_system, mutations) {
         return Err(CommitFailure {
-            error,
+            error: error.to_string(),
             rollback_errors: Vec::new(),
             attempted_paths: Vec::new(),
+            provider_failure: match error {
+                PatchPreparationError::Backend(error) => {
+                    Some(Box::new(ToolFailure::from_error(&error, false)))
+                }
+                _ => None,
+            },
         });
     }
     let mut applied = Vec::new();
@@ -827,13 +1006,29 @@ fn commit_plan(
     for mutation in mutations {
         let result = match mutation {
             PlannedMutation::Write { path, after, .. } => {
-                created_directories.extend(missing_parent_directories(path, root));
-                echo_core::utils::fs::atomic_write(path, after)
+                missing_parent_directories(file_system, path, root).and_then(|directories| {
+                    created_directories.extend(directories);
+                    file_system.atomic_write(path, after)
+                })
             }
-            PlannedMutation::Delete { path, .. } => std::fs::remove_file(path),
+            PlannedMutation::Delete { path, .. } => file_system.remove_file(path),
         };
         if let Err(error) = result {
-            let rollback_errors = rollback_mutations(&applied, &created_directories);
+            let failure = ToolFailure::from_error(&error, false);
+            if failure.side_effect != ToolSideEffect::None {
+                let mut attempted_paths = applied
+                    .iter()
+                    .map(|mutation: &PlannedMutation| mutation.path().to_path_buf())
+                    .collect::<Vec<_>>();
+                attempted_paths.push(mutation.path().to_path_buf());
+                return Err(CommitFailure {
+                    error: error.to_string(),
+                    rollback_errors: Vec::new(),
+                    attempted_paths,
+                    provider_failure: Some(Box::new(failure)),
+                });
+            }
+            let rollback_errors = rollback_mutations(file_system, &applied, &created_directories);
             let mut attempted_paths = applied
                 .iter()
                 .map(|applied| applied.path().to_path_buf())
@@ -843,6 +1038,11 @@ fn commit_plan(
                 error: format!("failed to update '{}': {error}", mutation.path().display()),
                 rollback_errors,
                 attempted_paths,
+                provider_failure: if matches!(error, echo_core::error::ReactError::Io(_)) {
+                    None
+                } else {
+                    Some(Box::new(failure))
+                },
             });
         }
         applied.push(mutation.clone());
@@ -850,7 +1050,10 @@ fn commit_plan(
     Ok(())
 }
 
-fn verify_originals_unchanged(mutations: &[PlannedMutation]) -> std::result::Result<(), String> {
+fn verify_originals_unchanged(
+    file_system: &dyn echo_core::tools::filesystem::FileSystem,
+    mutations: &[PlannedMutation],
+) -> std::result::Result<(), PatchPreparationError> {
     let mut seen = HashSet::new();
     for mutation in mutations {
         let path = mutation.path();
@@ -859,21 +1062,28 @@ fn verify_originals_unchanged(mutations: &[PlannedMutation]) -> std::result::Res
         }
         match mutation.original() {
             Some(expected) => {
-                let current = std::fs::read(path).map_err(|error| {
-                    format!("cannot re-read '{}' before commit: {error}", path.display())
+                let current = file_system.read(path).map_err(|error| {
+                    preparation_io_error(error, |error| {
+                        format!("cannot re-read '{}' before commit: {error}", path.display())
+                    })
                 })?;
                 if current != expected {
                     return Err(format!(
                         "file changed after patch validation: '{}'",
                         path.display()
-                    ));
+                    )
+                    .into());
                 }
             }
-            None if path.exists() => {
+            None if file_system
+                .exists(path)
+                .map_err(|error| preparation_io_error(error, |error| error.to_string()))? =>
+            {
                 return Err(format!(
                     "patch destination appeared after validation: '{}'",
                     path.display()
-                ));
+                )
+                .into());
             }
             None => {}
         }
@@ -881,7 +1091,11 @@ fn verify_originals_unchanged(mutations: &[PlannedMutation]) -> std::result::Res
     Ok(())
 }
 
-fn rollback_mutations(applied: &[PlannedMutation], created_directories: &[PathBuf]) -> Vec<String> {
+fn rollback_mutations(
+    file_system: &dyn echo_core::tools::filesystem::FileSystem,
+    applied: &[PlannedMutation],
+    created_directories: &[PathBuf],
+) -> Vec<String> {
     let mut errors = Vec::new();
     for mutation in applied.iter().rev() {
         let result = match mutation {
@@ -890,25 +1104,29 @@ fn rollback_mutations(applied: &[PlannedMutation], created_directories: &[PathBu
                 before: Some(before),
                 ..
             }
-            | PlannedMutation::Delete { path, before } => {
-                echo_core::utils::fs::atomic_write(path, before)
-            }
+            | PlannedMutation::Delete { path, before } => file_system.atomic_write(path, before),
             PlannedMutation::Write {
                 path, before: None, ..
-            } => match std::fs::remove_file(path) {
+            } => match file_system.remove_file(path) {
                 Ok(()) => Ok(()),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(error) if super::is_io_kind(&error, std::io::ErrorKind::NotFound) => Ok(()),
                 Err(error) => Err(error),
             },
         };
         if let Err(error) = result {
+            let failure = ToolFailure::from_error(&error, false);
             errors.push(format!("{}: {error}", mutation.path().display()));
+            if failure.side_effect != ToolSideEffect::None {
+                // No further rollback/cleanup writes while an undo operation
+                // itself has an unknown result in the original backend owner.
+                return errors;
+            }
         }
     }
     for directory in created_directories.iter().rev() {
-        if let Err(error) = std::fs::remove_dir(directory)
-            && error.kind() != std::io::ErrorKind::NotFound
-            && error.kind() != std::io::ErrorKind::DirectoryNotEmpty
+        if let Err(error) = file_system.remove_dir(directory)
+            && !super::is_io_kind(&error, std::io::ErrorKind::NotFound)
+            && !super::is_io_kind(&error, std::io::ErrorKind::DirectoryNotEmpty)
         {
             errors.push(format!("{}: {error}", directory.display()));
         }
@@ -916,18 +1134,22 @@ fn rollback_mutations(applied: &[PlannedMutation], created_directories: &[PathBu
     errors
 }
 
-fn missing_parent_directories(path: &Path, root: &Path) -> Vec<PathBuf> {
+fn missing_parent_directories(
+    file_system: &dyn echo_core::tools::filesystem::FileSystem,
+    path: &Path,
+    root: &Path,
+) -> Result<Vec<PathBuf>> {
     let mut missing = Vec::new();
     let mut current = path.parent();
     while let Some(directory) = current {
-        if directory == root || directory.exists() {
+        if directory == root || file_system.exists(directory)? {
             break;
         }
         missing.push(directory.to_path_buf());
         current = directory.parent();
     }
     missing.reverse();
-    missing
+    Ok(missing)
 }
 
 fn patch_result(plan: &PatchPlan, dry_run: bool, checkpoints: Vec<(String, String)>) -> ToolResult {
@@ -1122,11 +1344,18 @@ mod tests {
             },
         ];
         assert_eq!(
-            confirmed_mutation_paths(&mutations, std::slice::from_ref(&first)),
+            confirmed_mutation_paths(
+                &super::super::LocalFileSystem,
+                &mutations,
+                std::slice::from_ref(&first)
+            )?,
             [first.display().to_string()]
         );
         std::fs::write(&first, "original")?;
-        assert!(confirmed_mutation_paths(&mutations, &[first]).is_empty());
+        assert!(
+            confirmed_mutation_paths(&super::super::LocalFileSystem, &mutations, &[first])?
+                .is_empty()
+        );
         Ok(())
     }
 

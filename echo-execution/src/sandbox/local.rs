@@ -391,9 +391,18 @@ impl LocalSandbox {
         timeout: std::time::Duration,
         stdin: Option<&str>,
         sandbox_type: &'static str,
+        cancel: Option<Arc<CancellationToken>>,
+        resource_guards: Vec<echo_core::tools::InvocationResourceGuard>,
     ) -> Result<ExecutionResult> {
-        self.run_command_controlled(command, timeout, stdin, sandbox_type, None)
-            .await
+        self.run_command_controlled(
+            command,
+            timeout,
+            stdin,
+            sandbox_type,
+            cancel,
+            resource_guards,
+        )
+        .await
     }
 
     async fn run_command_controlled(
@@ -403,6 +412,7 @@ impl LocalSandbox {
         stdin: Option<&str>,
         sandbox_type: &'static str,
         cancel: Option<Arc<CancellationToken>>,
+        resource_guards: Vec<echo_core::tools::InvocationResourceGuard>,
     ) -> Result<ExecutionResult> {
         ensure_local_execution_supported()?;
 
@@ -415,7 +425,14 @@ impl LocalSandbox {
         }
 
         let StartedLocalCommand { mut stream, task } = self
-            .start_command_stream(command, timeout, stdin, sandbox_type, cancel)
+            .start_command_stream(
+                command,
+                timeout,
+                stdin,
+                sandbox_type,
+                cancel,
+                resource_guards,
+            )
             .await?;
         let mut completion = None;
         while let Some(event) = stream.next().await {
@@ -461,9 +478,18 @@ impl LocalSandbox {
         timeout: std::time::Duration,
         stdin: Option<&str>,
         sandbox_type: &'static str,
+        cancel: Option<Arc<CancellationToken>>,
+        resource_guards: Vec<echo_core::tools::InvocationResourceGuard>,
     ) -> Result<LocalEventStream> {
         let StartedLocalCommand { stream, task } = self
-            .start_command_stream(command, timeout, stdin, sandbox_type, None)
+            .start_command_stream(
+                command,
+                timeout,
+                stdin,
+                sandbox_type,
+                cancel,
+                resource_guards,
+            )
             .await?;
         // Streaming callers own the receiver. Dropping it wakes the detached
         // owner task, which performs kill + wait before it exits.
@@ -478,6 +504,7 @@ impl LocalSandbox {
         stdin: Option<&str>,
         sandbox_type: &'static str,
         cancel: Option<Arc<CancellationToken>>,
+        resource_guards: Vec<echo_core::tools::InvocationResourceGuard>,
     ) -> Result<StartedLocalCommand> {
         if stdin.is_some() {
             command.stdin(std::process::Stdio::piped());
@@ -500,6 +527,7 @@ impl LocalSandbox {
         let (tx, rx) = mpsc::channel(STREAM_CHANNEL_CAPACITY);
         let failure_events = tx.clone();
         let task = tokio::spawn(async move {
+            let _resource_guards = resource_guards;
             let terminal = run_streaming_child(
                 &mut child,
                 LocalChildRequest {
@@ -1259,8 +1287,15 @@ impl SandboxExecutor for LocalSandbox {
                     .build_code_command(language, code, &command)
                     .map_err(|e| echo_core::error::ReactError::Sandbox(Box::new(e)))?,
             };
-            self.run_command(cmd, timeout, command.stdin.as_deref(), self.sandbox_type())
-                .await
+            self.run_command(
+                cmd,
+                timeout,
+                command.stdin.as_deref(),
+                self.sandbox_type(),
+                command.cancel.clone(),
+                command.resource_guards.clone(),
+            )
+            .await
         })
     }
 
@@ -1280,8 +1315,15 @@ impl SandboxExecutor for LocalSandbox {
                     .build_code_command(language, code, &command)
                     .map_err(|error| echo_core::error::ReactError::Sandbox(Box::new(error)))?,
             };
-            self.run_command_stream(cmd, timeout, command.stdin.as_deref(), self.sandbox_type())
-                .await
+            self.run_command_stream(
+                cmd,
+                timeout,
+                command.stdin.as_deref(),
+                self.sandbox_type(),
+                command.cancel.clone(),
+                command.resource_guards.clone(),
+            )
+            .await
         })
     }
 
@@ -1344,7 +1386,8 @@ impl SandboxExecutor for LocalSandbox {
                     timeout,
                     command.stdin.as_deref(),
                     sandbox.sandbox_type(),
-                    cancel,
+                    cancel.or_else(|| command.cancel.clone()),
+                    command.resource_guards.clone(),
                 )
                 .await
         })

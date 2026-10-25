@@ -12,6 +12,8 @@ use std::sync::Arc;
 #[derive(Clone, Default)]
 pub struct StandardToolPack {
     cells: Option<Arc<dyn CommandCellRegistry>>,
+    #[cfg(feature = "files")]
+    file_system: Option<Arc<dyn echo_core::tools::filesystem::FileSystem>>,
 }
 
 impl StandardToolPack {
@@ -21,6 +23,17 @@ impl StandardToolPack {
 
     pub fn with_command_cells(mut self, cells: Arc<dyn CommandCellRegistry>) -> Self {
         self.cells = Some(cells);
+        self
+    }
+
+    /// Bind the existing file tools to one immutable target. Invocation cwd
+    /// still selects the actual checkout within that target.
+    #[cfg(feature = "files")]
+    pub fn with_file_system(
+        mut self,
+        file_system: Arc<dyn echo_core::tools::filesystem::FileSystem>,
+    ) -> Self {
+        self.file_system = Some(file_system);
         self
     }
 }
@@ -47,7 +60,13 @@ impl ToolPack for StandardToolPack {
                 ShellTool::new().with_cell_launcher(Arc::clone(cells))
             });
             tools.push(ToolPackEntry::new(Box::new(shell)));
-            tools.push(ToolPackEntry::new(Box::new(RunCodeTool::new())));
+            #[allow(unused_mut)]
+            let mut run_code = RunCodeTool::new();
+            #[cfg(feature = "files")]
+            if let Some(file_system) = &self.file_system {
+                run_code = run_code.with_file_system(Arc::clone(file_system));
+            }
+            tools.push(ToolPackEntry::new(Box::new(run_code)));
         }
 
         #[cfg(feature = "files")]
@@ -59,15 +78,35 @@ impl ToolPack for StandardToolPack {
             use crate::files::glob::GlobTool;
             use crate::files::grep::GrepTool;
             use crate::files::repo_map::RepoMapTool;
+            let file_system = self
+                .file_system
+                .clone()
+                .unwrap_or_else(|| Arc::new(crate::files::LocalFileSystem));
             tools.extend([
-                ToolPackEntry::read_only(Box::new(ReadFileTool::new())),
-                ToolPackEntry::read_only(Box::new(ListDirTool::new())),
-                ToolPackEntry::read_only(Box::new(GrepTool::new())),
-                ToolPackEntry::read_only(Box::new(GlobTool::new())),
-                ToolPackEntry::new(Box::new(ApplyPatchTool::new())),
-                ToolPackEntry::read_only(Box::new(DiffTool::new())),
-                ToolPackEntry::read_only(Box::new(RepoMapTool::new())),
-                ToolPackEntry::read_only(Box::new(CodeSearchTool::new())),
+                ToolPackEntry::read_only(Box::new(
+                    ReadFileTool::new().with_file_system(Arc::clone(&file_system)),
+                )),
+                ToolPackEntry::read_only(Box::new(
+                    ListDirTool::new().with_file_system(Arc::clone(&file_system)),
+                )),
+                ToolPackEntry::read_only(Box::new(
+                    GrepTool::new().with_file_system(Arc::clone(&file_system)),
+                )),
+                ToolPackEntry::read_only(Box::new(
+                    GlobTool::new().with_file_system(Arc::clone(&file_system)),
+                )),
+                ToolPackEntry::new(Box::new(
+                    ApplyPatchTool::new().with_file_system(Arc::clone(&file_system)),
+                )),
+                ToolPackEntry::read_only(Box::new(
+                    DiffTool::new().with_file_system(Arc::clone(&file_system)),
+                )),
+                ToolPackEntry::read_only(Box::new(
+                    RepoMapTool::new().with_file_system(Arc::clone(&file_system)),
+                )),
+                ToolPackEntry::read_only(Box::new(
+                    CodeSearchTool::new().with_file_system(file_system),
+                )),
             ]);
         }
 
@@ -77,16 +116,47 @@ impl ToolPack for StandardToolPack {
                 GitBlameTool, GitBranchTool, GitCommitTool, GitDiffTool, GitLogTool, GitStatusTool,
             };
             use crate::worktree_tool::{EnterWorktreeTool, ExitWorktreeTool, ListWorktreesTool};
+            #[cfg(feature = "files")]
+            let git_file_system = self.file_system.clone();
+            #[cfg(not(feature = "files"))]
+            let git_file_system = None;
             tools.extend([
-                ToolPackEntry::read_only(Box::new(GitStatusTool)),
-                ToolPackEntry::read_only(Box::new(GitDiffTool)),
-                ToolPackEntry::read_only(Box::new(GitLogTool)),
-                ToolPackEntry::read_only(Box::new(GitBlameTool)),
-                ToolPackEntry::new(Box::new(GitBranchTool)),
-                ToolPackEntry::new(Box::new(GitCommitTool)),
-                ToolPackEntry::new(Box::new(EnterWorktreeTool)),
-                ToolPackEntry::new(Box::new(ExitWorktreeTool)),
-                ToolPackEntry::read_only(Box::new(ListWorktreesTool)),
+                ToolPackEntry::read_only(crate::git::bind_file_system(
+                    GitStatusTool,
+                    git_file_system.clone(),
+                )),
+                ToolPackEntry::read_only(crate::git::bind_file_system(
+                    GitDiffTool,
+                    git_file_system.clone(),
+                )),
+                ToolPackEntry::read_only(crate::git::bind_file_system(
+                    GitLogTool,
+                    git_file_system.clone(),
+                )),
+                ToolPackEntry::read_only(crate::git::bind_file_system(
+                    GitBlameTool,
+                    git_file_system.clone(),
+                )),
+                ToolPackEntry::new(crate::git::bind_file_system(
+                    GitBranchTool,
+                    git_file_system.clone(),
+                )),
+                ToolPackEntry::new(crate::git::bind_file_system(
+                    GitCommitTool,
+                    git_file_system.clone(),
+                )),
+                ToolPackEntry::new(crate::git::bind_file_system(
+                    EnterWorktreeTool,
+                    git_file_system.clone(),
+                )),
+                ToolPackEntry::new(crate::git::bind_file_system(
+                    ExitWorktreeTool,
+                    git_file_system.clone(),
+                )),
+                ToolPackEntry::read_only(crate::git::bind_file_system(
+                    ListWorktreesTool,
+                    git_file_system.clone(),
+                )),
             ]);
         }
 

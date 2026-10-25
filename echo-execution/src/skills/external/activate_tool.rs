@@ -148,10 +148,11 @@ impl Tool for ActivateSkillTool {
                 .unwrap_or_default();
 
             match registry
-                .activate_with_args(
+                .activate_in_context(
                     &name,
                     &args,
                     crate::skills::external::prompt_exec::SkillSource::Local,
+                    ctx,
                 )
                 .await
             {

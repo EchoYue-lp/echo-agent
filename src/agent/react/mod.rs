@@ -738,6 +738,7 @@ impl ReactAgent {
                 #[cfg(feature = "subagent")]
                 subagent_executor,
                 skill_registry: SkillRegistry::new(),
+                default_skill_source: None,
                 progressive_skill_registry: None,
                 hook_registry,
                 #[cfg(feature = "mcp")]
@@ -970,13 +971,18 @@ impl ReactAgent {
     fn register_feature_gated_tools(config: &AgentConfig, tool_manager: &mut ToolManager) {
         if config.enable_tool {
             use echo_core::tools::ToolPack;
-            let pack = config.command_cells.as_ref().map_or_else(
+            #[allow(unused_mut)]
+            let mut pack = config.command_cells.as_ref().map_or_else(
                 echo_tools::StandardToolPack::new,
                 |cells| {
                     echo_tools::StandardToolPack::new()
                         .with_command_cells(std::sync::Arc::clone(cells))
                 },
             );
+            #[cfg(feature = "files")]
+            if let Some(file_system) = &config.file_system {
+                pack = pack.with_file_system(std::sync::Arc::clone(file_system));
+            }
             if config.readonly_tools {
                 pack.install_read_only(tool_manager);
             } else {
@@ -1784,6 +1790,13 @@ impl ReactAgent {
     /// Set the sandbox manager to provide secure isolation for skill script execution.
     pub fn set_sandbox_manager(&mut self, manager: Arc<SandboxManager>) {
         self.set_sandbox_executor(manager);
+    }
+
+    /// Clone the immutable file target selected for this host. `None` retains
+    /// native local behavior; callers must not infer the current GUI selection.
+    #[cfg(feature = "files")]
+    pub fn file_system(&self) -> Option<Arc<dyn echo_core::tools::filesystem::FileSystem>> {
+        self.config.file_system.clone()
     }
 
     /// Set an application-supplied sandbox executor. This is the generic

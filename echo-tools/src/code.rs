@@ -125,7 +125,11 @@ fn script_command(
     Ok((command, Some(profile.clone())))
 }
 
-fn validate_script_path(script_path: &str, working_dir: Option<&Path>) -> Result<PathBuf> {
+fn validate_script_path(
+    file_system: &dyn echo_core::tools::filesystem::FileSystem,
+    script_path: &str,
+    working_dir: Option<&Path>,
+) -> Result<PathBuf> {
     let trimmed = script_path.trim();
     if trimmed.is_empty() {
         return Err(ReactError::from(ToolError::InvalidParameter {
@@ -151,25 +155,34 @@ fn validate_script_path(script_path: &str, working_dir: Option<&Path>) -> Result
 
     let base = match working_dir {
         Some(path) => path.to_path_buf(),
-        None => std::env::current_dir().map_err(|error| ToolError::ExecutionFailed {
-            tool: "run_code".to_string(),
-            message: format!("Cannot resolve the current working directory: {error}"),
+        None => file_system.current_dir().map_err(|error| match error {
+            ReactError::Io(error) => ReactError::from(ToolError::ExecutionFailed {
+                tool: "run_code".to_string(),
+                message: format!("Cannot resolve the current working directory: {error}"),
+            }),
+            error => error,
         })?,
     };
-    let canonical_base = base
-        .canonicalize()
-        .map_err(|error| ToolError::ExecutionFailed {
-            tool: "run_code".to_string(),
-            message: format!("Cannot access the execution working directory: {error}"),
+    let canonical_base = file_system
+        .canonicalize(&base)
+        .map_err(|error| match error {
+            ReactError::Io(error) => ReactError::from(ToolError::ExecutionFailed {
+                tool: "run_code".to_string(),
+                message: format!("Cannot access the execution working directory: {error}"),
+            }),
+            error => error,
         })?;
     let resolved = base.join(relative);
-    let canonical_script = resolved
-        .canonicalize()
-        .map_err(|error| ToolError::ExecutionFailed {
-            tool: "run_code".to_string(),
-            message: format!("Cannot access script '{trimmed}': {error}"),
+    let canonical_script = file_system
+        .canonicalize(&resolved)
+        .map_err(|error| match error {
+            ReactError::Io(error) => ReactError::from(ToolError::ExecutionFailed {
+                tool: "run_code".to_string(),
+                message: format!("Cannot access script '{trimmed}': {error}"),
+            }),
+            error => error,
         })?;
-    if !canonical_script.starts_with(&canonical_base) || !canonical_script.is_file() {
+    if !canonical_script.starts_with(&canonical_base) || !file_system.is_file(&canonical_script)? {
         return Err(ReactError::from(ToolError::InvalidParameter {
             name: "script_path".to_string(),
             message: "Script must be a file inside the execution working directory".to_string(),
@@ -181,6 +194,7 @@ fn validate_script_path(script_path: &str, working_dir: Option<&Path>) -> Result
 
 /// Sandboxed inline or persisted-script execution tool.
 pub struct RunCodeTool {
+    file_system: Arc<dyn echo_core::tools::filesystem::FileSystem>,
     /// Interior-mutable so `Tool::set_sandbox` (a `&self` method) can inject
     /// the executor after construction (via `set_sandbox_manager` →
     /// `ToolManager::apply_sandbox`), without requiring `&mut self`.
@@ -196,6 +210,7 @@ pub struct RunCodeTool {
 impl Default for RunCodeTool {
     fn default() -> Self {
         Self {
+            file_system: Arc::new(crate::filesystem::LocalFileSystem),
             sandbox: Mutex::new(None),
             script_profile_resolver: Mutex::new(None),
             timeout_secs: 60,
@@ -205,6 +220,14 @@ impl Default for RunCodeTool {
 }
 
 impl RunCodeTool {
+    pub fn with_file_system(
+        mut self,
+        file_system: Arc<dyn echo_core::tools::filesystem::FileSystem>,
+    ) -> Self {
+        self.file_system = file_system;
+        self
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -348,8 +371,25 @@ impl Tool for RunCodeTool {
                         (SandboxCommand::code(&language, code), "inline", None, None)
                     }
                     (None, Some(script_path)) => {
-                        let relative =
-                            validate_script_path(script_path, ctx.working_dir.as_deref())?;
+                        let file_system = self.file_system.clone();
+                        let script_path = script_path.to_string();
+                        let working_dir = ctx.working_dir.clone();
+                        let guards = ctx.resource_guards.clone();
+                        let relative = tokio::task::spawn_blocking(move || {
+                            let _guards = guards;
+                            validate_script_path(
+                                file_system.as_ref(),
+                                &script_path,
+                                working_dir.as_deref(),
+                            )
+                        })
+                        .await
+                        .map_err(|error| {
+                            ToolError::ExecutionFailed {
+                                tool: "run_code".into(),
+                                message: format!("Script target preparation failed: {error}"),
+                            }
+                        })??;
                         let (command, profile) =
                             script_command(&language, &relative, resolved_script_profile.as_ref())?;
                         (command, "script", Some(relative), profile)
@@ -381,7 +421,10 @@ impl Tool for RunCodeTool {
             if let Some(dir) = &ctx.working_dir {
                 sandbox_cmd = sandbox_cmd.with_working_dir(dir.clone());
             }
-            sandbox_cmd = sandbox_cmd.with_timeout(timeout_duration);
+            sandbox_cmd = sandbox_cmd
+                .with_timeout(timeout_duration)
+                .with_resource_guards(ctx.resource_guards.clone())
+                .with_cancel(ctx.cancel.clone());
 
             let Some(sandbox) = sandbox else {
                 return Ok(sandbox_unavailable_result(

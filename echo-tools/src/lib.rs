@@ -27,6 +27,7 @@ pub mod code;
 #[cfg(any(feature = "artifact", feature = "files"))]
 #[cfg_attr(docsrs, doc(cfg(any(feature = "artifact", feature = "files"))))]
 pub mod files;
+pub mod filesystem;
 pub mod git_checkpoint;
 #[cfg(any(feature = "web", feature = "media", feature = "research"))]
 mod http_body;

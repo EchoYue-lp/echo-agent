@@ -426,6 +426,7 @@ impl K8sSandbox {
         limits: Option<&ResourceLimits>,
         cancel: Option<Arc<CancellationToken>>,
     ) -> Result<ExecutionResult> {
+        let cancel = cancel.or_else(|| command.cancel.clone());
         if limits.is_some_and(|limits| !limits.network) {
             return Err(echo_core::error::ReactError::Sandbox(Box::new(
                 SandboxError::PermissionDenied(
