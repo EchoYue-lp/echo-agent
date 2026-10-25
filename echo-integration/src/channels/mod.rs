@@ -75,6 +75,7 @@ pub mod types;
 
 pub use channels::feishu::channel::{FeishuChannel, FeishuConfig};
 pub use channels::qq::channel::{QqChannel, QqConfig};
+pub use channels::weixin;
 pub use manager::{
     ChannelHandle, ChannelLifecycleResult, ChannelManagementSnapshot, ChannelManager,
     ChannelMessageStream, ChannelTransportObservation,
@@ -89,6 +90,7 @@ pub mod prelude {
     pub use super::ChannelPlugin;
     pub use super::channels::feishu::channel::{FeishuChannel, FeishuConfig};
     pub use super::channels::qq::channel::{QqChannel, QqConfig};
+    pub use super::channels::weixin;
     pub use super::manager::{
         ChannelHandle, ChannelLifecycleResult, ChannelManagementSnapshot, ChannelManager,
         ChannelMessageStream, ChannelTransportObservation,

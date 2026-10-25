@@ -7,7 +7,7 @@ pub use echo_core::error::ReactError;
 use echo_core::error::Result;
 use futures::stream::{BoxStream, StreamExt};
 use std::sync::{Arc, Mutex, MutexGuard};
-use tokio::sync::{Notify, watch};
+use tokio::sync::{Notify, oneshot, watch};
 
 // ── Chat Type ────────────────────────────────────────────────────────────────
 
@@ -448,6 +448,13 @@ pub trait MessageHandler: Send + Sync {
         false
     }
 
+    /// Observe work retained by the original handler after its admission
+    /// stream has returned. This prevents idle expiration from retiring a
+    /// still-active durable pump; it does not create a queue or own its state.
+    fn has_pending_work(&self) -> bool {
+        false
+    }
+
     /// Run one stream with the owning session's cancellation lifetime.
     async fn handle_stream_with_cancel<'a>(
         &'a self,
@@ -456,6 +463,68 @@ pub trait MessageHandler: Send + Sync {
     ) -> Result<BoxStream<'a, Result<OutboundMessage>>> {
         self.handle_stream(msg).await
     }
+
+    /// Bind the original durable host to one transport service lifetime.
+    ///
+    /// The host must stop new claims when this child is cancelled and retain
+    /// its original physical work until `close` settles it. Binding must fail
+    /// for unsupported, already bound or closed handlers, without running a
+    /// legacy invocation as a capability probe. Cancelling this child never
+    /// cancels its transport parent.
+    fn bind_durable_ingress(&self, _service_cancel: CancellationToken) -> Result<()> {
+        Err(ReactError::Channel(Box::new(ChannelError::Other(
+            "handler does not support durable channel ingress ownership".to_string(),
+        ))))
+    }
+
+    /// Admit through the original durable input/control authority, without
+    /// returning or waiting for a response stream, claim slot or model result.
+    ///
+    /// The host owns queued DATA and its bounded claimed driver/renderers;
+    /// publishing a receipt must not leave a per-input output waiter behind.
+    /// Return only when this admission call's own effects have settled, also
+    /// after cancellation. Returning, failing or dropping a publisher is never
+    /// an acknowledgement; only the original authority publishes its fact.
+    async fn admit_with_ingress(
+        &self,
+        _msg: InboundMessage,
+        _cancel: CancellationToken,
+        _receipt: ChannelIngressReceipt,
+    ) -> Result<()> {
+        Err(ReactError::Channel(Box::new(ChannelError::Other(
+            "handler does not support durable channel ingress ownership".to_string(),
+        ))))
+    }
+}
+
+/// Facts owned by the existing input or control journal, never by a transport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChannelIngressDisposition {
+    DurableInput,
+    ControlHandled,
+    TerminalRejected,
+    /// The control owner durably retains an uncertain effect and forbids
+    /// replay. This releases the transport cursor without claiming success.
+    ControlRecoveryRequired,
+}
+
+/// One invocation's process-local observer of its original admission fact.
+/// Dropping it without publishing leaves admission unknown.
+#[derive(Debug)]
+pub struct ChannelIngressReceipt(oneshot::Sender<ChannelIngressDisposition>);
+
+impl ChannelIngressReceipt {
+    pub fn publish(self, disposition: ChannelIngressDisposition) -> bool {
+        self.0.send(disposition).is_ok()
+    }
+}
+
+pub fn channel_ingress_receipt() -> (
+    ChannelIngressReceipt,
+    oneshot::Receiver<ChannelIngressDisposition>,
+) {
+    let (sender, receiver) = oneshot::channel();
+    (ChannelIngressReceipt(sender), receiver)
 }
 
 /// Channel capability description
@@ -488,6 +557,7 @@ pub enum ChannelTransportEvidence {
     QqSessionResumed,
     FeishuWebSocketHandshake,
     LocalWebhookListener,
+    WeixinAuthenticatedPoll,
 }
 
 /// A latest-value observation. It neither admits work nor schedules retries.

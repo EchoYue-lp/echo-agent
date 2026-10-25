@@ -3,6 +3,15 @@
 //! Product config-file discovery belongs to the embedding application. This
 //! framework example reads explicit environment values and constructs channel
 //! configs directly.
+//!
+//! This remains a QQ/Feishu example. Personal Weixin requires the original host
+//! to implement `MessageHandler::bind_durable_ingress` and `admit_with_ingress`;
+//! `SessionHandler::with_durable_ingress` explicitly declares that factory.
+//! `AgentChannelHandler` does not supply this opt-in. A stream or wrapper ACK
+//! cannot substitute for real durable input/control ownership. Queued DATA and
+//! bounded claimed long outputs stay with the original host, while transport
+//! admits return without a response stream. Pressure/runtime/native checks need
+//! separate evidence; these comments do not qualify login or delivery.
 
 mod support;
 

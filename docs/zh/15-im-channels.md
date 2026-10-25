@@ -1,6 +1,6 @@
 # IM Channels —— 接入即时通讯平台
 
-echo-agent 支持将 Agent 接入主流 IM 平台（QQ Bot、飞书等），通过插件化架构实现消息自动收发。
+echo-agent 支持将 Agent 接入 QQ Bot、飞书等 IM 平台，通过插件化架构实现消息自动收发。个人微信原生 adapter 已加入当前源码候选；其编译、原生接入及真实平台验收仍待完成，限制见下文。
 
 ## 架构概览
 
@@ -230,7 +230,7 @@ pub trait ChannelPlugin: Send + Sync {
 
 ```rust
 pub struct InboundMessage {
-    pub channel_id: String,   // "qqbot" | "feishu"
+    pub channel_id: String,   // "qqbot" | "feishu" | "weixin"
     pub sender_id: String,    // 传输层命名空间化后的发送者规范标识
     pub chat_id: String,      // 会话标识
     pub chat_type: ChatType,  // Direct | Group
@@ -390,6 +390,46 @@ pub struct FeishuConfig {
 | 事件 | 说明 |
 |------|------|
 | `im.message.receive_v1` | 接收消息（仅文本） |
+
+## 个人微信（源码候选，待验收）
+
+`echo_agent::channels::weixin` 提供原生 HTTPS/JSON 的 `WeixinApi`、
+`QrChallenge`/`QrStatus`/`WeixinCredentials`、`WeixinChannel`、
+`WeixinDeliveryHandle` 和 `WeixinContextRef`。协议依据是腾讯第一方
+[Tencent/openclaw-weixin 874637a0，2.4.10](https://github.com/Tencent/openclaw-weixin/tree/874637a0dbc24050f72d1385add4fc6170a2d726)，
+原项目为 [MIT 许可证](https://github.com/Tencent/openclaw-weixin/blob/874637a0dbc24050f72d1385add4fc6170a2d726/LICENSE)。
+这里实现协议 adapter，不安装 OpenClaw Gateway，不注入桌面微信。固定客户端源码不能证明新客户端获准连接或实际投递成功。
+
+平台能力限定为 direct 单聊文字。媒体、混合媒体输入及群聊不执行残余文本；当前给出拒绝诊断，不承诺附件理解、ASR 或联系人枚举。
+账号与 peer 通过 `encode_target`/`decode_target` 形成可逆 canonical target；稳定账号身份、持久 credential generation 与进程实例身份分别保留。
+注入既有 `Store` 只保存隔离的 cursor/context 协议状态，不创建消息 inbox、TaskRun store 或调度器。
+
+QR client 区分等待、已扫码、数字码、受阻、过期、redirect、confirmed 和 already-bound。confirmed 不等于宿主保存成功，already-bound 不包含可冒充新登录的凭据。
+GET/POST 使用各自 headers；HTTPS origin 校验及禁用自动重定向防止本机凭据被错误转发，错误不返回 raw URL/body。
+宿主负责认证 operation、配置提交、允许的 peer 和 UI，框架不把 EKO 联系人策略写进通用权限系统。
+
+`MessageHandler::bind_durable_ingress(service_cancel)` 与 `admit_with_ingress(msg, cancel, receipt) -> Result<()>` 是默认明确 Unsupported 的可选接缝。`SessionHandler::with_durable_ingress()` 声明同一 factory 的能力；原 session owner 在业务准入前向 inner 绑定同一 session child。inner 绑定失败仍保留原 owner/close 义务，不试跑 legacy、不假 ACK；活实例不能重绑，已关闭实例不能复活。QQ/飞书继续原接口。
+
+| Disposition | 必须已有的原权威事实 |
+| --- | --- |
+| `DurableInput` | 完整输入/binding 已持久准入，或原 identity/digest 完全相同 |
+| `ControlHandled` | 原控制效果已处理 |
+| `TerminalRejected` | 明确终局拒绝且没有业务准入 |
+| `ControlRecoveryRequired` | 原控制 journal 已持久保留效果不明及禁止重放义务；不是成功 |
+
+返回、错误、publisher drop、lazy stream/EOF 或模型完成均不是 ACK。旧未发布 `handle_stream_with_ingress` 主路径已退出。admit 复用 host 原持久 owner、原 reply route publication 和 claim 唤醒，不返回响应流、不等 claim 槽/模型/HITL/最终输出，也不逐输入暗建输出 waiter。queued 只有 DATA；实际长 driver/renderer 由原 host 的执行许可和 close owner 持有，即时控制确认也使用同一原 sender。Framework 拦截的 durable reset 在现有 `OutboundMessage.reply_to` 保留原 provider message ID，交同一 inner host 解析并校验该条准确 context 关联；legacy scalar/stream reset 回复路径保持原行为。
+
+微信在 accepting/spawn/poll 前绑定 transport service child。原 JoinSet 只拥有真实尚未退出的 admit 调用，沿原 **32 普通 + 8 控制**许可到实际返回才释放；ACK 提前到不释放调用许可，spawn 前回收已结束项。唯一原发送队列仍为 32，不保留逐输入 transport 响应任务。严格 batch cursor 只有全部原 receipt 到达才前进。在可真实持久准入时，普通前缀只积累原 DATA，后页 `/reply` 能到原 HITL owner；不宣称 DATA/索引/route 存储恒定内存，也不承诺磁盘/I/O 满载故障时控制永远可达。不能接收仍 Unknown/游标停，不把 Busy 假作终局拒绝。
+
+回复固定原 account/peer/credential generation/context，沿 `ChannelSessionInstance::bind_outbound` 保存原 fence template；排队模板不提前领投递许可。`has_pending_work` 防 idle 误回收原 host 工作。Stop 父 token 先通过同 child 关闭 host claim，再等待准入、原 sender effect 和原 handler close；waiter 取消不丢 driver/renderer/恢复初始化实际句柄。child 取消不反向停止 transport 父。原 scalar/stream 路径保持行为。
+
+`capture_message_context(target, message_id)` 读取原消息关联，`send_with_context` 将准确 Option 交同一 sender。恢复使用 `validate_message_context(target, message_id, expected)`：None 必须存在真实 `context: null` 关联；Some 必须精确 identity/reference 且原 token record 可读有效。缺关联/字段、身份/reference/token 漂移或不同凭据 generation 均拒绝，不发 HTTP、不借 latest、不修状态、不返回秘密。A2 持久 binding、never-claimed 证明、workspace generation 和 TaskRun 意图留原 host 策略。
+
+typed send 仍等待唯一 producer 的真实 `Accepted`/`Rejected`/`Unknown`；HTTP200、入队、start 不等于成功，Unknown 不准重放。只有真实 authenticated 业务 poll 证明 `WeixinAuthenticatedPoll` Ready；`-14` 停止新收发并要求重新认证。
+
+源码反例使用真实本地 HTTP poll/sender、SessionHandler 与通用文件持久 host：40 条输入、128 单消息页后控制、原长流分段、提前 ACK 持有调用许可及取消 Stop waiter 后的实际 join。Framework focused 已实际通过 135 条渠道用例（含全部 10 条新增或重命名 NoStream 用例）、12 条 facade 用例和 2 条仅编译 doctest；demo38 类型检查、匹配范围的 warning/panic lint、featureless 隔离及 fmt/check 同样通过。该受控夹具资格绑定未改变的 Rust 输入，不证明 host 生产持久化、完整合并矩阵、官网镜像、应用恢复、原生 GUI、真实扫码收发或精确 main CI。详见 [ADR 0099](../adr/0099-personal-weixin-channel.md)。
+
+`demo38_im_channels` 继续演示 QQ/飞书。默认 `AgentChannelHandler` 没有持久 ingress opt-in；把它直接注册到微信或在 wrapper 中补一个假 ACK 会违反接收合同。示例的原编译链仍适用，不能把注释更新当作编译通过。
 
 ## ChannelManager
 

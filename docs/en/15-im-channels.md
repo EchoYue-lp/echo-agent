@@ -1,6 +1,6 @@
 # IM Channels —— Integrating with Messaging Platforms
 
-echo-agent supports connecting your Agent to mainstream IM platforms (QQ Bot, Feishu, etc.) through a pluggable architecture for automatic messaging.
+echo-agent connects Agents to QQ Bot, Feishu and other IM platforms through a pluggable architecture. A native personal Weixin adapter is present in the current source candidate; compilation, native integration and live platform acceptance remain pending, with limitations below.
 
 ## Architecture Overview
 
@@ -247,7 +247,7 @@ Raw `Agent::chat` remains available for lower-level Rust consumers. See
 
 ```rust
 pub struct InboundMessage {
-    pub channel_id: String,   // "qqbot" | "feishu"
+    pub channel_id: String,   // "qqbot" | "feishu" | "weixin"
     pub sender_id: String,    // Canonical transport-scoped sender identity
     pub chat_id: String,      // Session identifier
     pub chat_type: ChatType,  // Direct | Group
@@ -422,6 +422,109 @@ pub struct FeishuConfig {
 | Event | Description |
 |-------|-------------|
 | `im.message.receive_v1` | Receive message (text only) |
+
+## Personal Weixin (source candidate, not qualified)
+
+`echo_agent::channels::weixin` supplies the native HTTPS/JSON `WeixinApi`,
+`QrChallenge`/`QrStatus`/`WeixinCredentials`, `WeixinChannel`,
+`WeixinDeliveryHandle`, and `WeixinContextRef`. Its protocol reference is the
+first-party [Tencent/openclaw-weixin 874637a0, version 2.4.10](https://github.com/Tencent/openclaw-weixin/tree/874637a0dbc24050f72d1385add4fc6170a2d726),
+published under the [MIT license](https://github.com/Tencent/openclaw-weixin/blob/874637a0dbc24050f72d1385add4fc6170a2d726/LICENSE).
+This is a protocol adapter, without OpenClaw Gateway or desktop WeChat injection.
+The fixed client's source does not establish that another client is authorized
+to connect or that a message was delivered.
+
+Only direct text is supported. Media, mixed-media inputs and groups do not
+execute their remaining text; the candidate reports rejection diagnostics,
+without promising media understanding, ASR or contact enumeration.
+`encode_target`/`decode_target` reversibly namespace account and peer. Stable
+account identity, persisted credential generation and process instance identity
+remain distinct. The injected existing `Store` holds isolated cursor/context
+protocol state, not another message inbox, TaskRun store or scheduler.
+
+The QR client distinguishes waiting, scanned, numeric verification, blocked,
+expired, redirect, confirmed and already-bound responses. Confirmation is not
+host persistence; already-bound does not issue replacement credentials.
+GET and POST use different headers. HTTPS origin validation and disabled
+automatic redirects protect local credentials from accidental forwarding;
+errors omit raw URLs and bodies. The host owns authentication operations,
+configuration commit, peer policy and UI. EKO policy does not become a generic
+framework contact permission system.
+
+`MessageHandler::bind_durable_ingress(service_cancel)` and
+`admit_with_ingress(msg, cancel, receipt) -> Result<()>` are optional and explicitly
+Unsupported by default. `SessionHandler::with_durable_ingress()` declares the
+factory capability; its original session owner binds each inner handler to the
+same session child before business admission. Bind failure retains that owner for
+close, with no legacy capability probe or fabricated ACK. Live services cannot
+rebind and closed instances cannot revive. QQ/Feishu retain their original APIs.
+
+| Disposition | Original authority fact |
+| --- | --- |
+| `DurableInput` | Original complete input/binding durably admitted or exactly already present |
+| `ControlHandled` | Original control effect handled |
+| `TerminalRejected` | Terminal refusal without business admission |
+| `ControlRecoveryRequired` | Original control journal durably retains an uncertain effect and forbids replay; not success |
+
+Return, error, publisher drop, lazy stream/EOF and model completion do not ACK.
+The old unreleased `handle_stream_with_ingress` path is removed. Admit persists
+through the host's existing owner, publishes its original reply route and wakes
+its original claim loop; it returns without a response stream, claim-slot wait,
+model, HITL or output waiter. Queued work is DATA only. Long claimed drivers and
+renderers remain with the host's existing execution permits and real close owner.
+Immediate control replies also use that host's original sender.
+A framework-intercepted durable reset retains the original provider message ID
+in `OutboundMessage.reply_to` for the same inner host to resolve/validate its
+exact context association. Legacy scalar/stream reset replies are unchanged.
+
+Weixin binds a transport service child before accepting/spawning/polling. The
+original JoinSet now retains only actual admit calls, with **32 ordinary + 8
+control** permits until each call returns; an early ACK does not release its
+permit. Completed task metadata is reaped before spawning. The same original
+bounded send queue remains 32. No per-input transport response task remains.
+The strict batch cursor advances only past all original receipts. Available
+durable admission therefore lets arbitrary ordinary prefixes become DATA while
+later `/reply` reaches its original HITL owner. This does not bound durable DATA,
+indexes or route storage, or promise progress when disk/I/O admission fails;
+those failures remain Unknown and retain the cursor, without fake Busy rejection.
+
+Replies retain the original account/peer/credential generation/context and
+`ChannelSessionInstance::bind_outbound` fence template. A queued template takes
+no delivery permit. `has_pending_work` protects actual retained host work from
+idle expiry. Parent Stop cancels the same host child before joining admissions,
+sender effects and original handler close; cancelling a stop waiter does not
+lose actual driver/renderer/recovery-init handles. Child cancellation does not
+cancel the transport parent. Legacy scalar/stream paths retain their behavior.
+
+`capture_message_context(target, message_id)` reads an immutable original-message
+association and `send_with_context` preserves its explicit Option through the
+same sender. For recovery, `validate_message_context(target, message_id, expected)`
+proves presence: None requires an existing `context: null` association; Some needs
+exact identity/reference plus the original readable token record. Missing record,
+missing field, changed identity/reference/token or another credential generation
+fails without HTTP, latest lookup, repair or secret return. A2's durable binding,
+never-claimed proof, workspace generation and TaskRun intent remain host policy.
+
+Typed sending still returns the sole producer's actual `Accepted`, `Rejected` or
+`Unknown` receipt; HTTP200/queue/start are not success and Unknown does not permit
+replay. Only authenticated business poll proves `WeixinAuthenticatedPoll` Ready;
+`-14` stops new receive/send admission and requires authentication.
+
+Source regressions use actual local HTTP poll/sender, SessionHandler and a generic
+file-backed host: 40 inputs, 128 single-message pages then control, long multi-part
+claimed output, early ACK with retained permits and cancelled Stop waiter/actual
+join. The focused Framework checks passed 135 channel cases (including all 10 new or
+renamed NoStream cases), 12 facade cases and two compile-only doctests, with
+demo38 typecheck, scoped warning/panic lints, featureless isolation and fmt/check.
+This is controlled-fixture qualification of the unchanged Rust inputs; it does
+not establish host production durability, the full merge matrix, website
+mirrors, application recovery, native GUI, real login/messages or exact main CI.
+See [ADR 0099](../adr/0099-personal-weixin-channel.md).
+
+`demo38_im_channels` remains a QQ/Feishu example. Its default
+`AgentChannelHandler` does not opt into durable ingress. Registering it for
+Weixin or adding a fake wrapper ACK would violate the contract. The original
+example compilation gate still applies; documentation edits do not pass it.
 
 ## ChannelManager
 
