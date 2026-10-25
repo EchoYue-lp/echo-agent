@@ -369,7 +369,13 @@ impl PathValidator {
                 path: path.to_string(),
                 reason: "Cannot compute relative suffix".into(),
             })?;
-        let resolved = canonical_ancestor.join(suffix);
+        // Joining an empty suffix adds a separator, which makes native file
+        // metadata/read treat an existing file as a directory.
+        let resolved = if suffix.as_os_str().is_empty() {
+            canonical_ancestor
+        } else {
+            canonical_ancestor.join(suffix)
+        };
         // Re-check denied paths on the final path
         for denied in &self.denied_paths {
             let denied = match canonicalize(denied) {
@@ -949,6 +955,138 @@ fn normalize_absolute_path(path: &Path) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_existing_files_remain_readable_after_base_validation() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().join("workspace");
+        std::fs::create_dir_all(&base)?;
+        let validator = PathValidator::new();
+        let native = crate::filesystem::LocalFileSystem;
+
+        for relative in ["notes.txt", "same.txt", "说明🦀.txt"] {
+            let requested = base.join(relative);
+            std::fs::write(&requested, "内容🦀")?;
+            let requested_text = requested.to_string_lossy();
+            for resolved in [
+                validator.validate_within_base(&requested_text, &base),
+                validator.validate_within_base_with_file_system(&requested_text, &base, &native),
+            ] {
+                let resolved = resolved?;
+                // Path equality normalizes trailing separators; real native
+                // access is required to catch the existing-file regression.
+                assert!(std::fs::metadata(&resolved)?.is_file());
+                assert_eq!(std::fs::read_to_string(&resolved)?, "内容🦀");
+                assert_eq!(resolved.as_os_str(), requested.canonicalize()?.as_os_str());
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn native_base_directories_and_missing_descendants_keep_their_paths() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().join("workspace");
+        let directory = base.join("资料");
+        std::fs::create_dir_all(&directory)?;
+        let validator = PathValidator::new();
+        let native = crate::filesystem::LocalFileSystem;
+
+        for requested in [&base, &directory] {
+            let text = requested.to_string_lossy();
+            for resolved in [
+                validator.validate_within_base(&text, &base),
+                validator.validate_within_base_with_file_system(&text, &base, &native),
+            ] {
+                let resolved = resolved?;
+                assert!(std::fs::metadata(&resolved)?.is_dir());
+                assert_eq!(resolved, requested.canonicalize()?);
+            }
+        }
+
+        let requested = directory.join("new").join("未创建.txt");
+        let text = requested.to_string_lossy();
+        for resolved in [
+            validator.validate_within_base(&text, &base),
+            validator.validate_within_base_with_file_system(&text, &base, &native),
+        ] {
+            let resolved = resolved?;
+            assert_eq!(resolved, directory.canonicalize()?.join("new/未创建.txt"));
+            assert!(!resolved.exists());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn native_base_validation_keeps_absolute_traversal_and_denied_checks() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().join("workspace");
+        std::fs::create_dir_all(&base)?;
+        let outside = temp.path().join("outside.txt");
+        let denied = base.join("private.txt");
+        std::fs::write(&outside, "outside")?;
+        std::fs::write(&denied, "private")?;
+        let denied_text = denied.to_string_lossy();
+        let validator = PathValidator::new().with_denied_paths(&[denied_text.as_ref()]);
+        let native = crate::filesystem::LocalFileSystem;
+
+        for requested in [
+            PathBuf::from("relative.txt"),
+            base.join("../outside.txt"),
+            outside,
+            denied,
+        ] {
+            let text = requested.to_string_lossy();
+            assert!(validator.validate_within_base(&text, &base).is_err());
+            assert!(
+                validator
+                    .validate_within_base_with_file_system(&text, &base, &native)
+                    .is_err()
+            );
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_base_validation_preserves_symlink_target_checks() -> Result<()> {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().join("workspace");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(&base)?;
+        std::fs::create_dir_all(&outside)?;
+        let inner_file = base.join("说明.txt");
+        std::fs::write(&inner_file, "inner")?;
+        std::fs::write(outside.join("file.txt"), "outside")?;
+        let inner_link = base.join("inner-link");
+        let outer_link = base.join("outer-link");
+        symlink(&inner_file, &inner_link)?;
+        symlink(&outside, &outer_link)?;
+        let validator = PathValidator::new();
+        let native = crate::filesystem::LocalFileSystem;
+
+        let inner_text = inner_link.to_string_lossy();
+        for resolved in [
+            validator.validate_within_base(&inner_text, &base),
+            validator.validate_within_base_with_file_system(&inner_text, &base, &native),
+        ] {
+            let resolved = resolved?;
+            assert!(std::fs::metadata(&resolved)?.is_file());
+            assert_eq!(std::fs::read_to_string(&resolved)?, "inner");
+        }
+        for requested in [outer_link.join("file.txt"), outer_link.join("new/file.txt")] {
+            let text = requested.to_string_lossy();
+            assert!(validator.validate_within_base(&text, &base).is_err());
+            assert!(
+                validator
+                    .validate_within_base_with_file_system(&text, &base, &native)
+                    .is_err()
+            );
+        }
+        Ok(())
+    }
 
     #[test]
     fn test_path_validator_absolute_required() {
