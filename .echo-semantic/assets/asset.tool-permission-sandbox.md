@@ -11,6 +11,15 @@ boundary_refs:
 - boundary.tool-permission-sandbox
 code_refs:
 - echo-core/src/tools/mod.rs
+- echo-tools/src/security.rs
+- echo-core/src/project_rules.rs
+- echo-tools/src/files/code_search.rs
+- echo-tools/src/files/diff.rs
+- echo-tools/src/files/glob.rs
+- echo-tools/src/files/grep.rs
+- echo-tools/src/files/mod.rs
+- echo-tools/src/files/repo_map.rs
+- echo-tools/src/git_checkpoint.rs
 - echo-core/src/tools/permission.rs
 - echo-core/src/tools/artifact.rs
 - echo-execution/src/tools.rs
@@ -99,3 +108,30 @@ Hook Allow protected-path、readonly custom Tool 与 #47 精确资源 cleanup �
 `echo-tools/src/http_body.rs` 是已有HTTP适配与共享body读取边界；本次在原typed reqwest/HTTP状态与header仍存在时保留远端失败事实，不通过错误文本猜测。Web provider继续不拥有失败重试；既有ToolFailure承载恢复事实，原ToolManager保持唯一有限重试、等待取消及物理收束权威。DDG原策略回退、分页位置和各reader原大小/编码范围保持；不据此扩展research等其它消费者的验收。
 
 当前Tool＋Domain679包候选的976项选定Rust测试、格式、focused Clippy、featureless/web与demo41/demo56编译已实际通过；三个旧行为对照及首轮新测试返回分支误判的真实失败原件保留。本地原件与精确source epoch见`.echo-semantic/local/framework-tool-domain/batch-return.json`、`source-epoch3.json`及独立增量审查；64预算组合属于一条回归，不另计64测试。该映射不改变本资产原needs_review、observed_at或旧未知项，不表示全资产、完整feature矩阵、SDK Host、新accepted、native或main交付完成。
+
+
+## 当前项目文件适配的增量映射
+
+本次项目文件适配将原工具的实际 I/O 指向一个不可变 provider，保留 per-call cwd、
+原 ToolManager/权限、patch preimage/atomic/rollback 与资源 owner；类型化未知写
+不自动重放或猜测回滚。`echo-core/src/tools/filesystem.rs` 定义该通用文件 I/O
+接缝，`echo-tools/src/filesystem.rs` 复用原本机文件、CAS 与目录身份机制提供默认
+实现。这两个文件是当前候选新增源，不存在于本资产原 observed_at 的历史提交；
+因此在这里记录候选职责，不把它们误列为该历史 revision 的 code_refs。
+
+`echo-core/src/project_rules.rs` 保留原规则链并经 provider 读取；
+`echo-tools/src/files/mod.rs` 的原路径解析使用同 provider 的命名空间和每次调用 cwd。
+`echo-tools/src/files/code_search.rs`、`echo-tools/src/files/grep.rs` 和
+`echo-tools/src/files/glob.rs` 将原遍历与内容读取接到该来源，原匹配算法保持。
+`echo-tools/src/files/diff.rs` 通过同来源读取待比较内容；
+`echo-tools/src/files/repo_map.rs` 通过同来源读取目录与符号输入。上述七个原路径
+均可在原 observed_at revision 恢复，其 code_refs 补齐该既有资产的职责覆盖；
+本段明确描述的是当前候选的实际改动，不追溯宣称历史版本已经支持 provider。
+
+当前候选实际通过了限定 feature 的库测试、相关 Clippy、四个 feature 检查和
+格式检查，随后两个原离线示例也实际运行并自然退出 0；两批准确 clean 均为 0。
+本地原件见 `.echo-semantic/local/project-filesystem-adapter/actual-focused-v3/batch-return.json`
+与 `.echo-semantic/local/project-filesystem-adapter/offline-examples-actual-v1/lease-return.json`。
+这只是列明范围的执行证据；原 needs_review、observed_at、历史未知和全资产验证
+结论均不改变。完整 feature/platform、消费者、真实远端、SDK Host 及 main 资格
+仍未由本次检查建立。

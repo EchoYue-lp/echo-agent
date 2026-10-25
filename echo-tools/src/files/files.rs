@@ -12,7 +12,6 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
-use tokio::fs;
 
 // Used for the existing UTF-8-first, GBK-fallback decoding behavior.
 use encoding_rs;
@@ -106,18 +105,32 @@ fn partial_file_failure(
     )
 }
 // ── CreateFileTool ────────────────────────────────────────────────────────────
+#[derive(Clone)]
 pub struct CreateFileTool {
     base_dir: Option<PathBuf>,
+    file_system: std::sync::Arc<dyn echo_core::tools::filesystem::FileSystem>,
 }
 
 impl CreateFileTool {
+    pub fn with_file_system(
+        mut self,
+        file_system: std::sync::Arc<dyn echo_core::tools::filesystem::FileSystem>,
+    ) -> Self {
+        self.file_system = file_system;
+        self
+    }
+
     pub fn new() -> Self {
-        Self { base_dir: None }
+        Self {
+            base_dir: None,
+            file_system: std::sync::Arc::new(super::LocalFileSystem),
+        }
     }
 
     pub fn with_base_dir(base: impl Into<PathBuf>) -> Self {
         Self {
             base_dir: Some(base.into()),
+            file_system: std::sync::Arc::new(super::LocalFileSystem),
         }
     }
 }
@@ -159,43 +172,44 @@ impl Tool for CreateFileTool {
         parameters: ToolParameters,
         ctx: &'a echo_core::tools::ToolContext,
     ) -> BoxFuture<'a, echo_core::error::Result<ToolResult>> {
-        Box::pin(async move {
+        let this = self.clone();
+        let ctx = ctx.clone();
+        super::run_file_operation("files", &ctx.clone(), move || {
             let path_str = parameters
                 .get("path")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| ToolError::MissingParameter("path".to_string()))?;
 
             let path = resolve_path(
+                this.file_system.as_ref(),
                 "create_file",
                 path_str,
-                &self.base_dir,
+                &this.base_dir,
                 ctx.working_dir.as_deref(),
             )?;
 
             // Auto-create parent directory
             if let Some(parent) = path.parent() {
-                tokio::fs::create_dir_all(parent).await.map_err(|e| {
-                    ToolError::ExecutionFailed {
+                this.file_system.create_dir_all(parent).map_err(|e| {
+                    super::file_error(e, |e| ToolError::ExecutionFailed {
                         tool: "create_file".to_string(),
                         message: format!("Failed to create directory: {}", e),
-                    }
+                    })
                 })?;
             }
 
-            match tokio::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&path)
-                .await
-            {
-                Ok(file) => drop(file),
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            match this.file_system.create_file(&path) {
+                Ok(()) => {}
+                Err(error) if super::is_io_kind(&error, std::io::ErrorKind::AlreadyExists) => {
                     return Ok(ToolResult::failure(
                         ToolFailureCategory::InvalidArguments,
                         format!("File already exists: {}", path.display()),
                     ));
                 }
                 Err(error) => {
+                    if !matches!(error, echo_core::error::ReactError::Io(_)) {
+                        return Err(error);
+                    }
                     return Err(ToolError::ExecutionFailed {
                         tool: "create_file".to_string(),
                         message: format!("Failed to create file: {error}"),
@@ -215,18 +229,32 @@ impl Tool for CreateFileTool {
 }
 
 // ── DeleteFileTool ────────────────────────────────────────────────────────────
+#[derive(Clone)]
 pub struct DeleteFileTool {
     base_dir: Option<PathBuf>,
+    file_system: std::sync::Arc<dyn echo_core::tools::filesystem::FileSystem>,
 }
 
 impl DeleteFileTool {
+    pub fn with_file_system(
+        mut self,
+        file_system: std::sync::Arc<dyn echo_core::tools::filesystem::FileSystem>,
+    ) -> Self {
+        self.file_system = file_system;
+        self
+    }
+
     pub fn new() -> Self {
-        Self { base_dir: None }
+        Self {
+            base_dir: None,
+            file_system: std::sync::Arc::new(super::LocalFileSystem),
+        }
     }
 
     pub fn with_base_dir(base: impl Into<PathBuf>) -> Self {
         Self {
             base_dir: Some(base.into()),
+            file_system: std::sync::Arc::new(super::LocalFileSystem),
         }
     }
 }
@@ -271,26 +299,29 @@ impl Tool for DeleteFileTool {
         parameters: ToolParameters,
         ctx: &'a echo_core::tools::ToolContext,
     ) -> BoxFuture<'a, echo_core::error::Result<ToolResult>> {
-        Box::pin(async move {
+        let this = self.clone();
+        let ctx = ctx.clone();
+        super::run_file_operation("files", &ctx.clone(), move || {
             let path_str = parameters
                 .get("path")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| ToolError::MissingParameter("path".to_string()))?;
 
             let path = resolve_path(
+                this.file_system.as_ref(),
                 "delete_file",
                 path_str,
-                &self.base_dir,
+                &this.base_dir,
                 ctx.working_dir.as_deref(),
             )?;
 
-            if !path.exists() {
+            if !this.file_system.exists(&path)? {
                 return Ok(ToolResult::failure(
                     ToolFailureCategory::InvalidArguments,
                     format!("File does not exist: {}", path.display()),
                 ));
             }
-            if !path.is_file() {
+            if !this.file_system.is_file(&path)? {
                 return Ok(ToolResult::failure(
                     ToolFailureCategory::InvalidArguments,
                     format!("'{}' is not a file", path.display()),
@@ -298,23 +329,19 @@ impl Tool for DeleteFileTool {
             }
 
             // Create git checkpoint before deletion
-            let checkpoint_tag =
-                crate::git_checkpoint::create_checkpoint(&path).map_err(|error| {
-                    ToolError::ExecutionFailed {
-                        tool: "delete_file".to_string(),
-                        message: format!("Failed to create recovery checkpoint: {error}"),
-                    }
-                })?;
-            if checkpoint_tag.is_some() {
-                crate::git_checkpoint::cleanup_old_checkpoints(&path, 10);
-            }
+            let checkpoint_tag = this.file_system.checkpoint(&path).map_err(|error| {
+                super::file_error(error, |error| ToolError::ExecutionFailed {
+                    tool: "delete_file".to_string(),
+                    message: format!("Failed to create recovery checkpoint: {error}"),
+                })
+            })?;
 
-            tokio::fs::remove_file(&path)
-                .await
-                .map_err(|e| ToolError::ExecutionFailed {
+            this.file_system.remove_file(&path).map_err(|e| {
+                super::file_error(e, |e| ToolError::ExecutionFailed {
                     tool: "delete_file".to_string(),
                     message: format!("Failed to delete: {}", e),
-                })?;
+                })
+            })?;
 
             let mut result =
                 ToolResult::success(format!("File deleted successfully: {}", path.display()))
@@ -333,18 +360,32 @@ impl Tool for DeleteFileTool {
 
 // ── ReadFileTool ──────────────────────────────────────────────────────────────
 /// Read text with compact line numbers, bounded pagination, and encoding detection.
+#[derive(Clone)]
 pub struct ReadFileTool {
     base_dir: Option<PathBuf>,
+    file_system: std::sync::Arc<dyn echo_core::tools::filesystem::FileSystem>,
 }
 
 impl ReadFileTool {
+    pub fn with_file_system(
+        mut self,
+        file_system: std::sync::Arc<dyn echo_core::tools::filesystem::FileSystem>,
+    ) -> Self {
+        self.file_system = file_system;
+        self
+    }
+
     pub fn new() -> Self {
-        Self { base_dir: None }
+        Self {
+            base_dir: None,
+            file_system: std::sync::Arc::new(super::LocalFileSystem),
+        }
     }
 
     pub fn with_base_dir(base: impl Into<PathBuf>) -> Self {
         Self {
             base_dir: Some(base.into()),
+            file_system: std::sync::Arc::new(super::LocalFileSystem),
         }
     }
 }
@@ -400,7 +441,9 @@ impl Tool for ReadFileTool {
         parameters: ToolParameters,
         ctx: &'a echo_core::tools::ToolContext,
     ) -> BoxFuture<'a, echo_core::error::Result<ToolResult>> {
-        Box::pin(async move {
+        let this = self.clone();
+        let ctx = ctx.clone();
+        super::run_file_operation("files", &ctx.clone(), move || {
             let allowed_parameters = ["path", "offset", "limit"];
             let mut unknown_parameters = parameters
                 .keys()
@@ -444,31 +487,32 @@ impl Tool for ReadFileTool {
             };
 
             let path = resolve_path(
+                this.file_system.as_ref(),
                 "read_file",
                 path_str,
-                &self.base_dir,
+                &this.base_dir,
                 ctx.working_dir.as_deref(),
             )?;
 
-            if !path.exists() {
+            if !this.file_system.exists(&path)? {
                 return Ok(ToolResult::failure(
                     ToolFailureCategory::InvalidArguments,
                     format!("File does not exist: {}", path.display()),
                 ));
             }
-            if !path.is_file() {
+            if !this.file_system.is_file(&path)? {
                 return Ok(ToolResult::failure(
                     ToolFailureCategory::InvalidArguments,
                     format!("'{}' is not a file", path.display()),
                 ));
             }
 
-            let bytes = tokio::fs::read(&path)
-                .await
-                .map_err(|e| ToolError::ExecutionFailed {
+            let bytes = this.file_system.read(&path).map_err(|e| {
+                super::file_error(e, |e| ToolError::ExecutionFailed {
                     tool: "read_file".to_string(),
                     message: format!("Failed to read: {}", e),
-                })?;
+                })
+            })?;
 
             let hash = content_hash(&bytes);
             let (content, detected_encoding): (Cow<'_, str>, &str) =
@@ -579,18 +623,32 @@ impl Tool for ReadFileTool {
 // ── WriteFileTool ─────────────────────────────────────────────────────────────
 
 /// Write (overwrite) file content, auto-create parent directories if they don't exist
+#[derive(Clone)]
 pub struct WriteFileTool {
     base_dir: Option<PathBuf>,
+    file_system: std::sync::Arc<dyn echo_core::tools::filesystem::FileSystem>,
 }
 
 impl WriteFileTool {
+    pub fn with_file_system(
+        mut self,
+        file_system: std::sync::Arc<dyn echo_core::tools::filesystem::FileSystem>,
+    ) -> Self {
+        self.file_system = file_system;
+        self
+    }
+
     pub fn new() -> Self {
-        Self { base_dir: None }
+        Self {
+            base_dir: None,
+            file_system: std::sync::Arc::new(super::LocalFileSystem),
+        }
     }
 
     pub fn with_base_dir(base: impl Into<PathBuf>) -> Self {
         Self {
             base_dir: Some(base.into()),
+            file_system: std::sync::Arc::new(super::LocalFileSystem),
         }
     }
 }
@@ -640,7 +698,9 @@ impl Tool for WriteFileTool {
         parameters: ToolParameters,
         ctx: &'a echo_core::tools::ToolContext,
     ) -> BoxFuture<'a, echo_core::error::Result<ToolResult>> {
-        Box::pin(async move {
+        let this = self.clone();
+        let ctx = ctx.clone();
+        super::run_file_operation("files", &ctx.clone(), move || {
             let path_str = parameters
                 .get("path")
                 .and_then(|v| v.as_str())
@@ -653,16 +713,17 @@ impl Tool for WriteFileTool {
             let expected_hash = parameters.get("expected_hash").and_then(Value::as_str);
 
             let path = resolve_path(
+                this.file_system.as_ref(),
                 "write_file",
                 path_str,
-                &self.base_dir,
+                &this.base_dir,
                 ctx.working_dir.as_deref(),
             )?;
 
             if let Some(expected_hash) = expected_hash {
-                let current = match tokio::fs::read(&path).await {
+                let current = match this.file_system.read(&path) {
                     Ok(current) => current,
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    Err(error) if super::is_io_kind(&error, std::io::ErrorKind::NotFound) => {
                         return Ok(ToolResult::failure(
                             ToolFailureCategory::InvalidArguments,
                             format!(
@@ -672,6 +733,9 @@ impl Tool for WriteFileTool {
                         ));
                     }
                     Err(error) => {
+                        if !matches!(error, echo_core::error::ReactError::Io(_)) {
+                            return Err(error);
+                        }
                         return Ok(ToolResult::failure(
                             ToolFailureCategory::Permanent,
                             format!("Failed to verify '{}': {error}", path.display()),
@@ -694,10 +758,13 @@ impl Tool for WriteFileTool {
 
             // Auto-create parent directory
             if let Some(parent) = path.parent()
-                && let Err(error) = tokio::fs::create_dir_all(parent).await
+                && let Err(error) = this.file_system.create_dir_all(parent)
             {
+                if !matches!(error, echo_core::error::ReactError::Io(_)) {
+                    return Err(error);
+                }
                 return Ok(partial_file_failure(
-                    ctx,
+                    &ctx,
                     "write_file",
                     &path,
                     &target_hash,
@@ -706,25 +773,24 @@ impl Tool for WriteFileTool {
             }
 
             // Create git checkpoint before mutation (only if file already exists)
-            let checkpoint_tag = if path.exists() {
-                let tag = crate::git_checkpoint::create_checkpoint(&path).map_err(|error| {
-                    ToolError::ExecutionFailed {
+            let checkpoint_tag = if this.file_system.exists(&path)? {
+                this.file_system.checkpoint(&path).map_err(|error| {
+                    super::file_error(error, |error| ToolError::ExecutionFailed {
                         tool: "write_file".to_string(),
                         message: format!("Failed to create recovery checkpoint: {error}"),
-                    }
-                })?;
-                if tag.is_some() {
-                    crate::git_checkpoint::cleanup_old_checkpoints(&path, 10);
-                }
-                tag
+                    })
+                })?
             } else {
                 None
             };
 
             let bytes = content.len();
-            if let Err(error) = tokio::fs::write(&path, content).await {
+            if let Err(error) = this.file_system.write(&path, content.as_bytes()) {
+                if !matches!(error, echo_core::error::ReactError::Io(_)) {
+                    return Err(error);
+                }
                 return Ok(partial_file_failure(
-                    ctx,
+                    &ctx,
                     "write_file",
                     &path,
                     &target_hash,
@@ -749,7 +815,7 @@ impl Tool for WriteFileTool {
                 .with_meta("content_hash", target_hash.clone())
                 .with_meta(
                     "idempotency_key",
-                    file_idempotency_key(ctx, "write_file", &path, &target_hash),
+                    file_idempotency_key(&ctx, "write_file", &path, &target_hash),
                 )
                 .with_meta(
                     "postcondition",
@@ -764,18 +830,32 @@ impl Tool for WriteFileTool {
 // ── AppendFileTool ────────────────────────────────────────────────────────────
 
 /// Append content to end of file
+#[derive(Clone)]
 pub struct AppendFileTool {
     base_dir: Option<PathBuf>,
+    file_system: std::sync::Arc<dyn echo_core::tools::filesystem::FileSystem>,
 }
 
 impl AppendFileTool {
+    pub fn with_file_system(
+        mut self,
+        file_system: std::sync::Arc<dyn echo_core::tools::filesystem::FileSystem>,
+    ) -> Self {
+        self.file_system = file_system;
+        self
+    }
+
     pub fn new() -> Self {
-        Self { base_dir: None }
+        Self {
+            base_dir: None,
+            file_system: std::sync::Arc::new(super::LocalFileSystem),
+        }
     }
 
     pub fn with_base_dir(base: impl Into<PathBuf>) -> Self {
         Self {
             base_dir: Some(base.into()),
+            file_system: std::sync::Arc::new(super::LocalFileSystem),
         }
     }
 }
@@ -821,9 +901,9 @@ impl Tool for AppendFileTool {
         parameters: ToolParameters,
         ctx: &'a echo_core::tools::ToolContext,
     ) -> BoxFuture<'a, echo_core::error::Result<ToolResult>> {
-        Box::pin(async move {
-            use tokio::io::AsyncWriteExt;
-
+        let this = self.clone();
+        let ctx = ctx.clone();
+        super::run_file_operation("files", &ctx.clone(), move || {
             let path_str = parameters
                 .get("path")
                 .and_then(|v| v.as_str())
@@ -835,42 +915,31 @@ impl Tool for AppendFileTool {
                 .ok_or_else(|| ToolError::MissingParameter("content".to_string()))?;
 
             let path = resolve_path(
+                this.file_system.as_ref(),
                 "append_file",
                 path_str,
-                &self.base_dir,
+                &this.base_dir,
                 ctx.working_dir.as_deref(),
             )?;
 
             if let Some(parent) = path.parent() {
-                tokio::fs::create_dir_all(parent).await.map_err(|e| {
-                    ToolError::ExecutionFailed {
+                this.file_system.create_dir_all(parent).map_err(|e| {
+                    super::file_error(e, |e| ToolError::ExecutionFailed {
                         tool: "append_file".to_string(),
                         message: format!("Failed to create directory: {}", e),
-                    }
+                    })
                 })?;
             }
 
-            let existed_before = path.exists();
-            let mut file = tokio::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&path)
-                .await
-                .map_err(|e| ToolError::ExecutionFailed {
-                    tool: "append_file".to_string(),
-                    message: format!("Failed to open file: {}", e),
+            let existed_before = this.file_system.exists(&path)?;
+            this.file_system
+                .append(&path, content.as_bytes())
+                .map_err(|error| {
+                    super::file_error(error, |error| ToolError::ExecutionFailed {
+                        tool: "append_file".to_string(),
+                        message: format!("Failed to append write: {error}"),
+                    })
                 })?;
-
-            file.write_all(content.as_bytes())
-                .await
-                .map_err(|e| ToolError::ExecutionFailed {
-                    tool: "append_file".to_string(),
-                    message: format!("Failed to append write: {}", e),
-                })?;
-            file.flush().await.map_err(|e| ToolError::ExecutionFailed {
-                tool: "append_file".to_string(),
-                message: format!("Failed to flush append write: {}", e),
-            })?;
 
             let mut result = ToolResult::success(format!(
                 "Appended {} bytes to '{}'",
@@ -890,18 +959,32 @@ impl Tool for AppendFileTool {
 // ── UpdateFileTool ────────────────────────────────────────────────────────────────
 
 /// Update file content
+#[derive(Clone)]
 pub struct UpdateFileTool {
     base_dir: Option<PathBuf>,
+    file_system: std::sync::Arc<dyn echo_core::tools::filesystem::FileSystem>,
 }
 
 impl UpdateFileTool {
+    pub fn with_file_system(
+        mut self,
+        file_system: std::sync::Arc<dyn echo_core::tools::filesystem::FileSystem>,
+    ) -> Self {
+        self.file_system = file_system;
+        self
+    }
+
     pub fn new() -> Self {
-        Self { base_dir: None }
+        Self {
+            base_dir: None,
+            file_system: std::sync::Arc::new(super::LocalFileSystem),
+        }
     }
 
     pub fn with_base_dir(base: impl Into<PathBuf>) -> Self {
         Self {
             base_dir: Some(base.into()),
+            file_system: std::sync::Arc::new(super::LocalFileSystem),
         }
     }
 }
@@ -951,7 +1034,9 @@ impl Tool for UpdateFileTool {
         parameters: ToolParameters,
         ctx: &'a echo_core::tools::ToolContext,
     ) -> BoxFuture<'a, echo_core::error::Result<ToolResult>> {
-        Box::pin(async move {
+        let this = self.clone();
+        let ctx = ctx.clone();
+        super::run_file_operation("files", &ctx.clone(), move || {
             let path_str = parameters
                 .get("path")
                 .and_then(|v| v.as_str())
@@ -967,26 +1052,26 @@ impl Tool for UpdateFileTool {
                 .ok_or_else(|| ToolError::MissingParameter("new_content".to_string()))?;
 
             let path = resolve_path(
+                this.file_system.as_ref(),
                 "update_file",
                 path_str,
-                &self.base_dir,
+                &this.base_dir,
                 ctx.working_dir.as_deref(),
             )?;
 
-            if !path.exists() {
+            if !this.file_system.exists(&path)? {
                 return Ok(ToolResult::failure(
                     ToolFailureCategory::InvalidArguments,
                     format!("File does not exist: {}", path.display()),
                 ));
             }
 
-            let content =
-                tokio::fs::read_to_string(&path)
-                    .await
-                    .map_err(|e| ToolError::ExecutionFailed {
-                        tool: "update_file".to_string(),
-                        message: format!("Failed to read file: {}", e),
-                    })?;
+            let content = this.file_system.read_to_string(&path).map_err(|e| {
+                super::file_error(e, |e| ToolError::ExecutionFailed {
+                    tool: "update_file".to_string(),
+                    message: format!("Failed to read file: {}", e),
+                })
+            })?;
 
             if !content.contains(old_content) {
                 return Ok(ToolResult::failure(
@@ -1000,11 +1085,13 @@ impl Tool for UpdateFileTool {
 
             let updated = content.replacen(old_content, new_content, 1);
 
-            tokio::fs::write(&path, &updated)
-                .await
-                .map_err(|e| ToolError::ExecutionFailed {
-                    tool: "update_file".to_string(),
-                    message: format!("Failed to write update: {}", e),
+            this.file_system
+                .write(&path, updated.as_bytes())
+                .map_err(|e| {
+                    super::file_error(e, |e| ToolError::ExecutionFailed {
+                        tool: "update_file".to_string(),
+                        message: format!("Failed to write update: {}", e),
+                    })
                 })?;
 
             Ok(
@@ -1019,18 +1106,32 @@ impl Tool for UpdateFileTool {
 }
 // ── MoveFileTool ──────────────────────────────────────────────────────────────────
 /// Move file to a new path
+#[derive(Clone)]
 pub struct MoveFileTool {
     base_dir: Option<PathBuf>,
+    file_system: std::sync::Arc<dyn echo_core::tools::filesystem::FileSystem>,
 }
 
 impl MoveFileTool {
+    pub fn with_file_system(
+        mut self,
+        file_system: std::sync::Arc<dyn echo_core::tools::filesystem::FileSystem>,
+    ) -> Self {
+        self.file_system = file_system;
+        self
+    }
+
     pub fn new() -> Self {
-        Self { base_dir: None }
+        Self {
+            base_dir: None,
+            file_system: std::sync::Arc::new(super::LocalFileSystem),
+        }
     }
 
     pub fn with_base_dir(base: impl Into<PathBuf>) -> Self {
         Self {
             base_dir: Some(base.into()),
+            file_system: std::sync::Arc::new(super::LocalFileSystem),
         }
     }
 }
@@ -1075,7 +1176,9 @@ impl Tool for MoveFileTool {
         parameters: ToolParameters,
         ctx: &'a echo_core::tools::ToolContext,
     ) -> BoxFuture<'a, echo_core::error::Result<ToolResult>> {
-        Box::pin(async move {
+        let this = self.clone();
+        let ctx = ctx.clone();
+        super::run_file_operation("files", &ctx.clone(), move || {
             let old_path_str = parameters
                 .get("old_path")
                 .and_then(|v| v.as_str())
@@ -1087,31 +1190,33 @@ impl Tool for MoveFileTool {
                 .ok_or_else(|| ToolError::MissingParameter("new_path".to_string()))?;
 
             let old_path = resolve_path(
+                this.file_system.as_ref(),
                 "move_file",
                 old_path_str,
-                &self.base_dir,
+                &this.base_dir,
                 ctx.working_dir.as_deref(),
             )?;
             let new_path = resolve_path(
+                this.file_system.as_ref(),
                 "move_file",
                 new_path_str,
-                &self.base_dir,
+                &this.base_dir,
                 ctx.working_dir.as_deref(),
             )?;
 
-            if !old_path.exists() {
+            if !this.file_system.exists(&old_path)? {
                 return Ok(ToolResult::failure(
                     ToolFailureCategory::InvalidArguments,
                     format!("Source file does not exist: {}", old_path.display()),
                 ));
             }
-            if !old_path.is_file() {
+            if !this.file_system.is_file(&old_path)? {
                 return Ok(ToolResult::failure(
                     ToolFailureCategory::InvalidArguments,
                     format!("'{}' is not a file", old_path.display()),
                 ));
             }
-            if new_path.exists() {
+            if this.file_system.exists(&new_path)? {
                 return Ok(ToolResult::failure(
                     ToolFailureCategory::InvalidArguments,
                     format!("Target path already exists: {}", new_path.display()),
@@ -1119,17 +1224,16 @@ impl Tool for MoveFileTool {
             }
             // Auto-create target parent directory
             if let Some(parent) = new_path.parent() {
-                fs::create_dir_all(parent)
-                    .await
-                    .map_err(|e| ToolError::ExecutionFailed {
+                this.file_system.create_dir_all(parent).map_err(|e| {
+                    super::file_error(e, |e| ToolError::ExecutionFailed {
                         tool: "move_file".to_string(),
                         message: format!("Failed to create target directory: {}", e),
-                    })?;
+                    })
+                })?;
             }
 
-            fs::rename(&old_path, &new_path)
-                .await
-                .map_err(|e| ToolError::ExecutionFailed {
+            this.file_system.rename(&old_path, &new_path).map_err(|e| {
+                super::file_error(e, |e| ToolError::ExecutionFailed {
                     tool: "move_file".to_string(),
                     message: format!(
                         "Failed to move file, old_path: {}, new_path: {}. err: {}",
@@ -1137,7 +1241,8 @@ impl Tool for MoveFileTool {
                         new_path.display(),
                         e
                     ),
-                })?;
+                })
+            })?;
 
             Ok(ToolResult::success(format!(
                 "File moved successfully, old_path: {}, new_path: {}.",
@@ -1156,18 +1261,32 @@ impl Tool for MoveFileTool {
 // ── ListDirTool ───────────────────────────────────────────────────────────────
 
 /// List files and subdirectories in a directory
+#[derive(Clone)]
 pub struct ListDirTool {
     base_dir: Option<PathBuf>,
+    file_system: std::sync::Arc<dyn echo_core::tools::filesystem::FileSystem>,
 }
 
 impl ListDirTool {
+    pub fn with_file_system(
+        mut self,
+        file_system: std::sync::Arc<dyn echo_core::tools::filesystem::FileSystem>,
+    ) -> Self {
+        self.file_system = file_system;
+        self
+    }
+
     pub fn new() -> Self {
-        Self { base_dir: None }
+        Self {
+            base_dir: None,
+            file_system: std::sync::Arc::new(super::LocalFileSystem),
+        }
     }
 
     pub fn with_base_dir(base: impl Into<PathBuf>) -> Self {
         Self {
             base_dir: Some(base.into()),
+            file_system: std::sync::Arc::new(super::LocalFileSystem),
         }
     }
 }
@@ -1222,7 +1341,9 @@ impl Tool for ListDirTool {
         parameters: ToolParameters,
         ctx: &'a echo_core::tools::ToolContext,
     ) -> BoxFuture<'a, echo_core::error::Result<ToolResult>> {
-        Box::pin(async move {
+        let this = self.clone();
+        let ctx = ctx.clone();
+        super::run_file_operation("files", &ctx.clone(), move || {
             let path_str = parameters
                 .get("path")
                 .and_then(|v| v.as_str())
@@ -1233,54 +1354,39 @@ impl Tool for ListDirTool {
             };
 
             let path = resolve_path(
+                this.file_system.as_ref(),
                 "list_dir",
                 path_str,
-                &self.base_dir,
+                &this.base_dir,
                 ctx.working_dir.as_deref(),
             )?;
 
-            if !path.exists() {
+            if !this.file_system.exists(&path)? {
                 return Ok(ToolResult::failure(
                     ToolFailureCategory::InvalidArguments,
                     format!("Directory does not exist: {}", path.display()),
                 ));
             }
-            if !path.is_dir() {
+            if !this.file_system.is_dir(&path)? {
                 return Ok(ToolResult::failure(
                     ToolFailureCategory::InvalidArguments,
                     format!("'{}' is not a directory", path.display()),
                 ));
             }
 
-            let mut entries =
-                tokio::fs::read_dir(&path)
-                    .await
-                    .map_err(|e| ToolError::ExecutionFailed {
-                        tool: "list_dir".to_string(),
-                        message: format!("Failed to read directory: {}", e),
-                    })?;
+            let entries = this.file_system.read_dir(&path).map_err(|e| {
+                super::file_error(e, |e| ToolError::ExecutionFailed {
+                    tool: "list_dir".to_string(),
+                    message: format!("Failed to read directory: {}", e),
+                })
+            })?;
 
             let mut files = Vec::new();
             let mut dirs = Vec::new();
 
-            while let Some(entry) =
-                entries
-                    .next_entry()
-                    .await
-                    .map_err(|e| ToolError::ExecutionFailed {
-                        tool: "list_dir".to_string(),
-                        message: format!("Failed to iterate directory: {}", e),
-                    })?
-            {
+            for entry in entries {
                 let name = entry.file_name().to_string_lossy().to_string();
-                let file_type =
-                    entry
-                        .file_type()
-                        .await
-                        .map_err(|e| ToolError::ExecutionFailed {
-                            tool: "list_dir".to_string(),
-                            message: format!("Failed to get file type: {}", e),
-                        })?;
+                let file_type = entry.file_type();
 
                 if file_type.is_dir() {
                     dirs.push(format!("[Dir] {}/", name));

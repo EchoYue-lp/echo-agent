@@ -16,7 +16,7 @@
 //! ```
 
 use echo_agent::prelude::*;
-use echo_agent::skills::external::loader::{DiscoveryScope, SkillLoader};
+use echo_agent::skills::external::loader::{DiscoveryScope, SkillFileSource, SkillLoader};
 use echo_agent::skills::external::resource_tool::ReadSkillResourceTool;
 use echo_agent::skills::external::run_script_tool::RunSkillScriptTool;
 use echo_agent::skills::external::types::SkillDescriptor;
@@ -45,6 +45,10 @@ async fn main() -> echo_agent::error::Result<()> {
     println!("  Echo Agent × File-Based Skills (agentskills.io v2)");
     println!("═══════════════════════════════════════════════════════════\n");
 
+    demo_source_bound_discovery().await?;
+    if std::env::args().any(|arg| arg == "--source-only") {
+        return Ok(());
+    }
     demo_1_discovery().await?;
     demo_2_catalog().await?;
     demo_3_activation().await?;
@@ -56,6 +60,54 @@ async fn main() -> echo_agent::error::Result<()> {
     println!("\n{}", "═".repeat(59));
     println!("All demos completed.");
 
+    Ok(())
+}
+
+/// Bind the existing loader/registry without replacing the progressive parser.
+/// Run with --source-only for this offline check; no model/remote login is used.
+async fn demo_source_bound_discovery() -> echo_agent::error::Result<()> {
+    let source = SkillFileSource::new(
+        Arc::new(echo_agent::tools::files::LocalFileSystem),
+        Some(Arc::new(
+            echo_agent::sandbox::SandboxManager::local_sandbox(),
+        )),
+    );
+    let mut loader = SkillLoader::new().with_custom_source(source);
+    let descriptors = loader.discover_directory(demo_skills_dir()).await?;
+    if descriptors.is_empty() {
+        return Err(echo_agent::error::ReactError::Other(
+            "source-bound discovery returned no Skill".into(),
+        ));
+    }
+    let mut registry = SkillRegistry::new();
+    for descriptor in descriptors {
+        let source = loader
+            .get_file_source(&descriptor.name)
+            .cloned()
+            .ok_or_else(|| {
+                echo_agent::error::ReactError::Other("discovered Skill lost its file source".into())
+            })?;
+        registry.register_descriptor_with_source(descriptor, source);
+    }
+    let local_executor: Arc<dyn echo_agent::sandbox::SandboxExecutor> =
+        Arc::new(echo_agent::sandbox::SandboxManager::local_sandbox());
+    let mut agent = ReactAgent::new(
+        AgentConfig::new("offline-source-demo", "source-demo", "").auto_project_rules(false),
+    );
+    agent.set_default_skill_source(SkillFileSource::local(Some(local_executor.clone())));
+    let installed = agent
+        .discover_skills_with_source(
+            &[DiscoveryScope::Custom(demo_skills_dir())],
+            Arc::new(echo_agent::tools::files::LocalFileSystem),
+            Some(local_executor),
+        )
+        .await?;
+    if installed.is_empty() {
+        return Err(echo_agent::error::ReactError::Other(
+            "source-aware Agent did not admit demo Skills".into(),
+        ));
+    }
+    println!("✓ provider-backed Skill discovery retains each original source");
     Ok(())
 }
 

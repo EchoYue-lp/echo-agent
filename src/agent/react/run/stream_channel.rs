@@ -7591,6 +7591,260 @@ mod tests {
         steer_before_model_return_case(true, false).await
     }
 
+    #[cfg(feature = "files")]
+    #[tokio::test]
+    async fn provider_reader_settles_before_steer_skips_later_provider_wave() -> Result<()> {
+        use echo_core::tools::filesystem::FileSystem;
+        use echo_core::tools::{InvocationResourceGuard, ToolContext, ToolEffect, ToolResult};
+        use std::io::Read;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // The existing provider fixtures are private to their crates. This
+        // tool only supplies the original Steer barrier around a real reader;
+        // it adds no FileSystem implementation or alternative execution loop.
+        struct ProviderReadAtBarrier {
+            file_system: Arc<dyn FileSystem>,
+            path: std::path::PathBuf,
+            entered: Arc<tokio::sync::Notify>,
+            release: std::sync::Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+            reader_drops: Arc<AtomicUsize>,
+        }
+
+        impl crate::tools::Tool for ProviderReadAtBarrier {
+            fn name(&self) -> &str {
+                "provider_read_at_barrier"
+            }
+
+            fn description(&self) -> &str {
+                "Hold the actual provider reader at the existing Steer boundary"
+            }
+
+            fn parameters(&self) -> serde_json::Value {
+                serde_json::json!({"type":"object","properties":{}})
+            }
+
+            fn risk_level(&self) -> crate::tools::ToolRiskLevel {
+                crate::tools::ToolRiskLevel::ReadOnly
+            }
+
+            fn execute_with_context<'a>(
+                &'a self,
+                _parameters: crate::tools::ToolParameters,
+                context: &'a ToolContext,
+            ) -> BoxFuture<'a, Result<ToolResult>> {
+                Box::pin(async move {
+                    let release = self
+                        .release
+                        .lock()
+                        .map_err(|error| ReactError::Other(error.to_string()))?
+                        .take()
+                        .ok_or_else(|| {
+                            ReactError::Other("reader barrier already consumed".into())
+                        })?;
+                    let file_system = self.file_system.clone();
+                    let path = self.path.clone();
+                    let entered = self.entered.clone();
+                    let reader_drops = self.reader_drops.clone();
+                    let guards = context.resource_guards.clone();
+                    // Match the original run_file_operation boundary: the
+                    // physical closure owns the invocation guards and reader.
+                    tokio::task::spawn_blocking(move || {
+                        let _guards = guards;
+                        let mut reader = file_system.open_read(&path)?;
+                        let reader_lifetime = ResourceGuardDropProof(reader_drops);
+                        let mut first = [0_u8; 1];
+                        reader.read_exact(&mut first)?;
+                        entered.notify_one();
+                        // A failing assertion cannot leave this physical
+                        // fixture parked on a blocking thread indefinitely.
+                        let released = release.recv_timeout(std::time::Duration::from_secs(2));
+                        let mut bytes = first.to_vec();
+                        reader.read_to_end(&mut bytes)?;
+                        drop(reader);
+                        drop(reader_lifetime);
+                        released.map_err(|error| ReactError::Other(error.to_string()))?;
+                        let content = String::from_utf8(bytes)
+                            .map_err(|error| ReactError::Other(error.to_string()))?;
+                        Ok(
+                            ToolResult::success(content).with_effect(ToolEffect::FileRead {
+                                path: path.display().to_string(),
+                            }),
+                        )
+                    })
+                    .await
+                    .map_err(|error| ReactError::Other(error.to_string()))?
+                })
+            }
+        }
+
+        // Both controls use the same actual tool manager, provider, wave
+        // partition and physical barrier. Only accepted Steer differs.
+        for steer in [false, true] {
+            let directory = tempfile::tempdir()?;
+            let source_path = directory.path().join("source.txt");
+            let later_path = directory.path().join("later.txt");
+            let source_content = "original provider bytes 中文 🙂";
+            let file_system: Arc<dyn FileSystem> =
+                Arc::new(echo_tools::filesystem::LocalFileSystem);
+            file_system.write(&source_path, source_content.as_bytes())?;
+            let entered = Arc::new(tokio::sync::Notify::new());
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let reader_drops = Arc::new(AtomicUsize::new(0));
+            let scope_drops = Arc::new(AtomicUsize::new(0));
+            let mut later = steer_effect_call("provider-later", "write_file");
+            later.function.arguments = serde_json::json!({
+                "path":"later.txt","content":"later provider write"
+            })
+            .to_string();
+            let llm = Arc::new(
+                MockLlmClient::new()
+                    .then_tool_calls(vec![
+                        steer_effect_call("provider-started", "provider_read_at_barrier"),
+                        steer_effect_call("provider-wave-boundary", "sequential_marker"),
+                        later,
+                    ])
+                    .with_response("provider work settled"),
+            );
+            let agent = ReactAgentBuilder::new()
+                .llm_client(llm.clone())
+                .enable_tools()
+                .auto_project_rules(false)
+                .file_system(file_system.clone())
+                .tool(Box::new(ProviderReadAtBarrier {
+                    file_system: file_system.clone(),
+                    path: source_path,
+                    entered: entered.clone(),
+                    release: std::sync::Mutex::new(Some(release_rx)),
+                    reader_drops: reader_drops.clone(),
+                }))
+                // Reuse the original explicit sequential boundary, then the
+                // production file tool with the exact same provider instance.
+                .tool(Box::new(SequentialMarkerTool))
+                .tool(Box::new(
+                    echo_tools::files::files::WriteFileTool::with_base_dir(directory.path())
+                        .with_file_system(file_system.clone()),
+                ))
+                .max_iterations(4)
+                .build()?;
+            let invocation = echo_core::agent::AgentInvocationContext {
+                working_dir: Some(directory.path().to_path_buf()),
+                resource_guards: vec![InvocationResourceGuard::new(ResourceGuardDropProof(
+                    scope_drops.clone(),
+                ))],
+                ..Default::default()
+            };
+            let stream = agent
+                .execute_stream_with_invocation_context(
+                    "read then write on the selected provider",
+                    crate::agent::CancellationToken::new(),
+                    invocation,
+                )
+                .await?;
+            wait_for_steer_barrier(&entered).await?;
+            let mut receipt = if steer {
+                let receipt = agent
+                    .steer_input_tracked(
+                        None,
+                        Message::user("do not start the later provider write".to_string()),
+                    )
+                    .map_err(|error| ReactError::Other(error.to_string()))?;
+                assert_eq!(receipt.state(), crate::agent::AgentSteerState::Accepted);
+                Some(receipt)
+            } else {
+                None
+            };
+            assert_eq!(reader_drops.load(Ordering::SeqCst), 0);
+            assert_eq!(scope_drops.load(Ordering::SeqCst), 0);
+            assert!(agent.execution_mutex.try_lock().is_err());
+            assert!(!file_system.exists(&later_path)?);
+            release_tx
+                .send(())
+                .map_err(|error| ReactError::Other(error.to_string()))?;
+            let events = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                stream.collect::<Vec<_>>(),
+            )
+            .await
+            .map_err(|_| ReactError::Other("provider Steer run did not physically settle".into()))?
+            .into_iter()
+            .collect::<Result<Vec<_>>>()?;
+            assert_eq!(reader_drops.load(Ordering::SeqCst), 1);
+            assert_eq!(scope_drops.load(Ordering::SeqCst), 1);
+            assert!(agent.execution_mutex.try_lock().is_ok());
+            for id in [
+                "provider-started",
+                "provider-wave-boundary",
+                "provider-later",
+            ] {
+                assert_eq!(events.iter().filter(|event| matches!(event, AgentEvent::ToolCall { call_id, .. } if call_id == id)).count(), 1);
+                assert_eq!(events.iter().filter(|event| matches!(event, AgentEvent::ToolResult { call_id, .. } if call_id == id)).count(), 1);
+            }
+            assert!(events.iter().any(|event| matches!(event,
+                AgentEvent::ToolResult { call_id, result, .. }
+                    if call_id == "provider-started" && result.success && result.output == source_content
+            )));
+            let later_result = events
+                .iter()
+                .find_map(|event| match event {
+                    AgentEvent::ToolResult {
+                        call_id, result, ..
+                    } if call_id == "provider-later" => Some(result),
+                    _ => None,
+                })
+                .ok_or_else(|| ReactError::Other("missing later provider result".into()))?;
+            if let Some(receipt) = receipt.as_mut() {
+                assert!(
+                    !file_system.exists(&later_path)?,
+                    "Steer must prevent the later provider invocation"
+                );
+                assert!(!later_result.success);
+                assert!(later_result.failure.as_ref().is_some_and(
+                    |failure| failure.side_effect == crate::tools::ToolSideEffect::None
+                ));
+                assert_eq!(
+                    receipt.wait_for_turn_settled().await,
+                    crate::agent::AgentSteerState::TurnSettled {
+                        outcome: crate::agent::AgentSteerTurnOutcome::Completed,
+                        drained: true,
+                    }
+                );
+                let messages = llm.last_messages().unwrap_or_default();
+                let correction = messages
+                    .iter()
+                    .position(|message| {
+                        message.content.as_text().as_deref()
+                            == Some("do not start the later provider write")
+                    })
+                    .ok_or_else(|| {
+                        ReactError::Other("provider correction was not consumed".into())
+                    })?;
+                for id in [
+                    "provider-started",
+                    "provider-wave-boundary",
+                    "provider-later",
+                ] {
+                    let result = messages
+                        .iter()
+                        .position(|message| message.tool_call_id.as_deref() == Some(id))
+                        .ok_or_else(|| {
+                            ReactError::Other(format!("missing provider result {id}"))
+                        })?;
+                    assert!(
+                        result < correction,
+                        "close the original proposal before correction"
+                    );
+                }
+            } else {
+                assert!(later_result.success);
+                assert_eq!(
+                    file_system.read_to_string(&later_path)?,
+                    "later provider write"
+                );
+            }
+        }
+        Ok(())
+    }
+
     async fn steer_during_started_wave_case(
         parallel: bool,
         cancel_after_steer: bool,

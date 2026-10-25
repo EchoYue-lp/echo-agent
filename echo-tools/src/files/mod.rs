@@ -9,6 +9,8 @@ pub mod diff;
 #[allow(clippy::module_inception)]
 pub mod files;
 #[cfg(feature = "files")]
+pub use crate::filesystem::LocalFileSystem;
+#[cfg(feature = "files")]
 pub mod glob;
 #[cfg(feature = "files")]
 pub mod grep;
@@ -19,7 +21,9 @@ pub mod repo_map;
 use std::path::{Component, Path, PathBuf};
 
 #[cfg(feature = "files")]
-use echo_core::error::{Result, ToolError};
+use echo_core::error::{ReactError, Result, ToolError};
+#[cfg(feature = "files")]
+use echo_core::tools::filesystem::FileSystem;
 
 /// Resolve a user-supplied relative/absolute path into a safe absolute path.
 ///
@@ -38,11 +42,12 @@ use echo_core::error::{Result, ToolError};
 /// - Absolute path: normalize then (if base_dir set) verify it stays within base_dir
 /// - Relative path: expand relative to the chosen base then verify
 ///
-/// After textual normalization, `std::fs::canonicalize()` is used to resolve symlinks
+/// After textual normalization, the selected provider canonicalizes symlinks
 /// and verify the real path stays within the allowed directory. For write operations
 /// where the target file doesn't exist yet, the parent directory is canonicalized instead.
 #[cfg(feature = "files")]
 fn resolve_path(
+    file_system: &dyn FileSystem,
     tool: &str,
     path_str: &str,
     base_dir: &Option<PathBuf>,
@@ -81,13 +86,13 @@ fn resolve_path(
 
         // Defense against symlink bypass: canonicalize to resolve symlinks and
         // verify the real (resolved) path stays within the base directory.
-        match std::fs::canonicalize(&normalized) {
+        match file_system.canonicalize(&normalized) {
             Ok(canonical) => {
-                let canonical_base = std::fs::canonicalize(&normalized_base).map_err(|e| {
-                    ToolError::ExecutionFailed {
+                let canonical_base = file_system.canonicalize(&normalized_base).map_err(|e| {
+                    file_error(e, |e| ToolError::ExecutionFailed {
                         tool: tool.to_string(),
                         message: format!("Cannot resolve base directory: {}", e),
-                    }
+                    })
                 })?;
                 if !canonical.starts_with(&canonical_base) {
                     return Err(ToolError::ExecutionFailed {
@@ -101,14 +106,14 @@ fn resolve_path(
                 }
                 canonical
             }
-            Err(_) => {
+            Err(ReactError::Io(_)) => {
                 // File doesn't exist yet (write operation) — canonicalize parent directory
                 if let Some(parent) = normalized.parent()
                     && parent != Path::new("")
-                    && let Ok(canonical_parent) = std::fs::canonicalize(parent)
+                    && let Some(canonical_parent) = best_effort_canonicalize(file_system, parent)?
                 {
-                    let canonical_base = std::fs::canonicalize(&normalized_base)
-                        .unwrap_or_else(|_| normalized_base.clone());
+                    let canonical_base = best_effort_canonicalize(file_system, &normalized_base)?
+                        .unwrap_or_else(|| normalized_base.clone());
                     if !canonical_parent.starts_with(&canonical_base) {
                         return Err(ToolError::ExecutionFailed {
                             tool: tool.to_string(),
@@ -125,17 +130,22 @@ fn resolve_path(
                 // Fallback: return textually normalized path if parent doesn't exist
                 normalized
             }
+            Err(error) => return Err(error),
         }
     } else {
         let normalized = normalize_path(requested);
         // normalize_path strips "." to an empty path — use CWD as fallback
         let normalized = if normalized.as_os_str().is_empty() {
-            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+            file_system.current_dir()?
         } else {
             normalized
         };
         // Best-effort canonicalization when no base_dir constraint
-        std::fs::canonicalize(&normalized).unwrap_or(normalized)
+        match file_system.canonicalize(&normalized) {
+            Ok(path) => path,
+            Err(ReactError::Io(_)) => normalized,
+            Err(error) => return Err(error),
+        }
     };
 
     Ok(resolved)
@@ -157,4 +167,63 @@ fn normalize_path(path: &Path) -> PathBuf {
         }
     }
     components.iter().collect()
+}
+
+/// Keep the existing synchronous transaction and its resource guards together.
+/// Dropping the observer does not cancel a started filesystem mutation.
+#[cfg(feature = "files")]
+fn run_file_operation<F>(
+    tool: &'static str,
+    ctx: &echo_core::tools::ToolContext,
+    operation: F,
+) -> futures::future::BoxFuture<'static, Result<echo_core::tools::ToolResult>>
+where
+    F: FnOnce() -> Result<echo_core::tools::ToolResult> + Send + 'static,
+{
+    let guards = ctx.resource_guards.clone();
+    Box::pin(async move {
+        tokio::task::spawn_blocking(move || {
+            let _guards = guards;
+            operation()
+        })
+        .await
+        .map_err(|error| ToolError::ExecutionFailed {
+            tool: tool.to_string(),
+            message: format!("File operation task failed: {error}"),
+        })?
+    })
+}
+
+#[cfg(feature = "files")]
+fn is_io_kind(error: &ReactError, kind: std::io::ErrorKind) -> bool {
+    matches!(error, ReactError::Io(inner) if inner.kind() == kind)
+}
+
+/// Add the old local diagnostic without erasing a provider's recovery facts.
+#[cfg(feature = "files")]
+fn file_error(error: ReactError, local: impl FnOnce(&std::io::Error) -> ToolError) -> ReactError {
+    match error {
+        ReactError::Io(error) => local(&error).into(),
+        error => error,
+    }
+}
+
+#[cfg(feature = "files")]
+fn best_effort_canonicalize(file_system: &dyn FileSystem, path: &Path) -> Result<Option<PathBuf>> {
+    match file_system.canonicalize(path) {
+        Ok(path) => Ok(Some(path)),
+        Err(ReactError::Io(_)) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(feature = "files")]
+fn check_file_cancel(
+    cancel: Option<&echo_core::agent::CancellationToken>,
+    tool: &str,
+) -> Result<()> {
+    if cancel.is_some_and(|cancel| cancel.is_cancelled()) {
+        return Err(ToolError::Cancelled(tool.to_string()).into());
+    }
+    Ok(())
 }

@@ -291,7 +291,7 @@ impl ShellTool {
         ctx: &ToolContext,
         effective_input: &Value,
         timeout_secs: Option<u64>,
-        has_sandbox: bool,
+        executor: Option<Arc<dyn SandboxExecutor>>,
     ) -> ToolResult {
         let Some(launcher) = self.cell_launcher.clone() else {
             return ToolResult::error("background mode requires a command cell registry");
@@ -328,7 +328,9 @@ impl ShellTool {
                 .as_ref()
                 .map(|dir| dir.display().to_string()),
             timeout_secs,
-            require_sandbox: has_sandbox,
+            require_sandbox: executor.is_some(),
+            executor,
+            resource_guards: ctx.resource_guards.clone(),
             // Background cells outlive the foreground Turn. Product runtimes
             // that distinguish pause from cancel stop owned cells explicitly
             // by run identity instead of inheriting the Turn token here.
@@ -667,7 +669,7 @@ impl Tool for ShellTool {
                         } else {
                             None
                         },
-                        sandbox.is_some(),
+                        sandbox.clone(),
                     )
                     .await;
                 return Ok(single_complete_stream(result));
@@ -724,6 +726,8 @@ impl Tool for ShellTool {
                     SandboxCommand::program(program, parts.get(1..).unwrap_or_default().to_vec())
                 };
                 sandbox_cmd.timeout = timeout;
+                sandbox_cmd.resource_guards = ctx.resource_guards.clone();
+                sandbox_cmd.cancel = ctx.cancel.clone();
                 if let Some(dir) = &working_dir {
                     sandbox_cmd = sandbox_cmd.with_working_dir(dir);
                 }

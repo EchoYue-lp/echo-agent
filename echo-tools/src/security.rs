@@ -270,6 +270,39 @@ impl PathValidator {
     /// workspace root" pattern (Phase 6.1).  Other path validators in the
     /// codebase should converge here.
     pub fn validate_within_base(&self, path: &str, base: &Path) -> Result<PathBuf> {
+        self.validate_within_base_from(path, base, None)
+    }
+
+    /// The original containment algorithm in an explicitly selected namespace.
+    /// Call from the caller's existing blocking boundary; provider failures
+    /// never authorize a local same-name fallback.
+    pub fn validate_within_base_with_file_system(
+        &self,
+        path: &str,
+        base: &Path,
+        file_system: &dyn echo_core::tools::filesystem::FileSystem,
+    ) -> Result<PathBuf> {
+        self.validate_within_base_from(path, base, Some(file_system))
+    }
+
+    fn validate_within_base_from(
+        &self,
+        path: &str,
+        base: &Path,
+        file_system: Option<&dyn echo_core::tools::filesystem::FileSystem>,
+    ) -> Result<PathBuf> {
+        let exists = |path: &Path| -> Result<bool> {
+            match file_system {
+                Some(fs) => fs.exists(path),
+                None => Ok(path.exists()),
+            }
+        };
+        let canonicalize = |path: &Path| -> Result<PathBuf> {
+            match file_system {
+                Some(fs) => fs.canonicalize(path),
+                None => Ok(path.canonicalize()?),
+            }
+        };
         if !self.enabled {
             return Ok(PathBuf::from(path));
         }
@@ -292,25 +325,35 @@ impl PathValidator {
             }
         }
         // Find nearest existing ancestor
-        let mut check = if requested.exists() {
+        let mut check = if exists(requested)? {
             requested
         } else {
             requested.parent().unwrap_or(requested)
         };
-        while !check.exists() {
+        while !exists(check)? {
             if let Some(p) = check.parent() {
                 check = p;
             } else {
                 break;
             }
         }
-        let canonical_ancestor = check.canonicalize().map_err(|e| ToolError::InvalidPath {
-            path: check.display().to_string(),
-            reason: format!("Cannot resolve path: {}", e),
+        let canonical_ancestor = canonicalize(check).map_err(|error| match error {
+            echo_core::error::ReactError::Io(error) => {
+                echo_core::error::ReactError::from(ToolError::InvalidPath {
+                    path: check.display().to_string(),
+                    reason: format!("Cannot resolve path: {error}"),
+                })
+            }
+            error => error,
         })?;
-        let base_canonical = base.canonicalize().map_err(|e| ToolError::InvalidPath {
-            path: base.display().to_string(),
-            reason: format!("Cannot resolve base: {}", e),
+        let base_canonical = canonicalize(base).map_err(|error| match error {
+            echo_core::error::ReactError::Io(error) => {
+                echo_core::error::ReactError::from(ToolError::InvalidPath {
+                    path: base.display().to_string(),
+                    reason: format!("Cannot resolve base: {error}"),
+                })
+            }
+            error => error,
         })?;
         if !canonical_ancestor.starts_with(&base_canonical) {
             return Err(ToolError::AccessDenied {
@@ -329,9 +372,12 @@ impl PathValidator {
         let resolved = canonical_ancestor.join(suffix);
         // Re-check denied paths on the final path
         for denied in &self.denied_paths {
-            if let Ok(d) = denied.canonicalize()
-                && resolved.starts_with(&d)
-            {
+            let denied = match canonicalize(denied) {
+                Ok(denied) => Some(denied),
+                Err(echo_core::error::ReactError::Io(_)) => None,
+                Err(error) => return Err(error),
+            };
+            if denied.is_some_and(|denied| resolved.starts_with(denied)) {
                 return Err(ToolError::AccessDenied {
                     path: path.to_string(),
                     reason: "Path is in the denied list".into(),

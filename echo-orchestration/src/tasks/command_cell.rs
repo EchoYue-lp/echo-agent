@@ -707,7 +707,8 @@ impl BackgroundCommandManager {
             command: request.command,
             working_dir: request.working_dir.map(PathBuf::from),
             deadline,
-            sandbox: self.sandbox.clone(),
+            sandbox: request.executor.or_else(|| self.sandbox.clone()),
+            resource_guards: request.resource_guards,
             owner_cancel: request.cancel,
             max_retained: self.config.max_retained_output_bytes,
         };
@@ -817,7 +818,7 @@ impl BackgroundCommandManager {
                 message: "timeout must be greater than zero".to_string(),
             });
         }
-        if request.require_sandbox && self.sandbox.is_none() {
+        if request.require_sandbox && request.executor.is_none() && self.sandbox.is_none() {
             return Err(CommandCellError::Validation {
                 message: "background command requires a sandbox executor".to_string(),
             });
@@ -1100,6 +1101,7 @@ async fn supervise_prepared_cell(
     cells: Arc<DashMap<String, Arc<CommandCellHandle>>>,
     terminal_history: usize,
 ) {
+    let _resource_guards = run_spec.resource_guards.clone();
     let deadline = run_spec.deadline;
     let owner_cancel = run_spec.owner_cancel.clone();
     let mut outcome = tokio::select! {
@@ -1186,6 +1188,7 @@ struct CellRunSpec {
     /// Semaphore admission and execution consume the same budget.
     deadline: Instant,
     sandbox: Option<Arc<dyn SandboxExecutor>>,
+    resource_guards: Vec<echo_core::tools::InvocationResourceGuard>,
     owner_cancel: Option<Arc<CancellationToken>>,
     max_retained: usize,
 }
@@ -1251,6 +1254,7 @@ async fn run_cell(
     spec: CellRunSpec,
 ) -> CellOutcome {
     let CellRunSpec {
+        resource_guards,
         command,
         working_dir,
         deadline,
@@ -1302,10 +1306,15 @@ async fn run_cell(
     }
 
     if let Some(sandbox) = sandbox {
+        let mut sandbox_command = SandboxCommand::shell(command)
+            .with_resource_guards(resource_guards)
+            .with_cancel(Some(Arc::new(handle.cancel.clone())));
+        if let Some(dir) = &working_dir {
+            sandbox_command = sandbox_command.with_working_dir(dir);
+        }
         return run_sandbox_cell(
             handle,
-            command,
-            working_dir,
+            sandbox_command,
             deadline,
             sandbox,
             owner_cancel,
@@ -1414,8 +1423,7 @@ async fn run_cell(
 
 async fn run_sandbox_cell(
     handle: Arc<CommandCellHandle>,
-    command: String,
-    working_dir: Option<PathBuf>,
+    mut sandbox_command: SandboxCommand,
     deadline: Instant,
     sandbox: Arc<dyn SandboxExecutor>,
     owner_cancel: Option<Arc<CancellationToken>>,
@@ -1427,21 +1435,30 @@ async fn run_sandbox_cell(
     if backend_timeout.is_zero() {
         return CellOutcome::timed_out();
     }
-    let mut sandbox_command = SandboxCommand::shell(command);
     sandbox_command.timeout = backend_timeout;
-    if let Some(dir) = &working_dir {
-        sandbox_command = sandbox_command.with_working_dir(dir);
-    }
 
-    let stream = tokio::select! {
-        biased;
-        _ = cancellation_requested(&handle.cancel, owner_cancel.as_ref()) => {
-            return CellOutcome::cancelled();
+    let mut stop_cause = None;
+    let mut cleanup_warning_at = None;
+    let mut startup = sandbox.execute_stream(sandbox_command);
+    let stream = loop {
+        tokio::select! {
+            biased;
+            _ = cancellation_requested(&handle.cancel, owner_cancel.as_ref()), if stop_cause.is_none() => {
+                handle.cancel.cancel();
+                stop_cause = Some(CommandCellTerminalCause::Cancelled);
+                cleanup_warning_at = Some(Instant::now() + CANCEL_DRAIN_GRACE);
+            }
+            _ = wait_for_deadline(deadline), if stop_cause.is_none() => {
+                handle.cancel.cancel();
+                stop_cause = Some(CommandCellTerminalCause::TimedOut);
+                cleanup_warning_at = Some(Instant::now() + CANCEL_DRAIN_GRACE);
+            }
+            result = &mut startup => break result,
+            _ = wait_for_cleanup_warning(cleanup_warning_at), if cleanup_warning_at.is_some() => {
+                append_unsettled_cleanup(&handle, max_retained);
+                cleanup_warning_at = None;
+            }
         }
-        _ = wait_for_deadline(deadline) => {
-            return CellOutcome::timed_out();
-        }
-        result = sandbox.execute_stream(sandbox_command) => result,
     };
     let mut stream = match stream {
         Ok(stream) => stream,
@@ -1453,8 +1470,25 @@ async fn run_sandbox_cell(
                 max_retained,
                 ToolOutputChannel::Stderr,
             );
+            let failure = echo_core::tools::ToolFailure::from_error(&error, false);
+            if failure.side_effect == echo_core::tools::ToolSideEffect::None {
+                if failure.category == echo_core::tools::ToolFailureCategory::Cancelled {
+                    return if stop_cause == Some(CommandCellTerminalCause::TimedOut) {
+                        CellOutcome::timed_out()
+                    } else {
+                        CellOutcome::cancelled()
+                    };
+                }
+                if failure.category == echo_core::tools::ToolFailureCategory::Timeout {
+                    return CellOutcome::timed_out();
+                }
+            }
             return CellOutcome::runtime_failure(
-                CommandCellTerminalCause::LaunchFailed,
+                if failure.side_effect == echo_core::tools::ToolSideEffect::None {
+                    CommandCellTerminalCause::LaunchFailed
+                } else {
+                    CommandCellTerminalCause::WaitFailed
+                },
                 format!("sandbox execution failed: {error}"),
             );
         }
@@ -1464,13 +1498,24 @@ async fn run_sandbox_cell(
     loop {
         let event = tokio::select! {
             biased;
-            _ = cancellation_requested(&handle.cancel, owner_cancel.as_ref()) => {
-                return CellOutcome::cancelled();
+            _ = cancellation_requested(&handle.cancel, owner_cancel.as_ref()), if stop_cause.is_none() => {
+                handle.cancel.cancel();
+                stop_cause = Some(CommandCellTerminalCause::Cancelled);
+                cleanup_warning_at = Some(Instant::now() + CANCEL_DRAIN_GRACE);
+                continue;
             }
-            _ = wait_for_deadline(deadline) => {
-                return CellOutcome::timed_out();
+            _ = wait_for_deadline(deadline), if stop_cause.is_none() => {
+                handle.cancel.cancel();
+                stop_cause = Some(CommandCellTerminalCause::TimedOut);
+                cleanup_warning_at = Some(Instant::now() + CANCEL_DRAIN_GRACE);
+                continue;
             }
             event = stream.next() => event,
+            _ = wait_for_cleanup_warning(cleanup_warning_at), if cleanup_warning_at.is_some() => {
+                append_unsettled_cleanup(&handle, max_retained);
+                cleanup_warning_at = None;
+                continue;
+            }
         };
         let Some(event) = event else {
             return CellOutcome::runtime_failure(
@@ -1515,7 +1560,12 @@ async fn run_sandbox_cell(
                     output.total_bytes = output.total_bytes.max(logical_bytes);
                     output.truncated = true;
                 }
-                if result.cancelled {
+                // Only the original completed backend/drain permits a terminal
+                // cancellation/timeout receipt; dropping its future does not.
+                if stop_cause == Some(CommandCellTerminalCause::TimedOut) {
+                    return CellOutcome::timed_out();
+                }
+                if result.cancelled || stop_cause == Some(CommandCellTerminalCause::Cancelled) {
                     return CellOutcome::cancelled();
                 }
                 if result.timed_out {
@@ -1532,7 +1582,11 @@ async fn run_sandbox_cell(
                     ToolOutputChannel::Stderr,
                 );
                 if failure.is_cancelled() {
-                    return CellOutcome::cancelled();
+                    return if stop_cause == Some(CommandCellTerminalCause::TimedOut) {
+                        CellOutcome::timed_out()
+                    } else {
+                        CellOutcome::cancelled()
+                    };
                 }
                 return CellOutcome::runtime_failure(
                     CommandCellTerminalCause::OutputDrainFailed,
@@ -1540,6 +1594,25 @@ async fn run_sandbox_cell(
                 );
             }
         }
+    }
+}
+
+/// The original supervisor remains the physical owner after its bounded stop
+/// grace. Registry wait calls retain their finite yield budget, so callers can
+/// observe an unsettled running cell without releasing its invocation resources.
+fn append_unsettled_cleanup(handle: &CommandCellHandle, max_retained: usize) {
+    append_output(
+        handle,
+        b"[stop requested; backend cleanup is not confirmed; cell remains active]\n",
+        max_retained,
+        ToolOutputChannel::Stderr,
+    );
+}
+
+async fn wait_for_cleanup_warning(deadline: Option<Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
+        None => std::future::pending().await,
     }
 }
 
@@ -1850,6 +1923,116 @@ mod tests {
         let command = process_group_kill_command(2443);
         let args: Vec<_> = command.get_args().collect();
         assert_eq!(args, ["-KILL", "--", "-2443"]);
+    }
+
+    struct StopAwareSandbox {
+        entered: Notify,
+        release: Notify,
+        received_guard_count: AtomicU64,
+    }
+
+    impl SandboxExecutor for StopAwareSandbox {
+        fn name(&self) -> &str {
+            "actual-request-target"
+        }
+        fn isolation_level(&self) -> IsolationLevel {
+            IsolationLevel::None
+        }
+        fn is_available(&self) -> BoxFuture<'_, bool> {
+            Box::pin(async { true })
+        }
+        fn execute(
+            &self,
+            command: SandboxCommand,
+        ) -> BoxFuture<'_, echo_core::error::Result<ExecutionResult>> {
+            Box::pin(async move {
+                let _guards = command.resource_guards;
+                self.received_guard_count.store(
+                    u64::try_from(_guards.len()).unwrap_or(u64::MAX),
+                    Ordering::SeqCst,
+                );
+                let cancel = command.cancel;
+                self.entered.notify_one();
+                self.release.notified().await;
+                Ok(ExecutionResult {
+                    exit_code: 0,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    duration: Duration::ZERO,
+                    sandbox_type: self.name().into(),
+                    timed_out: false,
+                    cancelled: cancel.as_ref().is_some_and(|cancel| cancel.is_cancelled()),
+                    output_truncated: false,
+                    stdout_bytes: 0,
+                    stderr_bytes: 0,
+                })
+            })
+        }
+    }
+
+    struct GuardDropSignal {
+        dropped: Arc<AtomicU64>,
+        settled: Arc<Notify>,
+    }
+    impl Drop for GuardDropSignal {
+        fn drop(&mut self) {
+            self.dropped.fetch_add(1, Ordering::SeqCst);
+            self.settled.notify_one();
+        }
+    }
+
+    #[tokio::test]
+    async fn request_executor_and_guards_survive_stop_until_original_backend_settles()
+    -> std::result::Result<(), String> {
+        let manager = BackgroundCommandManager::new(BackgroundCommandManagerConfig::default())?;
+        let executor = Arc::new(StopAwareSandbox {
+            entered: Notify::new(),
+            release: Notify::new(),
+            received_guard_count: AtomicU64::new(0),
+        });
+        let dropped = Arc::new(AtomicU64::new(0));
+        let settled = Arc::new(Notify::new());
+        let launch = manager
+            .launch(CommandCellRequest {
+                command: "target-owned command".into(),
+                require_sandbox: true,
+                executor: Some(executor.clone()),
+                resource_guards: vec![echo_core::tools::InvocationResourceGuard::new(
+                    GuardDropSignal {
+                        dropped: dropped.clone(),
+                        settled: settled.clone(),
+                    },
+                )],
+                ..Default::default()
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+        tokio::time::timeout(Duration::from_secs(1), executor.entered.notified())
+            .await
+            .map_err(|error| error.to_string())?;
+        assert_eq!(executor.received_guard_count.load(Ordering::SeqCst), 1);
+        assert!(manager.stop(&launch.cell_id));
+        let pending = manager
+            .wait(&launch.cell_id, 0, 5)
+            .await
+            .map_err(|error| error.to_string())?;
+        assert_eq!(pending.snapshot.phase, CommandCellPhase::Running);
+        assert_eq!(dropped.load(Ordering::SeqCst), 0);
+        executor.release.notify_one();
+        let terminal = manager
+            .wait(&launch.cell_id, 0, 1_000)
+            .await
+            .map_err(|error| error.to_string())?;
+        assert_eq!(terminal.snapshot.phase, CommandCellPhase::Cancelled);
+        tokio::time::timeout(Duration::from_secs(1), settled.notified())
+            .await
+            .map_err(|error| error.to_string())?;
+        assert_eq!(dropped.load(Ordering::SeqCst), 1);
+        manager
+            .shutdown()
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(())
     }
 
     struct TestSandbox {
@@ -2430,6 +2613,7 @@ mod tests {
                 working_dir: None,
                 deadline,
                 sandbox: None,
+                resource_guards: Vec::new(),
                 owner_cancel: None,
                 max_retained: 1024,
             },

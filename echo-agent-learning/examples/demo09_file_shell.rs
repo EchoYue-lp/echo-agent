@@ -1,4 +1,7 @@
 //! demo09_file_shell.rs —— 文件系统 + Shell 综合演示
+//!
+//! Offline provider control (no model request):
+//! cargo run -p echo-agent-learning --features files,shell --example demo09_file_shell -- --file-system-only
 
 use echo_agent::agent::Agent;
 use echo_agent::prelude::*;
@@ -21,6 +24,11 @@ async fn main() -> echo_agent::error::Result<()> {
     println!("      Echo Agent × 文件系统 + Shell 综合演示");
     println!("═══════════════════════════════════════════════════════\n");
 
+    demo_file_system_adapter().await?;
+    if std::env::args().any(|arg| arg == "--file-system-only") {
+        return Ok(());
+    }
+
     // Part 1: 静态能力展示
     demo_skill_overview()?;
 
@@ -30,6 +38,38 @@ async fn main() -> echo_agent::error::Result<()> {
     // Part 3: Agent 真实执行
     demo_agent_tasks().await?;
 
+    Ok(())
+}
+
+/// Exercise the real standard pack with an injected provider and per-call cwd.
+/// The same construction accepts a transport adapter without new tool schemas.
+async fn demo_file_system_adapter() -> echo_agent::error::Result<()> {
+    use echo_agent::tools::files::LocalFileSystem;
+    use echo_agent::tools::{StandardToolPack, ToolContext, ToolPack};
+    let directory = tempfile::tempdir()?;
+    std::fs::write(directory.path().join("说明🙂.txt"), "目标文件内容\n")?;
+    let pack = StandardToolPack::new().with_file_system(std::sync::Arc::new(LocalFileSystem));
+    let tool = pack
+        .tools()
+        .into_iter()
+        .find(|entry| entry.tool.name() == "read_file")
+        .ok_or_else(|| echo_agent::error::ToolError::NotFound("read_file".into()))?
+        .tool;
+    let result = tool
+        .execute_with_context(
+            std::collections::HashMap::from([("path".into(), serde_json::json!("说明🙂.txt"))]),
+            &ToolContext {
+                working_dir: Some(directory.path().to_path_buf()),
+                ..Default::default()
+            },
+        )
+        .await?;
+    if !result.success || !result.output.contains("目标文件内容") {
+        return Err(echo_agent::error::ReactError::Other(
+            "provider-backed file example did not read its actual invocation directory".into(),
+        ));
+    }
+    println!("✓ provider-backed file read and Unicode cwd/content control");
     Ok(())
 }
 

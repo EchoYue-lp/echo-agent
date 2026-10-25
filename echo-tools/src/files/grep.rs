@@ -9,7 +9,6 @@ use echo_core::tools::{Tool, ToolParameters, ToolResult};
 use futures::future::BoxFuture;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
-use tokio::fs;
 
 // ── GrepTool ────────────────────────────────────────────────────────────────
 
@@ -18,18 +17,32 @@ use tokio::fs;
 /// Walks the directory tree from `path` (default: `.`), reads each file,
 /// and returns lines matching the `pattern` regex. Supports context lines,
 /// file glob filtering, and case-insensitive mode.
+#[derive(Clone)]
 pub struct GrepTool {
     base_dir: Option<PathBuf>,
+    file_system: std::sync::Arc<dyn echo_core::tools::filesystem::FileSystem>,
 }
 
 impl GrepTool {
+    pub fn with_file_system(
+        mut self,
+        file_system: std::sync::Arc<dyn echo_core::tools::filesystem::FileSystem>,
+    ) -> Self {
+        self.file_system = file_system;
+        self
+    }
+
     pub fn new() -> Self {
-        Self { base_dir: None }
+        Self {
+            base_dir: None,
+            file_system: std::sync::Arc::new(super::LocalFileSystem),
+        }
     }
 
     pub fn with_base_dir(base: impl Into<PathBuf>) -> Self {
         Self {
             base_dir: Some(base.into()),
+            file_system: std::sync::Arc::new(super::LocalFileSystem),
         }
     }
 }
@@ -100,7 +113,11 @@ impl Tool for GrepTool {
         parameters: ToolParameters,
         ctx: &'a echo_core::tools::ToolContext,
     ) -> BoxFuture<'a, Result<ToolResult>> {
-        Box::pin(async move {
+        let this = self.clone();
+        let ctx = ctx.clone();
+        super::run_file_operation("grep", &ctx.clone(), move || {
+            let file_system = this.file_system.as_ref();
+            let cancel = ctx.cancel.as_deref();
             let pattern_str = parameters
                 .get("pattern")
                 .and_then(|v| v.as_str())
@@ -158,21 +175,26 @@ impl Tool for GrepTool {
             // absolute `path` is used as-is. Confinement passes if the
             // canonicalized path starts with *any* allowed root.
             let mut allowed_roots: Vec<PathBuf> = Vec::new();
-            if let Some(base) = &self.base_dir {
+            if let Some(base) = &this.base_dir {
                 allowed_roots.push(base.clone());
             }
             if let Some(working) = &ctx.working_dir {
                 allowed_roots.push(working.clone());
             }
-            if let Some(artifacts) = ctx.output_artifacts.as_ref() {
+            if file_system.paths_are_native()
+                && let Some(artifacts) = ctx.output_artifacts.as_ref()
+            {
                 allowed_roots.push(artifacts.root_dir.clone());
             }
 
-            let preferred_root = self
+            let preferred_root = this
                 .base_dir
                 .clone()
                 .or_else(|| ctx.working_dir.as_ref().map(|p| p.to_path_buf()))
                 .or_else(|| {
+                    if !file_system.paths_are_native() {
+                        return None;
+                    }
                     ctx.output_artifacts
                         .as_ref()
                         .map(|artifacts| artifacts.root_dir.clone())
@@ -187,12 +209,12 @@ impl Tool for GrepTool {
                 // Canonicalize both the candidate and the roots so symlink /
                 // `..` escapes are caught. Missing roots (e.g. an uncreated
                 // artifact dir) are skipped rather than erroring.
-                let resolved_canon = match tokio::fs::canonicalize(&resolved).await {
+                let resolved_canon = match file_system.canonicalize(&resolved) {
                     Ok(p) => p,
-                    Err(_) => resolved.clone(),
+                    Err(echo_core::error::ReactError::Io(_)) => resolved.clone(),
+                    Err(error) => return Err(error),
                 };
-                let within_scope = canonicalize_roots(&allowed_roots)
-                    .await
+                let within_scope = canonicalize_roots(file_system, cancel, &allowed_roots)?
                     .iter()
                     .any(|root| resolved_canon.starts_with(root));
                 if !within_scope {
@@ -208,7 +230,7 @@ impl Tool for GrepTool {
                 PathBuf::from(path_str)
             };
 
-            if !search_path.exists() {
+            if !file_system.exists(&search_path)? {
                 return Ok(ToolResult::invalid_arguments(format!(
                     "Path does not exist: {}",
                     search_path.display()
@@ -217,24 +239,26 @@ impl Tool for GrepTool {
 
             let mut results = Vec::new();
 
-            if search_path.is_file() {
+            if file_system.is_file(&search_path)? {
                 search_file(
+                    file_system,
+                    cancel,
                     &search_path,
                     &regex,
                     glob_filter,
                     context_lines,
                     &mut results,
-                )
-                .await?;
-            } else if search_path.is_dir() {
+                )?;
+            } else if file_system.is_dir(&search_path)? {
                 walk_and_search(
+                    file_system,
+                    cancel,
                     &search_path,
                     &regex,
                     glob_filter,
                     context_lines,
                     &mut results,
-                )
-                .await?;
+                )?;
             }
 
             let query = serde_json::json!({
@@ -268,24 +292,34 @@ impl Tool for GrepTool {
 /// Resolve each candidate root to its canonical form, skipping any that do not
 /// exist on disk (e.g. an artifact dir not yet created). Used for confinement
 /// checks so symlinks and `..` cannot escape the allowed scope.
-async fn canonicalize_roots(roots: &[PathBuf]) -> Vec<PathBuf> {
+fn canonicalize_roots(
+    file_system: &dyn echo_core::tools::filesystem::FileSystem,
+    cancel: Option<&echo_core::agent::CancellationToken>,
+    roots: &[PathBuf],
+) -> Result<Vec<PathBuf>> {
+    super::check_file_cancel(cancel, "grep")?;
     let mut canon: Vec<PathBuf> = Vec::with_capacity(roots.len());
     for root in roots {
         // Missing root (e.g. an uncreated artifact dir) is skipped, not errored.
-        if let Ok(p) = tokio::fs::canonicalize(root).await {
-            canon.push(p);
+        match file_system.canonicalize(root) {
+            Ok(path) => canon.push(path),
+            Err(echo_core::error::ReactError::Io(_)) => {}
+            Err(error) => return Err(error),
         }
     }
-    canon
+    Ok(canon)
 }
 
-async fn search_file(
+fn search_file(
+    file_system: &dyn echo_core::tools::filesystem::FileSystem,
+    cancel: Option<&echo_core::agent::CancellationToken>,
     path: &Path,
     regex: &regex::Regex,
     glob_filter: Option<&str>,
     context_lines: usize,
     results: &mut Vec<String>,
 ) -> Result<()> {
+    super::check_file_cancel(cancel, "grep")?;
     // Check glob filter
     if let Some(glob) = glob_filter
         && let Some(name) = path.file_name().and_then(|n| n.to_str())
@@ -295,27 +329,29 @@ async fn search_file(
     }
 
     // Skip binary files and large files
-    let metadata = fs::metadata(path)
-        .await
-        .map_err(|e| ToolError::ExecutionFailed {
+    let metadata = file_system.metadata(path).map_err(|e| {
+        super::file_error(e, |e| ToolError::ExecutionFailed {
             tool: "grep".to_string(),
             message: format!("Cannot read metadata for {}: {}", path.display(), e),
-        })?;
+        })
+    })?;
 
     if metadata.len() > 10 * 1024 * 1024 {
         // Skip files > 10MB
         return Ok(());
     }
 
-    let content = match fs::read_to_string(path).await {
+    let content = match file_system.read_to_string(path) {
         Ok(c) => c,
-        Err(_) => return Ok(()), // Skip binary/unreadable files
+        Err(echo_core::error::ReactError::Io(_)) => return Ok(()),
+        Err(error) => return Err(error), // Skip binary/unreadable files
     };
 
     let lines: Vec<&str> = content.lines().collect();
     let path_display = path.display().to_string();
 
     for (line_idx, line) in lines.iter().enumerate() {
+        super::check_file_cancel(cancel, "grep")?;
         if regex.is_match(line) {
             let line_num = line_idx.saturating_add(1);
             if context_lines > 0 {
@@ -345,21 +381,26 @@ async fn search_file(
     Ok(())
 }
 
-async fn walk_and_search(
+fn walk_and_search(
+    file_system: &dyn echo_core::tools::filesystem::FileSystem,
+    cancel: Option<&echo_core::agent::CancellationToken>,
     dir: &Path,
     regex: &regex::Regex,
     glob_filter: Option<&str>,
     context_lines: usize,
     results: &mut Vec<String>,
 ) -> Result<()> {
-    let mut entries = match fs::read_dir(dir).await {
+    super::check_file_cancel(cancel, "grep")?;
+    let entries = match file_system.read_dir(dir) {
         Ok(e) => e,
-        Err(_) => return Ok(()),
+        Err(echo_core::error::ReactError::Io(_)) => return Ok(()),
+        Err(error) => return Err(error),
     };
 
     // Collect and sort entries for deterministic output
     let mut entry_paths: Vec<PathBuf> = Vec::new();
-    while let Ok(Some(entry)) = entries.next_entry().await {
+    for entry in entries {
+        super::check_file_cancel(cancel, "grep")?;
         let path = entry.path();
         // Skip hidden directories and common ignore patterns
         if let Some(name) = path.file_name().and_then(|n| n.to_str())
@@ -379,17 +420,27 @@ async fn walk_and_search(
     entry_paths.sort();
 
     for path in entry_paths {
-        if path.is_dir() {
-            Box::pin(walk_and_search(
+        super::check_file_cancel(cancel, "grep")?;
+        if file_system.is_dir(&path)? {
+            walk_and_search(
+                file_system,
+                cancel,
                 &path,
                 regex,
                 glob_filter,
                 context_lines,
                 results,
-            ))
-            .await?;
-        } else if path.is_file() {
-            search_file(&path, regex, glob_filter, context_lines, results).await?;
+            )?;
+        } else if file_system.is_file(&path)? {
+            search_file(
+                file_system,
+                cancel,
+                &path,
+                regex,
+                glob_filter,
+                context_lines,
+                results,
+            )?;
         }
     }
 

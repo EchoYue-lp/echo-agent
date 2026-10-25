@@ -12,9 +12,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use echo_core::tools::ToolContext;
-use echo_core::utils::fs::{
-    ExistingDirectoryGuard, open_existing_directory_guard, verify_existing_directory,
-};
+use echo_core::tools::filesystem::{DirectoryIdentityGuard, FileSystem};
 
 use crate::process::BoundedProcessOutput;
 
@@ -50,18 +48,22 @@ pub struct ManagedWorktree {
 }
 
 struct WorktreeCreationGuards {
-    checkout: ExistingDirectoryGuard,
+    checkout: Box<dyn DirectoryIdentityGuard>,
     admin_path: PathBuf,
-    admin: ExistingDirectoryGuard,
+    admin: Box<dyn DirectoryIdentityGuard>,
 }
 
 impl WorktreeCreationGuards {
-    fn capture(checkout: ExistingDirectoryGuard, marker_path: &Path) -> Result<Self, String> {
+    fn capture(
+        checkout: Box<dyn DirectoryIdentityGuard>,
+        marker_path: &Path,
+    ) -> Result<Self, String> {
         let admin_path = marker_path
             .parent()
             .ok_or_else(|| "Worktree marker has no Git administration directory".to_string())?
             .to_path_buf();
-        let admin = open_existing_directory_guard(&admin_path)
+        let admin = crate::filesystem::LocalFileSystem
+            .retain_directory(&admin_path)
             .map_err(|error| format!("Cannot retain Git administration identity: {error}"))?;
         Ok(Self {
             checkout,
@@ -71,9 +73,11 @@ impl WorktreeCreationGuards {
     }
 
     fn verify(&self, worktree_dir: &Path) -> Result<(), String> {
-        verify_existing_directory(worktree_dir, &self.checkout)
+        self.checkout
+            .verify(worktree_dir)
             .map_err(|error| format!("Checkout identity changed: {error}"))?;
-        verify_existing_directory(&self.admin_path, &self.admin)
+        self.admin
+            .verify(&self.admin_path)
             .map_err(|error| format!("Git administration identity changed: {error}"))
     }
 }
@@ -131,13 +135,15 @@ pub async fn create_worktree_with_context(
             worktree_dir.display()
         )
     })?;
-    let checkout_guard = open_existing_directory_guard(&worktree_dir).map_err(|error| {
-        let _ = std::fs::remove_dir(&worktree_dir);
-        format!(
-            "Cannot retain reserved worktree identity at {}: {error}",
-            worktree_dir.display()
-        )
-    })?;
+    let checkout_guard = crate::filesystem::LocalFileSystem
+        .retain_directory(&worktree_dir)
+        .map_err(|error| {
+            let _ = std::fs::remove_dir(&worktree_dir);
+            format!(
+                "Cannot retain reserved worktree identity at {}: {error}",
+                worktree_dir.display()
+            )
+        })?;
 
     // Git add may commit before its client reports a result. The owner must
     // finish marker publication or bounded compensation after caller drop.
@@ -221,7 +227,7 @@ async fn create_reserved_worktree(
     git_root: PathBuf,
     worktree_dir: PathBuf,
     config: WorktreeConfig,
-    checkout_guard: ExistingDirectoryGuard,
+    checkout_guard: Box<dyn DirectoryIdentityGuard>,
 ) -> Result<CreatedWorktree, String> {
     let context = ToolContext::default();
 
@@ -499,18 +505,37 @@ pub async fn list_worktrees_with_context(
     repo_path: &Path,
     context: &ToolContext,
 ) -> Result<Vec<ManagedWorktree>, String> {
-    let git_root = find_git_root(repo_path, context).await?;
+    list_worktrees_at(repo_path, context, None)
+        .await
+        .map_err(|error| error.to_string())
+}
 
-    let output = run_git(&git_root, &["worktree", "list", "--porcelain"], context).await?;
-    if !output.status.success() {
-        return Err(command_error(&output));
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
+// The original porcelain parser is shared by native and selected-target lists.
+// Only the I/O boundary changes; a failed target observation is never replaced
+// by a same-name native marker check.
+pub(crate) async fn list_worktrees_at(
+    repo_path: &Path,
+    context: &ToolContext,
+    backend: Option<&crate::git::GitBackend>,
+) -> echo_core::error::Result<Vec<ManagedWorktree>> {
+    let root = crate::git::run_git(
+        &repo_path.to_string_lossy(),
+        &["rev-parse", "--show-toplevel"],
+        context,
+        backend,
+    )
+    .await?;
+    let git_root = PathBuf::from(root.trim());
+    let stdout = crate::git::run_git(
+        &git_root.to_string_lossy(),
+        &["worktree", "list", "--porcelain"],
+        context,
+        backend,
+    )
+    .await?;
     let mut worktrees = Vec::new();
     let mut current_path: Option<PathBuf> = None;
     let mut current_branch = String::new();
-
     for line in stdout.lines() {
         if let Some(path) = line.strip_prefix("worktree ") {
             current_path = Some(PathBuf::from(path));
@@ -520,9 +545,7 @@ pub async fn list_worktrees_with_context(
         } else if line.is_empty()
             && let Some(path) = current_path.take()
         {
-            let managed = worktree_git_path(&path, MANAGED_MARKER, context)
-                .await
-                .is_ok_and(|marker| marker.is_file());
+            let managed = listed_worktree_is_managed(&path, context, backend).await?;
             worktrees.push(ManagedWorktree {
                 path,
                 branch: current_branch.clone(),
@@ -530,19 +553,51 @@ pub async fn list_worktrees_with_context(
             });
         }
     }
-    // Handle last entry
     if let Some(path) = current_path {
-        let managed = worktree_git_path(&path, MANAGED_MARKER, context)
-            .await
-            .is_ok_and(|marker| marker.is_file());
+        let managed = listed_worktree_is_managed(&path, context, backend).await?;
         worktrees.push(ManagedWorktree {
             path,
             branch: current_branch,
             managed,
         });
     }
-
     Ok(worktrees)
+}
+
+async fn listed_worktree_is_managed(
+    path: &Path,
+    context: &ToolContext,
+    backend: Option<&crate::git::GitBackend>,
+) -> echo_core::error::Result<bool> {
+    let Some(backend) = backend else {
+        return Ok(worktree_git_path(path, MANAGED_MARKER, context)
+            .await
+            .is_ok_and(|marker| marker.is_file()));
+    };
+    let marker = crate::git::run_git(
+        &path.to_string_lossy(),
+        &[
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-path",
+            MANAGED_MARKER,
+        ],
+        context,
+        Some(backend),
+    )
+    .await?;
+    let marker = PathBuf::from(marker.trim());
+    let files = backend.file_system.clone();
+    let guards = context.resource_guards.clone();
+    tokio::task::spawn_blocking(move || {
+        let _guards = guards;
+        files.is_file(&marker)
+    })
+    .await
+    .map_err(|error| echo_core::error::ToolError::ExecutionFailed {
+        tool: "list_worktrees".into(),
+        message: format!("Target marker observation did not settle: {error}"),
+    })?
 }
 
 /// Merge changes from a worktree branch back to the base branch.
@@ -798,14 +853,6 @@ async fn run_git<S: AsRef<OsStr>>(
     .map_err(|error| error.to_string())
 }
 
-fn command_error(output: &BoundedProcessOutput) -> String {
-    let mut error = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    if output.truncated {
-        error.push_str("\n[git output truncated at 1 MiB]");
-    }
-    error
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -844,7 +891,9 @@ mod tests {
     async fn test_creation_guards(
         path: &Path,
     ) -> Result<(PathBuf, WorktreeCreationGuards), String> {
-        let checkout = open_existing_directory_guard(path).map_err(|error| error.to_string())?;
+        let checkout = crate::filesystem::LocalFileSystem
+            .retain_directory(path)
+            .map_err(|error| error.to_string())?;
         let marker = worktree_git_path(path, MANAGED_MARKER, &ToolContext::default()).await?;
         let guards = WorktreeCreationGuards::capture(checkout, &marker)?;
         Ok((marker, guards))

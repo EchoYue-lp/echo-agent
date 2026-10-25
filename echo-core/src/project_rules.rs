@@ -1,5 +1,7 @@
 //! Project-scoped instruction discovery with explicit repository boundaries.
 
+use crate::error::{ReactError, Result};
+use crate::tools::filesystem::FileSystem;
 use std::path::{Path, PathBuf};
 
 const NATIVE_FILES: &[(&str, &str)] = &[
@@ -86,13 +88,31 @@ impl InstructionResolver {
     }
 
     pub fn resolve(&self) -> ResolvedInstructions {
-        let working_dir = canonical_or_original(&self.working_dir);
-        let project_root = self
+        // The existing local convenience API keeps its original best-effort behavior.
+        self.resolve_from(None).unwrap_or_default()
+    }
+
+    /// Resolve the same precedence chain in one provider namespace. Call from
+    /// the caller's blocking preparation boundary; transport failures are errors,
+    /// not missing instructions and never local same-name fallbacks.
+    pub fn resolve_with_file_system(
+        &self,
+        file_system: &dyn FileSystem,
+    ) -> Result<ResolvedInstructions> {
+        self.resolve_from(Some(file_system))
+    }
+
+    fn resolve_from(&self, file_system: Option<&dyn FileSystem>) -> Result<ResolvedInstructions> {
+        let working_dir = canonical_or_original(&self.working_dir, file_system)?;
+        let explicit_root = self
             .explicit_project_root
             .as_ref()
-            .map(|root| canonical_or_original(root))
-            .filter(|root| working_dir.starts_with(root))
-            .or_else(|| find_git_root(&working_dir));
+            .map(|root| canonical_or_original(root, file_system))
+            .transpose()?;
+        let project_root = match explicit_root.filter(|root| working_dir.starts_with(root)) {
+            Some(root) => Some(root),
+            None => find_git_root(&working_dir, file_system)?,
+        };
         let scan_root = project_root.clone().unwrap_or_else(|| working_dir.clone());
         let directories = path_from_root_to_working_dir(&scan_root, &working_dir);
 
@@ -100,7 +120,7 @@ impl InstructionResolver {
         let mut blocks = Vec::new();
         for directory in directories {
             let Some((path, kind, content)) =
-                load_one_directory(&directory, &scan_root, self.file_set)
+                load_one_directory(&directory, &scan_root, self.file_set, file_system)?
             else {
                 continue;
             };
@@ -117,23 +137,42 @@ impl InstructionResolver {
             });
         }
 
-        ResolvedInstructions {
+        Ok(ResolvedInstructions {
             content: blocks.join("\n\n"),
             sources,
             project_root,
-        }
+        })
     }
 }
 
-fn canonical_or_original(path: &Path) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+fn canonical_or_original(path: &Path, file_system: Option<&dyn FileSystem>) -> Result<PathBuf> {
+    let Some(file_system) = file_system else {
+        return Ok(path.canonicalize().unwrap_or_else(|_| path.to_path_buf()));
+    };
+    match file_system.canonicalize(path) {
+        Ok(path) => Ok(path),
+        Err(ReactError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            Ok(path.to_path_buf())
+        }
+        Err(error) => Err(error),
+    }
 }
 
-fn find_git_root(working_dir: &Path) -> Option<PathBuf> {
-    working_dir
-        .ancestors()
-        .find(|directory| directory.join(".git").exists())
-        .map(Path::to_path_buf)
+fn find_git_root(
+    working_dir: &Path,
+    file_system: Option<&dyn FileSystem>,
+) -> Result<Option<PathBuf>> {
+    for directory in working_dir.ancestors() {
+        let marker = directory.join(".git");
+        let exists = match file_system {
+            Some(file_system) => file_system.exists(&marker)?,
+            None => marker.exists(),
+        };
+        if exists {
+            return Ok(Some(directory.to_path_buf()));
+        }
+    }
+    Ok(None)
 }
 
 fn path_from_root_to_working_dir(root: &Path, working_dir: &Path) -> Vec<PathBuf> {
@@ -153,26 +192,55 @@ fn load_one_directory(
     directory: &Path,
     project_root: &Path,
     file_set: InstructionFileSet,
-) -> Option<(PathBuf, &'static str, String)> {
+    file_system: Option<&dyn FileSystem>,
+) -> Result<Option<(PathBuf, &'static str, String)>> {
     let candidates: Box<dyn Iterator<Item = &(&str, &str)> + '_> = match file_set {
         InstructionFileSet::All => Box::new(NATIVE_FILES.iter().chain(COMPATIBLE_FILES.iter())),
         InstructionFileSet::AgentsOnly => Box::new(AGENTS_FILES.iter()),
     };
     for (relative, kind) in candidates {
         let candidate = directory.join(relative);
-        let canonical = match candidate.canonicalize() {
-            Ok(path) => path,
-            Err(_) => continue,
+        let canonical = match file_system {
+            Some(file_system) => match file_system.canonicalize(&candidate) {
+                Ok(path) => path,
+                Err(ReactError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                    continue;
+                }
+                Err(error) => return Err(error),
+            },
+            None => match candidate.canonicalize() {
+                Ok(path) => path,
+                Err(_) => continue,
+            },
         };
-        if !canonical.starts_with(project_root) || !canonical.is_file() {
+        let is_file = match file_system {
+            Some(file_system) => file_system.is_file(&canonical)?,
+            None => canonical.is_file(),
+        };
+        if !canonical.starts_with(project_root) || !is_file {
             continue;
         }
-        match std::fs::read_to_string(&canonical) {
-            Ok(content) if !content.trim().is_empty() => return Some((canonical, kind, content)),
-            _ => continue,
+        let content = match file_system {
+            Some(file_system) => match file_system.read_to_string(&canonical) {
+                Ok(content) => content,
+                Err(ReactError::Io(error))
+                    if error.kind() == std::io::ErrorKind::NotFound
+                        || error.kind() == std::io::ErrorKind::InvalidData =>
+                {
+                    continue;
+                }
+                Err(error) => return Err(error),
+            },
+            None => match std::fs::read_to_string(&canonical) {
+                Ok(content) => content,
+                Err(_) => continue,
+            },
+        };
+        if !content.trim().is_empty() {
+            return Ok(Some((canonical, kind, content)));
         }
     }
-    None
+    Ok(None)
 }
 
 /// Backward-compatible convenience API returning the highest-precedence source
@@ -221,6 +289,7 @@ pub fn inject_rules_with_root(
 mod tests {
     use super::*;
     use std::fs;
+    use std::result::Result;
 
     struct TestDir(PathBuf);
 
@@ -264,7 +333,7 @@ mod tests {
         write(&child.join("AGENTS.override.md"), "leaf override")?;
 
         let resolved = InstructionResolver::new(&child).resolve();
-        let canonical_root = canonical_or_original(&root);
+        let canonical_root = canonical_or_original(&root, None)?;
         assert_eq!(
             resolved.project_root.as_deref(),
             Some(canonical_root.as_path())
@@ -369,7 +438,7 @@ mod tests {
         write(&root.join("AGENTS.md"), "worktree rules")?;
 
         let resolved = InstructionResolver::new(&child).resolve();
-        let canonical_root = canonical_or_original(&root);
+        let canonical_root = canonical_or_original(&root, None)?;
         assert_eq!(
             resolved.project_root.as_deref(),
             Some(canonical_root.as_path())

@@ -8,7 +8,6 @@ use echo_core::tools::{Tool, ToolParameters, ToolResult};
 use futures::future::BoxFuture;
 use serde_json::{Value, json};
 use std::path::PathBuf;
-use tokio::fs;
 
 // ── GlobTool ────────────────────────────────────────────────────────────────
 
@@ -16,18 +15,32 @@ use tokio::fs;
 ///
 /// Walks the directory tree from `path` (default: `.`) and returns
 /// file paths matching the `pattern` glob (e.g. `**/*.rs`, `src/**/*.ts`).
+#[derive(Clone)]
 pub struct GlobTool {
     base_dir: Option<PathBuf>,
+    file_system: std::sync::Arc<dyn echo_core::tools::filesystem::FileSystem>,
 }
 
 impl GlobTool {
+    pub fn with_file_system(
+        mut self,
+        file_system: std::sync::Arc<dyn echo_core::tools::filesystem::FileSystem>,
+    ) -> Self {
+        self.file_system = file_system;
+        self
+    }
+
     pub fn new() -> Self {
-        Self { base_dir: None }
+        Self {
+            base_dir: None,
+            file_system: std::sync::Arc::new(super::LocalFileSystem),
+        }
     }
 
     pub fn with_base_dir(base: impl Into<PathBuf>) -> Self {
         Self {
             base_dir: Some(base.into()),
+            file_system: std::sync::Arc::new(super::LocalFileSystem),
         }
     }
 }
@@ -86,7 +99,11 @@ impl Tool for GlobTool {
         parameters: ToolParameters,
         ctx: &'a echo_core::tools::ToolContext,
     ) -> BoxFuture<'a, Result<ToolResult>> {
-        Box::pin(async move {
+        let this = self.clone();
+        let ctx = ctx.clone();
+        super::run_file_operation("glob", &ctx.clone(), move || {
+            let file_system = this.file_system.as_ref();
+            let cancel = ctx.cancel.as_deref();
             let pattern_str = parameters
                 .get("pattern")
                 .and_then(|v| v.as_str())
@@ -105,7 +122,7 @@ impl Tool for GlobTool {
             // Effective base: construction-time base_dir (with confinement)
             // takes priority; otherwise fall back to runtime working_dir
             // (CWD override, no confinement check).
-            let effective_base: Option<PathBuf> = self
+            let effective_base: Option<PathBuf> = this
                 .base_dir
                 .clone()
                 .or_else(|| ctx.working_dir.as_ref().map(|p| p.to_path_buf()));
@@ -127,14 +144,14 @@ impl Tool for GlobTool {
                 PathBuf::from(path_str)
             };
 
-            if !search_path.exists() {
+            if !file_system.exists(&search_path)? {
                 return Ok(ToolResult::invalid_arguments(format!(
                     "Path does not exist: {}",
                     search_path.display()
                 )));
             }
 
-            if !search_path.is_dir() {
+            if !file_system.is_dir(&search_path)? {
                 return Ok(ToolResult::invalid_arguments(format!(
                     "Path is not a directory: {}",
                     search_path.display()
@@ -142,7 +159,7 @@ impl Tool for GlobTool {
             }
 
             let mut results = Vec::new();
-            walk_glob(&search_path, pattern_str, &mut results).await;
+            walk_glob(file_system, cancel, &search_path, pattern_str, &mut results)?;
             let query = serde_json::json!({
                 "pattern": pattern_str,
                 "path": search_path,
@@ -168,21 +185,31 @@ impl Tool for GlobTool {
     }
 }
 
-async fn walk_glob(dir: &std::path::Path, pattern: &str, results: &mut Vec<String>) {
-    let mut entries = match fs::read_dir(dir).await {
+fn walk_glob(
+    file_system: &dyn echo_core::tools::filesystem::FileSystem,
+    cancel: Option<&echo_core::agent::CancellationToken>,
+    dir: &std::path::Path,
+    pattern: &str,
+    results: &mut Vec<String>,
+) -> Result<()> {
+    super::check_file_cancel(cancel, "glob")?;
+    let entries = match file_system.read_dir(dir) {
         Ok(e) => e,
-        Err(_) => return,
+        Err(echo_core::error::ReactError::Io(_)) => return Ok(()),
+        Err(error) => return Err(error),
     };
 
     let mut entry_paths: Vec<PathBuf> = Vec::new();
-    while let Ok(Some(entry)) = entries.next_entry().await {
+    for entry in entries {
+        super::check_file_cancel(cancel, "glob")?;
         entry_paths.push(entry.path());
     }
     entry_paths.sort();
 
     for path in entry_paths {
+        super::check_file_cancel(cancel, "glob")?;
         // Skip hidden and common ignored directories
-        if path.is_dir()
+        if file_system.is_dir(&path)?
             && let Some(name) = path.file_name().and_then(|n| n.to_str())
             && (name.starts_with('.')
                 || name == "target"
@@ -196,15 +223,16 @@ async fn walk_glob(dir: &std::path::Path, pattern: &str, results: &mut Vec<Strin
             continue;
         }
 
-        if path.is_dir() {
-            Box::pin(walk_glob(&path, pattern, results)).await;
-        } else if path.is_file()
+        if file_system.is_dir(&path)? {
+            walk_glob(file_system, cancel, &path, pattern, results)?;
+        } else if file_system.is_file(&path)?
             && let Some(name) = path.file_name().and_then(|n| n.to_str())
             && glob_pattern_matches(pattern, name, &path)
         {
             results.push(path.display().to_string());
         }
     }
+    Ok(())
 }
 
 /// Match a glob pattern against a file name.

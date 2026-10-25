@@ -47,7 +47,7 @@ ToolManager                      ← 注册表 + 执行器
     └─ think                     ← CoT 显式思维工具（已被 CoT 文本方案替代）
 
 扩展工具（开箱即用）：
-    ├─ tools/files       ← 文件读写（2 个工具）
+    ├─ tools/files       ← 文件操作（原标准 files 块，产物读取独立）
     ├─ tools/shell       ← Shell 命令执行
     ├─ tools/web         ← Web 搜索 + 网页获取（feature: web）
     ├─ tools/media       ← PDF、Excel、Word、图片（feature: media）
@@ -58,7 +58,7 @@ ToolManager                      ← 注册表 + 执行器
     ├─ tools/database    ← SQL 数据库工具（feature: database）
     └─ tools/others      ← 数学计算、天气查询等示例工具
 
-总计：26 个功能分类，67 个已注册工具。
+实际注册集合取决于 features，以 StandardToolPack 与运行时 ToolManager 为准。
 ```
 
 ---
@@ -646,3 +646,55 @@ let agent = ReactAgentBuilder::new()
 ```
 
 详见 [demo64_tool_pipeline.rs](../../echo-agent-learning/tests/example_contracts/demo64_tool_pipeline.rs)。
+
+## 绑定实际位置的文件工具
+
+原标准 files 块的 `read_file`、`list_dir`、`grep`、`glob`、`apply_patch`、
+`diff`、`repo_map`、`code_search` 可使用一个不可变的
+`tools::filesystem::FileSystem`。通过 `StandardToolPack::with_file_system`
+或 `ReactAgentBuilder::file_system` 注入；未注入时继续本机 I/O。
+每次调用仍使用真实 `ToolContext.working_dir`，包括隔离 checkout，
+不新增 remote 工具名或模型可见的目标参数。
+
+同步 provider 操作在调用方已有 blocking 边界执行，原工具将 invocation guards
+保留至实际 I/O 结算。本机错误保留实际种类，远端错误保留原类型化恢复事实。
+不确定写入不能自动重放，也不能假称已经回滚；原子写必须在目标上确实原子，
+无法支持时明确报错。原 Git checkpoint 算法提供文件/结构化执行适配入口，
+Git 查询失败不代表可以静默跳过恢复保护。
+
+文件工具注入不会自动替换模型前项目上下文。已有 InstructionProvider 的应用应
+经同一 provider 成功准备规则，再显式配置 `auto_project_rules(false)`，
+避免框架自动本机规则流重复读取。原 InstructionResolver 也提供
+`resolve_with_file_system`，复用优先级并返回来源错误。
+Skill 后续激活、资源和脚本保持自身来源；用户级来源不继承项目远端 executor。
+
+执行复用现有 `ReactAgent::set_sandbox_executor`。绑定目标的 Git、持久化
+`run_code` 脚本校验使用匹配环境；`run_code` 仍要求真实 OsSandbox 收据。
+后台 command cell 携实际 executor 和原 guards，请求停止后由原物理 owner
+等待 backend 结算。命令 guards/cancel 只在运行时传递，不序列化。
+已捕获的 `read_artifact` 工具日志继续由原本机产物 owner 读取。
+
+
+`discover_skills_with_sources` 分别接收项目与已有本机 executor，每个 Skill
+及其命令 hook 保留对应来源。应用可用 `HookRegistry::bind_source_executor`
+绑定原 UserConfig/Plugin 项；混合 UserConfig 经
+`register_user_hooks_with_sources` 保留原追加顺序、同一清理/重载身份。
+原 descriptor/prepared 注册也有 `with_source` 入口。
+替换 host executor 不会迁移已绑定 hook。
+目标缺 executor 不裸跑本机，也不以客户端路径检查或覆盖目标 cwd/环境。
+
+应用可一次调用 `set_default_skill_source` 注入已有本机资源，原注册入口捕获
+该来源，不跟随之后的 host executor 变更；项目发现仍显式传入目标来源。
+
+`FileSystem::open_read` 返回标准 reader，不预先读取整个文件。证据摘要和大小校验
+继续使用原有固定大小缓冲区；provider 保留实际 operation 至真实关闭/结算。
+不支持流式读取时明确 Unsupported，不读本机同名文件。
+
+`list_worktrees` 经同一目标 Git executor 和文件 provider 检查原 marker。
+原本机 worktree 创建/清理仍保留目录身份保护。当前非本机
+`enter_worktree`/`exit_worktree` 在预留目录、合并或删除前明确不可用：
+标准 SFTP 缺少原算法要求的 no-follow 持有目录身份和路径重开比较保证，
+路径、mode、mtime 均不能代替。产品另有隔离路径不构成这组公共工具已验收。
+
+决策与验收边界见 [ADR 0098](../adr/0098-project-file-system-adapter.md)。
+此机制本身不提供 SSH 凭据、连接服务或已经合格的 EKO 远程项目工作流。

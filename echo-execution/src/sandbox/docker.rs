@@ -687,6 +687,7 @@ impl DockerSandbox {
         limits: Option<ResourceLimits>,
         cancel: Option<Arc<CancellationToken>>,
     ) -> Result<ExecutionResult> {
+        let cancel = cancel.or_else(|| command.cancel.clone());
         if cancel.as_ref().is_some_and(|token| token.is_cancelled()) {
             return Ok(empty_docker_interrupted_result(
                 DockerInterruption::Cancelled,

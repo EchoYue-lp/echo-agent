@@ -47,7 +47,7 @@ Built-in tools (builtin):
     └─ think                      ← explicit CoT tool (superseded by CoT text approach)
 
 Extension tools (ready to use):
-    ├─ tools/files       ← file read/write (2 tools)
+    ├─ tools/files       ← file operations (standard files block; artifact access is separate)
     ├─ tools/shell       ← shell command execution
     ├─ tools/web         ← web search + page fetch (feature: web)
     ├─ tools/media       ← PDF, Excel, Word, Image (feature: media)
@@ -58,7 +58,7 @@ Extension tools (ready to use):
     ├─ tools/database    ← SQL query tools (feature: database)
     └─ tools/others      ← math, weather, etc.
 
-Total: 67 registered tools across 26 feature categories.
+The installed set depends on features; StandardToolPack and the runtime ToolManager are authoritative.
 ```
 
 ---
@@ -673,3 +673,68 @@ let agent = ReactAgentBuilder::new()
 ```
 
 See [demo64_tool_pipeline.rs](../../echo-agent-learning/tests/example_contracts/demo64_tool_pipeline.rs).
+
+## Location-bound file tools
+
+The original standard files block (`read_file`, `list_dir`, `grep`, `glob`,
+`apply_patch`, `diff`, `repo_map`, `code_search`) can use one immutable
+`tools::filesystem::FileSystem`. `StandardToolPack::with_file_system` and
+`ReactAgentBuilder::file_system` inject that provider; constructors without it
+retain native local I/O. Each call still uses its actual `ToolContext.working_dir`,
+including an isolated checkout. No remote tool names or model-visible target
+parameters are added.
+
+Implement synchronous provider operations on the caller's existing blocking
+boundary. The standard tools retain invocation guards through physical I/O.
+Local errors retain their kind; adapters preserve structured remote failures.
+An uncertain write cannot be automatically replayed or treated as a completed
+rollback. Atomic writes must be atomic on the target or explicitly unsupported.
+The original Git checkpoint algorithm has filesystem/structured-executor adapter
+entries; a failed Git query is not permission to silently skip protection.
+
+File-tool configuration does not replace pre-model project context. Consumers
+owning an InstructionProvider prepare their rules through the same provider and
+explicitly use `auto_project_rules(false)` after successful preparation to avoid
+the automatic local loader. The original InstructionResolver also offers
+`resolve_with_file_system`; it preserves precedence and returns source errors.
+Skills retain their own source through later activation/resource/script reads;
+user/global sources do not inherit a project's remote executor.
+
+Use the existing `ReactAgent::set_sandbox_executor` for execution injection.
+Target-bound Git and persisted `run_code` validation use the matching target;
+`run_code` still requires an actual OsSandbox receipt. Command cells carry the
+selected executor and original guards, and stop requests await the existing
+physical backend. Runtime-only command guards/cancellation are not serialized.
+Captured `read_artifact` tool logs remain local under their original owner.
+
+
+`discover_skills_with_sources` accepts separate project and existing local
+executors. Each Skill and its command hooks keep that source. Hosts can use
+`HookRegistry::bind_source_executor` for existing UserConfig/Plugin entries;
+mixed UserConfig origins use `register_user_hooks_with_sources` in their original
+append order under one clear/reload identity. The original descriptor/prepared
+registration methods also have `with_source` entries. Replacing the host executor
+does not move bound hooks. Required target execution
+never falls back to bare local spawn, and target cwd/environment are not checked
+or replaced using client paths.
+
+Hosts can call `set_default_skill_source` once with their existing local resources;
+ordinary registration captures that source independently of later host executor
+changes. Explicit project discovery still supplies its target source.
+
+`FileSystem::open_read` returns a standard reader without a whole-file preload.
+Keep evidence hashing/size checks on their original bounded buffers and retain
+the provider's operation through actual close/settlement. An unsupported reader
+must report Unsupported, never fall back to a local same-name file.
+
+`list_worktrees` uses the same target Git executor and filesystem marker reads.
+The original local guarded worktree create/cleanup remains available. Current
+non-native `enter_worktree`/`exit_worktree` are explicitly unavailable before any
+reservation, merge or removal: standard SFTP lacks the stable, retained no-follow
+directory identity required by that original algorithm. Path, mode and timestamp
+comparisons are not substitutes. A product's other isolation path does not
+qualify these public tools.
+
+See [ADR 0098](../adr/0098-project-file-system-adapter.md) for the decisions and
+qualification boundary. This mechanism does not itself provide SSH credentials,
+a remote connection service or a qualified EKO remote-project workflow.

@@ -1,6 +1,10 @@
-//! Per-file Git worktree checkpoints used before destructive file mutations.
+//! Per-file Git checkpoints. Local and adapted targets share one format and algorithm.
 
+use echo_core::error::{ReactError, Result as CoreResult, ToolError};
+use echo_core::sandbox::{CommandKind, ExecutionResult, SandboxCommand};
+use echo_core::tools::filesystem::FileSystem;
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -25,255 +29,361 @@ struct CheckpointManifest {
     index_entry: Option<IndexEntry>,
 }
 
-/// Snapshot the exact worktree bytes and index entry for one file.
-///
-/// `Ok(None)` means the target is not inside a Git repository. Once a Git root
-/// is found, every snapshot failure is returned so callers can stop the pending
-/// destructive mutation.
-pub fn create_checkpoint(file_path: &Path) -> Result<Option<String>, String> {
-    let Some(git_root) = find_git_root(file_path)? else {
+/// Existing local entry point; its recovery format and path ownership are unchanged.
+pub fn create_checkpoint(path: &Path) -> Result<Option<String>, String> {
+    create_checkpoint_with_backend(path, &crate::filesystem::LocalFileSystem, &local_command)
+        .map_err(legacy_error)
+}
+
+/// Existing local restore entry point.
+pub fn rollback_to_checkpoint(path: &Path, id: &str) -> Result<(), String> {
+    rollback_to_checkpoint_with_backend(
+        path,
+        id,
+        &crate::filesystem::LocalFileSystem,
+        &local_command,
+    )
+    .map_err(legacy_error)
+}
+
+/// Existing best-effort local retention behavior.
+pub fn cleanup_old_checkpoints(path: &Path, keep: usize) {
+    let _ = cleanup_old_checkpoints_with_backend(
+        path,
+        keep,
+        &crate::filesystem::LocalFileSystem,
+        &local_command,
+    );
+}
+
+/// Snapshot the original bytes/index using the target's I/O and command executor.
+/// The callback consumes an existing structured command; it does not parse a terminal.
+/// `None` requires a completed Git query proving this is not a repository.
+pub fn create_checkpoint_with_backend(
+    path: &Path,
+    file_system: &dyn FileSystem,
+    execute: &dyn Fn(SandboxCommand) -> CoreResult<ExecutionResult>,
+) -> CoreResult<Option<String>> {
+    let Some(root) = find_git_root(path, file_system, execute)? else {
         return Ok(None);
     };
-    let target = fs::canonicalize(file_path)
-        .map_err(|error| format!("failed to resolve checkpoint target: {error}"))?;
-    let relative = target.strip_prefix(&git_root).map_err(|_| {
-        format!(
+    let target = file_system.canonicalize(path)?;
+    let relative = target.strip_prefix(&root).map_err(|_| {
+        checkpoint_error(format!(
             "checkpoint target '{}' is outside Git root '{}'",
             target.display(),
-            git_root.display()
-        )
+            root.display()
+        ))
     })?;
     let relative_path = relative
         .to_str()
-        .ok_or_else(|| "checkpoint path is not valid UTF-8".to_string())?
+        .ok_or_else(|| checkpoint_error("checkpoint path is not valid UTF-8"))?
         .to_string();
     let id = checkpoint_id();
-    let checkpoint_dir = checkpoint_root(&git_root)?.join(&id);
-    fs::create_dir_all(&checkpoint_dir)
-        .map_err(|error| format!("failed to create checkpoint directory: {error}"))?;
-
+    let directory = checkpoint_root(&root, execute)?.join(&id);
+    file_system.create_dir_all(&directory)?;
     let result = (|| {
-        let bytes = fs::read(&target)
-            .map_err(|error| format!("failed to read checkpoint target: {error}"))?;
-        echo_core::utils::fs::atomic_write(&checkpoint_dir.join("worktree.bin"), &bytes)
-            .map_err(|error| format!("failed to persist checkpoint bytes: {error}"))?;
+        let bytes = file_system.read(&target)?;
+        file_system.atomic_write(&directory.join("worktree.bin"), &bytes)?;
         let manifest = CheckpointManifest {
             relative_path,
             worktree_existed: true,
             #[cfg(unix)]
-            worktree_mode: file_mode(&target)?,
-            index_entry: read_index_entry(&git_root, relative)?,
+            worktree_mode: file_system.metadata(&target)?.mode,
+            index_entry: read_index_entry(&root, relative, execute)?,
         };
-        let encoded = serde_json::to_vec(&manifest)
-            .map_err(|error| format!("failed to encode checkpoint manifest: {error}"))?;
-        echo_core::utils::fs::atomic_write(&checkpoint_dir.join("manifest.json"), &encoded)
-            .map_err(|error| format!("failed to persist checkpoint manifest: {error}"))?;
+        let encoded = serde_json::to_vec(&manifest).map_err(|error| {
+            checkpoint_error(format!("failed to encode checkpoint manifest: {error}"))
+        })?;
+        file_system.atomic_write(&directory.join("manifest.json"), &encoded)?;
         Ok(Some(id))
     })();
-    if result.is_err() {
-        let _ = fs::remove_dir_all(&checkpoint_dir);
+    // Preserve local/definite-failure cleanup, but do not send another mutation
+    // after a provider reports that a write may still be unsettled.
+    if let Err(error) = &result
+        && echo_core::tools::ToolFailure::from_error(error, false).side_effect
+            == echo_core::tools::ToolSideEffect::None
+    {
+        let _ = file_system.remove_dir_all(&directory);
     }
     result
 }
 
-/// Restore only the file represented by `checkpoint_id`, including its exact
-/// pre-mutation Git index entry. Other worktree and staged changes are untouched.
-pub fn rollback_to_checkpoint(file_path: &Path, checkpoint_id: &str) -> Result<(), String> {
-    echo_core::utils::fs::validate_path_segment(checkpoint_id)
-        .map_err(|error| format!("invalid checkpoint id: {error}"))?;
-    let git_root = find_git_root(file_path)?
-        .ok_or_else(|| "checkpoint target is not inside a Git repository".to_string())?;
-    let checkpoint_dir = checkpoint_root(&git_root)?.join(checkpoint_id);
-    let manifest_bytes = fs::read(checkpoint_dir.join("manifest.json"))
-        .map_err(|error| format!("failed to read checkpoint manifest: {error}"))?;
-    let manifest: CheckpointManifest = serde_json::from_slice(&manifest_bytes)
-        .map_err(|error| format!("invalid checkpoint manifest: {error}"))?;
-    let target = git_root.join(&manifest.relative_path);
-    let expected = absolute_target(file_path)?;
-    if target != expected {
-        return Err("checkpoint does not belong to the requested file".to_string());
+/// Restore only the represented target and its exact original Git index entry.
+pub fn rollback_to_checkpoint_with_backend(
+    path: &Path,
+    id: &str,
+    file_system: &dyn FileSystem,
+    execute: &dyn Fn(SandboxCommand) -> CoreResult<ExecutionResult>,
+) -> CoreResult<()> {
+    echo_core::utils::fs::validate_path_segment(id)
+        .map_err(|error| checkpoint_error(format!("invalid checkpoint id: {error}")))?;
+    let root = find_git_root(path, file_system, execute)?
+        .ok_or_else(|| checkpoint_error("checkpoint target is not inside a Git repository"))?;
+    let directory = checkpoint_root(&root, execute)?.join(id);
+    let manifest: CheckpointManifest =
+        serde_json::from_slice(&file_system.read(&directory.join("manifest.json"))?)
+            .map_err(|error| checkpoint_error(format!("invalid checkpoint manifest: {error}")))?;
+    let target = root.join(&manifest.relative_path);
+    if target != absolute_target(path, file_system)? {
+        return Err(checkpoint_error(
+            "checkpoint does not belong to the requested file",
+        ));
     }
-
     if manifest.worktree_existed {
-        let bytes = fs::read(checkpoint_dir.join("worktree.bin"))
-            .map_err(|error| format!("failed to read checkpoint bytes: {error}"))?;
-        echo_core::utils::fs::atomic_write(&target, &bytes)
-            .map_err(|error| format!("failed to restore checkpoint bytes: {error}"))?;
+        file_system.atomic_write(&target, &file_system.read(&directory.join("worktree.bin"))?)?;
         #[cfg(unix)]
         if let Some(mode) = manifest.worktree_mode {
-            set_file_mode(&target, mode)?;
+            file_system.set_mode(&target, mode)?;
         }
-    } else if target.exists() {
-        fs::remove_file(&target)
-            .map_err(|error| format!("failed to remove restored-absent file: {error}"))?;
+    } else if file_system.exists(&target)? {
+        file_system.remove_file(&target)?;
     }
-    restore_index_entry(
-        &git_root,
-        &manifest.relative_path,
-        manifest.index_entry.as_ref(),
-    )
+    let line = match &manifest.index_entry {
+        Some(entry) => format!(
+            "{} {} {}\t{}\n",
+            entry.mode, entry.object_id, entry.stage, manifest.relative_path
+        ),
+        None => format!("0 {} 0\t{}\n", "0".repeat(40), manifest.relative_path),
+    };
+    let output = execute(
+        SandboxCommand::program("git", vec!["update-index".into(), "--index-info".into()])
+            .with_working_dir(&root)
+            .with_stdin(line),
+    )?;
+    require_success(output, "git update-index rejected checkpoint entry")?;
+    Ok(())
 }
 
-/// Remove older per-file checkpoints, preserving the newest `keep` entries.
-pub fn cleanup_old_checkpoints(file_path: &Path, keep: usize) {
-    let Ok(Some(git_root)) = find_git_root(file_path) else {
-        return;
+/// Apply the original per-target checkpoint retention policy in that namespace.
+pub fn cleanup_old_checkpoints_with_backend(
+    path: &Path,
+    keep: usize,
+    file_system: &dyn FileSystem,
+    execute: &dyn Fn(SandboxCommand) -> CoreResult<ExecutionResult>,
+) -> CoreResult<()> {
+    let Some(root) = find_git_root(path, file_system, execute)? else {
+        return Ok(());
     };
-    let Ok(root) = checkpoint_root(&git_root) else {
-        return;
+    let directory = checkpoint_root(&root, execute)?;
+    let entries = match file_system.read_dir(&directory) {
+        Ok(entries) => entries,
+        Err(ReactError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
     };
-    let Ok(entries) = fs::read_dir(root) else {
-        return;
-    };
-    let mut entries: Vec<_> = entries.filter_map(Result::ok).collect();
+    let mut entries = entries;
     entries.sort_by_key(|entry| std::cmp::Reverse(entry.file_name()));
     for entry in entries.into_iter().skip(keep) {
-        let _ = fs::remove_dir_all(entry.path());
+        file_system.remove_dir_all(&entry.path())?;
     }
+    Ok(())
 }
 
 fn checkpoint_id() -> String {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
+        .map(|v| v.as_nanos())
         .unwrap_or(0);
     let sequence = CHECKPOINT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     format!("{nanos:032x}-{:08x}-{sequence:016x}", std::process::id())
 }
 
-fn checkpoint_root(git_root: &Path) -> Result<PathBuf, String> {
-    let output = Command::new("git")
-        .args(["rev-parse", "--git-path", "echo-checkpoints"])
-        .current_dir(git_root)
-        .output()
-        .map_err(|error| format!("failed to locate Git metadata directory: {error}"))?;
-    if !output.status.success() {
-        return Err("git rev-parse --git-path failed".to_string());
-    }
-    let path = String::from_utf8(output.stdout)
-        .map_err(|error| format!("Git metadata path is not valid UTF-8: {error}"))?;
-    let path = PathBuf::from(path.trim());
+fn checkpoint_root(
+    root: &Path,
+    execute: &dyn Fn(SandboxCommand) -> CoreResult<ExecutionResult>,
+) -> CoreResult<PathBuf> {
+    let output = require_success(
+        execute(
+            SandboxCommand::program(
+                "git",
+                vec![
+                    "rev-parse".into(),
+                    "--git-path".into(),
+                    "echo-checkpoints".into(),
+                ],
+            )
+            .with_working_dir(root),
+        )?,
+        "git rev-parse --git-path failed",
+    )?;
+    let path = PathBuf::from(output.stdout.trim());
     Ok(if path.is_absolute() {
         path
     } else {
-        git_root.join(path)
+        root.join(path)
     })
 }
 
-fn absolute_target(file_path: &Path) -> Result<PathBuf, String> {
-    if let Ok(path) = fs::canonicalize(file_path) {
-        return Ok(path);
+fn absolute_target(path: &Path, file_system: &dyn FileSystem) -> CoreResult<PathBuf> {
+    match file_system.canonicalize(path) {
+        Ok(path) => Ok(path),
+        Err(ReactError::Io(_)) if path.is_absolute() => Ok(path.to_path_buf()),
+        Err(ReactError::Io(_)) => Ok(file_system.current_dir()?.join(path)),
+        Err(error) => Err(error),
     }
-    if file_path.is_absolute() {
-        return Ok(file_path.to_path_buf());
-    }
-    std::env::current_dir()
-        .map(|directory| directory.join(file_path))
-        .map_err(|error| format!("failed to resolve checkpoint target: {error}"))
 }
 
-fn find_git_root(file_path: &Path) -> Result<Option<PathBuf>, String> {
-    let dir = if file_path.is_file() {
-        file_path.parent().unwrap_or(file_path)
+fn find_git_root(
+    path: &Path,
+    file_system: &dyn FileSystem,
+    execute: &dyn Fn(SandboxCommand) -> CoreResult<ExecutionResult>,
+) -> CoreResult<Option<PathBuf>> {
+    let directory = if file_system.is_file(path)? {
+        path.parent().unwrap_or(path)
     } else {
-        file_path
+        path
     };
-    let output = Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .current_dir(dir)
-        .output()
-        .map_err(|error| format!("failed to run git rev-parse: {error}"))?;
-    if !output.status.success() {
+    let output = execute(
+        SandboxCommand::program("git", vec!["rev-parse".into(), "--show-toplevel".into()])
+            .with_working_dir(directory),
+    )?;
+    if output.timed_out || output.cancelled || output.output_truncated {
+        return Err(checkpoint_error("Git repository query did not complete"));
+    }
+    if output.exit_code != 0 {
+        // A failed query inside an actual Git worktree is not proof that
+        // checkpoint protection is unnecessary (permissions/safe.directory).
+        let directory = file_system.canonicalize(directory)?;
+        if !file_system.is_dir(&directory)? {
+            return Err(checkpoint_error("checkpoint parent is not a directory"));
+        }
+        for ancestor in directory.ancestors() {
+            match file_system.symlink_metadata(&ancestor.join(".git")) {
+                Ok(_) => {
+                    return Err(checkpoint_error(
+                        "Git repository query failed for a checkpoint-managed target",
+                    ));
+                }
+                Err(ReactError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+        if matches!(output.exit_code, 125..=127 | 255) {
+            return Err(checkpoint_error(
+                "Git command or target environment is unavailable",
+            ));
+        }
         return Ok(None);
     }
-    let root = String::from_utf8(output.stdout)
-        .map_err(|error| format!("Git root is not valid UTF-8: {error}"))?;
-    let root = fs::canonicalize(root.trim())
-        .map_err(|error| format!("failed to resolve Git root: {error}"))?;
-    Ok(Some(root))
+    Ok(Some(
+        file_system.canonicalize(Path::new(output.stdout.trim()))?,
+    ))
 }
 
-fn read_index_entry(git_root: &Path, relative: &Path) -> Result<Option<IndexEntry>, String> {
-    let output = Command::new("git")
-        .args(["ls-files", "--stage", "--"])
-        .arg(relative)
-        .current_dir(git_root)
-        .output()
-        .map_err(|error| format!("failed to inspect Git index: {error}"))?;
-    if !output.status.success() {
-        return Err("git ls-files failed while creating checkpoint".to_string());
-    }
-    let line = String::from_utf8(output.stdout)
-        .map_err(|error| format!("Git index output is not valid UTF-8: {error}"))?;
-    let Some(metadata) = line.split_once('\t').map(|(metadata, _)| metadata) else {
+fn read_index_entry(
+    root: &Path,
+    relative: &Path,
+    execute: &dyn Fn(SandboxCommand) -> CoreResult<ExecutionResult>,
+) -> CoreResult<Option<IndexEntry>> {
+    let path = relative
+        .to_str()
+        .ok_or_else(|| checkpoint_error("checkpoint path is not valid UTF-8"))?;
+    let output = require_success(
+        execute(
+            SandboxCommand::program(
+                "git",
+                vec![
+                    "ls-files".into(),
+                    "--stage".into(),
+                    "--".into(),
+                    path.into(),
+                ],
+            )
+            .with_working_dir(root),
+        )?,
+        "git ls-files failed while creating checkpoint",
+    )?;
+    let Some(metadata) = output.stdout.split_once('\t').map(|(value, _)| value) else {
         return Ok(None);
     };
     let mut fields = metadata.split_whitespace();
-    let mode = fields
-        .next()
-        .ok_or_else(|| "missing index mode".to_string())?;
-    let object_id = fields
-        .next()
-        .ok_or_else(|| "missing index object id".to_string())?;
-    let stage = fields
-        .next()
-        .ok_or_else(|| "missing index stage".to_string())?;
     Ok(Some(IndexEntry {
-        mode: mode.to_string(),
-        object_id: object_id.to_string(),
-        stage: stage.to_string(),
+        mode: fields
+            .next()
+            .ok_or_else(|| checkpoint_error("missing index mode"))?
+            .into(),
+        object_id: fields
+            .next()
+            .ok_or_else(|| checkpoint_error("missing index object id"))?
+            .into(),
+        stage: fields
+            .next()
+            .ok_or_else(|| checkpoint_error("missing index stage"))?
+            .into(),
     }))
 }
 
-fn restore_index_entry(
-    git_root: &Path,
-    relative_path: &str,
-    entry: Option<&IndexEntry>,
-) -> Result<(), String> {
-    let mut child = Command::new("git")
-        .args(["update-index", "--index-info"])
-        .current_dir(git_root)
-        .stdin(Stdio::piped())
-        .spawn()
-        .map_err(|error| format!("failed to start git update-index: {error}"))?;
-    let line = match entry {
-        Some(entry) => format!(
-            "{} {} {}\t{}\n",
-            entry.mode, entry.object_id, entry.stage, relative_path
-        ),
-        None => format!("0 {} 0\t{}\n", "0".repeat(40), relative_path),
-    };
-    let mut stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| "git update-index stdin unavailable".to_string())?;
-    stdin
-        .write_all(line.as_bytes())
-        .map_err(|error| format!("failed to restore Git index entry: {error}"))?;
-    drop(stdin);
-    let status = child
-        .wait()
-        .map_err(|error| format!("failed to wait for git update-index: {error}"))?;
-    if status.success() {
-        Ok(())
+fn require_success(output: ExecutionResult, message: &str) -> CoreResult<ExecutionResult> {
+    if output.success() && !output.output_truncated {
+        Ok(output)
     } else {
-        Err("git update-index rejected checkpoint entry".to_string())
+        Err(checkpoint_error(message))
     }
 }
 
-#[cfg(unix)]
-fn file_mode(path: &Path) -> Result<Option<u32>, String> {
-    use std::os::unix::fs::PermissionsExt;
-    fs::metadata(path)
-        .map(|metadata| Some(metadata.permissions().mode()))
-        .map_err(|error| format!("failed to inspect checkpoint permissions: {error}"))
+fn checkpoint_error(message: impl Into<String>) -> ReactError {
+    ToolError::ExecutionFailed {
+        tool: "file_checkpoint".into(),
+        message: message.into(),
+    }
+    .into()
 }
 
-#[cfg(unix)]
-fn set_file_mode(path: &Path, mode: u32) -> Result<(), String> {
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(mode))
-        .map_err(|error| format!("failed to restore checkpoint permissions: {error}"))
+fn legacy_error(error: ReactError) -> String {
+    match error {
+        ReactError::Tool(inner) => match *inner {
+            ToolError::ExecutionFailed { message, .. } => message,
+            other => other.to_string(),
+        },
+        other => other.to_string(),
+    }
+}
+
+fn local_command(command: SandboxCommand) -> CoreResult<ExecutionResult> {
+    let CommandKind::Program { program, args } = command.kind else {
+        return Err(checkpoint_error(
+            "checkpoint requires a direct program command",
+        ));
+    };
+    let started = std::time::Instant::now();
+    let mut process = Command::new(program);
+    process
+        .args(args)
+        .envs(command.env)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(directory) = command.working_dir {
+        process.current_dir(directory);
+    }
+    if command.stdin.is_some() {
+        process.stdin(Stdio::piped());
+    }
+    let mut child = process.spawn()?;
+    if let Some(input) = command.stdin {
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| checkpoint_error("git update-index stdin unavailable"))?;
+        stdin.write_all(input.as_bytes())?;
+    }
+    let output = child.wait_with_output()?;
+    let stdout_bytes = u64::try_from(output.stdout.len()).unwrap_or(u64::MAX);
+    let stderr_bytes = u64::try_from(output.stderr.len()).unwrap_or(u64::MAX);
+    let stdout = String::from_utf8(output.stdout)
+        .map_err(|error| checkpoint_error(format!("Git output is not valid UTF-8: {error}")))?;
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    Ok(ExecutionResult {
+        exit_code: output.status.code().unwrap_or(-1),
+        stdout,
+        stderr,
+        duration: started.elapsed(),
+        sandbox_type: "local".into(),
+        timed_out: false,
+        cancelled: false,
+        output_truncated: false,
+        stdout_bytes,
+        stderr_bytes,
+    })
 }
 
 #[cfg(test)]
