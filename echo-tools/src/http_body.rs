@@ -259,6 +259,9 @@ pub(crate) mod test_http {
                             Err(error) => return Err(error),
                         }
                     };
+                    // Darwin accepts inherit the listener's nonblocking flag;
+                    // this thread owns bounded blocking request reads.
+                    stream.set_nonblocking(false)?;
                     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
                     let mut request = Vec::new();
                     loop {

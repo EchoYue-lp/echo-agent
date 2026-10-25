@@ -1111,7 +1111,10 @@ fn plugin_publication_docs_and_demo_share_the_coordinator_receipt_contract()
     })?;
     let demo = std::fs::read_to_string(learning_root.join("examples/demo56_plugin_system.rs"))?;
     for entry in [
-        "PluginCoordinator::new(registry, PluginIntegrator::new())",
+        "let integrator = PluginIntegrator::new()",
+        "integrator.prepare(&mut registry).await",
+        "prepared.dependency_closure(&plugin_id)?",
+        "PluginCoordinator::new(registry, integrator)",
         "coordinator.reconcile(&mut agent).await?",
         "coordinator.disable(&mut agent, &plugin_id).await?",
         "coordinator.shutdown(&mut agent).await?",

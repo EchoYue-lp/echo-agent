@@ -5508,8 +5508,10 @@ mod tests {
         assert!(final_task.execution.claim.is_none());
         if batch_timeout {
             assert!(
-                matches!(&final_task.execution.status, crate::tasks::TaskStatus::Failed(error)
-                if error.contains("batch timeout"))
+                matches!(&final_task.execution.status, crate::tasks::TaskStatus::TimedOut { error }
+                if error.contains("batch timeout")),
+                "original batch terminal status: {:?}",
+                final_task.execution.status
             );
         } else {
             assert_eq!(
