@@ -229,6 +229,28 @@ let _terminal = receipt.wait_for_turn_settled().await;
 信号异常关闭时，所有 receipt clone 会收敛为 `Dropped`，同时保留最后确认的 drain
 事实。
 
+### 未启动工具之前的纠正
+
+流式与非流式共享的 ReAct 循环会在模型返回工具提议后，以及原有每个工具执行波次
+获准启动前检查同一 mailbox。在检查前已经接收的纠正会先交给原模型重新考虑，
+该批尚未启动的操作不会继续执行。检查与 tracked receipt 使用相同的 turn ID 和
+私有 incarnation，不按当前界面焦点寻找目标。
+
+尚未写入 transcript 的工具提议直接丢弃，不凭空生成工具结果。如果 assistant 的
+call ID 已经写入 transcript，则为余下每个未启动调用写入明确的“未执行、无副作用”
+结果；所有 call/result 配对闭合后，纠正才进入原上下文并变为 `Drained`。此前真实
+完成的结果仍供模型参考，此前的最终答案候选则需要重新考虑。
+
+已经获准启动的波次继续持有原执行 future、并行调用、结果、stream reader 和资源，
+直到真实结算。波次检查后才收到的 Steer 等到下一未启动边界处理，不抢占活动模型
+或工具，不回答 HITL，也不代表 Stop。显式 Stop、超时继续沿原取消与物理结算路径
+处理，不自动重放效果未知的操作。
+
+这些提前检查是本框架选定的响应性增强。已核对的 Pi 官方循环在整批工具完成后
+才消费 Steer，不能据此声称其已有逐工具纠正保证。取舍和参考见
+[ADR 0003](../adr/0003-tracked-steer-lifecycle.md)。草稿确认和持久输入仍由应用
+负责，`Accepted`、`Drained` 不替代这些产品事实。
+
 ### 可跟踪的初始输入
 
 冷启动 turn 应在把请求交给 `AgentTurnDriver` 前调用

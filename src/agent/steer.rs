@@ -169,6 +169,19 @@ impl TurnSteerMailbox {
         Ok(AgentSteerReceipt::new(steer_id, turn_id, receiver))
     }
 
+    /// Read the original mailbox at a tool-wave admission boundary. This does
+    /// not consume input or publish `Drained`; paired tool results must enter
+    /// the transcript before a later user message can be inserted there.
+    pub(crate) fn has_pending(&self, turn_id: &str, incarnation: &Arc<()>) -> bool {
+        self.active.lock().is_ok_and(|active| {
+            active.as_ref().is_some_and(|turn| {
+                turn.id == turn_id
+                    && Arc::ptr_eq(&turn.incarnation, incarnation)
+                    && !turn.pending.is_empty()
+            })
+        })
+    }
+
     pub(crate) fn take_pending(&self, turn_id: &str, incarnation: &Arc<()>) -> SteerDrainBatch {
         let Ok(mut active) = self.active.lock() else {
             return SteerDrainBatch {

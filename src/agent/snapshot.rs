@@ -2171,8 +2171,14 @@ impl AgentRunSnapshot {
         input: &serde_json::Value,
         category: crate::tools::ToolFailureCategory,
         message: &str,
+        known_not_started: bool,
     ) -> crate::tools::ToolResult {
-        if !self.tool_execution_started(call_id) {
+        // The set retains history for physical owners through this turn and
+        // can contain an earlier, completed attempt with the same model ID.
+        // Only the caller's original current-wave admission can prove that
+        // this specific attempt was never started; do not clear that history.
+        let started = !known_not_started && self.tool_execution_started(call_id);
+        if !started {
             // A pre-execution stage or future wave never reached ExecuteStage.
             // The invocation-local set is authoritative; trace persistence is
             // only a projection and may be unavailable or eventually visible.
@@ -2191,11 +2197,22 @@ impl AgentRunSnapshot {
             })
             .await;
         }
-        let failure = crate::tools::ToolFailure::new(category)
-            .with_side_effect(crate::tools::ToolSideEffect::Possible)
-            .with_postcondition(
-                "verify the external effect before retrying this interrupted tool call",
-            );
+        // ExecuteStage marks the invocation-local set before its first await
+        // and before invoking ToolManager. Callers settle only unadmitted
+        // waves or executions whose original future has already ended; no
+        // live future can enter ExecuteStage after this fact is sampled.
+        // Trace/event visibility is not evidence that an effect did not run.
+        let failure = if started {
+            crate::tools::ToolFailure::new(category)
+                .with_side_effect(crate::tools::ToolSideEffect::Possible)
+                .with_postcondition(
+                    "verify the external effect before retrying this interrupted tool call",
+                )
+        } else {
+            crate::tools::ToolFailure::new(category)
+                .with_side_effect(crate::tools::ToolSideEffect::None)
+                .with_postcondition("not executed: reconsider this tool call before starting it")
+        };
         let result = crate::tools::ToolResult::error(message).with_failure(failure.clone());
         self.record_event(crate::trace::RunEvent::ToolResult {
             call_id: call_id.to_string(),
@@ -3241,6 +3258,7 @@ impl AgentRunSnapshot {
                 rewrites: Vec::new(),
                 invocation_emitted: false,
                 callback_started: false,
+                execution_started: false,
                 interrupted_execution_error: None,
                 stream_tx,
             };
@@ -3377,7 +3395,7 @@ impl AgentRunSnapshot {
                     let error_message = error.to_string();
                     let result = if !ctx.callback_started
                         && ctx.result.is_none()
-                        && !self.tool_execution_started(&ctx.call_id)
+                        && !ctx.execution_started
                         && self
                             .cancel_token
                             .as_ref()
@@ -3393,6 +3411,7 @@ impl AgentRunSnapshot {
                             &ctx.input,
                             failure.category,
                             &error_message,
+                            true,
                         )
                         .await
                     } else {
@@ -4754,6 +4773,7 @@ mod transcript_filter_tests {
             rewrites: Vec::new(),
             invocation_emitted: false,
             callback_started: false,
+            execution_started: false,
             interrupted_execution_error: None,
             stream_tx: None,
         };

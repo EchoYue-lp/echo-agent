@@ -861,7 +861,16 @@ impl AgentSnapshot {
         }
     }
 
-    async fn drain_steer_into_context(
+    pub(super) fn has_pending_steer(&self) -> bool {
+        match (&self.current_turn_id, &self.turn_steer_incarnation) {
+            (Some(turn_id), Some(incarnation)) => {
+                self.turn_steer_mailbox.has_pending(turn_id, incarnation)
+            }
+            _ => false,
+        }
+    }
+
+    pub(super) async fn drain_steer_into_context(
         &self,
         context: &Arc<tokio::sync::Mutex<crate::compression::ContextManager>>,
         assistant_draft: Option<Message>,
@@ -6590,7 +6599,7 @@ mod tests {
             event,
             RunEvent::ToolError { call_id, failure: Some(failure), .. }
                 if call_id == "prehook-timeout"
-                    && failure.side_effect == crate::tools::ToolSideEffect::Possible
+                    && failure.side_effect == crate::tools::ToolSideEffect::None
         )));
         let audit_events =
             crate::audit::AuditLogger::query(audit.as_ref(), crate::audit::AuditFilter::default())
@@ -7125,6 +7134,8 @@ mod tests {
                 Message::user("barrier input".to_string()),
             )
             .map_err(|error| ReactError::Other(error.to_string()))?;
+        assert!(snapshot.has_pending_steer());
+        assert_eq!(receipt.state(), crate::agent::AgentSteerState::Accepted);
         let drain = {
             let snapshot = snapshot.clone();
             let context = context.clone();
@@ -7145,6 +7156,7 @@ mod tests {
             receipt.wait_for_drained().await,
             crate::agent::AgentSteerState::Drained
         );
+        assert!(!snapshot.has_pending_steer());
         lease.settle(crate::agent::AgentSteerTurnOutcome::Completed);
         Ok(())
     }
@@ -7212,6 +7224,7 @@ mod tests {
             .map_err(|error| ReactError::Other(error.to_string()))?;
         let context = agent.memory.context.clone();
 
+        assert!(!stale_snapshot.has_pending_steer());
         assert_eq!(
             stale_snapshot
                 .drain_steer_into_context(&context, None)
@@ -7223,6 +7236,7 @@ mod tests {
         let mut current_snapshot = AgentSnapshot::from_agent(&agent);
         current_snapshot.current_turn_id = Some("same-id-drain".to_string());
         current_snapshot.turn_steer_incarnation = Some(current_lease.incarnation());
+        assert!(current_snapshot.has_pending_steer());
         assert_eq!(
             current_snapshot
                 .drain_steer_into_context(&context, None)
@@ -7387,6 +7401,616 @@ mod tests {
                 .iter()
                 .any(|event| matches!(event, AgentEvent::FinalAnswer(t) if t.contains("42")))
         );
+    }
+
+    struct SteerReturnBarrier {
+        inner: MockLlmClient,
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    impl crate::llm::LlmClient for SteerReturnBarrier {
+        fn model_name(&self) -> &str {
+            crate::llm::LlmClient::model_name(&self.inner)
+        }
+
+        fn chat(
+            &self,
+            request: crate::llm::ChatRequest,
+        ) -> BoxFuture<'_, Result<crate::llm::ChatResponse>> {
+            crate::llm::LlmClient::chat(&self.inner, request)
+        }
+
+        fn chat_stream(
+            &self,
+            request: crate::llm::ChatRequest,
+        ) -> BoxFuture<'_, Result<futures::stream::BoxStream<'static, Result<crate::llm::ChatChunk>>>>
+        {
+            Box::pin(async move {
+                let first = self.inner.call_count() == 0;
+                let stream = crate::llm::LlmClient::chat_stream(&self.inner, request).await?;
+                if first {
+                    self.entered.notify_one();
+                    self.release.notified().await;
+                }
+                Ok(stream)
+            })
+        }
+    }
+
+    struct SteerEffectTool {
+        name: &'static str,
+        path: std::path::PathBuf,
+        parallel: bool,
+        barrier: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
+    }
+
+    impl crate::tools::Tool for SteerEffectTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn description(&self) -> &str {
+            "Write one owned test sentinel after an optional physical-execution barrier"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type":"object","properties":{}})
+        }
+
+        fn allows_parallel_batch_execution(&self) -> bool {
+            self.parallel
+        }
+
+        fn execute(
+            &self,
+            _parameters: crate::tools::ToolParameters,
+        ) -> BoxFuture<'_, Result<crate::tools::ToolResult>> {
+            Box::pin(async move {
+                if let Some((entered, release)) = &self.barrier {
+                    entered.notify_one();
+                    release.notified().await;
+                }
+                std::fs::write(&self.path, self.name)?;
+                Ok(crate::tools::ToolResult::success(format!(
+                    "{} physically completed",
+                    self.name
+                )))
+            })
+        }
+    }
+
+    fn steer_effect_call(id: &str, name: &str) -> ToolCall {
+        ToolCall {
+            id: id.to_string(),
+            call_type: "function".to_string(),
+            function: FunctionCall {
+                name: name.to_string(),
+                arguments: "{}".to_string(),
+            },
+        }
+    }
+
+    async fn wait_for_steer_barrier(barrier: &tokio::sync::Notify) -> Result<()> {
+        tokio::time::timeout(std::time::Duration::from_secs(2), barrier.notified())
+            .await
+            .map_err(|_| ReactError::Other("steer execution barrier was not reached".to_string()))
+    }
+
+    async fn steer_before_model_return_case(parallel: bool, steer: bool) -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("must-not-run-after-correction");
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let llm = Arc::new(SteerReturnBarrier {
+            inner: MockLlmClient::new()
+                .then_tool_call("unpublished-effect", "steer_effect", "{}")
+                .with_response("reconsidered answer"),
+            entered: entered.clone(),
+            release: release.clone(),
+        });
+        let agent = ReactAgentBuilder::new()
+            .llm_client(llm.clone())
+            .tool(Box::new(SteerEffectTool {
+                name: "steer_effect",
+                path: path.clone(),
+                parallel,
+                barrier: None,
+            }))
+            .max_iterations(4)
+            .build()?;
+        let stream = agent
+            .execute_stream_with_cancel("initial request", crate::agent::CancellationToken::new())
+            .await?;
+        wait_for_steer_barrier(&entered).await?;
+        let mut receipt = if steer {
+            let receipt = agent
+                .steer_input_tracked(None, Message::user("do not write the sentinel".to_string()))
+                .map_err(|error| ReactError::Other(error.to_string()))?;
+            assert_eq!(receipt.state(), crate::agent::AgentSteerState::Accepted);
+            Some(receipt)
+        } else {
+            None
+        };
+        assert!(!path.exists());
+        release.notify_one();
+        let events = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            stream.collect::<Vec<_>>(),
+        )
+        .await
+        .map_err(|_| ReactError::Other("steer model-return run did not settle".to_string()))?
+        .into_iter()
+        .collect::<Result<Vec<_>>>()?;
+        assert_eq!(path.exists(), !steer);
+        assert!(events.iter().any(|event| {
+            matches!(event, AgentEvent::FinalAnswer(answer) if answer == "reconsidered answer")
+        }));
+        let messages = llm.inner.last_messages().unwrap_or_default();
+        assert_eq!(
+            messages.iter().any(|message| {
+                message.content.as_text().as_deref() == Some("do not write the sentinel")
+            }),
+            steer
+        );
+        if let Some(receipt) = receipt.as_mut() {
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| matches!(event, AgentEvent::ToolCall { .. }))
+            );
+            assert!(
+                messages
+                    .iter()
+                    .all(|message| { message.tool_calls.as_ref().is_none_or(Vec::is_empty) })
+            );
+            assert_eq!(
+                receipt.wait_for_turn_settled().await,
+                crate::agent::AgentSteerState::TurnSettled {
+                    outcome: crate::agent::AgentSteerTurnOutcome::Completed,
+                    drained: true,
+                }
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn steer_before_sequential_tool_batch_discards_unpublished_effect() -> Result<()> {
+        steer_before_model_return_case(false, true).await
+    }
+
+    #[tokio::test]
+    async fn steer_before_parallel_tool_batch_discards_unpublished_effect() -> Result<()> {
+        steer_before_model_return_case(true, true).await
+    }
+
+    #[tokio::test]
+    async fn no_steer_preserves_sequential_and_parallel_tool_execution() -> Result<()> {
+        steer_before_model_return_case(false, false).await?;
+        steer_before_model_return_case(true, false).await
+    }
+
+    async fn steer_during_started_wave_case(
+        parallel: bool,
+        cancel_after_steer: bool,
+    ) -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let started_path = directory.path().join("started-effect");
+        let peer_path = directory.path().join("started-peer");
+        let later_path = directory.path().join("later-effect");
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let peer_entered = Arc::new(tokio::sync::Notify::new());
+        let peer_release = Arc::new(tokio::sync::Notify::new());
+        let mut calls = vec![steer_effect_call("started", "started_effect")];
+        if parallel {
+            calls.push(steer_effect_call("peer", "started_peer"));
+        }
+        calls.push(steer_effect_call("later", "later_effect"));
+        let llm = Arc::new(
+            MockLlmClient::new()
+                .then_tool_calls(calls)
+                .with_response("reconsidered after real settlement"),
+        );
+        let mut builder = ReactAgentBuilder::new()
+            .llm_client(llm.clone())
+            .tool(Box::new(SteerEffectTool {
+                name: "started_effect",
+                path: started_path.clone(),
+                parallel,
+                barrier: Some((entered.clone(), release.clone())),
+            }))
+            .tool(Box::new(SteerEffectTool {
+                name: "later_effect",
+                path: later_path.clone(),
+                parallel: false,
+                barrier: None,
+            }))
+            .max_iterations(4);
+        if parallel {
+            builder = builder.tool(Box::new(SteerEffectTool {
+                name: "started_peer",
+                path: peer_path.clone(),
+                parallel: true,
+                barrier: Some((peer_entered.clone(), peer_release.clone())),
+            }));
+        }
+        let agent = builder.build()?;
+        let cancel = crate::agent::CancellationToken::new();
+        let stream = agent
+            .execute_stream_with_cancel("run effects", cancel.clone())
+            .await?;
+        wait_for_steer_barrier(&entered).await?;
+        if parallel {
+            wait_for_steer_barrier(&peer_entered).await?;
+        }
+        let mut receipt = agent
+            .steer_input_tracked(
+                None,
+                Message::user("do not start the later effect".to_string()),
+            )
+            .map_err(|error| ReactError::Other(error.to_string()))?;
+        assert_eq!(receipt.state(), crate::agent::AgentSteerState::Accepted);
+        assert!(!started_path.exists());
+        assert!(!later_path.exists());
+        if cancel_after_steer {
+            cancel.cancel();
+        }
+        release.notify_one();
+        peer_release.notify_one();
+        let events = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            stream.collect::<Vec<_>>(),
+        )
+        .await
+        .map_err(|_| ReactError::Other("started steer wave did not physically settle".to_string()))?
+        .into_iter()
+        .collect::<Result<Vec<_>>>()?;
+        assert_eq!(std::fs::read_to_string(&started_path)?, "started_effect");
+        if parallel {
+            assert_eq!(std::fs::read_to_string(&peer_path)?, "started_peer");
+        }
+        assert!(
+            !later_path.exists(),
+            "a later wave must not execute the stale proposal"
+        );
+        for id in if parallel {
+            vec!["started", "peer", "later"]
+        } else {
+            vec!["started", "later"]
+        } {
+            assert_eq!(events.iter().filter(|event| matches!(event, AgentEvent::ToolCall { call_id, .. } if call_id == id)).count(), 1);
+            assert_eq!(events.iter().filter(|event| matches!(event, AgentEvent::ToolResult { call_id, .. } if call_id == id)).count(), 1);
+        }
+        let later_result = events
+            .iter()
+            .find_map(|event| match event {
+                AgentEvent::ToolResult {
+                    call_id, result, ..
+                } if call_id == "later" => Some(result),
+                _ => None,
+            })
+            .ok_or_else(|| ReactError::Other("missing genuine not-executed result".to_string()))?;
+        assert!(!later_result.success);
+        assert!(
+            later_result
+                .failure
+                .as_ref()
+                .is_some_and(|failure| failure.side_effect == crate::tools::ToolSideEffect::None)
+        );
+        let terminal = receipt.wait_for_turn_settled().await;
+        if cancel_after_steer {
+            assert_eq!(
+                terminal,
+                crate::agent::AgentSteerState::TurnSettled {
+                    outcome: crate::agent::AgentSteerTurnOutcome::Cancelled,
+                    drained: false,
+                }
+            );
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| matches!(event, AgentEvent::FinalAnswer(_)))
+            );
+        } else {
+            assert_eq!(
+                terminal,
+                crate::agent::AgentSteerState::TurnSettled {
+                    outcome: crate::agent::AgentSteerTurnOutcome::Completed,
+                    drained: true,
+                }
+            );
+            let messages = llm.last_messages().unwrap_or_default();
+            let correction = messages
+                .iter()
+                .position(|message| {
+                    message.content.as_text().as_deref() == Some("do not start the later effect")
+                })
+                .ok_or_else(|| {
+                    ReactError::Other("correction absent from next model request".to_string())
+                })?;
+            for id in if parallel {
+                vec!["started", "peer", "later"]
+            } else {
+                vec!["started", "later"]
+            } {
+                let result_position = messages
+                    .iter()
+                    .position(|message| message.tool_call_id.as_deref() == Some(id))
+                    .ok_or_else(|| {
+                        ReactError::Other(format!("model request missing result for {id}"))
+                    })?;
+                assert!(
+                    result_position < correction,
+                    "close the original tool batch before adding user input"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn steer_during_sequential_wave_retains_started_effect_and_skips_later_wave() -> Result<()>
+    {
+        steer_during_started_wave_case(false, false).await
+    }
+
+    #[tokio::test]
+    async fn steer_during_parallel_wave_retains_all_started_effects_and_skips_later_wave()
+    -> Result<()> {
+        steer_during_started_wave_case(true, false).await
+    }
+
+    #[tokio::test]
+    async fn stop_during_steered_wave_preserves_physical_settlement_and_cancelled_receipt()
+    -> Result<()> {
+        steer_during_started_wave_case(false, true).await?;
+        steer_during_started_wave_case(true, true).await
+    }
+
+    async fn steer_with_reused_call_id_case(steer: bool) -> Result<()> {
+        use crate::trace::{InMemoryRunStore, RunEvent, RunStore};
+
+        let directory = tempfile::tempdir()?;
+        let prior_path = directory.path().join("prior-effect");
+        let current_path = directory.path().join("current-started-effect");
+        let later_path = directory.path().join("later-reused-id-effect");
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let store = Arc::new(InMemoryRunStore::new());
+        let llm = Arc::new(
+            MockLlmClient::new()
+                .then_tool_call("reused-id", "prior_effect", "{}")
+                .then_tool_calls(vec![
+                    steer_effect_call("current-wave", "current_effect"),
+                    steer_effect_call("reused-id", "later_effect"),
+                ])
+                .with_response("considered the current request"),
+        );
+        let agent = ReactAgentBuilder::new()
+            .llm_client(llm)
+            .tool(Box::new(SteerEffectTool {
+                name: "prior_effect",
+                path: prior_path.clone(),
+                parallel: false,
+                barrier: None,
+            }))
+            .tool(Box::new(SteerEffectTool {
+                name: "current_effect",
+                path: current_path.clone(),
+                parallel: false,
+                barrier: Some((entered.clone(), release.clone())),
+            }))
+            .tool(Box::new(SteerEffectTool {
+                name: "later_effect",
+                path: later_path.clone(),
+                parallel: false,
+                barrier: None,
+            }))
+            .with_run_store(store.clone())
+            .max_iterations(5)
+            .build()?;
+        let stream = agent
+            .execute_stream("run the first and next proposals")
+            .await?;
+        wait_for_steer_barrier(&entered).await?;
+        assert_eq!(std::fs::read_to_string(&prior_path)?, "prior_effect");
+        let mut receipt = if steer {
+            Some(
+                agent
+                    .steer_input_tracked(None, Message::user("skip the later proposal".to_string()))
+                    .map_err(|error| ReactError::Other(error.to_string()))?,
+            )
+        } else {
+            None
+        };
+        release.notify_one();
+        let events = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            stream.collect::<Vec<_>>(),
+        )
+        .await
+        .map_err(|_| ReactError::Other("reused-ID original loop did not settle".to_string()))?
+        .into_iter()
+        .collect::<Result<Vec<_>>>()?;
+        assert_eq!(std::fs::read_to_string(&current_path)?, "current_effect");
+        assert_eq!(later_path.exists(), !steer);
+
+        // IDs may repeat after completion. Pair each original proposal, not
+        // a synthetic whole-turn map keyed only by the model's string ID.
+        let batches: Vec<_> = events
+            .split(|event| matches!(event, AgentEvent::ToolBatchEnd))
+            .filter(|batch| {
+                batch
+                    .iter()
+                    .any(|event| matches!(event, AgentEvent::ToolBatchStart { .. }))
+            })
+            .collect();
+        assert_eq!(batches.len(), 2);
+        for batch in &batches {
+            assert_eq!(batch.iter().filter(|event| matches!(event, AgentEvent::ToolCall { call_id, .. } if call_id == "reused-id")).count(), 1);
+            assert_eq!(batch.iter().filter(|event| matches!(event, AgentEvent::ToolResult { call_id, .. } if call_id == "reused-id")).count(), 1);
+        }
+        let later_batch = batches
+            .get(1)
+            .copied()
+            .ok_or_else(|| ReactError::Other("missing second tool proposal".to_string()))?;
+        let result = later_batch
+            .iter()
+            .find_map(|event| match event {
+                AgentEvent::ToolResult {
+                    call_id,
+                    name,
+                    result,
+                } if call_id == "reused-id" && name == "later_effect" => Some(result),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                ReactError::Other("missing current-attempt reused-ID result".to_string())
+            })?;
+        assert_eq!(result.success, !steer);
+        if steer {
+            assert!(
+                result.failure.as_ref().is_some_and(
+                    |failure| failure.side_effect == crate::tools::ToolSideEffect::None
+                )
+            );
+        }
+        let summaries = store.list_all(2).await?;
+        assert_eq!(summaries.len(), 1);
+        let summary = summaries
+            .first()
+            .ok_or_else(|| ReactError::Other("missing original trace run".to_string()))?;
+        let run = store
+            .load(&summary.run_id)
+            .await?
+            .ok_or_else(|| ReactError::Other("missing original trace".to_string()))?;
+        assert_eq!(run.events.iter().filter(|event| matches!(event, RunEvent::ToolExecutionSkipped { call_id, name, .. } if call_id == "reused-id" && name == "later_effect")).count(), usize::from(steer));
+        assert!(!run.events.iter().any(|event| matches!(event, RunEvent::ToolExecutionSkipped { call_id, name, .. } if call_id == "reused-id" && name == "prior_effect")));
+        if let Some(receipt) = receipt.as_mut() {
+            assert_eq!(
+                receipt.wait_for_turn_settled().await,
+                crate::agent::AgentSteerState::TurnSettled {
+                    outcome: crate::agent::AgentSteerTurnOutcome::Completed,
+                    drained: true,
+                }
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn steer_skips_reused_id_in_later_proposal_without_old_started_fact() -> Result<()> {
+        steer_with_reused_call_id_case(true).await
+    }
+
+    #[tokio::test]
+    async fn no_steer_preserves_reused_ids_across_completed_model_proposals() -> Result<()> {
+        steer_with_reused_call_id_case(false).await
+    }
+
+    #[tokio::test]
+    async fn reused_id_pre_execution_timeout_uses_current_attempt_not_started_fact() -> Result<()> {
+        use crate::trace::{InMemoryRunStore, RunEvent, RunStore};
+
+        let directory = tempfile::tempdir()?;
+        let prior_path = directory.path().join("prior-completed-effect");
+        let later_path = directory.path().join("never-executed-after-prehook");
+        let entered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let release = Arc::new(tokio::sync::Notify::new());
+        let store = Arc::new(InMemoryRunStore::new());
+        let agent = ReactAgentBuilder::new()
+            .llm_client(Arc::new(
+                MockLlmClient::new()
+                    .then_tool_call("same-prehook-id", "prior_effect", "{}")
+                    .then_tool_call("same-prehook-id", "bounded_effect", "{}")
+                    .with_response("must not complete after timeout"),
+            ))
+            .tool(Box::new(SteerEffectTool {
+                name: "prior_effect",
+                path: prior_path.clone(),
+                parallel: false,
+                barrier: None,
+            }))
+            .tool(Box::new(SteerEffectTool {
+                name: "bounded_effect",
+                path: later_path.clone(),
+                parallel: true,
+                barrier: None,
+            }))
+            .intervention_callback(Arc::new(StallingToolIntervention {
+                entered: entered.clone(),
+                tool_name: Some("bounded_effect"),
+                release: release.clone(),
+            }))
+            .tool_execution(crate::tools::ToolExecutionConfig {
+                timeout_ms: 10,
+                retry_on_fail: false,
+                ..Default::default()
+            })
+            .with_run_store(store.clone())
+            .max_iterations(5)
+            .build()?;
+        let stream = agent
+            .execute_stream("complete the first attempt then time out before the next executes")
+            .await?;
+        let collection = stream.collect::<Vec<_>>();
+        tokio::pin!(collection);
+        let observed =
+            tokio::time::timeout(std::time::Duration::from_millis(300), &mut collection).await;
+        let returned_before_original_callback = observed.is_ok();
+        release.notify_one();
+        let events = match observed {
+            Ok(events) => events,
+            Err(_) => tokio::time::timeout(std::time::Duration::from_secs(3), &mut collection)
+                .await
+                .map_err(|_| {
+                    ReactError::Other("reused-ID pre-execution owner did not settle".to_string())
+                })?,
+        }
+        .into_iter()
+        .collect::<Result<Vec<_>>>()?;
+        assert!(!returned_before_original_callback);
+        assert!(entered.load(std::sync::atomic::Ordering::Acquire));
+        assert_eq!(std::fs::read_to_string(&prior_path)?, "prior_effect");
+        assert!(!later_path.exists());
+        let current = events
+            .iter()
+            .find_map(|event| match event {
+                AgentEvent::ToolResult {
+                    call_id,
+                    name,
+                    result,
+                } if call_id == "same-prehook-id" && name == "bounded_effect" => Some(result),
+                _ => None,
+            })
+            .ok_or_else(|| ReactError::Other("missing current pre-execution result".to_string()))?;
+        assert!(
+            current
+                .failure
+                .as_ref()
+                .is_some_and(|failure| failure.side_effect == crate::tools::ToolSideEffect::None)
+        );
+        let summary = store
+            .list_all(1)
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| ReactError::Other("missing reused-ID timeout trace".to_string()))?;
+        let run = store
+            .load(&summary.run_id)
+            .await?
+            .ok_or_else(|| ReactError::Other("missing timeout trace body".to_string()))?;
+        assert_eq!(run.events.iter().filter(|event| matches!(event, RunEvent::ToolExecutionSkipped { call_id, name, .. } if call_id == "same-prehook-id" && name == "bounded_effect")).count(), 1);
+        assert!(!run.events.iter().any(|event| matches!(event, RunEvent::ToolExecutionSkipped { call_id, name, .. } if call_id == "same-prehook-id" && name == "prior_effect")));
+        assert!(events.iter().any(|event| matches!(event, AgentEvent::ToolResult { call_id, name, result } if call_id == "same-prehook-id" && name == "prior_effect" && result.success)));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::FinalAnswer(_)))
+        );
+        Ok(())
     }
 
     // Truncated / clean-disconnect stream: the loop must NOT accept the

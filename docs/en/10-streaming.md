@@ -231,6 +231,35 @@ tokens or transcript timing. Hook blocks settle as `Failed`. If the lifecycle
 signal closes abnormally, all receipt clones converge on `Dropped` while
 preserving the last known drain fact.
 
+### Steering before unstarted tools
+
+The shared streaming/non-streaming ReAct loop checks the original mailbox when
+the model returns a tool proposal, and before admitting each existing tool
+execution wave. A correction accepted before the check returns to the model
+before that unstarted work runs. This uses the same turn ID and private
+incarnation as the tracked receipt.
+
+An unpublished tool proposal is discarded without inventing tool results. If
+the assistant's call IDs are already in the transcript, every remaining
+unstarted call receives an explicit not-executed result with no side effects,
+and all call/result pairs are closed before the correction enters context and
+becomes `Drained`. Earlier physical results remain available to the model;
+earlier final-answer candidates are reconsidered.
+
+An admitted wave keeps its original execution futures, parallel peers, results,
+stream readers and resources until actual settlement. Steering received after
+that wave's check waits for the next unstarted boundary. It does not interrupt
+an active model/tool, answer HITL or request Stop. Explicit Stop and timeout
+continue to use their original cancellation and physical-settlement paths;
+uncertain effects are never automatically replayed.
+
+These earlier checks are the behavior selected by this framework. The reviewed
+official Pi loop polls steering after a whole tool batch; it is not evidence of
+a per-tool steering guarantee. See [ADR 0003](../adr/0003-tracked-steer-lifecycle.md)
+for the decision and source comparison. Product draft acknowledgment and durable
+ingress remain application responsibilities; `Accepted` and `Drained` do not
+replace those product facts.
+
 ### Tracked initial input
 
 For a cold turn, call `TurnRequest::with_input_receipt()` before passing the

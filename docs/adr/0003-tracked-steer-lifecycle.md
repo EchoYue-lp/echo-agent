@@ -72,6 +72,53 @@ No application journal, retry policy, UI state, or delivery-specific concept is
 added to the framework. Applications decide which receipt boundary is durable
 enough for their product.
 
+### Safe points before unstarted tool work (2026-10-25)
+
+The same core loop also checks accepted input after a model response and before
+admitting each existing execution wave. The alternatives were to keep waiting
+until the whole tool batch completes, or to interrupt already-running tool
+futures. We choose an earlier check for unstarted work while preserving the
+original physical owner for admitted work:
+
+- Before the assistant tool proposal is added to the transcript, the original
+  drain can discard that unpublished proposal and return to the next model
+  iteration with the correction. No tool result is fabricated for an
+  unpublished call. Ordinary assistant draft text may remain as context.
+- After the assistant tool message has been published, a correction at the next
+  wave admission skips the still-unstarted calls. Every published ID receives
+  its own explicit unsuccessful, not-executed result through the existing
+  interruption trace/audit/callback projector. Their execution-start authority
+  proves `side_effect = None`; an interrupted call that actually entered
+  `ExecuteStage` keeps the original conservative `Possible` fact.
+  The original current-wave slice proves which attempts were never admitted:
+  a completed earlier model batch may legally reuse a call ID. The accumulated
+  turn-wide started-ID history cannot override this later not-started fact,
+  and is retained for the original physical owners rather than cleared.
+  For an admitted attempt that fails before execution, the original pipeline
+  context independently records entry into `ExecuteStage` before its first
+  await. This flag covers direct/custom `ExecuteStage` calls without callbacks;
+  callback visibility or an empty result is not used to guess physical start.
+- Close the outstanding call/result pairs before inserting the new user input.
+  Only the original context insertion publishes `Drained`; observing pending
+  input does not consume it or acknowledge it. Both pending observation and
+  drain require the same turn ID and private incarnation.
+- A wave admitted at the mailbox check keeps all of its original futures,
+  results, stream readers and resources until actual settlement. Input accepted
+  after that check is considered at the next unstarted wave or loop boundary;
+  it does not preempt an active model, tool, parallel peer, HITL or side effect.
+  An explicit Stop continues through the original cancellation path.
+- A skipped remainder invalidates earlier final-answer candidates from that
+  batch. The original loop asks the model to reconsider; it does not replay
+  uncertain effects, mutate a task/plan graph, or create a second scheduler.
+
+The comparison source is the official
+[Pi agent loop](https://github.com/earendil-works/pi/blob/main/packages/agent/src/agent-loop.ts),
+reviewed as file blob `cfc9401e5581847f6d5a9bb1815ab0f0e663f2e5`
+(a file identity, not a repository commit). That implementation polls steering
+after the full assistant tool batch, including sequential execution. The
+pre-tool/wave checks here are an adopted responsiveness enhancement, not a
+claim that Pi already skips remaining calls when steering arrives.
+
 ## Consequences
 
 Durable consumers can retain input through `Accepted`, acknowledge it after
@@ -100,3 +147,14 @@ completed, provider-failed, and cancelled terminals after a real drain, plus a
 non-streaming hook block accepted before terminal. Closed-sender tests cover
 accepted/drained inputs and cloned waiters. A façade test keeps all public
 receipt types reachable through `echo_agent`.
+
+Original-loop model-return and physical-tool barriers additionally distinguish
+unpublished proposals, admitted sequential/parallel waves and later unstarted
+waves. They check actual owned sentinel files, complete call/result pairing,
+context-before-drain ordering, no-steering controls and Stop interleavings.
+Interruption controls distinguish started and unstarted calls for both timeout
+and cancellation. These tests require execution on the changed source; their
+definitions alone are not runtime qualification or application/GUI acceptance.
+Cross-iteration ID-reuse controls inspect each original proposal's call/result
+pairs separately and distinguish the earlier completed effect from the later
+unadmitted effect and its actual skipped trace fact.

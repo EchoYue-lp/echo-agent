@@ -284,6 +284,10 @@ async fn settle_interrupted_calls(
                 input,
                 settlement.category,
                 settlement.message,
+                !settlement
+                    .admitted_calls
+                    .iter()
+                    .any(|(admitted_id, _, _)| admitted_id == call_id),
             )
             .await;
         context.lock().await.push(Message::tool_result(
@@ -307,6 +311,11 @@ async fn settle_interrupted_calls(
 struct InterruptedSettlement<'a> {
     category: crate::tools::ToolFailureCategory,
     message: &'a str,
+    // IDs are unique inside this proposal, not across model iterations. A
+    // call absent from the original admitted wave is definitively unstarted
+    // even when a previous proposal used the same ID. Keep the original wave
+    // slice as the phase fact instead of adding a second started-ID store.
+    admitted_calls: &'a [ToolCallSpec],
 }
 
 fn build_execution_waves(
@@ -365,6 +374,26 @@ pub(crate) async fn run_tools(
     let agent = &snap.config.agent_name;
     let pt = think.pt;
     let ct = think.ct;
+
+    // The model has returned, but its proposed calls have not been published
+    // to the transcript or tool pipeline. A correction accepted during that
+    // model call can therefore discard the proposal without inventing any
+    // tool result. Keep any ordinary assistant draft as context only.
+    let assistant_draft = (!think.content_buffer.is_empty()).then(|| {
+        with_reasoning_content(
+            Message::assistant(think.content_buffer.clone()),
+            think.reasoning_buffer.clone(),
+            think.reasoning_blocks.clone(),
+        )
+    });
+    if !super::cancellation_requested(snap)
+        && snap
+            .drain_steer_into_context(context, assistant_draft)
+            .await
+            > 0
+    {
+        return Ok(IterOutcome::Continue);
+    }
 
     let (msg_tc, steps) =
         build_tool_calls_from_map(&think.tool_call_map).map_err(ReactError::Other)?;
@@ -438,6 +467,43 @@ pub(crate) async fn run_tools(
         })
         .collect();
     for wave in waves {
+        // A wave admitted by this check remains owned through all execution
+        // futures and stream readers. Steering never races/drops those
+        // futures. Re-check only before the next wave is admitted; Stop still
+        // follows the existing cancellation/physical-settlement branches.
+        if !super::cancellation_requested(snap) && snap.has_pending_steer() {
+            let mut completed = HashMap::new();
+            let mut emitted_invocations = HashSet::new();
+            let published = settle_interrupted_calls(
+                snap,
+                context,
+                tx,
+                &remaining_calls,
+                &mut completed,
+                &mut emitted_invocations,
+                InterruptedSettlement {
+                    category: crate::tools::ToolFailureCategory::Permanent,
+                    message: "Not executed: steering input requires reconsideration before this tool wave starts",
+                    admitted_calls: &[],
+                },
+            )
+            .await?;
+            batch_failure_count = batch_failure_count.saturating_add(published.failures);
+            // The original assistant already contains every call ID. Close
+            // all still-unstarted calls before inserting the correction and
+            // publishing its genuine Drained receipt. Earlier wave results
+            // remain intact, but their final-answer candidates are stale.
+            if super::cancellation_requested(snap) {
+                close_cancelled_batch(snap, context, tx, &batch_tool_names, batch_success_count)
+                    .await?;
+                return Ok(IterOutcome::TerminalSettled {
+                    outcome: crate::agent::AgentSteerTurnOutcome::Cancelled,
+                });
+            }
+            let _ = snap.drain_steer_into_context(context, None).await;
+            final_outputs.clear();
+            break;
+        }
         match wave {
             ToolExecutionWave::Concurrent(conc) => {
                 // Results are keyed by call id and projected in call order.
@@ -594,6 +660,7 @@ pub(crate) async fn run_tools(
                         } else {
                             "Tool call finished without a result"
                         },
+                        admitted_calls: &conc,
                     },
                 )
                 .await?;
@@ -647,6 +714,7 @@ pub(crate) async fn run_tools(
                         InterruptedSettlement {
                             category: crate::tools::ToolFailureCategory::Cancelled,
                             message: "Tool batch cancelled before this call started",
+                            admitted_calls: &[],
                         },
                     )
                     .await?;
@@ -728,6 +796,7 @@ pub(crate) async fn run_tools(
                     InterruptedSettlement {
                         category: crate::tools::ToolFailureCategory::Cancelled,
                         message: "Tool batch cancelled after this call completed",
+                        admitted_calls: std::slice::from_ref(&current_call),
                     },
                 )
                 .await?;
@@ -1057,7 +1126,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn interrupted_batch_settles_only_unfinished_calls_with_possible_effects()
+    async fn interrupted_batch_distinguishes_unstarted_calls_from_possible_effects()
     -> crate::error::Result<()> {
         use crate::agent::AgentEvent;
         use crate::trace::{InMemoryRunStore, RunEvent, RunStore};
@@ -1126,6 +1195,7 @@ mod tests {
             InterruptedSettlement {
                 category: ToolFailureCategory::Timeout,
                 message: "batch timeout",
+                admitted_calls: &calls,
             },
         )
         .await?;
@@ -1158,7 +1228,12 @@ mod tests {
                     } else {
                         assert!(result.failure.as_ref().is_some_and(|failure| {
                             failure.category == ToolFailureCategory::Timeout
-                                && failure.side_effect == ToolSideEffect::Possible
+                                && failure.side_effect
+                                    == if call_id == "pending-a" {
+                                        ToolSideEffect::Possible
+                                    } else {
+                                        ToolSideEffect::None
+                                    }
                         }));
                     }
                     observed.push((call_id, false));
@@ -1228,6 +1303,76 @@ mod tests {
             RunEvent::ToolResult { call_id, .. } | RunEvent::ToolError { call_id, .. }
             if call_id == "completed"
         )));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn interrupted_stop_and_timeout_use_original_execution_start_fact()
+    -> crate::error::Result<()> {
+        use echo_core::tools::{ToolFailureCategory, ToolSideEffect};
+
+        let agent = crate::agent::ReactAgentBuilder::new()
+            .model("test-model")
+            .build()?;
+        let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(&agent);
+        for category in [ToolFailureCategory::Cancelled, ToolFailureCategory::Timeout] {
+            for started in [false, true] {
+                let id = format!("{category:?}-{started}");
+                if started {
+                    snapshot.mark_tool_execution_started(&id);
+                }
+                let result = snapshot
+                    .settle_interrupted_tool_call(
+                        &id,
+                        "owned_effect",
+                        &Value::Null,
+                        category,
+                        "interrupted at the original boundary",
+                        false,
+                    )
+                    .await;
+                let failure = result.failure.ok_or_else(|| {
+                    crate::error::ReactError::Other("missing interrupted failure facts".to_string())
+                })?;
+                assert_eq!(failure.category, category);
+                assert_eq!(
+                    failure.side_effect,
+                    if started {
+                        ToolSideEffect::Possible
+                    } else {
+                        ToolSideEffect::None
+                    }
+                );
+                assert!(failure.postcondition.as_deref().is_some_and(|condition| {
+                    if started {
+                        condition.contains("verify the external effect")
+                    } else {
+                        condition.contains("not executed")
+                    }
+                }));
+                if started {
+                    // A completed earlier attempt may reuse this model ID.
+                    // The current unadmitted phase overrides that old marker
+                    // without deleting history needed by physical owners.
+                    let later = snapshot
+                        .settle_interrupted_tool_call(
+                            &id,
+                            "later_unadmitted_effect",
+                            &Value::Null,
+                            category,
+                            "this later attempt was not admitted",
+                            true,
+                        )
+                        .await;
+                    assert!(
+                        later
+                            .failure
+                            .as_ref()
+                            .is_some_and(|failure| { failure.side_effect == ToolSideEffect::None })
+                    );
+                }
+            }
+        }
         Ok(())
     }
 

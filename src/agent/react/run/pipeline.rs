@@ -74,6 +74,9 @@ pub(crate) struct ToolExecutionContext {
     pub invocation_emitted: bool,
     /// Whether callbacks observed the start of this invocation.
     pub callback_started: bool,
+    /// Whether this exact call context entered ExecuteStage, independently
+    /// of callback order or a prior attempt reusing its model-supplied ID.
+    pub execution_started: bool,
     /// An execution error that interrupted a tool before it returned a result.
     pub interrupted_execution_error: Option<ReactError>,
     /// Incremental tool events, tagged with their stable invocation identity.
@@ -787,6 +790,7 @@ impl PipelineStage for ExecuteStage {
         if ctx.call_id.is_empty() {
             ctx.call_id = format!("call_{}", uuid::Uuid::new_v4());
         }
+        ctx.execution_started = true;
         snapshot.mark_tool_execution_started(&ctx.call_id);
         // Record ToolCall trace event (redaction handled by new_tool_call)
         snapshot
@@ -2219,6 +2223,7 @@ mod tests {
             rewrites: Vec::new(),
             invocation_emitted: false,
             callback_started: false,
+            execution_started: false,
             interrupted_execution_error: None,
             stream_tx: Some(stream_tx),
         }
@@ -2247,6 +2252,7 @@ mod tests {
             rewrites: Vec::new(),
             invocation_emitted: false,
             callback_started: false,
+            execution_started: false,
             interrupted_execution_error: None,
             stream_tx: None,
         }
@@ -4267,6 +4273,108 @@ mod tests {
         assert!(
             result.1.is_none(),
             "delivery failure must not fabricate an execution result"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn custom_execute_without_callbacks_retains_possible_effect_after_cancelled_delivery()
+    -> Result<()> {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+        let directory = tempfile::tempdir()?;
+        let effect = directory.path().join("custom-execute-effect");
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let observed = Arc::new(AtomicBool::new(false));
+        let drops = Arc::new(AtomicUsize::new(0));
+        let producer = Arc::new(std::sync::Mutex::new(None::<ClosedDeliveryProducer>));
+        let agent = crate::agent::ReactAgentBuilder::new()
+            .model("test-model")
+            .tool_execution(crate::tools::ToolExecutionConfig {
+                timeout_ms: 0,
+                retry_on_fail: false,
+                ..Default::default()
+            })
+            .tool(Box::new(ClosedDeliveryStreamingTool {
+                started: started.clone(),
+                release: release.clone(),
+                cancellation_observed: observed.clone(),
+                source_drops: drops.clone(),
+                producer: producer.clone(),
+                effect: effect.clone(),
+            }))
+            .tool_execution_pipeline(ToolExecutionPipeline {
+                stages: vec![Box::new(ExecuteStage)],
+            })
+            .build()?;
+        let parent = crate::agent::CancellationToken::new();
+        let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent_with_invocation(
+            &agent,
+            &echo_core::agent::AgentInvocationContext {
+                cancel: Some(parent.clone()),
+                ..Default::default()
+            },
+        );
+        let (sender, receiver) = mpsc::channel(1);
+        drop(receiver);
+        let mut execution = tokio::spawn(async move {
+            snapshot
+                .execute_tool_with_policy(
+                    "custom-no-callback".to_string(),
+                    "closed_delivery",
+                    &ToolParameters::new(),
+                    &serde_json::json!({}),
+                    Some(sender),
+                )
+                .await
+        });
+        let entered =
+            tokio::time::timeout(std::time::Duration::from_secs(2), started.notified()).await;
+        parent.cancel();
+        let early = tokio::time::timeout(std::time::Duration::from_millis(100), &mut execution)
+            .await
+            .ok();
+        let returned_while_held = early.is_some();
+        release.notify_one();
+        let joined = producer
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        if let Some(joined) = joined {
+            tokio::time::timeout(std::time::Duration::from_secs(2), joined)
+                .await
+                .map_err(|_| {
+                    ReactError::Other("custom original producer did not join".to_string())
+                })?
+                .map_err(ReactError::Other)?;
+        }
+        let outcome = match early {
+            Some(result) => result,
+            None => tokio::time::timeout(std::time::Duration::from_secs(2), &mut execution)
+                .await
+                .map_err(|_| ReactError::Other("custom ExecuteStage did not settle".to_string()))?,
+        }
+        .map_err(|error| ReactError::Other(error.to_string()))?;
+        let failure = match outcome {
+            Err(failure) => failure,
+            Ok(_) => {
+                return Err(ReactError::Other(
+                    "closed custom delivery unexpectedly succeeded".to_string(),
+                ));
+            }
+        };
+        assert!(entered.is_ok());
+        assert!(!returned_while_held);
+        assert_eq!(tokio::fs::read(&effect).await?, b"original-producer-closed");
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        let result = failure
+            .result
+            .ok_or_else(|| ReactError::Other("missing conservative custom outcome".to_string()))?;
+        assert!(
+            result.failure.as_ref().is_some_and(
+                |failure| failure.side_effect == crate::tools::ToolSideEffect::Possible
+            )
         );
         Ok(())
     }
