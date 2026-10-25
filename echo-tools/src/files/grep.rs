@@ -59,7 +59,7 @@ impl Tool for GrepTool {
     }
 
     fn description(&self) -> &str {
-        "Exact text search over file contents using a regex. Returns matching lines with file paths and line numbers; use code_search for symbol-oriented code discovery."
+        "Regex content search: paths, line numbers, matching lines; use code_search for symbols."
     }
 
     fn permissions(&self) -> Vec<echo_core::tools::permission::ToolPermission> {
@@ -75,33 +75,33 @@ impl Tool for GrepTool {
             "properties": {
                 "pattern": {
                     "type": "string",
-                    "description": "Regular expression pattern to search for"
+                    "description": "Regex."
                 },
                 "path": {
                     "type": "string",
-                    "description": "Directory or file path to search in (default: current directory)"
+                    "description": "File/directory; default cwd."
                 },
                 "glob": {
                     "type": "string",
-                    "description": "File name glob filter (e.g. '*.rs', '*.py', '*.{ts,tsx}')"
+                    "description": "Filename glob."
                 },
                 "case_insensitive": {
                     "type": "boolean",
-                    "description": "Case insensitive matching (default: false)"
+                    "description": "Ignore case; default false."
                 },
                 "context": {
                     "type": "integer",
-                    "description": "Number of context lines before and after each match (default: 0)"
+                    "description": "Context lines on each side; default 0."
                 },
                 "limit": {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": 200,
-                    "description": "Results per page (default 50)"
+                    "description": "Results/page; default 50."
                 },
                 "cursor": {
                     "type": "string",
-                    "description": "Cursor from the previous page"
+                    "description": "Prior cursor."
                 }
             },
             "required": ["pattern"]

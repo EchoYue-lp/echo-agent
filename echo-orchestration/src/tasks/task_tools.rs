@@ -28,7 +28,7 @@ impl Tool for TaskCreateTool {
     }
 
     fn description(&self) -> &str {
-        "Atomically create the complete task graph in one call. Always put every task in the tasks array, including a single task; never split one graph across concurrent task_create calls. Dependencies are optional; use base_revision when adding tasks to an existing graph."
+        "Create all tasks atomically in tasks (even one). Never split a graph across concurrent calls. Dependencies optional; additions need base_revision. Titles/briefs: user's language; code/paths/commands/technical IDs unchanged."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -95,7 +95,7 @@ impl Tool for TaskUpdateTool {
     }
 
     fn description(&self) -> &str {
-        "Atomically update task specifications, dependency relations, ordering, or skip state using optimistic concurrency. Only pending or blocked task specifications may change while a run is active."
+        "Atomic spec/dependency/order/skip update via base_revision CAS; active-run spec edits: pending/blocked only. Titles/briefs: user's language; code/paths/commands/technical IDs unchanged."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -159,7 +159,7 @@ impl Tool for TaskListTool {
     }
 
     fn description(&self) -> &str {
-        "List the current TaskRun's tasks, dependency-aware graph revision, and runtime status. Results are bounded; use limit, cursor, and detail_level=full to page through the same committed graph without creating another task store."
+        "List current TaskRun tasks and dependency-aware revision/runtime status; page the same committed graph/store."
     }
 
     fn risk_level(&self) -> ToolRiskLevel {
@@ -176,17 +176,17 @@ impl Tool for TaskListTool {
                     "minimum": 1,
                     "maximum": TASK_LIST_MAX_LIMIT,
                     "default": TASK_LIST_DEFAULT_LIMIT,
-                    "description": "Maximum tasks returned in one page."
+                    "description": "Tasks/page."
                 },
                 "cursor": {
                     "type": "string",
-                    "description": "Opaque cursor returned in the previous page metadata."
+                    "description": "Opaque prior-page cursor."
                 },
                 "detail_level": {
                     "type": "string",
                     "enum": ["summary", "full"],
                     "default": "summary",
-                    "description": "Summary returns id/title/status; full also includes dependencies, retry count, and status detail."
+                    "description": "summary: id/title/status; full also dependencies, retry count and status detail."
                 }
             }
         })
@@ -287,15 +287,15 @@ fn task_create_schema(service: &TaskRevisionService) -> serde_json::Value {
             "tasks": {
                 "type": "array",
                 "minItems": 1,
-                "description": "The complete atomic task graph. Include every related task in this one array, even when it contains only one task. Dependency ids may refer to this batch or existing tasks.",
+                "description": "Dependencies may name batch or existing task IDs.",
                 "items": task_schema
             },
             "base_revision": {
                 "type": "integer",
                 "minimum": 1,
-                "description": "Required when the current TaskRun already has tasks."
+                "description": "Required if run has tasks."
             },
-            "reason": { "type": "string", "description": "Why these tasks are being added" },
+            "reason": { "type": "string", "description": "Why add tasks." },
             "assumptions": { "type": "array", "items": { "type": "string" } },
             "risks": { "type": "array", "items": { "type": "string" } },
             "execution_mode": { "type": "string", "enum": ["parallel", "sequential"] }
@@ -363,7 +363,7 @@ fn task_update_schema(service: &TaskRevisionService) -> serde_json::Value {
         "type": "object",
         "properties": {
             "base_revision": { "type": "integer", "minimum": 1 },
-            "reason": { "type": "string", "description": "Why runtime evidence requires this revision" },
+            "reason": { "type": "string", "description": "Revision evidence." },
             "operations": {
                 "type": "array",
                 "minItems": 1,
@@ -378,15 +378,15 @@ fn task_input_schema(service: &TaskRevisionService) -> serde_json::Value {
     let mut properties = serde_json::Map::from_iter([
         (
             "id".to_string(),
-            serde_json::json!({ "type": "string", "description": "Stable task id unique within this run" }),
+            serde_json::json!({ "type": "string", "description": "Stable run-unique ID." }),
         ),
         (
             "title".to_string(),
-            serde_json::json!({ "type": "string", "description": "User-visible task title in the user's current language; keep technical identifiers unchanged" }),
+            serde_json::json!({ "type": "string", "description": "Task title." }),
         ),
         (
             "description".to_string(),
-            serde_json::json!({ "type": "string", "description": "Subagent brief in the user's current language; keep code, paths, commands, and technical identifiers unchanged" }),
+            serde_json::json!({ "type": "string", "description": "Subagent brief." }),
         ),
         (
             "depends_on".to_string(),
@@ -418,11 +418,11 @@ fn task_patch_schema(service: &TaskRevisionService) -> serde_json::Value {
     let mut properties = serde_json::Map::from_iter([
         (
             "title".to_string(),
-            serde_json::json!({ "type": "string", "description": "User-visible task title in the user's current language" }),
+            serde_json::json!({ "type": "string", "description": "Task title." }),
         ),
         (
             "description".to_string(),
-            serde_json::json!({ "type": "string", "description": "Subagent brief in the user's current language" }),
+            serde_json::json!({ "type": "string", "description": "Subagent brief." }),
         ),
         (
             "depends_on".to_string(),

@@ -561,7 +561,7 @@ impl Tool for ShellTool {
     }
 
     fn description(&self) -> &str {
-        "Execute restricted shell commands (only safe read-only operations and code-related commands are allowed). Parameter: command - the command to execute. Note: only simple commands (program + args) are supported; pipes, redirects, command substitution, and other shell syntax are not allowed."
+        "Safe whitelisted read-only/code commands (program+args); no pipes/redirects/substitution/other shell syntax."
     }
 
     fn permissions(&self) -> Vec<ToolPermission> {
@@ -587,15 +587,15 @@ impl Tool for ShellTool {
             "properties": {
                 "command": {
                     "type": "string",
-                    "description": "The command to execute (only safe commands in the whitelist; shell syntax like pipes/redirects/command substitution is not supported)"
+                    "description": "Command."
                 },
                 "timeout": {
                     "type": "integer",
-                    "description": "Command timeout in seconds (foreground default: 60, max: 300; background uses the cell runtime limit)"
+                    "description": "Seconds: foreground default 60, max 300; background cell limit."
                 },
                 "background": {
                     "type": "boolean",
-                    "description": "Run in background and return a cell_id immediately. Use wait(cell_id, yield_time_ms) to long-poll for output/exit status."
+                    "description": "Immediate cell_id; poll output/exit with wait(cell_id,yield_time_ms)."
                 }
             },
             "required": ["command"]

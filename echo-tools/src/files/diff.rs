@@ -58,7 +58,7 @@ impl Tool for DiffTool {
     }
 
     fn description(&self) -> &str {
-        "Compare two files or a file against a string, returning a unified diff. Use path_a + path_b to compare two files, or path_a + content_b to compare a file against given content."
+        "Unified diff: path_a vs path_b (file) or content_b (text)."
     }
 
     fn permissions(&self) -> Vec<echo_core::tools::permission::ToolPermission> {
@@ -74,29 +74,29 @@ impl Tool for DiffTool {
             "properties": {
                 "path_a": {
                     "type": "string",
-                    "description": "First file path (the 'before' side)"
+                    "description": "Before-file path."
                 },
                 "path_b": {
                     "type": "string",
-                    "description": "Second file path (the 'after' side). Either path_b or content_b is required."
+                    "description": "After file; path_b or content_b required."
                 },
                 "content_b": {
                     "type": "string",
-                    "description": "Alternative to path_b: compare path_a against this string content."
+                    "description": "After text instead of path_b."
                 },
                 "context": {
                     "type": "integer",
-                    "description": "Number of context lines around changes (default: 3)"
+                    "description": "Context lines; default 3."
                 },
                 "limit": {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": 50,
-                    "description": "Hunks per page (default 10)"
+                    "description": "Hunks/page; default 10."
                 },
                 "cursor": {
                     "type": "string",
-                    "description": "Cursor from the previous page"
+                    "description": "Prior cursor."
                 }
             },
             "required": ["path_a"]

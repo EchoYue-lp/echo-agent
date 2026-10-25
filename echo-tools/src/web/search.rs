@@ -97,8 +97,7 @@ impl Tool for WebSearchTool {
     }
 
     fn description(&self) -> &str {
-        "Search for information on the internet. Returns search result titles, links, and snippets. \
-         Results use cursor pagination; repeat the same query and limit with page.next_cursor."
+        "Web search: titles, links and snippets. Page with the same query/limit and page.next_cursor."
     }
 
     fn parameters(&self) -> Value {
@@ -107,17 +106,17 @@ impl Tool for WebSearchTool {
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "Search keywords"
+                    "description": "Search terms."
                 },
                 "limit": {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": MAX_ALLOWED_RESULTS,
-                    "description": format!("Results per page (default {}, max {})", DEFAULT_MAX_RESULTS, MAX_ALLOWED_RESULTS)
+                    "description": format!("Results/page; default {}, max {}.", DEFAULT_MAX_RESULTS, MAX_ALLOWED_RESULTS)
                 },
                 "cursor": {
                     "type": "string",
-                    "description": "Cursor from the previous page"
+                    "description": "Prior cursor."
                 }
             },
             "required": ["query"]

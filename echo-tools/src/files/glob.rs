@@ -57,7 +57,7 @@ impl Tool for GlobTool {
     }
 
     fn description(&self) -> &str {
-        "Find files by name pattern. Returns file paths matching a glob pattern (e.g. '**/*.rs', 'src/**/*.ts', '*.md'). Supports ** for recursive directory matching."
+        "Find file paths by glob; ** recurses."
     }
 
     fn permissions(&self) -> Vec<echo_core::tools::permission::ToolPermission> {
@@ -73,21 +73,21 @@ impl Tool for GlobTool {
             "properties": {
                 "pattern": {
                     "type": "string",
-                    "description": "Glob pattern to match file names (e.g. '**/*.rs', 'src/**/*.ts', '*.md')"
+                    "description": "Filename glob."
                 },
                 "path": {
                     "type": "string",
-                    "description": "Directory to search in (default: current directory)"
+                    "description": "Search directory; default cwd."
                 },
                 "limit": {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": 200,
-                    "description": "Results per page (default 100)"
+                    "description": "Results/page; default 100."
                 },
                 "cursor": {
                     "type": "string",
-                    "description": "Cursor from the previous page"
+                    "description": "Prior cursor."
                 }
             },
             "required": ["pattern"]

@@ -64,7 +64,7 @@ impl Tool for ApplyPatchTool {
     }
 
     fn description(&self) -> &str {
-        "Apply one transactional patch across files. The patch must start with '*** Begin Patch' and end with '*** End Patch'. Use '*** Add File: path', '*** Update File: path', '*** Delete File: path', optional '*** Move to: path', and @@ context hunks. Added lines start with +; removed lines with -; unchanged context lines with a space."
+        "Atomic multi-file patch: start '*** Begin Patch', end '*** End Patch'. Use '*** Add File: path', '*** Update File: path', '*** Delete File: path'; optional '*** Move to: path'. @@ hunks: + add, - remove, space context."
     }
 
     fn parameters(&self) -> Value {
@@ -73,11 +73,11 @@ impl Tool for ApplyPatchTool {
             "properties": {
                 "patch": {
                     "type": "string",
-                    "description": "Complete apply_patch document"
+                    "description": "Complete patch."
                 },
                 "dry_run": {
                     "type": "boolean",
-                    "description": "Validate and return the diff without changing files"
+                    "description": "Validate/diff; no writes."
                 }
             },
             "required": ["patch"],

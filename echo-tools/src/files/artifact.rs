@@ -669,7 +669,7 @@ impl Tool for ReadArtifactTool {
     }
 
     fn description(&self) -> &str {
-        "Read the complete spilled output of a previous tool call in bounded UTF-8 pages. Use the returned next_cursor until complete."
+        "Read full spilled output as bounded UTF-8 pages; follow next_cursor to completion."
     }
 
     fn permissions(&self) -> Vec<ToolPermission> {
@@ -686,21 +686,21 @@ impl Tool for ReadArtifactTool {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Exact artifact path returned by a previous tool result"
+                    "description": "Exact artifact path from prior result."
                 },
                 "cursor": {
                     "type": "string",
-                    "description": "Opaque next_cursor returned by the previous read_artifact page"
+                    "description": "Prior read_artifact's opaque next_cursor."
                 },
                 "max_tokens": {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": MAX_ARTIFACT_CONTENT_TOKENS,
-                    "description": "Maximum content tokens for this page (default and hard maximum: 3500)"
+                    "description": "Content tokens/page; default/max 3500."
                 },
                 "expected_sha256": {
                     "type": "string",
-                    "description": "Optional full SHA-256 from the spill notice; fully verified on the first and final pages and bound into every cursor"
+                    "description": "Optional full spill SHA-256; verified first/final page and bound in every cursor."
                 }
             },
             "required": ["path"],
