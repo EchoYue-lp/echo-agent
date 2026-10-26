@@ -25,7 +25,7 @@ pub struct WeixinApi {
     client: reqwest::Client,
     bot_agent: String,
     route_tag: Option<HeaderValue>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "channel-test-support"))]
     fixture_origin: Option<url::Url>,
 }
 
@@ -43,14 +43,14 @@ impl WeixinApi {
             client,
             bot_agent: format!("echo-agent/{}", env!("CARGO_PKG_VERSION")),
             route_tag: None,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "channel-test-support"))]
             fixture_origin: None,
         })
     }
 
-    /// Local TCP fixture only. Production credentials and production HTTP clients
-    /// still require validated HTTPS origins; this endpoint override is not compiled.
-    #[cfg(test)]
+    /// Explicit local TCP fixture only. Production construction still requires
+    /// HTTPS; downstream tests enable the same override through channel-test-support.
+    #[cfg(any(test, feature = "channel-test-support"))]
     pub(crate) fn for_local_poll_fixture(address: std::net::SocketAddr) -> Result<Self> {
         if !address.ip().is_loopback() {
             return Err(protocol_error("Weixin fixture must use a loopback address"));
@@ -235,7 +235,7 @@ impl WeixinApi {
         let url = validated_origin(&credentials.base_url)?
             .join(endpoint)
             .map_err(|_| protocol_error("Weixin bot endpoint could not be constructed"))?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "channel-test-support"))]
         let url = match self.fixture_origin.as_ref() {
             Some(origin) => origin
                 .join(endpoint)
