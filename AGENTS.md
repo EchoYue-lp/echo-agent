@@ -2,6 +2,14 @@
 
 本文件是 AI agent 在本仓库工作时的**最高优先级约束**(优先级高于 agent 默认行为和任何技能),请严格遵守。本仓库可独立检出使用,本文件即完整约束,不依赖外部 superproject。
 
+## 本次 EKO 迭代的开发目录
+
+用户指定唯一开发根 `/Users/ls/MyWork/code/ylp_agent_learn/lp-agent`。本仓在该根的 `echo-agent/` 内开发；源码、工程文档、构建产物、回执与恢复材料均写在主根内，不创建外部 worktree。已有外部工作树只作冻结迁移来源，备份、哈希回读和依赖核对完成后按授权回收。同一主根多会话按文件划分单一写权；验证期间冻结对应源码及依赖。后文 worktree 规则仅用于维护既有工作树，不取消本轮目录限制。
+
+## 文档语言
+
+后续新增或修改的设计、计划、说明、验收清单和交付报告统一使用中文，不再为形式新增英文副本。代码、命令、API/协议标识及原始日志保留原文；历史证据不因翻译而改写。
+
 ## 仓库定位
 
 通用 Rust Agent 框架 Cargo workspace:根 crate `echo_agent` + 子 crate `echo_core` / `echo_macros` / `echo_execution` / `echo_integration` / `echo_tools` / `echo_state` / `echo_orchestration` / `echo-agent-learning`。SDK Host、protocol、合同和三语言 SDK 位于独立的 `echo-agent-sdk` 仓库；crate 名用下划线(`echo_agent`,`cargo check -p echo_agent`)。
