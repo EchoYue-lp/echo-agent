@@ -190,3 +190,20 @@ matrix, EKO GUI persistence, run/recovery binding, role catalog or SDK contracts
 Raw results and exact target cleanup are recorded in
 `evidence.subagent-depth-target-policy`; the earlier 244-test hard-scope evidence
 remains a separate historical checkpoint.
+
+## 程序化委派桥的完整目标策略
+
+后续源码核对确认，带 runtime context 的 text/message 程序化 delegate helper
+曾把调用方已经提供的完整目标 policy 重建为 legacy `policy_from_depth`，导致
+Fork 再次覆盖目标上下文中的最大层数与可委派资格。应用冻结的 1/2 上限因此可能
+被改成 3。该缺陷属于通用值传递，不应由应用重写调度器或逐工具查询配置修补。
+
+两种 helper 的私有 inner 共用完整策略解析：显式 runtime policy 原样保留三字段，
+同时核对原 `depth` 参数指向同一目标层数；冲突在选择/构造目标 Agent 前明确拒绝。
+没有完整 policy 的旧调用继续原 legacy 转换。这里不调用 `child_policy`，不增加
+public API，也不改变独立复用方的上限、原 exact attempt、取消或 Fork 结算 owner。
+应用只负责提供自己原 TaskRun/turn 已冻结的策略。
+
+回归通过真实 ReactAgent/Fork、原 `agent_tool` 和实际 ToolContext 观察，不以提示词
+或伪 dispatcher 比字段代替。源码定义与 focused 执行、应用/GUI/main 资格分别记录，
+不把本节说明当成尚未取得的完整矩阵或原生验收。

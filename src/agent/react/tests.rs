@@ -5709,3 +5709,357 @@ async fn activate_skill_of_unknown_skill_returns_error() -> Result<(), String> {
     );
     Ok(())
 }
+
+#[cfg(feature = "subagent")]
+#[derive(Clone, Copy, Debug)]
+enum DelegatePolicyEntry {
+    Text,
+    TextAttempt,
+    Message,
+    MessageAttempt,
+}
+
+#[cfg(feature = "subagent")]
+struct DelegatePolicyProbe {
+    actor: String,
+    observations:
+        Arc<std::sync::Mutex<Vec<(String, Option<echo_core::tools::NestedDelegationPolicy>)>>>,
+}
+
+#[cfg(feature = "subagent")]
+impl crate::tools::Tool for DelegatePolicyProbe {
+    fn name(&self) -> &str {
+        "delegate_policy_probe"
+    }
+    fn description(&self) -> &str {
+        "观察真实子智能体工具调用的目标策略"
+    }
+    fn parameters(&self) -> serde_json::Value {
+        json!({"type":"object","properties":{}})
+    }
+    fn execute(
+        &self,
+        _parameters: crate::tools::ToolParameters,
+    ) -> futures::future::BoxFuture<'_, crate::error::Result<crate::tools::ToolResult>> {
+        Box::pin(async { Ok(crate::tools::ToolResult::success("已观察")) })
+    }
+    fn execute_with_context<'a>(
+        &'a self,
+        parameters: crate::tools::ToolParameters,
+        context: &'a crate::tools::ToolContext,
+    ) -> futures::future::BoxFuture<'a, crate::error::Result<crate::tools::ToolResult>> {
+        Box::pin(async move {
+            self.observations
+                .lock()
+                .map_err(|error| crate::error::ReactError::Other(error.to_string()))?
+                .push((self.actor.clone(), context.delegation_policy));
+            self.execute(parameters).await
+        })
+    }
+}
+
+#[cfg(feature = "subagent")]
+async fn probe_delegate_policy_entry(
+    entry: DelegatePolicyEntry,
+    policy: Option<echo_core::tools::NestedDelegationPolicy>,
+    depth: u32,
+    expected_maximum: Option<u8>,
+) -> crate::error::Result<()> {
+    use crate::agent::subagent::{SubagentAttemptIdentity, SubagentEvent};
+    use crate::testing::MockLlmClient;
+
+    let registry = Arc::new(SubagentRegistry::new());
+    let observations = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut events = registry.event_bus().subscribe();
+    let mut clients = Vec::new();
+    // 多注册一层真实 Agent；越界调用不能因目标不存在而侥幸被拒。
+    for actor_depth in 1_u8..=5 {
+        let name = format!("policy-actor-{actor_depth}");
+        let client = Arc::new(
+            MockLlmClient::new()
+                .then_tool_call("probe", "delegate_policy_probe", "{}")
+                .then_tool_call("search", "tool_search", r#"{"query":"agent_tool"}"#)
+                .then_tool_call(
+                    "delegate",
+                    "agent_tool",
+                    json!({
+                        "agent_name": format!("policy-actor-{}", actor_depth.saturating_add(1)),
+                        "task": "继续下一层真实调用",
+                        "mode": "fork"
+                    })
+                    .to_string(),
+                )
+                .with_response("## Summary\n完成真实策略探针"),
+        );
+        let agent = ReactAgentBuilder::new()
+            .name(&name)
+            .model("mock-model")
+            .enable_tools()
+            .enable_subagent()
+            .register_agent_dispatch_tool()
+            .subagent_registry(registry.clone())
+            .llm_client(client.clone())
+            .tool(Box::new(DelegatePolicyProbe {
+                actor: name.clone(),
+                observations: observations.clone(),
+            }))
+            .build()?;
+        registry
+            .register(
+                SubagentBuilder::new(&name)
+                    .fork_mode()
+                    .can_delegate()
+                    .build(),
+                Box::new(agent),
+            )
+            .await;
+        clients.push((actor_depth, client));
+    }
+    let primary = ReactAgentBuilder::new()
+        .name("primary")
+        .model("mock-model")
+        .enable_tools()
+        .enable_subagent()
+        .subagent_registry(registry)
+        .build()?;
+    let runtime = policy.map(|policy| echo_core::tools::ExternalRunContext {
+        delegation_policy: Some(policy),
+        ..Default::default()
+    });
+    let identity = SubagentAttemptIdentity::new("policy-task", "policy-execution", 1)
+        .map_err(|error| crate::error::ReactError::Other(error.to_string()))?;
+    let result = match entry {
+        DelegatePolicyEntry::Text => {
+            primary
+                .delegate_to_agent_with_prompt_payload(
+                    "policy-actor-1",
+                    "首层任务",
+                    "primary",
+                    super::CancellationToken::new(),
+                    depth,
+                    runtime,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+        }
+        DelegatePolicyEntry::TextAttempt => {
+            primary
+                .delegate_to_agent_attempt_with_prompt_payload(
+                    "policy-actor-1",
+                    "首层任务",
+                    "primary",
+                    super::CancellationToken::new(),
+                    depth,
+                    runtime,
+                    None,
+                    None,
+                    None,
+                    identity,
+                )
+                .await
+        }
+        DelegatePolicyEntry::Message => {
+            primary
+                .delegate_to_agent_with_message_and_prompt_payload(
+                    "policy-actor-1",
+                    "首层任务",
+                    Message::user("带消息的首层任务".into()),
+                    "primary",
+                    super::CancellationToken::new(),
+                    depth,
+                    runtime,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+        }
+        DelegatePolicyEntry::MessageAttempt => {
+            primary
+                .delegate_to_agent_attempt_with_message_and_prompt_payload(
+                    "policy-actor-1",
+                    "首层任务",
+                    Message::user("带消息的首层任务".into()),
+                    "primary",
+                    super::CancellationToken::new(),
+                    depth,
+                    runtime,
+                    None,
+                    None,
+                    None,
+                    identity,
+                )
+                .await
+        }
+    };
+    let observed = observations
+        .lock()
+        .map_err(|error| crate::error::ReactError::Other(error.to_string()))?;
+    if let Some(maximum) = expected_maximum {
+        result?;
+        let last_depth = if policy.is_some_and(|value| !value.can_spawn_subagents) {
+            1
+        } else {
+            maximum
+        };
+        for (actor_depth, client) in clients {
+            assert_eq!(
+                client.call_count() > 0,
+                actor_depth <= last_depth,
+                "{entry:?}/{maximum}/{actor_depth}"
+            );
+        }
+        assert_eq!(observed.len(), usize::from(last_depth));
+        for actor_depth in 1..=last_depth {
+            let name = format!("policy-actor-{actor_depth}");
+            let actual = observed
+                .iter()
+                .find(|(actor, _)| actor == &name)
+                .ok_or_else(|| crate::error::ReactError::Other(format!("缺少真实调用 {name}")))?;
+            assert_eq!(
+                actual.1,
+                Some(echo_core::tools::NestedDelegationPolicy {
+                    can_spawn_subagents: policy.is_none_or(|value| value.can_spawn_subagents),
+                    delegate_depth: actor_depth,
+                    max_delegate_depth: maximum,
+                })
+            );
+        }
+        let mut starts = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            if let SubagentEvent::DispatchStarted { agent, mode, .. } = event.as_ref() {
+                assert_eq!(*mode, crate::agent::subagent::ExecutionMode::Fork);
+                starts.push(agent.clone());
+            }
+        }
+        assert_eq!(starts.len(), usize::from(last_depth));
+    } else {
+        assert!(result.is_err(), "冲突或越界目标必须拒绝");
+        assert!(observed.is_empty());
+        assert!(clients.iter().all(|(_, client)| client.call_count() == 0));
+        let conflicting_depth =
+            policy.is_some_and(|value| u32::from(value.delegate_depth) != depth);
+        let mut starts = 0_usize;
+        let mut failed = 0_usize;
+        while let Ok(event) = events.try_recv() {
+            match event.as_ref() {
+                SubagentEvent::DispatchStarted { .. } => starts = starts.saturating_add(1),
+                SubagentEvent::DispatchFailed {
+                    status, outcome, ..
+                } => {
+                    assert_eq!(*status, crate::agent::subagent::SubagentStatus::Failed);
+                    assert_eq!(outcome.status, *status);
+                    failed = failed.saturating_add(1);
+                }
+                _ => {}
+            }
+        }
+        // 冲突必须在 helper 内拒绝；已匹配但越界的目标仍保原
+        // dispatcher Started→Failed 顺序，Started 不等于模型已经执行。
+        assert_eq!(starts, usize::from(!conflicting_depth));
+        assert_eq!(failed, usize::from(!conflicting_depth));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "subagent")]
+#[tokio::test]
+async fn delegate_helpers_keep_bound_target_policy_in_fork() -> crate::error::Result<()> {
+    for entry in [
+        DelegatePolicyEntry::Text,
+        DelegatePolicyEntry::TextAttempt,
+        DelegatePolicyEntry::Message,
+        DelegatePolicyEntry::MessageAttempt,
+    ] {
+        for maximum in [1, 2, 3, 4] {
+            probe_delegate_policy_entry(
+                entry,
+                Some(echo_core::tools::NestedDelegationPolicy {
+                    can_spawn_subagents: true,
+                    delegate_depth: 1,
+                    max_delegate_depth: maximum,
+                }),
+                1,
+                Some(maximum),
+            )
+            .await?;
+        }
+        probe_delegate_policy_entry(
+            entry,
+            Some(echo_core::tools::NestedDelegationPolicy {
+                can_spawn_subagents: false,
+                delegate_depth: 1,
+                max_delegate_depth: 3,
+            }),
+            1,
+            Some(3),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "subagent")]
+#[tokio::test]
+async fn delegate_helpers_keep_legacy_default_without_runtime_policy() -> crate::error::Result<()> {
+    for entry in [
+        DelegatePolicyEntry::Text,
+        DelegatePolicyEntry::TextAttempt,
+        DelegatePolicyEntry::Message,
+        DelegatePolicyEntry::MessageAttempt,
+    ] {
+        probe_delegate_policy_entry(entry, None, 1, Some(3)).await?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "subagent")]
+#[tokio::test]
+async fn delegate_helpers_reject_conflicting_target_depth_before_dispatch()
+-> crate::error::Result<()> {
+    for entry in [
+        DelegatePolicyEntry::Text,
+        DelegatePolicyEntry::TextAttempt,
+        DelegatePolicyEntry::Message,
+        DelegatePolicyEntry::MessageAttempt,
+    ] {
+        probe_delegate_policy_entry(
+            entry,
+            Some(echo_core::tools::NestedDelegationPolicy {
+                can_spawn_subagents: true,
+                delegate_depth: 1,
+                max_delegate_depth: 3,
+            }),
+            0,
+            None,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "subagent")]
+#[tokio::test]
+async fn delegate_helpers_reject_target_already_beyond_bound() -> crate::error::Result<()> {
+    for entry in [
+        DelegatePolicyEntry::Text,
+        DelegatePolicyEntry::TextAttempt,
+        DelegatePolicyEntry::Message,
+        DelegatePolicyEntry::MessageAttempt,
+    ] {
+        probe_delegate_policy_entry(
+            entry,
+            Some(echo_core::tools::NestedDelegationPolicy {
+                can_spawn_subagents: true,
+                delegate_depth: 2,
+                max_delegate_depth: 1,
+            }),
+            2,
+            None,
+        )
+        .await?;
+    }
+    Ok(())
+}

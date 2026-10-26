@@ -2906,6 +2906,28 @@ impl ReactAgent {
     }
 
     #[cfg(feature = "subagent")]
+    fn target_delegation_policy(
+        depth: u32,
+        runtime_context: Option<&echo_core::tools::ExternalRunContext>,
+    ) -> Result<echo_core::tools::NestedDelegationPolicy> {
+        use crate::agent::subagent::executor::DispatchRequest;
+
+        if let Some(policy) = runtime_context.and_then(|context| context.delegation_policy) {
+            // 此入口的 depth 已指向目标 actor；完整策略与旧参数必须指向同一层，
+            // 不能重计一次派发，也不能用 legacy 默认上限覆盖调用方冻结的策略。
+            if u32::from(policy.delegate_depth) != depth {
+                return Err(echo_core::error::ReactError::Other(format!(
+                    "Subagent delegation depth mismatch: runtime policy {}, argument {depth}",
+                    policy.delegate_depth
+                )));
+            }
+            Ok(policy)
+        } else {
+            Ok(DispatchRequest::policy_from_depth(depth))
+        }
+    }
+
+    #[cfg(feature = "subagent")]
     #[allow(clippy::too_many_arguments)]
     async fn delegate_to_agent_with_prompt_payload_inner(
         &self,
@@ -2922,6 +2944,8 @@ impl ReactAgent {
     ) -> Result<crate::agent::subagent::SubagentResult> {
         use crate::agent::subagent::executor::DispatchRequest;
         use crate::agent::subagent::types::ExecutionMode;
+
+        let delegation_policy = Self::target_delegation_policy(depth, runtime_context.as_ref())?;
 
         // Verify the target agent exists in the registry
         let agents = self.tools.subagent_registry.list_available().await;
@@ -2953,7 +2977,7 @@ impl ReactAgent {
             cancel,
             parent_agent: parent_label.to_string(),
             parent_context,
-            delegation_policy: DispatchRequest::policy_from_depth(depth),
+            delegation_policy,
             runtime_context,
             message: None,
             prompt_payload,
@@ -3142,6 +3166,8 @@ impl ReactAgent {
         use crate::agent::subagent::executor::DispatchRequest;
         use crate::agent::subagent::types::ExecutionMode;
 
+        let delegation_policy = Self::target_delegation_policy(depth, runtime_context.as_ref())?;
+
         let agents = self.tools.subagent_registry.list_available().await;
         if !agents.iter().any(|d| d.name == target) {
             return Err(echo_core::error::ReactError::Other(format!(
@@ -3170,7 +3196,7 @@ impl ReactAgent {
             cancel,
             parent_agent: parent_label.to_string(),
             parent_context,
-            delegation_policy: DispatchRequest::policy_from_depth(depth),
+            delegation_policy,
             runtime_context,
             message: Some(message),
             prompt_payload,

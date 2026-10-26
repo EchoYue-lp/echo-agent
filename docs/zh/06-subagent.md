@@ -180,6 +180,13 @@ Executor 只复制该值，不再次推进层数；真实派发边独占 `child_
 包含通用 maximum 4 对照；该框架结果不代表应用 GUI 配置、run 恢复或完整 feature
 矩阵已经验收。
 
+接受显式 runtime context 并汇入两种 prompt-payload inner 的 text/message
+helper（含 exact-attempt 变体）同样保留
+`ExternalRunContext.delegation_policy` 已有的完整目标策略，包含可委派资格、当前层数
+和上限。该上下文描述目标 actor，不再调用 `child_policy`；显式 `depth` 参数必须与
+其中当前层数一致，冲突在派发前报错。没有完整 runtime policy 的独立旧调用保留
+原 `policy_from_depth` 行为，不借此更改框架默认上限或引入应用产品常量。
+
 所有路径都会先调用配置的 `SubagentPromptCompiler`：
 
 - 具体 Subagent 的工具面完成后调用 `compile_system`，能力说明来自实际注册定义、description
