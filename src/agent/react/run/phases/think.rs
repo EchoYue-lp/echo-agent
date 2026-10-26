@@ -28,6 +28,7 @@ pub(crate) async fn run_think(
     tx: &mpsc::Sender<Result<AgentEvent>>,
     messages: Vec<Message>,
     final_only: bool,
+    iteration: usize,
 ) -> Result<ThinkOutcome> {
     let agent = &snap.config.agent_name;
     for cb in snap.config.callbacks.iter() {
@@ -94,6 +95,43 @@ pub(crate) async fn run_think(
     }
 
     let request = build_llm_request(snap, messages, final_only);
+    if let Some(projector) = &snap.pre_model_context_projector {
+        let projection_context = crate::compression::ProjectionContext {
+            iteration,
+            agent_name: snap.config.agent_name.clone(),
+            session_id: snap.config.session_id.clone(),
+            conversation_id: snap.config.conversation_id.clone(),
+            run_id: snap.current_run_id.clone(),
+            turn_id: snap.current_turn_id.clone(),
+        };
+        if let Err(error) = projector
+            .validate_model_request(
+                &projection_context,
+                &request,
+                snap.config.tool_output_artifacts.as_ref(),
+            )
+            .await
+        {
+            if projector.is_required() {
+                let reason = error.to_string();
+                let terminal = super::required_context_failure_event(snap, error)?;
+                super::finalize::settle_terminal_projection(
+                    snap,
+                    context,
+                    Some(reason.clone()),
+                    tx,
+                )
+                .await?;
+                snap.finalize_run(crate::trace::RunStatus::Failed, None, Some(&reason))
+                    .await;
+                let _ = tx.send(Ok(terminal)).await;
+                return Ok(ThinkOutcome::TerminalSettled {
+                    outcome: crate::agent::AgentSteerTurnOutcome::Failed,
+                });
+            }
+            tracing::warn!(error = %error, "Optional model context qualification failed");
+        }
+    }
     let request_estimate = estimate_request_prompt(&request, snap.calibrated_tokenizer.as_ref())
         .and_then(|estimate| {
             validate_request_budget(snap, &estimate)?;
@@ -906,6 +944,98 @@ mod tests {
         assert!(rx.try_recv().is_err());
     }
 
+    struct FinalRequestQualificationProbe {
+        required: bool,
+        observed: std::sync::Mutex<Vec<usize>>,
+    }
+
+    impl crate::compression::PreModelContextProjector for FinalRequestQualificationProbe {
+        fn is_required(&self) -> bool {
+            self.required
+        }
+        fn project<'a>(
+            &'a self,
+            _: &'a crate::compression::ProjectionContext,
+        ) -> futures::future::BoxFuture<'a, Result<Vec<crate::compression::ContextProjection>>>
+        {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+        fn validate_model_request<'a>(
+            &'a self,
+            _: &'a crate::compression::ProjectionContext,
+            request: &'a crate::llm::ChatRequest,
+            _: Option<&'a crate::tools::artifact::ToolOutputArtifactConfig>,
+        ) -> futures::future::BoxFuture<'a, Result<()>> {
+            Box::pin(async move {
+                self.observed
+                    .lock()
+                    .map_err(|_| {
+                        crate::error::ReactError::Other("observation lock failed".to_owned())
+                    })?
+                    .push(request.tools.as_ref().map_or(0, Vec::len));
+                Err(crate::error::ReactError::Other(
+                    "fixture requires a reader in final request".to_owned(),
+                ))
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn final_request_qualification_observes_final_only_and_optional_policy() -> Result<()> {
+        for required in [false, true] {
+            let llm = Arc::new(crate::testing::MockLlmClient::new().with_response("normal answer"));
+            let agent = crate::agent::ReactAgentBuilder::new()
+                .enable_tools()
+                .llm_client(llm.clone())
+                .build()?;
+            let audit = Arc::new(FinalRequestQualificationProbe {
+                required,
+                observed: std::sync::Mutex::new(Vec::new()),
+            });
+            agent.set_pre_model_context_projector(Some(audit.clone()));
+            let snapshot = AgentRunSnapshot::from_agent(&agent);
+            let (tx, mut rx) = mpsc::channel(16);
+            let result = run_think(
+                &snapshot,
+                agent.context(),
+                &tx,
+                vec![Message::user("bounded input".to_owned())],
+                true,
+                3,
+            )
+            .await?;
+            assert_eq!(
+                audit
+                    .observed
+                    .lock()
+                    .map_err(|_| crate::error::ReactError::Other(
+                        "observation lock failed".to_owned()
+                    ))?
+                    .as_slice(),
+                &[0]
+            );
+            if required {
+                assert!(matches!(
+                    result,
+                    ThinkOutcome::TerminalSettled {
+                        outcome: crate::agent::AgentSteerTurnOutcome::Failed
+                    }
+                ));
+                assert_eq!(llm.call_count(), 0);
+                let event = rx.recv().await.ok_or_else(|| {
+                    crate::error::ReactError::Other("required failure missing".to_owned())
+                })??;
+                assert!(
+                    matches!(event, AgentEvent::Error { failure, .. } if failure.code == "required_context_unavailable")
+                );
+            } else {
+                assert!(matches!(result, ThinkOutcome::Continue(_)));
+                assert_eq!(llm.call_count(), 1);
+            }
+        }
+        Ok(())
+    }
+
     #[test]
     fn prompt_cache_fingerprint_isolates_stable_system_from_history() {
         let first = vec![
@@ -984,7 +1114,7 @@ mod tests {
         for _ in 0..12 {
             let (tx, _rx) = mpsc::channel(16);
             let outcome =
-                run_think(&snapshot, agent.context(), &tx, messages.clone(), false).await?;
+                run_think(&snapshot, agent.context(), &tx, messages.clone(), false, 0).await?;
             assert!(matches!(outcome, ThinkOutcome::Continue(_)));
         }
 
@@ -1026,7 +1156,7 @@ mod tests {
         for _ in 0..3 {
             let (tx, _rx) = mpsc::channel(16);
             let outcome =
-                run_think(&snapshot, agent.context(), &tx, messages.clone(), false).await?;
+                run_think(&snapshot, agent.context(), &tx, messages.clone(), false, 0).await?;
             assert!(matches!(outcome, ThinkOutcome::Continue(_)));
         }
 
@@ -1088,7 +1218,8 @@ mod tests {
 
         for message in [file, reasoning, reasoning_text] {
             let (tx, _rx) = mpsc::channel(16);
-            let outcome = run_think(&snapshot, agent.context(), &tx, vec![message], false).await?;
+            let outcome =
+                run_think(&snapshot, agent.context(), &tx, vec![message], false, 0).await?;
             assert!(matches!(outcome, ThinkOutcome::Continue(_)));
         }
 
@@ -1140,7 +1271,8 @@ mod tests {
                 agent.context(),
                 &tx,
                 vec![text_message.clone()],
-                false
+                false,
+                0,
             )
             .await?,
             ThinkOutcome::Continue(_)
@@ -1150,7 +1282,15 @@ mod tests {
 
         let (tx, _rx) = mpsc::channel(16);
         assert!(matches!(
-            run_think(&snapshot, agent.context(), &tx, vec![image_message], false).await?,
+            run_think(
+                &snapshot,
+                agent.context(),
+                &tx,
+                vec![image_message],
+                false,
+                0
+            )
+            .await?,
             ThinkOutcome::Continue(_)
         ));
         assert_eq!(snapshot.calibrated_tokenizer.sample_count(), 1);
@@ -1161,7 +1301,15 @@ mod tests {
 
         let (tx, _rx) = mpsc::channel(16);
         assert!(matches!(
-            run_think(&snapshot, agent.context(), &tx, vec![text_message], false).await?,
+            run_think(
+                &snapshot,
+                agent.context(),
+                &tx,
+                vec![text_message],
+                false,
+                0
+            )
+            .await?,
             ThinkOutcome::Continue(_)
         ));
         assert_eq!(snapshot.calibrated_tokenizer.sample_count(), 2);

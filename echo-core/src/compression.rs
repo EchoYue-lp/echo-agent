@@ -33,10 +33,28 @@ pub struct ProjectionContext {
 
 /// Produces replaceable context immediately before model input preparation.
 pub trait PreModelContextProjector: Send + Sync {
+    /// 声明本投影是否为本次模型调用的必要输入。
+    /// 默认保留既有 best-effort 行为；选择 true 后 project 的错误由原执行入口返回，
+    /// 不清空旧投影后继续调用模型。该声明不承载具体产品规则或新状态权威。
+    fn is_required(&self) -> bool {
+        false
+    }
+
     fn project<'a>(
         &'a self,
         context: &'a ProjectionContext,
     ) -> BoxFuture<'a, Result<Vec<ContextProjection>>>;
+
+    /// 在最终 ChatRequest 构建后核验投影引用是否能在本次实际工具范围内读取。
+    /// 默认允许，保留旧消费者；实现只能核验，不能扩展工具上界或改写请求。
+    fn validate_model_request<'a>(
+        &'a self,
+        _context: &'a ProjectionContext,
+        _request: &'a crate::llm::ChatRequest,
+        _artifacts: Option<&'a crate::tools::artifact::ToolOutputArtifactConfig>,
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
 }
 
 /// Compression pipeline input

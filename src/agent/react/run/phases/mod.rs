@@ -30,6 +30,27 @@ pub(crate) mod think;
 pub(crate) mod tools;
 pub(crate) mod verify;
 
+/// 必要输入不可用是可由应用恢复的执行拒绝，不是物理未结算观察。
+/// 使用原 typed failure envelope 的 code 扩点；取消和未结算仍保留原通道。
+pub(crate) fn required_context_failure_event(
+    snap: &AgentRunSnapshot,
+    error: crate::error::ReactError,
+) -> crate::error::Result<AgentEvent> {
+    let observed = crate::error::AgentFailure::try_from(&error)?;
+    if cancellation_requested(snap)
+        || observed.terminal_kind == crate::error::AgentTerminalKind::Cancelled
+    {
+        return Err(crate::error::AgentError::Cancelled(
+            "required context interrupted".to_string(),
+        )
+        .into());
+    }
+    Ok(AgentEvent::error_message(
+        "required_context_unavailable",
+        error.to_string(),
+    ))
+}
+
 pub(crate) fn cancellation_requested(snap: &AgentRunSnapshot) -> bool {
     snap.cancel_token
         .as_ref()

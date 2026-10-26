@@ -1076,25 +1076,28 @@ impl AgentSnapshot {
 
             // Think: callbacks + interventions + LLM stream → buffered output
             let final_only = state.budget.final_only;
-            let think =
-                match phases::think::run_think(&self, &context, &tx, messages, final_only).await? {
-                    phases::ThinkOutcome::Continue(t) => t,
-                    phases::ThinkOutcome::Abandoned => {
-                        self.settle_unobserved_terminal(
-                            &context,
-                            "event consumer disconnected during model response",
-                        )
-                        .await?;
-                        self.finalize_run(
-                            crate::trace::RunStatus::Cancelled,
-                            None,
-                            Some("event consumer disconnected or intervention blocked the run"),
-                        )
-                        .await;
-                        return Ok(crate::agent::AgentSteerTurnOutcome::Cancelled);
-                    }
-                    phases::ThinkOutcome::TerminalSettled { outcome } => return Ok(outcome),
-                };
+            let think = match phases::think::run_think(
+                &self, &context, &tx, messages, final_only, iteration,
+            )
+            .await?
+            {
+                phases::ThinkOutcome::Continue(t) => t,
+                phases::ThinkOutcome::Abandoned => {
+                    self.settle_unobserved_terminal(
+                        &context,
+                        "event consumer disconnected during model response",
+                    )
+                    .await?;
+                    self.finalize_run(
+                        crate::trace::RunStatus::Cancelled,
+                        None,
+                        Some("event consumer disconnected or intervention blocked the run"),
+                    )
+                    .await;
+                    return Ok(crate::agent::AgentSteerTurnOutcome::Cancelled);
+                }
+                phases::ThinkOutcome::TerminalSettled { outcome } => return Ok(outcome),
+            };
 
             let iteration_tokens = think.pt.saturating_add(think.ct);
             state

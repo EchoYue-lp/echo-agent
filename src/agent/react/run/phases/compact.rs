@@ -59,6 +59,14 @@ pub(crate) async fn run_compact(
     let projections = if let Some(projector) = &snap.pre_model_context_projector {
         match projector.project(&projection_context).await {
             Ok(projections) => projections,
+            Err(error) if projector.is_required() => {
+                let reason = error.to_string();
+                let terminal = super::required_context_failure_event(snap, error)?;
+                super::finalize::settle_terminal_projection(snap, context, Some(reason), tx)
+                    .await?;
+                yield_event_or!(tx, terminal, CompactOutcome::Abandoned);
+                return Ok(CompactOutcome::Failed);
+            }
             Err(error) => {
                 tracing::warn!(error = %error, "Pre-model context projection failed");
                 Vec::new()
@@ -510,6 +518,89 @@ mod tests {
                 })
                 .count(),
             1
+        );
+        Ok(())
+    }
+
+    struct RequiredFailureProjection(FailsAfterFirstProjection);
+
+    impl PreModelContextProjector for RequiredFailureProjection {
+        fn is_required(&self) -> bool {
+            true
+        }
+        fn project<'a>(
+            &'a self,
+            context: &'a ProjectionContext,
+        ) -> BoxFuture<'a, Result<Vec<ContextProjection>>> {
+            self.0.project(context)
+        }
+    }
+
+    #[test]
+    fn required_context_failure_keeps_cancel_and_unsettled_classification() -> Result<()> {
+        let agent = ReactAgent::new(AgentConfig::new("test-model", "agent", "sys"));
+        let mut snap = AgentRunSnapshot::from_agent(&agent);
+        let cancel = crate::agent::CancellationToken::new();
+        cancel.cancel();
+        snap.cancel_token = Some(cancel);
+        let cancelled = super::super::required_context_failure_event(
+            &snap,
+            crate::error::ReactError::Other("unavailable".to_owned()),
+        )
+        .err()
+        .ok_or_else(|| crate::error::ReactError::Other("cancel was overwritten".to_owned()))?;
+        assert_eq!(
+            crate::error::AgentFailure::try_from(&cancelled)?.terminal_kind,
+            crate::error::AgentTerminalKind::Cancelled
+        );
+        snap.cancel_token = None;
+        let unknown = super::super::required_context_failure_event(
+            &snap,
+            crate::error::ReactError::ExecutionNotSettled {
+                run_id: "physical-owner".to_owned(),
+                execution_id: Some("attempt".to_owned()),
+            },
+        );
+        assert!(
+            matches!(unknown, Err(crate::error::ReactError::ExecutionNotSettled { run_id, .. }) if run_id == "physical-owner")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn run_compact_stops_before_model_when_required_projection_fails() -> Result<()> {
+        let agent = ReactAgent::new(AgentConfig::new("test-model", "agent", "sys"));
+        agent.set_pre_model_context_projector(Some(Arc::new(RequiredFailureProjection(
+            FailsAfterFirstProjection {
+                calls: AtomicUsize::new(0),
+            },
+        ))));
+        let snap = AgentRunSnapshot::from_agent(&agent);
+        let (tx, mut rx) = mpsc::channel::<Result<AgentEvent>>(8);
+        let _ = run_compact(&snap, &agent.memory.context, &tx, 0).await?;
+        let result = run_compact(&snap, &agent.memory.context, &tx, 1).await?;
+        assert!(matches!(result, CompactOutcome::Failed));
+        let event = rx.recv().await.ok_or_else(|| {
+            crate::error::ReactError::Other("required failure event missing".to_string())
+        })??;
+        assert!(
+            matches!(event, AgentEvent::Error { failure, .. } if failure.code == "required_context_unavailable")
+        );
+        assert!(
+            agent
+                .memory
+                .context
+                .lock()
+                .await
+                .messages()
+                .iter()
+                .any(|message| {
+                    message
+                        .content
+                        .as_text_ref()
+                        .is_some_and(|text| text.contains("projection before failure"))
+                }),
+            "必要投影失败不能清掉旧上下文后继续执行"
         );
         Ok(())
     }

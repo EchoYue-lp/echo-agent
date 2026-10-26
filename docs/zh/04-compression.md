@@ -22,6 +22,28 @@ Summary、IncrementalSummary 与 SlidingWindow 复用同一个尾部选择器：
 取消或失败计算不发布缓存。工具 Hook 和图片注释使用运行态来源标记；工具组按 call ID
 闭合，原子边界不会被这些注释或多模态 User-role 消息打散。
 
+## 必要投影与最终请求资格
+
+`PreModelContextProjector::is_required()` 默认返回 `false`，保持原可选投影失败后
+告警、移除旧投影并继续的行为。调用方可为必要输入选择 `true`：`project()` 失败时，
+原 compact 消费点保留错误并结束本次有限执行，不清空后继续模型调用。
+
+`validate_model_request(context, request, artifacts)` 默认成功。该只读方法在原
+`build_llm_request` 之后、实际模型 API 之前执行，能检查本次真正发送的工具定义
+及 snapshot 的 artifact 配置。它不能改写请求或扩展工具权限。例如 protected
+消息只保留某文件的有界引用，而最终工具范围无法读取该文件时，required 投影可
+拒绝此次调用；注册目录里存在工具并不代表本次请求可以使用。
+
+required 错误使用既有 `AgentFailure` 信封，`code` 为
+`required_context_unavailable`，类别为 `Other`、不可自动重试。取消和
+`ExecutionNotSettled` 保持原 typed 通道。通用框架只结束有限执行，产品是否暂停
+TaskRun、如何修复来源和恢复仍由其原 owner 决定。没有新 journal、运行时状态或
+SDK wire 字段。Domain、工作区与原文保存策略不进入此接口。
+
+完整权威数据应保存在原来源中，活动消息使用有界预览和经校验的读取引用。
+仅有路径而没有本次可用读取能力不构成恢复保证。参见
+[ADR 0081](../adr/0081-token-budgeted-compression-tail.md)。
+
 ## 是什么
 
 LLM 的上下文窗口（Context Window）是有限的。当对话历史积累到一定长度时，如果直接发送全部消息，会超出 token 限制导致请求失败，或因 token 数量激增导致推理变慢、成本激增。
