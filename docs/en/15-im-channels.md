@@ -513,13 +513,40 @@ replay. Only authenticated business poll proves `WeixinAuthenticatedPoll` Ready;
 Source regressions use actual local HTTP poll/sender, SessionHandler and a generic
 file-backed host: 40 inputs, 128 single-message pages then control, long multi-part
 claimed output, early ACK with retained permits and cancelled Stop waiter/actual
-join. The focused Framework checks passed 135 channel cases (including all 10 new or
-renamed NoStream cases), 12 facade cases and two compile-only doctests, with
+join. Earlier focused Framework checks passed 135 channel cases (including all
+10 new or renamed NoStream cases), 12 facade cases and two compile-only doctests, with
 demo38 typecheck, scoped warning/panic lints, featureless isolation and fmt/check.
-This is controlled-fixture qualification of the unchanged Rust inputs; it does
-not establish host production durability, the full merge matrix, website
+Those results bind the earlier Rust inputs; the test-support constructor below
+is a subsequent source change and requires its own compilation and execution.
+Controlled-fixture qualification does not establish host production durability,
+the full merge matrix, website
 mirrors, application recovery, native GUI, real login/messages or exact main CI.
 See [ADR 0099](../adr/0099-personal-weixin-channel.md).
+
+### Cross-crate loopback fixtures
+
+Downstream Rust tests can explicitly enable the integration crate's separate,
+default-off feature:
+
+```toml
+[dev-dependencies]
+echo_integration = { version = "0.2", default-features = false, features = ["channel-test-support"] }
+```
+
+`WeixinChannel::for_local_fixture(config, socket_addr)` then constructs the same
+channel through `WeixinChannel::new` and directs its original poll/send HTTP
+requests to that loopback address. Use synthetic credentials with a valid HTTPS
+base origin; credential validation, request bodies, ACK/cursor ownership, bounded
+sender and Stop joins remain the original implementations. The fixture client
+disables proxies and redirects, and rejects non-loopback endpoints. This is not
+a QR authentication fixture or evidence of live Weixin access.
+
+The existing `echo_agent::channels::weixin` re-export exposes the same type when
+Cargo enables this feature on the same integration dependency. No root forwarding
+feature is required. `channel-test-support` enables `channels`; it is not included
+in the root `full`/`testing` aggregates. Explicit all-feature/test builds can still
+compile it. Enabling it does not change the HTTPS-only production constructor or
+add a GUI endpoint setting.
 
 `demo38_im_channels` remains a QQ/Feishu example. Its default
 `AgentChannelHandler` does not opt into durable ingress. Registering it for

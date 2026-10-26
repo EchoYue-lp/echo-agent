@@ -263,6 +263,23 @@ impl WeixinChannel {
         })
     }
 
+    /// Construct the original poll/sender channel against an explicit loopback fixture.
+    ///
+    /// Downstream tests must enable `echo_integration/channel-test-support`.
+    /// The endpoint must be loopback; the fixture client disables proxies and
+    /// redirects. Credentials still pass the production validation, so tests use
+    /// synthetic credentials with a valid HTTPS origin. Only bot poll/send requests
+    /// use the local endpoint; this does not emulate QR authentication.
+    ///
+    /// Production [`Self::new`] remains HTTPS-only even when this feature is enabled.
+    #[cfg(any(test, feature = "channel-test-support"))]
+    #[cfg_attr(docsrs, doc(cfg(feature = "channel-test-support")))]
+    pub fn for_local_fixture(config: WeixinConfig, address: std::net::SocketAddr) -> Result<Self> {
+        let mut channel = Self::new(config)?;
+        channel.api = WeixinApi::for_local_poll_fixture(address)?;
+        Ok(channel)
+    }
+
     pub fn delivery_handle(&self) -> Option<WeixinDeliveryHandle> {
         self.handle.clone()
     }
@@ -1065,7 +1082,7 @@ mod tests {
     }
 
     struct PollFixture {
-        api: WeixinApi,
+        address: std::net::SocketAddr,
         observation: tokio::sync::watch::Receiver<PollObservation>,
         stop: CancellationToken,
         server: JoinHandle<Result<()>>,
@@ -1093,7 +1110,6 @@ mod tests {
                 .with_state(state);
             let stop = CancellationToken::new();
             let shutdown = stop.clone();
-            let api = WeixinApi::for_local_poll_fixture(address)?;
             let server = tokio::spawn(async move {
                 axum::serve(listener, router)
                     .with_graceful_shutdown(async move { shutdown.cancelled().await })
@@ -1101,7 +1117,7 @@ mod tests {
                     .map_err(|_| error("poll fixture HTTP server failed"))
             });
             Ok(Self {
-                api,
+                address,
                 observation: received,
                 stop,
                 server,
@@ -1448,11 +1464,13 @@ mod tests {
         let hold = early_ack.then(CancellationToken::new);
         let data =
             Arc::new(tempfile::tempdir().map_err(|_| error("host DATA fixture directory failed"))?);
-        let mut channel = WeixinChannel::new(WeixinConfig {
-            credentials: credentials(),
-            store: super::super::state::tests::store(),
-        })?;
-        channel.api = fixture.api.clone();
+        let mut channel = WeixinChannel::for_local_fixture(
+            WeixinConfig {
+                credentials: credentials(),
+                store: super::super::state::tests::store(),
+            },
+            fixture.address,
+        )?;
         let delivery = channel
             .delivery_handle()
             .ok_or_else(|| error("fixture original sender missing"))?;
@@ -1596,11 +1614,13 @@ mod tests {
             let mut fixture = PollFixture::start(case).await?;
             let (calls, called) = tokio::sync::watch::channel(0_usize);
             let handler = Arc::new(NoAcknowledgmentHandler(calls));
-            let mut channel = WeixinChannel::new(WeixinConfig {
-                credentials: credentials(),
-                store: super::super::state::tests::store(),
-            })?;
-            channel.api = fixture.api.clone();
+            let mut channel = WeixinChannel::for_local_fixture(
+                WeixinConfig {
+                    credentials: credentials(),
+                    store: super::super::state::tests::store(),
+                },
+                fixture.address,
+            )?;
             channel.start(handler).await?;
             let repeated =
                 wait_observation(&mut fixture.observation, |state| state.requests >= 2).await;
@@ -1622,6 +1642,60 @@ mod tests {
             }
         }
         Ok(())
+    }
+
+    #[test]
+    fn local_fixture_constructor_accepts_only_loopback_endpoints() -> Result<()> {
+        for address in [
+            std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 12345)),
+            std::net::SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, 12345)),
+        ] {
+            let channel = WeixinChannel::for_local_fixture(
+                WeixinConfig {
+                    credentials: credentials(),
+                    store: super::super::state::tests::store(),
+                },
+                address,
+            )?;
+            assert!(channel.poll_task.is_none() && channel.send_task.is_none());
+        }
+        for address in [
+            std::net::SocketAddr::from(([192, 0, 2, 1], 12345)),
+            std::net::SocketAddr::from((
+                std::net::Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1),
+                12345,
+            )),
+        ] {
+            assert!(
+                WeixinChannel::for_local_fixture(
+                    WeixinConfig {
+                        credentials: credentials(),
+                        store: super::super::state::tests::store(),
+                    },
+                    address,
+                )
+                .is_err_and(|error| error
+                    .to_string()
+                    .contains("fixture must use a loopback address"))
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn local_fixture_constructor_keeps_production_credential_validation() {
+        let mut invalid = credentials();
+        invalid.base_url = "http://example.invalid/".into();
+        assert!(
+            WeixinChannel::for_local_fixture(
+                WeixinConfig {
+                    credentials: invalid,
+                    store: super::super::state::tests::store(),
+                },
+                std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 12345)),
+            )
+            .is_err_and(|error| error.to_string().contains("not a valid HTTPS origin"))
+        );
     }
 
     struct LegacyOnlyHost {

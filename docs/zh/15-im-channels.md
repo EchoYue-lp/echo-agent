@@ -427,7 +427,20 @@ GET/POST 使用各自 headers；HTTPS origin 校验及禁用自动重定向防�
 
 typed send 仍等待唯一 producer 的真实 `Accepted`/`Rejected`/`Unknown`；HTTP200、入队、start 不等于成功，Unknown 不准重放。只有真实 authenticated 业务 poll 证明 `WeixinAuthenticatedPoll` Ready；`-14` 停止新收发并要求重新认证。
 
-源码反例使用真实本地 HTTP poll/sender、SessionHandler 与通用文件持久 host：40 条输入、128 单消息页后控制、原长流分段、提前 ACK 持有调用许可及取消 Stop waiter 后的实际 join。Framework focused 已实际通过 135 条渠道用例（含全部 10 条新增或重命名 NoStream 用例）、12 条 facade 用例和 2 条仅编译 doctest；demo38 类型检查、匹配范围的 warning/panic lint、featureless 隔离及 fmt/check 同样通过。该受控夹具资格绑定未改变的 Rust 输入，不证明 host 生产持久化、完整合并矩阵、官网镜像、应用恢复、原生 GUI、真实扫码收发或精确 main CI。详见 [ADR 0099](../adr/0099-personal-weixin-channel.md)。
+源码反例使用真实本地 HTTP poll/sender、SessionHandler 与通用文件持久 host：40 条输入、128 单消息页后控制、原长流分段、提前 ACK 持有调用许可及取消 Stop waiter 后的实际 join。此前 Framework focused 已实际通过 135 条渠道用例（含全部 10 条新增或重命名 NoStream 用例）、12 条 facade 用例和 2 条仅编译 doctest；demo38 类型检查、匹配范围的 warning/panic lint、featureless 隔离及 fmt/check 同样通过。前述结果绑定此前的 Rust 输入；下述测试工厂属于后续源码变化，须单独编译和运行验证。受控夹具资格不证明 host 生产持久化、完整合并矩阵、官网镜像、应用恢复、原生 GUI、真实扫码收发或精确 main CI。详见 [ADR 0099](../adr/0099-personal-weixin-channel.md)。
+
+### 跨 crate 本机回环测试
+
+下游 Rust 测试可显式启用 integration crate 中独立、默认关闭的 feature：
+
+```toml
+[dev-dependencies]
+echo_integration = { version = "0.2", default-features = false, features = ["channel-test-support"] }
+```
+
+`WeixinChannel::for_local_fixture(config, socket_addr)` 先复用 `WeixinChannel::new`，再让原 poll/send HTTP 请求指向该回环地址。使用带合法 HTTPS base origin 的合成凭据；凭据校验、请求正文、ACK/游标权威、有界 sender 和 Stop join 均沿原实现。夹具 client 禁用代理和 redirect，拒绝非回环地址。这不模拟 QR 认证，也不证明真实微信接入。
+
+Cargo 在同一个 integration 依赖启用该 feature 后，既有 `echo_agent::channels::weixin` 重导出即可访问同一类型，无需 root 转发 feature。`channel-test-support` 会启用 `channels`，不加入 root `full`/`testing` 聚合；显式 all-feature/test 构建仍可能编入它。启用 feature 不改变生产构造的 HTTPS-only 行为，不增加 GUI endpoint 设置。
 
 `demo38_im_channels` 继续演示 QQ/飞书。默认 `AgentChannelHandler` 没有持久 ingress opt-in；把它直接注册到微信或在 wrapper 中补一个假 ACK 会违反接收合同。示例的原编译链仍适用，不能把注释更新当作编译通过。
 

@@ -23,6 +23,8 @@ default = []
 mcp = ["dep:tokio-tungstenite", "echo_core/mcp"]
 lsp = ["echo_core/lsp"]
 channels = ["echo_core/channels", "dep:axum", "dep:tokio-tungstenite", "dep:uuid", "dep:matchit"]
+# Explicit local fixtures for downstream tests; production constructors stay HTTPS-only.
+channel-test-support = ["channels"]
 
 [dependencies]
 echo_core = { version = "0.2.0", path = "../echo-core" }
