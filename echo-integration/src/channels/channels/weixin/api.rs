@@ -72,6 +72,30 @@ impl WeixinApi {
         })
     }
 
+    /// 下游认证回归复用原客户端与 QR 解码；仅显式测试 feature 允许回环 HTTP。
+    #[cfg(any(test, feature = "channel-test-support"))]
+    pub fn for_local_auth_fixture(address: std::net::SocketAddr) -> Result<Self> {
+        Self::for_local_poll_fixture(address)
+    }
+
+    fn qr_origin(&self, origin: &str) -> Result<url::Url> {
+        let origin = validated_origin(origin)?;
+        #[cfg(any(test, feature = "channel-test-support"))]
+        if let Some(fixture) = self.fixture_origin.as_ref() {
+            return Ok(fixture.clone());
+        }
+        Ok(origin)
+    }
+
+    fn qr_status_timeout(&self) -> Duration {
+        #[cfg(any(test, feature = "channel-test-support"))]
+        if self.fixture_origin.is_some() {
+            // 自有回环夹具缩短请求 deadline；生产仍是原 35 秒。
+            return Duration::from_millis(50);
+        }
+        POLL_TIMEOUT
+    }
+
     /// The application may declare its own honest observability identifier.
     /// Protocol compatibility version and host identity are separate values.
     pub fn with_bot_agent(mut self, bot_agent: &str) -> Result<Self> {
@@ -110,7 +134,8 @@ impl WeixinApi {
         {
             return Err(protocol_error("Weixin local credential list is invalid"));
         }
-        let mut url = validated_origin(INITIAL_API_BASE_URL)?
+        let mut url = self
+            .qr_origin(INITIAL_API_BASE_URL)?
             .join("ilink/bot/get_bot_qrcode")
             .map_err(|_| protocol_error("Weixin QR endpoint could not be constructed"))?;
         url.query_pairs_mut().append_pair("bot_type", "3");
@@ -148,7 +173,8 @@ impl WeixinApi {
                 "Weixin verification code must contain digits",
             ));
         }
-        let mut url = validated_origin(&challenge.polling_base_url)?
+        let mut url = self
+            .qr_origin(&challenge.polling_base_url)?
             .join("ilink/bot/get_qrcode_status")
             .map_err(|_| protocol_error("Weixin QR status endpoint could not be constructed"))?;
         url.query_pairs_mut()
@@ -161,7 +187,7 @@ impl WeixinApi {
             .client
             .get(url)
             .headers(self.common_headers())
-            .timeout(POLL_TIMEOUT)
+            .timeout(self.qr_status_timeout())
             .build()
             .map_err(|_| protocol_error("Weixin QR status request could not be constructed"))?;
         let response: QrStatusResponse = self.execute_json(request).await?;
@@ -298,7 +324,7 @@ impl WeixinApi {
             .client
             .execute(request)
             .await
-            .map_err(|_| protocol_error("Weixin HTTPS request failed or timed out"))?;
+            .map_err(|error| request_error(error, "Weixin HTTPS request failed"))?;
         if !response.status().is_success() {
             return Err(protocol_error(
                 "Weixin HTTPS response has a non-success status",
@@ -308,7 +334,7 @@ impl WeixinApi {
         while let Some(chunk) = response
             .chunk()
             .await
-            .map_err(|_| protocol_error("Weixin HTTPS response was interrupted"))?
+            .map_err(|error| request_error(error, "Weixin HTTPS response was interrupted"))?
         {
             if bytes.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
                 return Err(protocol_error(
@@ -319,6 +345,16 @@ impl WeixinApi {
         }
         serde_json::from_slice(&bytes)
             .map_err(|_| protocol_error("Weixin HTTPS response has an invalid protocol payload"))
+    }
+}
+
+// 超时来自 reqwest 的结构化事实；固定文案不保留含 QR/验证码的 URL。
+// 复用原 Io/TimedOut，避免为单个协议扩张 Core 公共错误枚举。
+fn request_error(error: reqwest::Error, message: &'static str) -> echo_core::error::ReactError {
+    if error.is_timeout() {
+        std::io::Error::new(std::io::ErrorKind::TimedOut, "微信 HTTPS 请求超时").into()
+    } else {
+        protocol_error(message)
     }
 }
 
@@ -454,6 +490,69 @@ mod tests {
                 .map_err(|_| protocol_error("fixture server join failed"))??;
         }
         Ok(())
+    }
+
+    async fn assert_typed_request_timeout(after_headers: bool) -> Result<()> {
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .map_err(|_| protocol_error("夹具监听失败"))?;
+        let address = listener
+            .local_addr()
+            .map_err(|_| protocol_error("夹具地址不可用"))?;
+        let (release, released) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener
+                .accept()
+                .await
+                .map_err(|_| protocol_error("夹具接收失败"))?;
+            let mut bytes = [0_u8; 4096];
+            stream
+                .read(&mut bytes)
+                .await
+                .map_err(|_| protocol_error("夹具读取失败"))?;
+            if after_headers {
+                stream
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 1024\r\nConnection: close\r\n\r\n",
+                    )
+                    .await
+                    .map_err(|_| protocol_error("夹具响应头失败"))?;
+            }
+            let _ = released.await;
+            Ok::<(), echo_core::error::ReactError>(())
+        });
+        let api = WeixinApi::for_local_auth_fixture(address)?;
+        let request = api
+            .client
+            .get(format!("http://{address}/?qrcode=fixture-query-private"))
+            .timeout(api.qr_status_timeout())
+            .build()
+            .map_err(|_| protocol_error("夹具请求构造失败"))?;
+        let result = api.execute_json::<Value>(request).await;
+        let _ = release.send(());
+        server
+            .await
+            .map_err(|_| protocol_error("夹具服务结算失败"))??;
+        let error = result
+            .err()
+            .ok_or_else(|| protocol_error("超时被误当成功"))?;
+        assert!(
+            matches!(&error, echo_core::error::ReactError::Io(inner) if inner.kind() == std::io::ErrorKind::TimedOut)
+        );
+        assert!(!format!("{error:?}").contains("fixture-query-private"));
+        assert!(!error.to_string().contains(&address.to_string()));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn qr_timeout_before_response_headers_keeps_typed_timeout_and_redacts_url() -> Result<()>
+    {
+        assert_typed_request_timeout(false).await
+    }
+
+    #[tokio::test]
+    async fn qr_timeout_during_response_body_keeps_typed_timeout_and_redacts_url() -> Result<()> {
+        assert_typed_request_timeout(true).await
     }
 
     #[test]

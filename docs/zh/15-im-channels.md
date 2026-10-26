@@ -496,3 +496,10 @@ Drop manager 不能代替 awaited shutdown。同一插件回调递归等待自�
 # 配置环境变量后
 cargo run -p echo-agent-learning --example demo38_im_channels --features channels
 ```
+### 微信扫码长轮询超时
+
+QR 状态请求到达原 35 秒请求 deadline 时，`WeixinApi` 保留既有 `ReactError::Io` / `ErrorKind::TimedOut`，包括响应体尚未读完时的超时。错误只含固定文案，不保留含二维码或验证码的 URL。协议、认证和 HTTP 拒绝仍走原失败路径；发送的 `Unknown` 收据语义不变，不因此自动重试发送。
+
+宿主自行决定扫码观察重试；框架不增加认证状态机或自动刷新凭据。EKO 复用原 AuthOwner，以同一二维码继续串行观察，保留原绝对过期时间、取消与配置/账号代次检查，不重放已提交的数字码。参考 ZCode 的“超时继续等待”机制，但当前 QR POST、完整账号身份、数码状态和 `-14` 合同保留，不退回其较早的 GET 路线。
+
+显式 `channel-test-support` 的 `WeixinApi::for_local_auth_fixture` 复用现有回环客户端，拒绝非回环地址，只在夹具中将 QR 状态请求 deadline 缩短到 50 毫秒。生产构造仍仅允许 HTTPS，35 秒 deadline 不变。响应头前和响应体中的真实超时回归均已通过，并验证错误不包含请求地址或二维码参数；这是本机回环证据，真实微信扫码和 GUI 验收仍需单独进行。
