@@ -187,6 +187,26 @@ helper（含 exact-attempt 变体）同样保留
 其中当前层数一致，冲突在派发前报错。没有完整 runtime policy 的独立旧调用保留
 原 `policy_from_depth` 行为，不借此更改框架默认上限或引入应用产品常量。
 
+### Run 与下一次尝试指导
+
+复用同一个 Agent/registry 的不同运行可以使用相同的 task ID 和 attempt。
+调用方应从既有 `SubagentCommandIdentity.attempt_identity()` 投影 exact attempt，
+保留 `run_id` 与 `control_scope_id`；`for_run` 以 Run 同时作为默认 control scope，
+显式嵌套运行仍可使用既有 `for_runtime_scope`。同一 scope/Run/task/attempt 的重复
+执行继续拒绝，完成后的有界去重记录不因开始新运行而清空。
+
+在未来 attempt 尚未有 execution ID 时，使用
+`SubagentExecutor::queue_guidance_scoped(scope, run, task, attempt, instruction)`
+把指导加入同一个原 control queue。准入只领取该 scope/Run/task/attempt 的指导一次；
+其它 Run、其它 control scope 和旧的无 scope 队列互不消费。scope、Run、task 不得为空，
+attempt 不得为零，指导不得为空。同一逻辑 attempt 已 active 或 settled 时拒绝追加。
+
+原 `queue_guidance(task, attempt, instruction)` 保持无 scope 的独立调用语义；它不猜测
+当前 Run，也不能给有 scope 的准入提供指导。两种入口共用原队列、锁与准入检查。
+revision、command 幂等及 durable journal 继续由调用方核验，活消息和 interrupt 仍定位
+真实 execution/attempt；排队成功不等于模型已消费或应用了指导。参见
+[ADR 0058](../adr/0058-task-claim-subagent-attempt-control.md)。
+
 所有路径都会先调用配置的 `SubagentPromptCompiler`：
 
 - 具体 Subagent 的工具面完成后调用 `compile_system`，能力说明来自实际注册定义、description

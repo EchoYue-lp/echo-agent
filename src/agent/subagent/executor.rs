@@ -1360,6 +1360,28 @@ impl SubagentExecutor {
             .queue_guidance(task_id, expected_next_attempt, instruction)
     }
 
+    /// Queue guidance in the same control scope and run as a future admission.
+    ///
+    /// The future attempt may not have an execution id yet. This carries its
+    /// logical scope/run identity into the existing queue; admission claims the
+    /// guidance once, without changing the legacy unscoped queue.
+    pub fn queue_guidance_scoped(
+        &self,
+        control_scope_id: &str,
+        run_id: &str,
+        task_id: &str,
+        expected_next_attempt: u32,
+        instruction: impl Into<String>,
+    ) -> std::result::Result<SubagentGuidanceQueueReceipt, SubagentControlError> {
+        self.control_registry.queue_guidance_scoped(
+            control_scope_id,
+            run_id,
+            task_id,
+            expected_next_attempt,
+            instruction,
+        )
+    }
+
     /// Cancel one exact attempt and wait until its dispatch has settled.
     pub async fn interrupt_subagent(
         &self,
@@ -6321,6 +6343,59 @@ mod tests {
             executor.queue_guidance("task-guided", 1, "late"),
             Err(SubagentControlError::AttemptAlreadyStarted { .. })
         ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn controlled_dispatch_claims_scoped_guidance_for_independent_runs() -> Result<()> {
+        let (registry, executor) = make_executor().await;
+        let agent = MockAgent::new("guided")
+            .with_response("done")
+            .with_response("done");
+        registry
+            .register(
+                SubagentDefinition::new("guided", "Guided subagent"),
+                Box::new(agent.clone()),
+            )
+            .await;
+        for (run, instruction) in [("run-a", "只处理甲"), ("run-b", "只处理乙")] {
+            executor
+                .queue_guidance_scoped(run, run, "task-guided", 1, instruction)
+                .map_err(|error| ReactError::Other(error.to_string()))?;
+        }
+
+        for (run, execution, instruction, other_instruction) in [
+            ("run-a", "execution-a", "只处理甲", "只处理乙"),
+            ("run-b", "execution-b", "只处理乙", "只处理甲"),
+        ] {
+            let request = DispatchRequest {
+                agent_name: "guided".to_string(),
+                task: "perform task".to_string(),
+                mode_override: Some(ExecutionMode::Sync),
+                cancel: CancellationToken::new(),
+                parent_agent: "parent".to_string(),
+                parent_context: None,
+                delegation_policy: DispatchRequest::policy_from_depth(0),
+                runtime_context: None,
+                message: None,
+                prompt_payload: None,
+                prompt_context: None,
+                constraints: Vec::new(),
+                background: false,
+            };
+            let identity = SubagentAttemptIdentity::for_run(run, "task-guided", execution, 1)
+                .map_err(|error| ReactError::Other(error.to_string()))?;
+            executor.dispatch_attempt(request, identity).await?;
+            let observed = agent.last_task().unwrap_or_default();
+            assert!(observed.contains("perform task"));
+            assert!(observed.contains("[queued_guidance]"));
+            assert!(observed.contains(instruction));
+            assert!(!observed.contains(other_instruction));
+            assert!(matches!(
+                executor.queue_guidance_scoped(run, run, "task-guided", 1, "late"),
+                Err(SubagentControlError::AttemptAlreadyStarted { .. })
+            ));
+        }
         Ok(())
     }
 

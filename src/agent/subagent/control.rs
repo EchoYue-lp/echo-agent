@@ -995,18 +995,60 @@ impl SubagentControlRegistry {
         expected_next_attempt: u32,
         instruction: impl Into<String>,
     ) -> Result<SubagentGuidanceQueueReceipt, SubagentControlError> {
-        let task_id = task_id.trim();
-        if task_id.is_empty() {
+        self.enqueue_guidance(
+            (
+                None,
+                None,
+                task_id.trim().to_string(),
+                expected_next_attempt,
+            ),
+            instruction,
+        )
+    }
+
+    pub(crate) fn queue_guidance_scoped(
+        &self,
+        control_scope_id: &str,
+        run_id: &str,
+        task_id: &str,
+        expected_next_attempt: u32,
+        instruction: impl Into<String>,
+    ) -> Result<SubagentGuidanceQueueReceipt, SubagentControlError> {
+        if control_scope_id.trim().is_empty() {
+            return Err(SubagentControlError::InvalidIdentity {
+                field: "control_scope_id",
+            });
+        }
+        if run_id.trim().is_empty() {
+            return Err(SubagentControlError::InvalidIdentity { field: "run_id" });
+        }
+        self.enqueue_guidance(
+            (
+                Some(control_scope_id.to_string()),
+                Some(run_id.to_string()),
+                task_id.to_string(),
+                expected_next_attempt,
+            ),
+            instruction,
+        )
+    }
+
+    fn enqueue_guidance(
+        &self,
+        key: ScopedTaskAttemptKey,
+        instruction: impl Into<String>,
+    ) -> Result<SubagentGuidanceQueueReceipt, SubagentControlError> {
+        let (_, _, task_id, expected_next_attempt) = &key;
+        if task_id.trim().is_empty() {
             return Err(SubagentControlError::InvalidIdentity { field: "task_id" });
         }
-        if expected_next_attempt == 0 {
+        if *expected_next_attempt == 0 {
             return Err(SubagentControlError::InvalidIdentity { field: "attempt" });
         }
         let instruction = instruction.into();
         if instruction.trim().is_empty() {
             return Err(SubagentControlError::EmptyInstruction);
         }
-        let key = (None, None, task_id.to_string(), expected_next_attempt);
         let mut state = self
             .state
             .lock()
@@ -1016,14 +1058,16 @@ impl SubagentControlRegistry {
         {
             return Err(SubagentControlError::AttemptAlreadyStarted {
                 task_id: task_id.to_string(),
-                attempt: expected_next_attempt,
+                attempt: *expected_next_attempt,
             });
         }
+        let task_id = task_id.to_string();
+        let attempt = *expected_next_attempt;
         let guidance = state.queued_guidance.entry(key).or_default();
         guidance.push_back(instruction);
         Ok(SubagentGuidanceQueueReceipt {
-            task_id: task_id.to_string(),
-            attempt: expected_next_attempt,
+            task_id,
+            attempt,
             queued_count: guidance.len(),
         })
     }
@@ -1530,6 +1574,110 @@ mod tests {
             Err(SubagentControlError::AttemptAlreadyStarted { .. })
         ));
         admission.settle(SubagentStatus::Completed);
+        Ok(())
+    }
+
+    #[test]
+    fn scoped_guidance_isolated_by_run_and_control_scope() -> Result<(), SubagentControlError> {
+        let registry = Arc::new(SubagentControlRegistry::default());
+        registry.queue_guidance_scoped("scope", "run-a", "task", 1, "仅运行甲")?;
+        registry.queue_guidance_scoped("scope", "run-a", "task", 1, "甲的后续指导")?;
+        registry.queue_guidance_scoped("scope", "run-b", "task", 1, "仅运行乙")?;
+        registry.queue_guidance_scoped("other-scope", "run-a", "task", 1, "仅另一控制域")?;
+        registry.queue_guidance("task", 1, "legacy guidance")?;
+
+        // Neither a different scope nor a different run can consume the queued
+        // instruction, even when task and logical attempt are the same.
+        for (scope, run, execution) in [
+            ("missing-scope", "run-a", "wrong-scope-execution"),
+            ("scope", "missing-run", "wrong-run-execution"),
+        ] {
+            let identity =
+                SubagentAttemptIdentity::for_runtime_scope(scope, run, "task", execution, 1)?;
+            let admission = registry.admit(identity, CancellationToken::new())?;
+            assert!(admission.guidance.is_empty());
+            admission.settle(SubagentStatus::Completed);
+        }
+
+        let run_a = registry.admit(
+            SubagentAttemptIdentity::for_runtime_scope("scope", "run-a", "task", "execution-a", 1)?,
+            CancellationToken::new(),
+        )?;
+        assert_eq!(run_a.guidance, vec!["仅运行甲", "甲的后续指导"]);
+        assert!(matches!(
+            registry.admit(
+                SubagentAttemptIdentity::for_runtime_scope(
+                    "scope",
+                    "run-a",
+                    "task",
+                    "duplicate-execution-a",
+                    1,
+                )?,
+                CancellationToken::new(),
+            ),
+            Err(SubagentControlError::AttemptAlreadyStarted { .. })
+        ));
+
+        // A second run remains admissible while the first run is active.
+        let run_b = registry.admit(
+            SubagentAttemptIdentity::for_runtime_scope("scope", "run-b", "task", "execution-b", 1)?,
+            CancellationToken::new(),
+        )?;
+        assert_eq!(run_b.guidance, vec!["仅运行乙"]);
+        run_a.settle(SubagentStatus::Completed);
+
+        // Settled retention still rejects the same logical attempt, while a
+        // distinct scope using that run/task/attempt remains independent.
+        assert!(matches!(
+            registry.queue_guidance_scoped("scope", "run-a", "task", 1, "late"),
+            Err(SubagentControlError::AttemptAlreadyStarted { .. })
+        ));
+        let other_scope = registry.admit(
+            SubagentAttemptIdentity::for_runtime_scope(
+                "other-scope",
+                "run-a",
+                "task",
+                "other-scope-execution",
+                1,
+            )?,
+            CancellationToken::new(),
+        )?;
+        assert_eq!(other_scope.guidance, vec!["仅另一控制域"]);
+        let legacy = registry.admit(
+            SubagentAttemptIdentity::new("task", "legacy-execution", 1)?,
+            CancellationToken::new(),
+        )?;
+        assert_eq!(legacy.guidance, vec!["legacy guidance"]);
+        run_b.settle(SubagentStatus::Completed);
+        other_scope.settle(SubagentStatus::Completed);
+        legacy.settle(SubagentStatus::Completed);
+        Ok(())
+    }
+
+    #[test]
+    fn scoped_guidance_rejects_invalid_inputs_without_queueing() -> Result<(), SubagentControlError>
+    {
+        let registry = SubagentControlRegistry::default();
+        for (scope, run, task, attempt, expected_field) in [
+            ("  ", "run", "task", 1, "control_scope_id"),
+            ("scope", "  ", "task", 1, "run_id"),
+            ("scope", "run", "  ", 1, "task_id"),
+            ("scope", "run", "task", 0, "attempt"),
+        ] {
+            assert!(matches!(
+                registry.queue_guidance_scoped(scope, run, task, attempt, "instruction"),
+                Err(SubagentControlError::InvalidIdentity { field }) if field == expected_field
+            ));
+        }
+        assert_eq!(
+            registry.queue_guidance_scoped("scope", "run", "task", 1, "  "),
+            Err(SubagentControlError::EmptyInstruction)
+        );
+        let state = registry
+            .state
+            .lock()
+            .map_err(|_| SubagentControlError::StateUnavailable)?;
+        assert!(state.queued_guidance.is_empty());
         Ok(())
     }
 

@@ -115,6 +115,26 @@ Option 4 is adopted.
 Durable command persistence remains a Host/SDK responsibility. Framework live
 control is replayable from durable claims but is not itself a command ledger.
 
+## 2026-10-27：Run 隔离与指导队列接缝
+
+原生 EKO 反例显示，同一 conversation 复用主 Agent 时，应用把已有 Run identity
+投影成无 scope 的 attempt，导致第二个独立 Run 的相同 task/attempt 撞到第一个已
+结算记录。正确边界已由本 ADR 的原 scoped registry 表达：保留同一 durable identity
+的 `attempt_identity()` 投影，不随机改 task ID、不清 settled 账、不重造运行权威。
+
+仅修正 attempt 投影会让原无 scope 的指导队列失配。公开追加
+`SubagentExecutor::queue_guidance_scoped`，显式携带 control scope、Run、task 与未来
+attempt；原 `queue_guidance` 的签名及 None/None 键保留。两入口共用原私有 enqueue、
+mutex、active/settled 检查与 queued guidance 表，准入按已有四元键一次领取，不新增
+mailbox、store 或执行状态。未来 claim 尚不存在时，不要求虚构 execution ID。
+
+替代方案包括清空完成账、为每个 Run 随机化逻辑 task ID、另建按 Run 的指导队列，
+均会损害原去重或产生第二权威，因此不采用。应用继续核验 revision、command 与
+持久事实，live message/interrupt、物理 owner 结算及 retention 不变。跨 Run 的
+active/settled、单独变化 scope/Run、无 scope 正控制和非法输入使用原 registry/dispatch
+回归；应用的真实旧 helper 与转交链路由其独立消费者验收。本次增量不承诺只读
+委派深度、新原生制品、SDK pin、完整矩阵或 main/CI 已通过。
+
 ## Consequences
 
 Events, callbacks, terminal results, and control requests now share the same
