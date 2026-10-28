@@ -2,6 +2,7 @@ pub mod anthropic;
 pub mod anthropic_cache;
 pub(crate) mod client;
 pub mod config;
+pub(crate) mod native_message;
 pub mod openai;
 pub mod responses;
 pub mod thinking_translate;

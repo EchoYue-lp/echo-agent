@@ -37,14 +37,12 @@ ToolManager                      ← 注册表 + 执行器
     └─ to_openai_tools()          ← 序列化为 OpenAI function-calling 格式
 
 内置工具（builtin）：
-    ├─ final_answer              ← Agent 输出最终结果（必须注册）
     ├─ task_create / task_update ← 版本化任务图 CRUD
     ├─ task_list                 ← 读取已提交任务图版本
     ├─ agent_tool                ← 分派任务给已注册 Subagent
     ├─ human_in_loop             ← 向人类请求文本输入
     ├─ recall / search_memory    ← 已批准记忆的 Store 召回
     ├─ remember / forget         ← 安装 MemoryLayerManager 后的 journal 写入
-    └─ think                     ← CoT 显式思维工具（已被 CoT 文本方案替代）
 
 扩展工具（开箱即用）：
     ├─ tools/files       ← 文件操作（原标准 files 块，产物读取独立）
@@ -546,7 +544,6 @@ agent.add_tools(vec![
 
 | 工具名 | 模块 | 说明 |
 |--------|------|------|
-| `final_answer` | builtin | 输出最终结果（自动注册） |
 | `task_create` | builtin | 原子创建任务图或追加任务 |
 | `task_update` | builtin | 应用乐观并发任务图 patch |
 | `task_list` | builtin | 读取已提交任务图版本 |
@@ -698,3 +695,5 @@ Skill 后续激活、资源和脚本保持自身来源；用户级来源不继�
 
 决策与验收边界见 [ADR 0098](../adr/0098-project-file-system-adapter.md)。
 此机制本身不提供 SSH 凭据、连接服务或已经合格的 EKO 远程项目工作流。
+
+原生消息与最终候选不占工具注册项。`think`/`final_answer` 控制工具已退役；详见[原生消息合同](../zh/43-native-message-execution.md)。

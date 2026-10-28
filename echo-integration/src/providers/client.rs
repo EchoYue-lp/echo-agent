@@ -393,66 +393,84 @@ pub(crate) async fn stream_post(
     let request = client.post(url).headers(header_map).json(&body);
     let raw_stream = stream_json_sse(request, model, timeouts, cancel_token).await?;
     Ok(async_stream::try_stream! {
-        let mut terminal: Option<ChatCompletionChunk> = None;
-        let mut stream_usage = None;
-        futures::pin_mut!(raw_stream);
-        while let Some(event) = raw_stream.next().await {
-            match event? {
-                JsonSseEvent::Done => {
-                    let mut completed = terminal.ok_or_else(|| LlmError::InvalidResponse(
-                        "Chat Completions stream ended with [DONE] before a finish reason".to_string()
-                    ))?;
-                    completed.usage = stream_usage.or(completed.usage);
-                    yield completed;
-                    return;
-                }
-                JsonSseEvent::Data(value) => {
-                    let mut chunk = serde_json::from_value::<ChatCompletionChunk>(value)
-                        .map_err(|error| LlmError::InvalidResponse(format!("invalid Chat Completions SSE event: {error}")))?;
-                    if let Some(usage) = chunk.usage.take() {
-                        stream_usage = Some(usage);
+            let mut terminal: Option<ChatCompletionChunk> = None;
+            let mut stream_usage = None;
+            let mut accumulated = echo_core::llm::types::Message::assistant(String::new());
+            let mut text = String::new();
+            let mut calls: std::collections::BTreeMap<u32, echo_core::llm::types::ToolCall> = std::collections::BTreeMap::new();
+            futures::pin_mut!(raw_stream);
+            while let Some(event) = raw_stream.next().await {
+                match event? {
+                    JsonSseEvent::Done => {
+                        let mut completed = terminal.ok_or_else(|| LlmError::InvalidResponse(
+                            "Chat Completions stream ended with [DONE] before a finish reason".to_string()
+                        ))?;
+                        accumulated.content = echo_core::llm::types::MessageContent::Text(text);
+                        accumulated.tool_calls = (!calls.is_empty()).then(|| calls.into_values().collect());
+                        super::native_message::validate_completion(&accumulated, completed.choices.first().and_then(|choice| choice.finish_reason.as_deref()))?;
+                        completed.usage = stream_usage.or(completed.usage);
+                        yield completed;
+                        return;
                     }
-                    if terminal.is_some() {
-                        if !chunk.choices.is_empty() {
-                            Err(LlmError::InvalidResponse("Chat Completions emitted choices after its finish reason".to_string()))?;
+                    JsonSseEvent::Data(value) => {
+                        let mut chunk = serde_json::from_value::<ChatCompletionChunk>(value)
+                            .map_err(|error| LlmError::InvalidResponse(format!("invalid Chat Completions SSE event: {error}")))?;
+                        if let Some(usage) = chunk.usage.take() {
+                            stream_usage = Some(usage);
                         }
-                        continue;
-                    }
-                    let finish = chunk.choices.first().and_then(|choice| choice.finish_reason.as_deref());
-                    if let Some(reason) = finish {
-                        if !matches!(reason, "stop" | "tool_calls" | "function_call") {
-                            Err(LlmError::InvalidResponse(format!(
-                                "Chat Completions stream ended with non-success finish reason '{reason}'"
-                            )))?;
-                        }
-                        let has_delta = chunk.choices.first().is_some_and(|choice| {
-                            let delta = &choice.delta;
-                            delta.role.is_some() || delta.content.is_some()
-                                || delta.reasoning_content.is_some()
-                                || delta.reasoning_blocks.is_some() || delta.tool_calls.is_some()
-                        });
-                        if has_delta {
-                            let mut progress = chunk.clone();
-                            if let Some(choice) = progress.choices.first_mut() {
-                                choice.finish_reason = None;
+                        if terminal.is_some() {
+                            if !chunk.choices.is_empty() {
+                                Err(LlmError::InvalidResponse("Chat Completions emitted choices after its finish reason".to_string()))?;
                             }
-                            progress.usage = None;
-                            yield progress;
+                            continue;
                         }
-                        if let Some(choice) = chunk.choices.first_mut() {
-                            choice.delta = Default::default();
+                        if let Some(choice) = chunk.choices.first() {
+                            if let Some(content) = &choice.delta.content { text.push_str(content); }
+                            for delta in choice.delta.tool_calls.as_deref().unwrap_or_default() {
+                                let call = calls.entry(delta.index).or_insert_with(|| echo_core::llm::types::ToolCall {
+    provider_source: None, id:String::new(),call_type:"function".into(),function:echo_core::llm::types::FunctionCall{name:String::new(),arguments:String::new()} });
+                                if let Some(id) = &delta.id { if !call.id.is_empty() && call.id != *id { Err(LlmError::InvalidResponse("tool call identity changed".into()))?; } call.id=id.clone(); }
+                                if let Some(function) = &delta.function {
+                                    if let Some(name)=&function.name { call.function.name.push_str(name); }
+                                    if let Some(arguments)=&function.arguments { call.function.arguments.push_str(arguments); }
+                                }
+                            }
                         }
-                        terminal = Some(chunk);
-                    } else if !chunk.choices.is_empty() {
-                        yield chunk;
+                        let finish = chunk.choices.first().and_then(|choice| choice.finish_reason.as_deref());
+                        if let Some(reason) = finish {
+                            if !matches!(reason, "stop" | "tool_calls" | "function_call") {
+                                Err(LlmError::InvalidResponse(format!(
+                                    "Chat Completions stream ended with non-success finish reason '{reason}'"
+                                )))?;
+                            }
+                            let has_delta = chunk.choices.first().is_some_and(|choice| {
+                                let delta = &choice.delta;
+                                delta.role.is_some() || delta.content.is_some()
+                                    || delta.reasoning_content.is_some()
+                                    || delta.reasoning_blocks.is_some() || delta.tool_calls.is_some()
+                            });
+                            if has_delta {
+                                let mut progress = chunk.clone();
+                                if let Some(choice) = progress.choices.first_mut() {
+                                    choice.finish_reason = None;
+                                }
+                                progress.usage = None;
+                                yield progress;
+                            }
+                            if let Some(choice) = chunk.choices.first_mut() {
+                                choice.delta = Default::default();
+                            }
+                            terminal = Some(chunk);
+                        } else if !chunk.choices.is_empty() {
+                            yield chunk;
+                        }
                     }
                 }
             }
-        }
-        Err(LlmError::InvalidResponse(
-            "Chat Completions stream reached SSE EOF before [DONE] and a finish reason".to_string()
-        ))?;
-    })
+            Err(LlmError::InvalidResponse(
+                "Chat Completions stream reached SSE EOF before [DONE] and a finish reason".to_string()
+            ))?;
+        })
 }
 
 /// Send a JSON request and decode its SSE response without assuming a provider
@@ -954,6 +972,574 @@ mod tests {
         Ok(items)
     }
 
+    async fn collect_provider_json(
+        provider: TestProvider,
+        body: serde_json::Value,
+    ) -> Result<echo_core::llm::ChatResponse> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let body = body.to_string();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await?;
+            let mut buffer = vec![0u8; 8192];
+            let _read = socket.read(&mut buffer).await?;
+            socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",body.len()).as_bytes()).await?;
+            socket.write_all(body.as_bytes()).await?;
+            socket.flush().await
+        });
+        let client = test_provider_client(provider, format!("http://{address}"))?;
+        let result = client
+            .chat(ChatRequest::new(vec![Message::user("hello".into())]))
+            .await;
+        server
+            .await
+            .map_err(|error| LlmError::NetworkError(error.to_string()))??;
+        result
+    }
+
+    fn native_text(
+        blocks: impl IntoIterator<Item = echo_core::agent::AssistantMessageBlock>,
+    ) -> std::collections::BTreeMap<String, (echo_core::agent::AssistantPhase, String)> {
+        let mut values = std::collections::BTreeMap::new();
+        for block in blocks {
+            let value = values
+                .entry(block.block_id)
+                .or_insert_with(|| (block.phase, String::new()));
+            value.1.push_str(&block.delta);
+        }
+        values
+    }
+
+    #[tokio::test]
+    async fn provider_native_responses_stream_nonstream_preserve_multiple_messages_and_tools()
+    -> Result<()> {
+        use serde_json::{Value, json};
+        let mut full: Value = serde_json::from_str(include_str!(
+            "../../fixtures/providers/responses/multi-output.json"
+        ))
+        .map_err(|error| LlmError::InvalidResponse(error.to_string()))?;
+        full.pointer_mut("/output/0/content")
+            .and_then(Value::as_array_mut)
+            .ok_or_else(|| LlmError::InvalidResponse("fixture content missing".into()))?
+            .insert(
+                0,
+                serde_json::json!({"type":"output_text","text":"","annotations":[]}),
+            );
+        let response = collect_provider_json(TestProvider::Responses, full.clone()).await?;
+        let mut events =
+            vec![json!({"type":"response.created","response":{"id":"resp_fixture_multi"}})];
+        for (index, item) in full
+            .get("output")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .enumerate()
+        {
+            let id = item
+                .get("id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| LlmError::InvalidResponse("fixture id missing".into()))?;
+            events.push(
+                json!({"type":"response.output_item.added","output_index":index,"item":item}),
+            );
+            if item.get("type").and_then(Value::as_str) == Some("message") {
+                for (content_index, part) in item
+                    .get("content")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .enumerate()
+                {
+                    let text = part.get("text").and_then(Value::as_str).unwrap_or_default();
+                    events.push(json!({"type":"response.output_text.delta","output_index":index,"content_index":content_index,"item_id":id,"delta":text}));
+                    events.push(json!({"type":"response.output_text.done","output_index":index,"content_index":content_index,"item_id":id,"text":text}));
+                }
+            } else if item.get("type").and_then(Value::as_str) == Some("reasoning") {
+                for (summary_index, part) in item
+                    .get("summary")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .enumerate()
+                {
+                    let text = part.get("text").and_then(Value::as_str).unwrap_or_default();
+                    events.push(json!({"type":"response.reasoning_summary_text.delta","output_index":index,"summary_index":summary_index,"item_id":id,"delta":text}));
+                    events.push(json!({"type":"response.reasoning_summary_text.done","output_index":index,"summary_index":summary_index,"item_id":id,"text":text}));
+                }
+            }
+            events
+                .push(json!({"type":"response.output_item.done","output_index":index,"item":item}));
+        }
+        events.push(json!({"type":"response.completed","response":full}));
+        let encoded = events.iter().map(Value::to_string).collect::<Vec<_>>();
+        let borrowed = encoded.iter().map(String::as_str).collect::<Vec<_>>();
+        let chunks = collect_provider_sse(TestProvider::Responses, &borrowed)
+            .await?
+            .into_iter()
+            .collect::<Result<Vec<_>>>()?;
+        assert_eq!(response.finish_reason.as_deref(), Some("tool_calls"));
+        assert_eq!(
+            chunks.iter().filter(|c| c.finish_reason.is_some()).count(),
+            1
+        );
+        assert_eq!(
+            chunks.last().and_then(|c| c.finish_reason.as_deref()),
+            Some("tool_calls")
+        );
+        let stream_blocks = chunks
+            .iter()
+            .flat_map(|c| c.delta.assistant_blocks.clone().unwrap_or_default())
+            .collect::<Vec<_>>();
+        assert!(stream_blocks.windows(2).all(|pair| {
+            pair.first()
+                .zip(pair.get(1))
+                .is_none_or(|(a, b)| a.sequence < b.sequence)
+        }));
+        assert_eq!(
+            native_text(stream_blocks),
+            native_text(
+                response
+                    .message
+                    .assistant_blocks
+                    .clone()
+                    .unwrap_or_default()
+            )
+        );
+        assert!(
+            response
+                .message
+                .assistant_blocks
+                .as_ref()
+                .is_some_and(|blocks| blocks
+                    .iter()
+                    .any(|b| b.phase == echo_core::agent::AssistantPhase::Unknown
+                        && b.delta == "工具结果已读取。"))
+        );
+        let tools = chunks
+            .iter()
+            .flat_map(|c| c.delta.tool_calls.as_deref().unwrap_or_default())
+            .filter_map(|c| c.id.as_deref())
+            .collect::<Vec<_>>();
+        assert_eq!(tools, vec!["call_1", "call_2"]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn provider_native_nonstream_rejects_empty_reasoning_only_and_truncated() -> Result<()> {
+        use serde_json::json;
+        let cases = [
+            (
+                TestProvider::OpenAi,
+                json!({"id":"chat_empty","choices":[{"message":{"role":"assistant","content":""},"finish_reason":"stop"}]}),
+            ),
+            (
+                TestProvider::OpenAi,
+                json!({"id":"chat_cut","choices":[{"message":{"role":"assistant","content":"partial"},"finish_reason":"length"}]}),
+            ),
+            (
+                TestProvider::Responses,
+                json!({"id":"resp_empty","status":"completed","output":[]}),
+            ),
+            (
+                TestProvider::Responses,
+                json!({"id":"resp_reasoning","status":"completed","output":[{"type":"reasoning","id":"rs_1","encrypted_content":"opaque","summary":[]}]}),
+            ),
+            (
+                TestProvider::Anthropic,
+                json!({"id":"msg_empty","content":[],"stop_reason":"end_turn"}),
+            ),
+            (
+                TestProvider::Anthropic,
+                json!({"id":"msg_cut","content":[{"type":"text","text":"partial"}],"stop_reason":"max_tokens"}),
+            ),
+            (
+                TestProvider::Anthropic,
+                json!({"id":"msg_unknown","content":[{"type":"text","text":"done"}],"stop_reason":"future_reason"}),
+            ),
+        ];
+        for (provider, body) in cases {
+            assert!(
+                collect_provider_json(provider, body).await.is_err(),
+                "{} accepted invalid completion",
+                provider.name()
+            );
+        }
+        Ok(())
+    }
+
+    async fn provider_http_history_roundtrip(
+        provider: TestProvider,
+        response: serde_json::Value,
+        from_stream: Option<Message>,
+    ) -> Result<(Message, Vec<serde_json::Value>)> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let body = response.to_string();
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for _ in 0..2 {
+                let (mut socket, _) = listener.accept().await?;
+                let mut bytes = Vec::new();
+                loop {
+                    let count = socket.read_buf(&mut bytes).await?;
+                    if count == 0 {
+                        return Err::<Vec<serde_json::Value>, echo_core::error::ReactError>(
+                            LlmError::InvalidResponse("HTTP fixture request truncated".into())
+                                .into(),
+                        );
+                    }
+                    let text = match std::str::from_utf8(&bytes) {
+                        Ok(text) => text,
+                        Err(error) if error.error_len().is_none() => continue,
+                        Err(error) => {
+                            return Err(LlmError::InvalidResponse(error.to_string()).into());
+                        }
+                    };
+                    if let Some((headers, payload)) = text.split_once("\r\n\r\n") {
+                        let length = headers
+                            .lines()
+                            .find_map(|line| {
+                                line.split_once(':')
+                                    .filter(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                                    .map(|(_, value)| value.trim().parse::<usize>())
+                            })
+                            .transpose()
+                            .map_err(|error| LlmError::InvalidResponse(error.to_string()))?
+                            .ok_or_else(|| {
+                                LlmError::InvalidResponse(
+                                    "HTTP fixture omitted Content-Length".into(),
+                                )
+                            })?;
+                        if payload.len() >= length {
+                            requests.push(
+                                serde_json::from_str(payload).map_err(|error| {
+                                    LlmError::InvalidResponse(error.to_string())
+                                })?,
+                            );
+                            break;
+                        }
+                    }
+                }
+                socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",body.len()).as_bytes()).await?;
+                socket.write_all(body.as_bytes()).await?;
+                socket.flush().await?;
+            }
+            Ok(requests)
+        });
+        let client = test_provider_client(provider, format!("http://{address}"))?;
+        let result = async {
+            let response = client
+                .chat(ChatRequest::new(vec![Message::user("request".into())]))
+                .await?;
+            let mut history = from_stream.unwrap_or(response.message);
+            let original = history.clone();
+            history.execution_status = Some(echo_core::agent::ExecutionStatus {
+                adapter_generated: false,
+                execution_id: "runtime-only".into(),
+                request_id: Some("runtime-request".into()),
+                sequence: 5,
+                phase: echo_core::agent::AgentPhase::Thinking,
+                status: echo_core::agent::ExecutionStatusKind::Candidate,
+                reason: None,
+            });
+            history.approved_assistant_blocks = history
+                .assistant_blocks
+                .as_ref()
+                .and_then(|blocks| blocks.first())
+                .map(|block| {
+                    let mut approved = block.clone();
+                    approved.block_id = "runtime:assistant:final".into();
+                    approved.delta = "APPROVED_RUNTIME_ONLY".into();
+                    approved.provider = Some("runtime".into());
+                    vec![approved]
+                });
+            let bytes = serde_json::to_vec(&history)
+                .map_err(|error| LlmError::InvalidResponse(error.to_string()))?;
+            let restored: Message = serde_json::from_slice(&bytes)
+                .map_err(|error| LlmError::InvalidResponse(error.to_string()))?;
+            client
+                .chat(ChatRequest::new(vec![
+                    Message::user("request".into()),
+                    restored,
+                ]))
+                .await?;
+            Ok::<Message, echo_core::error::ReactError>(original)
+        }
+        .await;
+        match result {
+            Ok(original) => {
+                let requests = server
+                    .await
+                    .map_err(|error| LlmError::NetworkError(error.to_string()))??;
+                Ok((original, requests))
+            }
+            Err(error) => {
+                server.abort();
+                let _settled = server.await;
+                Err(error)
+            }
+        }
+    }
+
+    fn has_runtime_wire_fields(value: &serde_json::Value) -> bool {
+        match value {
+            serde_json::Value::Object(fields) => fields.iter().any(|(key, value)| {
+                matches!(
+                    key.as_str(),
+                    "execution_status"
+                        | "approved_assistant_blocks"
+                        | "assistant_blocks"
+                        | "provider_source"
+                ) || has_runtime_wire_fields(value)
+            }),
+            serde_json::Value::Array(values) => values.iter().any(has_runtime_wire_fields),
+            _ => false,
+        }
+    }
+
+    #[tokio::test]
+    async fn provider_native_v4_http_refusal_tool_order_roundtrip() -> Result<()> {
+        use serde_json::Value;
+        let mut raw: Value = serde_json::from_str(include_str!(
+            "../../fixtures/providers/responses/refusal-tool-roundtrip.json"
+        ))
+        .map_err(|error| LlmError::InvalidResponse(error.to_string()))?;
+        raw.pointer_mut("/output/0/content")
+            .and_then(Value::as_array_mut)
+            .ok_or_else(|| LlmError::InvalidResponse("fixture content missing".into()))?
+            .insert(
+                0,
+                serde_json::json!({"type":"output_text","text":"","annotations":[]}),
+            );
+        let (original, requests) =
+            provider_http_history_roundtrip(TestProvider::Responses, raw, None).await?;
+        assert!(original.execution_status.is_none());
+        assert!(original.approved_assistant_blocks.is_none());
+        let request = requests
+            .get(1)
+            .ok_or_else(|| LlmError::InvalidResponse("second HTTP request missing".into()))?;
+        assert!(
+            !has_runtime_wire_fields(request),
+            "runtime metadata escaped into Responses request"
+        );
+        let items = request
+            .get("input")
+            .and_then(Value::as_array)
+            .ok_or_else(|| LlmError::InvalidResponse("Responses input missing".into()))?;
+        let native = items
+            .iter()
+            .filter(|item| item.get("role").and_then(Value::as_str) != Some("user"))
+            .collect::<Vec<_>>();
+        let kinds = native
+            .iter()
+            .filter_map(|item| item.get("type").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            kinds,
+            vec![
+                "message",
+                "function_call",
+                "reasoning",
+                "message",
+                "function_call"
+            ]
+        );
+        assert_eq!(
+            native
+                .first()
+                .and_then(|item| item.get("content"))
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(3)
+        );
+        assert_eq!(
+            native
+                .first()
+                .and_then(|item| item.get("content"))
+                .and_then(Value::as_array)
+                .and_then(|parts| parts.first())
+                .and_then(|part| part.get("text"))
+                .and_then(Value::as_str),
+            Some("")
+        );
+        assert_eq!(
+            native
+                .first()
+                .and_then(|item| item.get("id"))
+                .and_then(Value::as_str),
+            Some("msg_before")
+        );
+        assert_eq!(
+            native
+                .first()
+                .and_then(|item| item.get("phase"))
+                .and_then(Value::as_str),
+            Some("commentary")
+        );
+        assert_eq!(
+            native
+                .first()
+                .and_then(|item| item.get("content"))
+                .and_then(Value::as_array)
+                .and_then(|parts| parts.get(2))
+                .and_then(|part| part.get("type"))
+                .and_then(Value::as_str),
+            Some("refusal")
+        );
+        assert_eq!(
+            native
+                .first()
+                .and_then(|item| item.get("content"))
+                .and_then(Value::as_array)
+                .and_then(|parts| parts.get(2))
+                .and_then(|part| part.get("refusal"))
+                .and_then(Value::as_str),
+            Some("保留拒绝块")
+        );
+        assert_eq!(
+            native
+                .get(1)
+                .and_then(|item| item.get("id"))
+                .and_then(Value::as_str),
+            Some("fc_before")
+        );
+        assert_eq!(
+            native
+                .get(2)
+                .and_then(|item| item.get("encrypted_content"))
+                .and_then(Value::as_str),
+            Some("opaque-byte-for-byte")
+        );
+        assert_eq!(
+            native
+                .get(3)
+                .and_then(|item| item.get("phase"))
+                .and_then(Value::as_str),
+            Some("future_provider_phase")
+        );
+        assert_eq!(
+            native
+                .get(4)
+                .and_then(|item| item.get("call_id"))
+                .and_then(Value::as_str),
+            Some("call_after")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn provider_native_v4_http_runtime_fields_are_not_wire_or_provider_facts() -> Result<()> {
+        use serde_json::json;
+        let spoof = json!({"execution_id":"spoof-provider","request_id":"chat_spoof","sequence":99,"phase":"Terminal","status":"settled","reason":null});
+        let cases = [
+            (
+                TestProvider::OpenAi,
+                json!({"id":"chat_spoof","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"wire answer","execution_status":spoof,"approved_assistant_blocks":[]}}]}),
+            ),
+            (
+                TestProvider::Anthropic,
+                json!({"id":"msg_wire","content":[{"type":"thinking","thinking":"private","signature":"native-sig"},{"type":"text","text":"wire answer"}],"stop_reason":"end_turn","execution_status":spoof}),
+            ),
+        ];
+        for (provider, raw) in cases {
+            let (original, requests) = provider_http_history_roundtrip(provider, raw, None).await?;
+            assert!(
+                original.execution_status.is_none(),
+                "{} trusted provider runtime status",
+                provider.name()
+            );
+            assert!(
+                original.approved_assistant_blocks.is_none(),
+                "{} trusted provider approved content",
+                provider.name()
+            );
+            let request = requests
+                .get(1)
+                .ok_or_else(|| LlmError::InvalidResponse("second HTTP request missing".into()))?;
+            assert!(
+                !has_runtime_wire_fields(request),
+                "{} serialized runtime fields",
+                provider.name()
+            );
+            assert!(!request.to_string().contains("APPROVED_RUNTIME_ONLY"));
+            if matches!(provider, TestProvider::Anthropic) {
+                assert!(request.to_string().contains("native-sig"));
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn provider_native_v4_http_late_phase_stream_roundtrip() -> Result<()> {
+        use serde_json::{Value, json};
+        for phase_on_item in [true, false] {
+            let full = json!({"id":"resp_late","status":"completed","output":[{"type":"message","id":"msg_late","phase":"final_answer","status":"completed","content":[{"type":"output_text","text":"answer","annotations":[]}]}]});
+            let mut events = vec![
+                json!({"type":"response.created","response":{"id":"resp_late"}}),
+                json!({"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_late","content":[]}}),
+                json!({"type":"response.output_text.delta","output_index":0,"content_index":0,"item_id":"msg_late","delta":"answer"}),
+                json!({"type":"response.output_text.done","output_index":0,"content_index":0,"item_id":"msg_late","text":"answer"}),
+                json!({"type":"response.output_item.done","output_index":0,"item":{"type":"message","id":"msg_late","phase":"final_answer","status":"completed","content":[{"type":"output_text","text":"answer","annotations":[]}]}}),
+                json!({"type":"response.completed","response":full}),
+            ];
+            if !phase_on_item {
+                for event in &mut events {
+                    if event.get("type").and_then(Value::as_str)
+                        == Some("response.output_item.done")
+                        && let Some(item) = event.get_mut("item").and_then(Value::as_object_mut)
+                    {
+                        item.remove("phase");
+                    }
+                }
+            }
+            let encoded = events.iter().map(Value::to_string).collect::<Vec<_>>();
+            let refs = encoded.iter().map(String::as_str).collect::<Vec<_>>();
+            let chunks = collect_provider_sse(TestProvider::Responses, &refs)
+                .await?
+                .into_iter()
+                .collect::<Result<Vec<_>>>()?;
+            let blocks = chunks
+                .iter()
+                .flat_map(|chunk| chunk.delta.assistant_blocks.clone().unwrap_or_default())
+                .collect::<Vec<_>>();
+            assert!(
+                blocks
+                    .iter()
+                    .filter(|block| block.complete)
+                    .all(|block| block.phase == echo_core::agent::AssistantPhase::FinalAnswer)
+            );
+            assert!(blocks.last().is_some_and(|block| {
+                block.complete
+                    && block.phase == echo_core::agent::AssistantPhase::FinalAnswer
+                    && block
+                        .provider_source
+                        .as_ref()
+                        .and_then(|source| source.phase.as_deref())
+                        == Some("final_answer")
+            }));
+            let mut history = Message::assistant("answer".into());
+            history.assistant_blocks = Some(blocks);
+            let (_, requests) =
+                provider_http_history_roundtrip(TestProvider::Responses, full, Some(history))
+                    .await?;
+            let message = requests
+                .get(1)
+                .and_then(|request| request.get("input"))
+                .and_then(Value::as_array)
+                .and_then(|items| {
+                    items
+                        .iter()
+                        .find(|item| item.get("role").and_then(Value::as_str) == Some("assistant"))
+                })
+                .ok_or_else(|| LlmError::InvalidResponse("native replay message omitted".into()))?;
+            assert_eq!(
+                message.get("phase").and_then(Value::as_str),
+                Some("final_answer")
+            );
+        }
+        Ok(())
+    }
+
     #[tokio::test]
     async fn provider_streams_require_semantic_completion_after_partial_output() -> Result<()> {
         let cases: &[(TestProvider, &[&str])] = &[
@@ -972,7 +1558,9 @@ mod tests {
                 TestProvider::Anthropic,
                 &[
                     r#"{"type":"message_start","message":{"usage":{"input_tokens":2,"output_tokens":0}}}"#,
+                    r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
                     r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"partial"}}"#,
+                    r#"{"type":"content_block_stop","index":0}"#,
                     r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}"#,
                 ],
             ),
@@ -1024,7 +1612,9 @@ mod tests {
                 TestProvider::Anthropic,
                 &[
                     r#"{"type":"message_start","message":{"usage":{"input_tokens":2,"output_tokens":0}}}"#,
+                    r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
                     r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"done"}}"#,
+                    r#"{"type":"content_block_stop","index":0}"#,
                     r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}"#,
                     r#"{"type":"message_stop"}"#,
                 ],
@@ -1033,7 +1623,7 @@ mod tests {
                 TestProvider::Responses,
                 &[
                     r#"{"type":"response.output_text.delta","item_id":"msg_1","output_index":0,"content_index":0,"delta":"done"}"#,
-                    r#"{"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[],"usage":{"input_tokens":2,"output_tokens":1,"total_tokens":3}}}"#,
+                    r#"{"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"done"}]}],"usage":{"input_tokens":2,"output_tokens":1,"total_tokens":3}}}"#,
                 ],
             ),
         ];

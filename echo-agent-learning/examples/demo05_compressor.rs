@@ -139,7 +139,7 @@ async fn main() -> Result<()> {
             ),
             PermissionRule::allow(
                 RuleMatcher::Pattern {
-                    pattern: "final_answer".to_string(),
+                    pattern: "task_list".to_string(),
                 },
                 RuleSource::Session,
             ),
@@ -153,7 +153,7 @@ async fn main() -> Result<()> {
 2. 独立的费用计算任务不设依赖，可以并行执行；汇总类任务依赖所有费用任务
 3. 使用 add / subtract / multiply 工具完成计算
 4. 所有费用算出后，使用 divide 工具计算人均分摊金额
-5. 最后用 final_answer 给出完整的费用报告
+5. 最后以原生正文给出完整的费用报告
 
 **重要规则**：
 - 每次回复尽可能并行调用多个工具
@@ -213,7 +213,7 @@ async fn main() -> Result<()> {
         .execute(
             "现在只做一件事：使用 divide 工具计算 15720 / 5，\
 不要心算，不要改用其他工具，也不要跳过审批。\
-拿到 divide 的结果后，再用 final_answer 简短返回该结果。",
+拿到 divide 的结果后，再以原生正文简短返回该结果。",
         )
         .await?;
     if approval_validation.trim().is_empty() {

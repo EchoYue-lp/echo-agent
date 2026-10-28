@@ -1,12 +1,28 @@
 # ADR 0090: Retire only A2A and LSP after consumers remove their dependencies
 
-## Status
+## Status（2026-10-24 历史原记录）
 
 Accepted product direction on 2026-10-24; implementation has not started in
 this documentation contribution. At framework baseline
 `51726454985fd6f064b21a7e9c539e22d494c987`, A2A and LSP still exist and remain
 available. This record neither removes an API nor proves consumer migration,
 merged-main CI, or release acceptance.
+
+## 2026-10-28 后继源码实施同步
+
+本节与已批准的完整F30物理删除包共同采用，采用前须由Framework唯一writer核对真实source。
+A2A／LSP的feature、模块、公开facade、专属example及LSP插件专属字段退出，不使用空成功shim。
+旧`lsp.yaml`仍由原cold prepare的`PreparedPluginDocument`冻结、hash并在同generation私有
+容器持有，通用diagnostics保完整错误/路径/身份；缓存和invalidation仍原owner。健康同级
+组件与publication/rollback/shutdown保留，ProjectRoot/Instruction/scope及其它合理API不删。
+SDK接入此删后源时应只原样投影diagnostics，不再依赖`lsp_config_file`或追加自造退役事实。
+
+EKO独立TUI/REPL/CLI/JSONL退役属应用包；GUI内置终端、Agent shell、桌面最小参数、IM、
+cron、共享恢复和独立SDK Host stdio继续保留。没有新增executor、Store、CRUD或权限闸。
+
+以下原5172645基线表与早期桥接段落均属历史对照，不再表示当前可调用API。固定tag/分支、
+Exa独立提交与用户数据不改。源码采用／文档同步与删后构建、正常锁、依赖策略、SDK正式
+删除源Git pin、native、main CI和发布是独立资格；本节不据旧focused或受控Host宣告完成。
 
 ## Context and authority
 
@@ -89,12 +105,12 @@ separately; source reachability does not constitute a live-service test.
 | Disposition | Source and symbols | Boundary to close during implementation |
 | --- | --- | --- |
 | Retire A2A feature/facade | [Cargo.toml](../../Cargo.toml): `a2a`, `full`, docs.rs feature set; [src/lib.rs](../../src/lib.rs): `pub mod a2a` and prelude A2A re-exports | Remove feature requests and exports together; assess A2A-only `axum`/`jsonwebtoken` dependencies from actual users, not package names |
-| Retire A2A client/server and values | [src/a2a/mod.rs](../../src/a2a/mod.rs): `A2AClient`, `A2AServer`, `serve`, `serve_with_auth`, JWT and value re-exports; sibling `client.rs`, `server.rs`, `serve.rs`, `auth.rs`, `types.rs` | Includes discovery, task send/get/cancel/stream, HTTP/SSE and authentication; `serve.rs` mounts `/.well-known/agent.json`, `/`, `/health`, `/ready`. Do not retain empty facades or callable controllers |
-| Retire LSP feature/facade | [Cargo.toml](../../Cargo.toml): `lsp`, `full`, docs.rs set; [echo-core/Cargo.toml](../../echo-core/Cargo.toml): `lsp`; [echo-integration/Cargo.toml](../../echo-integration/Cargo.toml): `lsp`; [src/lib.rs](../../src/lib.rs), [echo-core/src/lib.rs](../../echo-core/src/lib.rs), [echo-integration/src/lib.rs](../../echo-integration/src/lib.rs): gated modules; [src/lsp.rs](../../src/lsp.rs): public re-exports | Remove the whole exported capability, not only the root feature flag |
-| Retire LSP types and process owner | [echo-core/src/lsp/mod.rs](../../echo-core/src/lsp/mod.rs): `LspClient`, `LspError`, `LspResult`, protocol values; [echo-integration/src/lsp/mod.rs](../../echo-integration/src/lsp/mod.rs): `StdioLspClient`, `LspConfig`, `LspManager`; sibling `client.rs`, `config.rs`, `jsonrpc.rs`, `manager.rs` | Includes language-server configuration/discovery, requests/diagnostics, child lifecycle and shutdown; preserve unrelated MCP/ACP process owners |
-| Retire five LSP tools | [src/tools/mod.rs](../../src/tools/mod.rs): `pub mod lsp`; [src/tools/lsp.rs](../../src/tools/lsp.rs): `LspDiagnosticsTool`, `LspGotoDefinitionTool`, `LspFindReferencesTool`, `LspHoverTool`, `LspStatusTool`, `register_lsp_tools`, `SharedLspManager` | Wire names are `lsp_diagnostics`, `lsp_goto_definition`, `lsp_find_references`, `lsp_hover`, `lsp_status`; `register_lsp_tools` is a helper, while EKO actually constructs the five tools itself |
+| Retire A2A client/server and values | `src/a2a/mod.rs`（退役前路径）: `A2AClient`, `A2AServer`, `serve`, `serve_with_auth`, JWT and value re-exports; sibling `client.rs`, `server.rs`, `serve.rs`, `auth.rs`, `types.rs` | Includes discovery, task send/get/cancel/stream, HTTP/SSE and authentication; `serve.rs` mounts `/.well-known/agent.json`, `/`, `/health`, `/ready`. Do not retain empty facades or callable controllers |
+| Retire LSP feature/facade | [Cargo.toml](../../Cargo.toml): `lsp`, `full`, docs.rs set; [echo-core/Cargo.toml](../../echo-core/Cargo.toml): `lsp`; [echo-integration/Cargo.toml](../../echo-integration/Cargo.toml): `lsp`; [src/lib.rs](../../src/lib.rs), [echo-core/src/lib.rs](../../echo-core/src/lib.rs), [echo-integration/src/lib.rs](../../echo-integration/src/lib.rs): gated modules; `src/lsp.rs`（退役前路径）: public re-exports | Remove the whole exported capability, not only the root feature flag |
+| Retire LSP types and process owner | `echo-core/src/lsp/mod.rs`（退役前路径）: `LspClient`, `LspError`, `LspResult`, protocol values; `echo-integration/src/lsp/mod.rs`（退役前路径）: `StdioLspClient`, `LspConfig`, `LspManager`; sibling `client.rs`, `config.rs`, `jsonrpc.rs`, `manager.rs` | Includes language-server configuration/discovery, requests/diagnostics, child lifecycle and shutdown; preserve unrelated MCP/ACP process owners |
+| Retire five LSP tools | [src/tools/mod.rs](../../src/tools/mod.rs): `pub mod lsp`; `src/tools/lsp.rs`（退役前路径）: `LspDiagnosticsTool`, `LspGotoDefinitionTool`, `LspFindReferencesTool`, `LspHoverTool`, `LspStatusTool`, `register_lsp_tools`, `SharedLspManager` | Wire names are `lsp_diagnostics`, `lsp_goto_definition`, `lsp_find_references`, `lsp_hover`, `lsp_status`; `register_lsp_tools` is a helper, while EKO actually constructs the five tools itself |
 | Retire only LSP plugin members | [echo-core/src/plugin/capability.rs](../../echo-core/src/plugin/capability.rs): `PluginCapability::LspServer` and parse aliases; [echo-core/src/plugin/registry.rs](../../echo-core/src/plugin/registry.rs): capability discovery and `ResolvedComponents::lsp_config_file`; [src/plugin/prepared.rs](../../src/plugin/prepared.rs): `PreparedPlugin::lsp_document`, `PluginWiringResult::lsp_discovered`, document freezing/wiring | These members are not isolated by the LSP feature. Remove their declarations and consumers explicitly; keep `PluginIntegrator`, registry/coordinator, other components and generation publication semantics |
-| Retire dedicated learning consumers; preserve remaining examples | [echo-agent-learning/Cargo.toml](../../echo-agent-learning/Cargo.toml): `full`, `a2a`, `lsp`, `demo23_a2a`; [demo23_a2a.rs](../../echo-agent-learning/examples/demo23_a2a.rs); [example_contracts.rs](../../echo-agent-learning/tests/example_contracts.rs) and its [demo55_lsp_tools contract module](../../echo-agent-learning/tests/example_contracts/demo55_lsp_tools.rs) | Remove only dedicated retired examples/feature requests and their test modules. Retain ACP `demo72_acp_agent_adapter`, IM `demo38_im_channels`, scheduler `demo70_scheduler` and unrelated learning targets. The LSP demo is a feature-gated contract test at this baseline, not a standalone Cargo example target |
+| Retire dedicated learning consumers; preserve remaining examples | [echo-agent-learning/Cargo.toml](../../echo-agent-learning/Cargo.toml): `full`, `a2a`, `lsp`, `demo23_a2a`; `demo23_a2a.rs`（退役前路径）; [example_contracts.rs](../../echo-agent-learning/tests/example_contracts.rs) and its `demo55_lsp_tools contract module`（退役前路径） | Remove only dedicated retired examples/feature requests and their test modules. Retain ACP `demo72_acp_agent_adapter`, IM `demo38_im_channels`, scheduler `demo70_scheduler` and unrelated learning targets. The LSP demo is a feature-gated contract test at this baseline, not a standalone Cargo example target |
 | Synchronize active documentation and matrices at removal | [README.md](../../README.md), [README.zh.md](../../README.zh.md), bilingual `docs/{en,zh}/README.md`, `architecture.md`, `lifecycles.md`, `31-lsp-integration.md`, `32-plugin-system.md`; [AGENTS.md](../../AGENTS.md), [scripts/verify.sh](../../scripts/verify.sh), [.github/workflows/rust-ci.yml](../../.github/workflows/rust-ci.yml) | Current feature lists and guides remain accurate for current code. Later remove active advertising and retired feature checks, keep retained-feature coverage and historical ADR/evidence truthful; synchronize website mirrors through their owner |
 
 Earlier LSP fidelity decisions, including [ADR 0082](0082-lsp-response-value-fidelity.md),
@@ -299,3 +315,25 @@ an empty Hook fixture and was corrected to the existing active-rule fixture
 without weakening the assertion or changing production behavior. Raw results
 and both cleanup receipts remain workspace-only in
 `.echo-semantic/local/lsp-frozen-diagnostics/`, outside the cleaned target.
+
+
+## 影响
+
+2026-10-28，本仓唯一writer已在Root实际交还epoch18读窗后采用完整30源码，18个专属
+文件删除、12处manifest/export/插件准备接缝修改；没有重复采用拆分包。当前A2A/LSP
+能力面、公开出口和专属示例撤销，保留ACP、MCP、channels、Task/Subagent、合理Store、
+原生消息及测试profile。本文较早的Status和构建桥接段落是历史事实，不再代表当前实现。
+
+只检查原插件根`lsp.yaml`：合法旧声明保原文/变量替换/hash/cache/invalidate并给明确
+退役诊断，错误保原component/plugin/path/severity；不声称扫描项目级`.lsp.yaml`。
+旧声明只在同generation私有冻结容器保全，不恢复公开LSP getter、执行器或成功shim。
+
+同日原`cargo metadata --locked --all-features --format-version 1`已实际自然0且stderr空，
+解析前后manifest与锁SHA相同，完整图676包、公开feature25项。锁最初变化只记疑似IDE
+自动reload、未捕获其原命令/出口，不能追认本线生成；该显式metadata票只证明当前锁与
+当前manifests一致，不是Cargo check/test/rustc、类型检查或49组依赖风险合同已通过。
+没有手改版本/来源、baseline、ignore或排除，zstd/vendor/testprofile保护保持原映射。
+
+后继验证须在Framework、SDK薄投影与EKO源码稳定后，由Root一次排相邻focused和适用
+完整矩阵；当前文档、静态检查和metadata不授全source、旧402、SDK正式Gitpin、native、
+main CI或发布资格。官网由所属writer从真实来源同步；原固定tag/分支/Exa与用户数据保留。

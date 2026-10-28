@@ -20,10 +20,10 @@
 //!
 //! ```bash
 //! # 基础运行（需要 LLM API Key 和 web feature + sqlite）
-//! QWEN_API_KEY=your_key cargo run -p echo-agent-learning --example demo49_research_agent --features "web sqlite"
+//! QWEN_API_KEY=your_key cargo run -p echo-agent-learning --example demo49_research_agent --features "web,sqlite,files,subagent"
 //!
 //!# 带详细日志
-//! RUST_LOG=info QWEN_API_KEY=your_key cargo run -p echo-agent-learning --example demo49_research_agent --features "web sqlite"
+//! RUST_LOG=info QWEN_API_KEY=your_key cargo run -p echo-agent-learning --example demo49_research_agent --features "web,sqlite,files,subagent"
 //! ```
 
 use echo_agent::memory::SqliteStore;
@@ -243,7 +243,7 @@ async fn demo_simple_research() -> Result<()> {
 1. 使用 web_search 搜索相关信息
 2. 使用 web_fetch 获取详细页面内容
 3. 分析并总结发现
-4. 使用 final_answer 给出最终报告",
+4. 以原生正文给出最终报告",
         )
         .enable_tools()
         .max_tool_output_tokens(2000) // 控制网页内容长度
@@ -282,12 +282,15 @@ async fn demo_simple_research() -> Result<()> {
                 let preview: String = result.output.chars().take(150).collect();
                 println!("   ✓ 结果: {}...", preview);
             }
-            AgentEvent::Token(token) => {
-                final_answer.push_str(&token);
-                print!("{}", token);
+            AgentEvent::AssistantMessage { block } => {
+                print!("[消息块 {:?}] {}", block.phase, block.delta);
                 std::io::stdout().flush().ok();
             }
-            AgentEvent::FinalAnswer(_) => println!(),
+            AgentEvent::FinalAnswer(answer) => {
+                // 确认事件只更新最终结果，不由Token/消息块猜测执行结束。
+                println!("\n[最终确认] {}", answer);
+                final_answer = answer;
+            }
             _ => {}
         }
     }

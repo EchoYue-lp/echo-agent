@@ -1450,7 +1450,7 @@ async fn react_agent_reset_preserves_system_prompt() -> crate::error::Result<()>
 
 // ── ReactAgent tool registration tests ─────────────────────────────────────────
 
-/// Note: ReactAgent::new automatically registers FinalAnswerTool
+/// 工具注册不依赖已退役的控制工具。
 #[test]
 fn react_agent_add_tool_enables_tool_flag() {
     let config = AgentConfig::minimal("test-model", "helper");
@@ -1466,10 +1466,14 @@ fn react_agent_add_tool_enables_tool_flag() {
         agent.config().is_tool_enabled(),
         "after add_tool, tools should be enabled"
     );
-    // FinalAnswerTool + test_tool
+    // 真实注册的test_tool；最终候选走原生消息。
     let tool_names = agent.tool_names();
     assert!(tool_names.contains(&String::from("test_tool")));
-    assert!(tool_names.contains(&String::from("final_answer")));
+    assert!(
+        !tool_names
+            .iter()
+            .any(|name| name == "final_answer" || name == "think")
+    );
 }
 
 #[test]
@@ -1532,7 +1536,7 @@ fn react_agent_tool_names() {
     let config = AgentConfig::minimal("test-model", "helper");
     let mut agent = ReactAgent::new(config);
 
-    // ReactAgent::new registers built-in tools (at least FinalAnswerTool)
+    // 默认构造保留任务图与工具发现能力；具名控制工具已退役。
     let initial_len = agent.tool_names().len();
     assert!(initial_len >= 1);
 
@@ -1931,17 +1935,16 @@ fn react_agent_builder_basic() {
 }
 
 #[test]
-fn react_agent_builder_with_tools() {
+fn react_agent_builder_with_tools() -> crate::error::Result<()> {
     let agent = crate::agent::ReactAgentBuilder::new()
         .model("qwen3-max")
         .enable_tools()
         .tool(Box::new(MockTool::new("tool1")))
         .tool(Box::new(MockTool::new("tool2")))
-        .build()
-        .unwrap();
+        .build()?;
 
     assert!(agent.config().is_tool_enabled());
-    // FinalAnswerTool + built-in tools (count depends on enabled features) + tool1 + tool2
+    // 标准内置能力与两个实际工具。
     let names = agent.tool_names();
     assert!(
         names.contains(&String::from("tool1")),
@@ -1952,10 +1955,21 @@ fn react_agent_builder_with_tools() {
         "Should contain tool2"
     );
     assert!(
-        names.contains(&String::from("final_answer")),
-        "Should contain final_answer"
+        !names.contains(&String::from("final_answer")),
+        "Retired final_answer must not be registered"
     );
-    assert!(names.len() >= 3, "Should have at least 3 tools");
+    for required in ["task_create", "task_update", "task_list", "tool1", "tool2"] {
+        assert!(
+            names.iter().any(|name| name == required),
+            "保留统一task authority与实际工具：{required}"
+        );
+    }
+    assert!(
+        !names
+            .iter()
+            .any(|name| name == "final_answer" || name == "think")
+    );
+    Ok(())
 }
 
 #[test]
@@ -4278,6 +4292,7 @@ async fn managed_compaction_checkpoint_preserves_retained_transcript_ordinals()
     let original = [
         Message::user("same user text".to_string()),
         Message::assistant_with_tools(vec![crate::llm::types::ToolCall {
+            provider_source: None,
             id: "retained-tool-call".to_string(),
             call_type: "function".to_string(),
             function: crate::llm::types::FunctionCall {
@@ -4532,6 +4547,7 @@ async fn managed_compaction_horizon_restart_and_empty_preserve_fact_frontier()
         context.push(Message::user("same text".to_string()));
         context.push(Message::assistant_with_tools(vec![
             crate::llm::types::ToolCall {
+                provider_source: None,
                 id: "horizon-call".to_string(),
                 call_type: "function".to_string(),
                 function: crate::llm::types::FunctionCall {
@@ -5720,10 +5736,12 @@ enum DelegatePolicyEntry {
 }
 
 #[cfg(feature = "subagent")]
+type DelegatePolicyObservation = (String, Option<echo_core::tools::NestedDelegationPolicy>);
+
+#[cfg(feature = "subagent")]
 struct DelegatePolicyProbe {
     actor: String,
-    observations:
-        Arc<std::sync::Mutex<Vec<(String, Option<echo_core::tools::NestedDelegationPolicy>)>>>,
+    observations: Arc<std::sync::Mutex<Vec<DelegatePolicyObservation>>>,
 }
 
 #[cfg(feature = "subagent")]

@@ -37,7 +37,7 @@
 //!
 //! | Module | Tools | Feature |
 //! |--------|-------|---------|
-//! | `builtin` | `ThinkTool`, `FinalAnswerTool`, memory tools, data tools, git, RAG, chart | various |
+//! | `builtin` | memory tools, data tools, git, RAG, chart | various |
 //! | `web` | `WebSearchTool`, `WebFetchTool` | `web` |
 //! | `media` | `ImageFetchTool`, PDF/Excel/Word tools | `media` |
 //! | `files` | File read/write/list/delete tools | `files` |
@@ -52,7 +52,7 @@
 //! | [`ToolResult`] | `ToolResult::success(...)` / `ToolResult::error(...)` |
 //! | [`ToolExecutionConfig`] | Timeout, retry count, max concurrency per tool |
 
-/// Built-in tools (security, think, etc.)
+/// 框架内置任务协作、人工介入、记忆和命令单元工具。
 pub mod builtin;
 /// File manipulation tools (re-export from echo_tools)
 #[cfg(feature = "files")]
@@ -161,10 +161,6 @@ pub mod rag {
 pub mod statistics {
     pub use echo_tools::statistics::*;
 }
-
-/// LSP tools — language server integration
-#[cfg(feature = "lsp")]
-pub mod lsp;
 
 /// Direct re-exports from `echo_execution::tools`.
 pub mod execution {

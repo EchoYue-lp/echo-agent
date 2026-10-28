@@ -4116,6 +4116,7 @@ mod tests {
             Message::system("be helpful".into()),
             multimodal,
             Message::assistant_with_tools(vec![ToolCall {
+                provider_source: None,
                 id: "call-1".into(),
                 call_type: "function".into(),
                 function: FunctionCall {

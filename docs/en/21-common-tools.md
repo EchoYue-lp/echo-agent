@@ -175,7 +175,7 @@ For most real tasks, the best sequence is:
 1. Use web search to discover sources.
 2. Use web fetch or browser tools to retrieve details.
 3. Use data tools to inspect structured files.
-4. Let the Agent synthesize the results with `final_answer`.
+4. 由 Agent 以原生正文汇总结果，运行时经校验/Stop/持久化后确认完成。
 
 If you need stronger reproducibility, prefer direct tool outputs over free-form LLM summaries.
 

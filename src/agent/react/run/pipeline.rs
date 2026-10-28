@@ -245,6 +245,20 @@ impl PipelineStage for ToolVisibilityStage {
         ctx: &mut ToolExecutionContext,
         snapshot: &crate::agent::snapshot::AgentRunSnapshot,
     ) -> Result<()> {
+        let outside_invocation = snapshot.tools.disabled_tools.contains(&ctx.tool_name)
+            || snapshot
+                .tools
+                .visibility
+                .as_ref()
+                .is_some_and(|visibility| !visibility.is_visible(&ctx.tool_name));
+        if outside_invocation && snapshot.tools.readonly_tools {
+            // 有界发现先排除写工具时仍沿原只读拒绝，不误报为可搜索激活。
+            PlanModeStage.run(ctx, snapshot).await?;
+            if ctx.blocked {
+                snapshot.tools.tool_manager.record_tool_selection_failure();
+                return Ok(());
+            }
+        }
         if snapshot.tools.disabled_tools.contains(&ctx.tool_name) {
             snapshot.tools.tool_manager.record_tool_selection_failure();
             ctx.block(
@@ -840,6 +854,13 @@ impl PipelineStage for ExecuteStage {
             active_message: snapshot.current_message.clone(),
             output_artifacts: snapshot.config.tool_output_artifacts.clone(),
             tool_visibility: snapshot.tools.visibility.clone(),
+            tool_access: Some(
+                if snapshot.tools.is_plan_mode() || snapshot.tools.readonly_tools {
+                    echo_core::tools::ToolAccess::ReadOnly
+                } else {
+                    echo_core::tools::ToolAccess::Mutating
+                },
+            ),
             script_execution_profile: None,
             cancel: snapshot.external_cancel.clone(),
             trace_sink: snapshot.external_trace_sink.clone(),
@@ -1809,6 +1830,14 @@ fn resolve_tracking_path(path: &str, working_dir: Option<&std::path::Path>) -> S
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "files")]
+    mod performance_baseline {
+        use super::*;
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/support/tool_output_baseline.rs"
+        ));
+    }
     use super::*;
     use crate::agent::AgentEvent;
     use echo_core::tools::{InvocationResourceGuard, Tool, ToolContext, ToolOutputChannel};

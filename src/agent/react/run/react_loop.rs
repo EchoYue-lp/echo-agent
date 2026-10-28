@@ -1,114 +1,14 @@
-//! ReAct loop core
+//! 非流式API的结果投影；执行、取消、租约与结算复用原Managed流路径。
 
 use super::super::ReactAgent;
 use super::types::StreamMode;
 use crate::agent::AgentEvent;
-use crate::agent::snapshot::AgentRunSnapshot;
-use crate::error::{ReactError, Result};
-use crate::guard::GuardDirection;
+use crate::error::{AgentError, ReactError, Result};
+#[cfg(test)]
 use crate::llm::types::Message;
-use tokio::sync::mpsc;
-use tracing::{debug, info, warn};
+use futures::StreamExt;
 
 impl ReactAgent {
-    /// Prepare non-streaming execution context: guard check, turn tracking,
-    /// memory recall, push user message, start trace run.
-    ///
-    /// Returns recalled memory count and the guard-approved input.
-    async fn prepare_react_context(
-        &self,
-        message: &str,
-        legacy: &super::super::LegacyExternalContextSnapshot,
-    ) -> Result<(usize, String)> {
-        let agent = self.config.agent_name.clone();
-        let mut effective_message = message.to_string();
-
-        // Clear read-before-edit tracking for the new conversation turn
-        self.clear_read_files();
-
-        // Input guard check
-        if let Some(gm) = &self.guard.guard_manager {
-            info!(agent = %agent, direction = "input", "🛡️ Guard check started");
-            let result = gm.check_all(message, GuardDirection::Input).await?;
-            match result {
-                crate::guard::GuardResult::Block { reason } => {
-                    info!(agent = %agent, reason = %reason, "🛡️ Input blocked by guard");
-                    if self.guard.audit_logger.is_some() {
-                        let event = crate::audit::AuditEvent::now(
-                            self.config.session_id.clone(),
-                            agent.clone(),
-                            crate::audit::AuditEventType::GuardBlock {
-                                guard: "guard_manager".to_string(),
-                                direction: GuardDirection::Input,
-                                reason: reason.clone(),
-                            },
-                        );
-                        self.record_audit_event(event).await;
-                    }
-                    return Err(ReactError::Other(format!(
-                        "Request blocked by safety guard: {reason}"
-                    )));
-                }
-                crate::guard::GuardResult::Transform { content, .. } => {
-                    effective_message = content;
-                }
-                crate::guard::GuardResult::Pass | crate::guard::GuardResult::Warn { .. } => {}
-            }
-        }
-
-        // Trace identity is independent from the product run identity and is
-        // established before the first observable execution phase.
-        self.start_legacy_trace_run(&effective_message, legacy)
-            .await;
-
-        // Phase: Recall
-        self.record_trace_event(crate::trace::RunEvent::PhaseTransition {
-            phase: "recall".into(),
-            iteration: 0,
-        })
-        .await;
-        // Persist memory-worthy triggers before recall injection mutates context.
-        self.detect_and_write_memory_triggers(&effective_message)
-            .await;
-
-        // Inject relevant long-term memories
-        let mut recalled = 0usize;
-        let mut memory_context = None;
-        match self.recall_long_term_memories(&effective_message).await {
-            Ok(items) if !items.is_empty() => {
-                recalled = items.len();
-                debug!(agent = %agent, count = items.len(), "📚 Injecting relevant long-term memories");
-                memory_context = Some(super::context::format_memory_context(&items));
-            }
-            Ok(_) => {}
-            Err(e) => {
-                warn!(agent = %agent, error = %e, "⚠️ Long-term memory retrieval failed, skipping injection");
-            }
-        }
-
-        let wd = self.config.working_dir.lock().ok().and_then(|g| g.clone());
-        let ws_block = crate::agent::react::ReactAgent::build_workspace_context_block(wd.as_ref());
-        let mut context = self.memory.context.lock().await;
-        context.replace_projection(
-            super::context::WORKSPACE_CONTEXT_PROJECTION,
-            (!ws_block.trim().is_empty())
-                .then(|| super::context::runtime_context_note("workspace", &ws_block)),
-        );
-        context.replace_tail_projection(
-            super::context::TURN_MEMORY_CONTEXT_PROJECTION,
-            memory_context
-                .map(|body| super::context::runtime_context_note("memory", body.as_str())),
-        );
-        context.push(Message::user(effective_message.clone()));
-
-        Ok((recalled, effective_message))
-    }
-
-    /// Core ReAct loop — thin wrapper that delegates to the shared `run_core_loop`.
-    ///
-    /// Creates a snapshot + channel, runs the unified core loop in a spawned task,
-    /// then collects `FinalAnswer` from the event stream.
-    #[tracing::instrument(skip(self, message), fields(agent = %self.config.agent_name, model = %self.config.model_name))]
     #[cfg(test)]
     pub(crate) async fn run_react_loop(&self, message: &str) -> Result<String> {
         self.run_react_loop_mode(message, StreamMode::Chat).await
@@ -119,294 +19,54 @@ impl ReactAgent {
         message: &str,
         mode: StreamMode,
     ) -> Result<String> {
-        // Capture legacy mutable context before queueing. A later caller may
-        // update or clear the shared setters while this invocation waits for
-        // the execution mutex, but cannot change this invocation's ownership.
-        let mut legacy_runtime = self.capture_legacy_external_context();
-        let (mut turn_lease, lifecycle_cancel) = self
-            .close_authority
-            .admit(legacy_runtime.cancel.as_deref().cloned())?;
-        legacy_runtime.cancel = Some(std::sync::Arc::new(lifecycle_cancel.clone()));
-        // ★ Serialize all execution on this agent — only one run at a time.
-        let _execution_guard = self.execution_mutex.lock().await;
-        if lifecycle_cancel.is_cancelled() {
-            return Err(ReactError::Agent(Box::new(
-                crate::error::AgentError::Cancelled(
-                    "Agent close cancelled queued turn".to_string(),
-                ),
-            )));
-        }
-        // From this point, cancellation of the caller future can abandon
-        // observable preparation work. Only explicit return paths may settle
-        // the close lease without recording debt.
-        turn_lease.mark_started();
-
-        let admission_snapshot =
-            AgentRunSnapshot::from_agent_with_legacy_context(self, &legacy_runtime);
-        let pending_settlement = match admission_snapshot
-            .reconcile_pending_transcript_projection()
-            .await
-        {
-            Ok(settlement) => settlement,
-            Err(error) => {
-                turn_lease.settle();
-                return Err(error);
-            }
-        };
-        if let Some(settlement) = pending_settlement
-            && settlement.status != crate::memory::TranscriptProjectionSettlementStatus::Settled
-        {
-            let error = crate::agent::snapshot::transcript_settlement_admission_error(&settlement);
-            turn_lease.settle();
-            return Err(error);
-        }
-        let scope_id = admission_snapshot.config.conversation_id.as_deref();
-        let runtime_state_id = admission_snapshot.config.runtime_state_id.as_deref();
-        let restore_result = match mode {
-            StreamMode::Execute => {
-                self.restore_thread_context_for(scope_id, runtime_state_id)
-                    .await
-            }
-            StreamMode::Chat => {
-                self.restore_chat_context_if_cold_for(scope_id, runtime_state_id)
-                    .await
-            }
-        };
-        if let Err(error) = restore_result {
-            turn_lease.settle();
-            return Err(error);
-        }
-
-        // Prepare context (guard check, memory recall, push message, start trace)
-        let (recalled, effective_message) =
-            match self.prepare_react_context(message, &legacy_runtime).await {
-                Ok(prepared) => prepared,
-                Err(e) => {
-                    // Guard blocked — return the message directly (not an error)
-                    let msg = e.to_string();
-                    if msg.starts_with("Request blocked by safety guard:") {
-                        let trace_run_id = self
-                            .start_legacy_trace_run("[input blocked by guard]", &legacy_runtime)
-                            .await;
-                        let mut terminal_snapshot =
-                            AgentRunSnapshot::from_agent_with_legacy_context(self, &legacy_runtime);
-                        terminal_snapshot.trace_run_id = trace_run_id;
-                        let settlement = match terminal_snapshot
-                            .save_transcript_projection(&self.memory.context, Some(msg.clone()))
-                            .await
-                        {
-                            Ok(settlement) => settlement,
-                            Err(error) => {
-                                if terminal_snapshot.conversation_store.is_some() {
-                                    terminal_snapshot.observe_persistence_failure(&error).await;
-                                }
-                                terminal_snapshot
-                                    .finalize_run(
-                                        crate::trace::RunStatus::Failed,
-                                        None,
-                                        Some(&error.to_string()),
-                                    )
-                                    .await;
-                                turn_lease.settle();
-                                return Err(error);
-                            }
-                        };
-                        if matches!(
-                            settlement.status,
-                            crate::memory::TranscriptProjectionSettlementStatus::Blocked
-                                | crate::memory::TranscriptProjectionSettlementStatus::Conflict
-                        ) {
-                            let error =
-                                crate::agent::snapshot::transcript_settlement_admission_error(
-                                    &settlement,
-                                );
-                            terminal_snapshot
-                                .finalize_run(
-                                    crate::trace::RunStatus::Failed,
-                                    None,
-                                    Some(&error.to_string()),
-                                )
-                                .await;
-                            turn_lease.settle();
-                            return Err(error);
-                        }
-                        terminal_snapshot
-                            .finalize_run(crate::trace::RunStatus::Failed, None, Some(&msg))
-                            .await;
-                        turn_lease.settle();
-                        if self
-                            .config
-                            .response_format
-                            .as_ref()
-                            .is_some_and(crate::llm::ResponseFormat::is_json)
-                        {
-                            return Err(e);
-                        }
-                        return Ok(msg);
-                    }
-                    turn_lease.settle();
-                    return Err(e);
+        // 同一流入口在排队前捕获既有legacy绑定；这里不再持有第二份execution锁/owner。
+        let mut stream = self.run_stream_entry(message, mode, None).await?;
+        let mut answer = None;
+        let mut first_error = None;
+        let mut settled = false;
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(AgentEvent::FinalAnswer(value)) => {
+                    answer.get_or_insert(value);
                 }
-            };
-        let turn_id = legacy_runtime
-            .turn_id
-            .clone()
-            .or_else(|| legacy_runtime.current_run_id.clone())
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        let active_turn_lease = self.turn_steer_mailbox.begin(turn_id.clone());
-
-        // Intent routing may activate a skill. Direct answers still use the
-        // canonical ReAct lifecycle so they share terminal and persistence semantics.
-        if let Some(ref router) = self.intent_router {
-            let messages = self.memory.context.lock().await.messages().to_vec();
-            let cancel = legacy_runtime
-                .cancel
-                .as_ref()
-                .map(|token| token.as_ref().clone())
-                .unwrap_or_default();
-            let intent = router
-                .classify_with_cancel(&effective_message, &messages, cancel)
-                .await;
-            match intent {
-                crate::intent::Intent::DirectAnswer { confidence } => {
-                    tracing::debug!(
-                        agent = %self.config.agent_name,
-                        confidence,
-                        "DirectAnswer routed through ReAct for pre-model projection"
-                    );
+                Ok(AgentEvent::ExecutionStatus(status)) => {
+                    settled = status.status == echo_core::agent::ExecutionStatusKind::Settled;
                 }
-                crate::intent::Intent::SkillRequired {
-                    skill_name,
-                    confidence,
-                } => {
-                    tracing::info!(
-                        agent = %self.config.agent_name,
-                        skill = %skill_name,
-                        confidence = confidence,
-                        "🎯 IntentRouter: activating skill"
-                    );
-                    if let Err(e) = self.activate_skill(&skill_name).await {
-                        tracing::warn!(skill = %skill_name, error = %e, "IntentRouter: failed to activate skill");
-                    }
+                Ok(AgentEvent::Cancelled) if first_error.is_none() => {
+                    first_error = Some(AgentError::Cancelled("agent run".to_string()).into());
                 }
-                crate::intent::Intent::Fallback => {
-                    tracing::debug!(agent = %self.config.agent_name, "IntentRouter: Fallback to ReAct");
-                }
-            }
-        }
-
-        // Create channel + snapshot
-        active_turn_lease.set_steerable(true);
-        let (tx, mut rx) = mpsc::channel::<Result<AgentEvent>>(self.config.stream_buffer_size);
-        let mut snap = AgentRunSnapshot::from_agent_with_legacy_context(self, &legacy_runtime);
-        snap.current_turn_id = Some(turn_id);
-        snap.turn_steer_incarnation = Some(active_turn_lease.incarnation());
-        let turn_cancel = snap
-            .external_cancel
-            .as_ref()
-            .map(|cancel| cancel.as_ref().clone());
-        let failure_snapshot = snap.clone();
-
-        // The core task owns the close lease. If the caller drops this outer
-        // future, Agent::close can still cancel the task and await lease release.
-        let context = self.memory.context.clone();
-        let text = effective_message;
-        let core = tokio::spawn(async move {
-            let result = snap
-                .run_core_loop(
-                    context,
-                    text,
-                    None,
-                    String::new(),
-                    StreamMode::Chat,
-                    recalled,
-                    false,
-                    tx,
-                )
-                .await;
-            (result, turn_lease)
-        });
-
-        // Collect events, extract FinalAnswer
-        let mut terminal = None;
-        while let Some(event) = rx.recv().await {
-            match event {
-                Ok(AgentEvent::FinalAnswer(a)) => {
-                    terminal = Some(Ok(a));
-                    break;
-                }
-                Ok(AgentEvent::Cancelled) => {
-                    terminal = Some(Err(ReactError::Agent(Box::new(
-                        crate::error::AgentError::Cancelled("agent run".to_string()),
-                    ))));
-                    break;
-                }
-                Ok(AgentEvent::Error { message, .. }) => {
-                    terminal = Some(Err(ReactError::Other(message)));
-                    break;
-                }
-                Err(e) => {
-                    terminal = Some(Err(e));
-                    break;
-                }
-                _ => {} // Ignore intermediate events (Token, ToolCall, etc.)
-            }
-        }
-
-        match core.await {
-            Ok((Ok(outcome), turn_lease)) => {
-                active_turn_lease.settle(outcome);
-                turn_lease.settle();
-            }
-            Ok((Err(error), turn_lease)) => {
-                let outcome = if turn_cancel
-                    .as_ref()
-                    .is_some_and(crate::agent::CancellationToken::is_cancelled)
-                {
-                    crate::agent::AgentSteerTurnOutcome::Cancelled
-                } else {
-                    crate::agent::AgentSteerTurnOutcome::Failed
-                };
-                active_turn_lease.settle(outcome);
-                let settlement_already_observed =
-                    failure_snapshot.transcript_settlement_was_observed();
-                if failure_snapshot.conversation_store.is_some() && !settlement_already_observed {
-                    failure_snapshot.observe_persistence_failure(&error).await;
-                }
-                failure_snapshot
-                    .finalize_run(
-                        if outcome == crate::agent::AgentSteerTurnOutcome::Cancelled {
-                            crate::trace::RunStatus::Cancelled
+                Ok(AgentEvent::Error {
+                    message, failure, ..
+                }) if first_error.is_none() => {
+                    first_error = Some(
+                        if failure.terminal_kind == echo_core::error::AgentTerminalKind::Cancelled {
+                            AgentError::Cancelled(message).into()
                         } else {
-                            crate::trace::RunStatus::Failed
+                            ReactError::Other(message)
                         },
-                        None,
-                        Some(&error.to_string()),
-                    )
-                    .await;
-                turn_lease.settle();
-                return Err(error);
-            }
-            Err(join_error) => {
-                let error = ReactError::Other(format!(
-                    "Core loop task failed before terminal: {join_error}"
-                ));
-                failure_snapshot
-                    .finalize_run(
-                        crate::trace::RunStatus::Failed,
-                        None,
-                        Some(&error.to_string()),
-                    )
-                    .await;
-                drop(active_turn_lease);
-                return Err(error);
+                    );
+                }
+                Err(error) if first_error.is_none() => {
+                    first_error = Some(error);
+                }
+                _ => {}
             }
         }
-        terminal.unwrap_or_else(|| {
-            Err(ReactError::Other(
-                "Core loop closed without a terminal event".to_string(),
-            ))
-        })
+        if let Some(error) = first_error {
+            return Err(error);
+        }
+        if settled {
+            return answer.ok_or_else(|| {
+                AgentError::NoResponse {
+                    model: self.config.model_name.clone(),
+                    agent: self.config.agent_name.clone(),
+                }
+                .into()
+            });
+        }
+        Err(ReactError::Other(
+            "Agent event stream ended without runtime settlement".to_string(),
+        ))
     }
 }
 
@@ -666,8 +326,11 @@ mod tests {
 
         let response = running
             .await
-            .map_err(|error| ReactError::Other(format!("nonstream task failed: {error}")))??;
-        assert!(response.contains("blocked by test hook"));
+            .map_err(|error| ReactError::Other(format!("nonstream task failed: {error}")))?;
+        let error = response
+            .err()
+            .ok_or_else(|| ReactError::Other("blocked hook unexpectedly succeeded".into()))?;
+        assert!(error.to_string().contains("blocked by test hook"));
         assert_eq!(
             receipt.wait_for_turn_settled().await,
             crate::agent::AgentSteerState::TurnSettled {

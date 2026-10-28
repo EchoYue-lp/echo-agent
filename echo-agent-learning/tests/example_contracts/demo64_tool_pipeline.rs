@@ -419,7 +419,7 @@ async fn demo_intervention_callback() -> echo_agent::error::Result<()> {
         .build()?;
 
     println!("\n  ReactAgentBuilder::add_intervention_callback() → 注册成功");
-    assert!(agent.tool_names().contains(&"final_answer".to_string()));
+    assert!(!agent.tool_names().contains(&"final_answer".to_string()));
 
     println!("  → InterventionCallback ✓");
     Ok(())
@@ -509,11 +509,7 @@ async fn demo_agent_callback() -> echo_agent::error::Result<()> {
         MockLlmClient::new()
             .with_model_name("pipeline-mock")
             .then_tool_call("call_add", "add", r#"{"a":15.0,"b":27.0}"#)
-            .then_tool_call(
-                "call_final_answer",
-                "final_answer",
-                r#"{"answer":"15 + 27 = 42"}"#,
-            ),
+            .with_response(r###"15 + 27 = 42"###),
     );
 
     let config = AgentConfig::new(

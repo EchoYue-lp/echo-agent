@@ -365,7 +365,7 @@ impl ContextCompressor for SummaryCompressor {
                 .filter(|message| message.role != Role::System || is_generated_summary(message))
                 .cloned()
                 .collect();
-            let (to_summarize, to_keep) = select_recent_tail(
+            let (to_summarize, to_keep, _) = select_recent_tail(
                 conv_msgs,
                 input
                     .token_limit
@@ -799,7 +799,7 @@ impl ContextCompressor for IncrementalSummaryCompressor {
                 .filter(|message| message.role != Role::System || is_generated_summary(message))
                 .cloned()
                 .collect();
-            let (to_summarize, to_keep) = select_recent_tail(
+            let (to_summarize, to_keep, _) = select_recent_tail(
                 conv_msgs,
                 input
                     .token_limit
@@ -1058,6 +1058,7 @@ mod tests {
         let request = "请保留当前用户的精确约束🚀";
         let mut call = Message::assistant(String::new());
         call.tool_calls = Some(vec![ToolCall {
+            provider_source: None,
             id: "lookup".to_string(),
             call_type: "function".to_string(),
             function: FunctionCall {

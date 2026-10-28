@@ -57,13 +57,13 @@ pub struct ReactAgentBuilder {
     /// dispatch targets through this single registry.
     #[cfg(feature = "subagent")]
     subagent_registry: Option<std::sync::Arc<crate::agent::subagent::SubagentRegistry>>,
-    enable_cot: bool,
     tool_error_feedback: bool,
     tool_execution: ToolExecutionConfig,
     max_iterations: usize,
     run_budget: echo_core::agent::RunBudgetPolicy,
     persistence_settlement_timeout: std::time::Duration,
     model_profile: Option<echo_core::llm::capabilities::ModelProfileResolution>,
+    model_streaming: bool,
     token_limit: usize,
     token_limit_explicit: bool,
     max_tokens: Option<u32>,
@@ -142,13 +142,13 @@ impl ReactAgentBuilder {
             subagent_prompt_compiler: None,
             #[cfg(feature = "subagent")]
             subagent_registry: None,
-            enable_cot: true,
             tool_error_feedback: true,
             tool_execution: ToolExecutionConfig::default(),
             max_iterations: 10,
             run_budget: echo_core::agent::RunBudgetPolicy::default(),
             persistence_settlement_timeout: std::time::Duration::from_secs(10),
             model_profile: None,
+            model_streaming: true,
             token_limit: DEFAULT_TOKEN_LIMIT,
             token_limit_explicit: false,
             max_tokens: None,
@@ -252,6 +252,12 @@ impl ReactAgentBuilder {
         self.configured_llm_client = None;
         self.model = client.model_name().to_string();
         self.llm_client = Some(client);
+        self
+    }
+
+    /// 显式选择模型HTTP传输；默认true，false仍复用同一ReAct和Managed结算路径。
+    pub fn model_streaming(mut self, enabled: bool) -> Self {
+        self.model_streaming = enabled;
         self
     }
 
@@ -439,18 +445,6 @@ impl ReactAgentBuilder {
     #[cfg(feature = "subagent")]
     pub fn register_subagent_message_tools(mut self) -> Self {
         self.register_subagent_message_tools = true;
-        self
-    }
-
-    /// Enable chain-of-thought guidance
-    pub fn enable_cot(mut self) -> Self {
-        self.enable_cot = true;
-        self
-    }
-
-    /// Disable chain-of-thought guidance
-    pub fn disable_cot(mut self) -> Self {
-        self.enable_cot = false;
         self
     }
 
@@ -934,6 +928,7 @@ impl ReactAgentBuilder {
                     .map(|client| client.model_profile_resolution())
             });
         let mut config = AgentConfig::new(&self.model, &self.name, &self.system_prompt)
+            .model_streaming(self.model_streaming)
             .enable_tool(self.enable_builtin_tools)
             .auto_project_rules(self.auto_project_rules)
             .readonly_tools(self.readonly_tools)
@@ -941,7 +936,6 @@ impl ReactAgentBuilder {
             .enable_human_in_loop(self.enable_human_in_loop)
             .enable_subagent(self.enable_subagent)
             .register_agent_dispatch_tool(self.register_agent_dispatch_tool)
-            .enable_cot(self.enable_cot)
             .tool_error_feedback(self.tool_error_feedback)
             .tool_execution(self.tool_execution)
             .max_iterations(self.max_iterations)

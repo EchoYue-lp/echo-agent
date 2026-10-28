@@ -10,6 +10,14 @@ if sys.version_info < (3, 11):
 import tomllib
 
 REGISTRY = "registry+https://github.com/rust-lang/crates.io-index"
+OPTIONAL_ORIGINS = {"polars-arrow", "polars-parquet"}
+EXPECTED_ORIGINS = {
+    "rust_xlsxwriter": "0.82.0",
+    "calamine": "0.36.1",
+    "docx-rs": "0.4.22",
+    "polars-arrow": "0.55.2",
+    "polars-parquet": "0.55.2",
+}
 
 def registry_origin_view(text: str, origins: list[dict]) -> str:
     original = tomllib.loads(text)
@@ -21,17 +29,33 @@ def registry_origin_view(text: str, origins: list[dict]) -> str:
     if owner_source is not None and (not isinstance(owner_source, str) or not owner_source.startswith("git+")):
         raise ValueError("echo_tools must be the path/Git framework owner")
     specs = {}
+    declared = set()
     for item in origins:
         name = item.get("name")
-        if not isinstance(name, str) or name in specs:
+        if not isinstance(name, str) or name in declared:
             raise ValueError("missing or duplicate origin name")
+        declared.add(name)
         if not isinstance(item.get("version"), str):
             raise ValueError(f"missing origin version: {name}")
         if not isinstance(item.get("checksum"), str) or not re.fullmatch(r"[0-9a-f]{64}", item["checksum"]):
             raise ValueError(f"missing or invalid original registry checksum: {name}")
         matches = [p for p in packages if p.get("name") == name]
+        references = [
+            dependency.split()
+            for package in packages
+            for dependency in package.get("dependencies", [])
+            if isinstance(dependency, str) and (dependency.split(maxsplit=1) or [None])[0] == name
+        ]
+        # 五项声明总是校验完整；只有确未进入此消费图的 Polars 可不投影。
+        # 先看引用再允许省略，避免损坏锁的缺包被误认为 feature 未选择。
+        if name in OPTIONAL_ORIGINS and not matches and not references:
+            continue
         if len(matches) != 1 or matches[0].get("version") != item["version"]:
             raise ValueError(f"missing, duplicate or wrong-version origin package: {name}")
+        if any(len(reference) > 1 and reference[1] != item["version"] for reference in references):
+            raise ValueError(f"origin dependency reference has wrong version: {name}")
+        if any(len(reference) > 2 and (len(reference) != 3 or reference[2] != f"({matches[0].get('source')})") for reference in references):
+            raise ValueError(f"origin dependency reference has different source: {name}")
         if matches[0].get("source") != owner_source:
             raise ValueError(f"origin source differs from echo_tools owner: {name}")
         if "checksum" in matches[0]:
@@ -75,8 +99,10 @@ def registry_origin_view(text: str, origins: list[dict]) -> str:
 
 def load_origins(root: Path) -> list[dict]:
     meta = tomllib.loads((root / "vendor/registry-origins.toml").read_text(encoding="utf-8"))
-    if set(meta) != {"schema_version", "package"} or meta["schema_version"] != 1 or len(meta["package"]) != 3:
-        raise ValueError("expected the three declared media registry origins")
+    if set(meta) != {"schema_version", "package"} or meta["schema_version"] != 1 or len(meta["package"]) != 5:
+        raise ValueError("expected the five declared registry origins")
+    if {item.get("name"): item.get("version") for item in meta["package"]} != EXPECTED_ORIGINS:
+        raise ValueError("missing, duplicate or unexpected declared registry origin")
     for item in meta["package"]:
         if set(item) != {"name", "version", "checksum", "manifest"}:
             raise ValueError("unexpected registry-origin fields")

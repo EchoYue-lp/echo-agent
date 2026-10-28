@@ -366,7 +366,8 @@ impl echo_core::agent::AgentInputLifecycle for TurnInputLifecycle {
 #[derive(Debug, Clone)]
 pub enum TurnInput {
     Text(String),
-    Message(Message),
+    // 原生消息的可选回放数据较大；间接存放避免每个纯文本输入也占用整条消息大小。
+    Message(Box<Message>),
 }
 
 impl TurnRequest {
@@ -384,7 +385,7 @@ impl TurnRequest {
 
     pub fn from_message(identity: EventIdentity, message: Message) -> Self {
         Self {
-            input: TurnInput::Message(message),
+            input: TurnInput::Message(Box::new(message)),
             identity,
             mode: TurnMode::Chat,
             cancel: None,
@@ -471,6 +472,20 @@ impl TurnOutcome {
     /// envelopes the same way the driver does.
     pub fn classify(event: &AgentEvent) -> Option<Self> {
         match event {
+            AgentEvent::ExecutionStatus(status) => match status.status {
+                echo_core::agent::ExecutionStatusKind::Settled => Some(Self::Completed),
+                echo_core::agent::ExecutionStatusKind::Cancelled => Some(Self::Cancelled),
+                echo_core::agent::ExecutionStatusKind::Failed => {
+                    Some(Self::Failed(AgentFailure::message(
+                        "runtime",
+                        status
+                            .reason
+                            .clone()
+                            .unwrap_or_else(|| "execution failed".to_string()),
+                    )))
+                }
+                _ => None,
+            },
             AgentEvent::FinalAnswer(_) => Some(Self::Completed),
             AgentEvent::Cancelled => Some(Self::Cancelled),
             AgentEvent::Error { failure, .. } => {
@@ -748,7 +763,7 @@ impl AgentTurnDriver {
             (TurnInput::Message(message), TurnMode::Chat, invocation) => {
                 agent
                     .chat_stream_message_with_invocation_context(
-                        message.clone(),
+                        message.as_ref().clone(),
                         token.clone(),
                         invocation_with_cancel(invocation, &token),
                     )
@@ -757,13 +772,14 @@ impl AgentTurnDriver {
             (TurnInput::Message(message), TurnMode::Execute, invocation) => {
                 agent
                     .execute_stream_message_with_invocation_context(
-                        message.clone(),
+                        message.as_ref().clone(),
                         token.clone(),
                         invocation_with_cancel(invocation, &token),
                     )
                     .await
             }
         };
+        let mut source_has_runtime_status = false;
         let mut raw = match raw {
             Ok(stream) => stream,
             Err(error) => {
@@ -819,6 +835,7 @@ impl AgentTurnDriver {
             }
         }
         .inspect(move |item| {
+            source_has_runtime_status |= matches!(item, Ok(AgentEvent::ExecutionStatus(_)));
             let mut pending = source_progress.lock().unwrap_or_else(|p| p.into_inner());
             let matches_owner = |error: &ReactError| {
                 matches!(error,
@@ -839,7 +856,18 @@ impl AgentTurnDriver {
                         });
                     }
                 }
-                Ok(event) if event.is_terminal() && pending.as_ref().is_some_and(matches_owner) => {
+                Ok(event @ AgentEvent::ExecutionStatus(status))
+                    if event.is_terminal()
+                        && Some(status.execution_id.as_str()) == source_execution.as_deref()
+                        && pending.as_ref().is_some_and(matches_owner) =>
+                {
+                    *pending = None;
+                }
+                Ok(event)
+                    if !source_has_runtime_status
+                        && event.is_terminal()
+                        && pending.as_ref().is_some_and(matches_owner) =>
+                {
                     *pending = None;
                 }
                 _ => {}
@@ -847,6 +875,8 @@ impl AgentTurnDriver {
         })
         .fuse();
         let mut outcome: Option<TurnOutcome> = None;
+        let mut native_execution = false;
+        let mut native_failure: Option<TurnOutcome> = None;
         let mut delivery = TurnDeliveryOutcome::NotAttempted;
         let mut final_answer: Option<String> = None;
         let mut final_message_id: Option<MessageId> = None;
@@ -868,7 +898,10 @@ impl AgentTurnDriver {
                 Ok(envelope) => envelope,
                 Err(error) => {
                     match AgentFailure::try_from(&error) {
-                        Ok(failure) => outcome = Some(TurnOutcome::Failed(failure)),
+                        Ok(failure) => {
+                            let cause = TurnOutcome::Failed(failure);
+                            outcome = Some(native_failure.get_or_insert(cause).clone());
+                        }
                         Err(error) => {
                             if let Some(lifecycle) = input_lifecycle.as_ref() {
                                 lifecycle.observe_not_settled(&error);
@@ -883,6 +916,12 @@ impl AgentTurnDriver {
             };
             last_event_sequence = envelope.sequence;
             match &envelope.payload {
+                AgentEvent::ExecutionStatus(_) => {
+                    native_execution = true;
+                    if let Some(terminal) = TurnOutcome::classify(&envelope.payload) {
+                        outcome = Some(native_failure.take().unwrap_or(terminal));
+                    }
+                }
                 AgentEvent::LlmUsage {
                     prompt_tokens: prompt,
                     completion_tokens: completion,
@@ -897,7 +936,9 @@ impl AgentTurnDriver {
                 }
                 AgentEvent::FinalAnswer(answer) => {
                     if outcome.is_none() {
-                        outcome = Some(TurnOutcome::Completed);
+                        if !native_execution {
+                            outcome = Some(TurnOutcome::Completed);
+                        }
                         final_answer = Some(answer.clone());
                         final_message_id = envelope.message_id.clone();
                     }
@@ -906,16 +947,24 @@ impl AgentTurnDriver {
                     compaction_count = compaction_count.saturating_add(1);
                 }
                 AgentEvent::Cancelled => {
-                    outcome.get_or_insert(TurnOutcome::Cancelled);
+                    if native_execution {
+                        native_failure.get_or_insert(TurnOutcome::Cancelled);
+                    } else {
+                        outcome.get_or_insert(TurnOutcome::Cancelled);
+                    }
                 }
                 AgentEvent::Error { failure, .. } => {
-                    outcome.get_or_insert(
-                        if failure.terminal_kind == echo_core::error::AgentTerminalKind::Cancelled {
-                            TurnOutcome::Cancelled
-                        } else {
-                            TurnOutcome::Failed(failure.clone())
-                        },
-                    );
+                    let failure_outcome = if failure.terminal_kind
+                        == echo_core::error::AgentTerminalKind::Cancelled
+                    {
+                        TurnOutcome::Cancelled
+                    } else {
+                        TurnOutcome::Failed(failure.clone())
+                    };
+                    let cause = native_failure.get_or_insert(failure_outcome).clone();
+                    if !native_execution {
+                        outcome.get_or_insert(cause);
+                    }
                 }
                 _ => {}
             }
@@ -926,7 +975,7 @@ impl AgentTurnDriver {
                 Ok(SinkControl::Closed) => {
                     delivery = TurnDeliveryOutcome::Closed;
                     token.cancel();
-                    if outcome.is_none() {
+                    if outcome.is_none() && !native_execution {
                         outcome = Some(TurnOutcome::Cancelled);
                     }
                     break;
@@ -945,9 +994,8 @@ impl AgentTurnDriver {
                     delivery = TurnDeliveryOutcome::Failed(failure.clone());
                     token.cancel();
                     if outcome.is_none() {
+                        // 已观察正文仍等待原末尾status裁决；非完成时统一清除，不能在投递失败处丢事实。
                         outcome = Some(TurnOutcome::Failed(failure));
-                        final_answer = None;
-                        final_message_id = None;
                     }
                     break;
                 }
@@ -959,10 +1007,58 @@ impl AgentTurnDriver {
         // physical settlement. Retain every opened original source through
         // actual EOF, preserving the cause and accounting already observed.
         while let Some(item) = raw.next().await {
-            if let Err(error @ ReactError::ExecutionNotSettled { .. }) = item
-                && let Some(lifecycle) = input_lifecycle.as_ref()
-            {
-                lifecycle.observe_not_settled(&error);
+            // 仍读同一原source，保首个producer原因；尾部不是新的投递，不增加序号。
+            match &item {
+                Ok(event @ AgentEvent::ExecutionStatus(status)) => {
+                    if let Some(terminal) = TurnOutcome::classify(event) {
+                        let preserve_delivery_cause = status.adapter_generated
+                            && matches!(delivery, TurnDeliveryOutcome::Failed(_))
+                            && final_answer.is_none()
+                            && matches!(outcome, Some(TurnOutcome::Failed(_)));
+                        if let Some(cause) = native_failure.as_ref() {
+                            outcome = Some(cause.clone());
+                        } else if !preserve_delivery_cause {
+                            outcome = Some(terminal);
+                        }
+                    }
+                }
+                Ok(AgentEvent::Error { failure, .. }) => {
+                    let cause = if failure.terminal_kind
+                        == echo_core::error::AgentTerminalKind::Cancelled
+                    {
+                        TurnOutcome::Cancelled
+                    } else {
+                        TurnOutcome::Failed(failure.clone())
+                    };
+                    // sink失败已触发cancel；晚到的诱发取消不能覆盖更早的投递失败原因。
+                    if !(matches!(delivery, TurnDeliveryOutcome::Failed(_))
+                        && matches!(cause, TurnOutcome::Cancelled))
+                    {
+                        outcome = Some(native_failure.get_or_insert(cause).clone());
+                    }
+                }
+                Err(error) => match AgentFailure::try_from(error) {
+                    Ok(failure) => {
+                        let cause = if failure.terminal_kind
+                            == echo_core::error::AgentTerminalKind::Cancelled
+                        {
+                            TurnOutcome::Cancelled
+                        } else {
+                            TurnOutcome::Failed(failure)
+                        };
+                        if !(matches!(delivery, TurnDeliveryOutcome::Failed(_))
+                            && matches!(cause, TurnOutcome::Cancelled))
+                        {
+                            outcome = Some(native_failure.get_or_insert(cause).clone());
+                        }
+                    }
+                    Err(observation) => {
+                        if let Some(lifecycle) = input_lifecycle.as_ref() {
+                            lifecycle.observe_not_settled(&observation);
+                        }
+                    }
+                },
+                _ => {}
             }
         }
         if let Some(error) = source_observation
@@ -982,6 +1078,10 @@ impl AgentTurnDriver {
                 "turn stream ended without a terminal event",
             ))
         });
+        if !matches!(outcome, TurnOutcome::Completed) {
+            final_answer = None;
+            final_message_id = None;
+        }
         if let Some(lifecycle) = input_lifecycle.as_ref() {
             lifecycle.settle(match &outcome {
                 TurnOutcome::Completed => AgentSteerTurnOutcome::Completed,
@@ -1016,9 +1116,7 @@ mod tests {
     use std::sync::atomic::Ordering;
     use std::time::Duration as StdDuration;
 
-    /// Agent that replays scripted events, optionally with a delay so
-    /// cancellation can be observed mid-stream. Events are built per stream
-    /// because `AgentEvent` is not `Clone`.
+    /// 每次调用重建同一 raw 脚本；可选延迟用于观察流中的取消。
     struct ScriptedAgent {
         name: &'static str,
         script: fn() -> Vec<AgentEvent>,
@@ -1190,6 +1288,8 @@ mod tests {
     #[derive(Default)]
     struct RecordingSink {
         events: Mutex<Vec<u64>>,
+        payloads: Mutex<Vec<AgentEvent>>,
+        envelopes: Mutex<Vec<EventEnvelope>>,
         close_after: Option<usize>,
     }
 
@@ -1201,11 +1301,200 @@ mod tests {
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
             events.push(envelope.sequence);
+            self.envelopes
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .push(envelope.clone());
+            self.payloads
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .push(envelope.payload);
             Ok(match self.close_after {
                 Some(limit) if events.len() >= limit => SinkControl::Closed,
                 _ => SinkControl::Continue,
             })
         }
+    }
+
+    // 只观察真实执行状态；FinalAnswer 是正文投影，不是物理终态。
+    fn delivery_kind(event: &AgentEvent) -> &'static str {
+        use echo_core::agent::ExecutionStatusKind;
+        match event {
+            AgentEvent::ExecutionStatus(status) => match status.status {
+                ExecutionStatusKind::Started => "started",
+                ExecutionStatusKind::Settled => "settled",
+                ExecutionStatusKind::Failed => "runtime_failed",
+                ExecutionStatusKind::Cancelled => "runtime_cancelled",
+                ExecutionStatusKind::Waiting
+                | ExecutionStatusKind::ToolPending
+                | ExecutionStatusKind::Candidate => "runtime_progress",
+            },
+            AgentEvent::LlmUsage { .. } => "usage",
+            AgentEvent::Token(_) => "token",
+            AgentEvent::FinalAnswer(_) => "final_answer",
+            AgentEvent::Error { .. } => "error",
+            AgentEvent::Cancelled => "cancelled_projection",
+            _ => "other",
+        }
+    }
+
+    fn assert_delivery_trace(
+        envelopes: &[EventEnvelope],
+        expected_identity: &EventIdentity,
+        persisted: u64,
+        expected: &[&str],
+    ) -> echo_core::error::Result<()> {
+        let kinds: Vec<_> = envelopes
+            .iter()
+            .map(|event| delivery_kind(&event.payload))
+            .collect();
+        assert_eq!(
+            kinds, expected,
+            "必须核对完整投递轨迹，不能过滤新增状态后只改计数"
+        );
+        let violations = echo_core::agent::validate_envelope_trajectory(envelopes);
+        assert!(violations.is_empty(), "{violations:?}");
+        for (offset, envelope) in envelopes.iter().enumerate() {
+            let sequence = u64::try_from(offset)
+                .ok()
+                .and_then(|offset| persisted.checked_add(offset))
+                .and_then(|sequence| sequence.checked_add(1));
+            assert_eq!(Some(envelope.sequence), sequence);
+            let rebuilt = EventEnvelope::new(
+                expected_identity,
+                envelope.sequence,
+                expected_identity.parent_event_id.clone(),
+                envelope.payload.clone(),
+            )?;
+            assert_eq!(envelope.event_id, rebuilt.event_id);
+            assert_eq!(envelope.content_hash, rebuilt.content_hash);
+            assert_eq!(envelope.stream_id, expected_identity.stream_id);
+            assert_eq!(envelope.turn_id, expected_identity.turn_id);
+            assert_eq!(envelope.run_id, expected_identity.run_id);
+            assert_eq!(envelope.execution_id, expected_identity.execution_id);
+            assert_eq!(envelope.message_id, expected_identity.message_id);
+            assert_eq!(envelope.conversation_id, expected_identity.conversation_id);
+        }
+        let statuses: Vec<_> = envelopes
+            .iter()
+            .filter_map(|event| match &event.payload {
+                AgentEvent::ExecutionStatus(status) => Some(status),
+                _ => None,
+            })
+            .collect();
+        if let Some(first) = statuses.first() {
+            assert!(!first.execution_id.is_empty());
+            assert_eq!(first.status, echo_core::agent::ExecutionStatusKind::Started);
+            assert!(
+                statuses
+                    .iter()
+                    .all(|status| status.execution_id == first.execution_id)
+            );
+            assert!(statuses.windows(2).all(|pair| match pair {
+                [left, right] => left.sequence < right.sequence,
+                _ => false,
+            }));
+        }
+        let physical: Vec<_> = envelopes
+            .iter()
+            .filter(|event| event.payload.is_execution_terminal())
+            .collect();
+        assert!(physical.len() <= 1);
+        if let Some(terminal) = physical.first() {
+            assert_eq!(
+                Some(terminal.sequence),
+                envelopes.last().map(|event| event.sequence)
+            );
+        }
+        assert!(
+            envelopes
+                .iter()
+                .filter(|event| matches!(event.payload, AgentEvent::FinalAnswer(_)))
+                .count()
+                <= 1
+        );
+        Ok(())
+    }
+
+    // 故障落在具名语义事件，不依赖 Started/Status 加入前的序号布局。
+    struct SemanticSink {
+        recording: RecordingSink,
+        target: fn(&AgentEvent) -> bool,
+        close: bool,
+        hits: std::sync::atomic::AtomicUsize,
+    }
+
+    impl SemanticSink {
+        fn new(target: fn(&AgentEvent) -> bool, close: bool) -> Self {
+            Self {
+                recording: RecordingSink::default(),
+                target,
+                close,
+                hits: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl EventSink for SemanticSink {
+        async fn on_event(&self, envelope: EventEnvelope) -> echo_core::error::Result<SinkControl> {
+            let hit = (self.target)(&envelope.payload);
+            self.recording.on_event(envelope).await?;
+            if !hit {
+                return Ok(SinkControl::Continue);
+            }
+            self.hits.fetch_add(1, Ordering::SeqCst);
+            if self.close {
+                Ok(SinkControl::Closed)
+            } else {
+                Err(ReactError::Other(
+                    "injected durable sink failure".to_string(),
+                ))
+            }
+        }
+    }
+
+    fn native_status(
+        execution: &str,
+        kind: echo_core::agent::ExecutionStatusKind,
+        sequence: u64,
+    ) -> AgentEvent {
+        AgentEvent::ExecutionStatus(echo_core::agent::ExecutionStatus {
+            adapter_generated: false,
+            execution_id: execution.to_string(),
+            request_id: None,
+            sequence,
+            phase: if kind == echo_core::agent::ExecutionStatusKind::Started {
+                echo_core::agent::AgentPhase::Thinking
+            } else {
+                echo_core::agent::AgentPhase::Terminal
+            },
+            status: kind,
+            reason: None,
+        })
+    }
+
+    async fn guarded_invocation() -> echo_core::error::Result<(
+        AgentInvocationContext,
+        Arc<tokio::sync::Semaphore>,
+        Arc<std::sync::atomic::AtomicUsize>,
+    )> {
+        let capacity = Arc::new(tokio::sync::Semaphore::new(1));
+        let permit = Arc::clone(&capacity)
+            .acquire_owned()
+            .await
+            .map_err(|error| ReactError::Other(error.to_string()))?;
+        let drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let invocation = AgentInvocationContext {
+            resource_guards: vec![echo_core::tools::InvocationResourceGuard::new(
+                ObservationResource {
+                    _permit: permit,
+                    drops: Arc::clone(&drops),
+                },
+            )],
+            ..Default::default()
+        };
+        Ok((invocation, capacity, drops))
     }
 
     fn identity(label: &str) -> EventIdentity {
@@ -1360,16 +1649,12 @@ mod tests {
     #[tokio::test]
     async fn completed_turn_maps_final_answer_and_sequences_from_one()
     -> echo_core::error::Result<()> {
-        let agent: Arc<dyn Agent> = Arc::new(ScriptedAgent::new(|| {
-            vec![
-                usage_event(10, 5),
-                AgentEvent::FinalAnswer("done".to_string()),
-            ]
-        }));
+        let agent =
+            ScriptedAgent::new(|| vec![usage_event(10, 5), AgentEvent::FinalAnswer("done".into())]);
         let sink = RecordingSink::default();
-        let request = TurnRequest::new(identity("ok"), "hello");
+        let id = identity("ok");
         let receipt = AgentTurnDriver
-            .drive(agent.as_ref(), request, &sink)
+            .drive(&agent, TurnRequest::new(id.clone(), "hello"), &sink)
             .await?;
         assert_eq!(receipt.outcome, TurnOutcome::Completed);
         assert_eq!(receipt.delivery, TurnDeliveryOutcome::Delivered);
@@ -1377,12 +1662,120 @@ mod tests {
         assert_eq!(receipt.prompt_tokens, 10);
         assert_eq!(receipt.completion_tokens, 5);
         assert_eq!(receipt.llm_calls, 1);
-        assert_eq!(receipt.last_event_sequence, 2);
-        let events = sink
-            .events
+        let envelopes = sink
+            .envelopes
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        assert_eq!(*events, vec![1, 2]);
+        // 既有 default legacy adapter 在同一原 source 前后发布 Started / Settled。
+        assert_delivery_trace(
+            &envelopes,
+            &id,
+            0,
+            &["started", "usage", "final_answer", "settled"],
+        )?;
+        assert_eq!(receipt.last_event_sequence, 4);
+        assert!(
+            matches!(envelopes.iter().find(|event| delivery_kind(&event.payload) == "final_answer").map(|event| &event.payload), Some(AgentEvent::FinalAnswer(text)) if text == "done")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn native_message_turn_driver_delivers_final_runtime_status()
+    -> echo_core::error::Result<()> {
+        fn status(kind: echo_core::agent::ExecutionStatusKind, sequence: u64) -> AgentEvent {
+            AgentEvent::ExecutionStatus(echo_core::agent::ExecutionStatus {
+                adapter_generated: false,
+                execution_id: "execution-native".to_string(),
+                request_id: Some("response-native".to_string()),
+                sequence,
+                phase: echo_core::agent::AgentPhase::Terminal,
+                status: kind,
+                reason: None,
+            })
+        }
+        let agent = ScriptedAgent::new(|| {
+            vec![
+                status(echo_core::agent::ExecutionStatusKind::Started, 0),
+                AgentEvent::FinalAnswer("native done".to_string()),
+                status(echo_core::agent::ExecutionStatusKind::Settled, 1),
+            ]
+        });
+        let sink = RecordingSink::default();
+        let receipt = AgentTurnDriver
+            .drive(&agent, TurnRequest::new(identity("native"), "run"), &sink)
+            .await?;
+        assert_eq!(receipt.outcome, TurnOutcome::Completed);
+        assert_eq!(receipt.final_answer.as_deref(), Some("native done"));
+        assert_eq!(receipt.last_event_sequence, 3);
+        let payloads = sink
+            .payloads
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        assert!(
+            matches!(payloads.last(), Some(AgentEvent::ExecutionStatus(status))
+            if status.status == echo_core::agent::ExecutionStatusKind::Settled)
+        );
+        assert_eq!(
+            payloads
+                .iter()
+                .filter(|event| event.is_execution_terminal())
+                .count(),
+            1
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn native_message_turn_driver_keeps_execution_settlement_separate_from_sink_closure()
+    -> echo_core::error::Result<()> {
+        let agent = ScriptedAgent::new(|| {
+            vec![
+                AgentEvent::ExecutionStatus(echo_core::agent::ExecutionStatus {
+                    adapter_generated: false,
+                    execution_id: "execution-native".into(),
+                    request_id: None,
+                    sequence: 0,
+                    phase: echo_core::agent::AgentPhase::Thinking,
+                    status: echo_core::agent::ExecutionStatusKind::Started,
+                    reason: None,
+                }),
+                AgentEvent::FinalAnswer("native done".into()),
+                AgentEvent::ExecutionStatus(echo_core::agent::ExecutionStatus {
+                    adapter_generated: false,
+                    execution_id: "execution-native".into(),
+                    request_id: None,
+                    sequence: 1,
+                    phase: echo_core::agent::AgentPhase::Terminal,
+                    status: echo_core::agent::ExecutionStatusKind::Settled,
+                    reason: None,
+                }),
+            ]
+        });
+        let sink = RecordingSink {
+            close_after: Some(2),
+            ..Default::default()
+        };
+        let receipt = AgentTurnDriver
+            .drive(
+                &agent,
+                TurnRequest::new(identity("native-closed"), "run"),
+                &sink,
+            )
+            .await?;
+        assert_eq!(receipt.delivery, TurnDeliveryOutcome::Closed);
+        assert_eq!(receipt.outcome, TurnOutcome::Completed);
+        assert_eq!(
+            receipt.last_event_sequence, 2,
+            "未交付的status不能冒称journal已提交"
+        );
+        assert_eq!(
+            sink.payloads
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .len(),
+            2
+        );
         Ok(())
     }
 
@@ -1489,35 +1882,60 @@ mod tests {
 
     #[tokio::test]
     async fn failed_terminal_delivery_keeps_final_completion_facts() -> Result<(), String> {
-        let agent: Arc<dyn Agent> = Arc::new(ScriptedAgent::new(|| {
-            vec![AgentEvent::FinalAnswer("undelivered".to_string())]
-        }));
-        let identity = EventIdentity::for_chat(
-            Some("conversation-delivery-failure".to_string()),
-            "turn-delivery-failure",
-            "message-delivery-failure",
-            None,
-        )
-        .map_err(|error| error.to_string())?;
-        let receipt = AgentTurnDriver
-            .drive(
-                agent.as_ref(),
-                TurnRequest::new(identity, "hello"),
-                &FailingSink,
+        for at_projection in [false, true] {
+            let agent = ScriptedAgent::new(|| vec![AgentEvent::FinalAnswer("undelivered".into())]);
+            let id = EventIdentity::for_chat(
+                Some("conversation-delivery-failure".into()),
+                "turn-delivery-failure",
+                "message-delivery-failure",
+                None,
             )
-            .await
             .map_err(|error| error.to_string())?;
-
-        assert_eq!(receipt.outcome, TurnOutcome::Completed);
-        assert!(matches!(receipt.delivery, TurnDeliveryOutcome::Failed(_)));
-        assert_eq!(receipt.final_answer.as_deref(), Some("undelivered"));
-        assert_eq!(
-            receipt
-                .final_message_id
-                .as_ref()
-                .map(echo_core::agent::MessageId::as_str),
-            Some("message-delivery-failure")
-        );
+            let target: fn(&AgentEvent) -> bool = if at_projection {
+                |event| matches!(event, AgentEvent::FinalAnswer(_))
+            } else {
+                AgentEvent::is_execution_terminal
+            };
+            let sink = SemanticSink::new(target, false);
+            let receipt = AgentTurnDriver
+                .drive(&agent, TurnRequest::new(id.clone(), "hello"), &sink)
+                .await
+                .map_err(|error| error.to_string())?;
+            assert_eq!(receipt.outcome, TurnOutcome::Completed);
+            assert_eq!(
+                receipt.delivery,
+                TurnDeliveryOutcome::Failed(AgentFailure::message(
+                    "other",
+                    "injected durable sink failure"
+                ))
+            );
+            assert_eq!(receipt.final_answer.as_deref(), Some("undelivered"));
+            assert_eq!(
+                receipt
+                    .final_message_id
+                    .as_ref()
+                    .map(echo_core::agent::MessageId::as_str),
+                Some("message-delivery-failure")
+            );
+            assert_eq!(sink.hits.load(Ordering::SeqCst), 1);
+            let envelopes = sink
+                .recording
+                .envelopes
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let expected: &[&str] = if at_projection {
+                &["started", "final_answer"]
+            } else {
+                &["started", "final_answer", "settled"]
+            };
+            assert_delivery_trace(&envelopes, &id, 0, expected)
+                .map_err(|error| error.to_string())?;
+            assert_eq!(
+                receipt.last_event_sequence,
+                if at_projection { 2 } else { 3 },
+                "末尾是尝试投递，Failed 不能冒称持久提交"
+            );
+        }
         Ok(())
     }
 
@@ -1540,42 +1958,104 @@ mod tests {
     #[tokio::test]
     async fn producer_error_delivery_failure_keeps_original_failure() -> echo_core::error::Result<()>
     {
-        let producer_failure =
-            AgentFailure::try_from(&ReactError::Other("producer boom".to_string()))?;
-        let agent: Arc<dyn Agent> = Arc::new(ScriptedAgent::new(|| {
-            vec![AgentEvent::Error {
-                source: "producer".to_string(),
-                message: "producer boom".to_string(),
-                failure: AgentFailure::message("other", "producer boom"),
-            }]
-        }));
-        let receipt = AgentTurnDriver
-            .drive(
-                agent.as_ref(),
-                TurnRequest::new(identity("error-delivery-failure"), "hello"),
-                &FailingSink,
-            )
-            .await?;
-        assert_eq!(receipt.outcome, TurnOutcome::Failed(producer_failure));
-        assert!(matches!(receipt.delivery, TurnDeliveryOutcome::Failed(_)));
+        for before_error in [false, true] {
+            let producer_failure =
+                AgentFailure::try_from(&ReactError::Other("producer boom".to_string()))?;
+            let agent = ScriptedAgent::new(|| {
+                vec![AgentEvent::Error {
+                    source: "producer".into(),
+                    message: "producer boom".into(),
+                    failure: AgentFailure::message("other", "producer boom"),
+                }]
+            });
+            let id = identity("error-delivery-failure");
+            let target: fn(&AgentEvent) -> bool = if before_error {
+                |event| {
+                    matches!(event, AgentEvent::ExecutionStatus(status)
+                if status.status == echo_core::agent::ExecutionStatusKind::Started)
+                }
+            } else {
+                |event| {
+                    matches!(event, AgentEvent::Error { source, message, .. }
+                if source == "producer" && message == "producer boom")
+                }
+            };
+            let sink = SemanticSink::new(target, false);
+            let receipt = AgentTurnDriver
+                .drive(&agent, TurnRequest::new(id.clone(), "hello"), &sink)
+                .await?;
+            assert_eq!(
+                receipt.outcome,
+                TurnOutcome::Failed(producer_failure.clone())
+            );
+            assert_eq!(
+                receipt.delivery,
+                TurnDeliveryOutcome::Failed(AgentFailure::message(
+                    "other",
+                    "injected durable sink failure"
+                ))
+            );
+            assert!(receipt.final_answer.is_none());
+            assert_eq!(sink.hits.load(Ordering::SeqCst), 1);
+            let envelopes = sink
+                .recording
+                .envelopes
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let expected: &[&str] = if before_error {
+                &["started"]
+            } else {
+                &["started", "error"]
+            };
+            assert_delivery_trace(&envelopes, &id, 0, expected)?;
+            if !before_error {
+                assert!(
+                    matches!(envelopes.last().map(|event| &event.payload), Some(AgentEvent::Error { failure, .. }) if failure == &producer_failure)
+                );
+            }
+            assert_eq!(
+                receipt.last_event_sequence,
+                if before_error { 1 } else { 2 },
+                "raw drain 的末尾状态未试投 sink，不能增加投递序号"
+            );
+        }
         Ok(())
     }
 
     #[tokio::test]
     async fn resumed_sequencing_continues_after_persisted_sequence() -> echo_core::error::Result<()>
     {
-        let agent: Arc<dyn Agent> = Arc::new(ScriptedAgent::new(|| vec![AgentEvent::Cancelled]));
+        let agent = ScriptedAgent::new(|| vec![AgentEvent::Cancelled]);
         let sink = RecordingSink::default();
-        let request = TurnRequest::new(identity("resume"), "hello").last_persisted_sequence(41);
+        let id = identity("resume");
         let receipt = AgentTurnDriver
-            .drive(agent.as_ref(), request, &sink)
+            .drive(
+                &agent,
+                TurnRequest::new(id.clone(), "hello").last_persisted_sequence(41),
+                &sink,
+            )
             .await?;
-        assert_eq!(receipt.last_event_sequence, 42);
-        let events = sink
-            .events
+        assert_eq!(receipt.outcome, TurnOutcome::Cancelled);
+        assert_eq!(receipt.delivery, TurnDeliveryOutcome::Delivered);
+        assert!(receipt.final_answer.is_none());
+        let envelopes = sink
+            .envelopes
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        assert_eq!(*events, vec![42]);
+        assert_delivery_trace(
+            &envelopes,
+            &id,
+            41,
+            &["started", "cancelled_projection", "runtime_cancelled"],
+        )?;
+        assert_eq!(receipt.last_event_sequence, 44);
+        assert_eq!(
+            *sink
+                .events
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()),
+            vec![42, 43, 44]
+        );
         Ok(())
     }
 
@@ -1607,23 +2087,23 @@ mod tests {
 
     #[tokio::test]
     async fn terminal_closed_sink_keeps_completed_execution() -> echo_core::error::Result<()> {
-        let agent: Arc<dyn Agent> = Arc::new(ScriptedAgent::new(|| {
-            vec![AgentEvent::FinalAnswer("done".to_string())]
-        }));
-        let sink = RecordingSink {
-            close_after: Some(1),
-            ..RecordingSink::default()
-        };
+        let agent = ScriptedAgent::new(|| vec![AgentEvent::FinalAnswer("done".into())]);
+        let id = identity("terminal-closed");
+        let sink = SemanticSink::new(AgentEvent::is_execution_terminal, true);
         let receipt = AgentTurnDriver
-            .drive(
-                agent.as_ref(),
-                TurnRequest::new(identity("terminal-closed"), "hello"),
-                &sink,
-            )
+            .drive(&agent, TurnRequest::new(id.clone(), "hello"), &sink)
             .await?;
         assert_eq!(receipt.outcome, TurnOutcome::Completed);
         assert_eq!(receipt.delivery, TurnDeliveryOutcome::Closed);
         assert_eq!(receipt.final_answer.as_deref(), Some("done"));
+        assert_eq!(sink.hits.load(Ordering::SeqCst), 1);
+        let envelopes = sink
+            .recording
+            .envelopes
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        assert_delivery_trace(&envelopes, &id, 0, &["started", "final_answer", "settled"])?;
+        assert_eq!(receipt.last_event_sequence, 3);
         Ok(())
     }
 
@@ -2179,11 +2659,14 @@ mod tests {
                 release_eof: Arc::new(tokio::sync::Notify::new()),
                 raw_closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             };
-            let sink = ObservedTerminalSink::default();
+            let sink = RecordingSink::default();
             let cancel = CancellationToken::new();
-            let (request, input) = TurnRequest::new(identity("held-terminal"), "task")
+            let id = identity("held-terminal");
+            let (invocation, capacity, drops) = guarded_invocation().await?;
+            let (request, input) = TurnRequest::new(id.clone(), "task")
                 .mode(TurnMode::Execute)
                 .cancel(cancel.clone())
+                .invocation(invocation)
                 .with_input_receipt();
             if !cancelled {
                 agent.release_terminal.notify_one();
@@ -2195,32 +2678,36 @@ mod tests {
                 assert!(futures::poll!(drive.as_mut()).is_pending());
             }
             let expected_status = if cancelled { "cancelled" } else { "completed" };
-            assert_eq!(
-                *sink
-                    .terminals
+            // 默认适配器缓冲 legacy final 到原 EOF，不能提前发布物理完成。
+            assert_delivery_trace(
+                &sink
+                    .envelopes
                     .lock()
                     .unwrap_or_else(|error| error.into_inner()),
-                if cancelled {
-                    vec![]
-                } else {
-                    vec![expected_status]
-                }
-            );
+                &id,
+                0,
+                &["started", "token"],
+            )?;
             assert!(!agent.raw_closed.load(Ordering::SeqCst));
+            assert_eq!(capacity.available_permits(), 0);
+            assert_eq!(drops.load(Ordering::SeqCst), 0);
             assert!(!matches!(input.state(), TurnInputState::TurnSettled { .. }));
             if cancelled {
-                // Even the later original terminal cannot substitute for EOF
-                // or replace the cancellation cause already admitted.
                 agent.release_terminal.notify_one();
                 assert!(futures::poll!(drive.as_mut()).is_pending());
                 assert!(!agent.raw_closed.load(Ordering::SeqCst));
+                assert_eq!(capacity.available_permits(), 0);
+                assert_eq!(drops.load(Ordering::SeqCst), 0);
+                assert!(!matches!(input.state(), TurnInputState::TurnSettled { .. }));
             }
             agent.release_eof.notify_one();
             let receipt = drive.await?;
             assert!(agent.raw_closed.load(Ordering::SeqCst));
+            assert_eq!(capacity.available_permits(), 1);
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
             assert_eq!(receipt.status(), expected_status);
             assert_eq!(receipt.delivery, TurnDeliveryOutcome::Delivered);
-            assert_eq!(receipt.last_event_sequence, 2);
+            assert_eq!(receipt.last_event_sequence, 4);
             assert_eq!(
                 receipt.final_answer.as_deref(),
                 if cancelled {
@@ -2229,23 +2716,37 @@ mod tests {
                     Some("later terminal")
                 }
             );
-            assert_eq!(
-                *sink
-                    .terminals
+            let expected = if cancelled {
+                [
+                    "started",
+                    "token",
+                    "cancelled_projection",
+                    "runtime_cancelled",
+                ]
+            } else {
+                ["started", "token", "final_answer", "settled"]
+            };
+            assert_delivery_trace(
+                &sink
+                    .envelopes
                     .lock()
                     .unwrap_or_else(|error| error.into_inner()),
-                vec![expected_status]
-            );
+                &id,
+                0,
+                &expected,
+            )?;
             assert!(
                 matches!(input.state(), TurnInputState::TurnSettled { outcome, .. }
-                if outcome == if cancelled { AgentSteerTurnOutcome::Cancelled }
-                    else { AgentSteerTurnOutcome::Completed })
+                if outcome == if cancelled { AgentSteerTurnOutcome::Cancelled } else { AgentSteerTurnOutcome::Completed })
             );
         }
         Ok(())
     }
 
     struct TailObservationAgent {
+        native_projection: bool,
+        terminal_execution_id: Option<&'static str>,
+        release_physical_terminal: tokio::sync::Notify,
         release_terminal: tokio::sync::Notify,
         release_observation: tokio::sync::Notify,
         release_eof: tokio::sync::Notify,
@@ -2277,11 +2778,18 @@ mod tests {
         > {
             Box::pin(async move {
                 Ok(async_stream::stream! {
+                    if self.native_projection {
+                        yield Ok(native_status("original-observed-attempt", echo_core::agent::ExecutionStatusKind::Started, 0));
+                    }
                     yield Ok(AgentEvent::Token("before terminal".to_string()));
                     self.release_terminal.notified().await;
                     yield Ok(AgentEvent::FinalAnswer("original terminal".to_string()));
                     self.release_observation.notified().await;
                     yield Err(pending_observation());
+                    if let Some(execution) = self.terminal_execution_id {
+                        self.release_physical_terminal.notified().await;
+                        yield Ok(native_status(execution, echo_core::agent::ExecutionStatusKind::Settled, 1));
+                    }
                     self.release_eof.notified().await;
                     self.raw_closed.store(true, Ordering::SeqCst);
                 }
@@ -2290,85 +2798,178 @@ mod tests {
         }
     }
 
+    // 借用同一个原 source 与 Notify，既不复制执行器也不创建第二 owner。
+    struct DirectNativeSource<'a>(&'a dyn Agent);
+
+    impl Agent for DirectNativeSource<'_> {
+        fn name(&self) -> &str {
+            self.0.name()
+        }
+        fn model_name(&self) -> &str {
+            self.0.model_name()
+        }
+        fn system_prompt(&self) -> &str {
+            self.0.system_prompt()
+        }
+        fn execute<'a>(&'a self, task: &'a str) -> BoxFuture<'a, echo_core::error::Result<String>> {
+            self.0.execute(task)
+        }
+        fn execute_stream<'a>(
+            &'a self,
+            task: &'a str,
+        ) -> BoxFuture<
+            'a,
+            echo_core::error::Result<BoxStream<'a, echo_core::error::Result<AgentEvent>>>,
+        > {
+            self.0.execute_stream(task)
+        }
+
+        fn execute_stream_with_invocation_context<'a>(
+            &'a self,
+            task: &'a str,
+            _cancel: CancellationToken,
+            invocation: AgentInvocationContext,
+        ) -> BoxFuture<
+            'a,
+            echo_core::error::Result<BoxStream<'a, echo_core::error::Result<AgentEvent>>>,
+        > {
+            // 原生 producer 直接返回同一原流；仅持有 invocation，不走 legacy 缓冲。
+            Box::pin(async move {
+                let raw = self.0.execute_stream(task).await?;
+                Ok(raw
+                    .map(move |item| {
+                        let _keep = &invocation;
+                        item
+                    })
+                    .boxed())
+            })
+        }
+        fn execute_stream_message_with_invocation_context<'a>(
+            &'a self,
+            _message: Message,
+            _cancel: CancellationToken,
+            invocation: AgentInvocationContext,
+        ) -> BoxFuture<
+            'a,
+            echo_core::error::Result<BoxStream<'a, echo_core::error::Result<AgentEvent>>>,
+        > {
+            // 本 source 不消费正文；结构化入口也持有原 invocation 到原 EOF。
+            Box::pin(async move {
+                let raw = self.0.execute_stream("").await?;
+                Ok(raw
+                    .map(move |item| {
+                        let _keep = &invocation;
+                        item
+                    })
+                    .boxed())
+            })
+        }
+    }
+
     #[tokio::test]
     async fn late_cleanup_observation_prevents_receipt_after_delivered_terminal()
     -> echo_core::error::Result<()> {
-        for matching_identity in [false, true] {
-            for cancelled in [true, false] {
-                let agent = TailObservationAgent {
-                    release_terminal: tokio::sync::Notify::new(),
-                    release_observation: tokio::sync::Notify::new(),
-                    release_eof: tokio::sync::Notify::new(),
-                    raw_closed: std::sync::atomic::AtomicBool::new(false),
-                };
-                let sink = ObservedTerminalSink::default();
-                let cancel = CancellationToken::new();
-                let source_identity = if matching_identity {
-                    identity("late-cleanup-observation")
-                        .with_run_id("original-observed-run")?
-                        .with_execution_id("original-observed-attempt")?
-                } else {
-                    identity("late-cleanup-observation")
-                };
-                let (request, input) = TurnRequest::new(source_identity, "task")
-                    .mode(TurnMode::Execute)
-                    .cancel(cancel.clone())
-                    .with_input_receipt();
-                if !cancelled {
-                    agent.release_terminal.notify_one();
-                }
-                // Use the actual default cancellation and invocation wrappers;
-                // cancellation drains must forward knowledge from this same source.
-                let mut drive = Box::pin(AgentTurnDriver.drive(&agent, request, &sink));
-                assert!(futures::poll!(drive.as_mut()).is_pending());
-                if cancelled {
-                    cancel.cancel();
+        for native_projection in [false, true] {
+            for matching_identity in [false, true] {
+                for cancelled in [true, false] {
+                    let agent = TailObservationAgent {
+                        native_projection,
+                        terminal_execution_id: None,
+                        release_physical_terminal: tokio::sync::Notify::new(),
+                        release_terminal: tokio::sync::Notify::new(),
+                        release_observation: tokio::sync::Notify::new(),
+                        release_eof: tokio::sync::Notify::new(),
+                        raw_closed: std::sync::atomic::AtomicBool::new(false),
+                    };
+                    let sink = RecordingSink::default();
+                    let cancel = CancellationToken::new();
+                    let id = if matching_identity {
+                        identity("late-cleanup-observation")
+                            .with_run_id("original-observed-run")?
+                            .with_execution_id("original-observed-attempt")?
+                    } else {
+                        identity("late-cleanup-observation")
+                    };
+                    let (invocation, capacity, drops) = guarded_invocation().await?;
+                    let initial = if native_projection {
+                        TurnRequest::from_message(id.clone(), Message::user("task".to_string()))
+                    } else {
+                        TurnRequest::new(id.clone(), "task")
+                    };
+                    let (request, input) = initial
+                        .mode(TurnMode::Execute)
+                        .cancel(cancel.clone())
+                        .invocation(invocation)
+                        .with_input_receipt();
+                    if !cancelled {
+                        agent.release_terminal.notify_one();
+                    }
+                    let native = DirectNativeSource(&agent);
+                    let source: &dyn Agent = if native_projection { &native } else { &agent };
+                    let mut drive = Box::pin(AgentTurnDriver.drive(source, request, &sink));
                     assert!(futures::poll!(drive.as_mut()).is_pending());
-                    agent.release_terminal.notify_one();
+                    if cancelled {
+                        cancel.cancel();
+                        assert!(futures::poll!(drive.as_mut()).is_pending());
+                        agent.release_terminal.notify_one();
+                        assert!(futures::poll!(drive.as_mut()).is_pending());
+                    }
+                    // 原生路径必须确实交付过正文投影；legacy 路径必须仍缓冲它。
+                    let expected = if native_projection {
+                        vec!["started", "token", "final_answer"]
+                    } else {
+                        vec!["started", "token"]
+                    };
+                    assert_delivery_trace(
+                        &sink
+                            .envelopes
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner()),
+                        &id,
+                        0,
+                        &expected,
+                    )?;
+                    assert_eq!(input.state(), TurnInputState::Accepted);
+                    assert!(!agent.raw_closed.load(Ordering::SeqCst));
+                    assert_eq!(capacity.available_permits(), 0);
+                    assert_eq!(drops.load(Ordering::SeqCst), 0);
+                    agent.release_observation.notify_one();
                     assert!(futures::poll!(drive.as_mut()).is_pending());
+                    assert_eq!(input.state(), TurnInputState::Accepted);
+                    assert_input_observation(
+                        &input,
+                        "original-observed-run",
+                        Some("original-observed-attempt"),
+                    )
+                    .await;
+                    assert!(!agent.raw_closed.load(Ordering::SeqCst));
+                    assert_eq!(capacity.available_permits(), 0);
+                    assert_eq!(drops.load(Ordering::SeqCst), 0);
+                    agent.release_eof.notify_one();
+                    assert!(
+                        matches!(drive.await, Err(ReactError::ExecutionNotSettled { run_id, execution_id })
+                        if run_id == "original-observed-run" && execution_id.as_deref() == Some("original-observed-attempt"))
+                    );
+                    assert!(agent.raw_closed.load(Ordering::SeqCst));
+                    assert_eq!(capacity.available_permits(), 1);
+                    assert_eq!(drops.load(Ordering::SeqCst), 1);
+                    assert_eq!(input.state(), TurnInputState::Accepted);
+                    assert_input_observation(
+                        &input,
+                        "original-observed-run",
+                        Some("original-observed-attempt"),
+                    )
+                    .await;
+                    assert_delivery_trace(
+                        &sink
+                            .envelopes
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner()),
+                        &id,
+                        0,
+                        &expected,
+                    )?;
                 }
-                // Cancellation cannot manufacture a terminal after an unresolved
-                // late observation; the non-cancelled earlier terminal remains.
-                let expected = if cancelled { vec![] } else { vec!["completed"] };
-                assert_eq!(
-                    *sink
-                        .terminals
-                        .lock()
-                        .unwrap_or_else(|error| error.into_inner()),
-                    expected
-                );
-                assert_eq!(input.state(), TurnInputState::Accepted);
-                assert!(!agent.raw_closed.load(Ordering::SeqCst));
-                agent.release_observation.notify_one();
-                assert!(futures::poll!(drive.as_mut()).is_pending());
-                assert_eq!(input.state(), TurnInputState::Accepted);
-                assert_input_observation(
-                    &input,
-                    "original-observed-run",
-                    Some("original-observed-attempt"),
-                )
-                .await;
-                assert!(!agent.raw_closed.load(Ordering::SeqCst));
-                agent.release_eof.notify_one();
-                assert!(matches!(drive.await,
-                Err(ReactError::ExecutionNotSettled { run_id, execution_id })
-                if run_id == "original-observed-run"
-                    && execution_id.as_deref() == Some("original-observed-attempt")));
-                assert!(agent.raw_closed.load(Ordering::SeqCst));
-                assert_eq!(input.state(), TurnInputState::Accepted);
-                assert_input_observation(
-                    &input,
-                    "original-observed-run",
-                    Some("original-observed-attempt"),
-                )
-                .await;
-                assert_eq!(
-                    *sink
-                        .terminals
-                        .lock()
-                        .unwrap_or_else(|error| error.into_inner()),
-                    expected
-                );
             }
         }
         Ok(())
@@ -2513,35 +3114,52 @@ mod tests {
 
     #[async_trait]
     impl EventSink for FailingSink {
-        async fn on_event(
-            &self,
-            _envelope: EventEnvelope,
-        ) -> echo_core::error::Result<SinkControl> {
-            Err(ReactError::Other(
-                "injected durable sink failure".to_string(),
-            ))
+        async fn on_event(&self, envelope: EventEnvelope) -> echo_core::error::Result<SinkControl> {
+            // 三个既有调用方检查物理终态或 setup Error 的投递失败；
+            // 新 Started/正文不能提前触发故障。正文失败由 SemanticSink 单独覆盖。
+            let setup_error = matches!(&envelope.payload, AgentEvent::Error { source, .. } if source == "turn_driver");
+            if envelope.payload.is_execution_terminal() || setup_error {
+                Err(ReactError::Other(
+                    "injected durable sink failure".to_string(),
+                ))
+            } else {
+                Ok(SinkControl::Continue)
+            }
         }
     }
 
     #[tokio::test]
     async fn sink_failure_is_failed_not_cancelled() -> echo_core::error::Result<()> {
-        let agent: Arc<dyn Agent> = Arc::new(ScriptedAgent::new(|| {
+        let agent = ScriptedAgent::new(|| {
             vec![
-                AgentEvent::Token("partial".to_string()),
-                AgentEvent::FinalAnswer("must not win".to_string()),
+                AgentEvent::Token("partial".into()),
+                AgentEvent::FinalAnswer("must not win".into()),
             ]
-        }));
+        });
+        let id = identity("sink-failure");
+        let sink = SemanticSink::new(
+            |event| matches!(event, AgentEvent::Token(text) if text == "partial"),
+            false,
+        );
         let receipt = AgentTurnDriver
-            .drive(
-                agent.as_ref(),
-                TurnRequest::new(identity("sink-failure"), "hello"),
-                &FailingSink,
-            )
+            .drive(&agent, TurnRequest::new(id.clone(), "hello"), &sink)
             .await?;
-        assert!(matches!(receipt.outcome, TurnOutcome::Failed(_)));
-        assert!(matches!(receipt.delivery, TurnDeliveryOutcome::Failed(_)));
+        let failure = AgentFailure::message("other", "injected durable sink failure");
+        assert_eq!(receipt.outcome, TurnOutcome::Failed(failure.clone()));
+        assert_eq!(receipt.delivery, TurnDeliveryOutcome::Failed(failure));
         assert!(receipt.final_answer.is_none());
-        assert_eq!(receipt.last_event_sequence, 1);
+        assert_eq!(receipt.last_event_sequence, 2);
+        assert_eq!(sink.hits.load(Ordering::SeqCst), 1);
+        assert_delivery_trace(
+            &sink
+                .recording
+                .envelopes
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()),
+            &id,
+            0,
+            &["started", "token"],
+        )?;
         Ok(())
     }
 
@@ -2618,6 +3236,42 @@ mod tests {
                 )
             })
         }
+    }
+
+    #[test]
+    fn boxed_message_input_preserves_serialized_message_payload()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use echo_core::llm::types::{ContentPart, LinkedResource};
+        let mut message = Message::user_multimodal(vec![
+            ContentPart::Text {
+                text: "原始输入🙂".into(),
+            },
+            ContentPart::ResourceLink {
+                resource: Box::new(LinkedResource {
+                    annotations: None,
+                    description: None,
+                    mime_type: Some("text/plain".into()),
+                    name: "source".into(),
+                    size: Some(12),
+                    title: None,
+                    uri: "echo-tool-output:sha256:original".into(),
+                    meta: Some(serde_json::json!({"opaque": [null, true, "中文"]})),
+                }),
+            },
+        ]);
+        message.assistant_blocks = Some(Vec::new());
+        message.approved_assistant_blocks = Some(Vec::new());
+        let expected = serde_json::to_value(&message)?;
+        let request = TurnRequest::from_message(identity("boxed-message-payload"), message);
+        let TurnInput::Message(boxed) = request.input else {
+            return Err("structured input lost its message payload".into());
+        };
+        // TurnInput不是Serde类型；只核真正可序列化的原Message，不伪称外层协议测试。
+        let encoded = serde_json::to_value(boxed.as_ref())?;
+        assert_eq!(encoded, expected);
+        let restored: Message = serde_json::from_value(encoded)?;
+        assert_eq!(serde_json::to_value(restored)?, expected);
+        Ok(())
     }
 
     #[tokio::test]
@@ -2723,16 +3377,18 @@ mod tests {
 
     struct DelayedSink {
         events: tokio::sync::Mutex<Vec<(u64, bool)>>,
+        envelopes: tokio::sync::Mutex<Vec<EventEnvelope>>,
     }
 
     #[async_trait]
     impl EventSink for DelayedSink {
         async fn on_event(&self, envelope: EventEnvelope) -> echo_core::error::Result<SinkControl> {
             tokio::time::sleep(StdDuration::from_millis(5)).await;
-            self.events.lock().await.push((
-                envelope.sequence,
-                TurnOutcome::classify(&envelope.payload).is_some(),
-            ));
+            self.events
+                .lock()
+                .await
+                .push((envelope.sequence, envelope.payload.is_execution_terminal()));
+            self.envelopes.lock().await.push(envelope);
             Ok(SinkControl::Continue)
         }
     }
@@ -2749,6 +3405,7 @@ mod tests {
         }));
         let sink = DelayedSink {
             events: tokio::sync::Mutex::new(Vec::new()),
+            envelopes: tokio::sync::Mutex::new(Vec::new()),
         };
         let runtime_progressed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let progressed = Arc::clone(&runtime_progressed);
@@ -2757,20 +3414,37 @@ mod tests {
             progressed.store(true, Ordering::SeqCst);
         });
 
+        let id = identity("async-sink");
         let receipt = AgentTurnDriver
-            .drive(
-                agent.as_ref(),
-                TurnRequest::new(identity("async-sink"), "hello"),
-                &sink,
-            )
+            .drive(agent.as_ref(), TurnRequest::new(id.clone(), "hello"), &sink)
             .await?;
         assert!(heartbeat.await.is_ok());
         assert!(runtime_progressed.load(Ordering::SeqCst));
         assert_eq!(receipt.outcome, TurnOutcome::Completed);
         assert_eq!(
             *sink.events.lock().await,
-            vec![(1, false), (2, false), (3, true)]
+            vec![(1, false), (2, false), (3, false), (4, false), (5, true)]
         );
+        assert_eq!(receipt.delivery, TurnDeliveryOutcome::Delivered);
+        assert_eq!(receipt.final_answer.as_deref(), Some("done"));
+        assert_eq!(receipt.last_event_sequence, 5);
+        assert_delivery_trace(
+            &sink.envelopes.lock().await,
+            &id,
+            0,
+            &["started", "token", "token", "final_answer", "settled"],
+        )?;
+        let tokens: Vec<_> = sink
+            .envelopes
+            .lock()
+            .await
+            .iter()
+            .filter_map(|event| match &event.payload {
+                AgentEvent::Token(text) => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(tokens, ["one", "two"]);
         Ok(())
     }
 
@@ -2816,7 +3490,8 @@ mod tests {
             ]
         }));
         let sink = OwningSink::default();
-        let request = TurnRequest::new(identity("exactly"), "hello");
+        let id = identity("exactly");
+        let request = TurnRequest::new(id.clone(), "hello");
         let receipt = AgentTurnDriver
             .drive(agent.as_ref(), request, &sink)
             .await?;
@@ -2832,13 +3507,334 @@ mod tests {
             .unwrap_or_else(|error| error.into_inner());
         let terminals: Vec<&EventEnvelope> = envelopes
             .iter()
-            .filter(|envelope| TurnOutcome::classify(&envelope.payload).is_some())
+            .filter(|envelope| envelope.payload.is_execution_terminal())
             .collect();
         assert_eq!(terminals.len(), 1);
         assert!(matches!(
             terminals.first().map(|envelope| &envelope.payload),
-            Some(AgentEvent::FinalAnswer(answer)) if answer == "fin"
+            Some(AgentEvent::ExecutionStatus(status)) if status.status == echo_core::agent::ExecutionStatusKind::Settled
         ));
+        assert_delivery_trace(
+            &envelopes,
+            &id,
+            0,
+            &["started", "usage", "token", "final_answer", "settled"],
+        )?;
+        assert_eq!(envelopes.iter().filter(|event| matches!(&event.payload, AgentEvent::FinalAnswer(answer) if answer == "fin")).count(), 1);
+        assert_eq!(receipt.last_event_sequence, 5);
+        Ok(())
+    }
+
+    struct CancelledTailAgent {
+        native: bool,
+        cancel: CancellationToken,
+        release_eof: tokio::sync::Notify,
+        cancel_seen: std::sync::atomic::AtomicBool,
+        typed_cancel_emitted: std::sync::atomic::AtomicBool,
+        raw_closed: std::sync::atomic::AtomicBool,
+        slots: Arc<tokio::sync::Semaphore>,
+        drops: Arc<std::sync::atomic::AtomicUsize>,
+        original_status: Mutex<Option<echo_core::agent::ExecutionStatus>>,
+    }
+
+    impl Agent for CancelledTailAgent {
+        fn name(&self) -> &str {
+            "cancelled-tail-original-source"
+        }
+        fn model_name(&self) -> &str {
+            "test-model"
+        }
+        fn system_prompt(&self) -> &str {
+            ""
+        }
+        fn execute<'a>(
+            &'a self,
+            _task: &'a str,
+        ) -> BoxFuture<'a, echo_core::error::Result<String>> {
+            Box::pin(async {
+                Err(ReactError::Agent(Box::new(
+                    echo_core::error::AgentError::Cancelled("original source cancelled".into()),
+                )))
+            })
+        }
+        fn execute_stream<'a>(
+            &'a self,
+            _task: &'a str,
+        ) -> BoxFuture<
+            'a,
+            echo_core::error::Result<BoxStream<'a, echo_core::error::Result<AgentEvent>>>,
+        > {
+            Box::pin(async move {
+                let permit = Arc::clone(&self.slots)
+                    .acquire_owned()
+                    .await
+                    .map_err(|error| ReactError::Other(error.to_string()))?;
+                let guard = ObservationResource {
+                    _permit: permit,
+                    drops: Arc::clone(&self.drops),
+                };
+                Ok(async_stream::stream! {
+                    let _guard = guard;
+                    if self.native {
+                        yield Ok(native_status("native-cancel-tail", echo_core::agent::ExecutionStatusKind::Started, 0));
+                    }
+                    yield Ok(AgentEvent::Token("partial".into()));
+                    self.cancel.cancelled().await;
+                    self.cancel_seen.store(true, Ordering::SeqCst);
+                    if self.native {
+                        let event = native_status("native-cancel-tail", echo_core::agent::ExecutionStatusKind::Cancelled, 1);
+                        if let AgentEvent::ExecutionStatus(status) = &event {
+                            *self.original_status.lock().unwrap_or_else(|error| error.into_inner()) = Some(status.clone());
+                        }
+                        yield Ok(event);
+                    } else {
+                        self.typed_cancel_emitted.store(true, Ordering::SeqCst);
+                        yield Err(ReactError::Agent(Box::new(echo_core::error::AgentError::Cancelled("original source cancelled".into()))));
+                    }
+                    self.release_eof.notified().await;
+                    self.raw_closed.store(true, Ordering::SeqCst);
+                }.boxed())
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn sink_failure_preserves_legacy_cause_but_accepts_native_cancelled_at_original_eof()
+    -> echo_core::error::Result<()> {
+        for native in [false, true] {
+            let cancel = CancellationToken::new();
+            let agent = CancelledTailAgent {
+                native,
+                cancel: cancel.clone(),
+                release_eof: tokio::sync::Notify::new(),
+                cancel_seen: std::sync::atomic::AtomicBool::new(false),
+                typed_cancel_emitted: std::sync::atomic::AtomicBool::new(false),
+                raw_closed: std::sync::atomic::AtomicBool::new(false),
+                slots: Arc::new(tokio::sync::Semaphore::new(1)),
+                drops: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                original_status: Mutex::new(None),
+            };
+            let sink = SemanticSink::new(
+                |event| matches!(event, AgentEvent::Token(text) if text == "partial"),
+                false,
+            );
+            let id = identity("cancelled-tail-cause");
+            let (request, input) = TurnRequest::new(id.clone(), "task")
+                .mode(TurnMode::Execute)
+                .cancel(cancel.clone())
+                .with_input_receipt();
+            let native_source = DirectNativeSource(&agent);
+            let source: &dyn Agent = if native { &native_source } else { &agent };
+            let mut drive = Box::pin(AgentTurnDriver.drive(source, request, &sink));
+            assert!(futures::poll!(drive.as_mut()).is_pending());
+            assert!(cancel.is_cancelled());
+            assert!(
+                agent.cancel_seen.load(Ordering::SeqCst),
+                "sink 失败必须触发同一个原 source 的 typed cancel 尾部"
+            );
+            assert_eq!(sink.hits.load(Ordering::SeqCst), 1);
+            assert_eq!(agent.typed_cancel_emitted.load(Ordering::SeqCst), !native);
+            assert!(!agent.raw_closed.load(Ordering::SeqCst));
+            assert_eq!(agent.slots.available_permits(), 0);
+            assert_eq!(agent.drops.load(Ordering::SeqCst), 0);
+            assert_eq!(input.state(), TurnInputState::Accepted);
+            assert_delivery_trace(
+                &sink
+                    .recording
+                    .envelopes
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()),
+                &id,
+                0,
+                &["started", "token"],
+            )?;
+            assert!(futures::poll!(drive.as_mut()).is_pending());
+            assert_eq!(
+                agent.drops.load(Ordering::SeqCst),
+                0,
+                "不能把 cancel/terminal 当物理 EOF"
+            );
+            agent.release_eof.notify_one();
+            let receipt = drive.await?;
+            let failure = AgentFailure::message("other", "injected durable sink failure");
+            assert_eq!(
+                receipt.outcome,
+                if native {
+                    TurnOutcome::Cancelled
+                } else {
+                    TurnOutcome::Failed(failure.clone())
+                }
+            );
+            assert_eq!(receipt.delivery, TurnDeliveryOutcome::Failed(failure));
+            assert!(receipt.final_answer.is_none());
+            assert!(receipt.final_message_id.is_none());
+            assert_eq!(
+                receipt.last_event_sequence, 2,
+                "raw drain 不增加 sink 试投序号"
+            );
+            assert!(agent.raw_closed.load(Ordering::SeqCst));
+            assert_eq!(agent.slots.available_permits(), 1);
+            assert_eq!(agent.drops.load(Ordering::SeqCst), 1);
+            let original = agent
+                .original_status
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if native {
+                assert!(
+                    matches!(original.as_ref(), Some(status) if !status.adapter_generated
+                    && status.execution_id == "native-cancel-tail"
+                    && status.status == echo_core::agent::ExecutionStatusKind::Cancelled)
+                );
+            } else {
+                assert!(original.is_none());
+            }
+            assert!(
+                matches!(input.state(), TurnInputState::TurnSettled { outcome, .. }
+                if outcome == if native { AgentSteerTurnOutcome::Cancelled } else { AgentSteerTurnOutcome::Failed })
+            );
+            assert_delivery_trace(
+                &sink
+                    .recording
+                    .envelopes
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()),
+                &id,
+                0,
+                &["started", "token"],
+            )?;
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn native_unknown_requires_matching_owner_terminal_and_original_eof()
+    -> echo_core::error::Result<()> {
+        for matching_owner in [false, true] {
+            let agent = TailObservationAgent {
+                native_projection: true,
+                terminal_execution_id: Some(if matching_owner {
+                    "original-observed-attempt"
+                } else {
+                    "foreign-attempt-B"
+                }),
+                release_physical_terminal: tokio::sync::Notify::new(),
+                release_terminal: tokio::sync::Notify::new(),
+                release_observation: tokio::sync::Notify::new(),
+                release_eof: tokio::sync::Notify::new(),
+                raw_closed: std::sync::atomic::AtomicBool::new(false),
+            };
+            let source = DirectNativeSource(&agent);
+            let sink = RecordingSink::default();
+            let id = identity("native-unknown-owner")
+                .with_run_id("original-observed-run")?
+                .with_execution_id("original-observed-attempt")?;
+
+            let capacity = Arc::new(tokio::sync::Semaphore::new(1));
+            let permit = Arc::clone(&capacity)
+                .acquire_owned()
+                .await
+                .map_err(|error| ReactError::Other(error.to_string()))?;
+            let drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let invocation = AgentInvocationContext {
+                runtime: Some(echo_core::tools::ExternalRunContext {
+                    run_id: Some("original-observed-run".into()),
+                    execution_id: Some("original-observed-attempt".into()),
+                    ..Default::default()
+                }),
+                resource_guards: vec![echo_core::tools::InvocationResourceGuard::new(
+                    ObservationResource {
+                        _permit: permit,
+                        drops: Arc::clone(&drops),
+                    },
+                )],
+                ..Default::default()
+            };
+            let (request, input) =
+                TurnRequest::from_message(id.clone(), Message::user("task".to_string()))
+                    .mode(TurnMode::Execute)
+                    .invocation(invocation)
+                    .with_input_receipt();
+            agent.release_terminal.notify_one();
+            let mut drive = Box::pin(AgentTurnDriver.drive(&source, request, &sink));
+            assert!(futures::poll!(drive.as_mut()).is_pending());
+            assert_delivery_trace(
+                &sink
+                    .envelopes
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()),
+                &id,
+                0,
+                &["started", "token", "final_answer"],
+            )?;
+            assert_eq!(input.state(), TurnInputState::Accepted);
+            agent.release_observation.notify_one();
+            assert!(futures::poll!(drive.as_mut()).is_pending());
+            assert_input_observation(
+                &input,
+                "original-observed-run",
+                Some("original-observed-attempt"),
+            )
+            .await;
+            agent.release_physical_terminal.notify_one();
+            assert!(futures::poll!(drive.as_mut()).is_pending());
+            assert_eq!(input.state(), TurnInputState::Accepted);
+            assert!(!agent.raw_closed.load(Ordering::SeqCst));
+            assert_eq!(capacity.available_permits(), 0);
+            assert_eq!(drops.load(Ordering::SeqCst), 0);
+            {
+                let events = sink
+                    .envelopes
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                assert_eq!(
+                    events
+                        .iter()
+                        .filter(|event| event.payload.is_execution_terminal())
+                        .count(),
+                    1
+                );
+                assert!(
+                    matches!(events.first().map(|event| &event.payload), Some(AgentEvent::ExecutionStatus(status))
+                    if !status.adapter_generated && status.execution_id == "original-observed-attempt")
+                );
+                assert!(
+                    matches!(events.last().map(|event| &event.payload), Some(AgentEvent::ExecutionStatus(status))
+                    if !status.adapter_generated && status.execution_id == if matching_owner { "original-observed-attempt" } else { "foreign-attempt-B" })
+                );
+                assert!(echo_core::agent::validate_envelope_trajectory(&events).is_empty());
+            }
+            agent.release_eof.notify_one();
+            let result = drive.await;
+            assert!(agent.raw_closed.load(Ordering::SeqCst));
+            assert_eq!(capacity.available_permits(), 1);
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+            if matching_owner {
+                let receipt = result?;
+                assert_eq!(receipt.outcome, TurnOutcome::Completed);
+                assert_eq!(receipt.delivery, TurnDeliveryOutcome::Delivered);
+                assert_eq!(receipt.final_answer.as_deref(), Some("original terminal"));
+                assert_eq!(receipt.last_event_sequence, 4);
+                assert!(matches!(
+                    input.state(),
+                    TurnInputState::TurnSettled {
+                        outcome: AgentSteerTurnOutcome::Completed,
+                        ..
+                    }
+                ));
+            } else {
+                assert!(
+                    matches!(result, Err(ReactError::ExecutionNotSettled { run_id, execution_id })
+                    if run_id == "original-observed-run" && execution_id.as_deref() == Some("original-observed-attempt"))
+                );
+                assert_eq!(input.state(), TurnInputState::Accepted);
+                assert_input_observation(
+                    &input,
+                    "original-observed-run",
+                    Some("original-observed-attempt"),
+                )
+                .await;
+            }
+        }
         Ok(())
     }
 }

@@ -41,7 +41,7 @@ Trace、transcript和checkpoint write可在finalization前或期间发生。它�
 但Agent producer contract显式传播的write error可令driven Turn失败；best-effort transcript diagnostic本身不会。
 Adapter projection 与 awaited close 是不同事实。ACP、Headless、Channels
 现在由各自 owner 关闭接纳、取消已接纳工作、等待结算，再 await `Agent::close`。
-A2A 不在本轮修复范围，既有 lifecycle Findings 保持开放；Channel delivery 仍有
+A2A 实现已具名退出；旧 lifecycle Findings 和失败原件仅保留其历史资格，不因此自动关闭；Channel delivery 仍有
 独立协议边界。参见 [ADR 0066](../adr/0066-agent-adapter-close-ownership.md)
 及[IM Channels](./15-im-channels.md)。
 
@@ -203,7 +203,7 @@ withdraw request -> component-specific close / cleanup observation
 | --- | --- |
 | Trigger | Project、user、Plugin、SDK或application configuration |
 | Admission | Publish前解析和校验identity、scope、capability和required resource |
-| Authority | MCP、Hook、Skill、Plugin 和 LSP 保留各自registry和resource owner；没有拥有全部组件的通用active generation |
+| Authority | MCP、Hook、Skill 与 Plugin 保留各自registry和resource owner；没有拥有全部组件的通用active generation |
 | Event 与 Effect | Tool/resource registration、child process、network connection、resource transfer、Hook action或Skill activation |
 | Cancellation 与 failure | Partial publication、rollback和cleanup debt是component-specific且必须可观测；当前组件不共享一个settlement protocol |
 | Terminal | 只有specific owner报告resource已settle时close才是terminal；并非所有management API郺wait全部child resource |
@@ -214,7 +214,7 @@ Plugin publication 可组合component，但不消除child cleanup责任。当前
 client、manager 与 Agent close 会传播 `Result`；stdio 与旧版 SSE 只有在 pending call、owned task 和 child
 process 已结算后才返回成功，manager 会继续尝试全部 client 后再聚合失败。
 当前行为必须从 [MCP](./08-mcp.md)、
-[Hook](./23-hooks.md)、[Skill](./07-skills.md)、[Plugin](./32-plugin-system.md) 和 [LSP](./31-lsp-integration.md)
+[Hook](./23-hooks.md)、[Skill](./07-skills.md)、[Plugin](./32-plugin-system.md) ；[LSP退役说明](./31-lsp-integration.md)
 读取；本概览不承诺atomic hot reload。
 
 ## SDK Consumer
@@ -264,3 +264,10 @@ process 已结算后才返回成功，manager 会继续尝试全部 client 后�
 及其它 sibling。连接关闭拒绝新调用并取消 fallback child；`cancel_all` 同时取消
 custom-run child，而不会取消其父 token。调用结算与 bounded drain 保持独立，不成为
 Agent 或 Task 终态的第二权威。见 [ADR 0060](../adr/0060-task-execution-store-cas-and-local-interruption.md)。
+
+## 退役后生命周期边界
+
+旧LSP声明不再启动manager；原prepare仍持有同generation的完整冻结文本、identity与诊断，
+缓存不重读，失效后重建。Skill/Hook/MCP/Subagent的publication、rollback和cleanup receipt
+不因删除组件而丢失。原生reasoning签名、普通assistant phase、最终校验、Stop继续、持久化
+与物理结算仍沿原运行owner；运行时结束不等于EKO TaskRun／Goal完成。

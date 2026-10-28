@@ -8,7 +8,7 @@ ReAct（**Re**asoning + **Act**ing）是目前最主流的 Agent 执行范式。
 Thought（推理）→ Action（调用工具）→ Observation（观测结果）
 ```
 
-循环执行，直到 LLM 认为任务已完成并调用 `final_answer` 工具输出结果。
+循环持续到完整原生响应形成最终候选，再经校验、Stop Hook、持久化与真实执行结算确认完成。
 
 echo-agent 的核心实现是 `ReactAgent`，它将 ReAct 范式与工具管理、记忆、压缩、人工介入、Subagent 编排等能力全部集成在一个结构体中。
 
@@ -22,7 +22,7 @@ ReAct 范式解决了：
 - **推理与行动分离**：LLM 先"思考"，再"行动"，再"观测"，可处理任意复杂度任务
 - **工具调用**：让 LLM 能够执行代码、查询数据库、调用 API
 - **迭代纠错**：工具返回错误时，LLM 可以调整策略重试
-- **Chain-of-Thought**：自然产生可追溯的推理链，便于调试
+- **原生消息**：分别保留 provider reasoning 与普通 assistant 正文，不把普通文字推断为 thinking
 
 ---
 
@@ -41,7 +41,7 @@ execute(task)
           ├─ llm.chat()           ← 调用 LLM
           │
           ├─ 解析响应：
-          │     ├─ content 非空  → Token 事件（流式 / CoT 推理文本）
+          │     ├─ assistant blocks → 按原 phase 分别保留 reasoning 与正文
           │     └─ tool_calls   → 工具调用列表
           │
           ├─ 并行执行所有工具调用：
@@ -49,7 +49,7 @@ execute(task)
           │     ├─ ToolManager.execute_tool()
           │     └─ 触发 on_tool_start / on_tool_end 回调
           │
-          ├─ 调用 final_answer → 返回结果，退出循环
+          ├─ 原生最终候选 → 校验/Stop/持久化/结算后返回
           │
           └─ 将 assistant + tool_results 消息追加到上下文
 
@@ -74,7 +74,6 @@ AgentConfig::new("qwen3-max", "my_agent", "你是一个助手")
     .enable_subagent(true)      // 启用 Subagent 编排（Orchestrator 模式）
     .enable_memory(true)        // 启用已批准记忆的 Store 召回；manager 增加写入工具
     .enable_human_in_loop(true) // 启用人工介入
-    .enable_cot(true)           // 启用 Chain-of-Thought 引导语（Builder 默认 true）
     .session_id("thread-001")   // run-grouping 标签（进程内）
     .conversation_id("conv-001")// 对话 ID，同时作为 RuntimeStateStore 的恢复键
     .token_limit(8192)          // 上下文 token 上限（超限自动压缩）
@@ -231,12 +230,7 @@ async fn main() -> Result<()> {
 
 ## 关键设计细节
 
-**为什么不用 `think` 工具而用 CoT 文本？**
-
-旧方案是专门提供一个 `think` 工具让 LLM "思考"。新方案是在系统提示词末尾追加 `COT_INSTRUCTION`，让 LLM 在每次工具调用前在 `content` 字段输出推理文本。好处是：
-1. 推理内容天然进入消息历史（context）
-2. 直接产生流式 Token 事件，UI 可实时展示思考过程
-3. 减少一次无意义的工具调用
+原生 reasoning 与 assistant 正文使用独立 typed 块；不再注册 Think/FinalAnswer 控制工具，也不注入工具前强制分析提示。普通文字不因同响应调用工具而成为 thinking；最终发布须经原 Guard/Critic/Stop、持久化与物理结算。这里的运行时结算不等于应用 TaskRun 或 Goal 已完成。块身份、来源、阶段、增量与运行时最后终态见[原生消息合同](../zh/43-native-message-execution.md)。
 
 **并行工具调用**
 

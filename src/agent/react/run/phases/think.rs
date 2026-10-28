@@ -1,5 +1,5 @@
 //! Per-iteration LLM call: fire `on_think_start`, run intervention
-//! callbacks, stream LLM chunks, derive token counts and emit `ThinkEnd`.
+//! callbacks、原生消息块和token统计；新执行不再重复发布旧Think/Token投影。
 
 use super::super::processor::process_stream_chunk;
 use super::super::stream_macros::yield_event_or;
@@ -30,6 +30,22 @@ pub(crate) async fn run_think(
     final_only: bool,
     iteration: usize,
 ) -> Result<ThinkOutcome> {
+    let projection_context = crate::compression::ProjectionContext {
+        iteration,
+        agent_name: snap.config.agent_name.clone(),
+        session_id: snap.config.session_id.clone(),
+        conversation_id: snap.config.conversation_id.clone(),
+        run_id: snap.current_run_id.clone(),
+        turn_id: snap.current_turn_id.clone(),
+    };
+    // 原restore/reconcile及compact已完成；这里只转换本次模型请求的克隆副本。
+    // 持久context/cursor/CAS仍核原消息，来源由宿主原projector给出，非名称拦截。
+    let messages = crate::state::legacy_control_history::project_recovered_model_messages(
+        snap.pre_model_context_projector.as_deref(),
+        &projection_context,
+        messages,
+    )
+    .await?;
     let agent = &snap.config.agent_name;
     for cb in snap.config.callbacks.iter() {
         cb.on_think_start(agent, &messages).await;
@@ -95,42 +111,28 @@ pub(crate) async fn run_think(
     }
 
     let request = build_llm_request(snap, messages, final_only);
-    if let Some(projector) = &snap.pre_model_context_projector {
-        let projection_context = crate::compression::ProjectionContext {
-            iteration,
-            agent_name: snap.config.agent_name.clone(),
-            session_id: snap.config.session_id.clone(),
-            conversation_id: snap.config.conversation_id.clone(),
-            run_id: snap.current_run_id.clone(),
-            turn_id: snap.current_turn_id.clone(),
-        };
-        if let Err(error) = projector
+    if let Some(projector) = &snap.pre_model_context_projector
+        && let Err(error) = projector
             .validate_model_request(
                 &projection_context,
                 &request,
                 snap.config.tool_output_artifacts.as_ref(),
             )
             .await
-        {
-            if projector.is_required() {
-                let reason = error.to_string();
-                let terminal = super::required_context_failure_event(snap, error)?;
-                super::finalize::settle_terminal_projection(
-                    snap,
-                    context,
-                    Some(reason.clone()),
-                    tx,
-                )
+    {
+        if projector.is_required() {
+            let reason = error.to_string();
+            let terminal = super::required_context_failure_event(snap, error)?;
+            super::finalize::settle_terminal_projection(snap, context, Some(reason.clone()), tx)
                 .await?;
-                snap.finalize_run(crate::trace::RunStatus::Failed, None, Some(&reason))
-                    .await;
-                let _ = tx.send(Ok(terminal)).await;
-                return Ok(ThinkOutcome::TerminalSettled {
-                    outcome: crate::agent::AgentSteerTurnOutcome::Failed,
-                });
-            }
-            tracing::warn!(error = %error, "Optional model context qualification failed");
+            snap.finalize_run(crate::trace::RunStatus::Failed, None, Some(&reason))
+                .await;
+            let _ = tx.send(Ok(terminal)).await;
+            return Ok(ThinkOutcome::TerminalSettled {
+                outcome: crate::agent::AgentSteerTurnOutcome::Failed,
+            });
         }
+        tracing::warn!(error = %error, "Optional model context qualification failed");
     }
     let request_estimate = estimate_request_prompt(&request, snap.calibrated_tokenizer.as_ref())
         .and_then(|estimate| {
@@ -170,6 +172,26 @@ pub(crate) async fn run_think(
         )
     };
     let llm_started = Instant::now();
+    // One request identity is shared by every native assistant block emitted
+    // below. Consumers can therefore reconstruct provider order without
+    // guessing from text or from the legacy ThinkStart/ThinkEnd projection.
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let mut block_sequence = 0_u64;
+    yield_event_or!(
+        tx,
+        super::finalize::execution_status_event(
+            snap,
+            echo_core::agent::ExecutionStatusKind::Waiting,
+            echo_core::agent::AgentPhase::Thinking,
+            Some(request_id.clone()),
+            u64::try_from(iteration)
+                .unwrap_or(u64::MAX)
+                .saturating_mul(2)
+                .saturating_add(1),
+            None
+        ),
+        ThinkOutcome::Abandoned
+    );
     let mut llm_stream = match create_llm_stream(snap, request).await {
         Ok(stream) => Box::pin(stream),
         Err(error) => {
@@ -211,10 +233,12 @@ pub(crate) async fn run_think(
     let mut content_buffer = String::new();
     let mut reasoning_buffer = String::new();
     let mut reasoning_blocks = Vec::new();
-    let mut tool_call_map: HashMap<u32, (String, String, String)> = HashMap::new();
+    let mut assistant_blocks = Vec::new();
+    let mut tool_call_map: super::super::processor::ToolCallFragments = HashMap::new();
     let mut last_usage = None;
     let mut finish_reason = None::<String>;
     let mut in_reasoning = false;
+    let mut legacy_reasoning_open = false;
 
     loop {
         let next = tokio::select! {
@@ -286,7 +310,15 @@ pub(crate) async fn run_think(
                     Some(&error.to_string()),
                 )
                 .await;
-                emit_partial_content_before_failure(snap, tx, &content_buffer).await;
+                emit_partial_content_before_failure(
+                    snap,
+                    tx,
+                    &content_buffer,
+                    &assistant_blocks,
+                    &request_id,
+                    block_sequence,
+                )
+                .await;
                 let _ = tx.send(Ok(terminal)).await;
                 return Ok(ThinkOutcome::TerminalSettled {
                     outcome: crate::agent::AgentSteerTurnOutcome::Failed,
@@ -303,27 +335,75 @@ pub(crate) async fn run_think(
         if chunk.usage.is_some() {
             last_usage = chunk.usage.clone();
         }
-        for blocks in chunk
-            .choices
-            .iter()
-            .filter_map(|choice| choice.delta.reasoning_blocks.as_ref())
-        {
-            reasoning_blocks.extend(blocks.iter().cloned());
+        for choice in &chunk.choices {
+            let native_blocks = choice.delta.assistant_blocks.as_deref().unwrap_or_default();
+            for block in native_blocks {
+                // 原生块身份/阶段/顺序属于provider事实；正文在完整响应分类及校验前缓冲。
+                assistant_blocks.push(block.clone());
+                block_sequence = block_sequence.max(block.sequence.saturating_add(1));
+                if let Some(reasoning) = &block.reasoning
+                    && !reasoning_blocks.contains(reasoning)
+                {
+                    reasoning_blocks.push(reasoning.clone());
+                }
+            }
+            if native_blocks.is_empty() {
+                if let Some(reasoning) = choice
+                    .delta
+                    .reasoning_content
+                    .as_deref()
+                    .filter(|text| !text.is_empty())
+                {
+                    legacy_reasoning_open = true;
+                    let block = echo_core::agent::AssistantMessageBlock {
+                        block_id: format!("{request_id}:reasoning"),
+                        request_id: request_id.clone(),
+                        sequence: block_sequence,
+                        phase: echo_core::agent::AssistantPhase::Reasoning,
+                        delta: reasoning.to_string(),
+                        complete: false,
+                        provider: snap.config.provider.clone(),
+                        provider_source: None,
+                        reasoning: None,
+                    };
+                    assistant_blocks.push(block.clone());
+                    block_sequence = block_sequence.saturating_add(1);
+                }
+                for reasoning in choice.delta.reasoning_blocks.as_deref().unwrap_or_default() {
+                    let block = echo_core::agent::AssistantMessageBlock {
+                        block_id: format!("{request_id}:reasoning:{block_sequence}"),
+                        request_id: request_id.clone(),
+                        sequence: block_sequence,
+                        phase: echo_core::agent::AssistantPhase::Reasoning,
+                        delta: String::new(),
+                        complete: true,
+                        provider: snap.config.provider.clone(),
+                        provider_source: None,
+                        reasoning: Some(reasoning.clone()),
+                    };
+                    assistant_blocks.push(block.clone());
+                    block_sequence = block_sequence.saturating_add(1);
+                }
+            }
+            for reasoning in choice.delta.reasoning_blocks.as_deref().unwrap_or_default() {
+                if !reasoning_blocks.contains(reasoning) {
+                    reasoning_blocks.push(reasoning.clone());
+                }
+            }
         }
-        for event in process_stream_chunk(
+        // 复用既有工具碎片组装；旧Think/Token是兼容观察，不能再次投影同一正文/推理。
+        let _ = process_stream_chunk(
             &chunk,
             &mut content_buffer,
             &mut reasoning_buffer,
             &mut tool_call_map,
             &mut in_reasoning,
             false,
-        ) {
-            yield_event_or!(tx, event, ThinkOutcome::Abandoned);
-        }
+        );
     }
 
     match finish_reason.as_deref() {
-        Some("stop" | "tool_calls" | "function_call") => {}
+        Some("stop" | "tool_calls" | "function_call" | "continue") => {}
         Some(reason) => {
             let error =
                 crate::error::ReactError::Llm(Box::new(crate::error::LlmError::InvalidResponse(
@@ -337,7 +417,15 @@ pub(crate) async fn run_think(
                 Some(&error.to_string()),
             )
             .await;
-            emit_partial_content_before_failure(snap, tx, &content_buffer).await;
+            emit_partial_content_before_failure(
+                snap,
+                tx,
+                &content_buffer,
+                &assistant_blocks,
+                &request_id,
+                block_sequence,
+            )
+            .await;
             let _ = tx.send(Err(error)).await;
             return Ok(ThinkOutcome::TerminalSettled {
                 outcome: crate::agent::AgentSteerTurnOutcome::Failed,
@@ -357,11 +445,131 @@ pub(crate) async fn run_think(
                 Some(&error.to_string()),
             )
             .await;
-            emit_partial_content_before_failure(snap, tx, &content_buffer).await;
+            emit_partial_content_before_failure(
+                snap,
+                tx,
+                &content_buffer,
+                &assistant_blocks,
+                &request_id,
+                block_sequence,
+            )
+            .await;
             let _ = tx.send(Err(error)).await;
             return Ok(ThinkOutcome::TerminalSettled {
                 outcome: crate::agent::AgentSteerTurnOutcome::Failed,
             });
+        }
+    }
+
+    if legacy_reasoning_open {
+        // 旧reasoning_content协议以正常response完成补最后空增量；它只结束reasoning块。
+        assistant_blocks.push(echo_core::agent::AssistantMessageBlock {
+            block_id: format!("{request_id}:reasoning"),
+            request_id: request_id.clone(),
+            sequence: block_sequence,
+            phase: echo_core::agent::AssistantPhase::Reasoning,
+            delta: String::new(),
+            complete: true,
+            provider: snap.config.provider.clone(),
+            provider_source: None,
+            reasoning: None,
+        });
+        block_sequence = block_sequence.saturating_add(1);
+    }
+    // 没有原生正文身份的旧协议只补Unknown，不能因同响应有工具而改成commentary。
+    let has_native_text = assistant_blocks
+        .iter()
+        .any(|block| block.phase != echo_core::agent::AssistantPhase::Reasoning);
+    if !has_native_text && !content_buffer.is_empty() {
+        assistant_blocks.push(echo_core::agent::AssistantMessageBlock {
+            block_id: format!("{request_id}:assistant"),
+            request_id: request_id.clone(),
+            sequence: block_sequence,
+            phase: echo_core::agent::AssistantPhase::Unknown,
+            delta: content_buffer.clone(),
+            complete: true,
+            provider: snap.config.provider.clone(),
+            provider_source: None,
+            reasoning: None,
+        });
+    }
+    content_buffer = assistant_blocks
+        .iter()
+        .filter(|block| {
+            super::effective_assistant_phase(&assistant_blocks, block)
+                != echo_core::agent::AssistantPhase::Reasoning
+        })
+        .map(|block| block.delta.as_str())
+        .collect();
+    let continue_response = finish_reason.as_deref() == Some("continue");
+    let candidate_answer = if tool_call_map.is_empty() && finish_reason.as_deref() == Some("stop") {
+        let phase = if assistant_blocks.iter().any(|block| {
+            super::effective_assistant_phase(&assistant_blocks, block)
+                == echo_core::agent::AssistantPhase::FinalAnswer
+        }) {
+            echo_core::agent::AssistantPhase::FinalAnswer
+        } else {
+            echo_core::agent::AssistantPhase::Unknown
+        };
+        let selected: Vec<_> = assistant_blocks
+            .iter()
+            .filter(|block| super::effective_assistant_phase(&assistant_blocks, block) == phase)
+            .collect();
+        // 一块的complete只结束该块；最终候选还要求整个协议正常完成且同身份最后增量已结束。
+        let complete = !selected.is_empty()
+            && selected.iter().all(|block| {
+                assistant_blocks
+                    .iter()
+                    .rev()
+                    .find(|last| {
+                        last.block_id == block.block_id && last.request_id == block.request_id
+                    })
+                    .is_some_and(|last| last.complete)
+            });
+        let answer: String = selected.iter().map(|block| block.delta.as_str()).collect();
+        (complete && !answer.is_empty()).then_some(answer)
+    } else {
+        None
+    };
+    // 工具优先/纯进度会继续原执行；候选正文留到Guard/Critic/Stop/持久化之后统一发布。
+    let progress_only = super::assistant_progress_only(&assistant_blocks);
+    let mut approved_assistant_blocks = Vec::new();
+    if !tool_call_map.is_empty() || progress_only || candidate_answer.is_none() {
+        let approved_text = if content_buffer.is_empty() {
+            true
+        } else {
+            snap.check_final_answer_guard(&content_buffer)
+                .await
+                .is_ok_and(|approved| approved == content_buffer)
+        };
+        for block in &assistant_blocks {
+            let phase = super::effective_assistant_phase(&assistant_blocks, block);
+            let reasoning = phase == echo_core::agent::AssistantPhase::Reasoning;
+            let progress = matches!(
+                phase,
+                echo_core::agent::AssistantPhase::Commentary
+                    | echo_core::agent::AssistantPhase::PartialAnswer
+            );
+            let structured_output = snap
+                .config
+                .response_format
+                .as_ref()
+                .is_some_and(crate::llm::ResponseFormat::is_json);
+            // 最终Critic不阻断已过Guard的非最终正文；工具/协议继续只决定公开许可，
+            // 不改原phase。最终phase（含晚到metadata）不能借工具分支提前公开。
+            let ordinary_nonfinal = phase == echo_core::agent::AssistantPhase::Unknown
+                && (!tool_call_map.is_empty() || continue_response)
+                && !structured_output;
+            if reasoning || (approved_text && (progress || ordinary_nonfinal)) {
+                approved_assistant_blocks.push(block.clone());
+                yield_event_or!(
+                    tx,
+                    AgentEvent::AssistantMessage {
+                        block: block.clone()
+                    },
+                    ThinkOutcome::Abandoned
+                );
+            }
         }
     }
 
@@ -476,54 +684,77 @@ pub(crate) async fn run_think(
         ThinkOutcome::Abandoned
     );
 
-    if in_reasoning {
-        yield_event_or!(
-            tx,
-            AgentEvent::ThinkEnd {
-                prompt_tokens: pt,
-                completion_tokens: ct,
-            },
-            ThinkOutcome::Abandoned
-        );
-    }
-
-    if !content_buffer.is_empty() && !tool_call_map.is_empty() {
-        yield_event_or!(tx, AgentEvent::ThinkStart, ThinkOutcome::Abandoned);
-        yield_event_or!(
-            tx,
-            AgentEvent::Token(content_buffer.clone()),
-            ThinkOutcome::Abandoned
-        );
-        yield_event_or!(
-            tx,
-            AgentEvent::ThinkEnd {
-                prompt_tokens: pt,
-                completion_tokens: ct,
-            },
-            ThinkOutcome::Abandoned
-        );
-    }
-
-    Ok(ThinkOutcome::Continue(ThinkOutput {
+    Ok(ThinkOutcome::Continue(Box::new(ThinkOutput {
         content_buffer,
+        candidate_answer,
+        continue_response,
         reasoning_buffer,
         reasoning_blocks,
+        assistant_blocks,
+        approved_assistant_blocks,
         tool_call_map,
         pt,
         ct,
         usage_reported,
-    }))
+    })))
 }
 
 async fn emit_partial_content_before_failure(
     snap: &AgentRunSnapshot,
     tx: &mpsc::Sender<Result<AgentEvent>>,
     content: &str,
+    blocks: &[echo_core::agent::AssistantMessageBlock],
+    request_id: &str,
+    sequence: u64,
 ) {
-    if !content.is_empty()
-        && let Ok(content) = snap.check_final_answer_guard(content).await
+    if snap.config.verifier_enabled
+        || snap
+            .config
+            .response_format
+            .as_ref()
+            .is_some_and(crate::llm::ResponseFormat::is_json)
     {
-        let _ = tx.send(Ok(AgentEvent::Token(content))).await;
+        return;
+    }
+    if !content.is_empty()
+        && let Ok(approved) = snap.check_final_answer_guard(content).await
+    {
+        if approved == content
+            && blocks
+                .iter()
+                .any(|block| block.phase != echo_core::agent::AssistantPhase::Reasoning)
+        {
+            for block in blocks
+                .iter()
+                .filter(|block| block.phase != echo_core::agent::AssistantPhase::Reasoning)
+            {
+                if tx
+                    .send(Ok(AgentEvent::AssistantMessage {
+                        block: block.clone(),
+                    }))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        } else {
+            let _ = tx
+                .send(Ok(AgentEvent::AssistantMessage {
+                    block: echo_core::agent::AssistantMessageBlock {
+                        block_id: format!("{request_id}:incomplete"),
+                        request_id: request_id.to_string(),
+                        sequence,
+                        phase: echo_core::agent::AssistantPhase::Unknown,
+                        delta: approved,
+                        complete: false,
+                        provider: snap.config.provider.clone(),
+                        provider_source: None,
+                        reasoning: None,
+                    },
+                }))
+                .await;
+        }
     }
 }
 
@@ -616,7 +847,56 @@ pub(crate) async fn create_llm_stream(
                 let llm_client = llm_client.clone();
                 let request = request.clone();
                 async move {
-                    let inner = llm_client.chat_stream(request).await?;
+                    // 公开Agent返回形式不决定HTTP传输。默认保持原流式调用；显式
+                    // 非流式仅把同provider完整响应适配成一个输入块，后续校验/工具/结算共用。
+                    let inner: futures::stream::BoxStream<'static, Result<crate::llm::ChatChunk>> =
+                        if snap.config.model_streaming {
+                            llm_client.chat_stream(request).await?
+                        } else {
+                            let response = llm_client.chat(request).await?;
+                            let message = response.message;
+                            let tool_calls = message
+                                .tool_calls
+                                .map(|calls| {
+                                    calls
+                                        .into_iter()
+                                        .enumerate()
+                                        .map(|(index, call)| {
+                                            let index = u32::try_from(index).map_err(|_| {
+                                                crate::error::ReactError::Other(
+                                                    "provider returned too many tool calls".into(),
+                                                )
+                                            })?;
+                                            Ok(crate::llm::types::DeltaToolCall {
+                                                provider_source: call.provider_source,
+                                                index,
+                                                id: Some(call.id),
+                                                call_type: Some(call.call_type),
+                                                function: Some(
+                                                    crate::llm::types::DeltaFunctionCall {
+                                                        name: Some(call.function.name),
+                                                        arguments: Some(call.function.arguments),
+                                                    },
+                                                ),
+                                            })
+                                        })
+                                        .collect::<Result<Vec<_>>>()
+                                })
+                                .transpose()?;
+                            let chunk = crate::llm::ChatChunk {
+                                delta: crate::llm::types::DeltaMessage {
+                                    role: Some("assistant".into()),
+                                    content: message.content.as_text(),
+                                    reasoning_content: message.reasoning_content,
+                                    reasoning_blocks: message.reasoning_blocks,
+                                    assistant_blocks: message.assistant_blocks,
+                                    tool_calls,
+                                },
+                                finish_reason: response.finish_reason,
+                                usage: response.usage,
+                            };
+                            Box::pin(futures::stream::iter([Ok(chunk)]))
+                        };
                     // Adapt the trait's flattened ChatChunk back into the
                     // ChatCompletionChunk shape consumed by the think phase.
                     // Both originate from the same stream, so no information is lost.
@@ -940,7 +1220,15 @@ mod tests {
         ]));
         let snapshot = AgentRunSnapshot::from_agent(&agent);
         let (tx, mut rx) = mpsc::channel::<Result<AgentEvent>>(4);
-        emit_partial_content_before_failure(&snapshot, &tx, "unfiltered partial").await;
+        emit_partial_content_before_failure(
+            &snapshot,
+            &tx,
+            "unfiltered partial",
+            &[],
+            "failed-request",
+            0,
+        )
+        .await;
         assert!(rx.try_recv().is_err());
     }
 

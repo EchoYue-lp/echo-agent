@@ -341,6 +341,9 @@ pub fn envelope_event_stream_after<'a>(
         let mut sequence = last_persisted_sequence;
         let mut terminal_emitted = false;
         let mut observation_only = false;
+        // 运输层只识别生产者已有的runtime事实，不再于已确认正文处截掉尾部状态。
+        // 旧custom Agent没有runtime事件时仍沿原公开terminal合同读取。
+        let mut native_execution = false;
         let mut tool_calls = HashMap::<String, EventId>::new();
 
         while let Some(item) = stream.next().await {
@@ -372,7 +375,12 @@ pub fn envelope_event_stream_after<'a>(
                 | AgentEvent::ToolStream { call_id, .. } => tool_calls.get(call_id).cloned(),
                 _ => identity.parent_event_id.clone(),
             };
-            let is_terminal = payload.is_terminal();
+            native_execution |= matches!(payload, AgentEvent::ExecutionStatus(_));
+            let is_terminal = if native_execution {
+                payload.is_execution_terminal()
+            } else {
+                payload.is_terminal()
+            };
             let envelope = match EventEnvelope::new(&identity, sequence, parent_event_id, payload) {
                 Ok(envelope) => envelope,
                 Err(error) => {
@@ -511,6 +519,9 @@ pub fn validate_event_trajectory(events: &[EventEnvelope]) -> Vec<String> {
     }
     let mut tool_calls = HashMap::<String, EventId>::new();
     let mut terminal_count = 0_usize;
+    let native_execution = events
+        .iter()
+        .any(|event| matches!(event.payload, AgentEvent::ExecutionStatus(_)));
 
     for (index, event) in events.iter().enumerate() {
         match &event.payload {
@@ -540,7 +551,11 @@ pub fn validate_event_trajectory(events: &[EventEnvelope]) -> Vec<String> {
             }
             _ => {}
         }
-        if event.payload.is_terminal() {
+        if if native_execution {
+            event.payload.is_execution_terminal()
+        } else {
+            event.payload.is_terminal()
+        } {
             terminal_count = terminal_count.saturating_add(1);
             if index.saturating_add(1) != events.len() {
                 violations.push(format!(
@@ -584,6 +599,38 @@ mod tests {
             execution_id: Some(ExecutionId("execution-1".to_string())),
             parent_event_id: None,
         }
+    }
+
+    fn native_status(status: super::super::ExecutionStatusKind, sequence: u64) -> AgentEvent {
+        AgentEvent::ExecutionStatus(super::super::ExecutionStatus {
+            adapter_generated: false,
+            execution_id: "execution-1".to_string(),
+            request_id: Some("response-1".to_string()),
+            sequence,
+            phase: super::super::AgentPhase::Terminal,
+            status,
+            reason: None,
+        })
+    }
+
+    #[tokio::test]
+    async fn native_message_envelope_delivers_runtime_terminal_after_final_answer() -> Result<()> {
+        let raw = stream::iter(vec![
+            Ok(native_status(super::super::ExecutionStatusKind::Started, 0)),
+            Ok(AgentEvent::FinalAnswer("已结算的回答".to_string())),
+            Ok(native_status(super::super::ExecutionStatusKind::Settled, 1)),
+        ]);
+        let events = envelope_event_stream(Box::pin(raw), identity())
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>>>()?;
+        assert_eq!(events.len(), 3, "FinalAnswer 不能截掉 SDK/EKO 最后结算事实");
+        assert!(matches!(events.last().map(|event| &event.payload),
+            Some(AgentEvent::ExecutionStatus(status))
+                if status.status == super::super::ExecutionStatusKind::Settled));
+        assert!(validate_event_trajectory(&events).is_empty());
+        Ok(())
     }
 
     #[tokio::test]

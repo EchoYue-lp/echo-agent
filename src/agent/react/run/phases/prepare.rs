@@ -256,12 +256,10 @@ mod tests {
         // (tested separately). This test only verifies system message stability.
     }
 
-    /// `UserPromptSubmit` hook returns `block: true` (via a Permission
-    /// `deny` action) → `prepare_turn` yields a `FinalAnswer` event whose
-    /// body starts with `"Blocked by UserPromptSubmit hook:"` and returns
-    /// `BlockedAndDone`.
+    /// UserPromptSubmit明确拒绝时，phase发布带原原因的Error并返回BlockedAndDone。
+    /// 该phase不伪装成功；完整执行的最后运行status由调用方原owner负责。
     #[tokio::test]
-    async fn prepare_turn_user_prompt_submit_block_short_circuits() {
+    async fn prepare_turn_user_prompt_submit_block_short_circuits() -> Result<()> {
         let mut def = HooksDefinition::default();
         def.add_rules(
             HookEvent::UserPromptSubmit,
@@ -296,8 +294,7 @@ mod tests {
             0,
             false,
         )
-        .await
-        .expect("prepare_turn must succeed even when the hook blocks");
+        .await?;
 
         assert!(
             matches!(outcome, PrepareOutcome::BlockedAndDone),
@@ -305,24 +302,16 @@ mod tests {
             phase_outcome_label(&outcome),
         );
 
-        let final_event = rx
-            .recv()
-            .await
-            .expect("FinalAnswer must be yielded")
-            .expect("FinalAnswer is a success event");
-        match final_event {
-            AgentEvent::FinalAnswer(text) => {
-                assert!(
-                    text.starts_with("Blocked by UserPromptSubmit hook:"),
-                    "final answer text: {text:?}",
-                );
-                assert!(
-                    text.contains("test-deny"),
-                    "final answer should carry the deny reason: {text:?}",
-                );
-            }
-            other => panic!("expected FinalAnswer, got {other:?}"),
-        }
+        let failure = rx.recv().await.ok_or_else(|| {
+            crate::error::ReactError::Other("UserPromptSubmit failure event missing".into())
+        })??;
+        assert!(
+            matches!(&failure,AgentEvent::Error{source,message,failure} if source=="user_prompt_hook"
+            && message.starts_with("Blocked by UserPromptSubmit hook:")&&message.contains("test-deny")
+            && failure.terminal_kind==crate::error::AgentTerminalKind::Failed)
+        );
+        assert!(rx.try_recv().is_err(), "phase不得额外发布成功或另一终态");
+        Ok(())
     }
 
     #[tokio::test]

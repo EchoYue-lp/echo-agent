@@ -114,8 +114,13 @@ cargo check --workspace --lib --no-default-features --locked
 framework 既有独立人类裁决接受的是49组、107个精确 crate/version/source
 `warning[duplicate]` 身份；历史校验锁为
 `4cdd98547fe19f58fb8d7fe0fe5c54b6342bf0b2f007f9d2591b47a993ad21d1`。
-当前具名 **Tool＋Domain（679包）** 工作线的校验锁为
+历史具名 **Tool＋Domain（679包）** 工作线的校验锁为
 `a6c5630b41c2240dec5a90de65962678b3d3eccfc7e872e237408aac774ddf78`。
+2026-10-28 已批准 A2A/LSP 退役后的本次676包校验锁为
+`1442bf309239cca9354070fee0d6278bb53cb8aeee0cafa436e97c64a93324af`。Root仅授权精确c48→1442机械绑定维护；原官方scanner自然0，
+完整raw逐项对账仍为同49组/107身份，原严格caller1保留；原未改checker复用同一
+raw/receipt已实际自然0，原policy14项控制亦自然0。
+此授权不扩原接受集合，也不预授未来锁、组、版本或来源变化。
 这是协调者在原四类官方扫描与独立精确对账通过后，对同一原接受集作的验证绑定维护，
 并非用户另行接受新 SHA 或新增风险；不扩张原49组/107身份、策略、工具、scope 或忽略集合。
 唯一当前机器权威为
@@ -135,7 +140,7 @@ advisory、license、source、配置及其它工具的零警告/零失败约束�
 修改 `Cargo.toml`、feature 定义、`#[cfg(...)]` 分支、可选依赖或跨 crate 公共 API 时,额外逐个编译根 crate 的独立 feature:
 
 ```bash
-for feature in acp a2a mcp lsp sqlite telemetry topology subagent web media \
+for feature in acp mcp sqlite telemetry topology subagent web media \
   data statistics channels git database rag chart; do
   cargo check -p echo_agent --no-default-features --features "$feature" --locked || exit 1
 done
@@ -161,7 +166,7 @@ done
 ## 磁盘与清理
 
 - 用户于 2026-10-24 明确要求:**每个编译/测试批次实际结束后及时 `cargo clean` 自有准确 target**,替代此前默认保留增量缓存的策略。相邻验证命令可组成同一批次,先保存必要日志、真实退出状态及需保留的 Host/制品到 target 外(原始日志放本仓 ignored `.echo-semantic/local/<task-id>/`),确认该 target 无活动 cargo/rustc/Host 或其它制品读取者后再清理;不得先删再声称证据或制品可恢复。
-- 同机最多两条 focused Rust 构建/测试并发,完整 all-feature/GUI/语言矩阵同一时间只运行一套;每条 Rust 构建 `jobs <= 2`,dev/test debuginfo 关闭。每个 worktree 使用自有独立 target,禁止与其它聊天或 primary 共用 `CARGO_TARGET_DIR`。
+- 同机最多五条 focused Rust 构建/测试并发,完整 all-feature/GUI/语言矩阵同一时间只运行一套;每条 Rust 构建 `jobs <= 5`,dev/test debuginfo 关闭。每个 worktree 使用自有独立 target,禁止与其它聊天或 primary 共用 `CARGO_TARGET_DIR`。
 - 构建批次及清理前后记录 `df`/`du`。在准确 workspace/manifest 下执行 `cargo clean`,使用自定义 target 时显式指定准确目录,记录命令与实际出口;清理失败必须处理或明确保留,不能报成已释放空间。可用空间低于 **5 GiB** 时停止新的重构建,先处理已验证且无活动进程使用的自有可重建缓存。
 - 纯文档/只读任务未产生 Cargo 产物时明确报告不适用,不为形式重跑已通过的同源构建或清理无关目录。不清其它聊天或 primary 缓存;工作树、分支、未提交/未跟踪源码、stash、保留 tag 和原件的维护清理按独立授权及协调归属执行,不得借 `cargo clean` 扩大范围。
 

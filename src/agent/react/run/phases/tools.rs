@@ -1,13 +1,13 @@
 //! Per-iteration tool-call branch: emit `ToolCall` events, push assistant
 //! message, split sequential/concurrent batches, execute, dispatch verifier
-//! handoff to `finalize_completed_run` when `final_answer` is accepted.
+//! handoff to the normal text-candidate path after tools settle.
 
 use super::super::TOOL_CANCELLATION_GRACE_PERIOD;
 use super::super::processor::build_tool_calls_from_map;
 use super::super::stream_macros::yield_event_or;
 use super::{IterOutcome, ThinkOutput, with_reasoning_content};
+use crate::agent::react::StepType;
 use crate::agent::react::run::pipeline::ToolPipelineEvent;
-use crate::agent::react::{StepType, TOOL_FINAL_ANSWER};
 use crate::agent::snapshot::AgentRunSnapshot;
 use crate::agent::{AgentEvent, ToolInvocation};
 use crate::error::{ReactError, Result};
@@ -31,7 +31,67 @@ type CompletedToolCalls = HashMap<String, (String, ToolCallOutcome)>;
 struct PublishedWave {
     successes: usize,
     failures: usize,
-    final_answers: Vec<String>,
+}
+
+/// 将原ToolResult.artifact放入同一canonical tool Message的既有typed ResourceLink。
+/// 格式只定位原producer已有的显示引用，不用路径/工具名授予artifact来源。
+fn tool_result_with_artifact(
+    call_id: &str,
+    name: &str,
+    output: String,
+    artifact: Option<&echo_core::tools::artifact::ToolOutputArtifactRef>,
+) -> Message {
+    use echo_core::llm::types::LinkedResource;
+    use sha2::{Digest as _, Sha256};
+    let Some(reference) = artifact else {
+        return Message::tool_result(call_id.to_string(), name.to_string(), output);
+    };
+    let reference_value = match serde_json::to_value(reference) {
+        Ok(value) => value,
+        Err(error) => {
+            // 保原真实result/事件/错误结算路径，不为新呈现失败丢弃已执行调用。
+            tracing::warn!(%error, "canonical tool artifact link could not be encoded; original result retained");
+            return Message::tool_result(call_id.to_string(), name.to_string(), output);
+        }
+    };
+    let mut message = Message::tool_result(call_id.to_string(), name.to_string(), String::new());
+    const PREFIX: &str = "\n\n[Tool output preview only: the text above is not a summary and is not the complete result. Full output artifact: ";
+    let suffix = format!(
+        "{PREFIX}{} ({:.1} MiB, sha256 {}). Use read_artifact with this exact path and expected_sha256 to retrieve bounded pages until complete.]",
+        reference.path.display(),
+        reference.payload_bytes as f64 / 1_048_576.0,
+        reference.sha256
+    );
+    // Producer-owned exact suffix, if present. Arbitrary output path text stays untouched.
+    let text_reference = output.strip_suffix(&suffix).map(|preview| {
+        serde_json::json!({
+            "part": 0, "start_chars": preview.chars().count(), "chars": suffix.chars().count(),
+            "sha256": format!("{:x}", Sha256::digest(suffix.as_bytes())),
+            "path_start_chars": PREFIX.chars().count(),
+            "path_chars": reference.path.to_string_lossy().chars().count(),
+        })
+    });
+    // Value/String/primitive members only: no fallible external Serialize here.
+    let meta = serde_json::json!({ "echo_tool_output_artifact": {
+        "version": 1, "call_id": call_id, "tool_name": name,
+        "reference": reference_value, "text_reference": text_reference,
+    }});
+    message.content = MessageContent::Parts(vec![
+        ContentPart::Text { text: output },
+        ContentPart::ResourceLink {
+            resource: Box::new(LinkedResource {
+                annotations: None,
+                description: Some("Complete tool output artifact".into()),
+                mime_type: Some("text/plain".into()),
+                name: format!("{name} output"),
+                size: i64::try_from(reference.artifact_bytes).ok(),
+                title: None,
+                uri: format!("echo-tool-output:sha256:{}", reference.sha256),
+                meta: Some(meta),
+            }),
+        },
+    ]);
+    message
 }
 
 async fn project_typed_tool_result(
@@ -111,8 +171,8 @@ async fn publish_completed_call(
     tx: &mpsc::Sender<Result<AgentEvent>>,
     call_id: &str,
     outcome: ToolCallOutcome,
-) -> Result<Option<String>> {
-    Ok(match outcome {
+) -> Result<()> {
+    match outcome {
         Ok(execution) => {
             let name = execution.name;
             let mut result = execution.result;
@@ -130,10 +190,11 @@ async fn publish_completed_call(
             .await;
             result.model_content.clear();
             let mut context_guard = context.lock().await;
-            context_guard.push(Message::tool_result(
-                call_id.to_string(),
-                name.clone(),
+            context_guard.push(tool_result_with_artifact(
+                call_id,
+                &name,
                 output.clone(),
+                result.artifact.as_ref(),
             ));
             if let Some(message) = model_message {
                 context_guard.push(message);
@@ -146,7 +207,6 @@ async fn publish_completed_call(
                     result,
                 }))
                 .await;
-            (name == TOOL_FINAL_ANSWER).then_some(output)
         }
         Err(failure) => {
             let crate::agent::snapshot::ToolCallFailure {
@@ -162,10 +222,11 @@ async fn publish_completed_call(
                 None => return Err(error),
             };
             let message = result.error.clone().unwrap_or_else(|| error.to_string());
-            context.lock().await.push(Message::tool_result(
-                call_id.to_string(),
-                name.clone(),
+            context.lock().await.push(tool_result_with_artifact(
+                call_id,
+                &name,
                 format!("[Error] {message}"),
+                result.artifact.as_ref(),
             ));
             let _ = tx
                 .send(Ok(AgentEvent::ToolResult {
@@ -174,9 +235,9 @@ async fn publish_completed_call(
                     result,
                 }))
                 .await;
-            None
         }
-    })
+    }
+    Ok(())
 }
 
 async fn close_cancelled_batch(
@@ -265,11 +326,7 @@ async fn settle_interrupted_calls(
         }
         if let Some((_, outcome)) = completed.remove(call_id) {
             let succeeded = outcome.is_ok();
-            if let Some(answer) =
-                publish_completed_call(snap, context, tx, call_id, outcome).await?
-            {
-                published.final_answers.push(answer);
-            }
+            publish_completed_call(snap, context, tx, call_id, outcome).await?;
             if succeeded {
                 published.successes = published.successes.saturating_add(1);
             } else {
@@ -380,11 +437,14 @@ pub(crate) async fn run_tools(
     // model call can therefore discard the proposal without inventing any
     // tool result. Keep any ordinary assistant draft as context only.
     let assistant_draft = (!think.content_buffer.is_empty()).then(|| {
-        with_reasoning_content(
+        let mut message = with_reasoning_content(
             Message::assistant(think.content_buffer.clone()),
             think.reasoning_buffer.clone(),
             think.reasoning_blocks.clone(),
-        )
+        );
+        message.assistant_blocks = Some(think.assistant_blocks.clone());
+        message.approved_assistant_blocks = Some(think.approved_assistant_blocks.clone());
+        message
     });
     if !super::cancellation_requested(snap)
         && snap
@@ -423,7 +483,7 @@ pub(crate) async fn run_tools(
     // reject the next request with HTTP 400 ("content or tool_calls must be
     // set"). Fall back to a content-bearing assistant message so the turn is
     // structurally valid and the model can retry the call.
-    let assistant_message = if msg_tc.is_empty() {
+    let mut assistant_message = if msg_tc.is_empty() {
         Message::assistant("(流式工具调用参数解析失败,已跳过;请重新发起工具调用)".to_string())
     } else {
         let mut message = Message::assistant_with_tools(msg_tc);
@@ -432,6 +492,8 @@ pub(crate) async fn run_tools(
         }
         message
     };
+    assistant_message.assistant_blocks = Some(think.assistant_blocks.clone());
+    assistant_message.approved_assistant_blocks = Some(think.approved_assistant_blocks.clone());
     context.lock().await.push(with_reasoning_content(
         assistant_message,
         think.reasoning_buffer,
@@ -446,7 +508,6 @@ pub(crate) async fn run_tools(
     }
     let waves = build_execution_waves(steps, &sequential_call_ids);
 
-    let mut final_outputs = Vec::new();
     let mut batch_success_count = 0usize;
     let mut batch_failure_count = 0usize;
     let batch_tool_names: Vec<String> = waves
@@ -492,7 +553,8 @@ pub(crate) async fn run_tools(
             // The original assistant already contains every call ID. Close
             // all still-unstarted calls before inserting the correction and
             // publishing its genuine Drained receipt. Earlier wave results
-            // remain intact, but their final-answer candidates are stale.
+            // remain intact; the next model request will reconsider the
+            // ordinary tool results with the drained steering input.
             if super::cancellation_requested(snap) {
                 close_cancelled_batch(snap, context, tx, &batch_tool_names, batch_success_count)
                     .await?;
@@ -501,7 +563,6 @@ pub(crate) async fn run_tools(
                 });
             }
             let _ = snap.drain_steer_into_context(context, None).await;
-            final_outputs.clear();
             break;
         }
         match wave {
@@ -693,7 +754,6 @@ pub(crate) async fn run_tools(
                         outcome: crate::agent::AgentSteerTurnOutcome::Cancelled,
                     });
                 }
-                final_outputs.extend(published.final_answers);
                 remaining_calls.drain(..conc.len().min(remaining_calls.len()));
             }
             ToolExecutionWave::Sequential((id, fname, args)) => {
@@ -815,7 +875,6 @@ pub(crate) async fn run_tools(
                         outcome: crate::agent::AgentSteerTurnOutcome::Cancelled,
                     });
                 }
-                final_outputs.extend(published.final_answers);
                 remaining_calls.drain(..1.min(remaining_calls.len()));
             }
         }
@@ -839,11 +898,6 @@ pub(crate) async fn run_tools(
     yield_event_or!(tx, AgentEvent::ToolBatchEnd, IterOutcome::Abandoned);
     snap.fire_post_tool_batch(&batch_tool_names, batch_success_count, batch_failure_count)
         .await;
-    if !final_outputs.is_empty() {
-        return Ok(IterOutcome::FinishCandidates {
-            outputs: final_outputs,
-        });
-    }
     snap.auto_snapshot(context, iteration).await;
 
     // Periodic runtime checkpoint based on configured interval
@@ -868,6 +922,7 @@ pub(crate) async fn run_tools(
 
 #[cfg(test)]
 mod tests {
+    use super::{AgentRunSnapshot, ReactError, tool_result_with_artifact};
     use super::{
         InterruptedSettlement, ToolExecutionWave, build_execution_waves, project_typed_tool_result,
         publish_completed_call, settle_interrupted_calls,
@@ -961,6 +1016,207 @@ mod tests {
         }
     }
 
+    #[test]
+    fn canonical_tool_artifact_link_uses_real_processed_output_reference()
+    -> crate::error::Result<()> {
+        let root = tempfile::tempdir().map_err(|error| ReactError::Other(error.to_string()))?;
+        let agent = crate::agent::ReactAgent::new(
+            crate::agent::AgentConfig::new("test-model", "agent", "system").tool_output_artifacts(
+                Some(
+                    echo_core::tools::artifact::ToolOutputArtifactConfig::new(
+                        root.path(),
+                        "conversation_or_30d",
+                    )
+                    .threshold_bytes(1),
+                ),
+            ),
+        );
+        let snapshot = AgentRunSnapshot::from_agent(&agent);
+        let raw = "中文工具原文🙂".repeat(4000);
+        let processed = snapshot.process_tool_output_for_call(raw, "call-real", "shell", None);
+        let reference = processed
+            .artifact
+            .as_ref()
+            .ok_or_else(|| ReactError::Other("real producer did not spill".into()))?;
+        let message = tool_result_with_artifact(
+            "call-real",
+            "shell",
+            processed.output.clone(),
+            Some(reference),
+        );
+        let MessageContent::Parts(parts) = &message.content else {
+            return Err(ReactError::Other("typed content missing".into()));
+        };
+        let resource = parts
+            .iter()
+            .find_map(|part| match part {
+                ContentPart::ResourceLink { resource } => Some(resource),
+                _ => None,
+            })
+            .ok_or_else(|| ReactError::Other("typed link missing".into()))?;
+        let binding = resource
+            .meta
+            .as_ref()
+            .and_then(|value| value.get("echo_tool_output_artifact"))
+            .ok_or_else(|| ReactError::Other("binding missing".into()))?;
+        assert_eq!(
+            binding.get("call_id").and_then(Value::as_str),
+            Some("call-real")
+        );
+        let text = binding
+            .get("text_reference")
+            .and_then(Value::as_object)
+            .ok_or_else(|| {
+                ReactError::Other(
+                    "real producer suffix did not bind; verify actual newline characters".into(),
+                )
+            })?;
+        let start = text
+            .get("start_chars")
+            .and_then(Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok())
+            .ok_or_else(|| ReactError::Other("range missing".into()))?;
+        assert!(
+            processed
+                .output
+                .chars()
+                .skip(start)
+                .collect::<String>()
+                .starts_with("\n\n[Tool output preview only:")
+        );
+        let projected = crate::memory::project_message("branch", &message)?;
+        let restored = crate::memory::restore_message(&projected)?;
+        assert_eq!(
+            serde_json::to_value(restored)?,
+            serde_json::to_value(message)?
+        );
+        let ordinary =
+            tool_result_with_artifact("call-real", "shell", processed.output.clone(), None);
+        assert!(
+            matches!(ordinary.content, MessageContent::Text(_)),
+            "matching text is not an artifact producer"
+        );
+        let arbitrary = tool_result_with_artifact(
+            "call-real",
+            "shell",
+            "ordinary output /user/example".into(),
+            Some(reference),
+        );
+        let MessageContent::Parts(parts) = arbitrary.content else {
+            return Err(ReactError::Other("typed content missing".into()));
+        };
+        assert!(
+            matches!(parts.first(), Some(ContentPart::Text { text }) if text == "ordinary output /user/example")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn published_tool_result_keeps_actual_artifact_in_same_canonical_message()
+    -> crate::error::Result<()> {
+        for failure in [false, true] {
+            let root = tempfile::tempdir().map_err(|error| ReactError::Other(error.to_string()))?;
+            let agent = crate::agent::ReactAgent::new(
+                crate::agent::AgentConfig::new("test-model", "agent", "system")
+                    .tool_output_artifacts(Some(
+                        echo_core::tools::artifact::ToolOutputArtifactConfig::new(
+                            root.path(),
+                            "conversation_or_30d",
+                        )
+                        .threshold_bytes(1),
+                    )),
+            );
+            let snapshot = AgentRunSnapshot::from_agent(&agent);
+            let processed = snapshot.process_tool_output_for_call(
+                "真实工具原文🙂".repeat(4000),
+                "publisher-real",
+                "shell",
+                None,
+            );
+            let reference = processed
+                .artifact
+                .clone()
+                .ok_or_else(|| ReactError::Other("actual spill reference missing".into()))?;
+            let result = if failure {
+                ToolResult::error("guarded diagnostic").with_artifact(reference.clone())
+            } else {
+                ToolResult::success(processed.output.clone()).with_artifact(reference.clone())
+            };
+            let outcome = if failure {
+                Err(crate::agent::snapshot::ToolCallFailure {
+                    name: "shell".into(),
+                    error: ReactError::Other("guarded diagnostic".into()),
+                    result: Some(result),
+                })
+            } else {
+                Ok(crate::agent::snapshot::ToolCallSuccess {
+                    name: "shell".into(),
+                    result,
+                })
+            };
+            let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+            publish_completed_call(
+                &snapshot,
+                &agent.memory.context,
+                &tx,
+                "publisher-real",
+                outcome,
+            )
+            .await?;
+            let event = rx
+                .try_recv()
+                .map_err(|error| ReactError::Other(error.to_string()))??;
+            let crate::agent::AgentEvent::ToolResult { result, .. } = event else {
+                return Err(ReactError::Other("actual result event missing".into()));
+            };
+            assert_eq!(result.success, !failure);
+            assert_eq!(
+                serde_json::to_value(result.artifact)?,
+                serde_json::to_value(Some(reference.clone()))?
+            );
+            let messages = agent.memory.context.lock().await.messages().to_vec();
+            let tool_message = messages
+                .iter()
+                .find(|message| message.tool_call_id.as_deref() == Some("publisher-real"))
+                .ok_or_else(|| ReactError::Other("actual canonical tool message missing".into()))?;
+            let MessageContent::Parts(parts) = &tool_message.content else {
+                return Err(ReactError::Other(
+                    "publisher dropped actual artifact carrier".into(),
+                ));
+            };
+            let binding = parts
+                .iter()
+                .find_map(|part| match part {
+                    ContentPart::ResourceLink { resource } => resource
+                        .meta
+                        .as_ref()
+                        .and_then(|meta| meta.get("echo_tool_output_artifact")),
+                    _ => None,
+                })
+                .ok_or_else(|| ReactError::Other("publisher artifact metadata missing".into()))?;
+            assert_eq!(
+                binding.get("reference"),
+                Some(&serde_json::to_value(&reference)?)
+            );
+            assert_eq!(
+                binding.get("call_id").and_then(Value::as_str),
+                Some("publisher-real")
+            );
+            let expected = if failure {
+                "[Error] guarded diagnostic"
+            } else {
+                processed.output.as_str()
+            };
+            assert!(matches!(parts.first(), Some(ContentPart::Text { text }) if text == expected));
+            let stored = crate::memory::project_message("branch", tool_message)?;
+            assert_eq!(
+                serde_json::to_value(crate::memory::restore_message(&stored)?)?,
+                serde_json::to_value(tool_message)?
+            );
+        }
+        Ok(())
+    }
+
     #[tokio::test]
     async fn guarded_tool_result_cannot_reinject_rich_content_into_context()
     -> crate::error::Result<()> {
@@ -1034,7 +1290,7 @@ mod tests {
             error: crate::error::ReactError::Other("raw secret diagnostic".to_string()),
             result: Some(ToolResult::error("guarded diagnostic")),
         };
-        let answer = publish_completed_call(
+        publish_completed_call(
             &snapshot,
             &agent.memory.context,
             &tx,
@@ -1042,7 +1298,6 @@ mod tests {
             Err(failure),
         )
         .await?;
-        assert!(answer.is_none());
         let event = rx
             .try_recv()
             .map_err(|error| crate::error::ReactError::Other(error.to_string()))?;

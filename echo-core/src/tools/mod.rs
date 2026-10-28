@@ -1525,7 +1525,7 @@ impl std::fmt::Debug for ExternalRunContext {
 
 /// 运行时上下文，工具执行时由 ExecuteStage 注入。
 ///
-/// 所有字段均为 `Option`，`None` = 回退默认行为（向后兼容老工具）。
+/// 可选字段的 `None` 保留原行为；能力上界只收窄，资源 guard 继续持有原生命周期。
 /// 工具 override `Tool::execute_with_context` 时可读取这些字段。
 ///
 /// `cancel` / `trace_sink` 由应用层经 [`ExternalRunContext`] 注入 subagent，
@@ -1567,6 +1567,8 @@ pub struct ToolContext {
     pub output_artifacts: Option<artifact::ToolOutputArtifactConfig>,
     /// Invocation-scoped schema visibility shared with `tool_search`.
     pub tool_visibility: Option<std::sync::Arc<ToolVisibilityState>>,
+    /// 原执行快照已经求值的能力上界；后代只能继续收窄。
+    pub tool_access: Option<ToolAccess>,
     /// Application-resolved runtime for a persisted script execution.
     ///
     /// This value is intentionally absent from model-visible tool parameters.
@@ -1610,6 +1612,7 @@ impl std::fmt::Debug for ToolContext {
             .field("effect_sink", &self.effect_sink.as_ref().map(|_| "<sink>"))
             .field("has_active_message", &self.active_message.is_some())
             .field("output_artifacts", &self.output_artifacts)
+            .field("tool_access", &self.tool_access)
             .field(
                 "visible_tool_count",
                 &self
@@ -1950,6 +1953,7 @@ mod tool_context_tests {
             effect_sink: None,
             output_artifacts: None,
             tool_visibility: None,
+            tool_access: None,
             script_execution_profile: None,
             cancel: None,
             trace_sink: None,

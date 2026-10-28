@@ -145,6 +145,52 @@ managed clear/delete helper 提供 context-aware 变体，把调用方 absolute 
 legacy unmanaged Store 的原始 trait 没有 context 参数，因此兼容 helper 保留历史上的无界合同；其
 context-aware 变体会返回 Unsupported，不会伪装成无法兑现的 deadline 保证。
 
+### Transcript 投影坐标与应用扩展元数据
+
+`StoredMessage.attachments_json` 可同时包含 Framework 的规范消息字段与应用自有
+JSON 扩展。`set_transcript_projection_meta` 先校验既有 projection marker、版本及已知
+字段，再只替换 `transcript_generation_id` 和 `transcript_ordinal`。未知字段、嵌套值、
+显式 `null`、布尔值和中文内容按 JSON 值保留；该操作不负责解释应用呈现 schema，
+也不承诺 JSON 空白或对象键顺序逐字节不变。
+
+`normalized_transcript_attachments` 是现有 **Framework canonical 摘要视图**，供
+`transcript_projection_message_digest` 与 runtime cursor 使用。它继续忽略应用扩展及
+append 坐标，不可作为重写存储行的方法。此次修复不改变该 v1 digest 的序列化、
+旧 checkpoint hash 或 cursor 比较语义；应用呈现扩展的变化不代表新的模型执行事实。
+
+Managed import／projection batch 的操作身份及 Store ordinal digest 仍覆盖完整
+`StoredMessage`，包括应用扩展。修改扩展后须按原 CAS 生成新的有效请求，不能复用
+旧 payload_digest；这与排除应用扩展的 runtime cursor 摘要是两层既有合同。FileStore
+原件冷重载与重复请求回执沿用同一权威，无需新增 Store 或迁移版本。
+
+原生 raw／approved assistant blocks、`Some(empty)` 的禁止回退语义、reasoning 签名／
+opaque payload 及多模态 Parts 继续通过规范字段持久化。此处只保证数据保存，不使
+应用呈现 provenance 成为 Framework 的成功终态或执行许可。
+
+### 已核旧控制历史的恢复后继
+
+`RuntimeStateStore::inspect_runtime_state_for_recovery_with_context` 是显式纯读合同，默认
+`Unsupported`；普通 load 允许 owner-first reconcile 写入，不能作为纯读默认实现。
+`ReactAgent::prepare_pending_control_checkpoint` 只准备原 snapshot、已核来源、历史副本
+和待原 owner 处理的真实调用，不执行工具、模型或签发成功。
+
+自动恢复与显式 Resume 先等待 normal load；只有配对或结构 `SerializationError` 才考虑
+旧控制归一，原 typed unknown、取消、deadline、IO 不进入 fallback。若当前 checkpoint
+本来严格合法，保持原 normal error，不提交恢复。调用方必须传播同一个绝对 deadline。
+
+`RuntimeCheckpointRecoveryRequest` 经 `commit_checkpoint_recovery_with_context` 复用
+File Store 原 CAS kernel、scope/runtime 锁与 expected version。原始 owner 的完整 bytes、
+SHA/size 和 snapshot 先保存在 `_recovery_sources` 并回读核准，再提交正常后继版本；该目录
+不参与正常 runtime 扫描。旧 checkpoint、cursor 和日志保持原件，不能通过改旧 digest
+放行恢复。重试仍核原 bytes，owner-first crash cut 沿原 replay/reconcile 处理。
+
+真实 pending effect、未结算投递及未知/custom 来源不由归一化重放。runtime-only 后继
+保存仍以实际 hydrated base 做 CAS，不能用 fresh expected 覆盖新输入；丢失等待者或到期
+不代表物理结算，原 close authority 继续保留 admission、execution mutex 与资源 guard。
+
+显式 Resume 与 stream 一样，在等待 execution mutex 前捕获原外部调用上下文；排队期间
+清除或替换共享 context 不改变该调用的身份与资源，锁后两个 snapshot 都复用同一捕获值。
+
 ### 其它同名 checkpoint
 
 框架还有其它作用域不同的 checkpoint：

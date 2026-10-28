@@ -24,7 +24,6 @@ reqwest = ["dep:reqwest"]
 guard = []
 permission = ["dep:globset"]
 mcp = []
-lsp = []
 channels = []
 
 [dependencies]

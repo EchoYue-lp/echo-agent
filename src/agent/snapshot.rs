@@ -150,6 +150,39 @@ fn transcript_projection_messages(
         .collect()
 }
 
+/// 沿现有context-only transform计算派生cursor，原source/cursor不改。
+pub(crate) fn derive_control_recovery_checkpoint(
+    original: &crate::state::ManagedRuntimeStateSnapshot,
+    messages: Vec<Message>,
+) -> crate::error::Result<crate::state::AgentCheckpoint> {
+    let source = original
+        .checkpoint
+        .as_ref()
+        .ok_or_else(|| persistence_configuration_error("checkpoint recovery source missing"))?;
+    let payload = source.inspect_payload_for_recovery()?;
+    if payload.pending_transcript_projection.is_some() {
+        return Err(persistence_configuration_error(
+            "checkpoint recovery cannot overwrite pending projection",
+        ));
+    }
+    let cursor = if let Some(cursor) = payload.transcript_projection {
+        let mut derived = TranscriptProjectionCursor::default();
+        derived.restore(cursor);
+        let projected = crate::memory::project_messages(
+            &original.scope.scope_id,
+            &filter_user_visible_transcript(&messages),
+        )?;
+        derived.assign_view(&original.runtime_state_id, &projected, true)?;
+        Some(derived.checkpoint_for(&original.runtime_state_id))
+    } else {
+        None
+    };
+    let mut checkpoint = source.clone();
+    checkpoint.messages_json = crate::state::AgentCheckpoint::serialize_payload(messages, cursor)?;
+    checkpoint.restore_runtime_payload()?;
+    Ok(checkpoint)
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct TranscriptProjectionCursor {
     generation_id: Option<String>,
@@ -288,6 +321,8 @@ pub struct RuntimeConfig {
     pub token_budget_error: Option<String>,
     pub run_budget: echo_core::agent::RunBudgetPolicy,
     pub supports_tool_choice_none: bool,
+    /// 模型HTTP模式，独立于公开调用返回String还是事件流；默认保持流式。
+    pub model_streaming: bool,
     /// Caller-declared final response format, fixed for this run.
     pub response_format: Option<ResponseFormat>,
     /// Resolved provider/model capability, never inferred from the format request.
@@ -379,6 +414,7 @@ impl RuntimeConfig {
         Self {
             agent_name: config.agent_name.clone(),
             model_name: config.model_name.clone(),
+            model_streaming: config.model_streaming,
             provider: model_profile.map(|resolution| resolution.profile.provider.clone()),
             max_iterations: config.max_iterations,
             token_limit,
@@ -513,7 +549,7 @@ pub struct ToolRuntime {
     pub visibility: Option<std::sync::Arc<echo_core::tools::ToolVisibilityState>>,
     /// Whether the invocation uses plan mode's read-only tool surface.
     pub plan_mode: bool,
-    /// Construction-time read-only Agent policy, including custom tools.
+    /// 锁后快照唯一求值的有效只读策略，合并配置和本次调用上界。
     pub readonly_tools: bool,
     /// Live permission-mode authority for mode changes made through SDK/host APIs.
     #[cfg(feature = "human-loop")]
@@ -534,6 +570,7 @@ impl ToolRuntime {
             invocation_visible_tools,
             None,
             None,
+            None,
         )
     }
 
@@ -543,6 +580,7 @@ impl ToolRuntime {
         invocation_disabled_tools: Option<&std::collections::HashSet<String>>,
         invocation_visible_tools: Option<&std::collections::HashSet<String>>,
         invocation_allowed_tools: Option<&std::collections::HashSet<String>>,
+        invocation_tool_access: Option<echo_core::tools::ToolAccess>,
         delegation_policy: Option<echo_core::tools::NestedDelegationPolicy>,
     ) -> Self {
         let invocation_allowed_tools =
@@ -562,6 +600,8 @@ impl ToolRuntime {
         if let Some(config) = agent.llm_config() {
             disabled_tools.extend(tool_manager.incompatible_tool_names(&config.input_modalities));
         }
+        let readonly_tools = agent.config.readonly_tools
+            || invocation_tool_access == Some(echo_core::tools::ToolAccess::ReadOnly);
         let skill_allowed_tools = agent.tools.skill_registry.active_skill_allowed_tools();
         #[cfg(feature = "human-loop")]
         let permission_service = agent.approval.permission_service.clone();
@@ -586,7 +626,7 @@ impl ToolRuntime {
         // back to the shared registry and rediscover the excluded dispatcher.
         let explicit_visibility =
             invocation_visible_tools.is_some() || invocation_allowed_tools.is_some();
-        let visibility = (explicit_visibility || delegation_blocked).then(|| {
+        let visibility = (explicit_visibility || delegation_blocked || readonly_tools).then(|| {
             let current_tools = tool_manager.get_openai_tools();
             if let Some(allowed) = invocation_allowed_tools {
                 // Keep the original unavailable diagnostic for names known at
@@ -606,7 +646,7 @@ impl ToolRuntime {
                 })
                 .filter(|tool| !disabled_tools.contains(&tool.function.name))
                 .filter(|tool| {
-                    !(plan_mode || agent.config.readonly_tools)
+                    !(plan_mode || readonly_tools)
                         || tool_manager
                             .get_tool(&tool.function.name)
                             .is_some_and(|tool| tool.capabilities().is_read_only())
@@ -647,7 +687,7 @@ impl ToolRuntime {
             disabled_tools,
             visibility,
             plan_mode,
-            readonly_tools: agent.config.readonly_tools,
+            readonly_tools,
             #[cfg(feature = "human-loop")]
             permission_service,
         }
@@ -1125,20 +1165,39 @@ impl<'a> AgentPersistenceCoordinator<'a> {
         crate::state::RuntimeStateExpectedVersion,
         Option<crate::state::ManagedRuntimeStateSnapshot>,
     )> {
-        let scope_revision = tokio::time::timeout_at(
-            self.deadline,
-            store.load_scope_authority_with_context(self.call_context, scope_id),
-        )
-        .await
-        .map_err(|_| persistence_deadline_error("runtime scope load"))??
-        .map(|scope| scope.revision)
-        .unwrap_or(0);
-        let current = tokio::time::timeout_at(
-            self.deadline,
-            store.load_runtime_state_with_context(self.call_context, scope_id, runtime_state_id),
-        )
-        .await
-        .map_err(|_| persistence_deadline_error("runtime generation load"))??;
+        self.current_runtime_state_observed(store, scope_id, runtime_state_id, false)
+            .await
+    }
+
+    async fn current_runtime_state_observed(
+        &self,
+        store: &dyn crate::state::RuntimeStateStore,
+        scope_id: &str,
+        runtime_state_id: &str,
+        await_physical_settlement: bool,
+    ) -> crate::error::Result<(
+        u64,
+        crate::state::RuntimeStateExpectedVersion,
+        Option<crate::state::ManagedRuntimeStateSnapshot>,
+    )> {
+        let scope_load = store.load_scope_authority_with_context(self.call_context, scope_id);
+        let scope = if await_physical_settlement {
+            scope_load.await?
+        } else {
+            tokio::time::timeout_at(self.deadline, scope_load)
+                .await
+                .map_err(|_| persistence_deadline_error("runtime scope load"))??
+        };
+        let scope_revision = scope.map(|scope| scope.revision).unwrap_or(0);
+        let state_load =
+            store.load_runtime_state_with_context(self.call_context, scope_id, runtime_state_id);
+        let current = if await_physical_settlement {
+            state_load.await?
+        } else {
+            tokio::time::timeout_at(self.deadline, state_load)
+                .await
+                .map_err(|_| persistence_deadline_error("runtime generation load"))??
+        };
         let expected = match current.as_ref().map(|state| &state.version) {
             None | Some(crate::state::RuntimeStateVersion::Absent) => {
                 crate::state::RuntimeStateExpectedVersion::Absent
@@ -1343,12 +1402,27 @@ impl<'a> AgentPersistenceCoordinator<'a> {
         runtime_store: &dyn crate::state::RuntimeStateStore,
         request: crate::state::RuntimeCheckpointCasRequest,
     ) -> crate::error::Result<crate::state::RuntimeCheckpointCasReceipt> {
-        let receipt = tokio::time::timeout_at(
-            self.deadline,
-            runtime_store.compare_and_save_checkpoint_with_context(self.call_context, request),
-        )
-        .await
-        .map_err(|_| persistence_deadline_error("checkpoint compare-and-save"))??;
+        self.save_frozen_checkpoint_observed(runtime_store, request, false)
+            .await
+    }
+
+    async fn save_frozen_checkpoint_observed(
+        &self,
+        runtime_store: &dyn crate::state::RuntimeStateStore,
+        request: crate::state::RuntimeCheckpointCasRequest,
+        await_physical_settlement: bool,
+    ) -> crate::error::Result<crate::state::RuntimeCheckpointCasReceipt> {
+        let operation =
+            runtime_store.compare_and_save_checkpoint_with_context(self.call_context, request);
+        // 新runtime-only versioned路径须等原Store真实结算；同一deadline/receipt校验，
+        // 不复制CAS策略，也不让调用侧timeout丢弃已准入blocking写。
+        let receipt = if await_physical_settlement {
+            operation.await?
+        } else {
+            tokio::time::timeout_at(self.deadline, operation)
+                .await
+                .map_err(|_| persistence_deadline_error("checkpoint compare-and-save"))??
+        };
         if !matches!(
             receipt.status,
             crate::state::RuntimeCheckpointCasStatus::Applied
@@ -1750,9 +1824,54 @@ impl<'a> AgentPersistenceCoordinator<'a> {
             .conversation_id
             .as_deref()
             .unwrap_or(runtime_state_id);
-        store
-            .save_checkpoint_for_scope(scope_id, &checkpoint)
-            .await?;
+        let versioned = self
+            .snapshot
+            .runtime_state_version
+            .lock()
+            .await
+            .as_ref()
+            .is_some_and(|version| {
+                matches!(version, crate::state::RuntimeStateVersion::Managed { .. })
+            });
+        if versioned {
+            // 已经通过原恢复CAS进入revisioned owner，不能退回无版本save覆盖。
+            let (scope_revision, expected, current) = self
+                .current_runtime_state_observed(store.as_ref(), scope_id, runtime_state_id, true)
+                .await?;
+            // 只能保存本context实际hydrate的版本，不能借fresh expected覆盖并发后继。
+            self.require_hydrated_base(current.as_ref()).await?;
+            let conversation_epoch = current
+                .as_ref()
+                .and_then(|state| state.scope.conversation_epoch);
+            let mut checkpoint = checkpoint;
+            if let Some(current) = current.as_ref() {
+                // runtime-only恢复亦保留原cursor lineage；新view沿既有context-only派生，
+                // 不把未投递到ConversationStore的内容伪造为耐久transcript事实。
+                let messages = checkpoint.restore_messages()?;
+                checkpoint.messages_json =
+                    derive_control_recovery_checkpoint(current, messages)?.messages_json;
+            }
+            let receipt = self
+                .save_frozen_checkpoint_observed(
+                    store.as_ref(),
+                    crate::state::RuntimeCheckpointCasRequest {
+                        scope_id: scope_id.to_string(),
+                        runtime_state_id: runtime_state_id.clone(),
+                        conversation_epoch,
+                        expected_scope_revision: scope_revision,
+                        expected_state_version: expected,
+                        checkpoint,
+                        managed_import: None,
+                    },
+                    true,
+                )
+                .await?;
+            *self.snapshot.runtime_state_version.lock().await = Some(receipt.version);
+        } else {
+            store
+                .save_checkpoint_for_scope(scope_id, &checkpoint)
+                .await?;
+        }
         self.snapshot
             .record_checkpoint_event(runtime_state_id)
             .await;
@@ -1887,6 +2006,7 @@ impl AgentRunSnapshot {
             invocation.and_then(|context| context.disabled_tools.as_ref()),
             invocation.and_then(|context| context.visible_tools.as_ref()),
             invocation.and_then(|context| context.allowed_tools.as_ref()),
+            invocation.and_then(|context| context.tool_access),
             external_delegation_policy,
         );
         let skill_activation = agent.tools.skill_registry.activation_handle();
@@ -4005,6 +4125,7 @@ mod transcript_filter_tests {
             cancel: None,
             disabled_tools: None,
             allowed_tools: None,
+            tool_access: None,
             visible_tools: None,
             run_budget: None,
             history: None,
@@ -4330,6 +4451,279 @@ mod transcript_filter_tests {
             .collect();
 
         assert_eq!(visible, vec!["read_file"]);
+    }
+
+    struct InvocationAccessProbe {
+        name: &'static str,
+        readonly: bool,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Tool for InvocationAccessProbe {
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn description(&self) -> &str {
+            "invocation access probe"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type":"object","properties":{}})
+        }
+        fn risk_level(&self) -> echo_core::tools::ToolRiskLevel {
+            if self.readonly {
+                echo_core::tools::ToolRiskLevel::ReadOnly
+            } else {
+                echo_core::tools::ToolRiskLevel::Standard
+            }
+        }
+        fn execute(&self, _: ToolParameters) -> futures::future::BoxFuture<'_, Result<ToolResult>> {
+            Box::pin(async move {
+                self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(ToolResult::success("called"))
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn readonly_invocation_snapshot_limits_schema_search_and_forced_calls() -> Result<()> {
+        for hard_scope in [false, true] {
+            let writes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let agent = crate::agent::ReactAgentBuilder::new()
+                .model("test-model")
+                .tool(Box::new(InvocationAccessProbe {
+                    name: "read_file",
+                    readonly: true,
+                    calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                }))
+                .tool(Box::new(InvocationAccessProbe {
+                    name: "write_file",
+                    readonly: false,
+                    calls: Arc::clone(&writes),
+                }))
+                .build()?;
+            let invocation = echo_core::agent::AgentInvocationContext {
+                tool_access: Some(echo_core::tools::ToolAccess::ReadOnly),
+                allowed_tools: hard_scope.then(|| {
+                    HashSet::from([
+                        "read_file".into(),
+                        "write_file".into(),
+                        "tool_search".into(),
+                        "final_answer".into(),
+                    ])
+                }),
+                ..Default::default()
+            };
+            let snapshot = AgentRunSnapshot::from_agent_with_invocation(&agent, &invocation);
+            assert!(snapshot.tools.readonly_tools);
+            let names = tool_names(&snapshot);
+            assert!(names.iter().any(|name| name == "read_file"));
+            assert!(!names.iter().any(|name| name == "write_file"));
+            let visibility = snapshot.tools.visibility.as_ref().ok_or_else(|| {
+                ReactError::Other("readonly invocation visibility missing".into())
+            })?;
+            assert!(
+                !visibility
+                    .available_names()
+                    .iter()
+                    .any(|name| name == "write_file")
+            );
+            let search = snapshot
+                .tools
+                .tool_manager
+                .get_tool("tool_search")
+                .ok_or_else(|| ReactError::Other("tool_search missing".into()))?;
+            search
+                .execute_with_context(
+                    [("query".into(), serde_json::json!("write_file"))]
+                        .into_iter()
+                        .collect(),
+                    &echo_core::tools::ToolContext {
+                        tool_access: Some(echo_core::tools::ToolAccess::ReadOnly),
+                        tool_visibility: Some(Arc::clone(visibility)),
+                        ..Default::default()
+                    },
+                )
+                .await?;
+            assert!(!visibility.is_eligible("write_file"));
+            assert!(!visibility.is_visible("write_file"));
+            let denied = snapshot
+                .execute_tool_with_policy(
+                    "readonly-forced".into(),
+                    "write_file",
+                    &ToolParameters::new(),
+                    &serde_json::json!({}),
+                    None,
+                )
+                .await;
+            assert!(denied.is_err());
+            assert_eq!(writes.load(std::sync::atomic::Ordering::SeqCst), 0);
+            assert!(
+                !agent.config.readonly_tools,
+                "test must use invocation-only restriction"
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn readonly_invocation_rechecks_same_name_and_late_mutating_registrations() -> Result<()>
+    {
+        let writes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let agent = crate::agent::ReactAgentBuilder::new()
+            .model("test-model")
+            .tool(Box::new(InvocationAccessProbe {
+                name: "replaceable",
+                readonly: true,
+                calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            }))
+            .build()?;
+        let snapshot = AgentRunSnapshot::from_agent_with_invocation(
+            &agent,
+            &echo_core::agent::AgentInvocationContext {
+                tool_access: Some(echo_core::tools::ToolAccess::ReadOnly),
+                ..Default::default()
+            },
+        );
+        assert!(
+            tool_names(&snapshot)
+                .iter()
+                .any(|name| name == "replaceable")
+        );
+        snapshot
+            .tools
+            .tool_manager
+            .replace(Box::new(InvocationAccessProbe {
+                name: "replaceable",
+                readonly: false,
+                calls: Arc::clone(&writes),
+            }));
+        snapshot
+            .tools
+            .tool_manager
+            .register(Box::new(InvocationAccessProbe {
+                name: "late_write",
+                readonly: false,
+                calls: Arc::clone(&writes),
+            }));
+        let search = snapshot
+            .tools
+            .tool_manager
+            .get_tool("tool_search")
+            .ok_or_else(|| ReactError::Other("tool_search missing".into()))?;
+        let searched = search
+            .execute_with_context(
+                [("query".into(), serde_json::json!("replaceable"))]
+                    .into_iter()
+                    .collect(),
+                &echo_core::tools::ToolContext {
+                    tool_access: Some(echo_core::tools::ToolAccess::ReadOnly),
+                    tool_visibility: snapshot.tools.visibility.clone(),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        assert!(
+            !searched.metadata.contains_key("matched_tools"),
+            "search rediscovered a same-name Mutating replacement: {}",
+            searched.output
+        );
+        for name in ["replaceable", "late_write"] {
+            assert!(!tool_names(&snapshot).iter().any(|visible| visible == name));
+            let denied = snapshot
+                .execute_tool_with_policy(
+                    format!("forced-{name}"),
+                    name,
+                    &ToolParameters::new(),
+                    &serde_json::json!({}),
+                    None,
+                )
+                .await;
+            assert!(denied.is_err());
+        }
+        assert_eq!(writes.load(std::sync::atomic::Ordering::SeqCst), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn readonly_config_cannot_be_promoted_and_none_keeps_writer_behavior() -> Result<()> {
+        let agent = crate::agent::ReactAgentBuilder::new()
+            .model("test-model")
+            .readonly_tools()
+            .build()?;
+        let snapshot = AgentRunSnapshot::from_agent_with_invocation(
+            &agent,
+            &echo_core::agent::AgentInvocationContext {
+                tool_access: Some(echo_core::tools::ToolAccess::Mutating),
+                ..Default::default()
+            },
+        );
+        assert!(snapshot.tools.readonly_tools);
+        let writes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let writer = crate::agent::ReactAgentBuilder::new()
+            .model("test-model")
+            .tool(Box::new(InvocationAccessProbe {
+                name: "write_probe",
+                readonly: false,
+                calls: Arc::clone(&writes),
+            }))
+            .build()?;
+        let snapshot = AgentRunSnapshot::from_agent_with_invocation(&writer, &Default::default());
+        assert!(!snapshot.tools.readonly_tools);
+        let result = snapshot
+            .execute_tool_with_policy(
+                "writer-control".into(),
+                "write_probe",
+                &ToolParameters::new(),
+                &serde_json::json!({}),
+                None,
+            )
+            .await;
+        assert!(result.is_ok());
+        assert_eq!(writes.load(std::sync::atomic::Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[cfg(feature = "subagent")]
+    #[tokio::test]
+    async fn readonly_agent_dispatch_schema_preserves_legitimate_readonly_delegation() -> Result<()>
+    {
+        use crate::agent::subagent::{SubagentAccessMode, SubagentDefinition, SubagentRegistry};
+
+        let registry = Arc::new(SubagentRegistry::new());
+        let mut reader = SubagentDefinition::new("reader", "只读研究");
+        reader.access_mode = SubagentAccessMode::ReadOnly;
+        registry
+            .register(reader, Box::new(crate::testing::MockAgent::new("reader")))
+            .await;
+        registry
+            .register(
+                SubagentDefinition::new("writer", "写入角色"),
+                Box::new(crate::testing::MockAgent::new("writer")),
+            )
+            .await;
+        let agent = crate::agent::ReactAgentBuilder::new()
+            .model("test-model")
+            .readonly_tools()
+            .subagent_registry(registry)
+            .register_agent_dispatch_tool()
+            .build()?;
+        let snapshot = AgentRunSnapshot::from_agent(&agent);
+        let schema = snapshot
+            .tools
+            .tools_for_llm()
+            .into_iter()
+            .find(|tool| tool.function.name == "agent_tool")
+            .ok_or_else(|| {
+                ReactError::Other("readonly invocation lost legitimate agent_tool schema".into())
+            })?;
+        let targets = schema
+            .function
+            .parameters
+            .pointer("/properties/agent_name/enum")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| ReactError::Other("readonly dispatch target schema missing".into()))?;
+        assert_eq!(targets, &vec![serde_json::json!("reader")]);
+        Ok(())
     }
 
     #[tokio::test]

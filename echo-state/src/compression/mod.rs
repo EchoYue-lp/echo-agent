@@ -16,7 +16,7 @@ pub mod verifier;
 pub use echo_core::compression::{
     CanonicalContext, CompressionCheckpoint, CompressionInput, CompressionOutput,
     ContextCompressor, ContextProjection, PreModelContextProjector, ProjectionContext,
-    StructuredSummary, ToolPairFix, ToolPairFixType,
+    RecoveredToolKind, RecoveredToolOrigin, StructuredSummary, ToolPairFix, ToolPairFixType,
 };
 
 use crate::compression::compressor::SlidingWindowCompressor;
@@ -3038,6 +3038,7 @@ mod tests {
     fn test_sanitize_tool_call_pairing_valid() {
         use echo_core::llm::types::ToolCall;
         let tc = ToolCall {
+            provider_source: None,
             id: "call_1".to_string(),
             call_type: "function".to_string(),
             function: echo_core::llm::types::FunctionCall {
@@ -3085,6 +3086,7 @@ mod tests {
         // When ALL tool_calls are orphaned, we null out the tool_calls field
         // rather than adding placeholder results.
         let tc = ToolCall {
+            provider_source: None,
             id: "call_missing".to_string(),
             call_type: "function".to_string(),
             function: echo_core::llm::types::FunctionCall {
@@ -3111,6 +3113,7 @@ mod tests {
         use echo_core::llm::types::ToolCall;
         // assistant has 2 tool_calls, but only 1 result exists
         let tc1 = ToolCall {
+            provider_source: None,
             id: "call_present".to_string(),
             call_type: "function".to_string(),
             function: echo_core::llm::types::FunctionCall {
@@ -3119,6 +3122,7 @@ mod tests {
             },
         };
         let tc2 = ToolCall {
+            provider_source: None,
             id: "call_missing".to_string(),
             call_type: "function".to_string(),
             function: echo_core::llm::types::FunctionCall {
@@ -3232,6 +3236,7 @@ mod tests {
             ctx.push(Message::user(format!("question {index}")));
             let id = format!("call-{index}");
             ctx.push(Message::assistant_with_tools(vec![ToolCall {
+                provider_source: None,
                 id: id.clone(),
                 call_type: "function".into(),
                 function: FunctionCall {

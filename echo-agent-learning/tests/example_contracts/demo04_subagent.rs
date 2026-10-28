@@ -91,11 +91,7 @@ async fn contract_demo04_subagent() -> Result<()> {
                     "tool":"weather-context"
                 }"#,
             )
-            .then_tool_call(
-                "weather-final-1",
-                "final_answer",
-                r#"{"answer":"已通过 human_in_loop 向用户确认：今天下雨，因此后续计算需要叠加雨天 85 折。"}"#,
-            ),
+            .with_response(r###"已通过 human_in_loop 向用户确认：今天下雨，因此后续计算需要叠加雨天 85 折。"###),
     );
 
     let math_llm = Arc::new(
@@ -111,11 +107,7 @@ async fn contract_demo04_subagent() -> Result<()> {
             .then_tool_call("math-8", "multiply", r#"{"a":874,"b":0.9}"#)
             .then_tool_call("math-9", "multiply", r#"{"a":786.6,"b":0.85}"#)
             .then_tool_call("math-10", "subtract", r#"{"a":1000,"b":668.61}"#)
-            .then_tool_call(
-                "math-final-1",
-                "final_answer",
-                r#"{"answer":"计算结果：本子 150 元，笔 128 元，玩具 196 元，衣服满 500 打八折后为 400 元；小计 874 元，满 800 打九折后为 786.6 元；已确认下雨，再打 85 折，实付 668.61 元，最终剩余 331.39 元。"}"#,
-            ),
+            .with_response(r###"计算结果：本子 150 元，笔 128 元，玩具 196 元，衣服满 500 打八折后为 400 元；小计 874 元，满 800 打九折后为 786.6 元；已确认下雨，再打 85 折，实付 668.61 元，最终剩余 331.39 元。"###),
     );
 
     let orchestrator_llm = Arc::new(
@@ -137,11 +129,7 @@ async fn contract_demo04_subagent() -> Result<()> {
                     "task":"预算是 1000 元。已确认今天下雨。请按先单品折扣、再满减折扣、最后雨天折扣的顺序计算剩余金额，并返回清晰的计算结论。"
                 }"#,
             )
-            .then_tool_call(
-                "main-final-1",
-                "final_answer",
-                r#"{"answer":"weather-agent 先通过 human_in_loop 完成了天气澄清，确认今天下雨；math-agent 随后完成折扣计算，最终实付 668.61 元，还剩 331.39 元。"}"#,
-            ),
+            .with_response(r###"weather-agent 先通过 human_in_loop 完成了天气澄清，确认今天下雨；math-agent 随后完成折扣计算，最终实付 668.61 元，还剩 331.39 元。"###),
     );
 
     let weather_agent = ReactAgentBuilder::new()

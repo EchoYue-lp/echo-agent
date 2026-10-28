@@ -18,6 +18,12 @@
 
 </div>
 
+> 具名退役：当前源码移除 A2A／LSP 的实现、feature、公开出口和专属示例；
+> ACP、MCP、channels、Task/Subagent、通用工具和存储菜单继续保留。
+> 旧插件 `lsp.yaml` 由原 prepare owner 冻结并明确诊断，不启动服务，也不删除用户文件。
+> 源码同步不代表删后构建、最终锁、SDK正式新Git来源、native或发布资格已通过。
+> 边界和恢复锚点见[ADR0090](docs/adr/0090-a2a-lsp-retirement-contract.md)。
+
 ---
 
 ## 快速上手
@@ -147,7 +153,7 @@ echo-agent 提供跨越 8 个 crate 的 **67 个注册工具**。Prelude 只导�
 | **记忆系统** | `Store`（长期 KV）+ `RuntimeStateStore`（崩溃恢复）+ `ConversationStore`（会话历史） | `.with_memory_tools(store)` |
 | **上下文压缩** | 滑动窗口 / LLM 摘要 / 混合管道 | `SlidingWindowCompressor::new(4096)` |
 | **Token 预算** | 自动截断 + think 前触发压缩 | `.max_tool_output_tokens(2000)` |
-| **统一重试** | 一套策略覆盖 LLM、MCP、A2A、沙箱 | `with_retry(&policy, \|\| ...)` |
+| **统一重试** | 一套策略覆盖 LLM、MCP、沙箱 | `with_retry(&policy, \|\| ...)` |
 | **动态工具** | 对话中增 / 删 / 换工具 | `agent.remove_tool("old")` |
 | **流式输出** | 实时 `AgentEvent` 流（Token + 工具调用） | `agent.execute_stream(task).await?` |
 | **结构化输出** | LLM 输出 → Rust 类型（JSON Schema） | `agent.extract::<Contact>(text)` |
@@ -174,7 +180,6 @@ echo-agent 提供跨越 8 个 crate 的 **67 个注册工具**。Prelude 只导�
 |------|------|---------|
 | **ACP Agent** | 基于 `AgentTurnDriver` 的稳定 v1 Client-Agent adapter | `AcpAgentAdapter::new(factory)` |
 | **MCP 协议** | 接入任意 MCP 服务器（stdio/SSE/HTTP） | `mcp.connect(McpServerConfig::stdio(...))` |
-| **A2A 协议** | Agent Card 发布、跨框架协作 | `A2AServer::bind("0.0.0.0:3000")` |
 | **Skill 系统** | 渐进式披露：发现 → 激活 → 使用 | `agent.load_skill("web_research")` |
 | **IM 通道** | QQ Bot（WebSocket）+ 飞书（Webhook） | `ChannelManager::new()` |
 | **Web 工具** | 搜索 + 网页获取 | `WebSearchTool::auto()` |
@@ -210,9 +215,7 @@ echo-agent = { version = "0.2.0", default-features = false, features = ["mcp", "
 |---------|------|---------|
 | `full` | 启用下列全部 feature | — |
 | `acp` | 稳定 ACP v1 Agent adapter | `agent-client-protocol` |
-| `a2a` | Agent-to-Agent 协议 | `axum`, `jsonwebtoken` |
 | `mcp` | MCP 协议客户端 | — |
-| `lsp` | Language Server Protocol 集成 | — |
 | `sqlite` | SQLite 持久化状态 | `rusqlite` |
 | `telemetry` | OpenTelemetry 追踪与指标 | `opentelemetry` |
 | `human-loop` | 人工审批 | `tokio-tungstenite` |
@@ -273,7 +276,7 @@ echo-agent/
 - **多模态** — 文本、图片（base64 & URL）、文件附件混合消息
 - **IM 集成** — QQ Bot（WebSocket）& 飞书（Webhook）开箱即用
 - **声明式工作流** — 用 YAML/JSON 定义 Agent 图，无需写 Rust 代码
-- **统一重试** — 一套 `RetryPolicy` 覆盖所有外部调用（LLM、MCP、A2A、沙箱）
+- **统一重试** — 一套 `RetryPolicy` 覆盖所有外部调用（LLM、MCP、沙箱）
 - **零成本抽象** — 编译为原生代码，无运行时开销
 
 ---
@@ -376,7 +379,7 @@ agent.set_compressor(Box::new(SlidingWindowCompressor::new(4096)));
 
 ### 6. 统一重试策略 — 一套策略覆盖所有外部调用
 
-配置一次重试、超时和退避，应用于 LLM 调用、MCP 请求、A2A 通信和沙箱执行。
+配置一次重试、超时和退避，应用于 LLM 调用、MCP 请求、沙箱执行。
 
 ```rust
 let policy = RetryPolicy::new(3, Duration::from_millis(500))
@@ -720,7 +723,6 @@ agent.set_circuit_breaker(cb_config);
 | 18 | [`demo18_semantic_memory`](echo-agent-learning/examples/demo18_semantic_memory.rs) | 语义记忆 |
 | 19 | [`demo19_guard`](echo-agent-learning/examples/demo19_guard.rs) | 护栏系统 |
 | 20 | [`demo20_audit`](echo-agent-learning/examples/demo20_audit.rs) | 审计日志 |
-| 23 | [`demo23_a2a`](echo-agent-learning/examples/demo23_a2a.rs) | A2A 协议 |
 | 24 | [`demo24_topology`](echo-agent-learning/tests/example_contracts/demo24_topology.rs) | 拓扑可视化 |
 | 25 | [`demo25_macros`](echo-agent-learning/examples/demo25_macros.rs) | 宏系统展示 |
 | 26 | [`demo26_provider_factory`](echo-agent-learning/examples/demo26_provider_factory.rs) | 动态 LLM 工厂 |

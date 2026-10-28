@@ -508,3 +508,14 @@ Chart范围的当前源码观察和局部候选只覆盖上述新场景；旧宽
 ## 现有GitTool分支切换具体闭合
 
 只新增GitBranchTool switch原根缺陷的源码/四场景消费，nativeGit维持唯一repo事实。实际原CLI2/Tool3fail→same4pass与最后保护oracle/源码独审支持具体localresolved。此模型当前observed定位046674保存的a193原source文件/新场景，其他旧正文与对象状态全部保留；不把原DB/RAG verified平移为全部Git，也不扩大原permission/cleanup闭合。最终snapshot/remoteCI及SDKpublishedpin消费者独立。
+
+
+## 既有管线性能helper的当前依赖职责
+
+`tests/support/performance_baseline.rs` 是已有 `src/agent/react/run/pipeline.rs`
+的files/test include链所需helper：pipeline → `tests/support/tool_output_baseline.rs`
+→ performance_baseline。它只提供原测量日志/fixture适配，无执行/重试/权限权威；
+保留同一ToolManager与原拒绝/缓存路径。当前身份为 `source:69225014cbf5d5b28fa8e8bff9fd368792c1ad199efbb8afb55b5b688f01ac5f`，源码
+读回及相关focused编译回执只证明该依赖存在且可编译，不代表已执行性能基线测量。
+当前默认七项合同真实运行的是另一套example_contracts，不能替代性能测量。
+保留本资产原needs_review、observed_at、未知项和原49组依赖合同。

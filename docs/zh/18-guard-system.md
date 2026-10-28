@@ -12,11 +12,8 @@ Guard 系统在用户输入、有效工具参数、工具结果和最终文本�
 | `ToolOutput` | 工具结果进入预算与终态观察前 | 允许 |
 | `Output` | 模型文本最终答案进入回调和交付前 | 允许 |
 
-`final_answer` 工具结果只按 `ToolOutput` 检查，不在写入 transcript 后再次按
-`Output` 检查。护栏后端错误 fail-closed，不降级为警告。ToolInput 转换会被拒绝，
-因为审批收据绑定的是未经再次修改的有效参数。
-文本答案的 `Token` 与 `FinalAnswer` 事件携带相同的受检内容；provider 失败时
-的部分内容也要经过检查才会以 `Token` 交付。
+原生最终候选按 `Output` 检查，真实工具结果按 `ToolOutput` 检查；已退役的控制工具不再拥有特殊路径。护栏后端错误 fail-closed，ToolInput 转换仍会拒绝，因为审批收据绑定有效参数。
+整段校验不提前公开候选正文。`assistant_blocks` 保留协议原件；`approved_assistant_blocks` 只包含同一检查已批准的呈现内容，显式空值禁止回退原件。最终 `Message.content` 和确认事件使用受检内容。失败 partial 也不能绕过配置护栏。
 配置 GuardManager 后，工具流的 chunk 和进度被抑制，caller 只收到经过护栏和
 输出预算的权威终态 `ToolResult`；未配置时保留原有
 stdout/stderr 实时流。工具失败且无输出时，受检诊断统一进入返回错误、Trace、

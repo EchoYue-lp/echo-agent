@@ -318,6 +318,9 @@ impl Agent for RecordingAgent {
                 tool_call_id: None,
                 reasoning_content: None,
                 reasoning_blocks: None,
+                assistant_blocks: None,
+                execution_status: None,
+                approved_assistant_blocks: None,
             } => {
                 return Box::pin(async move {
                     let events = async_stream::stream! {
@@ -2470,10 +2473,36 @@ async fn text_only_agent_fallback_setup_error_keeps_original_canonical_failed_re
     );
     assert!(receipt.final_answer.is_none());
     let events = sink.0.lock().unwrap_or_else(|e| e.into_inner());
+    // 兼容Error和原生执行终态是两种事实；唯一性约束属于后者。
     assert_eq!(
         events
             .iter()
-            .filter(|event| event.payload.is_terminal())
+            .filter(|event| event.payload.is_execution_terminal())
+            .count(),
+        1
+    );
+    let started = events
+        .iter()
+        .find_map(|event| match &event.payload {
+            AgentEvent::ExecutionStatus(status)
+                if status.status == echo_core::agent::ExecutionStatusKind::Started =>
+            {
+                Some(status)
+            }
+            _ => None,
+        })
+        .ok_or_else(|| ReactError::Other("original started status missing".into()))?;
+    assert!(matches!(events.last().map(|event| &event.payload),
+        Some(AgentEvent::ExecutionStatus(status))
+            if status.status == echo_core::agent::ExecutionStatusKind::Failed
+                && status.execution_id == started.execution_id
+                && status.sequence > started.sequence));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(&event.payload,
+        AgentEvent::Error { failure, .. }
+            if failure.message == "original legacy setup failure"))
             .count(),
         1
     );

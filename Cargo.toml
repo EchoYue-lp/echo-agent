@@ -21,7 +21,11 @@ default-members = [
     "echo-orchestration",
 ]
 resolver = "3"
-exclude = ["vendor/rust_xlsxwriter-0.82.0", "vendor/calamine-0.36.1", "vendor/docx-rs-0.4.22"]
+exclude = ["vendor/rust_xlsxwriter-0.82.0", "vendor/calamine-0.36.1", "vendor/docx-rs-0.4.22", "vendor/polars-arrow-0.55.2", "vendor/polars-parquet-0.55.2"]
+
+[patch.crates-io]
+polars-arrow = { path = "vendor/polars-arrow-0.55.2" }
+polars-parquet = { path = "vendor/polars-parquet-0.55.2" }
 
 [package]
 name = "echo_agent"
@@ -55,7 +59,7 @@ exclude = [
 
 [package.metadata.docs.rs]
 no-default-features = true
-features = ["acp", "a2a", "mcp", "lsp", "telemetry", "human-loop", "topology", "subagent", "web", "media", "sqlite", "channels", "git", "database", "rag", "chart", "content-guard", "project-rules", "eval", "improve", "statistics"]
+features = ["acp", "mcp", "telemetry", "human-loop", "topology", "subagent", "web", "media", "sqlite", "channels", "git", "database", "rag", "chart", "content-guard", "project-rules", "eval", "improve", "statistics"]
 rustdoc-args = ["--cfg", "docsrs"]
 # NOTE: `data` (polars) is still excluded from docs.rs. polars-ops 0.46–0.53
 # broke nightly builds by unconditionally enabling its `nightly` cfg and then
@@ -66,11 +70,9 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
 default = []
-full = ["acp", "a2a", "mcp", "lsp", "telemetry", "human-loop", "topology", "subagent", "web", "media", "data", "sqlite", "channels", "git", "database", "rag", "chart", "content-guard", "project-rules", "shell", "files", "research", "eval", "improve", "statistics", "testing"]
+full = ["acp", "mcp", "telemetry", "human-loop", "topology", "subagent", "web", "media", "data", "sqlite", "channels", "git", "database", "rag", "chart", "content-guard", "project-rules", "shell", "files", "research", "eval", "improve", "statistics", "testing"]
 acp = ["dep:agent-client-protocol"]
-a2a = ["dep:axum", "dep:jsonwebtoken"]
 mcp = ["echo_integration/mcp"]
-lsp = ["echo_core/lsp", "echo_integration/lsp"]
 sqlite = ["echo_state/sqlite", "dep:rusqlite"]
 telemetry = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:tracing-opentelemetry"]
 human-loop = ["echo_orchestration/websocket"]
@@ -137,10 +139,6 @@ opentelemetry = { version = "0.27", features = ["trace", "metrics"], optional = 
 opentelemetry_sdk = { version = "0.27", features = ["rt-tokio", "metrics"], optional = true }
 opentelemetry-otlp = { version = "0.27", features = ["tonic", "metrics"], optional = true }
 tracing-opentelemetry = { version = "0.28", optional = true }
-axum = { version = "0.7", optional = true }
-# Optional A2A JWT verification. JwtConfig binds each accepted algorithm to the
-# matching key family and never accepts caller-supplied mixed algorithm lists.
-jsonwebtoken = { version = "9", optional = true }
 rusqlite = { version = "0.32.1", features = ["bundled"], optional = true }
 
 [dev-dependencies]
@@ -163,3 +161,10 @@ harness = false
 rust_xlsxwriter = { version = "=0.82.0", path = "vendor/rust_xlsxwriter-0.82.0" }
 calamine = { version = "=0.36.1", path = "vendor/calamine-0.36.1" }
 docx-rs = { version = "=0.4.22", path = "vendor/docx-rs-0.4.22" }
+
+# 测试构建使用温和优化，保留调试断言与整数溢出检查。
+# Rust测试harness继续unwind；不设置会被Cargo忽略的test.panic，不改变dev/release。
+[profile.test]
+opt-level = 1
+debug-assertions = true
+overflow-checks = true

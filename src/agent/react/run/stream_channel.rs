@@ -35,7 +35,14 @@ async fn finish_pre_spawn_terminal(
     reason: String,
     business_terminal: AgentEvent,
 ) -> (crate::agent::AgentSteerTurnOutcome, Vec<Result<AgentEvent>>) {
-    let mut events = Vec::new();
+    let mut events = vec![Ok(phases::finalize::execution_status_event(
+        snapshot,
+        echo_core::agent::ExecutionStatusKind::Started,
+        echo_core::agent::AgentPhase::Thinking,
+        None,
+        0,
+        None,
+    ))];
     match snapshot
         .save_transcript_projection(context, Some(reason.clone()))
         .await
@@ -73,32 +80,80 @@ async fn finish_pre_spawn_terminal(
                 let settlement = snapshot.observe_persistence_failure(&error).await;
                 events.push(Ok(AgentEvent::TranscriptProjectionSettlement(settlement)));
             }
-            snapshot
-                .finalize_run(
-                    crate::trace::RunStatus::Failed,
-                    None,
-                    Some(&error.to_string()),
-                )
-                .await;
+            if !matches!(error, crate::error::ReactError::ExecutionNotSettled { .. }) {
+                snapshot
+                    .finalize_run(
+                        crate::trace::RunStatus::Failed,
+                        None,
+                        Some(&error.to_string()),
+                    )
+                    .await;
+            }
             events.push(AgentEvent::from_error("react_loop", &error));
         }
+    }
+    if !events.iter().any(|event| {
+        matches!(
+            event,
+            Err(crate::error::ReactError::ExecutionNotSettled { .. })
+        )
+    }) {
+        events.push(Ok(phases::finalize::execution_status_event(
+            snapshot,
+            echo_core::agent::ExecutionStatusKind::Failed,
+            echo_core::agent::AgentPhase::Terminal,
+            None,
+            1,
+            Some(reason),
+        )));
     }
     (crate::agent::AgentSteerTurnOutcome::Failed, events)
 }
 
-struct ReactStreamTurnOwner {
+pub(in crate::agent::react) struct ReactStreamTurnOwner {
     lease: Option<crate::agent::react::lifecycle::ReactAgentTurnLease>,
     steering: Option<crate::agent::steer::ActiveTurnLease>,
     execution: Option<tokio::sync::OwnedMutexGuard<()>>,
     // Snapshot merges invocation and runtime guards; retain that original
     // bundle with the same physical owner if settlement remains unknown.
     resource_guards: Vec<echo_core::tools::InvocationResourceGuard>,
-    run_id: String,
+    run_id: Option<String>,
     execution_id: Option<String>,
 }
 
 impl ReactStreamTurnOwner {
-    fn settle(&mut self, outcome: crate::agent::AgentSteerTurnOutcome) {
+    fn unknown_identity(events: &[Result<AgentEvent>]) -> Option<(String, Option<String>)> {
+        events.iter().find_map(|event| match event {
+            Err(crate::error::ReactError::ExecutionNotSettled {
+                run_id,
+                execution_id,
+            }) => Some((run_id.clone(), execution_id.clone())),
+            _ => None,
+        })
+    }
+
+    fn retain_pre_spawn(
+        snapshot: &crate::agent::snapshot::AgentRunSnapshot,
+        lease: crate::agent::react::lifecycle::ReactAgentTurnLease,
+        execution: tokio::sync::OwnedMutexGuard<()>,
+        steering: Option<crate::agent::steer::ActiveTurnLease>,
+        run_id: String,
+        execution_id: Option<String>,
+    ) {
+        // 准备期也保留本次实际admission的原lease/锁/资源束；身份只取原typed观察。
+        // 不制造替代任务，不从持久ledger重建已释放owner。
+        Self {
+            lease: Some(lease),
+            steering,
+            execution: Some(execution),
+            resource_guards: snapshot.resource_guards.clone(),
+            run_id: Some(run_id),
+            execution_id,
+        }
+        .retain_unknown();
+    }
+
+    pub(in crate::agent::react) fn settle(&mut self, outcome: crate::agent::AgentSteerTurnOutcome) {
         if let Some(steering) = self.steering.take() {
             steering.settle(outcome);
         }
@@ -109,29 +164,71 @@ impl ReactStreamTurnOwner {
         self.resource_guards.clear();
     }
 
+    pub(in crate::agent::react) fn preparation(
+        snapshot: &crate::agent::snapshot::AgentRunSnapshot,
+        lease: crate::agent::react::lifecycle::ReactAgentTurnLease,
+        execution: tokio::sync::OwnedMutexGuard<()>,
+    ) -> Self {
+        Self {
+            lease: Some(lease),
+            steering: None,
+            execution: Some(execution),
+            resource_guards: snapshot.resource_guards.clone(),
+            run_id: snapshot.current_run_id.clone(),
+            execution_id: snapshot.current_execution_id.clone(),
+        }
+    }
+
+    pub(in crate::agent::react) fn take_preparation_parts(
+        &mut self,
+    ) -> Result<(
+        crate::agent::react::lifecycle::ReactAgentTurnLease,
+        tokio::sync::OwnedMutexGuard<()>,
+    )> {
+        if self.lease.is_none() || self.execution.is_none() {
+            return Err(crate::error::ReactError::Other(
+                "original preparation owner resources missing".to_string(),
+            ));
+        }
+        let lease = self.lease.take().ok_or_else(|| {
+            crate::error::ReactError::Other("original preparation lease missing".to_string())
+        })?;
+        let guard = self.execution.take().ok_or_else(|| {
+            crate::error::ReactError::Other("original preparation mutex missing".to_string())
+        })?;
+        Ok((lease, guard))
+    }
+
+    pub(in crate::agent::react) fn observe_preparation_result<T>(&mut self, result: &Result<T>) {
+        if let Err(crate::error::ReactError::ExecutionNotSettled {
+            run_id,
+            execution_id,
+        }) = result
+        {
+            self.run_id = Some(run_id.clone());
+            self.execution_id = execution_id.clone();
+            self.retain_unknown();
+        } else {
+            self.settle(crate::agent::AgentSteerTurnOutcome::Failed);
+        }
+    }
+
     fn retain_unknown(&mut self) {
-        if let Some(mut steering) = self.steering.take() {
-            steering.retain_unknown();
-            if let Some(lease) = self.lease.take() {
-                lease.retain_unknown(
-                    self.run_id.clone(),
-                    self.execution_id.clone(),
-                    Box::new((
-                        steering,
-                        self.execution.take(),
-                        std::mem::take(&mut self.resource_guards),
-                    )),
-                );
+        let mut steering = self.steering.take();
+        if let Some(active) = steering.as_mut() {
+            active.retain_unknown();
+        }
+        if let Some(lease) = self.lease.take() {
+            let resources = Box::new((
+                steering,
+                self.execution.take(),
+                std::mem::take(&mut self.resource_guards),
+            ));
+            if let Some(run_id) = self.run_id.as_ref() {
+                lease.retain_unknown(run_id.clone(), self.execution_id.clone(), resources);
+            } else {
+                lease.retain_unidentified(resources);
             }
-        } else if let Some(lease) = self.lease.take() {
-            lease.retain_unknown(
-                self.run_id.clone(),
-                self.execution_id.clone(),
-                Box::new((
-                    self.execution.take(),
-                    std::mem::take(&mut self.resource_guards),
-                )),
-            );
         }
     }
 }
@@ -148,6 +245,11 @@ struct ManagedAgentEventStream {
     task: Option<tokio::task::JoinHandle<()>>,
     runtime: tokio::runtime::Handle,
     pending_terminal: Option<Result<AgentEvent>>,
+    // 同一producer的成功发布包在物理结算前不可逃逸；尾部失败丢弃该包。
+    pending_publication: std::collections::VecDeque<Result<AgentEvent>>,
+    status_sequence: u64,
+    terminal_status: Option<echo_core::agent::ExecutionStatus>,
+    publication_ready: bool,
     receiver_closed: bool,
     observation_run_id: String,
     observation_execution_id: Option<String>,
@@ -176,42 +278,144 @@ impl ManagedAgentEventStream {
     }
 }
 
+impl ManagedAgentEventStream {
+    fn sequenced(&mut self, mut item: Result<AgentEvent>) -> Result<AgentEvent> {
+        if let Ok(AgentEvent::ExecutionStatus(status)) = &mut item {
+            status.sequence = status.sequence.max(self.status_sequence);
+            self.status_sequence = status.sequence.saturating_add(1);
+        }
+        item
+    }
+
+    fn prepare_publication(&mut self) {
+        self.publication_ready = true;
+        let Some(terminal) = self.pending_terminal.take() else {
+            self.pending_publication.clear();
+            return;
+        };
+        if matches!(
+            &terminal,
+            Err(crate::error::ReactError::ExecutionNotSettled { .. })
+        ) {
+            self.pending_publication.clear();
+            self.terminal_status.take();
+            self.pending_publication.push_back(terminal);
+            return;
+        }
+        let (status, reason) = match &terminal {
+            Ok(AgentEvent::FinalAnswer(_)) => {
+                (echo_core::agent::ExecutionStatusKind::Settled, None)
+            }
+            Ok(AgentEvent::Cancelled) => (
+                echo_core::agent::ExecutionStatusKind::Cancelled,
+                Some("execution cancelled".to_string()),
+            ),
+            Ok(AgentEvent::Error {
+                message, failure, ..
+            }) => (
+                if failure.terminal_kind == crate::error::AgentTerminalKind::Cancelled {
+                    echo_core::agent::ExecutionStatusKind::Cancelled
+                } else {
+                    echo_core::agent::ExecutionStatusKind::Failed
+                },
+                Some(message.clone()),
+            ),
+            Err(error) => (
+                echo_core::agent::ExecutionStatusKind::Failed,
+                Some(error.to_string()),
+            ),
+            _ => return,
+        };
+        if status != echo_core::agent::ExecutionStatusKind::Settled {
+            self.pending_publication.clear();
+        }
+        let mut observation =
+            self.terminal_status
+                .take()
+                .unwrap_or_else(|| echo_core::agent::ExecutionStatus {
+                    adapter_generated: false,
+                    execution_id: self
+                        .observation_execution_id
+                        .clone()
+                        .unwrap_or_else(|| self.observation_run_id.clone()),
+                    request_id: None,
+                    sequence: self.status_sequence,
+                    phase: echo_core::agent::AgentPhase::Terminal,
+                    status: status.clone(),
+                    reason: reason.clone(),
+                });
+        observation.status = status;
+        observation.reason = reason;
+        // terminal status是最后一个公开事件；SDK可在此停止读取而不会丢正文/尾部原因。
+        let needs_cancel_event = observation.status
+            == echo_core::agent::ExecutionStatusKind::Cancelled
+            && !matches!(&terminal, Ok(AgentEvent::Cancelled));
+        self.pending_publication.push_back(terminal);
+        if needs_cancel_event {
+            self.pending_publication
+                .push_back(Ok(AgentEvent::Cancelled));
+        }
+        self.pending_publication
+            .push_back(Ok(AgentEvent::ExecutionStatus(observation)));
+    }
+}
+
 impl Stream for ManagedAgentEventStream {
     type Item = Result<AgentEvent>;
-
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let stream = self.get_mut();
         loop {
-            if stream.pending_terminal.is_some() {
-                return match stream.poll_producer(cx) {
-                    Poll::Pending => Poll::Pending,
-                    Poll::Ready(Ok(())) => Poll::Ready(stream.pending_terminal.take()),
-                    Poll::Ready(Err(error)) => {
-                        stream.pending_terminal.take();
-                        Poll::Ready(Some(Err(error)))
-                    }
-                };
-            }
             if stream.receiver_closed {
-                return match stream.poll_producer(cx) {
-                    Poll::Pending => Poll::Pending,
-                    Poll::Ready(Ok(())) => Poll::Ready(None),
-                    Poll::Ready(Err(error)) => Poll::Ready(Some(Err(error))),
-                };
+                if !stream.publication_ready {
+                    match stream.poll_producer(cx) {
+                        Poll::Pending => return Poll::Pending,
+                        Poll::Ready(Err(error)) => {
+                            stream.pending_publication.clear();
+                            stream.pending_terminal = Some(Err(error));
+                        }
+                        Poll::Ready(Ok(())) => {}
+                    }
+                    stream.prepare_publication();
+                }
+                let item = stream.pending_publication.pop_front();
+                return Poll::Ready(item.map(|item| stream.sequenced(item)));
             }
             match Pin::new(&mut stream.receiver).poll_next(cx) {
                 Poll::Pending => return Poll::Pending,
+                Poll::Ready(Some(Ok(AgentEvent::ExecutionStatus(status))))
+                    if matches!(
+                        status.status,
+                        echo_core::agent::ExecutionStatusKind::Settled
+                            | echo_core::agent::ExecutionStatusKind::Failed
+                            | echo_core::agent::ExecutionStatusKind::Cancelled
+                    ) =>
+                {
+                    // producer内部先交发布包标记；公开事实仍由原物理owner完成后才释放。
+                    stream.terminal_status = Some(status);
+                }
                 Poll::Ready(Some(item)) => {
-                    let terminal = match &item {
-                        Ok(event) => event.is_terminal(),
-                        Err(_) => true,
-                    };
-                    if terminal {
-                        stream.pending_terminal = Some(item);
-                        stream.receiver_closed = true;
-                    } else {
-                        return Poll::Ready(Some(item));
+                    let success = matches!(&item, Ok(AgentEvent::FinalAnswer(_)));
+                    let failure = item.is_err()
+                        || matches!(&item, Ok(AgentEvent::Error { .. } | AgentEvent::Cancelled));
+                    if failure {
+                        stream.pending_publication.clear();
+                        if stream
+                            .pending_terminal
+                            .as_ref()
+                            .is_none_or(|item| matches!(item, Ok(AgentEvent::FinalAnswer(_))))
+                        {
+                            stream.pending_terminal = Some(item);
+                        }
+                    } else if success {
+                        if stream.pending_terminal.is_none() {
+                            stream.pending_terminal = Some(item);
+                        }
+                    } else if stream.terminal_status.is_some() {
+                        stream.pending_publication.push_back(item);
+                    } else if stream.pending_terminal.is_none() {
+                        return Poll::Ready(Some(stream.sequenced(item)));
                     }
+                    // 读到原EOF再join；不能在FinalAnswer处停读而漏尾失败或卡住原sender。
                 }
                 Poll::Ready(None) => stream.receiver_closed = true,
             }
@@ -324,13 +528,54 @@ impl ReactAgent {
             (None, Some(legacy)) => AgentSnapshot::from_agent_with_legacy_context(self, legacy),
             (None, None) => make_snapshot(self),
         };
+        let mut recovery_owner =
+            ReactStreamTurnOwner::preparation(&admission_snapshot, turn_lease, execution_guard);
+        let normalization: Result<()> = async {
+            if let (Some(scope_id), Some(runtime_id)) = (
+                admission_snapshot.config.conversation_id.as_deref(),
+                runtime_state_id,
+            ) {
+                self.normalize_pending_control_checkpoint(
+                    scope_id,
+                    runtime_id,
+                    crate::memory::PersistenceCallContext::with_timeout(
+                        std::time::Duration::from_secs(10),
+                    )?,
+                    &lifecycle_cancel,
+                )
+                .await?;
+            }
+            Ok(())
+        }
+        .await;
+        if normalization.is_err() {
+            recovery_owner.observe_preparation_result(&normalization);
+        }
+        normalization?;
+        let (turn_lease, execution_guard) = recovery_owner.take_preparation_parts()?;
+        drop(recovery_owner);
         let pending_settlement = match admission_snapshot
             .reconcile_pending_transcript_projection()
             .await
         {
             Ok(settlement) => settlement,
             Err(error) => {
-                turn_lease.settle();
+                if let crate::error::ReactError::ExecutionNotSettled {
+                    run_id,
+                    execution_id,
+                } = &error
+                {
+                    ReactStreamTurnOwner::retain_pre_spawn(
+                        &admission_snapshot,
+                        turn_lease,
+                        execution_guard,
+                        None,
+                        run_id.clone(),
+                        execution_id.clone(),
+                    );
+                } else {
+                    turn_lease.settle();
+                }
                 return Err(error);
             }
         };
@@ -371,7 +616,22 @@ impl ReactAgent {
                 .hydrate_managed_runtime_before_input_guard(scope_id, runtime_state_id)
                 .await
             {
-                turn_lease.settle();
+                if let crate::error::ReactError::ExecutionNotSettled {
+                    run_id,
+                    execution_id,
+                } = &error
+                {
+                    ReactStreamTurnOwner::retain_pre_spawn(
+                        &admission_snapshot,
+                        turn_lease,
+                        execution_guard,
+                        None,
+                        run_id.clone(),
+                        execution_id.clone(),
+                    );
+                } else {
+                    turn_lease.settle();
+                }
                 return Err(error);
             }
         }
@@ -385,7 +645,22 @@ impl ReactAgent {
             {
                 Ok(result) => result,
                 Err(error) => {
-                    turn_lease.settle();
+                    if let crate::error::ReactError::ExecutionNotSettled {
+                        run_id,
+                        execution_id,
+                    } = &error
+                    {
+                        ReactStreamTurnOwner::retain_pre_spawn(
+                            &admission_snapshot,
+                            turn_lease,
+                            execution_guard,
+                            None,
+                            run_id.clone(),
+                            execution_id.clone(),
+                        );
+                    } else {
+                        turn_lease.settle();
+                    }
                     return Err(error);
                 }
             };
@@ -446,6 +721,19 @@ impl ReactAgent {
                         ),
                     )
                     .await;
+                    if let Some((run_id, execution_id)) =
+                        ReactStreamTurnOwner::unknown_identity(&events)
+                    {
+                        ReactStreamTurnOwner::retain_pre_spawn(
+                            &terminal_snapshot,
+                            turn_lease,
+                            execution_guard,
+                            None,
+                            run_id,
+                            execution_id,
+                        );
+                        return Ok(Box::pin(futures::stream::iter(events)));
+                    }
                     turn_lease.settle();
                     drop(execution_guard);
                     return Ok(Box::pin(futures::stream::iter(events)));
@@ -511,6 +799,9 @@ impl ReactAgent {
             })
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let active_turn_lease = self.turn_steer_mailbox.begin(turn_id.clone());
+        // admission与实际drain分开：准备期可排队，只有原safe point才消费。
+        // Hook拒绝/恢复失败仍由同一lease结算Accepted且未drain的receipt。
+        active_turn_lease.set_steerable(true);
 
         // ── Restore thread context (Execute mode) + memory triggers/recall ──
         let history = invocation
@@ -566,12 +857,40 @@ impl ReactAgent {
                     ),
                 )
                 .await;
+                if let Some((run_id, execution_id)) =
+                    ReactStreamTurnOwner::unknown_identity(&events)
+                {
+                    ReactStreamTurnOwner::retain_pre_spawn(
+                        &terminal_snapshot,
+                        turn_lease,
+                        execution_guard,
+                        Some(active_turn_lease),
+                        run_id,
+                        execution_id,
+                    );
+                    return Ok(Box::pin(futures::stream::iter(events)));
+                }
                 active_turn_lease.settle(outcome);
                 turn_lease.settle();
                 drop(execution_guard);
                 return Ok(Box::pin(futures::stream::iter(events)));
             }
             Err(error) => {
+                if let crate::error::ReactError::ExecutionNotSettled {
+                    run_id,
+                    execution_id,
+                } = &error
+                {
+                    ReactStreamTurnOwner::retain_pre_spawn(
+                        &admission_snapshot,
+                        turn_lease,
+                        execution_guard,
+                        Some(active_turn_lease),
+                        run_id.clone(),
+                        execution_id.clone(),
+                    );
+                    return Err(error);
+                }
                 let mut terminal_snapshot = match (invocation.as_ref(), legacy_runtime.as_ref()) {
                     (Some(invocation), _) => {
                         AgentSnapshot::from_agent_with_invocation(self, invocation)
@@ -590,6 +909,19 @@ impl ReactAgent {
                     terminal,
                 )
                 .await;
+                if let Some((run_id, execution_id)) =
+                    ReactStreamTurnOwner::unknown_identity(&events)
+                {
+                    ReactStreamTurnOwner::retain_pre_spawn(
+                        &terminal_snapshot,
+                        turn_lease,
+                        execution_guard,
+                        Some(active_turn_lease),
+                        run_id,
+                        execution_id,
+                    );
+                    return Ok(Box::pin(futures::stream::iter(events)));
+                }
                 active_turn_lease.settle(outcome);
                 turn_lease.settle();
                 drop(execution_guard);
@@ -666,6 +998,9 @@ impl ReactAgent {
             (None, None) => make_snapshot(self),
         };
         snap.current_turn_id = Some(turn_id.clone());
+        if snap.current_execution_id.is_none() {
+            snap.current_execution_id = Some(format!("execution:{}", uuid::Uuid::new_v4()));
+        }
         snap.turn_steer_incarnation = Some(active_turn_lease.incarnation());
         snap.current_message = message.clone();
         snap.trace_run_id = trace_run_id;
@@ -677,7 +1012,6 @@ impl ReactAgent {
             .unwrap_or_default();
         snap.cancel_token = Some(consumer_cancel.clone());
         snap.external_cancel = Some(Arc::new(consumer_cancel.clone()));
-        active_turn_lease.set_steerable(true);
         let terminal_cancel = consumer_cancel.clone();
         let failure_snapshot = snap.clone();
 
@@ -709,13 +1043,14 @@ impl ReactAgent {
                 legacy_runtime
                     .as_ref()
                     .and_then(|runtime| runtime.execution_id.clone())
-            });
+            })
+            .or_else(|| snap.current_execution_id.clone());
         let mut physical_owner = ReactStreamTurnOwner {
             lease: Some(turn_lease),
             steering: Some(active_turn_lease),
             execution: Some(execution_guard),
             resource_guards: snap.resource_guards.clone(),
-            run_id: observation_run_id.clone(),
+            run_id: Some(observation_run_id.clone()),
             execution_id: observation_execution_id.clone(),
         };
         let task = runtime.spawn(async move {
@@ -741,7 +1076,7 @@ impl ReactAgent {
                         execution_id,
                     } = &error
                     {
-                        physical_owner.run_id = run_id.clone();
+                        physical_owner.run_id = Some(run_id.clone());
                         physical_owner.execution_id = execution_id.clone();
                         physical_owner.retain_unknown();
                         let _ = tx.send(Err(error)).await;
@@ -784,6 +1119,10 @@ impl ReactAgent {
             task: Some(task),
             runtime,
             pending_terminal: None,
+            pending_publication: std::collections::VecDeque::new(),
+            status_sequence: 0,
+            terminal_status: None,
+            publication_ready: false,
             receiver_closed: false,
             observation_run_id,
             observation_execution_id,
@@ -924,6 +1263,16 @@ impl AgentSnapshot {
         // (acquired in run_stream_channel via lock_owned()), so we don't
         // need to lock again here.
 
+        let _ = tx
+            .send(Ok(phases::finalize::execution_status_event(
+                &self,
+                echo_core::agent::ExecutionStatusKind::Started,
+                echo_core::agent::AgentPhase::Thinking,
+                None,
+                0,
+                None,
+            )))
+            .await;
         let structured_format_result = self
             .config
             .response_format
@@ -985,6 +1334,10 @@ impl AgentSnapshot {
         // config still remains bounded here and reaches typed finalization.
         let max_iterations = self.config.max_iterations;
         for iteration in 0..max_iterations {
+            if phases::cancellation_requested(&self) {
+                return phases::finalize::settle_cancelled_final_candidate(&self, &context, &tx)
+                    .await;
+            }
             for cb in self.config.callbacks.iter() {
                 cb.on_iteration(&agent_name, iteration).await;
             }
@@ -1081,7 +1434,7 @@ impl AgentSnapshot {
             )
             .await?
             {
-                phases::ThinkOutcome::Continue(t) => t,
+                phases::ThinkOutcome::Continue(t) => *t,
                 phases::ThinkOutcome::Abandoned => {
                     self.settle_unobserved_terminal(
                         &context,
@@ -1142,14 +1495,52 @@ impl AgentSnapshot {
 
             // Branch: tool calls vs text answer vs no-response
             let outcome = if !think.tool_call_map.is_empty() {
+                let _ = tx
+                    .send(Ok(phases::finalize::execution_status_event(
+                        &self,
+                        echo_core::agent::ExecutionStatusKind::ToolPending,
+                        echo_core::agent::AgentPhase::Acting,
+                        think
+                            .assistant_blocks
+                            .first()
+                            .map(|block| block.request_id.clone())
+                            .or_else(|| {
+                                think.tool_call_map.values().find_map(|(_, _, _, source)| {
+                                    source.as_ref().map(|source| source.request_id.clone())
+                                })
+                            }),
+                        0,
+                        None,
+                    )))
+                    .await;
                 phases::tools::run_tools(&self, &context, &tx, iteration, think, &label).await?
-            } else if !think.content_buffer.is_empty() {
+            } else if (think.continue_response
+                && (!think.assistant_blocks.is_empty()
+                    || !think.reasoning_blocks.is_empty()
+                    || !think.reasoning_buffer.is_empty()))
+                || (think.candidate_answer.is_none()
+                    && phases::assistant_progress_only(&think.assistant_blocks))
+            {
+                // 显式进度/部分回答存原消息后继续同一执行；它不是最终候选，也不调用Stop。
+                let mut message = phases::with_reasoning_content(
+                    Message::assistant(think.content_buffer),
+                    think.reasoning_buffer,
+                    think.reasoning_blocks,
+                );
+                message.assistant_blocks = Some(think.assistant_blocks);
+                message.approved_assistant_blocks = Some(think.approved_assistant_blocks);
+                context.lock().await.push(message);
+                self.save_runtime_checkpoint(&context, None).await?;
+                IterOutcome::Continue
+            } else if think.candidate_answer.is_some() {
                 let mut think = think;
-                let assistant_draft = phases::with_reasoning_content(
+                let mut assistant_draft = phases::with_reasoning_content(
                     Message::assistant(think.content_buffer.clone()),
                     think.reasoning_buffer.clone(),
                     think.reasoning_blocks.clone(),
                 );
+                assistant_draft.assistant_blocks = Some(think.assistant_blocks.clone());
+                assistant_draft.approved_assistant_blocks = Some(Vec::new());
                 if self
                     .drain_steer_into_context(&context, Some(assistant_draft))
                     .await
@@ -1157,16 +1548,17 @@ impl AgentSnapshot {
                 {
                     continue;
                 }
-                think.content_buffer =
-                    match self.check_final_answer_guard(&think.content_buffer).await {
-                        Ok(answer) => answer,
-                        Err(error) => {
-                            return phases::finalize::settle_final_guard_failure(
-                                &self, &context, &tx, error,
-                            )
-                            .await;
-                        }
-                    };
+                // 只校验完整响应选出的最终块；前面的进度不是最终回答的前缀。
+                let candidate = think.candidate_answer.take().unwrap_or_default();
+                think.content_buffer = match self.check_final_answer_guard(&candidate).await {
+                    Ok(answer) => answer,
+                    Err(error) => {
+                        return phases::finalize::settle_final_guard_failure(
+                            &self, &context, &tx, error,
+                        )
+                        .await;
+                    }
+                };
                 match phases::verify::validate_structured_final(
                     structured_format.as_ref(),
                     &self,
@@ -1220,6 +1612,7 @@ impl AgentSnapshot {
                         answer,
                         reasoning_content,
                         reasoning_blocks,
+                        assistant_blocks,
                     } => {
                         match phases::finalize::emit_final_text(
                             &self,
@@ -1232,6 +1625,7 @@ impl AgentSnapshot {
                             answer,
                             reasoning_content,
                             reasoning_blocks,
+                            assistant_blocks,
                             true,
                         )
                         .await?
@@ -1250,63 +1644,6 @@ impl AgentSnapshot {
                 IterOutcome::Continue => {
                     continue;
                 }
-                IterOutcome::FinishCandidates { outputs } => {
-                    if self.drain_steer_into_context(&context, None).await > 0 {
-                        continue;
-                    }
-                    if phases::cancellation_requested(&self) {
-                        return phases::finalize::settle_cancelled_final_candidate(
-                            &self, &context, &tx,
-                        )
-                        .await;
-                    }
-                    let selected = tokio::select! {
-                        selected = phases::verify::select_final_answer(
-                            structured_format.as_ref(),
-                            &self,
-                            &context,
-                            &mut state,
-                            iteration,
-                            outputs,
-                        ) => selected,
-                        _ = phases::wait_for_cancellation(&self) => {
-                            return phases::finalize::settle_cancelled_final_candidate(
-                                &self, &context, &tx,
-                            ).await;
-                        }
-                    };
-                    if phases::cancellation_requested(&self) {
-                        return phases::finalize::settle_cancelled_final_candidate(
-                            &self, &context, &tx,
-                        )
-                        .await;
-                    }
-                    let output = match selected {
-                        Ok(Some(output)) => output,
-                        Ok(None) => continue,
-                        Err(error) => {
-                            phases::finalize::settle_terminal_projection(
-                                &self,
-                                &context,
-                                Some(error.to_string()),
-                                &tx,
-                            )
-                            .await?;
-                            return Err(error);
-                        }
-                    };
-                    match phases::finalize::finalize_completed_run(
-                        &self, &context, &label, &output, iteration, &state, &tx,
-                    )
-                    .await?
-                    {
-                        ControlFlow::Continue(()) => {
-                            state.stop_hook_continued = true;
-                            continue;
-                        }
-                        ControlFlow::Break(outcome) => return Ok(outcome),
-                    }
-                }
                 // FinalText is only produced by verify_final_text and is
                 // already handled inline in the text branch above. Reaching
                 // it here would mean a phase returned an outcome out of band
@@ -1316,6 +1653,7 @@ impl AgentSnapshot {
                     answer,
                     reasoning_content,
                     reasoning_blocks,
+                    assistant_blocks,
                 } => {
                     let answer = match self.check_final_answer_guard(&answer).await {
                         Ok(answer) => answer,
@@ -1362,6 +1700,7 @@ impl AgentSnapshot {
                         answer,
                         reasoning_content,
                         reasoning_blocks,
+                        assistant_blocks,
                         true,
                     )
                     .await?
@@ -1410,6 +1749,129 @@ mod tests {
     use futures::future::BoxFuture;
     use std::sync::Arc;
 
+    /// 验证整个原生事件序列；不剥离新status去满足旧末尾断言。
+    fn assert_native_runtime_terminal(
+        events: &[AgentEvent],
+        expected: echo_core::agent::ExecutionStatusKind,
+    ) {
+        use echo_core::agent::{AgentPhase, ExecutionStatusKind};
+        let statuses: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::ExecutionStatus(status) => Some(status),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            statuses
+                .iter()
+                .filter(|status| status.status == ExecutionStatusKind::Started)
+                .count(),
+            1,
+            "{events:?}"
+        );
+        let identity = statuses
+            .first()
+            .map(|status| status.execution_id.as_str())
+            .unwrap_or("");
+        assert!(!identity.is_empty(), "{events:?}");
+        assert!(
+            statuses
+                .iter()
+                .all(|status| status.execution_id == identity),
+            "同执行不能换身份：{events:?}"
+        );
+        for pair in statuses.windows(2) {
+            if let Some((left, right)) = pair.first().zip(pair.get(1)) {
+                assert!(
+                    left.sequence < right.sequence,
+                    "状态序号须严格递增：{events:?}"
+                );
+            }
+        }
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.is_execution_terminal())
+                .count(),
+            1,
+            "{events:?}"
+        );
+        assert!(
+            matches!(events.last(),Some(AgentEvent::ExecutionStatus(status)) if status.status==expected&&status.phase==AgentPhase::Terminal),
+            "最后一次真实status：{events:?}"
+        );
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                AgentEvent::Token(_) | AgentEvent::ThinkStart | AgentEvent::ThinkEnd { .. }
+            )),
+            "新执行不再重复旧正文/思考事件：{events:?}"
+        );
+        let answers = events
+            .iter()
+            .filter(|event| matches!(event, AgentEvent::FinalAnswer(_)))
+            .count();
+        if expected == ExecutionStatusKind::Settled {
+            assert_eq!(answers, 1, "成功确认回答恰一次：{events:?}");
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| matches!(event, AgentEvent::Error { .. } | AgentEvent::Cancelled)),
+                "失败/取消不能伪成功：{events:?}"
+            );
+            let answer_position = events
+                .iter()
+                .position(|event| matches!(event, AgentEvent::FinalAnswer(_)));
+            assert!(
+                answer_position.is_some_and(|index| index.saturating_add(1) < events.len()),
+                "正文先于末尾物理结算：{events:?}"
+            );
+        } else {
+            assert_eq!(answers, 0, "失败/取消不得有成功回答：{events:?}");
+        }
+    }
+    fn last_confirmed_final(events: &[AgentEvent]) -> Option<&AgentEvent> {
+        assert_native_runtime_terminal(events, echo_core::agent::ExecutionStatusKind::Settled);
+        events
+            .iter()
+            .find(|event| matches!(event, AgentEvent::FinalAnswer(_)))
+    }
+    /// 仅是现Mock的原生协议fixture；不增加runner或执行权威。
+    fn native_response_script(
+        request: &str,
+        parts: &[(echo_core::agent::AssistantPhase, &str)],
+    ) -> Result<Vec<StreamChunk>> {
+        let blocks: Vec<_> = parts
+            .iter()
+            .enumerate()
+            .map(
+                |(index, (phase, text))| echo_core::agent::AssistantMessageBlock {
+                    block_id: format!("{request}:{index}"),
+                    request_id: request.to_string(),
+                    sequence: u64::try_from(index).unwrap_or(u64::MAX),
+                    phase: *phase,
+                    delta: (*text).to_string(),
+                    complete: true,
+                    provider: Some("mock".into()),
+                    provider_source: None,
+                    reasoning: None,
+                },
+            )
+            .collect();
+        let content: String = parts.iter().map(|(_, text)| *text).collect();
+        let delta: DeltaMessage = serde_json::from_value(
+            serde_json::json!({"role":"assistant","content":content,"assistant_blocks":blocks}),
+        )?;
+        Ok(vec![
+            StreamChunk::Delta(delta),
+            StreamChunk::Terminal {
+                finish_reason: Some("stop".into()),
+                usage: None,
+            },
+        ])
+    }
+
     #[tokio::test]
     async fn managed_stream_releases_terminal_after_producer_settlement() -> Result<()> {
         use futures::StreamExt;
@@ -1435,6 +1897,10 @@ mod tests {
             task: Some(task),
             runtime: tokio::runtime::Handle::current(),
             pending_terminal: None,
+            pending_publication: std::collections::VecDeque::new(),
+            status_sequence: 0,
+            terminal_status: None,
+            publication_ready: false,
             receiver_closed: false,
             observation_run_id: "managed-stream-test-run".to_string(),
             observation_execution_id: Some("managed-stream-test-execution".to_string()),
@@ -1458,11 +1924,13 @@ mod tests {
                 "managed stream returned the wrong terminal".to_string(),
             ));
         }
-        if stream.next().await.is_some() {
-            return Err(crate::error::ReactError::Other(
-                "managed stream emitted an event after terminal".to_string(),
-            ));
-        }
+        let settled = stream.next().await.ok_or_else(|| {
+            crate::error::ReactError::Other("missing physical completion status".into())
+        })??;
+        assert!(
+            matches!(settled,AgentEvent::ExecutionStatus(status) if status.status==echo_core::agent::ExecutionStatusKind::Settled)
+        );
+        assert!(stream.next().await.is_none(), "terminal status之后必须EOF");
         Ok(())
     }
 
@@ -1490,6 +1958,10 @@ mod tests {
             task: Some(task),
             runtime: tokio::runtime::Handle::current(),
             pending_terminal: None,
+            pending_publication: std::collections::VecDeque::new(),
+            status_sequence: 0,
+            terminal_status: None,
+            publication_ready: false,
             receiver_closed: false,
             observation_run_id: "managed-stream-test-run".to_string(),
             observation_execution_id: Some("managed-stream-test-execution".to_string()),
@@ -1833,7 +2305,7 @@ mod tests {
 
     /// A blocked input guard preserves the unconfigured path's single terminal.
     #[tokio::test]
-    async fn stream_guard_block_yields_single_final_answer() {
+    async fn stream_guard_block_yields_one_failed_runtime_terminal() -> Result<()> {
         let agent = agent_with_blocking_guard();
         let stream = agent
             .run_stream_channel(
@@ -1845,22 +2317,21 @@ mod tests {
                 },
                 StreamMode::Chat,
             )
+            .await?;
+
+        let events = stream
+            .collect::<Vec<_>>()
             .await
-            .expect("run_stream_channel must return a stream even when blocked");
-
-        let events: Vec<_> = stream.collect().await;
-
-        assert_eq!(events.len(), 1, "blocked stream should have one terminal");
-        match events.first().and_then(|event| event.as_ref().ok()) {
-            Some(AgentEvent::FinalAnswer(text)) => {
-                assert!(
-                    text.starts_with("Request blocked by safety guard:"),
-                    "expected block message, got: {text:?}",
-                );
-                assert!(text.contains("test-input-blocked"));
-            }
-            other => panic!("expected FinalAnswer, got {other:?}"),
-        }
+            .into_iter()
+            .collect::<Result<Vec<_>>>()?;
+        assert_native_runtime_terminal(&events, echo_core::agent::ExecutionStatusKind::Failed);
+        assert!(
+            matches!(events.as_slice(),[AgentEvent::ExecutionStatus(started),AgentEvent::Error{source,message,failure},AgentEvent::ExecutionStatus(terminal)]
+            if started.status==echo_core::agent::ExecutionStatusKind::Started && source=="input_guard"
+            && message.contains("test-input-blocked") && failure.terminal_kind==crate::error::AgentTerminalKind::Failed
+            && terminal.status==echo_core::agent::ExecutionStatusKind::Failed)
+        );
+        Ok(())
     }
 
     #[tokio::test]
@@ -1912,14 +2383,15 @@ mod tests {
             .await
             .into_iter()
             .collect::<Result<Vec<_>>>()?;
-        assert!(matches!(
-            events.as_slice(),
-            [
-                AgentEvent::TranscriptProjectionSettlement(settlement),
-                AgentEvent::FinalAnswer(_)
-            ] if settlement.status
-                == crate::memory::TranscriptProjectionSettlementStatus::Settled
-        ));
+        assert_native_runtime_terminal(&events, echo_core::agent::ExecutionStatusKind::Failed);
+        let settlement_index=events.iter().position(|event|matches!(event,AgentEvent::TranscriptProjectionSettlement(settlement) if settlement.status==crate::memory::TranscriptProjectionSettlementStatus::Settled));
+        let error_index=events.iter().position(|event|matches!(event,AgentEvent::Error{source,failure,..} if source=="input_guard"&&failure.terminal_kind==crate::error::AgentTerminalKind::Failed));
+        assert!(
+            settlement_index.zip(error_index).is_some_and(
+                |(settled, error)| settled < error && error.saturating_add(1) < events.len()
+            ),
+            "水合/持久化结算先于拒绝，运行status最后：{events:?}"
+        );
         let messages = agent.memory.context.lock().await.messages().to_vec();
         assert!(
             messages
@@ -2241,24 +2713,28 @@ mod tests {
         let settlement_index = events
             .iter()
             .position(|event| matches!(event, AgentEvent::TranscriptProjectionSettlement(_)));
-        let terminal_indices = events
+        assert_native_runtime_terminal(&events, echo_core::agent::ExecutionStatusKind::Failed);
+        let error_indices: Vec<_> = events
             .iter()
             .enumerate()
-            .filter_map(|(index, event)| event.is_terminal().then_some(index))
-            .collect::<Vec<_>>();
-        assert_eq!(terminal_indices.len(), 1);
-        assert!(matches!(
-            events.get(terminal_indices[0]),
-            Some(AgentEvent::Error { source, .. }) if source == "intervention"
-        ));
-        assert!(
-            settlement_index.is_some_and(|index| index < terminal_indices[0]),
-            "settlement must precede the intervention terminal: {events:?}"
+            .filter_map(|(index, event)| {
+                matches!(event,AgentEvent::Error{source,..} if source=="intervention")
+                    .then_some(index)
+            })
+            .collect();
+        assert_eq!(
+            error_indices.len(),
+            1,
+            "原干预拒绝原因须保留恰一次：{events:?}"
         );
+        let error_index = error_indices
+            .first()
+            .copied()
+            .ok_or_else(|| ReactError::Other("intervention error missing".into()))?;
         assert!(
-            events
-                .iter()
-                .all(|event| !matches!(event, AgentEvent::FinalAnswer(_)))
+            settlement_index.is_some_and(|index| index < error_index)
+                && error_index.saturating_add(1) < events.len(),
+            "结算先于Error和末status：{events:?}"
         );
         let stored = echo_core::memory::ConversationStore::get_messages(
             conversations.as_ref(),
@@ -2324,7 +2800,7 @@ mod tests {
     /// regression where a short-circuited branch forgets to drop the owned
     /// `execution_guard` (the agent would then deadlock forever).
     #[tokio::test]
-    async fn stream_guard_block_releases_execution_mutex() {
+    async fn stream_guard_block_releases_execution_mutex() -> Result<()> {
         let agent = agent_with_blocking_guard();
 
         // First call: blocked, must release the lock.
@@ -2338,9 +2814,14 @@ mod tests {
                 },
                 StreamMode::Chat,
             )
+            .await?;
+        let first = s1
+            .collect::<Vec<_>>()
             .await
-            .expect("first stream");
-        let _: Vec<_> = s1.collect().await;
+            .into_iter()
+            .collect::<Result<Vec<_>>>()?;
+        assert_native_runtime_terminal(&first, echo_core::agent::ExecutionStatusKind::Failed);
+        assert!(agent.execution_mutex.try_lock().is_ok());
 
         // Second call must not hang — if the lock leaked, this await never
         // completes and the test times out.
@@ -2357,19 +2838,19 @@ mod tests {
             ),
         )
         .await
-        .expect("second run_stream_channel must not hang (execution_guard leaked?)")
-        .expect("second stream");
+        .map_err(|_| {
+            ReactError::Other("second blocked invocation leaked execution mutex".into())
+        })??;
 
-        let events: Vec<_> = s2.collect().await;
-        assert_eq!(
-            events.len(),
-            1,
-            "second blocked stream also has one terminal"
-        );
-        assert!(matches!(
-            events.first().and_then(|event| event.as_ref().ok()),
-            Some(AgentEvent::FinalAnswer(_))
-        ));
+        let events = s2
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>>>()?;
+        assert_native_runtime_terminal(&events, echo_core::agent::ExecutionStatusKind::Failed);
+        assert!(events.iter().any(|event|matches!(event,AgentEvent::Error{source,message,..} if source=="input_guard"&&message.contains("test-input-blocked"))));
+        assert!(agent.execution_mutex.try_lock().is_ok());
+        Ok(())
     }
 
     // ── End-to-end run_core_loop tests driven by MockLlmClient ─────────────
@@ -2858,6 +3339,7 @@ mod tests {
             cancel: None,
             disabled_tools: None,
             allowed_tools: None,
+            tool_access: None,
             visible_tools: None,
             run_budget: None,
             history: None,
@@ -2905,6 +3387,7 @@ mod tests {
             cancel: None,
             disabled_tools: None,
             allowed_tools: None,
+            tool_access: None,
             visible_tools: None,
             run_budget: None,
             history: None,
@@ -3493,6 +3976,7 @@ mod tests {
             cancel: None,
             disabled_tools: None,
             allowed_tools: None,
+            tool_access: None,
             visible_tools: None,
             run_budget: None,
             history: None,
@@ -3560,6 +4044,7 @@ mod tests {
             cancel: None,
             disabled_tools: None,
             allowed_tools: None,
+            tool_access: None,
             visible_tools: None,
             run_budget: None,
             history: None,
@@ -4081,27 +4566,19 @@ mod tests {
         Ok(())
     }
 
-    /// A single-turn text answer: the mock LLM replies with plain content, so
-    /// the loop should emit a Token + a terminal FinalAnswer and stop (no tool
-    /// phase). Guards the core-loop text branch.
+    /// 普通正文经原ReAct校验后发布canonical AssistantMessage及唯一FinalAnswer，
+    /// 原owner结算后以唯一ExecutionStatus结束；不再附加Token副本。
     #[tokio::test]
-    async fn run_core_loop_text_only_yields_final_answer() {
+    async fn run_core_loop_text_only_yields_final_answer() -> Result<()> {
         let llm = MockLlmClient::new().with_response("Paris is the capital of France.");
         let agent = agent_with_mock_llm(llm);
 
         let events = collect_events(&agent, "What is the capital of France?").await;
 
-        // Must end with a FinalAnswer carrying the mock content.
-        let last = events.last().expect("at least one event");
-        match last {
-            AgentEvent::FinalAnswer(text) => {
-                assert!(
-                    text.contains("Paris"),
-                    "final answer should contain the mock text, got: {text:?}"
-                );
-            }
-            other => panic!("expected FinalAnswer as last event, got {other:?}"),
-        }
+        assert!(
+            matches!(last_confirmed_final(&events),Some(AgentEvent::FinalAnswer(text)) if text.contains("Paris"))
+        );
+        Ok(())
     }
 
     #[tokio::test]
@@ -4150,7 +4627,7 @@ mod tests {
 
         let events = collect_events_result(&agent, "input").await?;
         assert!(
-            matches!(events.last(), Some(AgentEvent::FinalAnswer(answer)) if answer == "producer answer")
+            matches!(last_confirmed_final(&events), Some(AgentEvent::FinalAnswer(answer)) if answer == "producer answer")
         );
         let failures = observer.wait_for_count(1)?;
         assert_eq!(failures.len(), 1);
@@ -4213,7 +4690,7 @@ mod tests {
     /// returns a scripted result, then the LLM produces a final text answer.
     /// Guards the core-loop tool-call branch (think → tools → think → finalize).
     #[tokio::test]
-    async fn run_core_loop_tool_call_cycle_completes() {
+    async fn run_core_loop_tool_call_cycle_completes() -> Result<()> {
         // The mock tool returns a fixed result; the LLM script is:
         //   1. request tool_call "mock_calc" with args {"x": 6, "y": 7}
         //   2. after seeing the tool result, emit a final text answer.
@@ -4227,17 +4704,27 @@ mod tests {
             .llm_client(Arc::new(llm))
             .system_prompt("You are a test assistant. Use tools when asked.")
             .tool(Box::new(tool))
-            .build()
-            .expect("agent builds");
+            .build()?;
 
         let events = collect_events(&agent, "What is 6 times 7?").await;
 
-        // The last event must be a FinalAnswer.
-        let last = events.last().expect("at least one event");
         assert!(
-            matches!(last, AgentEvent::FinalAnswer(t) if t.contains("42")),
-            "expected FinalAnswer with 42, got: {last:?}"
+            matches!(last_confirmed_final(&events),Some(AgentEvent::FinalAnswer(text)) if text.contains("42"))
         );
+        let call = events.iter().position(
+            |event| matches!(event,AgentEvent::ToolCall{call_id,..} if call_id=="call_1"),
+        );
+        let result=events.iter().position(|event|matches!(event,AgentEvent::ToolResult{call_id,result,..} if call_id=="call_1"&&result.success&&result.output=="42"));
+        let final_position = events
+            .iter()
+            .position(|event| matches!(event, AgentEvent::FinalAnswer(_)));
+        assert!(call.zip(result).is_some_and(|(call, result)| call < result));
+        assert!(
+            result
+                .zip(final_position)
+                .is_some_and(|(result, answer)| result < answer)
+        );
+        Ok(())
     }
 
     #[tokio::test]
@@ -4413,6 +4900,7 @@ mod tests {
         let checkpoint_messages = vec![
             Message::system("system".to_string()),
             Message::assistant_with_tools(vec![echo_core::llm::types::ToolCall {
+                provider_source: None,
                 id: "write-1".to_string(),
                 call_type: "function".to_string(),
                 function: echo_core::llm::types::FunctionCall {
@@ -5293,7 +5781,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn model_token_budget_blocks_tools_and_forces_final_only_request() {
+    async fn model_token_budget_blocks_tools_and_forces_final_only_request() -> Result<()> {
         let usage = crate::llm::types::Usage {
             prompt_tokens: Some(6),
             completion_tokens: Some(5),
@@ -5321,8 +5809,7 @@ mod tests {
                 iteration_wind_down_remaining: None,
                 max_model_tokens: Some(10),
             })
-            .build()
-            .expect("agent builds");
+            .build()?;
 
         let events = collect_events(&agent, "run").await;
         assert!(events.iter().any(|event| {
@@ -5342,9 +5829,10 @@ mod tests {
                 .any(|event| matches!(event, AgentEvent::ToolCall { .. }))
         );
         assert!(
-            matches!(events.last(), Some(AgentEvent::FinalAnswer(text)) if text == "final without tools")
+            matches!(last_confirmed_final(&events), Some(AgentEvent::FinalAnswer(text)) if text == "final without tools")
         );
         assert_eq!(llm.all_tool_choices(), vec![None, Some("none".to_string())]);
+        Ok(())
     }
 
     #[tokio::test]
@@ -5368,7 +5856,7 @@ mod tests {
 
         let events = collect_events(&agent, "run").await;
         assert!(
-            matches!(events.last(), Some(AgentEvent::FinalAnswer(text)) if text == r#"{"ok":true}"#)
+            matches!(last_confirmed_final(&events), Some(AgentEvent::FinalAnswer(text)) if text == r#"{"ok":true}"#)
         );
         let formats = llm.all_response_formats();
         assert_eq!(formats.len(), 2);
@@ -5419,7 +5907,7 @@ mod tests {
 
         let events = collect_events(&agent, "run").await;
         assert!(
-            matches!(events.last(), Some(AgentEvent::FinalAnswer(text)) if text == "plain answer")
+            matches!(last_confirmed_final(&events), Some(AgentEvent::FinalAnswer(text)) if text == "plain answer")
         );
         assert_eq!(llm.all_response_formats().len(), 1);
         assert!(llm.all_response_formats().iter().all(Option::is_none));
@@ -5496,19 +5984,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn strict_schema_retries_final_answer_tool_before_success_terminal() -> Result<()> {
+    async fn strict_schema_retries_native_candidate_before_success_terminal() -> Result<()> {
         let llm = Arc::new(
             MockLlmClient::new()
-                .then_tool_call(
-                    "bad-final",
-                    "final_answer",
-                    serde_json::json!({"answer": r#"{"age":"wrong"}"#}).to_string(),
-                )
-                .then_tool_call(
-                    "good-final",
-                    "final_answer",
-                    serde_json::json!({"answer": r#"{"age":28}"#}).to_string(),
-                ),
+                .with_stream_script(native_response_script(
+                    "bad-native",
+                    &[(
+                        echo_core::agent::AssistantPhase::FinalAnswer,
+                        r#"{"age":"wrong"}"#,
+                    )],
+                )?)
+                .with_stream_script(native_response_script(
+                    "good-native",
+                    &[(
+                        echo_core::agent::AssistantPhase::FinalAnswer,
+                        r#"{"age":28}"#,
+                    )],
+                )?),
         );
         let agent = ReactAgentBuilder::new()
             .llm_client(llm.clone())
@@ -5534,16 +6026,21 @@ mod tests {
             .collect();
         assert_eq!(final_answers, vec![r#"{"age":28}"#]);
         assert_eq!(llm.call_count(), 2);
+        assert_native_runtime_terminal(&events, echo_core::agent::ExecutionStatusKind::Settled);
         Ok(())
     }
 
     #[tokio::test]
     async fn strict_final_answer_schema_precedes_optional_critic() -> Result<()> {
-        let llm = Arc::new(MockLlmClient::new().then_tool_call(
-            "bad-final",
-            "final_answer",
-            serde_json::json!({"answer": r#"{"age":"wrong"}"#}).to_string(),
-        ));
+        let llm = Arc::new(
+            MockLlmClient::new().with_stream_script(native_response_script(
+                "schema-before-critic",
+                &[(
+                    echo_core::agent::AssistantPhase::FinalAnswer,
+                    r#"{"age":"wrong"}"#,
+                )],
+            )?),
+        );
         let mut agent = ReactAgent::new(
             AgentConfig::new("mock-model", "critic-agent", "system")
                 .model_profile(
@@ -5560,7 +6057,27 @@ mod tests {
                 .max_iterations(1),
         )
         .with_llm_client(llm.clone());
-        agent.set_critic(Arc::new(echo_core::agent::StaticCritic::always_fail()));
+        struct SchemaOrderCritic(Arc<std::sync::atomic::AtomicUsize>);
+        impl echo_core::agent::Critic for SchemaOrderCritic {
+            fn critique<'a>(
+                &'a self,
+                _task: &'a str,
+                _answer: &'a str,
+                _context: &'a str,
+            ) -> BoxFuture<'a, Result<echo_core::agent::Critique>> {
+                Box::pin(async move {
+                    self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Ok(echo_core::agent::Critique {
+                        score: 9.0,
+                        passed: true,
+                        feedback: "checked".into(),
+                        suggestions: Vec::new(),
+                    })
+                })
+            }
+        }
+        let critic_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        agent.set_critic(Arc::new(SchemaOrderCritic(critic_calls.clone())));
 
         let events = collect_events(&agent, "run").await;
         assert!(
@@ -5573,59 +6090,126 @@ mod tests {
             AgentEvent::Error { message, .. } if message.contains("does not match JSON Schema")
         )));
         assert_eq!(llm.call_count(), 1);
+        assert_eq!(critic_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_native_runtime_terminal(&events, echo_core::agent::ExecutionStatusKind::Failed);
         Ok(())
     }
 
     #[tokio::test]
-    async fn later_valid_final_answer_in_same_batch_is_not_poisoned_by_invalid_peer() -> Result<()>
-    {
-        let final_call = |id: &str, answer: &str| crate::llm::types::ToolCall {
-            id: id.to_string(),
-            call_type: "function".to_string(),
-            function: crate::llm::types::FunctionCall {
-                name: "final_answer".to_string(),
-                arguments: serde_json::json!({"answer": answer}).to_string(),
-            },
-        };
-        let llm = Arc::new(MockLlmClient::new().then_tool_calls(vec![
-            final_call("bad-final", r#"{"age":"wrong"}"#),
-            final_call("good-final", r#"{"age":28}"#),
-        ]));
-        let agent = ReactAgentBuilder::new()
-            .llm_client(llm.clone())
-            .model_profile(
-                echo_core::llm::capabilities::ModelProfile::from_provider_name(
-                    "mock-model",
-                    "openai",
-                ),
-            )
-            .response_format(crate::llm::ResponseFormat::json_schema(
-                "person",
-                serde_json::json!({"type":"object","properties":{"age":{"type":"integer"}},"required":["age"]}),
-            ))
-            .max_iterations(1)
-            .build()?;
-
+    async fn native_progress_in_same_response_does_not_poison_schema_final() -> Result<()> {
+        let llm = Arc::new(
+            MockLlmClient::new().with_stream_script(native_response_script(
+                "same-response-schema",
+                &[
+                    (
+                        echo_core::agent::AssistantPhase::PartialAnswer,
+                        r#"{"age":"not-final"}"#,
+                    ),
+                    (
+                        echo_core::agent::AssistantPhase::FinalAnswer,
+                        r#"{"age":28}"#,
+                    ),
+                ],
+            )?),
+        );
+        let agent=ReactAgentBuilder::new().llm_client(llm.clone())
+            .model_profile(echo_core::llm::capabilities::ModelProfile::from_provider_name("mock-model","openai"))
+            .response_format(crate::llm::ResponseFormat::json_schema("person",serde_json::json!({"type":"object","properties":{"age":{"type":"integer"}},"required":["age"]})))
+            .max_iterations(1).build()?;
         let events = collect_events(&agent, "run").await;
-        assert!(events.iter().any(|event| matches!(
-            event,
-            AgentEvent::FinalAnswer(answer) if answer == r#"{"age":28}"#
-        )));
+        assert!(
+            matches!(last_confirmed_final(&events),Some(AgentEvent::FinalAnswer(answer)) if answer==r#"{"age":28}"#)
+        );
+        let raw: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::AssistantMessage { block }
+                    if block.request_id == "same-response-schema" =>
+                {
+                    Some((block.sequence, block.phase, block.delta.as_str()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            raw,
+            vec![
+                (
+                    0,
+                    echo_core::agent::AssistantPhase::PartialAnswer,
+                    r#"{"age":"not-final"}"#
+                ),
+                (
+                    1,
+                    echo_core::agent::AssistantPhase::FinalAnswer,
+                    r#"{"age":28}"#
+                )
+            ]
+        );
         assert_eq!(llm.call_count(), 1);
         Ok(())
     }
 
     #[tokio::test]
-    async fn invalid_tool_final_does_not_preempt_accepted_steer() -> Result<()> {
+    async fn retired_control_tool_proposal_is_not_registered_or_a_success_terminal() -> Result<()> {
+        let llm = Arc::new(MockLlmClient::new().then_tool_call(
+            "retired-proposal",
+            "final_answer",
+            r#"{"answer":"must not complete"}"#,
+        ));
+        let mut agent = ReactAgentBuilder::new()
+            .llm_client(llm.clone())
+            .max_iterations(2)
+            .build()?;
+        agent.config_mut().llm_max_retries = 0;
+        assert!(
+            !agent
+                .tool_names()
+                .iter()
+                .any(|name| name == "final_answer" || name == "think")
+        );
+        let raw = agent
+            .execute_stream("rejected old control proposal")
+            .await?
+            .collect::<Vec<_>>()
+            .await;
+        assert!(
+            raw.iter().any(|event| match event {
+                Ok(AgentEvent::ToolResult { name, result, .. }) =>
+                    name == "final_answer" && !result.success,
+                Ok(AgentEvent::Error { message, .. }) => message.contains("final_answer"),
+                Err(error) => error.to_string().contains("final_answer"),
+                _ => false,
+            }),
+            "必须保实际退休调用拒绝原因：{raw:?}"
+        );
+        assert!(
+            !raw.iter()
+                .any(|event| matches!(event, Err(ReactError::ExecutionNotSettled { .. })))
+        );
+        assert!(
+            matches!(raw.first(),Some(Ok(AgentEvent::ExecutionStatus(status))) if status.status==echo_core::agent::ExecutionStatusKind::Started)
+        );
+        assert!(
+            matches!(raw.last(),Some(Ok(AgentEvent::ExecutionStatus(status))) if status.status==echo_core::agent::ExecutionStatusKind::Failed),
+            "原Result通道也必须最后才结算：{raw:?}"
+        );
+        let events: Vec<_> = raw
+            .iter()
+            .filter_map(|event| event.as_ref().ok().cloned())
+            .collect();
+        assert_native_runtime_terminal(&events, echo_core::agent::ExecutionStatusKind::Failed);
+        assert!(llm.call_count() <= 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn invalid_native_final_does_not_preempt_accepted_steer() -> Result<()> {
         use std::time::Duration;
 
         let llm = Arc::new(
             MockLlmClient::new()
-                .then_tool_call(
-                    "bad-final",
-                    "final_answer",
-                    serde_json::json!({"answer": r#"{"age":"wrong"}"#}).to_string(),
-                )
+                .with_response(r#"{"age":"wrong"}"#)
                 .with_response(r#"{"age":28}"#)
                 .with_delay(Duration::from_millis(150)),
         );
@@ -5681,11 +6265,15 @@ mod tests {
     async fn cancellation_during_final_critic_cannot_complete_run() -> Result<()> {
         use futures::StreamExt;
 
-        let llm = Arc::new(MockLlmClient::new().then_tool_call(
-            "valid-final",
-            "final_answer",
-            serde_json::json!({"answer": r#"{"age":28}"#}).to_string(),
-        ));
+        let llm = Arc::new(
+            MockLlmClient::new().with_stream_script(native_response_script(
+                "explicit-final-critic",
+                &[(
+                    echo_core::agent::AssistantPhase::FinalAnswer,
+                    r#"{"age":28}"#,
+                )],
+            )?),
+        );
         let entered = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Notify::new());
         let run_store = Arc::new(crate::trace::InMemoryRunStore::new());
@@ -5711,14 +6299,9 @@ mod tests {
         }));
         agent.set_run_store(run_store.clone());
         let cancel = crate::agent::CancellationToken::new();
-        let mut stream = agent
+        let stream = agent
             .execute_stream_with_cancel("run", cancel.clone())
             .await?;
-        while let Some(event) = stream.next().await {
-            if matches!(event?, AgentEvent::ToolBatchEnd) {
-                break;
-            }
-        }
         tokio::time::timeout(std::time::Duration::from_secs(2), entered.notified())
             .await
             .map_err(|_| ReactError::Other("critic did not start".to_string()))?;
@@ -5741,6 +6324,8 @@ mod tests {
                 .iter()
                 .any(|event| matches!(event, Ok(AgentEvent::FinalAnswer(_))))
         );
+        let observed = remaining.into_iter().collect::<Result<Vec<_>>>()?;
+        assert_native_runtime_terminal(&observed, echo_core::agent::ExecutionStatusKind::Cancelled);
         let summary = crate::trace::RunStore::list_all(run_store.as_ref(), 1)
             .await?
             .into_iter()
@@ -5898,63 +6483,116 @@ mod tests {
 
     #[tokio::test]
     async fn schema_retry_note_follows_every_tool_result_in_its_batch() -> Result<()> {
-        let call = |id: &str, name: &str, arguments: String| crate::llm::types::ToolCall {
-            id: id.to_string(),
-            call_type: "function".to_string(),
-            function: crate::llm::types::FunctionCall {
-                name: name.to_string(),
-                arguments,
-            },
-        };
-        let llm = Arc::new(
-            MockLlmClient::new()
-                .then_tool_calls(vec![
-                    call(
-                        "bad-final",
-                        "final_answer",
-                        serde_json::json!({"answer": r#"{"age":"wrong"}"#}).to_string(),
-                    ),
-                    call("later", "sequential_marker", "{}".to_string()),
-                ])
-                .with_response(r#"{"age":28}"#),
-        );
-        let agent = ReactAgentBuilder::new()
-            .llm_client(llm.clone())
-            .model_profile(
-                echo_core::llm::capabilities::ModelProfile::from_provider_name(
-                    "mock-model",
-                    "openai",
-                ),
-            )
-            .response_format(crate::llm::ResponseFormat::json_schema(
-                "person",
-                serde_json::json!({"type":"object","properties":{"age":{"type":"integer"}},"required":["age"]}),
-            ))
-            .tool(Box::new(SequentialMarkerTool))
-            .max_iterations(2)
-            .build()?;
-
-        let events = collect_events(&agent, "run").await;
-        assert!(events.iter().any(|event| matches!(
-            event,
-            AgentEvent::FinalAnswer(answer) if answer == r#"{"age":28}"#
-        )));
-        let messages = agent.memory.context.lock().await.messages().to_vec();
-        let position = |needle: &str| {
-            messages.iter().position(|message| {
-                message
+        // 原2轮预算仍保负控；原生修正回复需要第三个真实模型请求，不把预算耗尽当成功。
+        for limit in [2, 3] {
+            let call = |id: &str| crate::llm::types::ToolCall {
+                provider_source: None,
+                id: id.into(),
+                call_type: "function".into(),
+                function: crate::llm::types::FunctionCall {
+                    name: "sequential_marker".into(),
+                    arguments: "{}".into(),
+                },
+            };
+            let llm = Arc::new(
+                MockLlmClient::new()
+                    .then_tool_calls(vec![call("earlier"), call("later")])
+                    .with_stream_script(native_response_script(
+                        "invalid-after-tools",
+                        &[(
+                            echo_core::agent::AssistantPhase::FinalAnswer,
+                            r#"{"age":"wrong"}"#,
+                        )],
+                    )?)
+                    .with_stream_script(native_response_script(
+                        "corrected-after-tools",
+                        &[(
+                            echo_core::agent::AssistantPhase::FinalAnswer,
+                            r#"{"age":28}"#,
+                        )],
+                    )?),
+            );
+            let agent=ReactAgentBuilder::new().llm_client(llm.clone())
+                .model_profile(echo_core::llm::capabilities::ModelProfile::from_provider_name("mock-model","openai"))
+                .response_format(crate::llm::ResponseFormat::json_schema("person",serde_json::json!({"type":"object","properties":{"age":{"type":"integer"}},"required":["age"]})))
+                .tool(Box::new(SequentialMarkerTool)).max_iterations(limit).build()?;
+            let events = collect_events(&agent, "run").await;
+            let result_ids: Vec<_> = events
+                .iter()
+                .filter_map(|event| match event {
+                    AgentEvent::ToolResult {
+                        call_id, result, ..
+                    } if result.success => Some(call_id.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(result_ids, vec!["earlier", "later"]);
+            let calls = llm.all_calls();
+            let post_tools = calls
+                .get(1)
+                .ok_or_else(|| ReactError::Other("post-tools request missing".into()))?;
+            assert_eq!(
+                post_tools
+                    .iter()
+                    .filter_map(|message| message.tool_call_id.as_deref())
+                    .collect::<Vec<_>>(),
+                vec!["earlier", "later"]
+            );
+            assert!(
+                !post_tools.iter().any(|message| message
                     .text_content()
-                    .is_some_and(|text| text.contains(needle))
-            })
-        };
-        let final_result = position(r#"{"age":"wrong"}"#)
-            .ok_or_else(|| ReactError::Other("final tool result missing".to_string()))?;
-        let later_result = position("later tool result")
-            .ok_or_else(|| ReactError::Other("sequential tool result missing".to_string()))?;
-        let retry_note = position("[runtime_context:StructuredOutput:Retry]")
-            .ok_or_else(|| ReactError::Other("schema retry note missing".to_string()))?;
-        assert!(final_result < later_result && later_result < retry_note);
-        assert_eq!(llm.call_count(), 2);
+                    .is_some_and(|text| text.contains("[runtime_context:StructuredOutput:Retry]"))),
+                "工具回填之前没有最终候选schema重试"
+            );
+            if limit == 2 {
+                assert_native_runtime_terminal(
+                    &events,
+                    echo_core::agent::ExecutionStatusKind::Failed,
+                );
+                assert_eq!(llm.call_count(), 2);
+                let error=events.iter().position(|event|matches!(event,AgentEvent::Error{message,..} if message.contains("does not match JSON Schema")));
+                let last_tool = events
+                    .iter()
+                    .rposition(|event| matches!(event, AgentEvent::ToolResult { .. }));
+                assert!(
+                    last_tool
+                        .zip(error)
+                        .is_some_and(|(tool, error)| tool < error),
+                    "原预算下真实schema失败也只能在批次结果后：{events:?}"
+                );
+            } else {
+                assert!(
+                    matches!(last_confirmed_final(&events),Some(AgentEvent::FinalAnswer(answer)) if answer==r#"{"age":28}"#)
+                );
+                assert_eq!(llm.call_count(), 3);
+                let repair = calls
+                    .get(2)
+                    .ok_or_else(|| ReactError::Other("schema repair request missing".into()))?;
+                let retry = repair
+                    .iter()
+                    .position(|message| {
+                        message.text_content().is_some_and(|text| {
+                            text.contains("[runtime_context:StructuredOutput:Retry]")
+                        })
+                    })
+                    .ok_or_else(|| ReactError::Other("schema retry note missing".into()))?;
+                let positions: Vec<_> = ["earlier", "later"]
+                    .into_iter()
+                    .map(|id| {
+                        repair
+                            .iter()
+                            .position(|message| message.tool_call_id.as_deref() == Some(id))
+                            .ok_or_else(|| ReactError::Other(format!("tool result missing: {id}")))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                assert!(
+                    positions
+                        .first()
+                        .zip(positions.get(1))
+                        .is_some_and(|(first, second)| first < second && *second < retry)
+                );
+            }
+        }
         Ok(())
     }
 
@@ -6155,7 +6793,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn final_only_falls_back_to_empty_tool_surface_when_none_is_unsupported() {
+    async fn final_only_falls_back_to_empty_tool_surface_when_none_is_unsupported() -> Result<()> {
         let usage = crate::llm::types::Usage {
             prompt_tokens: Some(6),
             completion_tokens: Some(5),
@@ -6180,17 +6818,17 @@ mod tests {
                 iteration_wind_down_remaining: None,
                 max_model_tokens: Some(10),
             })
-            .build()
-            .expect("agent builds");
+            .build()?;
 
         let events = collect_events(&agent, "run").await;
         assert!(
-            matches!(events.last(), Some(AgentEvent::FinalAnswer(text)) if text == "fallback final")
+            matches!(last_confirmed_final(&events), Some(AgentEvent::FinalAnswer(text)) if text == "fallback final")
         );
         assert_eq!(llm.all_tool_choices(), vec![None, None]);
         let tool_counts = llm.all_tool_counts();
         assert!(tool_counts.first().is_some_and(|count| *count > 0));
         assert_eq!(tool_counts.get(1), Some(&0));
+        Ok(())
     }
 
     #[tokio::test]
@@ -6640,6 +7278,7 @@ mod tests {
         let llm = MockLlmClient::new()
             .then_tool_calls(vec![
                 ToolCall {
+                    provider_source: None,
                     id: "slow-prehook".to_string(),
                     call_type: "function".to_string(),
                     function: FunctionCall {
@@ -6648,6 +7287,7 @@ mod tests {
                     },
                 },
                 ToolCall {
+                    provider_source: None,
                     id: "fast-completed".to_string(),
                     call_type: "function".to_string(),
                     function: FunctionCall {
@@ -6848,6 +7488,7 @@ mod tests {
             cancel: None,
             disabled_tools: None,
             allowed_tools: None,
+            tool_access: None,
             visible_tools: None,
             run_budget: None,
             history: None,
@@ -6991,6 +7632,7 @@ mod tests {
             cancel: None,
             disabled_tools: None,
             allowed_tools: None,
+            tool_access: None,
             visible_tools: None,
             run_budget: None,
             history: None,
@@ -7037,6 +7679,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tracked_steer_typed_resource_survives_active_context_and_checkpoint() -> Result<()> {
+        use echo_core::llm::types::LinkedResource;
+        let agent = ReactAgent::new(AgentConfig::new("test-model", "agent", "system"));
+        let lease = agent
+            .turn_steer_mailbox
+            .begin("resource-live-turn".to_string());
+        lease.set_steerable(true);
+        let mut snapshot = AgentSnapshot::from_agent(&agent);
+        snapshot.current_turn_id = Some("resource-live-turn".to_string());
+        snapshot.turn_steer_incarnation = Some(lease.incarnation());
+        let message = Message::user_multimodal(vec![
+            ContentPart::Text {
+                text: "same text can also be an ordinary quotation".into(),
+            },
+            ContentPart::ResourceLink {
+                resource: Box::new(LinkedResource {
+                    annotations: None,
+                    description: None,
+                    mime_type: Some("text/plain".into()),
+                    name: "input".into(),
+                    size: Some(8),
+                    title: None,
+                    uri: "app-resource:identity".into(),
+                    meta: Some(
+                        serde_json::json!({"application_extension":{"identity":"opaque-producer-proof"}}),
+                    ),
+                }),
+            },
+        ]);
+        let expected = serde_json::to_value(&message)?;
+        let mut receipt = agent
+            .steer_input_tracked(Some("resource-live-turn"), message)
+            .map_err(|error| ReactError::Other(error.to_string()))?;
+        assert_eq!(
+            snapshot
+                .drain_steer_into_context(&agent.memory.context, None)
+                .await,
+            1
+        );
+        assert_eq!(
+            receipt.wait_for_drained().await,
+            crate::agent::AgentSteerState::Drained
+        );
+        // Physical turn is still live. Project from the actual active Context, not from a receipt/body match.
+        let messages = agent.memory.context.lock().await.messages().to_vec();
+        let rows = crate::memory::project_messages("branch", &messages)?;
+        let restored = crate::memory::restore_messages(&rows)?;
+        assert!(
+            restored
+                .iter()
+                .any(|message| serde_json::to_value(message).ok().as_ref() == Some(&expected))
+        );
+        assert_eq!(receipt.state(), crate::agent::AgentSteerState::Drained);
+        let mut checkpoint = crate::state::AgentCheckpoint::new("branch");
+        checkpoint.messages_json =
+            crate::state::AgentCheckpoint::serialize_payload(messages, None)?;
+        let recovered = checkpoint.restore_messages()?;
+        assert!(
+            recovered
+                .iter()
+                .any(|message| serde_json::to_value(message).ok().as_ref() == Some(&expected))
+        );
+        // No terminal reconciliation runs before canonical Context and checkpoint already carry the link.
+        lease.settle(crate::agent::AgentSteerTurnOutcome::Completed);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn tracked_steer_reports_cancelled_after_real_drain() -> Result<()> {
         use futures::StreamExt;
         use std::time::Duration;
@@ -7072,6 +7782,7 @@ mod tests {
             cancel: Some(cancel.clone()),
             disabled_tools: None,
             allowed_tools: None,
+            tool_access: None,
             visible_tools: None,
             run_budget: None,
             history: None,
@@ -7263,7 +7974,7 @@ mod tests {
     // fix and passes after.
 
     #[tokio::test]
-    async fn stream_script_terminal_chunk_reports_usage() {
+    async fn stream_script_terminal_chunk_reports_usage() -> Result<()> {
         // Real providers report usage on a separate terminal chunk; the
         // loop-level `usage_reported` must be true only in that shape.
         let usage = crate::llm::types::Usage {
@@ -7277,6 +7988,7 @@ mod tests {
                 content: Some("Hello world".to_string()),
                 reasoning_content: None,
                 reasoning_blocks: None,
+                assistant_blocks: None,
                 tool_calls: None,
             }),
             StreamChunk::Terminal {
@@ -7290,7 +8002,7 @@ mod tests {
         let usage_event = events
             .iter()
             .find(|event| matches!(event, AgentEvent::LlmUsage { .. }))
-            .expect("LlmUsage event must be emitted");
+            .ok_or_else(|| ReactError::Other("LlmUsage event missing".into()))?;
         match usage_event {
             AgentEvent::LlmUsage {
                 prompt_tokens,
@@ -7302,10 +8014,16 @@ mod tests {
                 assert_eq!(*prompt_tokens, 11);
                 assert_eq!(*completion_tokens, 7);
             }
-            _ => unreachable!("matched LlmUsage above"),
+            _ => {
+                return Err(ReactError::Other(
+                    "usage lookup returned another event".into(),
+                ));
+            }
         }
-        let last = events.last().expect("terminal event");
+        let last = last_confirmed_final(&events)
+            .ok_or_else(|| ReactError::Other("confirmed final missing".into()))?;
         assert!(matches!(last, AgentEvent::FinalAnswer(t) if t == "Hello world"));
+        Ok(())
     }
 
     #[tokio::test]
@@ -7320,6 +8038,7 @@ mod tests {
                 content: Some("No usage here".to_string()),
                 reasoning_content: None,
                 reasoning_blocks: None,
+                assistant_blocks: None,
                 tool_calls: None,
             }),
             StreamChunk::Terminal {
@@ -7352,6 +8071,7 @@ mod tests {
         let llm = MockLlmClient::new()
             .then_tool_calls(vec![
                 ToolCall {
+                    provider_source: None,
                     id: "call_1".to_string(),
                     call_type: "function".to_string(),
                     function: FunctionCall {
@@ -7360,6 +8080,7 @@ mod tests {
                     },
                 },
                 ToolCall {
+                    provider_source: None,
                     id: "call_2".to_string(),
                     call_type: "function".to_string(),
                     function: FunctionCall {
@@ -7485,6 +8206,7 @@ mod tests {
 
     fn steer_effect_call(id: &str, name: &str) -> ToolCall {
         ToolCall {
+            provider_source: None,
             id: id.to_string(),
             call_type: "function".to_string(),
             function: FunctionCall {
@@ -8282,6 +9004,7 @@ mod tests {
                 content: Some("Partial answer that never finished".to_string()),
                 reasoning_content: None,
                 reasoning_blocks: None,
+                assistant_blocks: None,
                 tool_calls: None,
             }),
             StreamChunk::Err(ReactError::Llm(Box::new(LlmError::NetworkError(
@@ -8305,7 +9028,12 @@ mod tests {
         let partial = events
             .iter()
             .filter_map(|event| match event {
-                AgentEvent::Token(token) => Some(token.as_str()),
+                AgentEvent::AssistantMessage { block }
+                    if block.phase == echo_core::agent::AssistantPhase::Unknown
+                        && !block.complete =>
+                {
+                    Some(block.delta.as_str())
+                }
                 _ => None,
             })
             .collect::<String>();

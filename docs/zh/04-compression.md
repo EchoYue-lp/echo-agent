@@ -8,6 +8,12 @@ Summary、IncrementalSummary 与 SlidingWindow 复用同一个尾部选择器：
 最近请求超过软预算时可以扩展保留量；超过扣除 system/protected 内容后的硬输入预算则
 返回超限错误。压缩不会静默截断用户文本，也不会永久发送所有历史用户输入。
 
+最新工具调用之后尚无后继 assistant 响应时，该完整调用/结果组仍属于当前模型输入。
+选择器保留它及当前请求，允许超过近期软预算；原窗口、输出预留和 safety 预算不变。
+确实超出硬输入预算时返回原 `ContextLimitExceeded`，不能整组丢掉新页后继续成功。
+已有后继 assistant 响应的历史工具组仍可按近期预算裁剪，调用与结果保持原子配对。
+旧消息条数模式同样完整保留必需的当前请求与未消费工具组，不能用条数上限丢弃当前输入。
+
 生成摘要重新参与下一次摘要，不成为永久 canonical system 内容。自动 compact 从当前
 上下文提取最新真实请求作为 focus；projection、Hook 和其它运行态提示不冒充用户请求。
 手动入口 `force_compress_context_with_options(focus, cancel)` 共享一次 hook/trace 生命周期，

@@ -135,3 +135,15 @@ checkpoint/CAS, with internal schema3, explicit legacy limits, read-only Store
 reentry and cancellation/observer acceptance controls. Broad lifecycle status and
 old scenarios are not promoted; full gates, SDK pin/aggregate compatibility,
 website mirrors and main CI remain separate.
+
+
+## 已核旧控制历史与pending恢复的当前增量
+
+`src/state/legacy_control_history.rs` 对已核历史来源做模型副本投影；
+`src/state/legacy_control_history/pending_recovery.rs` 通过原File Store、原CAS、
+scope/epoch/revision及close admission派生恢复后继。它们不新增Store/终态状态权威；
+原始bytes/SHA保全、未知来源/真实pending effect暂停，不补造结果或重放副作用。
+本段对应 `source:69225014cbf5d5b28fa8e8bff9fd368792c1ad199efbb8afb55b5b688f01ac5f`／ADR 0101；原Legacy17、Pending22、File30及ReAct407
+为实际证据，epoch08实施不变关系由发布5908记载。pending_recovery测试模块的
+`AdmittedRecoveryStore`只委托真实File CAS以观察已准入的物理任务，不是生产Store。
+不把历史observed_at/未知项改为当前已验，也不宣称新test profile重跑了旧全套。

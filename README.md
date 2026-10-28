@@ -18,6 +18,12 @@
 
 </div>
 
+> 具名退役：当前源码移除 A2A／LSP 的实现、feature、公开出口和专属示例；
+> ACP、MCP、channels、Task/Subagent、通用工具和存储菜单继续保留。
+> 旧插件 `lsp.yaml` 由原 prepare owner 冻结并明确诊断，不启动服务，也不删除用户文件。
+> 源码同步不代表删后构建、最终锁、SDK正式新Git来源、native或发布资格已通过。
+> 边界和恢复锚点见[ADR0090](docs/adr/0090-a2a-lsp-retirement-contract.md)。
+
 ---
 
 ## Quick Start
@@ -133,9 +139,7 @@ Task APIs are part of the framework core and do not have a separate feature flag
 |---------|-----------|-------------|
 | `full` | — | Meta-feature: enables every flag listed below |
 | `acp` | yes | Stable ACP v1 Agent adapter over the canonical turn runtime |
-| `a2a` | yes | Agent-to-Agent protocol server and client |
 | `mcp` | yes | Model Context Protocol client |
-| `lsp` | yes | Language Server Protocol integration |
 | `sqlite` | yes | SQLite-backed persistent state |
 | `telemetry` | yes | OpenTelemetry tracing and metrics |
 | `human-loop` | yes | Human-in-the-loop approval (Console/Webhook/WebSocket) |
@@ -194,7 +198,7 @@ echo-agent ships with **67 registered tools** across 8 crates. The prelude expos
 | **Memory** | `Store` (long-term KV) + `RuntimeStateStore` (crash recovery) + `ConversationStore` (transcript) | `.with_memory_tools(store)` |
 | **Context Compression** | SlidingWindow / LLM Summary / Hybrid | `SlidingWindowCompressor::new(4096)` |
 | **Token Budget** | Auto-truncation + pre-think compression trigger | `.max_tool_output_tokens(2000)` |
-| **Unified Retry** | One `RetryPolicy` for LLM, MCP, A2A, sandbox | `with_retry(&policy, \|\| ...)` |
+| **Unified Retry** | One `RetryPolicy` for LLM, MCP, sandbox | `with_retry(&policy, \|\| ...)` |
 | **Dynamic Tools** | Add / remove / replace tools mid-conversation | `agent.remove_tool("old")` |
 | **Streaming** | Real-time `AgentEvent` stream (tokens + tool calls) | `agent.execute_stream(task).await?` |
 | **Structured Output** | LLM output → typed Rust structs via JSON Schema | `agent.extract::<Contact>(text)` |
@@ -221,7 +225,6 @@ echo-agent ships with **67 registered tools** across 8 crates. The prelude expos
 |---------|-------------|-------------|
 | **ACP Agent** | Stable v1 Client-Agent adapter over `AgentTurnDriver` | `AcpAgentAdapter::new(factory)` |
 | **MCP Protocol** | Connect any MCP server (stdio / SSE / HTTP) | `mcp.connect(McpServerConfig::stdio(...))` |
-| **A2A Protocol** | Agent Card publishing, cross-framework collaboration | `A2AServer::bind("0.0.0.0:3000")` |
 | **Skill System** | Progressive disclosure: discover → activate → use | `agent.load_skill("web_research")` |
 | **IM Channels** | QQ Bot (WebSocket) & Feishu (Webhook) built-in | `ChannelManager::new()` |
 | **Web Tools** | Search (DuckDuckGo/Brave/Tavily) + Page Fetch | `WebSearchTool::auto()` |
@@ -278,7 +281,7 @@ The framework accepts typed `FrameworkConfig`, `AgentConfig`, `LlmConfig`, `Perm
 - **Multi-modal** — text, images (base64 & URL), and file attachments in a single message
 - **IM integration** — QQ Bot (WebSocket) & Feishu (Webhook) out of the box
 - **Declarative workflows** — define agent graphs in YAML/JSON, no Rust code required
-- **Unified retry** — one `RetryPolicy` for all external calls (LLM, MCP, A2A, sandbox)
+- **Unified retry** — one `RetryPolicy` for all external calls (LLM, MCP, sandbox)
 - **Zero-cost abstractions** — compiled to native code, no runtime overhead
 
 ---
@@ -315,10 +318,10 @@ fn main() -> echo_agent::error::Result<()> {
     // Minimal — no tools, no memory, just chat
     let _agent = ReactAgentBuilder::simple("qwen3.7-max", "Be helpful")?;
 
-    // Standard — tools + CoT enabled
+    // 标准配置：启用工具，reasoning 使用模型原生配置
     let _agent = ReactAgentBuilder::standard("qwen3.7-max", "assistant", "Be helpful")?;
 
-    // Full-featured — tools + memory + tasks + CoT
+    // 完整配置：工具、记忆与任务
     let _agent = ReactAgentBuilder::full_featured("qwen3.7-max", "assistant", "Be helpful")?;
     Ok(())
 }
@@ -434,7 +437,7 @@ fn main() {
 
 ### 6. Unified Retry Policy — One policy for all external calls
 
-Configure retry, timeout, and backoff once, apply to LLM calls, MCP requests, A2A communication, and sandbox execution.
+Configure retry, timeout, and backoff once, apply to LLM calls, MCP requests, sandbox execution.
 
 ```rust
 use echo_agent::prelude::*;
@@ -992,7 +995,6 @@ See `echo-agent-learning/examples/README.md` for the full bucketed inventory and
 | 18 | [`demo18_semantic_memory`](echo-agent-learning/examples/demo18_semantic_memory.rs) | Semantic memory |
 | 19 | [`demo19_guard`](echo-agent-learning/examples/demo19_guard.rs) | Guard system |
 | 20 | [`demo20_audit`](echo-agent-learning/examples/demo20_audit.rs) | Audit logging |
-| 23 | [`demo23_a2a`](echo-agent-learning/examples/demo23_a2a.rs) | A2A protocol |
 | 24 | [`demo24_topology`](echo-agent-learning/tests/example_contracts/demo24_topology.rs) | Topology visualization |
 | 25 | [`demo25_macros`](echo-agent-learning/examples/demo25_macros.rs) | Macro system showcase |
 | 26 | [`demo26_provider_factory`](echo-agent-learning/examples/demo26_provider_factory.rs) | Dynamic LLM factory |
@@ -1017,7 +1019,6 @@ See `echo-agent-learning/examples/README.md` for the full bucketed inventory and
 | 51 | [`demo51_self_improvement`](echo-agent-learning/tests/example_contracts/demo51_self_improvement.rs) | Self-improvement: Analyzer, CritiqueStore, Curator, TrajectorySaver |
 | 53 | [`demo53_adaptive_compression`](echo-agent-learning/tests/example_contracts/demo53_adaptive_compression.rs) | 5-level adaptive compression (Snip→Micro→Collapse→Compact→Reactive) |
 | 54 | [`demo54_headless`](echo-agent-learning/tests/example_contracts/demo54_headless.rs) | Headless mode: single-prompt CI/CD execution |
-| 55 | [`demo55_lsp_tools`](echo-agent-learning/tests/example_contracts/demo55_lsp_tools.rs) | LSP tools: go-to-definition, find-references, diagnostics |
 | 56 | [`demo56_plugin_system`](echo-agent-learning/examples/demo56_plugin_system.rs) | Plugin system: manifest, registry, lifecycle, scope |
 | 57 | [`demo57_data_pipeline`](echo-agent-learning/tests/example_contracts/demo57_data_pipeline.rs) | Code-first data pipeline: persist script → execute → verify artifacts |
 | 58 | [`demo58_git_worktree`](echo-agent-learning/examples/demo58_git_worktree.rs) | Git worktree isolation + checkpoint rollback |
@@ -1095,7 +1096,7 @@ Any **OpenAI-compatible** API, plus native Anthropic and Ollama:
 | Config Reference | [EN](docs/en/28-config-reference.md) | [ZH](docs/zh/28-config-reference.md) |
 | Runtime & Task System | [EN](docs/en/29-long-running-tasks.md) | [ZH](docs/zh/29-long-running-tasks.md) |
 | ReAct Safety | [EN](docs/en/30-react-safety.md) | [ZH](docs/zh/30-react-safety.md) |
-| LSP Integration | [EN](docs/en/31-lsp-integration.md) | [ZH](docs/zh/31-lsp-integration.md) |
+| LSP退役与历史恢复 | [EN](docs/en/31-lsp-integration.md) | [ZH](docs/zh/31-lsp-integration.md) |
 | Plugin System | [EN](docs/en/32-plugin-system.md) | [ZH](docs/zh/32-plugin-system.md) |
 | Headless Mode | [EN](docs/en/33-headless-mode.md) | [ZH](docs/zh/33-headless-mode.md) |
 | Git Isolation | [EN](docs/en/34-git-isolation.md) | [ZH](docs/zh/34-git-isolation.md) |

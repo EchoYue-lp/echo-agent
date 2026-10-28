@@ -7,6 +7,15 @@ use crate::llm::types::{ChatCompletionChunk, FunctionCall, ToolCall as LlmToolCa
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
+/// 原工具碎片累积器附带同一 provider 的来源坐标，不创建第二套调用权威。
+pub(crate) type ToolCallFragment = (
+    String,
+    String,
+    String,
+    Option<crate::llm::types::ProviderOutputSource>,
+);
+pub(crate) type ToolCallFragments = HashMap<u32, ToolCallFragment>;
+
 /// Process streaming response chunk, collect content and return events.
 ///
 /// `in_reasoning` tracks whether reasoning_content is being output (Qwen3/DeepSeek thinking process).
@@ -17,7 +26,7 @@ pub(crate) fn process_stream_chunk(
     chunk: &ChatCompletionChunk,
     content_buffer: &mut String,
     reasoning_buffer: &mut String,
-    tool_call_map: &mut HashMap<u32, (String, String, String)>,
+    tool_call_map: &mut ToolCallFragments,
     in_reasoning: &mut bool,
     emit_content_tokens: bool,
 ) -> Vec<AgentEvent> {
@@ -64,7 +73,10 @@ pub(crate) fn process_stream_chunk(
             for dc in delta_calls {
                 let entry = tool_call_map
                     .entry(dc.index)
-                    .or_insert_with(|| (String::new(), String::new(), String::new()));
+                    .or_insert_with(|| (String::new(), String::new(), String::new(), None));
+                if let Some(source) = &dc.provider_source {
+                    entry.3 = Some(source.clone());
+                }
                 if let Some(id) = &dc.id
                     && !id.is_empty()
                 {
@@ -138,7 +150,7 @@ fn parse_tool_args(args_str: &str) -> Result<(Value, String), serde_json::Error>
 pub(crate) type ParsedToolStep = (String, String, Value);
 
 pub(crate) fn build_tool_calls_from_map(
-    tool_call_map: &HashMap<u32, (String, String, String)>,
+    tool_call_map: &ToolCallFragments,
 ) -> Result<(Vec<LlmToolCall>, Vec<ParsedToolStep>), String> {
     let mut sorted_indices: Vec<u32> = tool_call_map.keys().cloned().collect();
     sorted_indices.sort();
@@ -148,7 +160,7 @@ pub(crate) fn build_tool_calls_from_map(
     let mut seen_ids = HashSet::new();
 
     for idx in &sorted_indices {
-        let Some((id, name, args_str)) = tool_call_map.get(idx) else {
+        let Some((id, name, args_str, provider_source)) = tool_call_map.get(idx) else {
             continue;
         };
         let canonical_id = if id.trim().is_empty() {
@@ -167,6 +179,7 @@ pub(crate) fn build_tool_calls_from_map(
                 // Send the CANONICAL (repaired) args back to the provider so
                 // the assistant message always carries valid JSON.
                 msg_tool_calls.push(LlmToolCall {
+                    provider_source: provider_source.clone(),
                     id: canonical_id.clone(),
                     call_type: "function".to_string(),
                     function: FunctionCall {
@@ -257,7 +270,10 @@ mod tests {
 
     #[test]
     fn tool_call_ids_are_non_empty_and_shared_across_projections() -> Result<(), String> {
-        let calls = HashMap::from([(0, (String::new(), "Read".to_string(), "{}".to_string()))]);
+        let calls = HashMap::from([(
+            0,
+            (String::new(), "Read".to_string(), "{}".to_string(), None),
+        )]);
         let (messages, steps) = build_tool_calls_from_map(&calls)?;
         let message_id = messages.first().map(|call| call.id.as_str());
         let step_id = steps.first().map(|(id, _, _)| id.as_str());
@@ -275,6 +291,7 @@ mod tests {
                     "duplicate".to_string(),
                     "Read".to_string(),
                     "{}".to_string(),
+                    None,
                 ),
             ),
             (
@@ -283,6 +300,7 @@ mod tests {
                     "duplicate".to_string(),
                     "Read".to_string(),
                     "{}".to_string(),
+                    None,
                 ),
             ),
         ]);
@@ -314,6 +332,50 @@ mod tests {
 
         assert_eq!(reasoning, "先分析，再调用工具。");
         assert!(in_reasoning);
+        Ok(())
+    }
+
+    #[test]
+    fn native_message_tool_fragments_preserve_provider_source_for_replay()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let source = crate::llm::types::ProviderOutputSource {
+            protocol: echo_core::llm::LlmApiProtocol::Responses,
+            request_id: "response-original".into(),
+            item_id: "function-item".into(),
+            output_index: 3,
+            content_index: None,
+            content_kind: Some("function_call".into()),
+            phase: None,
+        };
+        let mut content = String::new();
+        let mut reasoning = String::new();
+        let mut calls = HashMap::new();
+        let mut in_reasoning = false;
+        for delta in [
+            serde_json::json!({"tool_calls":[{"index":3,"id":"call-original","provider_source":source,"function":{"name":"read_file","arguments":"{"}}]}),
+            serde_json::json!({"tool_calls":[{"index":3,"function":{"arguments":"}"}}]}),
+        ] {
+            let chunk: ChatCompletionChunk = serde_json::from_value(serde_json::json!({
+                "choices":[{"index":0,"delta":delta}]
+            }))?;
+            let _ = process_stream_chunk(
+                &chunk,
+                &mut content,
+                &mut reasoning,
+                &mut calls,
+                &mut in_reasoning,
+                false,
+            );
+        }
+        let (tool_calls, steps) = build_tool_calls_from_map(&calls)?;
+        let call = tool_calls.first().ok_or("assembled tool call missing")?;
+        assert_eq!(call.provider_source.as_ref(), Some(&source));
+        assert_eq!(call.id, "call-original");
+        assert_eq!(call.function.arguments, "{}");
+        assert_eq!(steps.len(), 1);
+        let decoded: crate::llm::types::ToolCall =
+            serde_json::from_value(serde_json::to_value(call)?)?;
+        assert_eq!(decoded.provider_source.as_ref(), Some(&source));
         Ok(())
     }
 }

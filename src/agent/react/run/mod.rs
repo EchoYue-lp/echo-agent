@@ -25,3 +25,6 @@ pub(crate) mod stream_channel;
 pub(crate) mod stream_macros;
 pub(crate) mod types;
 pub(crate) use types::StreamMode;
+
+#[cfg(test)]
+mod native_message_contract_tests;

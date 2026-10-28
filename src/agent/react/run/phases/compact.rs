@@ -189,6 +189,7 @@ mod tests {
             context.push(Message::user("old user".to_string()));
             context.push(Message::assistant_with_tools(vec![
                 crate::llm::types::ToolCall {
+                    provider_source: None,
                     id: "auto-horizon-call".to_string(),
                     call_type: "function".to_string(),
                     function: crate::llm::types::FunctionCall {

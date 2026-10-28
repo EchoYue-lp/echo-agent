@@ -126,6 +126,8 @@ pub struct SubagentContext {
     /// Nonempty hard tool upper bound for this invocation and its descendants.
     /// `None` and `Some([])` retain the historical no-additional-whitelist meaning.
     pub allowed_tools: Option<Vec<String>>,
+    /// 祖先调用的工具能力上界，与历史/Goal 是否继承无关。
+    pub tool_access: Option<echo_core::tools::ToolAccess>,
 }
 
 impl std::fmt::Debug for SubagentContext {
@@ -136,6 +138,7 @@ impl std::fmt::Debug for SubagentContext {
             .field("store", &self.store.as_ref().map(|_| "Store { .. }"))
             .field("parent_goal", &self.parent_goal)
             .field("allowed_tools", &self.allowed_tools)
+            .field("tool_access", &self.tool_access)
             .finish()
     }
 }
@@ -150,6 +153,7 @@ impl SubagentContext {
             // Scoped context fields
             parent_goal: None,
             allowed_tools: None,
+            tool_access: None,
         }
     }
 
@@ -200,6 +204,7 @@ impl SubagentContext {
             // inherited conversation history, so Fresh subagents receive it.
             parent_goal,
             allowed_tools: None,
+            tool_access: None,
         }
     }
 
@@ -210,6 +215,7 @@ impl SubagentContext {
             || self.store.is_some()
             || self.parent_goal.is_some()
             || self.allowed_tools.is_some()
+            || self.tool_access.is_some()
     }
 
     /// Carry a known parent hard scope independently of transcript inheritance.
@@ -261,6 +267,21 @@ fn latest_user_request(messages: &[Message]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn access_only_context_survives_fresh_inheritance() {
+        let context = SubagentContext {
+            tool_access: Some(echo_core::tools::ToolAccess::ReadOnly),
+            ..SubagentContext::empty()
+        };
+        assert!(context.has_content());
+        assert!(context.messages.is_empty());
+        assert!(context.parent_goal.is_none());
+        assert_eq!(
+            context.clone().tool_access,
+            Some(echo_core::tools::ToolAccess::ReadOnly)
+        );
+    }
 
     #[test]
     fn inherited_tool_scope_is_monotonic_and_empty_intersection_rejects() -> Result<(), String> {

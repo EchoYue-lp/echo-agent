@@ -322,3 +322,11 @@ dispatch 身份，使 consumer 能以准确地址持久化 gap。
 `SubagentEventReplay::gap` 会明确报告保留后缀不连续；高频 thinking/token
 delta 可能在 gap 后缺失，但保留的 lifecycle/tool 边界与 `terminal` 可用于恢复状态和最终输出。
 该能力是进程内恢复窗口，不是永久存储；应用仍负责自己的 durable projection。
+
+## 调用级只读委派
+
+只读 Agent 可以继续向声明为只读的 Subagent 委派。框架在原装配时使用受限 dispatcher，普通 dispatcher 的写能力声明不变。每次调用的 `tool_access` 使用现有 `ToolAccess`：同一目标声明的 ReadOnly 与任一上游 ReadOnly 都继续收窄后代；它与父工具正向上界共同作用，Fresh 或空历史也不会丢失。
+
+真实可用集由锁后快照计算，模型 schema、tool_search 和强制工具调用采用相同限制。只读角色若错误装有写工具，实际调用仍被阻止；同名工具替换、晚注册、Team 写成员、后台和子调用声明 Mutating 都不能提升能力。受限工具缺少有效 ToolContext/visibility 或工具硬交集为空时明确失败，不靠角色名、prompt 或全局把 agent_tool 标只读。
+
+自定义 Agent 若仅实现旧 execute/chat，默认 invocation 回退会拒绝新的 ReadOnly 请求，避免静默忽略约束；None 保留原行为。新增公开字段的完整 literal 需显式补值，SDK 不自动继承。泛用框架合法深度与 EKO 产品层数分别配置和验收。详细取舍见 [ADR0094](../adr/0094-subagent-tool-boundary-inheritance.md)。

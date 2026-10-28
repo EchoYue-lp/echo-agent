@@ -16,6 +16,14 @@ embedding application 以 coding 为主。内置数据工具负责查看、清�
 
 `statistics` 依赖 `data`。正式推断通常同时启用 `statistics` 和 `shell`。
 
+### Parquet 与独立消费者的依赖选择
+
+数据读写继续使用原 Polars 路径，`export_data` 与 `excel_load` 写出的 Parquet 默认采用 Zstd；`load_dataframe`、`read_data` 和描述性统计继续读取这些文件，不新增包装器或独立缓存。
+
+Framework 在 `vendor/` 唯一维护 `polars-arrow`、`polars-parquet` 0.55.2 的最小 zstd 依赖补丁，使用 zstd 0.14.3 链。独立 Cargo root 不会自动继承依赖仓库中的 `[patch.crates-io]`；通过 Git 使用 Framework 的数据能力时，消费 root 必须显式把这两个包选择到与 Framework 相同的 Git URL 和精确 revision。原三个媒体父包的相对 path 依赖方式不变。
+
+`polars_parquet::parquet::compression::DecompressionContext::Zstd` 的嵌套 `DCtx` 从 zstd-safe 7 改为 8，Rust crate 类型身份变化；不能把旧版本显式构造的 context 当作兼容证明。普通 `Unset`、`BasicDecompressor` 和已有 context 复用机制继续保留。来源归属、消费 root 配置及审计边界见 [vendor 维护说明](../../vendor/README.md) 和 [ADR 0100](../adr/0100-zstd-safe-chain-vendoring.md)；不据此扩大 SDK 接受合同或宣称完整依赖/发布验收已经通过。
+
 ## 工具一览
 
 | 目标 | 工具 | 合同 |

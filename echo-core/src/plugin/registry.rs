@@ -49,9 +49,6 @@ impl PluginEntry {
         if self.root.join("hooks/hooks.yaml").is_file() {
             capabilities.push(PluginCapability::Hook);
         }
-        if self.root.join("lsp.yaml").is_file() {
-            capabilities.push(PluginCapability::LspServer);
-        }
         capabilities
     }
 }
@@ -70,8 +67,6 @@ pub struct ResolvedComponents {
     pub hooks_file: Option<PathBuf>,
     /// MCP server configuration file.
     pub mcp_config_file: Option<PathBuf>,
-    /// LSP server configuration file.
-    pub lsp_config_file: Option<PathBuf>,
     /// Non-fatal standard component diagnostics.
     pub diagnostics: Vec<String>,
 }
@@ -932,7 +927,10 @@ impl PluginRegistry {
 
         let lsp_file = root.join("lsp.yaml");
         if lsp_file.is_file() {
-            resolved.lsp_config_file = Some(lsp_file);
+            resolved.diagnostics.push(format!(
+                "LSP component is retired: Plugin '{plugin_id}' declaration '{}'",
+                lsp_file.display()
+            ));
         } else if lsp_file.exists() {
             resolved.diagnostics.push(format!(
                 "Plugin '{plugin_id}' LSP path '{}' is not a regular file",
@@ -1051,7 +1049,10 @@ impl PluginRegistry {
         )
         .await
         {
-            resolved.lsp_config_file = Some(lsp_file);
+            resolved.diagnostics.push(format!(
+                "LSP component is retired: Plugin '{plugin_id}' declaration '{}'",
+                lsp_file.display()
+            ));
         }
 
         if let Some(entry) = self.plugins.get_mut(plugin_id) {
@@ -1360,7 +1361,13 @@ mod tests {
         assert_eq!(resolved.mcp_config_file, Some(plugin.join("mcp.json")));
         assert_eq!(resolved.agent_files.len(), 1);
         assert_eq!(resolved.hooks_file, Some(plugin.join("hooks/hooks.yaml")));
-        assert!(resolved.diagnostics.is_empty());
+        assert_eq!(
+            resolved.diagnostics,
+            vec![format!(
+                "LSP component is retired: Plugin 'resolve.test' declaration '{}'",
+                plugin.join("lsp.yaml").display()
+            )]
+        );
         std::fs::remove_dir_all(temporary).map_err(|error| error.to_string())
     }
 
@@ -1374,7 +1381,22 @@ mod tests {
         let (_, resolved) =
             PluginRegistry::validate_plugin_dir(&plugin).map_err(|errors| errors.join("; "))?;
         assert!(resolved.skill_dirs.is_empty());
-        assert_eq!(resolved.diagnostics.len(), 1);
+        assert_eq!(resolved.mcp_config_file, Some(plugin.join("mcp.json")));
+        assert_eq!(resolved.agent_files.len(), 1);
+        assert_eq!(resolved.hooks_file, Some(plugin.join("hooks/hooks.yaml")));
+        assert_eq!(
+            resolved.diagnostics,
+            vec![
+                format!(
+                    "Plugin 'wrong.kind' standard skills path '{}' is not a directory",
+                    plugin.join("skills").display()
+                ),
+                format!(
+                    "LSP component is retired: Plugin 'wrong.kind' declaration '{}'",
+                    plugin.join("lsp.yaml").display()
+                ),
+            ]
+        );
         std::fs::remove_dir_all(temporary).map_err(|error| error.to_string())
     }
 

@@ -1,6 +1,6 @@
 //! Executable contracts migrated from deterministic framework examples.
 
-#[cfg(all(feature = "testing", feature = "human-loop"))]
+#[cfg(all(feature = "testing", feature = "human-loop", feature = "subagent"))]
 #[path = "example_contracts/demo04_subagent.rs"]
 mod demo04_subagent;
 #[cfg(feature = "testing")]
@@ -34,9 +34,6 @@ mod demo51_self_improvement;
 mod demo53_adaptive_compression;
 #[path = "example_contracts/demo54_headless.rs"]
 mod demo54_headless;
-#[cfg(feature = "lsp")]
-#[path = "example_contracts/demo55_lsp_tools.rs"]
-mod demo55_lsp_tools;
 #[cfg(feature = "testing")]
 #[path = "example_contracts/demo57_data_pipeline.rs"]
 mod demo57_data_pipeline;

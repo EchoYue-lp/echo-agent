@@ -435,6 +435,7 @@ mod tests {
         let tool_calls: Vec<ToolCall> = calls
             .iter()
             .map(|(id, name)| ToolCall {
+                provider_source: None,
                 id: id.to_string(),
                 call_type: "function".to_string(),
                 function: echo_core::llm::types::FunctionCall {

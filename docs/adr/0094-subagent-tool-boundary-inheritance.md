@@ -207,3 +207,31 @@ public API，也不改变独立复用方的上限、原 exact attempt、取消�
 回归通过真实 ReactAgent/Fork、原 `agent_tool` 和实际 ToolContext 观察，不以提示词
 或伪 dispatcher 比字段代替。源码定义与 focused 执行、应用/GUI/main 资格分别记录，
 不把本节说明当成尚未取得的完整矩阵或原生验收。
+
+## 2026-10-27：调用级只读能力与受限委派
+
+### 背景与候选
+
+真实只读 reviewer 已声明可委派，但普通 `agent_tool` 的 Mutating 能力被原只读快照正确过滤，合法下一层因此不可达。仅把全部 dispatcher 标成 ReadOnly 会扩大普通 writer 的能力；仅核目标角色标签又无法防止错误只读标签的 Agent 实际装入写工具。二者均不采用。
+
+采用原 `ToolAccess` 的可选调用上界，沿 `AgentInvocationContext`、`ToolContext`、`SubagentContext` 三个既有载体传递。它不形成新的权限 store、角色策略或任务状态。`None` 保留旧调用，任何已有 ReadOnly 均不得被 Mutating 值提升；Fresh、空历史及没有 Goal 时仍保留 access-only context。
+
+### 决策与数据流
+
+只读 Agent 的原装配选择 `AgentDispatchTool::read_only`，普通 `new` 继续声明 Mutating；受限实例的 capabilities.access 为 ReadOnly，模型 catalog 只列只读目标；运行 risk 保留 Standard，沿原 `tool_search` 的分类方式避免结果缓存。调用必须具备原 `ToolContext` 的有效 visibility，从不可变 available 集继承父工具上界；缺上下文、缺范围或空交集明确失败，不回退无限制。此检查防本地运行时丢失约束后误写用户文件，不限制用户直接打开终端或配置 MCP，也不要求 full-auto。
+
+同一不可变 registration 在 factory 前合并目标自身的 ReadOnly 声明与祖先上界，再验证只读调用不得选择 writer。目标声明是已有 typed mutation boundary，普通 writer 父或 None 调用也不能让被标为 ReadOnly 的目标误执行写工具；这个上界保留在原请求中，失败后的重试/转派不能降权。后续执行仍用该 record；Team 的实际成员/manager 同样逐项进入原准入，不按外层 Team 标签放行写成员。Sync、Fork、Teammate、Team 与后台沿原执行器传递同一调用值，不另建调度或改变取消、物理结算与深度计数。
+
+Agent 获得原执行锁后，`ToolRuntime` 从当前 catalog 计算配置只读与调用 ReadOnly 的有效值。模型 schema、tool_search 可用集及最终工具执行共同沿该快照过滤，再与父工具正向集合、disabled/model/skill/depth 条件求交；同名替换或排队后注册写工具不能扩大权限。`ToolRuntime::from_agent` 仍保原公开签名；只有内部构造接受调用上界。默认 `Agent` 三个 invocation 回退不能落实 ReadOnly，因此在旧 execute/chat 开始前明确返回不支持，None 正控制不变；ReactAgent 和 Arc 转发承接完整上下文。
+
+### 影响与验收
+
+追加公开 Rust 字段要求使用完整 struct literal 的调用方明确补值，使用 Default 的原代码无需机械改写；不宣称完全源码兼容，不自动升级 SDK pin/accepted 或把完整 public inventory 当跨语言承诺。Framework 保留合理 max4/None/writer 消费能力；EKO 的默认总层数1、GUI最多3及真实 reviewer 工厂资格归应用。
+
+要求真实旧只读 schema/工厂行为先红后绿，验证四模式/后台、Fresh/access-only、同一 record、writer/错误标签/Team混写、工具搜索/强制调用/晚注册/同名替换及默认回退负控制。执行层数、公开字段 literal 与示例需适用编译；原生、完整 feature/工程矩阵、精确 main/CI 和 SDK 独立来源分别验收，定向通过不替代它们。官方参考沿本 ADR 与跨仓已审设计的原件，不把注册表 `tool_names()` 当实际模型曝光证据。
+
+### 安全收口补充：只读能力不等于派发结果可缓存
+
+`ToolAccess::ReadOnly` 约束后代不得改写用户环境；派发本身仍建立新的子调用生命周期与真实回执。原 ToolManager 以 `ToolRiskLevel::ReadOnly` 进入成功结果缓存，其上下文键不包含每个独立 call_id，因此不能把受限派发也按普通可缓存读取分类。这里复用原 tool_search 的既有模式：普通和受限 dispatcher 的运行 risk 均为 Standard，只有受限实例的 capability access 为 ReadOnly。只读 schema、搜索和最终准入继续检查 access，不依赖缓存分类。
+
+没有新增 cache trait、工具名特例或全局缓存策略；两次相同参数但独立 call_id 的合法派发必须实际建立两次子调用，不重放旧结果或旧“已启动”回执。该回归经原 ToolManager 实际入口取得一次实际调用/预期两次的行为失败，再验证修复；这项局部修复不代表当前只读整体、原生或后继原生 reasoning/assistant 执行切换已经完成。

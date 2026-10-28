@@ -73,3 +73,13 @@ echo-agent-learning/
 ├── tests/learning_contract.rs   lesson-level contracts
 └── src/bin/facade_consumer.rs   external consumer facade probe
 ```
+
+
+## 已批准的专属示例退役
+
+当前源码不再提供A2A/LSP feature，`demo23_a2a`独立示例与`demo55_lsp_tools`合同模块
+随具名能力退出；其它示例和原`example_contracts`执行入口保留，不把专属测试删除算作
+保留行为通过。ACP的demo72、IM的demo38、scheduler的demo70及Plugin/MCP继续适用。
+恢复旧源码使用固定`pre-retirement-2026-10-24` tag，只读对照后另行评估移植，不恢复
+已退役feature或覆写用户数据。根公开feature清单为25项（含full、不含default），README
+全集合对照仍由`documentation_contract`测试执行；删后编译与依赖门禁待准确后继源验证。

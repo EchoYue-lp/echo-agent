@@ -33,7 +33,6 @@ async fn main() -> echo_agent::error::Result<()> {
         .llm_config(support::llm_config(None)?)
         .name("extractor")
         .system_prompt("你是一个精准的信息提取助手，请仅根据用户提供的文本进行提取。")
-        .disable_cot()
         .build()?;
 
     println!("╔══════════════════════════════════════════════════════╗");
@@ -218,7 +217,6 @@ async fn demo_config_level() -> echo_agent::error::Result<()> {
         .name("translator")
         .system_prompt("你是一个专业翻译助手，将用户输入翻译成英文。")
         .response_format(schema)
-        .disable_cot()
         .build()?;
 
     let input = "人工智能正在改变世界。";

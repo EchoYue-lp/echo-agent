@@ -503,7 +503,7 @@ impl SubagentRegistry {
     pub(super) async fn admit_registration(
         &self,
         registration: &SubagentRegistration,
-        request: &super::executor::DispatchRequest,
+        request: &mut super::executor::DispatchRequest,
     ) -> Result<()> {
         // This local correctness check prevents a validated handle from one
         // registry being executed under another registry's host authority.
@@ -525,6 +525,27 @@ impl SubagentRegistry {
             return Err(crate::error::ReactError::Other(format!(
                 "Delegation depth exceeded (max {}): agent '{}'",
                 request.delegation_policy.max_delegate_depth, request.agent_name
+            )));
+        }
+        if registration.definition.access_mode == super::types::SubagentAccessMode::ReadOnly {
+            // 目标声明本身也是 mutation boundary；不能只相信 factory 会装对工具。
+            // 保留在原请求里，使重试/转派也不能降权。
+            request
+                .parent_context
+                .get_or_insert_with(super::context::SubagentContext::empty)
+                .tool_access = Some(echo_core::tools::ToolAccess::ReadOnly);
+        }
+        if request
+            .parent_context
+            .as_ref()
+            .and_then(|context| context.tool_access)
+            == Some(echo_core::tools::ToolAccess::ReadOnly)
+            && registration.definition.access_mode != super::types::SubagentAccessMode::ReadOnly
+        {
+            // 同一不可变 registration 必须在 factory 之前核验，避免本地错派写角色。
+            return Err(crate::error::ReactError::Other(format!(
+                "Read-only Subagent invocation cannot dispatch write target '{}'",
+                request.agent_name
             )));
         }
         let admission = self.registration_admission.read().await.clone();

@@ -29,7 +29,7 @@ impl ToolApprovalReceipt {
     /// Issue a receipt for the final effective invocation.
     ///
     /// Permission services and trusted hook adapters are the intended issuers.
-    /// Consumers should only pass the receipt through [`ToolContext`] and must
+    /// Consumers should only pass the receipt through [`ToolContext`](crate::tools::ToolContext) and must
     /// validate it immediately before the effect they protect.
     pub fn issue(tool_name: impl Into<String>, args: &Value) -> Result<Self, serde_json::Error> {
         Ok(Self {

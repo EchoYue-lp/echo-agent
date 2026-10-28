@@ -4,7 +4,9 @@ use crate::agent::subagent::{ExecutionMode, SubagentOutcome};
 use crate::error::ToolError;
 use crate::tools::{Tool, ToolParameters, ToolResult};
 use echo_core::agent::CancellationToken;
-use echo_core::tools::{ExternalRunContext, NestedDelegationPolicy, ToolContext};
+use echo_core::tools::{
+    ExternalRunContext, NestedDelegationPolicy, ToolAccess, ToolContext, ToolRiskLevel,
+};
 use futures::future::BoxFuture;
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -43,7 +45,6 @@ impl ParentContextFactory {
             .tool_manager
             .get_tool_definitions()
             .into_iter()
-            .filter(|d| d.function.name != "final_answer")
             .collect();
         SubagentContext::from_parent(&tool_defs, &messages, self.store.clone(), inheritance)
     }
@@ -69,6 +70,8 @@ pub struct AgentDispatchTool {
     /// Snapshot of available subagents exposed to the LLM through the tool schema.
     catalog: Arc<std::sync::RwLock<Vec<crate::agent::subagent::SubagentDefinition>>>,
     catalog_revision: Arc<AtomicU64>,
+    /// 该实例只委派只读目标；不改变普通 dispatcher 的能力声明。
+    read_only: bool,
 }
 
 impl AgentDispatchTool {
@@ -84,7 +87,19 @@ impl AgentDispatchTool {
             parent_agent: parent_agent.into(),
             cancel: Arc::new(tokio::sync::Mutex::new(Some(cancel))),
             parent_context_factory: None,
+            read_only: false,
         }
+    }
+
+    /// 为只读 Agent 装配的受限实例。普通 `new` 仍保留 Mutating 合同。
+    pub fn read_only(
+        executor: Arc<SubagentExecutor>,
+        parent_agent: impl Into<String>,
+        cancel: CancellationToken,
+    ) -> Self {
+        let mut tool = Self::new(executor, parent_agent, cancel);
+        tool.read_only = true;
+        tool
     }
 
     /// Create with a parent context factory for context inheritance.
@@ -187,9 +202,24 @@ impl AgentDispatchTool {
         // `available` is the immutable invocation hard bound. First-turn
         // visibility and the shared manager's catalog do not grant descendants
         // permission to recover tools excluded by the invoking task.
+        let read_only = self.read_only
+            || ctx.and_then(|context| context.tool_access) == Some(ToolAccess::ReadOnly);
+        let inherited_access = if read_only {
+            Some(ToolAccess::ReadOnly)
+        } else {
+            ctx.and_then(|context| context.tool_access)
+        };
         let inherited_tools = ctx
             .and_then(|context| context.tool_visibility.as_ref())
             .map(|visibility| visibility.available_names());
+        if read_only && inherited_tools.is_none() {
+            // 本地调用丢失执行快照时不能把缺失范围误当无限制权限。
+            return Box::pin(async {
+                Ok(ToolResult::error(
+                    "Read-only delegation requires an invocation ToolContext with tool visibility",
+                ))
+            });
+        }
         if inherited_tools
             .as_ref()
             .is_some_and(|tools| !tools.iter().any(|name| name == "agent_tool"))
@@ -360,6 +390,13 @@ impl AgentDispatchTool {
                 }
             }
 
+            if let Some(inherited) = inherited_access {
+                let context = parent_context.get_or_insert_with(SubagentContext::empty);
+                if context.tool_access != Some(ToolAccess::ReadOnly) {
+                    context.tool_access = Some(inherited);
+                }
+            }
+
             // ToolContext is invocation-scoped and therefore authoritative for
             // pooled agents. The shared handle remains a compatibility fallback
             // for callers that execute the tool without runtime context.
@@ -497,6 +534,23 @@ impl Tool for AgentDispatchTool {
         "agent_tool"
     }
 
+    fn risk_level(&self) -> ToolRiskLevel {
+        // 每次派发都建立真实子调用/回执；只读能力不代表可重放缓存结果。
+        ToolRiskLevel::Standard
+    }
+
+    fn capabilities(&self) -> echo_core::tools::ToolCapabilities {
+        echo_core::tools::ToolCapabilities {
+            access: if self.read_only {
+                ToolAccess::ReadOnly
+            } else {
+                ToolAccess::Mutating
+            },
+            risk: self.risk_level(),
+            permissions: self.permissions(),
+        }
+    }
+
     fn description(&self) -> &str {
         "Dispatch tasks to specialized Subagents in an isolated context. \
          Default is fresh context (no parent conversation). Use mode=fork only when \
@@ -526,7 +580,17 @@ impl Tool for AgentDispatchTool {
         let catalog = self
             .catalog
             .read()
-            .map(|entries| entries.clone())
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter(|entry| {
+                        !self.read_only
+                            || entry.access_mode
+                                == crate::agent::subagent::SubagentAccessMode::ReadOnly
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
             .unwrap_or_default();
         let agent_names: Vec<String> = catalog.iter().map(|entry| entry.name.clone()).collect();
         let catalog_text = if catalog.is_empty() {
@@ -606,6 +670,253 @@ mod tests {
     use crate::testing::{FailingMockAgent, MockAgent, MockAgentFailure};
     use echo_core::llm::types::{ContentPart, Message};
     use std::sync::atomic::AtomicUsize;
+
+    #[tokio::test]
+    async fn readonly_dispatch_uses_distinct_real_calls_instead_of_result_cache_replay()
+    -> Result<(), String> {
+        let registry = Arc::new(SubagentRegistry::new());
+        let child = MockAgent::new("reader")
+            .with_responses(["## Summary\nfirst child", "## Summary\nsecond child"]);
+        let mut definition = SubagentDefinition::new("reader", "readonly child");
+        definition.access_mode = crate::agent::subagent::SubagentAccessMode::ReadOnly;
+        registry.register(definition, Box::new(child.clone())).await;
+        let executor = Arc::new(SubagentExecutor::new(
+            registry,
+            SubagentExecutorConfig::default(),
+        ));
+        let manager = crate::tools::ToolManager::new();
+        manager.register(Box::new(AgentDispatchTool::read_only(
+            executor,
+            "primary",
+            CancellationToken::new(),
+        )));
+        let parameters = [
+            ("agent_name".into(), json!("reader")),
+            ("task".into(), json!("same requested task")),
+        ]
+        .into_iter()
+        .collect::<ToolParameters>();
+        let mut context = readonly_dispatch_context(&["agent_tool"]);
+        context.run_id = Some("same-parent-run".to_string());
+        context.turn_id = Some("same-parent-turn".to_string());
+        context.message_id = Some("same-parent-message".to_string());
+        context.execution_id = Some("same-parent-execution".to_string());
+        for call_id in ["first-physical-request", "second-physical-request"] {
+            context.call_id = Some(call_id.to_string());
+            let result = manager
+                .execute_tool_with_context("agent_tool", parameters.clone(), &context)
+                .await
+                .map_err(|error| error.to_string())?;
+            assert!(result.success, "{}", result.output);
+        }
+        assert_eq!(
+            child.invocation_contexts().len(),
+            2,
+            "a second independent dispatch replayed an old cached Subagent outcome"
+        );
+        Ok(())
+    }
+
+    fn readonly_dispatch_context(names: &[&str]) -> ToolContext {
+        let names = names.iter().map(|name| (*name).to_string()).collect();
+        ToolContext {
+            tool_access: Some(ToolAccess::ReadOnly),
+            tool_visibility: Some(Arc::new(echo_core::tools::ToolVisibilityState::new(
+                names,
+                std::collections::HashSet::new(),
+            ))),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn readonly_dispatch_instance_requires_context_filters_catalog_and_keeps_ordinary_mode()
+    -> Result<(), String> {
+        let registry = Arc::new(SubagentRegistry::new());
+        let reader = MockAgent::new("reader").with_response("## Summary\nread");
+        let writer = MockAgent::new("writer").with_response("## Summary\nwrite");
+        let mut definition = SubagentDefinition::new("reader", "read only");
+        definition.access_mode = crate::agent::subagent::SubagentAccessMode::ReadOnly;
+        registry
+            .register(definition, Box::new(reader.clone()))
+            .await;
+        registry
+            .register(
+                SubagentDefinition::new("writer", "write"),
+                Box::new(writer.clone()),
+            )
+            .await;
+        let executor = Arc::new(SubagentExecutor::new(
+            Arc::clone(&registry),
+            SubagentExecutorConfig::default(),
+        ));
+        let restricted = AgentDispatchTool::read_only(
+            Arc::clone(&executor),
+            "primary",
+            CancellationToken::new(),
+        );
+        let ordinary = AgentDispatchTool::new(executor, "primary", CancellationToken::new());
+        assert_eq!(restricted.risk_level(), ToolRiskLevel::Standard);
+        assert_eq!(restricted.capabilities().risk, ToolRiskLevel::Standard);
+        assert_eq!(restricted.capabilities().access, ToolAccess::ReadOnly);
+        assert_eq!(ordinary.capabilities().access, ToolAccess::Mutating);
+        assert_eq!(
+            restricted
+                .parameters()
+                .pointer("/properties/agent_name/enum"),
+            Some(&json!(["reader"]))
+        );
+        let params = |name: &str| {
+            [
+                ("agent_name".into(), json!(name)),
+                ("task".into(), json!("bounded read")),
+            ]
+            .into_iter()
+            .collect::<ToolParameters>()
+        };
+        let missing = restricted
+            .execute(params("reader"))
+            .await
+            .map_err(|error| error.to_string())?;
+        assert!(!missing.success);
+        for context in [
+            ToolContext::default(),
+            readonly_dispatch_context(&[]),
+            readonly_dispatch_context(&["read_file"]),
+        ] {
+            let result = restricted
+                .execute_with_context(params("reader"), &context)
+                .await
+                .map_err(|error| error.to_string())?;
+            assert!(!result.success);
+        }
+        assert!(reader.invocation_contexts().is_empty());
+        let context = readonly_dispatch_context(&["agent_tool", "read_file", "tool_search"]);
+        let blocked = restricted
+            .execute_with_context(params("writer"), &context)
+            .await
+            .map_err(|error| error.to_string())?;
+        assert!(!blocked.success);
+        assert!(writer.invocation_contexts().is_empty());
+        let result = restricted
+            .execute_with_context(params("reader"), &context)
+            .await
+            .map_err(|error| error.to_string())?;
+        assert!(result.success, "{}", result.output);
+        let calls = reader.invocation_contexts();
+        let invocation = calls
+            .first()
+            .ok_or_else(|| "readonly child invocation missing".to_string())?;
+        assert_eq!(invocation.tool_access, Some(ToolAccess::ReadOnly));
+        assert_eq!(
+            invocation.allowed_tools,
+            Some(
+                ["agent_tool", "read_file", "tool_search"]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect()
+            )
+        );
+        let positive = ordinary
+            .execute(params("writer"))
+            .await
+            .map_err(|error| error.to_string())?;
+        assert!(positive.success, "{}", positive.output);
+        assert_eq!(writer.invocation_contexts().len(), 1);
+        // A per-call ReadOnly value also narrows a normal instance used directly.
+        let blocked = ordinary
+            .execute_with_context(params("writer"), &context)
+            .await
+            .map_err(|error| error.to_string())?;
+        assert!(!blocked.success);
+        assert_eq!(writer.invocation_contexts().len(), 1);
+        Ok(())
+    }
+
+    struct ReadOnlyScopeProbe(ScopeProbeTool);
+    impl Tool for ReadOnlyScopeProbe {
+        fn name(&self) -> &str {
+            self.0.name()
+        }
+        fn description(&self) -> &str {
+            self.0.description()
+        }
+        fn parameters(&self) -> Value {
+            self.0.parameters()
+        }
+        fn risk_level(&self) -> ToolRiskLevel {
+            ToolRiskLevel::ReadOnly
+        }
+        fn execute(
+            &self,
+            parameters: ToolParameters,
+        ) -> BoxFuture<'_, crate::error::Result<ToolResult>> {
+            self.0.execute(parameters)
+        }
+    }
+
+    #[tokio::test]
+    async fn readonly_target_label_does_not_enable_writer_tools_or_tool_search_promotion()
+    -> crate::error::Result<()> {
+        let registry = Arc::new(SubagentRegistry::new());
+        let writes = Arc::new(AtomicUsize::new(0));
+        let reads = Arc::new(AtomicUsize::new(0));
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let child = crate::agent::ReactAgentBuilder::new()
+            .name("mistagged-reader")
+            .model("mock-model")
+            .llm_client(Arc::new(ScopeRequestClient {
+                inner: crate::testing::MockLlmClient::new()
+                    .then_tool_call("read", "read_file", "{}")
+                    .then_tool_call("search", "tool_search", r#"{"query":"write_file"}"#)
+                    .then_tool_call("write", "write_file", "{}")
+                    .with_response("## Summary\n只读完成"),
+                requests: Arc::clone(&requests),
+            }))
+            .tool(Box::new(ReadOnlyScopeProbe(ScopeProbeTool {
+                name: "read_file",
+                calls: Arc::clone(&reads),
+            })))
+            .tool(Box::new(ScopeProbeTool {
+                name: "write_file",
+                calls: Arc::clone(&writes),
+            }))
+            .build()?;
+        let mut definition =
+            SubagentDefinition::new("mistagged-reader", "declaration alone is insufficient");
+        definition.access_mode = crate::agent::subagent::SubagentAccessMode::ReadOnly;
+        registry.register(definition, Box::new(child)).await;
+        let executor = Arc::new(SubagentExecutor::new(
+            registry,
+            SubagentExecutorConfig::default(),
+        ));
+        // 可写父也必须兑现目标的 ReadOnly 声明。
+        let dispatch = AgentDispatchTool::new(executor, "primary", CancellationToken::new());
+        let result = dispatch
+            .execute_with_context(
+                [
+                    ("agent_name".into(), json!("mistagged-reader")),
+                    ("task".into(), json!("只读检查")),
+                ]
+                .into_iter()
+                .collect(),
+                &ToolContext::default(),
+            )
+            .await?;
+        assert!(result.success, "{}", result.output);
+        assert_eq!(writes.load(Ordering::SeqCst), 0);
+        assert_eq!(reads.load(Ordering::SeqCst), 1);
+        let requests = requests
+            .lock()
+            .map_err(|error| crate::error::ReactError::Other(error.to_string()))?;
+        assert!(!requests.is_empty());
+        assert!(
+            requests
+                .iter()
+                .all(|names| !names.iter().any(|name| name == "write_file"))
+        );
+        Ok(())
+    }
 
     struct ScopeRequestClient {
         inner: crate::testing::MockLlmClient,
@@ -688,6 +999,7 @@ mod tests {
     struct DepthObservation {
         policy: Option<NestedDelegationPolicy>,
         available: Option<Vec<String>>,
+        access: Option<ToolAccess>,
     }
 
     struct DepthProbeTool {
@@ -701,6 +1013,9 @@ mod tests {
         }
         fn description(&self) -> &str {
             "capture the actual tool invocation policy"
+        }
+        fn risk_level(&self) -> ToolRiskLevel {
+            ToolRiskLevel::ReadOnly
         }
         fn parameters(&self) -> Value {
             self.inner.parameters()
@@ -722,6 +1037,7 @@ mod tests {
                     .map_err(|error| crate::error::ReactError::Other(error.to_string()))?
                     .push(DepthObservation {
                         policy: context.delegation_policy,
+                        access: context.tool_access,
                         available: context
                             .tool_visibility
                             .as_ref()
@@ -736,6 +1052,7 @@ mod tests {
         mode: &'static str,
         maximum: u8,
         team: bool,
+        readonly: bool,
     ) -> crate::error::Result<()> {
         let registry = Arc::new(SubagentRegistry::new());
         let mut events = registry.event_bus().subscribe();
@@ -764,7 +1081,7 @@ mod tests {
                     .with_response(format!("## Summary\nactor {depth} complete")),
                 requests: Arc::clone(&requests),
             });
-            let agent = crate::agent::ReactAgentBuilder::new()
+            let builder = crate::agent::ReactAgentBuilder::new()
                 .name(&name)
                 .model("mock-model")
                 .enable_tools()
@@ -778,18 +1095,22 @@ mod tests {
                         calls: Arc::new(AtomicUsize::new(0)),
                     },
                     observations: Arc::clone(&observations),
-                }))
-                .build()?;
-            registry
-                .register(
-                    SubagentDefinition::new(&name, "bounded actor"),
-                    Box::new(agent),
-                )
-                .await;
+                }));
+            let agent = if readonly {
+                builder.readonly_tools()
+            } else {
+                builder
+            }
+            .build()?;
+            let mut definition = SubagentDefinition::new(&name, "bounded actor");
+            if readonly {
+                definition.access_mode = crate::agent::subagent::SubagentAccessMode::ReadOnly;
+            }
+            registry.register(definition, Box::new(agent)).await;
             actors.push((depth, name, requests, observations));
         }
         let target = if team {
-            let definition = crate::agent::subagent::SubagentBuilder::new("depth-team")
+            let mut definition = crate::agent::subagent::SubagentBuilder::new("depth-team")
                 .team(crate::agent::subagent::TeamSpec {
                     strategy: crate::agent::subagent::TeamStrategy::Pipeline(vec![
                         "depth-2".into(),
@@ -799,6 +1120,9 @@ mod tests {
                     config: crate::agent::subagent::TeamConfig::default(),
                 })
                 .build();
+            if readonly {
+                definition.access_mode = crate::agent::subagent::SubagentAccessMode::ReadOnly;
+            }
             registry
                 .register(definition, Box::new(MockAgent::new("depth-team")))
                 .await;
@@ -810,7 +1134,11 @@ mod tests {
             Arc::clone(&registry),
             SubagentExecutorConfig::default(),
         ));
-        let dispatch = AgentDispatchTool::new(executor, "primary", CancellationToken::new());
+        let dispatch = if readonly {
+            AgentDispatchTool::read_only(executor, "primary", CancellationToken::new())
+        } else {
+            AgentDispatchTool::new(executor, "primary", CancellationToken::new())
+        };
         let result = dispatch
             .execute_with_context(
                 [
@@ -821,6 +1149,16 @@ mod tests {
                 .into_iter()
                 .collect(),
                 &ToolContext {
+                    tool_access: readonly.then_some(ToolAccess::ReadOnly),
+                    tool_visibility: readonly.then(|| {
+                        Arc::new(echo_core::tools::ToolVisibilityState::new(
+                            ["agent_tool", "depth_probe", "tool_search"]
+                                .into_iter()
+                                .map(str::to_string)
+                                .collect(),
+                            std::collections::HashSet::new(),
+                        ))
+                    }),
                     delegation_policy: Some(NestedDelegationPolicy {
                         can_spawn_subagents: true,
                         delegate_depth: 0,
@@ -848,6 +1186,9 @@ mod tests {
             let actual = observed.first().ok_or_else(|| {
                 crate::error::ReactError::Other("actual policy probe missing".into())
             })?;
+            if readonly {
+                assert_eq!(actual.access, Some(ToolAccess::ReadOnly));
+            }
             assert_eq!(
                 actual.policy,
                 Some(NestedDelegationPolicy {
@@ -897,7 +1238,7 @@ mod tests {
     async fn direct_dispatch_stamps_actual_child_policy_once() -> crate::error::Result<()> {
         for mode in ["sync", "fork", "teammate"] {
             for maximum in [1, 2, 3, 4] {
-                assert_actual_depth_chain(mode, maximum, false).await?;
+                assert_actual_depth_chain(mode, maximum, false, false).await?;
             }
         }
         Ok(())
@@ -906,7 +1247,19 @@ mod tests {
     #[tokio::test]
     async fn team_member_keeps_its_original_target_depth() -> crate::error::Result<()> {
         for maximum in [1, 2, 3, 4] {
-            assert_actual_depth_chain("sync", maximum, true).await?;
+            assert_actual_depth_chain("sync", maximum, true, false).await?;
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn readonly_model_dispatch_keeps_actual_depth_and_access_in_each_mode()
+    -> crate::error::Result<()> {
+        for maximum in [1, 2, 3, 4] {
+            for mode in ["sync", "fork", "teammate"] {
+                assert_actual_depth_chain(mode, maximum, false, true).await?;
+            }
+            assert_actual_depth_chain("sync", maximum, true, true).await?;
         }
         Ok(())
     }

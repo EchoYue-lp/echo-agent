@@ -113,6 +113,15 @@ impl InstructionResolver {
             Some(root) => Some(root),
             None => find_git_root(&working_dir, file_system)?,
         };
+        self.resolve_at_root(working_dir, project_root, file_system)
+    }
+
+    fn resolve_at_root(
+        &self,
+        working_dir: PathBuf,
+        project_root: Option<PathBuf>,
+        file_system: Option<&dyn FileSystem>,
+    ) -> Result<ResolvedInstructions> {
         let scan_root = project_root.clone().unwrap_or_else(|| working_dir.clone());
         let directories = path_from_root_to_working_dir(&scan_root, &working_dir);
 
@@ -340,6 +349,19 @@ mod tests {
         );
         assert_eq!(resolved.sources.len(), 3);
         assert_eq!(
+            resolved
+                .sources
+                .iter()
+                .map(|source| (source.path.clone(), source.precedence))
+                .collect::<Vec<_>>(),
+            vec![
+                (canonical_root.join(".echo-agent/AGENT.md"), 0),
+                (canonical_root.join("src/AGENTS.md"), 1),
+                (canonical_root.join("src/module/AGENTS.override.md"), 2),
+            ],
+            "真实discovery必须停在最近fixture边界，且root到leaf每层只取一个文件",
+        );
+        assert_eq!(
             resolved.sources.first().map(|source| source.kind.as_str()),
             Some("echo_agent")
         );
@@ -385,11 +407,87 @@ mod tests {
         write(&parent.join("AGENTS.md"), "outside")?;
         write(&child.join("CLAUDE.md"), "local")?;
 
-        let resolved = InstructionResolver::new(&child).resolve();
+        // TMPDIR可位于真实仓库中；直接验证Git探测返回None后的同一解析路径，
+        // 不依赖测试宿主祖先目录恰好没有.git，也不改进程全局cwd/env。
+        let resolved = InstructionResolver::new(&child).resolve_at_root(
+            canonical_or_original(&child, None)?,
+            None,
+            None,
+        )?;
+        // 此单测只覆盖discovery无根后的解析分支；实际祖先边界由相邻public resolver用例验证。
         assert_eq!(resolved.project_root, None);
-        assert_eq!(resolved.sources.len(), 1);
+        let canonical_child = canonical_or_original(&child, None)?;
+        assert_eq!(
+            resolved.sources,
+            vec![InstructionSource {
+                path: canonical_child.join("CLAUDE.md"),
+                kind: "claude".to_string(),
+                precedence: 0,
+            }],
+            "无根时只读cwd，不准把parent或宿主仓库指令当作本项目来源",
+        );
         assert!(resolved.content.contains("local"));
         assert!(!resolved.content.contains("outside"));
+        Ok(())
+    }
+
+    #[test]
+    fn nearest_git_marker_excludes_outer_instruction_chain()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // 本resolver既有合同识别.git目录/文件边界，不校验Git对象数据库；
+        // 两种标记都必须在最近边界停下，不能穿透到TMPDIR祖先中的外层仓库。
+        for gitfile in [false, true] {
+            let temp = TestDir::new()?;
+            let outer = temp.path().join("outer");
+            let inner = outer.join("nested/inner");
+            let child = inner.join("src/module");
+            fs::create_dir_all(outer.join(".git"))?;
+            fs::create_dir_all(&child)?;
+            if gitfile {
+                write(&inner.join(".git"), "gitdir: ../../metadata/inner")?;
+            } else {
+                fs::create_dir_all(inner.join(".git"))?;
+            }
+            write(
+                &outer.join("AGENTS.md"),
+                "outer instructions must be excluded",
+            )?;
+            write(
+                &outer.join("nested/CLAUDE.md"),
+                "intermediate instructions must be excluded",
+            )?;
+            write(&inner.join("AGENTS.md"), "inner instructions")?;
+            write(&child.join("AGENTS.override.md"), "leaf instructions")?;
+
+            let resolved = InstructionResolver::new(&child).resolve();
+            let canonical_inner = canonical_or_original(&inner, None)?;
+            assert_eq!(
+                resolved.project_root.as_deref(),
+                Some(canonical_inner.as_path())
+            );
+            assert_eq!(
+                resolved
+                    .sources
+                    .iter()
+                    .map(|source| (source.path.clone(), source.precedence))
+                    .collect::<Vec<_>>(),
+                vec![
+                    (canonical_inner.join("AGENTS.md"), 0),
+                    (canonical_inner.join("src/module/AGENTS.override.md"), 1)
+                ],
+            );
+            let inner_position = resolved
+                .content
+                .find("inner instructions")
+                .ok_or_else(|| std::io::Error::other("inner instruction block missing"))?;
+            let leaf_position = resolved
+                .content
+                .find("leaf instructions")
+                .ok_or_else(|| std::io::Error::other("leaf instruction block missing"))?;
+            assert!(inner_position < leaf_position);
+            assert!(!resolved.content.contains("outer instructions"));
+            assert!(!resolved.content.contains("intermediate instructions"));
+        }
         Ok(())
     }
 

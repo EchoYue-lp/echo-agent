@@ -231,11 +231,7 @@ async fn demo_feedback_on() -> echo_agent::error::Result<()> {
                 r#"{"input":"trigger failure"}"#,
             )
             .then_tool_call("call_add_once", "add", r#"{"a":3,"b":4}"#)
-            .then_tool_call(
-                "call_final_answer",
-                "final_answer",
-                r#"{"answer":"broken_tool 失败后已自动改用 add，结果是 7。"}"#,
-            ),
+            .with_response(r###"broken_tool 失败后已自动改用 add，结果是 7。"###),
     );
 
     let mut agent = ReactAgentBuilder::new()
@@ -273,11 +269,7 @@ async fn demo_flaky_tool() -> echo_agent::error::Result<()> {
             .then_tool_call("call_weather_1", "weather_api", r#"{"city":"北京"}"#)
             .then_tool_call("call_weather_2", "weather_api", r#"{"city":"北京"}"#)
             .then_tool_call("call_weather_3", "weather_api", r#"{"city":"北京"}"#)
-            .then_tool_call(
-                "call_final_answer",
-                "final_answer",
-                r#"{"answer":"北京天气查询已在偶发故障后恢复成功：北京：晴，26°C"}"#,
-            ),
+            .with_response(r###"北京天气查询已在偶发故障后恢复成功：北京：晴，26°C"###),
     );
 
     let mut agent = ReactAgentBuilder::new()

@@ -500,11 +500,14 @@ print(f"Fibonacci(10) = {result}")
                 let preview: String = result.output.chars().take(100).collect();
                 println!("   ✓ 结果: {}...", preview);
             }
-            AgentEvent::Token(token) => {
-                final_answer.push_str(&token);
-                print!("{}", token);
+            AgentEvent::AssistantMessage { block } => {
+                print!("[消息块 {:?}] {}", block.phase, block.delta);
             }
-            AgentEvent::FinalAnswer(_) => println!(),
+            AgentEvent::FinalAnswer(answer) => {
+                // 确认事件只更新最终结果，不由Token/消息块猜测执行结束。
+                println!("\n[最终确认] {}", answer);
+                final_answer = answer;
+            }
             _ => {}
         }
     }

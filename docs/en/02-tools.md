@@ -37,14 +37,12 @@ ToolManager                       ← registry + executor
     └─ to_openai_tools()           ← serialize to OpenAI function-calling format
 
 Built-in tools (builtin):
-    ├─ final_answer               ← output final result (always registered)
     ├─ task_create / task_update  ← revisioned task-graph CRUD
     ├─ task_list                  ← read the committed graph revision
     ├─ agent_tool                 ← dispatch to a registered Subagent
     ├─ human_in_loop              ← request human text input
     ├─ recall / search_memory    ← approved Store recall
     ├─ remember / forget         ← journaled writes with MemoryLayerManager
-    └─ think                      ← explicit CoT tool (superseded by CoT text approach)
 
 Extension tools (ready to use):
     ├─ tools/files       ← file operations (standard files block; artifact access is separate)
@@ -565,7 +563,6 @@ agent.add_tools(vec![
 
 | Tool Name | Module | Description |
 |-----------|--------|-------------|
-| `final_answer` | builtin | Output final result (auto-registered) |
 | `task_create` | builtin | Atomically create or append to a revisioned task graph |
 | `task_update` | builtin | Apply an optimistic graph patch |
 | `task_list` | builtin | Read the committed task graph revision |
@@ -738,3 +735,5 @@ qualify these public tools.
 See [ADR 0098](../adr/0098-project-file-system-adapter.md) for the decisions and
 qualification boundary. This mechanism does not itself provide SSH credentials,
 a remote connection service or a qualified EKO remote-project workflow.
+
+原生消息与最终候选不占工具注册项。`think`/`final_answer` 控制工具已退役；详见[原生消息合同](../zh/43-native-message-execution.md)。

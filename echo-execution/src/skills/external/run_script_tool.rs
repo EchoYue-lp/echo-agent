@@ -6,7 +6,7 @@
 //!
 //! ## Sandbox integration
 //!
-//! All script execution goes through [`SandboxManager`], which automatically
+//! All script execution goes through [`SandboxManager`](crate::sandbox::SandboxManager), which automatically
 //! selects the best isolation level based on security policy:
 //!
 //! | Command type | Typical isolation |

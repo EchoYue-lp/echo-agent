@@ -455,6 +455,8 @@ pub struct AgentInvocationContext {
     /// `None` and an empty set preserve the historical unrestricted behavior.
     /// A nonempty set with zero registered matches still allows no tool.
     pub allowed_tools: Option<std::collections::HashSet<String>>,
+    /// 调用级工具能力上界。ReadOnly 只会收窄已有配置，不改变共享 Agent。
+    pub tool_access: Option<crate::tools::ToolAccess>,
     /// Initial tool names whose schemas are visible to the model.
     /// `None` keeps the complete eligible tool surface visible.
     pub visible_tools: Option<std::collections::HashSet<String>>,
@@ -526,6 +528,7 @@ impl std::fmt::Debug for AgentInvocationContext {
                     .as_ref()
                     .map(std::collections::HashSet::len),
             )
+            .field("tool_access", &self.tool_access)
             .field("run_budget", &self.run_budget)
             .field("history_messages", &self.history.as_ref().map(Vec::len))
             .field("resource_guard_count", &self.resource_guards.len())
@@ -545,6 +548,18 @@ impl std::fmt::Debug for AgentInvocationContext {
 #[allow(clippy::large_enum_variant)]
 pub enum AgentEvent {
     // ── LLM Interaction ──────────────────────────────────────────────────────────
+    /// Provider-neutral assistant output block.
+    ///
+    /// This is the lossless message contract for new consumers. The legacy
+    /// `Token`/`ThinkStart`/`ThinkEnd` events remain as compatibility
+    /// projections until downstream consumers have migrated, but they are not
+    /// an execution or completion authority.
+    AssistantMessage {
+        /// Stable block identity and provider/request ordering metadata.
+        block: AssistantMessageBlock,
+    },
+    /// Runtime execution observation. This is not a TaskRun completion signal.
+    ExecutionStatus(ExecutionStatus),
     /// LLM is generating a token (streaming)
     Token(String),
     /// LLM reasoning started
@@ -703,13 +718,82 @@ pub enum AgentEvent {
     Cancelled,
 }
 
+/// Semantic phase of an assistant output block.
+///
+/// `Unknown` is intentional: adapters must not infer a phase from wording
+/// when the provider did not supply one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AssistantPhase {
+    Reasoning,
+    Commentary,
+    PartialAnswer,
+    FinalAnswer,
+    Unknown,
+}
+
+/// Lossless provider-neutral assistant block used by Framework, providers,
+/// EKO and SDK consumers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssistantMessageBlock {
+    /// Native source coordinates and content kind. Runtime-confirmed blocks
+    /// do not fabricate provider provenance and leave this field None.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_source: Option<crate::llm::types::ProviderOutputSource>,
+    /// Provider item/block id, or a Framework-generated stable fallback.
+    pub block_id: String,
+    /// Model request/response identity owning this block.
+    pub request_id: String,
+    /// Monotonic order within one model response.
+    pub sequence: u64,
+    /// Provider-neutral semantic phase.
+    pub phase: AssistantPhase,
+    /// Incremental text for this observation.
+    pub delta: String,
+    /// Whether the provider/runtime has completed this block.
+    pub complete: bool,
+    /// Provider identity, when known.
+    pub provider: Option<String>,
+    /// Native signed/redacted/opaque reasoning payload, if any.
+    pub reasoning: Option<crate::llm::types::ReasoningBlock>,
+}
+
+/// Runtime execution observation. This is deliberately separate from
+/// TaskRun/Agent completion and cannot publish a successful task on its own.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionStatusKind {
+    Started,
+    Waiting,
+    ToolPending,
+    Candidate,
+    Settled,
+    Cancelled,
+    Failed,
+}
+
+/// Stable execution status envelope shared by all consumers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecutionStatus {
+    /// 默认legacy适配器合成的状态，仅在进程内区分投影与原source事实。
+    /// 不进入JSON/Message/Checkpoint合同，嵌套wrapper不能把合成身份当原owner。
+    #[serde(skip)]
+    pub adapter_generated: bool,
+    pub execution_id: String,
+    pub request_id: Option<String>,
+    pub sequence: u64,
+    pub phase: AgentPhase,
+    pub status: ExecutionStatusKind,
+    pub reason: Option<String>,
+}
+
 /// The lifecycle phase an Agent event belongs to
 ///
 /// Maps each variant of `AgentEvent` into a unified phase model for:
 /// - **State persistence**: checkpoints are only created at phase boundaries
 /// - **Frontend rendering**: route to the corresponding UI component per phase, without matching every variant
 /// - **Developer understanding**: newcomers first understand phases, then specific events
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum AgentPhase {
     /// LLM reasoning in progress (Token → ThinkStart → ThinkEnd)
@@ -744,10 +828,17 @@ impl AgentEvent {
 
     /// Whether this event ends the invocation event stream.
     pub fn is_terminal(&self) -> bool {
-        matches!(
-            self,
-            AgentEvent::FinalAnswer(_) | AgentEvent::Cancelled | AgentEvent::Error { .. }
-        )
+        self.is_execution_terminal()
+            || matches!(
+                self,
+                AgentEvent::FinalAnswer(_) | AgentEvent::Cancelled | AgentEvent::Error { .. }
+            )
+    }
+
+    /// 原生执行最后的物理结算事实。模型块和 FinalAnswer 确认发布仍不能代替它。
+    pub fn is_execution_terminal(&self) -> bool {
+        matches!(self, Self::ExecutionStatus(status) if matches!(status.status,
+            ExecutionStatusKind::Settled | ExecutionStatusKind::Failed | ExecutionStatusKind::Cancelled))
     }
 
     /// Return prompt token count for `ThinkEnd`.
@@ -806,6 +897,9 @@ impl AgentEvent {
     /// ```
     pub fn phase(&self) -> AgentPhase {
         match self {
+            // provider阶段描述正文类型，不能充当执行生命周期终态。
+            AgentEvent::AssistantMessage { .. } => AgentPhase::Thinking,
+            AgentEvent::ExecutionStatus(status) => status.phase,
             AgentEvent::Token(_)
             | AgentEvent::ThinkStart
             | AgentEvent::ThinkEnd { .. }
@@ -846,23 +940,52 @@ impl AgentEvent {
     /// assert!(!AgentEvent::Token("hello".into()).is_checkpoint());
     /// ```
     pub fn is_checkpoint(&self) -> bool {
-        matches!(
-            self,
+        match self {
+            // 单块结束时整个模型响应/工具批仍可能在途，不是运行安全点。
+            AgentEvent::AssistantMessage { .. } => false,
+            AgentEvent::ExecutionStatus(status) => matches!(
+                status.status,
+                ExecutionStatusKind::Settled
+                    | ExecutionStatusKind::Cancelled
+                    | ExecutionStatusKind::Failed
+            ),
             AgentEvent::ThinkEnd { .. }
-                | AgentEvent::ToolResult { .. }
-                | AgentEvent::ParameterError { .. }
-                | AgentEvent::ContextCompressed { .. }
-                | AgentEvent::TranscriptProjectionSettlement(_)
-                | AgentEvent::FinalAnswer(_)
-                | AgentEvent::Cancelled
-                | AgentEvent::Error { .. }
-        )
+            | AgentEvent::ToolResult { .. }
+            | AgentEvent::ParameterError { .. }
+            | AgentEvent::ContextCompressed { .. }
+            | AgentEvent::TranscriptProjectionSettlement(_)
+            | AgentEvent::FinalAnswer(_)
+            | AgentEvent::Cancelled
+            | AgentEvent::Error { .. } => true,
+            _ => false,
+        }
     }
 }
 
 #[cfg(test)]
 mod accounting_tests {
     use super::AgentEvent;
+
+    #[test]
+    fn native_model_final_block_is_not_execution_terminal_or_safe_point() {
+        let event = AgentEvent::AssistantMessage {
+            block: super::AssistantMessageBlock {
+                provider_source: None,
+                block_id: "final-with-pending-tools".to_string(),
+                request_id: "response".to_string(),
+                sequence: 0,
+                phase: super::AssistantPhase::FinalAnswer,
+                delta: "尚有工具待执行".to_string(),
+                complete: true,
+                provider: Some("fixture".to_string()),
+                reasoning: None,
+            },
+        };
+        assert!(!event.is_terminal());
+        assert!(!event.is_execution_terminal());
+        assert!(!event.is_checkpoint());
+        assert_eq!(event.phase(), super::AgentPhase::Thinking);
+    }
 
     #[test]
     fn total_tokens_saturates_without_panicking() {
@@ -1062,8 +1185,8 @@ pub trait Agent: Send + Sync {
 
     /// Execute with invocation metadata carried as one immutable value.
     ///
-    /// The default preserves compatibility for agents that do not consume
-    /// invocation metadata.
+    /// 默认实现保留旧元数据调用行为；若请求 ReadOnly，则在旧执行入口前
+    /// 明确拒绝，不能声称已落实一个实际被忽略的能力上界。
     fn execute_stream_with_invocation_context<'a>(
         &'a self,
         task: &'a str,
@@ -1071,6 +1194,12 @@ pub trait Agent: Send + Sync {
         invocation: AgentInvocationContext,
     ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
         Box::pin(async move {
+            if invocation.tool_access == Some(crate::tools::ToolAccess::ReadOnly) {
+                // 本地复用方也不能静默丢弃只读调用，否则旧实现可能写入用户文件。
+                return Err(ReactError::Other(
+                    "this agent does not support read-only invocation constraints".to_string(),
+                ));
+            }
             let stream = self.execute_stream_with_cancel(task, cancel).await?;
             Ok(invocation_retaining_stream(stream, invocation))
         })
@@ -1144,6 +1273,9 @@ pub trait Agent: Send + Sync {
                 tool_call_id: None,
                 reasoning_content: None,
                 reasoning_blocks: None,
+                assistant_blocks: None,
+                execution_status: None,
+                approved_assistant_blocks: None,
             } = message
             {
                 // The adapter owns text for as long as the legacy stream can
@@ -1172,8 +1304,8 @@ pub trait Agent: Send + Sync {
 
     /// Structured multi-turn chat with value-scoped invocation metadata.
     ///
-    /// The default delegates to the existing structured chat method so
-    /// third-party agents can opt into metadata without changing semantics.
+    /// None 沿用原结构化聊天；ReadOnly 必须由实际支持该约束的实现承接，
+    /// 默认回退在旧方法开始前拒绝。
     fn chat_stream_message_with_invocation_context<'a>(
         &'a self,
         message: Message,
@@ -1181,6 +1313,12 @@ pub trait Agent: Send + Sync {
         invocation: AgentInvocationContext,
     ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
         Box::pin(async move {
+            if invocation.tool_access == Some(crate::tools::ToolAccess::ReadOnly) {
+                // 本地复用方也不能静默丢弃只读调用，否则旧实现可能写入用户文件。
+                return Err(ReactError::Other(
+                    "this agent does not support read-only invocation constraints".to_string(),
+                ));
+            }
             let stream = self
                 .chat_stream_message_with_cancel(message, cancel)
                 .await?;
@@ -1214,8 +1352,8 @@ pub trait Agent: Send + Sync {
 
     /// Multimodal streaming with value-scoped invocation metadata.
     ///
-    /// The default delegates to the existing multimodal method so third-party
-    /// agents remain source compatible.
+    /// None 沿用原多模态方法；ReadOnly 由实际支持该约束的实现承接，
+    /// 默认回退不能静默退化成不限能力的旧调用。
     fn execute_stream_message_with_invocation_context<'a>(
         &'a self,
         message: Message,
@@ -1223,6 +1361,12 @@ pub trait Agent: Send + Sync {
         invocation: AgentInvocationContext,
     ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
         Box::pin(async move {
+            if invocation.tool_access == Some(crate::tools::ToolAccess::ReadOnly) {
+                // 本地复用方也不能静默丢弃只读调用，否则旧实现可能写入用户文件。
+                return Err(ReactError::Other(
+                    "this agent does not support read-only invocation constraints".to_string(),
+                ));
+            }
             let stream = self
                 .execute_stream_message_with_cancel(message, cancel)
                 .await?;
@@ -1537,63 +1681,413 @@ fn retaining_source_stream<'a>(
 ) -> BoxStream<'a, Result<AgentEvent>> {
     let wrapped = async_stream::stream! {
         let _invocation = invocation;
+        let execution_id = _invocation.as_ref().and_then(|value| value.runtime.as_ref())
+            .and_then(|runtime| runtime.execution_id.clone());
+        let invocation_run_id = _invocation.as_ref().and_then(|value| value.runtime.as_ref())
+            .and_then(|runtime| runtime.run_id.clone());
+        let mut native_source_execution_id: Option<String> = None;
+        let fallback_id = format!("execution:{}",uuid::Uuid::new_v4());
         let mut cancel_requested = false;
         let mut business_observed = false;
-        // A final answer projects the business result but is not a failure
-        // cause. Preserve the first later cleanup error while still draining
-        // the same original source, without replacing an earlier failure.
         let mut failure_observed = false;
+        let mut cancelled_observed = false;
         let mut source_observation_pending = false;
+        let mut foreign_observation_pending = false;
+        let mut pending_success = None;
+        let mut pending_status: Option<ExecutionStatus> = None;
+        let mut publication = Vec::new();
+        let mut next_sequence = 0_u64;
+        let mut first_item = true;
         loop {
-            let next = if cancel_requested || business_observed {
-                stream.next().await
-            } else if let Some(cancel) = cancel.as_ref() {
-                tokio::select! {
-                    biased;
+            let next = if cancel_requested { stream.next().await }
+            else if let Some(cancel) = cancel.as_ref() {
+                tokio::select! { biased;
                     next = stream.next() => next,
-                    _ = cancel.cancelled() => {
-                        cancel_requested = true;
-                        continue;
-                    }
+                    _ = cancel.cancelled() => { cancel_requested=true; pending_success=None; publication.clear(); continue; }
                 }
-            } else {
-                stream.next().await
-            };
-            let Some(item) = next else { break; };
-            match &item {
-                Err(ReactError::ExecutionNotSettled { .. }) => {
-                    source_observation_pending = true;
-                    yield item;
+            } else { stream.next().await };
+            let Some(mut item) = next else { break; };
+            if let Ok(AgentEvent::ExecutionStatus(status)) = &mut item
+                && status.adapter_generated
+                && let Some(id) = native_source_execution_id.as_ref().or(execution_id.as_ref())
+            {
+                // 只绑定合成投影，且Started/末尾一致；真实原生身份绝不覆盖。
+                status.execution_id = id.clone();
+            }
+            if first_item {
+                first_item = false;
+                if let Ok(AgentEvent::ExecutionStatus(status)) = &item
+                    && !status.adapter_generated
+                {
+                    native_source_execution_id = Some(status.execution_id.clone());
+                }
+                if !matches!(&item, Ok(AgentEvent::ExecutionStatus(_))) {
+                    // 旧custom Agent的原source由此既有adapter持有；标记运输模式，
+                    // 让外层envelope继续读取至同source的最终结算而非早停于正文。
+                    yield Ok(AgentEvent::ExecutionStatus(ExecutionStatus {
+                        adapter_generated: true,
+                        execution_id: execution_id.clone().unwrap_or_else(|| fallback_id.clone()),
+                        request_id: None, sequence: next_sequence, phase: AgentPhase::Thinking,
+                        status: ExecutionStatusKind::Started, reason: None,
+                    }));
+                    next_sequence = next_sequence.saturating_add(1);
+                }
+            }
+            match item {
+                Err(error @ ReactError::ExecutionNotSettled { .. }) => {
+                    if let ReactError::ExecutionNotSettled { run_id, execution_id: observed } = &error {
+                        // 已知owner的foreign观察不能被本owner的final/状态清除。
+                        // 未绑定的legacy原source仍可在真正闭合后给晚到final。
+                        foreign_observation_pending |= invocation_run_id.as_ref()
+                            .is_some_and(|owner| owner != run_id)
+                            || native_source_execution_id.as_ref().or(execution_id.as_ref())
+                                .is_some_and(|owner| observed.as_ref() != Some(owner));
+                    }
+                    source_observation_pending=true;
+                    pending_success=None; publication.clear(); business_observed=false;
+                    // 保原source和原错误身份；只观察到EOF不能把unknown补成终态。
+                    yield Err(error);
+                }
+                Ok(AgentEvent::ExecutionStatus(status)) if matches!(status.status,
+                    ExecutionStatusKind::Settled | ExecutionStatusKind::Failed | ExecutionStatusKind::Cancelled) => {
+                    source_observation_pending=foreign_observation_pending;
+                    pending_status=Some(status);
+                }
+                Ok(AgentEvent::ExecutionStatus(mut status)) => {
+                    status.sequence=status.sequence.max(next_sequence);
+                    next_sequence=status.sequence.saturating_add(1);
+                    yield Ok(AgentEvent::ExecutionStatus(status));
+                }
+                Ok(event @ AgentEvent::FinalAnswer(_)) => {
+                    source_observation_pending=foreign_observation_pending;
+                    if !cancel_requested && !failure_observed && pending_success.is_none() {
+                        business_observed=true; pending_success=Some(event);
+                    }
                 }
                 Ok(event) if event.is_terminal() => {
-                    let confirms_observation = source_observation_pending;
-                    source_observation_pending = false;
-                    if !cancel_requested && (!business_observed || confirms_observation) {
-                        // A confirmation after a delivered terminal is consumed
-                        // by the original drainer, not replayed as another
-                        // canonical business terminal by the normalizer.
-                        business_observed = true;
-                        failure_observed |= matches!(event, AgentEvent::Cancelled | AgentEvent::Error { .. });
-                        yield item;
+                    source_observation_pending=foreign_observation_pending; pending_success=None; publication.clear();
+                    if !cancel_requested && !failure_observed {
+                        business_observed=true; failure_observed=true;
+                        cancelled_observed=matches!(event,AgentEvent::Cancelled);
+                        yield Ok(event);
                     }
                 }
-                Err(_) if !cancel_requested && !failure_observed => {
-                    business_observed = true;
-                    failure_observed = true;
-                    yield item;
+                Err(error) if !cancel_requested && !failure_observed => {
+                    pending_success=None; publication.clear();
+                    cancelled_observed |= crate::error::AgentFailure::try_from(&error)
+                        .is_ok_and(|failure| failure.terminal_kind == crate::error::AgentTerminalKind::Cancelled);
+                    business_observed=true; failure_observed=true; yield Err(error);
                 }
-                Ok(_) if !cancel_requested && !business_observed => yield item,
+                Ok(event) if !cancel_requested && !failure_observed && pending_status.is_some() => publication.push(event),
+                Ok(event) if !cancel_requested && !business_observed => yield Ok(event),
                 _ => {}
             }
         }
-        if cancel_requested && !business_observed && !source_observation_pending {
-            // With prior uncertainty this projection is backed by a genuine
-            // later source terminal AND the just-observed original EOF. A
-            // cancelled token or EOF alone never clears that uncertainty.
-            yield Ok(AgentEvent::Cancelled);
+        // 既有source物理EOF之后才发布单次terminal status；嵌套wrapper保同一原状态，不复制终态。
+        if !source_observation_pending {
+            let kind = if cancel_requested || cancelled_observed { Some(ExecutionStatusKind::Cancelled) }
+                else if failure_observed { Some(ExecutionStatusKind::Failed) }
+                else if pending_success.is_some() { Some(ExecutionStatusKind::Settled) }
+                else { pending_status.as_ref().map(|status|status.status.clone()) };
+            if let Some(kind)=kind {
+                if kind==ExecutionStatusKind::Settled {
+                    for event in publication { yield Ok(event); }
+                    if let Some(success)=pending_success { yield Ok(success); }
+                } else if cancel_requested && !failure_observed { yield Ok(AgentEvent::Cancelled); }
+                let mut status=pending_status.unwrap_or_else(||ExecutionStatus {
+                    adapter_generated: true,
+                    execution_id:native_source_execution_id.clone().or_else(|| execution_id.clone()).unwrap_or(fallback_id),request_id:None,
+                    sequence:next_sequence,phase:AgentPhase::Terminal,status:kind.clone(),reason:None,
+                });
+                // 原生source已有身份就保持它；仅legacy合成投影使用调用上下文身份。
+                if status.adapter_generated
+                    && let Some(id)=native_source_execution_id.as_ref().or(execution_id.as_ref()) { status.execution_id=id.clone(); }
+                status.status=kind; status.sequence=status.sequence.max(next_sequence);
+                yield Ok(AgentEvent::ExecutionStatus(status));
+            }
         }
     };
     Box::pin(wrapped)
+}
+
+#[cfg(test)]
+mod native_default_wrapper_identity_tests {
+    use super::*;
+    use futures::StreamExt;
+
+    #[test]
+    fn adapter_provenance_is_runtime_only_and_does_not_change_serialized_status()
+    -> std::result::Result<(), serde_json::Error> {
+        let mut status = ExecutionStatus {
+            adapter_generated: true,
+            execution_id: "legacy-projection".into(),
+            request_id: None,
+            sequence: 0,
+            phase: AgentPhase::Thinking,
+            status: ExecutionStatusKind::Started,
+            reason: None,
+        };
+        let projected = serde_json::to_value(&status)?;
+        assert!(projected.get("adapter_generated").is_none());
+        status.adapter_generated = false;
+        assert_eq!(projected, serde_json::to_value(&status)?);
+        assert!(!serde_json::from_value::<ExecutionStatus>(projected)?.adapter_generated);
+        Ok(())
+    }
+
+    struct NativeSource {
+        foreign_observation: Option<bool>,
+        emit_terminal: bool,
+    }
+
+    impl Agent for NativeSource {
+        fn name(&self) -> &str {
+            "native-default-source"
+        }
+        fn model_name(&self) -> &str {
+            "fixture"
+        }
+        fn system_prompt(&self) -> &str {
+            "fixture"
+        }
+        fn execute<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<String>> {
+            Box::pin(async { Ok("unused".into()) })
+        }
+        fn execute_stream<'a>(
+            &'a self,
+            _: &'a str,
+        ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+            Box::pin(async move {
+                let status = |kind, phase, sequence| {
+                    AgentEvent::ExecutionStatus(ExecutionStatus {
+                        adapter_generated: false,
+                        execution_id: "source-execution".into(),
+                        request_id: None,
+                        sequence,
+                        phase,
+                        status: kind,
+                        reason: None,
+                    })
+                };
+                let mut events = vec![Ok(status(
+                    ExecutionStatusKind::Started,
+                    AgentPhase::Thinking,
+                    0,
+                ))];
+                if let Some(foreign) = self.foreign_observation {
+                    events.push(Err(ReactError::ExecutionNotSettled {
+                        run_id: if foreign { "foreign-run" } else { "source-run" }.into(),
+                        execution_id: Some(
+                            if foreign {
+                                "foreign-execution"
+                            } else {
+                                "source-execution"
+                            }
+                            .into(),
+                        ),
+                    }));
+                }
+                events.push(Ok(AgentEvent::FinalAnswer("source answer".into())));
+                if self.emit_terminal {
+                    events.push(Ok(status(
+                        ExecutionStatusKind::Settled,
+                        AgentPhase::Terminal,
+                        1,
+                    )));
+                }
+                Ok(futures::stream::iter(events).boxed())
+            })
+        }
+        fn execute_stream_message_with_cancel<'a>(
+            &'a self,
+            _: Message,
+            _: CancellationToken,
+        ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+            // 实现原结构化source，公共invocation方法仍用被测的默认adapter。
+            self.execute_stream("native source fixture")
+        }
+    }
+
+    async fn collect(
+        source: NativeSource,
+        caller_execution: &str,
+    ) -> Result<Vec<Result<AgentEvent>>> {
+        let invocation = AgentInvocationContext {
+            runtime: Some(crate::tools::ExternalRunContext {
+                run_id: Some("source-run".into()),
+                execution_id: Some(caller_execution.into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        Ok(source
+            .execute_stream_message_with_invocation_context(
+                Message::user("request".into()),
+                CancellationToken::new(),
+                invocation,
+            )
+            .await?
+            .collect()
+            .await)
+    }
+
+    #[tokio::test]
+    async fn native_default_wrapper_keeps_original_execution_identity() -> Result<()> {
+        let events = collect(
+            NativeSource {
+                foreign_observation: None,
+                emit_terminal: true,
+            },
+            "caller-execution",
+        )
+        .await?;
+        let ids = events
+            .iter()
+            .filter_map(|event| match event {
+                Ok(AgentEvent::ExecutionStatus(status)) => Some(status.execution_id.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec!["source-execution", "source-execution"]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn native_default_wrapper_keeps_native_owner_for_synthesized_terminal() -> Result<()> {
+        let events = collect(
+            NativeSource {
+                foreign_observation: None,
+                emit_terminal: false,
+            },
+            "caller-execution",
+        )
+        .await?;
+        let statuses = events
+            .iter()
+            .filter_map(|event| match event {
+                Ok(AgentEvent::ExecutionStatus(status)) => Some(status),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            statuses
+                .iter()
+                .map(|status| status.execution_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["source-execution", "source-execution"]
+        );
+        assert!(
+            statuses
+                .last()
+                .is_some_and(|status| status.status == ExecutionStatusKind::Settled)
+        );
+        assert!(events.iter().any(|event| matches!(event, Ok(AgentEvent::FinalAnswer(answer)) if answer == "source answer")));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn native_default_wrapper_foreign_unknown_cannot_be_cleared_by_own_final() -> Result<()> {
+        for (foreign, caller) in [
+            (true, "source-execution"),
+            (false, "source-execution"),
+            (true, "caller-execution"),
+            (false, "caller-execution"),
+        ] {
+            let events = collect(
+                NativeSource {
+                    foreign_observation: Some(foreign),
+                    emit_terminal: true,
+                },
+                caller,
+            )
+            .await?;
+            assert!(
+                events
+                    .iter()
+                    .any(|event| matches!(event, Err(ReactError::ExecutionNotSettled { .. })))
+            );
+            let final_answer = events
+                .iter()
+                .any(|event| matches!(event, Ok(AgentEvent::FinalAnswer(_))));
+            let settled = events.iter().any(|event| matches!(event, Ok(AgentEvent::ExecutionStatus(status)) if status.status == ExecutionStatusKind::Settled));
+            assert_eq!(final_answer, !foreign);
+            assert_eq!(settled, !foreign);
+        }
+        Ok(())
+    }
+
+    struct LegacySource;
+    impl Agent for LegacySource {
+        fn name(&self) -> &str {
+            "legacy default source"
+        }
+        fn model_name(&self) -> &str {
+            "fixture"
+        }
+        fn system_prompt(&self) -> &str {
+            "fixture"
+        }
+        fn execute<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<String>> {
+            Box::pin(async { Ok("unused".into()) })
+        }
+        fn execute_stream<'a>(
+            &'a self,
+            task: &'a str,
+        ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+            self.chat_stream(task)
+        }
+        fn chat_stream<'a>(
+            &'a self,
+            _: &'a str,
+        ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+            Box::pin(async {
+                Ok(futures::stream::iter([
+                    Err(ReactError::ExecutionNotSettled {
+                        run_id: "source-run".into(),
+                        execution_id: Some("source-execution".into()),
+                    }),
+                    Ok(AgentEvent::FinalAnswer("legacy closed answer".into())),
+                ])
+                .boxed())
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn native_default_wrapper_binds_nested_legacy_projection_to_caller() -> Result<()> {
+        let invocation = AgentInvocationContext {
+            runtime: Some(crate::tools::ExternalRunContext {
+                run_id: Some("source-run".into()),
+                execution_id: Some("source-execution".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let events = LegacySource
+            .chat_stream_message_with_invocation_context(
+                Message::user("pure text".into()),
+                CancellationToken::new(),
+                invocation,
+            )
+            .await?
+            .collect::<Vec<_>>()
+            .await;
+        assert!(events.iter().any(|event| matches!(event, Ok(AgentEvent::FinalAnswer(answer)) if answer == "legacy closed answer")));
+        let statuses = events
+            .iter()
+            .filter_map(|event| match event {
+                Ok(AgentEvent::ExecutionStatus(status)) => Some(status),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(statuses.len(), 2);
+        assert!(
+            statuses
+                .iter()
+                .all(|status| status.execution_id == "source-execution")
+        );
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -1678,6 +2172,10 @@ mod invocation_retaining_stream_tests {
                 AgentInvocationContext::default(),
             )
             .await?;
+        let started = source.next().await;
+        assert!(
+            matches!(started, Some(Ok(AgentEvent::ExecutionStatus(status))) if status.status == ExecutionStatusKind::Started)
+        );
         let first = source.next().await;
         let early = tokio::time::timeout(std::time::Duration::from_millis(20), source.next()).await;
         let held = std::fs::read_to_string(&path).ok();
@@ -1706,7 +2204,7 @@ mod invocation_retaining_stream_tests {
         );
         assert_eq!(early_drops, 0);
         assert!(
-            matches!(tail.as_slice(), [Ok(AgentEvent::FinalAnswer(answer))] if answer == "same original source")
+            matches!(tail.as_slice(), [Ok(AgentEvent::FinalAnswer(answer)), Ok(AgentEvent::ExecutionStatus(status))] if answer == "same original source" && status.status==ExecutionStatusKind::Settled)
         );
         assert_eq!(drops.load(Ordering::SeqCst), 1);
         Ok(())
@@ -1892,9 +2390,9 @@ mod invocation_retaining_stream_tests {
             )
             .await?;
             assert!(
-                matches!(events.as_slice(), [Ok(AgentEvent::FinalAnswer(answer)), Err(ReactError::Other(error))]
-                    if answer == "done" && error == "first cleanup failure"),
-                "{entry:?} must retain the first cleanup failure after its final answer: {events:?}"
+                matches!(events.as_slice(), [Ok(AgentEvent::ExecutionStatus(started)), Err(ReactError::Other(error)), Ok(AgentEvent::ExecutionStatus(status))]
+                    if error == "first cleanup failure" && started.status == ExecutionStatusKind::Started && status.status==ExecutionStatusKind::Failed && started.execution_id == status.execution_id),
+                "{entry:?} must suppress premature success and retain the first cleanup failure: {events:?}"
             );
         }
         Ok(())
@@ -1921,8 +2419,14 @@ mod invocation_retaining_stream_tests {
                     ],
                 )
                 .await?;
-                assert_eq!(events.len(), 1, "{entry:?}: {events:?}");
-                assert_eq!(format!("{:?}", events.first()), format!("Some({expected})"));
+                assert_eq!(events.len(), 3, "{entry:?}: {events:?}");
+                assert!(
+                    matches!(events.first(), Some(Ok(AgentEvent::ExecutionStatus(status))) if status.status == ExecutionStatusKind::Started)
+                );
+                assert_eq!(format!("{:?}", events.get(1)), format!("Some({expected})"));
+                assert!(
+                    matches!(events.last(),Some(Ok(AgentEvent::ExecutionStatus(status))) if matches!(status.status,ExecutionStatusKind::Failed|ExecutionStatusKind::Cancelled))
+                );
             }
         }
         Ok(())
@@ -1948,9 +2452,33 @@ mod invocation_retaining_stream_tests {
             )
             .await?;
             assert!(
-                matches!(events.as_slice(), [Ok(AgentEvent::FinalAnswer(_)), Err(ReactError::ExecutionNotSettled { run_id, execution_id: Some(execution_id) }), Err(ReactError::Other(error))]
-                    if run_id == "original-run" && execution_id == "original-attempt" && error == "cleanup failure"),
+                matches!(events.as_slice(), [Ok(AgentEvent::ExecutionStatus(started)), Err(ReactError::ExecutionNotSettled { run_id, execution_id: Some(execution_id) }), Err(ReactError::Other(error))]
+                    if started.status == ExecutionStatusKind::Started && run_id == "original-run" && execution_id == "original-attempt" && error == "cleanup failure"),
                 "{entry:?} lost original observation or cleanup cause: {events:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn default_invocation_entries_publish_only_one_success_after_clean_original_eof()
+    -> Result<()> {
+        for entry in [
+            DefaultStreamEntry::Text,
+            DefaultStreamEntry::ChatMessage,
+            DefaultStreamEntry::ExecuteMessage,
+        ] {
+            let events = default_tail_events(
+                entry,
+                vec![
+                    Ok(AgentEvent::FinalAnswer("done".into())),
+                    Ok(AgentEvent::FinalAnswer("duplicate".into())),
+                ],
+            )
+            .await?;
+            assert!(
+                matches!(events.as_slice(), [Ok(AgentEvent::ExecutionStatus(started)), Ok(AgentEvent::FinalAnswer(answer)), Ok(AgentEvent::ExecutionStatus(status))] if answer == "done" && started.status == ExecutionStatusKind::Started && status.status==ExecutionStatusKind::Settled && started.execution_id == status.execution_id),
+                "{entry:?}: {events:?}"
             );
         }
         Ok(())
@@ -2213,6 +2741,12 @@ mod default_pure_text_chat_tests {
             .await?;
         assert_eq!(agent.calls.load(Ordering::SeqCst), 0);
         assert_eq!(drops.load(Ordering::SeqCst), 0);
+        let Some(Ok(AgentEvent::ExecutionStatus(started))) = events.next().await else {
+            return Err(ReactError::Other(
+                "missing original execution Started".into(),
+            ));
+        };
+        assert_eq!(started.status, ExecutionStatusKind::Started);
         assert!(
             matches!(events.next().await, Some(Ok(AgentEvent::Token(text))) if text == "owned 中文🌊")
         );
@@ -2234,6 +2768,13 @@ mod default_pure_text_chat_tests {
             events.next().await,
             Some(Ok(AgentEvent::Cancelled))
         ));
+        let Some(Ok(AgentEvent::ExecutionStatus(cancelled))) = events.next().await else {
+            return Err(ReactError::Other(
+                "missing original execution Cancelled".into(),
+            ));
+        };
+        assert_eq!(cancelled.status, ExecutionStatusKind::Cancelled);
+        assert_eq!(cancelled.execution_id, started.execution_id);
         assert!(events.next().await.is_none());
         drop(events);
         assert_eq!(drops.load(Ordering::SeqCst), 1);
@@ -2357,12 +2898,167 @@ mod default_pure_text_chat_tests {
                 AgentInvocationContext::default(),
             )
             .await?;
+        let Some(Ok(AgentEvent::ExecutionStatus(started))) = events.next().await else {
+            return Err(ReactError::Other(
+                "missing structured execution Started".into(),
+            ));
+        };
+        assert_eq!(started.status, ExecutionStatusKind::Started);
         assert!(
             matches!(events.next().await, Some(Ok(AgentEvent::FinalAnswer(answer))) if answer == "structured-original")
         );
+        let Some(Ok(AgentEvent::ExecutionStatus(settled))) = events.next().await else {
+            return Err(ReactError::Other(
+                "missing structured execution Settled".into(),
+            ));
+        };
+        assert_eq!(settled.status, ExecutionStatusKind::Settled);
+        assert_eq!(settled.execution_id, started.execution_id);
         assert!(events.next().await.is_none());
         assert_eq!(agent.structured.load(Ordering::SeqCst), 1);
         assert_eq!(agent.legacy.load(Ordering::SeqCst), 0);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod readonly_invocation_fallback_tests {
+    use super::*;
+    use futures::StreamExt;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Default)]
+    struct LegacyAgent {
+        calls: AtomicUsize,
+    }
+
+    impl Agent for LegacyAgent {
+        fn name(&self) -> &str {
+            "legacy"
+        }
+        fn model_name(&self) -> &str {
+            "test"
+        }
+        fn system_prompt(&self) -> &str {
+            ""
+        }
+        fn execute<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<String>> {
+            Box::pin(async {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Ok("legacy".into())
+            })
+        }
+        fn execute_stream<'a>(
+            &'a self,
+            _: &'a str,
+        ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+            Box::pin(async {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Ok(futures::stream::empty().boxed())
+            })
+        }
+        fn chat_stream_message_with_cancel<'a>(
+            &'a self,
+            _: Message,
+            _: CancellationToken,
+        ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+            Box::pin(async {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Ok(futures::stream::empty().boxed())
+            })
+        }
+        fn execute_stream_message_with_cancel<'a>(
+            &'a self,
+            _: Message,
+            _: CancellationToken,
+        ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+            Box::pin(async {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Ok(futures::stream::empty().boxed())
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn readonly_default_invocation_fallbacks_reject_before_legacy_calls() -> Result<()> {
+        let agent = std::sync::Arc::new(LegacyAgent::default());
+        for mode in 0..3 {
+            let context = AgentInvocationContext {
+                tool_access: Some(crate::tools::ToolAccess::ReadOnly),
+                ..Default::default()
+            };
+            let result = match mode {
+                0 => {
+                    agent
+                        .execute_stream_with_invocation_context(
+                            "task",
+                            CancellationToken::new(),
+                            context,
+                        )
+                        .await
+                }
+                1 => {
+                    agent
+                        .chat_stream_message_with_invocation_context(
+                            Message::user("task".to_string()),
+                            CancellationToken::new(),
+                            context,
+                        )
+                        .await
+                }
+                _ => {
+                    agent
+                        .execute_stream_message_with_invocation_context(
+                            Message::user("task".to_string()),
+                            CancellationToken::new(),
+                            context,
+                        )
+                        .await
+                }
+            };
+            assert!(
+                matches!(result, Err(error) if error.to_string().contains("read-only invocation constraints"))
+            );
+        }
+        assert_eq!(agent.calls.load(Ordering::SeqCst), 0);
+        for mode in 0..3 {
+            match mode {
+                0 => {
+                    drop(
+                        agent
+                            .execute_stream_with_invocation_context(
+                                "task",
+                                CancellationToken::new(),
+                                AgentInvocationContext::default(),
+                            )
+                            .await?,
+                    );
+                }
+                1 => {
+                    drop(
+                        agent
+                            .chat_stream_message_with_invocation_context(
+                                Message::user("task".to_string()),
+                                CancellationToken::new(),
+                                AgentInvocationContext::default(),
+                            )
+                            .await?,
+                    );
+                }
+                _ => {
+                    drop(
+                        agent
+                            .execute_stream_message_with_invocation_context(
+                                Message::user("task".to_string()),
+                                CancellationToken::new(),
+                                AgentInvocationContext::default(),
+                            )
+                            .await?,
+                    );
+                }
+            }
+        }
+        assert_eq!(agent.calls.load(Ordering::SeqCst), 3);
         Ok(())
     }
 }

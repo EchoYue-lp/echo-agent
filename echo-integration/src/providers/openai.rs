@@ -13,6 +13,7 @@ use tracing::{Instrument, info_span};
 
 use super::client::{ensure_request_not_cancelled, post, stream_post};
 use super::config::LlmConfig;
+use super::native_message::{blocks_from_message, output_source};
 use super::thinking_translate::translate_thinking_openai_compat;
 
 fn token_limits(model: &str, limit: Option<u32>) -> (Option<u32>, Option<u32>) {
@@ -49,6 +50,12 @@ fn normalize_messages(messages: Vec<Message>) -> Vec<Message> {
             // Preserve them in provider-neutral history, but do not leak these
             // extension fields to OpenAI-compatible endpoints.
             msg.reasoning_blocks = None;
+            msg.assistant_blocks = None;
+            msg.execution_status = None;
+            msg.approved_assistant_blocks = None;
+            for tool in msg.tool_calls.as_mut().into_iter().flatten() {
+                tool.provider_source = None;
+            }
             if let MessageContent::Parts(parts) = &mut msg.content {
                 let mut rewritten: Vec<ContentPart> = Vec::with_capacity(parts.len());
                 for part in parts.drain(..) {
@@ -236,7 +243,7 @@ impl LlmClient for OpenAiClient {
                     user_id: request.user_id.clone(),
                 };
 
-                let raw = post(
+                let mut raw = post(
                     self.client.clone(),
                     &req,
                     self.header_map.clone(),
@@ -246,10 +253,60 @@ impl LlmClient for OpenAiClient {
                 )
                 .await?;
 
+                let request_id = if raw.id.is_empty() {
+                    super::native_message::fallback_request_id("chat")
+                } else {
+                    raw.id.clone()
+                };
+                // Provider JSON can contain similarly named extension fields;
+                // only the runtime may supply execution/approved observations.
+                for choice in &mut raw.choices {
+                    choice.message.execution_status = None;
+                    choice.message.approved_assistant_blocks = None;
+                    choice.message.assistant_blocks = None;
+                    for (index, tool) in choice
+                        .message
+                        .tool_calls
+                        .as_mut()
+                        .into_iter()
+                        .flatten()
+                        .enumerate()
+                    {
+                        let index = u32::try_from(index).map_err(|_| {
+                            LlmError::InvalidResponse("Chat tool index exceeds u32".into())
+                        })?;
+                        tool.provider_source = Some(output_source(
+                            echo_core::llm::LlmApiProtocol::ChatCompletions,
+                            &request_id,
+                            &tool.id,
+                            index,
+                            None,
+                            "tool_calls",
+                            None,
+                        ));
+                    }
+                }
                 let choice = raw.choices.first().ok_or(LlmError::EmptyResponse)?;
+                super::native_message::validate_completion(
+                    &choice.message,
+                    choice.finish_reason.as_deref(),
+                )?;
 
+                let mut message = choice.message.clone();
+                let assistant_blocks = blocks_from_message(
+                    &message,
+                    &request_id,
+                    self.config
+                        .provider_name
+                        .as_deref()
+                        .unwrap_or("openai_compatible"),
+                    true,
+                );
+                if !assistant_blocks.is_empty() {
+                    message.assistant_blocks = Some(assistant_blocks);
+                }
                 let response = ChatResponse {
-                    message: choice.message.clone(),
+                    message,
                     finish_reason: choice.finish_reason.clone(),
                     usage: raw.usage.clone(),
                     raw,
@@ -311,12 +368,79 @@ impl LlmClient for OpenAiClient {
                 )
                 .await?;
 
-                Ok(Box::pin(futures::StreamExt::map(stream, |result| {
+                let provider = self
+                    .config
+                    .provider_name
+                    .clone()
+                    .unwrap_or_else(|| "openai_compatible".into());
+                let mut request_id = String::new();
+                let mut sequence = 0_u64;
+                let mut observed_blocks = std::collections::BTreeMap::new();
+                let mut tool_ids = std::collections::BTreeMap::new();
+                Ok(Box::pin(futures::StreamExt::map(stream, move |result| {
                     result.map(|chunk| {
+                        if request_id.is_empty() {
+                            request_id = if chunk.id.is_empty() {
+                                super::native_message::fallback_request_id("chat")
+                            } else {
+                                chunk.id.clone()
+                            };
+                        }
                         let choice = chunk.choices.first();
+                        let mut delta = choice.map(|c| c.delta.clone()).unwrap_or_default();
+                        delta.assistant_blocks = None;
+                        for tool in delta.tool_calls.as_mut().into_iter().flatten() {
+                            tool.provider_source = None;
+                            if let Some(id) = &tool.id {
+                                tool_ids.insert(tool.index, id.clone());
+                            }
+                            if let Some(id) = tool_ids.get(&tool.index) {
+                                tool.provider_source = Some(output_source(
+                                    echo_core::llm::LlmApiProtocol::ChatCompletions,
+                                    &request_id,
+                                    id,
+                                    tool.index,
+                                    None,
+                                    "tool_calls",
+                                    None,
+                                ));
+                            }
+                        }
+                        let finish_reason = choice.and_then(|c| c.finish_reason.clone());
+                        let message = Message {
+                            content: delta
+                                .content
+                                .clone()
+                                .map(MessageContent::Text)
+                                .unwrap_or_default(),
+                            reasoning_content: delta.reasoning_content.clone(),
+                            reasoning_blocks: delta.reasoning_blocks.clone(),
+                            ..Default::default()
+                        };
+                        let mut blocks =
+                            blocks_from_message(&message, &request_id, &provider, false);
+                        for block in &mut blocks {
+                            block.sequence = sequence;
+                            sequence = sequence.saturating_add(1);
+                            observed_blocks.insert(block.block_id.clone(), block.clone());
+                        }
+                        if finish_reason.is_some() {
+                            for block in observed_blocks.values() {
+                                let mut closed = block.clone();
+                                closed.delta.clear();
+                                closed.reasoning = None;
+                                closed.complete = true;
+                                closed.sequence = sequence;
+                                sequence = sequence.saturating_add(1);
+                                blocks.push(closed);
+                            }
+                        }
+                        if !blocks.is_empty() {
+                            delta.assistant_blocks = Some(blocks);
+                        }
                         ChatChunk {
-                            delta: choice.map(|c| c.delta.clone()).unwrap_or_default(),
-                            finish_reason: choice.and_then(|c| c.finish_reason.clone()),
+                            delta,
+                            finish_reason,
                             usage: chunk.usage.clone(),
                         }
                     })

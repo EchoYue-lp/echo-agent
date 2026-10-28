@@ -242,8 +242,7 @@ async fn run_scripted_task(
         let arguments = serde_json::to_string(args)?;
         mock = mock.then_tool_call(format!("call_{idx}_{tool_name}"), *tool_name, arguments);
     }
-    let final_arguments = serde_json::to_string(&json!({ "answer": final_answer }))?;
-    mock = mock.then_tool_call("call_final_answer", "final_answer", final_arguments);
+    mock = mock.with_response(final_answer);
 
     let agent = ReactAgentBuilder::new()
         .name(agent_name)

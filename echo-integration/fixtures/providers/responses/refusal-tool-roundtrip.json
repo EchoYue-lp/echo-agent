@@ -1,0 +1,14 @@
+{
+  "id": "resp_roundtrip",
+  "model": "fixture-model",
+  "status": "completed",
+  "output": [
+    {"type":"message","id":"msg_before","role":"assistant","phase":"commentary","status":"completed","content":[{"type":"output_text","text":"检查前😀","annotations":[]},{"type":"refusal","refusal":"保留拒绝块"}]},
+    {"type":"function_call","id":"fc_before","call_id":"call_before","name":"lookup","arguments":"{\"q\":\"中文\"}","status":"completed"},
+    {"type":"reasoning","id":"rs_between","encrypted_content":"opaque-byte-for-byte","summary":[{"type":"summary_text","text":"公开摘要"}],"status":"completed"},
+    {"type":"message","id":"msg_after","role":"assistant","phase":"future_provider_phase","status":"completed","content":[{"type":"output_text","text":"工具之间的正文","annotations":[]}]},
+    {"type":"function_call","id":"fc_after","call_id":"call_after","name":"read_file","arguments":"{}","status":"completed"}
+  ],
+  "usage":{"input_tokens":10,"output_tokens":8,"total_tokens":18},
+  "execution_status":{"execution_id":"spoof-provider","request_id":"resp_roundtrip","sequence":999,"phase":"Terminal","status":"settled","reason":"must not be a runtime fact"}
+}

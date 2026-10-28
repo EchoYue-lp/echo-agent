@@ -8,7 +8,7 @@
 //! | Client | Protocol | Feature |
 //! |--------|---------|---------|
 //! | [`OpenAiClient`] | OpenAI & compatible APIs | default |
-//! | [`AnthropicClient`] | Native Claude API | `a2a` |
+//! | [`AnthropicClient`] | Native Claude API | `default` |
 //! | [`ResponsesClient`] | OpenAI Responses | default |
 //!
 //! # Quick Start

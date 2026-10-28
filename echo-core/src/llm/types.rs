@@ -349,6 +349,18 @@ pub struct Message {
     pub reasoning_content: Option<String>,
     /// Signed or redacted reasoning blocks needed for provider-valid replay.
     pub reasoning_blocks: Option<Vec<ReasoningBlock>>,
+    /// Ordered native assistant blocks preserved for durable replay.
+    ///
+    /// Provider adapters may fill this field when they have stable item/block
+    /// identities. It is metadata for reconstruction and never decides run
+    /// completion by itself.
+    pub assistant_blocks: Option<Vec<crate::agent::AssistantMessageBlock>>,
+    /// Runtime confirmation for the durable message. A provider phase or
+    /// block completion alone never proves this execution fact.
+    pub execution_status: Option<crate::agent::ExecutionStatus>,
+    /// 由配置输出校验派生的呈现投影；Some(empty) 明确禁止回退到原始块。
+    /// 原始 assistant_blocks 始终用于协议回放，不赋予呈现或运行完成资格。
+    pub approved_assistant_blocks: Option<Vec<crate::agent::AssistantMessageBlock>>,
 }
 
 impl Serialize for Message {
@@ -378,6 +390,15 @@ impl Serialize for Message {
         if let Some(ref blocks) = self.reasoning_blocks {
             map.serialize_entry("reasoning_blocks", blocks)?;
         }
+        if let Some(ref blocks) = self.assistant_blocks {
+            map.serialize_entry("assistant_blocks", blocks)?;
+        }
+        if let Some(ref status) = self.execution_status {
+            map.serialize_entry("execution_status", status)?;
+        }
+        if let Some(ref blocks) = self.approved_assistant_blocks {
+            map.serialize_entry("approved_assistant_blocks", blocks)?;
+        }
         map.end()
     }
 }
@@ -400,6 +421,12 @@ impl<'de> Deserialize<'de> for Message {
             reasoning_content: Option<String>,
             #[serde(default)]
             reasoning_blocks: Option<Vec<ReasoningBlock>>,
+            #[serde(default)]
+            assistant_blocks: Option<Vec<crate::agent::AssistantMessageBlock>>,
+            #[serde(default)]
+            execution_status: Option<crate::agent::ExecutionStatus>,
+            #[serde(default)]
+            approved_assistant_blocks: Option<Vec<crate::agent::AssistantMessageBlock>>,
         }
         let raw = RawMessage::deserialize(deserializer)?;
         let role: Role = serde_json::from_value(serde_json::Value::String(raw.role))
@@ -416,6 +443,9 @@ impl<'de> Deserialize<'de> for Message {
             tool_call_id: raw.tool_call_id,
             reasoning_content: raw.reasoning_content,
             reasoning_blocks: raw.reasoning_blocks,
+            assistant_blocks: raw.assistant_blocks,
+            execution_status: raw.execution_status,
+            approved_assistant_blocks: raw.approved_assistant_blocks,
         })
     }
 }
@@ -431,6 +461,9 @@ impl Message {
             tool_call_id: None,
             reasoning_content: None,
             reasoning_blocks: None,
+            assistant_blocks: None,
+            execution_status: None,
+            approved_assistant_blocks: None,
         }
     }
 
@@ -444,6 +477,9 @@ impl Message {
             tool_call_id: None,
             reasoning_content: None,
             reasoning_blocks: None,
+            assistant_blocks: None,
+            execution_status: None,
+            approved_assistant_blocks: None,
         }
     }
 
@@ -457,6 +493,9 @@ impl Message {
             tool_call_id: None,
             reasoning_content: None,
             reasoning_blocks: None,
+            assistant_blocks: None,
+            execution_status: None,
+            approved_assistant_blocks: None,
         }
     }
 
@@ -512,6 +551,9 @@ impl Message {
             tool_call_id: None,
             reasoning_content: None,
             reasoning_blocks: None,
+            assistant_blocks: None,
+            execution_status: None,
+            approved_assistant_blocks: None,
         }
     }
 
@@ -525,6 +567,9 @@ impl Message {
             tool_call_id: None,
             reasoning_content: None,
             reasoning_blocks: None,
+            assistant_blocks: None,
+            execution_status: None,
+            approved_assistant_blocks: None,
         }
     }
 
@@ -538,6 +583,9 @@ impl Message {
             tool_call_id: Some(tool_call_id),
             reasoning_content: None,
             reasoning_blocks: None,
+            assistant_blocks: None,
+            execution_status: None,
+            approved_assistant_blocks: None,
         }
     }
 
@@ -559,9 +607,42 @@ impl Message {
     }
 }
 
+/// Native provider provenance carried by the existing message and tool types.
+///
+/// It records protocol coordinates and original wire kind/phase only. It is
+/// never a runtime execution or completion authority. Provider adapters create
+/// this value from native fields; similarly named vendor extension fields are
+/// not trusted as Framework metadata.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct ProviderOutputSource {
+    /// The wire protocol that owns these native coordinates.
+    pub protocol: crate::llm::LlmApiProtocol,
+    /// Native response/message identity for one model request.
+    pub request_id: String,
+    /// Native item identity, or the adapter's stable block fallback when the
+    /// protocol does not assign a separate item id.
+    pub item_id: String,
+    /// Native Responses output position / Anthropic content-block position /
+    /// Chat Completions tool-call or choice position, according to content_kind.
+    pub output_index: u32,
+    /// Position inside one native item's content/summary list, when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_index: Option<u32>,
+    /// Original wire kind, e.g. output_text, refusal, function_call, thinking.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_kind: Option<String>,
+    /// Original provider phase. Unknown values remain lossless here while the
+    /// semantic AssistantPhase remains Unknown; no wording inference is used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+}
+
 /// A single tool call initiated by the LLM
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ToolCall {
+    /// Provider-native coordinates used for lossless history replay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_source: Option<ProviderOutputSource>,
     /// Unique identifier for the tool call
     pub id: String,
     /// Tool call type, typically "function"
@@ -967,6 +1048,9 @@ pub struct DeltaMessage {
     /// Completed signed/redacted reasoning blocks for replay.
     #[serde(default)]
     pub reasoning_blocks: Option<Vec<ReasoningBlock>>,
+    /// Provider-native assistant block metadata for lossless stream replay.
+    #[serde(default)]
+    pub assistant_blocks: Option<Vec<crate::agent::AssistantMessageBlock>>,
     /// Tool call delta
     #[serde(default)]
     pub tool_calls: Option<Vec<DeltaToolCall>>,
@@ -975,6 +1059,10 @@ pub struct DeltaMessage {
 /// Incremental fragment of a streaming tool call
 #[derive(Debug, Deserialize, Clone)]
 pub struct DeltaToolCall {
+    /// Provider-native coordinates; later deltas may omit them after identity
+    /// has been established for this tool index.
+    #[serde(default)]
+    pub provider_source: Option<ProviderOutputSource>,
     /// Tool call index
     pub index: u32,
     /// Tool call ID (appears incrementally)
@@ -1004,6 +1092,57 @@ pub struct DeltaFunctionCall {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn assistant_blocks_round_trip_with_message_history() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mut message = Message::assistant("已完成检查".to_string());
+        let source = ProviderOutputSource {
+            protocol: crate::llm::LlmApiProtocol::Responses,
+            request_id: "resp".to_string(),
+            item_id: "message-0".to_string(),
+            output_index: 3,
+            content_index: Some(1),
+            content_kind: Some("refusal".to_string()),
+            phase: Some("vendor_future_phase".to_string()),
+        };
+        message.assistant_blocks = Some(vec![crate::agent::AssistantMessageBlock {
+            provider_source: Some(source.clone()),
+            block_id: "resp:message:0".to_string(),
+            request_id: "resp".to_string(),
+            sequence: 0,
+            phase: crate::agent::AssistantPhase::FinalAnswer,
+            delta: "已完成检查".to_string(),
+            complete: true,
+            provider: Some("test".to_string()),
+            reasoning: None,
+        }]);
+        message.approved_assistant_blocks = Some(Vec::new());
+        message.execution_status = Some(crate::agent::ExecutionStatus {
+            adapter_generated: false,
+            execution_id: "execution-original".to_string(),
+            request_id: Some("resp".to_string()),
+            sequence: 4,
+            phase: crate::agent::AgentPhase::Thinking,
+            status: crate::agent::ExecutionStatusKind::Candidate,
+            reason: None,
+        });
+
+        let encoded = serde_json::to_value(&message)?;
+        let decoded: Message = serde_json::from_value(encoded)?;
+        let block = decoded
+            .assistant_blocks
+            .as_deref()
+            .and_then(|blocks| blocks.first())
+            .ok_or("assistant block was lost during Message round-trip")?;
+        assert_eq!(block.block_id, "resp:message:0");
+        assert_eq!(block.phase, crate::agent::AssistantPhase::FinalAnswer);
+        assert!(block.complete);
+        assert_eq!(block.provider_source.as_ref(), Some(&source));
+        assert_eq!(decoded.approved_assistant_blocks, Some(Vec::new()));
+        assert_eq!(decoded.execution_status, message.execution_status);
+        Ok(())
+    }
 
     #[test]
     fn content_part_text_serde_roundtrip() {

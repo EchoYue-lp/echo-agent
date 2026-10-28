@@ -99,6 +99,14 @@ struct RuntimeTranscriptAckProof {
     payload_digest: String,
 }
 
+/// 完整raw owner的不可变读回凭据；只属恢复材料，不拥有执行/版本权威。
+#[derive(Serialize, Deserialize)]
+struct CheckpointRecoverySourceArchive {
+    snapshot: ManagedRuntimeStateSnapshot,
+    owner_sha256: String,
+    owner_size: u64,
+}
+
 fn active_scope_lifecycle() -> RuntimeScopeLifecycle {
     RuntimeScopeLifecycle::Active
 }
@@ -188,6 +196,307 @@ impl FileRuntimeStateStore {
     #[cfg(test)]
     fn checkpoint_path(&self, conversation_id: &str) -> Result<PathBuf, ReactError> {
         self.runtime_owner_path(conversation_id)
+    }
+
+    fn commit_checkpoint_cas<'a>(
+        &'a self,
+        request: RuntimeCheckpointCasRequest,
+        recovery: Option<super::RuntimeCheckpointRecoveryRequest>,
+    ) -> BoxFuture<'a, crate::error::Result<RuntimeCheckpointCasReceipt>> {
+        if let Some(source) = recovery.as_ref()
+            && let Err(error) =
+                super::legacy_control_history::pending_recovery::validate_recovery_request(source)
+        {
+            return Box::pin(async move { Err(error) });
+        }
+        if let Err(error) = Self::validate_checkpoint_cas_request(&request) {
+            return Box::pin(async move { Err(error) });
+        }
+        let runtime_state_id = request.runtime_state_id.clone();
+        self.run_blocking(runtime_state_id, move |store, runtime_state_id| {
+            let _scope = store.lock_scope(&request.scope_id)?;
+            let _runtime = store.lock_runtime(&runtime_state_id)?;
+            store.ensure_active_deadline("runtime checkpoint CAS after lock")?;
+            let mut scope_record = if recovery.is_some() {
+                store.read_scope_owner_sync(&request.scope_id)?
+            } else {
+                store.reconcile_scope_owner_sync(&request.scope_id)?
+            };
+            let owner = if recovery.is_some() {
+                store.read_runtime_owner_for_read(&runtime_state_id, true)?
+            } else {
+                store.read_live_runtime_owner_sync(&runtime_state_id)?
+            };
+            if let Some(owner) = owner.as_ref()
+                && owner.scope_id != request.scope_id
+            {
+                return Err(Self::invalid_state(format!(
+                    "runtime state {runtime_state_id} already belongs to scope {}",
+                    owner.scope_id
+                )));
+            }
+            // owner-first写入后崩溃可能尚未更新scope。只有严格新owner匹配
+            // 同一请求replay时才回到原reconcile，不放宽旧pending源的pairing。
+            if let (Some(recovery), Some(current)) = (recovery.as_ref(), owner.as_ref())
+                && Self::is_direct_cas_replay(current, &request)?
+            {
+                store.verify_checkpoint_recovery_source(&recovery.original)?;
+                Self::validate_runtime_owner_payload(current)?;
+                scope_record = store.reconcile_scope_owner_sync(&request.scope_id)?;
+            }
+            let owners = owner.iter().cloned().collect::<Vec<_>>();
+            let scope =
+                Self::authority_or_unmanaged(&request.scope_id, scope_record.as_ref(), &owners);
+            let current_version = owner.as_ref().map(Self::owner_state_version).transpose()?;
+            if let Some(RuntimeStateVersion::Retired { .. }) = current_version.as_ref() {
+                return Ok(RuntimeCheckpointCasReceipt {
+                    scope,
+                    runtime_state_id,
+                    version: current_version.ok_or_else(|| {
+                        Self::invalid_state("retired runtime state lost its version")
+                    })?,
+                    status: RuntimeCheckpointCasStatus::GenerationRetired,
+                });
+            }
+            let epoch_matches = scope.conversation_epoch == request.conversation_epoch;
+            let can_bind_epoch = scope.revision == 0 && scope.conversation_epoch.is_none();
+            let can_bind_import = request.managed_import.as_ref().is_some_and(|import| {
+                scope.lifecycle == RuntimeScopeLifecycle::Active
+                    && scope.conversation_epoch == Some(import.request.expected_epoch)
+            });
+            let can_reopen = scope.lifecycle == RuntimeScopeLifecycle::Tombstoned
+                && request.conversation_epoch.is_some()
+                && request.conversation_epoch > scope.conversation_epoch;
+            let fenced = match scope.lifecycle {
+                RuntimeScopeLifecycle::Active => {
+                    !epoch_matches && !can_bind_epoch && !can_bind_import
+                }
+                RuntimeScopeLifecycle::Retiring => true,
+                RuntimeScopeLifecycle::Tombstoned => !can_reopen,
+            };
+            if fenced {
+                let version = current_version.unwrap_or(RuntimeStateVersion::Absent);
+                return Ok(RuntimeCheckpointCasReceipt {
+                    scope,
+                    runtime_state_id,
+                    version,
+                    status: RuntimeCheckpointCasStatus::ScopeFenced,
+                });
+            }
+            if let Some(owner) = owner.as_ref()
+                && Self::is_direct_cas_replay(owner, &request)?
+            {
+                if let Some(recovery) = recovery.as_ref() {
+                    store.verify_checkpoint_recovery_source(&recovery.original)?;
+                }
+                return Ok(RuntimeCheckpointCasReceipt {
+                    scope,
+                    runtime_state_id,
+                    version: current_version.ok_or_else(|| {
+                        Self::invalid_state("current runtime state lost its version")
+                    })?,
+                    status: RuntimeCheckpointCasStatus::AlreadyCurrent,
+                });
+            }
+            if scope.revision != request.expected_scope_revision
+                || !Self::state_matches_expected(
+                    current_version.as_ref(),
+                    &request.expected_state_version,
+                )
+            {
+                let version = current_version.unwrap_or(RuntimeStateVersion::Absent);
+                return Ok(RuntimeCheckpointCasReceipt {
+                    scope,
+                    runtime_state_id,
+                    version,
+                    status: RuntimeCheckpointCasStatus::RevisionConflict,
+                });
+            }
+            if let Some(recovery) = recovery.as_ref() {
+                let original = &recovery.original;
+                let actual = owner
+                    .as_ref()
+                    .ok_or_else(|| Self::invalid_state("recovery source disappeared"))?;
+                let actual_version = current_version
+                    .as_ref()
+                    .ok_or_else(|| Self::invalid_state("recovery source version missing"))?;
+                if scope != original.scope
+                    || actual_version != &original.version
+                    || actual
+                        .checkpoint
+                        .as_ref()
+                        .map(serde_json::to_value)
+                        .transpose()?
+                        != original
+                            .checkpoint
+                            .as_ref()
+                            .map(serde_json::to_value)
+                            .transpose()?
+                {
+                    return Ok(RuntimeCheckpointCasReceipt {
+                        scope,
+                        runtime_state_id,
+                        version: actual_version.clone(),
+                        status: RuntimeCheckpointCasStatus::RevisionConflict,
+                    });
+                }
+                // 原version/debt/cursor已核，来源归一必须原件可完整回读后才提交同CAS后继。
+                store.preserve_checkpoint_recovery_source(original)?;
+                Self::validate_pending_transition(None, &request.checkpoint)?;
+            } else {
+                Self::validate_pending_transition(owner.as_ref(), &request.checkpoint)?;
+            }
+            let current_state_revision = current_version
+                .as_ref()
+                .map(Self::state_revision)
+                .unwrap_or(0);
+            let state_revision = Self::next_revision(current_state_revision, &runtime_state_id)?;
+            let scope_revision = Self::next_revision(scope.revision, &request.scope_id)?;
+            let version = RuntimeStateVersion::Managed {
+                revision: state_revision,
+            };
+            let authority = RuntimeScopeAuthority {
+                scope_id: request.scope_id.clone(),
+                conversation_epoch: request.conversation_epoch,
+                revision: scope_revision,
+                lifecycle: RuntimeScopeLifecycle::Active,
+            };
+            store.write_runtime_owner_sync(&RuntimeStateOwner {
+                version: RUNTIME_STATE_RECORD_VERSION,
+                runtime_state_id: runtime_state_id.clone(),
+                scope_id: request.scope_id.clone(),
+                phase: RuntimeStatePhase::Active,
+                checkpoint: Some(request.checkpoint),
+                state_version: Some(version.clone()),
+                conversation_epoch: request.conversation_epoch,
+                scope_revision,
+                scope_lifecycle: RuntimeScopeLifecycle::Active,
+                cas_expected_state_version: Some(request.expected_state_version),
+                cas_expected_scope_revision: request.expected_scope_revision,
+                transcript_ack_proof: None,
+            })?;
+            let completed_retirements = scope_record
+                .take()
+                .map(|record| record.completed_retirements)
+                .unwrap_or_default();
+            store.write_scope_owner_sync(&RuntimeScopeOwner {
+                version: RUNTIME_SCOPE_RECORD_VERSION,
+                authority: authority.clone(),
+                current_retirement: None,
+                completed_retirements,
+            })?;
+            store.repair_scope_index_best_effort(&request.scope_id);
+            Ok(RuntimeCheckpointCasReceipt {
+                scope: authority,
+                runtime_state_id,
+                version,
+                status: RuntimeCheckpointCasStatus::Applied,
+            })
+        })
+    }
+
+    /// 旧原件是不可变恢复材料；不拥有运行状态，运行authority仍只有原owner/CAS。
+    fn recovery_source_paths(
+        &self,
+        source: &ManagedRuntimeStateSnapshot,
+    ) -> crate::error::Result<(PathBuf, PathBuf)> {
+        let digest = format!("{:x}", Sha256::digest(serde_json::to_vec(source)?));
+        let root = self
+            .base
+            .join("_recovery_sources")
+            .join(safe_segment(&source.runtime_state_id)?);
+        Ok((
+            root.join(format!("{digest}.owner.json")),
+            root.join(format!("{digest}.snapshot.json")),
+        ))
+    }
+
+    fn verify_checkpoint_recovery_source(
+        &self,
+        source: &ManagedRuntimeStateSnapshot,
+    ) -> crate::error::Result<()> {
+        let (owner_path, metadata_path) = self.recovery_source_paths(source)?;
+        for path in [&owner_path, &metadata_path] {
+            let kind = std::fs::symlink_metadata(path).map_err(Self::to_react_err)?;
+            if !kind.is_file() || kind.file_type().is_symlink() {
+                return Err(Self::invalid_state(
+                    "recovery source archive is not a regular file",
+                ));
+            }
+        }
+        let raw = std::fs::read(owner_path).map_err(Self::to_react_err)?;
+        let metadata: CheckpointRecoverySourceArchive =
+            serde_json::from_slice(&std::fs::read(metadata_path).map_err(Self::to_react_err)?)?;
+        let raw_size = u64::try_from(raw.len()).map_err(Self::to_react_err)?;
+        let raw_sha256 = format!("{:x}", Sha256::digest(&raw));
+        let owner: RuntimeStateOwner = serde_json::from_slice(&raw)?;
+        if metadata.owner_size != raw_size
+            || metadata.owner_sha256 != raw_sha256
+            || serde_json::to_vec(&metadata.snapshot)? != serde_json::to_vec(source)?
+            || owner.scope_id != source.scope.scope_id
+            || owner.runtime_state_id != source.runtime_state_id
+            || Self::owner_state_version(&owner)? != source.version
+            || owner
+                .checkpoint
+                .as_ref()
+                .map(serde_json::to_value)
+                .transpose()?
+                != source
+                    .checkpoint
+                    .as_ref()
+                    .map(serde_json::to_value)
+                    .transpose()?
+        {
+            return Err(Self::invalid_state(
+                "checkpoint recovery source archive is corrupt",
+            ));
+        }
+        Ok(())
+    }
+
+    fn preserve_checkpoint_recovery_source(
+        &self,
+        source: &ManagedRuntimeStateSnapshot,
+    ) -> crate::error::Result<()> {
+        let (owner_path, metadata_path) = self.recovery_source_paths(source)?;
+        let root = owner_path
+            .parent()
+            .ok_or_else(|| Self::invalid_state("recovery source parent missing"))?;
+        create_dir_all_durable(root).map_err(Self::to_react_err)?;
+        let owner_bytes = std::fs::read(self.runtime_owner_path(&source.runtime_state_id)?)
+            .map_err(Self::to_react_err)?;
+        let metadata = serde_json::to_vec(&CheckpointRecoverySourceArchive {
+            snapshot: source.clone(),
+            owner_sha256: format!("{:x}", Sha256::digest(&owner_bytes)),
+            owner_size: u64::try_from(owner_bytes.len()).map_err(Self::to_react_err)?,
+        })?;
+        for (path, contents) in [(owner_path, owner_bytes), (metadata_path, metadata)] {
+            match std::fs::symlink_metadata(&path) {
+                Ok(kind) if !kind.is_file() || kind.file_type().is_symlink() => {
+                    return Err(Self::invalid_state(
+                        "recovery source archive is not a regular file",
+                    ));
+                }
+                Ok(_) => {
+                    if std::fs::read(&path).map_err(Self::to_react_err)? != contents {
+                        return Err(Self::invalid_state(
+                            "immutable recovery source archive differs",
+                        ));
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    echo_core::utils::fs::atomic_write(&path, &contents)
+                        .map_err(Self::to_react_err)?;
+                }
+                Err(error) => return Err(Self::to_react_err(error)),
+            }
+            if std::fs::read(&path).map_err(Self::to_react_err)? != contents {
+                return Err(Self::invalid_state("recovery source readback failed"));
+            }
+        }
+        self.verify_checkpoint_recovery_source(source)?;
+        self.ensure_active_deadline("recovery source preserved before checkpoint CAS")?;
+        Ok(())
     }
 
     fn scope_index_path(&self, scope_id: &str) -> Result<PathBuf, ReactError> {
@@ -327,10 +636,34 @@ impl FileRuntimeStateStore {
     }
 
     fn validate_runtime_owner_payload(owner: &RuntimeStateOwner) -> crate::error::Result<()> {
+        Self::validate_runtime_owner_payload_for_read(owner, false)
+    }
+
+    fn checked_payload_for_owner_read(
+        checkpoint: &AgentCheckpoint,
+        recovery_inspection: bool,
+    ) -> crate::error::Result<super::ManagedAgentCheckpointPayload> {
+        if recovery_inspection {
+            checkpoint.inspect_payload_for_recovery()
+        } else {
+            checkpoint.restore_managed_runtime_payload()
+        }
+    }
+
+    fn validate_runtime_owner_payload_for_read(
+        owner: &RuntimeStateOwner,
+        recovery_inspection: bool,
+    ) -> crate::error::Result<()> {
         match owner.state_version.as_ref() {
             None | Some(RuntimeStateVersion::Unmanaged { .. }) => {
                 if let Some(checkpoint) = owner.checkpoint.as_ref() {
-                    Self::validate_unmanaged_checkpoint(checkpoint)?;
+                    let payload =
+                        Self::checked_payload_for_owner_read(checkpoint, recovery_inspection)?;
+                    if payload.pending_transcript_projection.is_some() {
+                        return Err(Self::managed_state_error(
+                            "pending checkpoint payload requires compare-and-save",
+                        ));
+                    }
                 }
             }
             Some(RuntimeStateVersion::Managed { revision }) => {
@@ -340,7 +673,8 @@ impl FileRuntimeStateStore {
                         owner.runtime_state_id
                     ))
                 })?;
-                let payload = checkpoint.restore_managed_runtime_payload()?;
+                let payload =
+                    Self::checked_payload_for_owner_read(checkpoint, recovery_inspection)?;
                 if payload
                     .pending_transcript_projection
                     .as_ref()
@@ -365,13 +699,10 @@ impl FileRuntimeStateStore {
             }
         }
         if let Some(proof) = owner.transcript_ack_proof.as_ref() {
-            let payload = owner
-                .checkpoint
-                .as_ref()
-                .ok_or_else(|| {
-                    Self::invalid_state("acknowledged runtime state is missing checkpoint")
-                })?
-                .restore_managed_runtime_payload()?;
+            let checkpoint = owner.checkpoint.as_ref().ok_or_else(|| {
+                Self::invalid_state("acknowledged runtime state is missing checkpoint")
+            })?;
+            let payload = Self::checked_payload_for_owner_read(checkpoint, recovery_inspection)?;
             if proof.payload_digest.len() != 64
                 || !proof
                     .payload_digest
@@ -918,6 +1249,14 @@ impl FileRuntimeStateStore {
         &self,
         runtime_state_id: &str,
     ) -> crate::error::Result<Option<RuntimeStateOwner>> {
+        self.read_runtime_owner_for_read(runtime_state_id, false)
+    }
+
+    fn read_runtime_owner_for_read(
+        &self,
+        runtime_state_id: &str,
+        recovery_inspection: bool,
+    ) -> crate::error::Result<Option<RuntimeStateOwner>> {
         let path = self.runtime_owner_path(runtime_state_id)?;
         let raw = match std::fs::read_to_string(&path) {
             Ok(raw) => raw,
@@ -972,16 +1311,13 @@ impl FileRuntimeStateStore {
             )));
         }
         if let Some(proof) = owner.transcript_ack_proof.as_ref() {
-            let payload = owner
-                .checkpoint
-                .as_ref()
-                .ok_or_else(|| {
-                    Self::invalid_state(format!(
-                        "acknowledged runtime state is missing checkpoint at {}",
-                        path.display()
-                    ))
-                })?
-                .restore_managed_runtime_payload()?;
+            let checkpoint = owner.checkpoint.as_ref().ok_or_else(|| {
+                Self::invalid_state(format!(
+                    "acknowledged runtime state is missing checkpoint at {}",
+                    path.display()
+                ))
+            })?;
+            let payload = Self::checked_payload_for_owner_read(checkpoint, recovery_inspection)?;
             if proof.operation_id.trim().is_empty()
                 || proof.payload_digest.trim().is_empty()
                 || !matches!(
@@ -1029,7 +1365,7 @@ impl FileRuntimeStateStore {
                 }
             }
         }
-        Self::validate_runtime_owner_payload(&owner)?;
+        Self::validate_runtime_owner_payload_for_read(&owner, recovery_inspection)?;
         Ok(Some(owner))
     }
 
@@ -1390,6 +1726,65 @@ impl RuntimeStateStore for FileRuntimeStateStore {
         Box::pin(async move { store.load_runtime_state(&scope_id, &runtime_state_id).await })
     }
 
+    fn inspect_runtime_state_for_recovery_with_context<'a>(
+        &'a self,
+        context: crate::memory::PersistenceCallContext,
+        scope_id: &'a str,
+        runtime_state_id: &'a str,
+    ) -> BoxFuture<'a, crate::error::Result<Option<ManagedRuntimeStateSnapshot>>> {
+        if let Err(error) = Self::ensure_call_deadline(context, "runtime recovery inspection") {
+            return Box::pin(async move { Err(error) });
+        }
+        let store = self.with_call_context(context);
+        let scope_id = scope_id.to_string();
+        let runtime_id = runtime_state_id.to_string();
+        Box::pin(async move {
+            store.run_blocking(runtime_id, move |effective_store, runtime_id| {
+                let store = effective_store;
+            let _scope = store.lock_scope(&scope_id)?;
+            let _runtime = store.lock_runtime(&runtime_id)?;
+            store.ensure_active_deadline("runtime recovery inspection after lock")?;
+            // 不调用reconcile/live清理：原owner、scope revision和索引一字节不改。
+            let Some(owner) = store.read_runtime_owner_for_read(&runtime_id, true)? else {
+                return Ok(None);
+            };
+            if owner.scope_id != scope_id {
+                return Err(Self::invalid_state(
+                    "recovery runtime belongs to another scope",
+                ));
+            }
+            let record = store.read_scope_owner_sync(&scope_id)?;
+                if owner.scope_revision > 0 && record.is_none() {
+                    return Err(Self::managed_state_error(
+                        "managed recovery scope authority is missing; original reconcile required",
+                    ));
+                }
+                if let Some(record) = record.as_ref() {
+                let authority = &record.authority;
+                if authority.revision < owner.scope_revision
+                    || (owner.conversation_epoch.is_some()
+                        && authority.conversation_epoch != owner.conversation_epoch)
+                    || (authority.revision == owner.scope_revision
+                        && authority.lifecycle != owner.scope_lifecycle)
+                {
+                    return Err(Self::managed_state_error(
+                        "recovery scope authority conflicts with original runtime owner; original reconcile required",
+                    ));
+                }
+            }
+            let scope = Self::authority_or_unmanaged(&scope_id, record.as_ref(), std::slice::from_ref(&owner));
+            let version = Self::owner_state_version(&owner)?;
+            store.ensure_active_deadline("runtime recovery inspection before return")?;
+            Ok(Some(ManagedRuntimeStateSnapshot {
+                scope,
+                runtime_state_id: runtime_id,
+                version,
+                checkpoint: owner.checkpoint,
+            }))
+            }).await
+        })
+    }
+
     fn load_scope_authority_with_context<'a>(
         &'a self,
         context: crate::memory::PersistenceCallContext,
@@ -1533,137 +1928,38 @@ impl RuntimeStateStore for FileRuntimeStateStore {
         &'a self,
         request: RuntimeCheckpointCasRequest,
     ) -> BoxFuture<'a, crate::error::Result<RuntimeCheckpointCasReceipt>> {
-        if let Err(error) = Self::validate_checkpoint_cas_request(&request) {
-            return Box::pin(async move { Err(error) });
-        }
-        let runtime_state_id = request.runtime_state_id.clone();
-        self.run_blocking(runtime_state_id, move |store, runtime_state_id| {
-            let _scope = store.lock_scope(&request.scope_id)?;
-            let _runtime = store.lock_runtime(&runtime_state_id)?;
-            store.ensure_active_deadline("runtime checkpoint CAS after lock")?;
-            let mut scope_record = store.reconcile_scope_owner_sync(&request.scope_id)?;
-            let owner = store.read_live_runtime_owner_sync(&runtime_state_id)?;
-            if let Some(owner) = owner.as_ref()
-                && owner.scope_id != request.scope_id
-            {
-                return Err(Self::invalid_state(format!(
-                    "runtime state {runtime_state_id} already belongs to scope {}",
-                    owner.scope_id
-                )));
-            }
-            let owners = owner.iter().cloned().collect::<Vec<_>>();
-            let scope =
-                Self::authority_or_unmanaged(&request.scope_id, scope_record.as_ref(), &owners);
-            let current_version = owner.as_ref().map(Self::owner_state_version).transpose()?;
-            if let Some(RuntimeStateVersion::Retired { .. }) = current_version.as_ref() {
-                return Ok(RuntimeCheckpointCasReceipt {
-                    scope,
-                    runtime_state_id,
-                    version: current_version.ok_or_else(|| {
-                        Self::invalid_state("retired runtime state lost its version")
-                    })?,
-                    status: RuntimeCheckpointCasStatus::GenerationRetired,
+        self.commit_checkpoint_cas(request, None)
+    }
+
+    fn commit_checkpoint_recovery_with_context<'a>(
+        &'a self,
+        context: crate::memory::PersistenceCallContext,
+        recovery: super::RuntimeCheckpointRecoveryRequest,
+    ) -> BoxFuture<'a, crate::error::Result<RuntimeCheckpointCasReceipt>> {
+        let expected = match &recovery.original.version {
+            RuntimeStateVersion::Unmanaged { digest } => RuntimeStateExpectedVersion::Unmanaged {
+                digest: digest.clone(),
+            },
+            RuntimeStateVersion::Managed { revision } => RuntimeStateExpectedVersion::Managed {
+                revision: *revision,
+            },
+            _ => {
+                return Box::pin(async {
+                    Err(Self::invalid_state("recovery source is absent or retired"))
                 });
             }
-            let epoch_matches = scope.conversation_epoch == request.conversation_epoch;
-            let can_bind_epoch = scope.revision == 0 && scope.conversation_epoch.is_none();
-            let can_bind_import = request.managed_import.as_ref().is_some_and(|import| {
-                scope.lifecycle == RuntimeScopeLifecycle::Active
-                    && scope.conversation_epoch == Some(import.request.expected_epoch)
-            });
-            let can_reopen = scope.lifecycle == RuntimeScopeLifecycle::Tombstoned
-                && request.conversation_epoch.is_some()
-                && request.conversation_epoch > scope.conversation_epoch;
-            let fenced = match scope.lifecycle {
-                RuntimeScopeLifecycle::Active => {
-                    !epoch_matches && !can_bind_epoch && !can_bind_import
-                }
-                RuntimeScopeLifecycle::Retiring => true,
-                RuntimeScopeLifecycle::Tombstoned => !can_reopen,
-            };
-            if fenced {
-                let version = current_version.unwrap_or(RuntimeStateVersion::Absent);
-                return Ok(RuntimeCheckpointCasReceipt {
-                    scope,
-                    runtime_state_id,
-                    version,
-                    status: RuntimeCheckpointCasStatus::ScopeFenced,
-                });
-            }
-            if let Some(owner) = owner.as_ref()
-                && Self::is_direct_cas_replay(owner, &request)?
-            {
-                return Ok(RuntimeCheckpointCasReceipt {
-                    scope,
-                    runtime_state_id,
-                    version: current_version.ok_or_else(|| {
-                        Self::invalid_state("current runtime state lost its version")
-                    })?,
-                    status: RuntimeCheckpointCasStatus::AlreadyCurrent,
-                });
-            }
-            if scope.revision != request.expected_scope_revision
-                || !Self::state_matches_expected(
-                    current_version.as_ref(),
-                    &request.expected_state_version,
-                )
-            {
-                let version = current_version.unwrap_or(RuntimeStateVersion::Absent);
-                return Ok(RuntimeCheckpointCasReceipt {
-                    scope,
-                    runtime_state_id,
-                    version,
-                    status: RuntimeCheckpointCasStatus::RevisionConflict,
-                });
-            }
-            Self::validate_pending_transition(owner.as_ref(), &request.checkpoint)?;
-            let current_state_revision = current_version
-                .as_ref()
-                .map(Self::state_revision)
-                .unwrap_or(0);
-            let state_revision = Self::next_revision(current_state_revision, &runtime_state_id)?;
-            let scope_revision = Self::next_revision(scope.revision, &request.scope_id)?;
-            let version = RuntimeStateVersion::Managed {
-                revision: state_revision,
-            };
-            let authority = RuntimeScopeAuthority {
-                scope_id: request.scope_id.clone(),
-                conversation_epoch: request.conversation_epoch,
-                revision: scope_revision,
-                lifecycle: RuntimeScopeLifecycle::Active,
-            };
-            store.write_runtime_owner_sync(&RuntimeStateOwner {
-                version: RUNTIME_STATE_RECORD_VERSION,
-                runtime_state_id: runtime_state_id.clone(),
-                scope_id: request.scope_id.clone(),
-                phase: RuntimeStatePhase::Active,
-                checkpoint: Some(request.checkpoint),
-                state_version: Some(version.clone()),
-                conversation_epoch: request.conversation_epoch,
-                scope_revision,
-                scope_lifecycle: RuntimeScopeLifecycle::Active,
-                cas_expected_state_version: Some(request.expected_state_version),
-                cas_expected_scope_revision: request.expected_scope_revision,
-                transcript_ack_proof: None,
-            })?;
-            let completed_retirements = scope_record
-                .take()
-                .map(|record| record.completed_retirements)
-                .unwrap_or_default();
-            store.write_scope_owner_sync(&RuntimeScopeOwner {
-                version: RUNTIME_SCOPE_RECORD_VERSION,
-                authority: authority.clone(),
-                current_retirement: None,
-                completed_retirements,
-            })?;
-            store.repair_scope_index_best_effort(&request.scope_id);
-            Ok(RuntimeCheckpointCasReceipt {
-                scope: authority,
-                runtime_state_id,
-                version,
-                status: RuntimeCheckpointCasStatus::Applied,
-            })
-        })
+        };
+        let request = RuntimeCheckpointCasRequest {
+            scope_id: recovery.original.scope.scope_id.clone(),
+            runtime_state_id: recovery.original.runtime_state_id.clone(),
+            conversation_epoch: recovery.original.scope.conversation_epoch,
+            expected_scope_revision: recovery.original.scope.revision,
+            expected_state_version: expected,
+            checkpoint: recovery.checkpoint.clone(),
+            managed_import: None,
+        };
+        let store = self.with_call_context(context);
+        Box::pin(async move { store.commit_checkpoint_cas(request, Some(recovery)).await })
     }
 
     fn acknowledge_transcript_projection<'a>(

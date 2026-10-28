@@ -42,7 +42,7 @@ use std::time::Duration;
 /// Enum of preset responses (text, tool calls, scripted streams, or errors)
 enum MockLlmResponse {
     Content(String, Option<crate::llm::types::Usage>),
-    ToolCalls(Message, Option<crate::llm::types::Usage>),
+    ToolCalls(Box<Message>, Option<crate::llm::types::Usage>),
     Stream(Vec<StreamChunk>),
     Err(ReactError),
 }
@@ -185,6 +185,7 @@ impl MockLlmClient {
         arguments: impl Into<String>,
     ) -> Self {
         let tc = ToolCall {
+            provider_source: None,
             id: id.into(),
             call_type: "function".to_string(),
             function: FunctionCall {
@@ -196,7 +197,7 @@ impl MockLlmClient {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push_back(MockLlmResponse::ToolCalls(
-                Message::assistant_with_tools(vec![tc]),
+                Box::new(Message::assistant_with_tools(vec![tc])),
                 None,
             ));
         self
@@ -213,6 +214,7 @@ impl MockLlmClient {
         reasoning_content: impl Into<String>,
     ) -> Self {
         let tc = ToolCall {
+            provider_source: None,
             id: id.into(),
             call_type: "function".to_string(),
             function: FunctionCall {
@@ -226,7 +228,7 @@ impl MockLlmClient {
         self.responses
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .push_back(MockLlmResponse::ToolCalls(message, None));
+            .push_back(MockLlmResponse::ToolCalls(Box::new(message), None));
         self
     }
 
@@ -239,6 +241,7 @@ impl MockLlmClient {
         usage: crate::llm::types::Usage,
     ) -> Self {
         let tc = ToolCall {
+            provider_source: None,
             id: id.into(),
             call_type: "function".to_string(),
             function: FunctionCall {
@@ -250,7 +253,7 @@ impl MockLlmClient {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push_back(MockLlmResponse::ToolCalls(
-                Message::assistant_with_tools(vec![tc]),
+                Box::new(Message::assistant_with_tools(vec![tc])),
                 Some(usage),
             ));
         self
@@ -262,7 +265,7 @@ impl MockLlmClient {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push_back(MockLlmResponse::ToolCalls(
-                Message::assistant_with_tools(calls),
+                Box::new(Message::assistant_with_tools(calls)),
                 None,
             ));
         self
@@ -308,6 +311,7 @@ impl MockLlmClient {
     ///         content: Some("Hello".to_string()),
     ///         reasoning_content: None,
     ///         reasoning_blocks: None,
+    ///         assistant_blocks: None,
     ///         tool_calls: None,
     ///     }),
     ///     StreamChunk::Terminal {
@@ -425,7 +429,7 @@ impl MockLlmClient {
 
 enum PopResult {
     Content(String, Option<crate::llm::types::Usage>),
-    ToolCalls(Message, Option<crate::llm::types::Usage>),
+    ToolCalls(Box<Message>, Option<crate::llm::types::Usage>),
     Stream(Vec<StreamChunk>),
 }
 
@@ -477,7 +481,7 @@ impl LlmClient for MockLlmClient {
                     },
                 }),
                 PopResult::ToolCalls(message, usage) => Ok(ChatResponse {
-                    message,
+                    message: *message,
                     finish_reason: Some("tool_calls".to_string()),
                     usage: usage.clone(),
                     raw: crate::llm::types::ChatCompletionResponse {
@@ -596,6 +600,7 @@ impl LlmClient for MockLlmClient {
                                 content: Some(text),
                                 reasoning_content: None,
                                 reasoning_blocks: None,
+                                assistant_blocks: None,
                                 tool_calls: None,
                             },
                             finish_reason: None,
@@ -607,6 +612,7 @@ impl LlmClient for MockLlmClient {
                                 content: None,
                                 reasoning_content: None,
                                 reasoning_blocks: None,
+                                assistant_blocks: None,
                                 tool_calls: None,
                             },
                             finish_reason: Some("stop".to_string()),
@@ -623,6 +629,7 @@ impl LlmClient for MockLlmClient {
                         .into_iter()
                         .enumerate()
                         .map(|(i, tc)| DeltaToolCall {
+                            provider_source: tc.provider_source,
                             index: i as u32,
                             id: Some(tc.id),
                             call_type: Some(tc.call_type),
@@ -641,6 +648,7 @@ impl LlmClient for MockLlmClient {
                                 content,
                                 reasoning_content,
                                 reasoning_blocks: message.reasoning_blocks,
+                                assistant_blocks: message.assistant_blocks,
                                 tool_calls: Some(delta_calls),
                             },
                             finish_reason: None,
@@ -652,6 +660,7 @@ impl LlmClient for MockLlmClient {
                                 content: None,
                                 reasoning_content: None,
                                 reasoning_blocks: None,
+                                assistant_blocks: None,
                                 tool_calls: None,
                             },
                             finish_reason: Some("tool_calls".to_string()),
@@ -679,6 +688,7 @@ impl LlmClient for MockLlmClient {
                                     content: None,
                                     reasoning_content: None,
                                     reasoning_blocks: None,
+                                    assistant_blocks: None,
                                     tool_calls: None,
                                 },
                                 finish_reason,

@@ -30,7 +30,6 @@ use crate::skills::SkillRegistry;
 use crate::skills::hooks::HookRegistry;
 #[cfg(feature = "subagent")]
 use crate::tools::builtin::agent_dispatch::AgentDispatchTool;
-use crate::tools::builtin::answer::FinalAnswerTool;
 use crate::tools::builtin::cell_tools::{ListCellsTool, StopCellTool, WaitCellTool};
 #[cfg(feature = "human-loop")]
 use crate::tools::builtin::human_in_loop::HumanInLoop;
@@ -79,10 +78,6 @@ pub mod structured;
 pub(crate) mod subsystems;
 #[cfg(test)]
 mod tests;
-// ── Built-in tool name constants ────────────────────────────────────────────────
-
-pub(crate) const TOOL_FINAL_ANSWER: &str = "final_answer";
-
 /// Returns `true` if the LLM error is worth retrying (network, timeout, rate-limit, server 5xx).
 pub(crate) fn is_retryable_llm_error(err: &ReactError) -> bool {
     match err {
@@ -361,10 +356,6 @@ impl ReactAgent {
             .steer_tracked(expected_turn_id, message)
     }
 
-    /// Chain-of-thought preamble auto-injected before tool calls.
-    const COT_INSTRUCTION: &'static str =
-        "Before calling any tool, briefly describe your analysis and execution plan.";
-
     /// Create a new ReAct Agent instance.
     ///
     /// # Parameters
@@ -566,7 +557,11 @@ impl ReactAgent {
             .unwrap_or_default();
 
         // ── Core tools ─────────────────────────────────────────────
-        tool_manager.register(Box::new(FinalAnswerTool));
+        // Final answers are produced by the native assistant-message path
+        // after Guard/Critic/Stop/persistence settlement. The former
+        // `final_answer` control tool is intentionally not registered for new
+        // executions; old transcripts remain readable through compatibility
+        // adapters only.
         let task_revision_service = Arc::new(echo_orchestration::tasks::TaskRevisionService::new(
             Arc::new(echo_orchestration::tasks::InMemoryRevisionedTaskStore::new()),
             Arc::new(echo_orchestration::tasks::DefaultTaskToolPolicy::default()),
@@ -695,11 +690,19 @@ impl ReactAgent {
                     store: store.clone(),
                 },
             );
-            let dispatch_tool = AgentDispatchTool::new(
-                subagent_executor.clone(),
-                config.agent_name.clone(),
-                CancellationToken::new(),
-            )
+            let dispatch_tool = if config.readonly_tools {
+                AgentDispatchTool::read_only(
+                    subagent_executor.clone(),
+                    config.agent_name.clone(),
+                    CancellationToken::new(),
+                )
+            } else {
+                AgentDispatchTool::new(
+                    subagent_executor.clone(),
+                    config.agent_name.clone(),
+                    CancellationToken::new(),
+                )
+            }
             .with_parent_context(factory);
             tool_manager.register(Box::new(dispatch_tool));
         }
@@ -915,11 +918,8 @@ impl ReactAgent {
         // what provider-side prompt caching (DeepSeek KVCache, Anthropic
         // prompt cache, OpenAI prefix cache) keys on — any change to it
         // invalidates the entire cache.
-        let mut prompt = if config.enable_tool && config.enable_cot {
-            format!("{}\n\n{}", base.trim_end(), Self::COT_INSTRUCTION,)
-        } else {
-            base.to_string()
-        };
+        // 普通进度与原生 reasoning 由模型/provider明确区分，不注入强制分析提示。
+        let mut prompt = base.to_string();
 
         if let Some(suffix) = config
             .model_profile
@@ -2188,6 +2188,162 @@ impl ReactAgent {
         Ok(())
     }
 
+    /// caller已持有原execution mutex；这里只经原Store CAS发布恢复后继，再正常hydrate。
+    pub(crate) async fn normalize_pending_control_checkpoint(
+        &self,
+        scope_id: &str,
+        runtime_id: &str,
+        call_context: crate::memory::PersistenceCallContext,
+        cancel: &crate::agent::CancellationToken,
+    ) -> Result<()> {
+        let Some(store) = self.memory.state_store.as_ref() else {
+            return Ok(());
+        };
+        if store.runtime_state_capability() != crate::state::RuntimeStateCapability::RevisionedV1 {
+            return Ok(());
+        }
+        let projector = self
+            .pre_model_context_projector
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        let Some(projector) = projector else {
+            return Ok(());
+        };
+        // File严格load可能执行owner-first scope修复，不能视为纯读后timeout丢waiter。
+        call_context.ensure_not_expired()?;
+        let normal = store
+            .load_runtime_state_with_context(call_context, scope_id, runtime_id)
+            .await;
+        let normal_error = match normal {
+            Ok(_) => return Ok(()),
+            // 只允许结构/配对恢复类错误进入纯读检查；unknown/取消/deadline/IO保原错误。
+            Err(error @ crate::error::ReactError::RuntimeState(_))
+                if matches!(&error, crate::error::ReactError::RuntimeState(state)
+                    if matches!(state.as_ref(), echo_core::error::RuntimeStateError::SerializationError(_))) =>
+            {
+                error
+            }
+            Err(error) => return Err(error),
+        };
+        let context = crate::compression::ProjectionContext {
+            iteration: 0,
+            agent_name: self.config.agent_name.clone(),
+            session_id: self.config.session_id.clone(),
+            conversation_id: Some(scope_id.to_string()),
+            run_id: None,
+            turn_id: None,
+        };
+        let prepared = crate::state::legacy_control_history::pending_recovery::prepare_pending_control_recovery(
+            store.as_ref(), call_context, runtime_id, &context, projector.as_ref(), cancel, None,
+        ).await?;
+        if prepared
+            .original
+            .checkpoint
+            .as_ref()
+            .is_some_and(|checkpoint| checkpoint.restore_runtime_payload().is_ok())
+        {
+            // normal load可能因别的记录/索引失败；不修改本来严格合法的当前owner。
+            return Err(normal_error);
+        }
+        if !prepared.pending_real_call_ids.is_empty() {
+            return Err(crate::error::ReactError::Other(format!(
+                "真实工具仍未结算，不能重放或使用旧final：{}",
+                prepared.pending_real_call_ids.join(", ")
+            )));
+        }
+        let checkpoint = crate::agent::snapshot::derive_control_recovery_checkpoint(
+            &prepared.original,
+            prepared.messages,
+        )?;
+        if cancel.is_cancelled() {
+            return Err(crate::error::ReactError::Other(
+                "恢复提交前已取消".to_string(),
+            ));
+        }
+        call_context.ensure_not_expired()?;
+        // 原Store用同一绝对deadline控制准入。写已准入后须await真实物理结算；
+        // timeout/select会drop waiter，却不能停止原blocking写，不能假报已释放。
+        let receipt = store
+            .commit_checkpoint_recovery_with_context(
+                call_context,
+                crate::state::RuntimeCheckpointRecoveryRequest {
+                    original: prepared.original,
+                    checkpoint,
+                    origins: prepared.origins,
+                },
+            )
+            .await?;
+        if !matches!(
+            receipt.status,
+            crate::state::RuntimeCheckpointCasStatus::Applied
+                | crate::state::RuntimeCheckpointCasStatus::AlreadyCurrent
+        ) {
+            return Err(crate::error::ReactError::Other(format!(
+                "原恢复CAS未接纳：{:?}",
+                receipt.status
+            )));
+        }
+        if cancel.is_cancelled() {
+            return Err(crate::error::ReactError::Other(
+                "恢复CAS已结算，当前执行已取消；未发布回答".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// 原恢复暂停后的显式只读准备入口。它不标记hydrated、不写入转换checkpoint，
+    /// 也不发布候选或重放工具；调用方仍须沿原expected-resume/结算处理返回的原版本。
+    /// `prior_terminal`来自原owner的真实结算记录，不从旧回答文本猜测。
+    pub async fn prepare_pending_control_checkpoint(
+        &self,
+        runtime_state_id: &str,
+        call_context: crate::memory::PersistenceCallContext,
+        cancel: &crate::agent::CancellationToken,
+        prior_terminal: Option<crate::agent::ExecutionStatusKind>,
+    ) -> Result<crate::state::PreparedPendingControlRecovery> {
+        self.validate_persistence_configuration()?;
+        let remaining = call_context.remaining_duration()?;
+        let _execution = tokio::select! {
+            guard = tokio::time::timeout(remaining, self.execution_mutex.lock()) => {
+                guard.map_err(|_| crate::error::ReactError::Other("原恢复deadline在等锁时到达".to_string()))?
+            }
+            _ = cancel.cancelled() => return Err(crate::error::ReactError::Other("原恢复等锁已取消".to_string())),
+        };
+        let store = self.memory.state_store.as_ref().ok_or_else(|| {
+            crate::error::ReactError::Other("原恢复没有RuntimeStateStore".to_string())
+        })?;
+        let projector = self
+            .pre_model_context_projector
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+            .ok_or_else(|| {
+                crate::error::ReactError::Other("没有原恢复来源projector".to_string())
+            })?;
+        let scope_id = self.config.conversation_id.as_deref().ok_or_else(|| {
+            crate::error::ReactError::Other("原恢复缺少conversation scope".to_string())
+        })?;
+        let context = crate::compression::ProjectionContext {
+            iteration: 0,
+            agent_name: self.config.agent_name.clone(),
+            session_id: self.config.session_id.clone(),
+            conversation_id: Some(scope_id.to_string()),
+            run_id: None,
+            turn_id: None,
+        };
+        crate::state::legacy_control_history::pending_recovery::prepare_pending_control_recovery(
+            store.as_ref(),
+            call_context,
+            runtime_state_id,
+            &context,
+            projector.as_ref(),
+            cancel,
+            prior_terminal,
+        )
+        .await
+    }
+
     /// Resume agent state from a [`RuntimeStateStore`](crate::state::RuntimeStateStore) checkpoint.
     ///
     /// Loads the most recent [`AgentCheckpoint`](crate::state::AgentCheckpoint) for
@@ -2199,29 +2355,66 @@ impl ReactAgent {
     /// plan data remains in the returned record but is not restored into ReAct.
     pub async fn resume_from_state_store(&self) -> Result<Option<crate::state::AgentCheckpoint>> {
         self.validate_persistence_configuration()?;
-        let _execution_guard = self.execution_mutex.lock().await;
-        let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent(self);
-        if let Some(settlement) = snapshot.reconcile_pending_transcript_projection().await?
-            && settlement.status != crate::memory::TranscriptProjectionSettlementStatus::Settled
-        {
-            return Err(crate::agent::snapshot::transcript_settlement_admission_error(&settlement));
+        // 此操作首次真实admission；未有业务run也保原lease/锁/资源，不捏造run id。
+        let (mut lease, cancel) = self.close_authority.admit(None)?;
+        // 与stream同样在等锁前捕获原调用；共享context在排队期间清除不能释放原资源。
+        let legacy_context = self.capture_legacy_external_context();
+        let execution = self.execution_mutex.clone().lock_owned().await;
+        if cancel.is_cancelled() {
+            return Err(crate::error::ReactError::Other(
+                "Agent close cancelled recovery before preparation".to_string(),
+            ));
         }
-        let Some(runtime_state_id) = self.config.conversation_id.clone() else {
-            tracing::debug!("resume_from_state_store: no conversation_id configured");
-            return Ok(None);
-        };
-        let previous_hydration = self
-            .begin_runtime_state_hydration(Some(&runtime_state_id))
-            .await;
-        self.clear_runtime_snapshots();
-        let checkpoint = self.resume_from_state_store_id(&runtime_state_id).await?;
-        if checkpoint.is_some() {
-            self.commit_runtime_state_hydration(Some(&runtime_state_id))
+        lease.mark_started();
+        let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent_with_legacy_context(
+            self,
+            &legacy_context,
+        );
+        let mut owner =
+            run::stream_channel::ReactStreamTurnOwner::preparation(&snapshot, lease, execution);
+        let result = async {
+            if let Some(runtime_id) = self.config.conversation_id.as_deref() {
+                self.normalize_pending_control_checkpoint(
+                    runtime_id,
+                    runtime_id,
+                    crate::memory::PersistenceCallContext::with_timeout(
+                        std::time::Duration::from_secs(10),
+                    )?,
+                    &cancel,
+                )
+                .await?;
+            }
+            let snapshot = crate::agent::snapshot::AgentRunSnapshot::from_agent_with_legacy_context(
+                self,
+                &legacy_context,
+            );
+            if let Some(settlement) = snapshot.reconcile_pending_transcript_projection().await?
+                && settlement.status != crate::memory::TranscriptProjectionSettlementStatus::Settled
+            {
+                return Err(
+                    crate::agent::snapshot::transcript_settlement_admission_error(&settlement),
+                );
+            }
+            let Some(runtime_state_id) = self.config.conversation_id.clone() else {
+                tracing::debug!("resume_from_state_store: no conversation_id configured");
+                return Ok(None);
+            };
+            let previous_hydration = self
+                .begin_runtime_state_hydration(Some(&runtime_state_id))
                 .await;
-        } else {
-            *self.memory.runtime_state_hydration.lock().await = previous_hydration;
+            self.clear_runtime_snapshots();
+            let checkpoint = self.resume_from_state_store_id(&runtime_state_id).await?;
+            if checkpoint.is_some() {
+                self.commit_runtime_state_hydration(Some(&runtime_state_id))
+                    .await;
+            } else {
+                *self.memory.runtime_state_hydration.lock().await = previous_hydration;
+            }
+            Ok(checkpoint)
         }
-        Ok(checkpoint)
+        .await;
+        owner.observe_preparation_result(&result);
+        result
     }
 
     pub(crate) async fn resume_from_state_store_id(
@@ -2248,19 +2441,16 @@ impl ReactAgent {
         };
 
         let managed = self.memory.conversation_store.is_some();
-        let (checkpoint, runtime_version) = if managed {
+        let (checkpoint, runtime_version) = if managed
+            || store.runtime_state_capability()
+                == crate::state::RuntimeStateCapability::RevisionedV1
+        {
             let timeout = std::time::Duration::from_secs(10);
             let context = crate::memory::PersistenceCallContext::with_timeout(timeout)?;
-            let loaded = tokio::time::timeout(
-                timeout,
-                store.load_runtime_state_with_context(context, scope_id, runtime_state_id),
-            )
-            .await
-            .map_err(|_| {
-                echo_core::error::RuntimeStateError::DeadlineExceeded(
-                    "runtime state hydration".to_string(),
-                )
-            })??;
+            // 同一Store load也可能修复scope，await真实结算；deadline由原context传播。
+            let loaded = store
+                .load_runtime_state_with_context(context, scope_id, runtime_state_id)
+                .await?;
             match loaded {
                 Some(state) => (state.checkpoint, Some(state.version)),
                 None => (None, Some(crate::state::RuntimeStateVersion::Absent)),
@@ -3745,17 +3935,13 @@ impl Agent for ReactAgent {
 
     /// Get the list of tool definitions (name, description, parameter schema).
     fn tool_definitions(&self) -> Vec<crate::llm::types::ToolDefinition> {
-        let definitions = match self.llm_config.as_ref() {
+        match self.llm_config.as_ref() {
             Some(config) => self
                 .tools
                 .tool_manager
                 .get_tool_definitions_for_modalities(&config.input_modalities),
             None => self.tools.tool_manager.get_tool_definitions(),
-        };
-        definitions
-            .into_iter()
-            .filter(|d| d.function.name != TOOL_FINAL_ANSWER)
-            .collect()
+        }
     }
 
     fn disabled_tool_names(&self) -> std::collections::HashSet<String> {

@@ -40,6 +40,7 @@ mod tests {
 
     fn make_tool_call(id: &str, name: &str) -> ToolCall {
         ToolCall {
+            provider_source: None,
             id: id.to_string(),
             call_type: "function".to_string(),
             function: echo_core::llm::types::FunctionCall {

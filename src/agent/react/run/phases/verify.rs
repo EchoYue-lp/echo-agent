@@ -58,41 +58,6 @@ pub(crate) async fn validate_structured_final(
     }
 }
 
-/// Choose the last schema- and Critic-accepted answer after the complete tool
-/// batch. Only a batch with no schema-valid candidate consumes repair budget.
-pub(crate) async fn select_final_answer(
-    prepared: Option<&crate::agent::react::PreparedResponseFormat>,
-    snap: &AgentRunSnapshot,
-    context: &Arc<Mutex<crate::compression::ContextManager>>,
-    state: &mut LoopState,
-    iteration: usize,
-    outputs: Vec<String>,
-) -> Result<Option<String>> {
-    let mut accepted = None;
-    let mut last_schema_rejection = None;
-    let mut saw_schema_valid_candidate = false;
-    for output in outputs {
-        match prepared
-            .map(|format| format.parse_text(&output))
-            .transpose()
-        {
-            Ok(_) => {
-                saw_schema_valid_candidate = true;
-                if verify_answer(snap, context, &output, state.verifier_retry_count).await {
-                    accepted = Some(output);
-                } else {
-                    state.verifier_retry_count = state.verifier_retry_count.saturating_add(1);
-                }
-            }
-            Err(_) => last_schema_rejection = Some(output),
-        }
-    }
-    if !saw_schema_valid_candidate && let Some(rejected) = last_schema_rejection {
-        validate_structured_final(prepared, snap, context, state, iteration, &rejected).await?;
-    }
-    Ok(accepted)
-}
-
 /// Verify a final answer with the configured Critic.
 ///
 /// Returns `true` if the answer passes verification (or verification is
@@ -103,23 +68,14 @@ pub(crate) async fn verify_answer(
     context: &Arc<Mutex<crate::compression::ContextManager>>,
     answer: &str,
     retry_count: usize,
-) -> bool {
+) -> Result<bool> {
     // Skip if verifier is disabled or no critic is configured
     if !snap.config.verifier_enabled {
-        return true;
+        return Ok(true);
     }
     let Some(ref critic) = snap.critic else {
-        return true;
+        return Ok(true);
     };
-    // Don't retry beyond max (but always allow the first check)
-    if retry_count > 0 && retry_count >= snap.config.verifier_max_retries {
-        tracing::info!(
-            retries = retry_count,
-            "Verifier max retries reached, accepting answer"
-        );
-        return true;
-    }
-
     let task_description = {
         let ctx = context.lock().await;
         // Use the last user message as the task description
@@ -138,10 +94,17 @@ pub(crate) async fn verify_answer(
 
     match critic.critique(&task_description, answer, "").await {
         Ok(critique) => {
-            if critique.passed || critique.score >= snap.config.verifier_min_score {
+            if critique.passed && critique.score >= snap.config.verifier_min_score {
                 tracing::debug!(score = critique.score, "Verifier passed, accepting answer");
-                true
+                Ok(true)
             } else {
+                // 重试预算限制修正次数，不是跳过已配置校验的成功凭据。
+                if retry_count >= snap.config.verifier_max_retries {
+                    return Err(ReactError::Other(format!(
+                        "Critic rejected final answer after {} repair attempts: {}",
+                        retry_count, critique.feedback,
+                    )));
+                }
                 let feedback = format!(
                     "[Verifier feedback] Score: {}/10 (min: {}). {}\nSuggestions: {}",
                     critique.score,
@@ -155,7 +118,7 @@ pub(crate) async fn verify_answer(
                 );
                 tracing::info!(
                     score = critique.score,
-                    retry = retry_count + 1,
+                    retry = retry_count.saturating_add(1),
                     max = snap.config.verifier_max_retries,
                     "Verifier rejected answer, injecting feedback for self-correction"
                 );
@@ -165,13 +128,10 @@ pub(crate) async fn verify_answer(
                     &feedback,
                 )
                 .await;
-                false
+                Ok(false)
             }
         }
-        Err(e) => {
-            tracing::warn!(error = %e, "Verifier critique failed, accepting answer");
-            true // Fail-open: accept answer if critique itself errors
-        }
+        Err(error) => Err(error),
     }
 }
 
@@ -196,14 +156,18 @@ pub(crate) async fn verify_final_text(
     let content_buffer = think.content_buffer;
     let reasoning_content = think.reasoning_buffer;
     let reasoning_blocks = think.reasoning_blocks;
-    if !verify_answer(snap, context, &content_buffer, state.verifier_retry_count).await {
+    let assistant_blocks = think.assistant_blocks;
+    if !verify_answer(snap, context, &content_buffer, state.verifier_retry_count).await? {
         // Push the LLM's answer to context so it can see its own attempt
-        context.lock().await.push(with_reasoning_content(
+        let mut message = with_reasoning_content(
             Message::assistant(content_buffer),
             reasoning_content,
             reasoning_blocks,
-        ));
-        state.verifier_retry_count += 1;
+        );
+        message.assistant_blocks = Some(assistant_blocks.clone());
+        message.approved_assistant_blocks = Some(Vec::new());
+        context.lock().await.push(message);
+        state.verifier_retry_count = state.verifier_retry_count.saturating_add(1);
         return Ok(IterOutcome::Continue);
     }
 
@@ -211,6 +175,7 @@ pub(crate) async fn verify_final_text(
         answer: content_buffer,
         reasoning_content,
         reasoning_blocks,
+        assistant_blocks,
     })
 }
 
@@ -226,37 +191,39 @@ mod tests {
     /// `verifier_enabled = false` (the default) accepts every answer without
     /// touching the critic or the context.
     #[tokio::test]
-    async fn verify_answer_disabled_returns_true() {
+    async fn verify_answer_disabled_returns_true() -> Result<()> {
         let config = AgentConfig::new("test-model", "agent", "sys");
         let agent = ReactAgent::new(config);
         let snap = AgentRunSnapshot::from_agent(&agent);
 
         assert!(!snap.config.verifier_enabled);
-        let accepted = verify_answer(&snap, &agent.memory.context, "any answer", 0).await;
+        let accepted = verify_answer(&snap, &agent.memory.context, "any answer", 0).await?;
         assert!(
             accepted,
             "verifier disabled should fail-open without inspecting the critic",
         );
+        Ok(())
     }
 
     /// `verifier_enabled = true` but no critic configured accepts every
     /// answer.
     #[tokio::test]
-    async fn verify_answer_no_critic_returns_true() {
+    async fn verify_answer_no_critic_returns_true() -> Result<()> {
         let config = AgentConfig::new("test-model", "agent", "sys").verifier_enabled(true);
         let agent = ReactAgent::new(config);
         let snap = AgentRunSnapshot::from_agent(&agent);
 
         assert!(snap.critic.is_none());
-        let accepted = verify_answer(&snap, &agent.memory.context, "answer", 0).await;
+        let accepted = verify_answer(&snap, &agent.memory.context, "answer", 0).await?;
         assert!(accepted, "no critic should fail-open with true");
+        Ok(())
     }
 
     /// On the first failed critique, feedback is injected into context and
     /// the answer is rejected. The retry counter starts at 0 so the
     /// "max retries reached" short-circuit must NOT fire.
     #[tokio::test]
-    async fn verify_answer_low_score_pushes_feedback_and_rejects() {
+    async fn verify_answer_low_score_pushes_feedback_and_rejects() -> Result<()> {
         let config = AgentConfig::new("test-model", "agent", "sys")
             .verifier_enabled(true)
             .verifier_min_score(7.0);
@@ -265,7 +232,7 @@ mod tests {
         let snap = AgentRunSnapshot::from_agent(&agent);
 
         let before = agent.memory.context.lock().await.messages().len();
-        let accepted = verify_answer(&snap, &agent.memory.context, "bad answer", 0).await;
+        let accepted = verify_answer(&snap, &agent.memory.context, "bad answer", 0).await?;
         let after = agent.memory.context.lock().await.messages().len();
 
         assert!(!accepted, "low-score critique should reject the answer");
@@ -284,12 +251,12 @@ mod tests {
                 && text.contains("[Verifier feedback]"),
             "injected feedback should be runtime context, got: {text:?}",
         );
+        Ok(())
     }
 
-    /// Once `retry_count` reaches `verifier_max_retries`, even a failing
-    /// critic causes acceptance (avoids infinite self-correction loops).
+    /// 修正预算耗尽后仍校验新候选，未通过时明确失败，不能伪成功。
     #[tokio::test]
-    async fn verify_answer_max_retries_short_circuits_to_true() {
+    async fn verify_answer_max_retries_does_not_bypass_rejection() {
         let config = AgentConfig::new("test-model", "agent", "sys")
             .verifier_enabled(true)
             .verifier_max_retries(2);
@@ -299,8 +266,8 @@ mod tests {
 
         let accepted = verify_answer(&snap, &agent.memory.context, "answer", 2).await;
         assert!(
-            accepted,
-            "retry_count >= max_retries should accept without consulting the critic",
+            accepted.is_err(),
+            "retry exhaustion must not approve a rejected answer",
         );
     }
 }

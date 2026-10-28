@@ -2,7 +2,7 @@
 
 ## 是什么
 
-流式输出（Streaming）让 Agent 在 LLM 生成内容的同时，将 Token 片段实时推送给调用方，而不是等待完整响应后一次性返回。用户可以看到 Agent "打字"的过程，大幅改善交互体验。
+流式输出（Streaming）让 Agent 在 LLM 生成内容的同时，以typed消息块、真实工具和运行状态向调用方传递事实。明确进度和工具事实能持续展示；最终候选在配置校验与结算前按合同缓冲。
 
 ---
 
@@ -14,8 +14,8 @@
 - **体验割裂**：与现代 AI 对话产品（ChatGPT、Claude）的流畅体验差距明显
 
 流式输出解决了：
-- 响应第一个 Token 的延迟（TTFT，Time to First Token）从几秒降至毫秒级
-- 用户可以实时看到思考过程（CoT 推理文本）和工具调用
+- 及时展示已经允许公开的消息块、真实工具与等待状态；不承诺固定首字延迟
+- provider reasoning/公开摘要独立于普通正文与工具显示
 - 可以在生成过程中提前终止
 
 ---
@@ -27,10 +27,11 @@
 
 ```rust
 pub enum AgentEvent {
-    Token(String),                              // LLM 输出的 Token 片段（推理过程 / 最终回答）
+    AssistantMessage { block: AssistantMessageBlock }, // 原生身份/阶段/增量
+    ExecutionStatus(ExecutionStatus),              // 最后runtime结算事实
     ToolCall { invocation: ToolInvocation },    // LLM 决定调用某个工具
     ToolResult { name: String, result: ToolResult }, // 工具执行完毕，返回结果
-    FinalAnswer(String),                        // 最终答案已生成，之后仍可能清理
+    FinalAnswer(String),                        // 受检最终正文确认；最后status仍须消费
 }
 ```
 
@@ -56,8 +57,8 @@ async fn main() -> Result<()> {
     let mut first_error = None;
     while let Some(event) = stream.next().await {
         match event {
-            Ok(AgentEvent::Token(token)) => {
-                print!("{}", token);          // 实时打印推理/回答文本
+            Ok(AgentEvent::AssistantMessage { block }) => {
+                print!("[{:?}] {}", block.phase, block.delta); // 教学追踪事件；业务正文按批准投影呈现
                 std::io::Write::flush(&mut std::io::stdout()).ok();
             }
             Ok(AgentEvent::ToolCall { invocation, .. }) => {
@@ -88,23 +89,11 @@ async fn main() -> Result<()> {
 
 ---
 
-## 流式输出与 CoT 的配合
+## 原生块与执行终态
 
-当 `enable_cot=true`（默认启用）时，系统提示词末尾追加引导语，要求 LLM 在工具调用前先输出思考文本。这个文本会作为 `Token` 事件实时流出：
+新执行仅以 `AssistantMessage` 的明确 phase/身份/增量区分 reasoning、普通进度与正文，不再双发 Token/ThinkStart/ThinkEnd 副本。块 complete 只结束块；最终候选经 Guard/Critic/Stop、持久化、原 EOF 和 owner Join 后才发布，最后单次 `ExecutionStatus(Settled)` 才提供运行时完成事实。旧变体保留给历史读取与合理公开 custom Agent。应用不能把确认事件再次拼进已经呈现的正文。
 
-```
-用户: "计算 42 * 7"
-
-流事件序列：
-  Token("让我先分析一下这道计算题...")  ← CoT 推理文本（实时）
-  Token("42 乘以 7，需要调用计算工具")
-  ToolCall { name: "multiply", args: {"a": 42, "b": 7} }
-  ToolResult { name: "multiply", output: "294" }
-  Token("计算完成，结果是 294。")        ← 最终回答（实时）
-  FinalAnswer("42 × 7 = 294")
-```
-
----
+详细字段、恢复呈现资格与 TaskRun 边界见[原生消息合同](../zh/43-native-message-execution.md)。
 
 ## 阻塞式 vs 流式对比
 

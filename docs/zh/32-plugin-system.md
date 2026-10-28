@@ -15,7 +15,7 @@ my-plugin/
 │   └── reviewer.md
 ├── hooks/
 │   └── hooks.yaml
-├── lsp.yaml
+├── lsp.yaml          # 旧声明：仅冻结与诊断，不加载语言服务
 ├── monitors.yaml
 ├── themes/
 ├── output-styles/
@@ -118,26 +118,31 @@ Integrator 注入 prepared plugin owner。
 |---|---|
 | `agents/*.md` | Subagent 适配器 |
 | `hooks/hooks.yaml` | Hook registry |
-| `lsp.yaml` | 宿主应用 LSP manager |
+| `lsp.yaml` | 已退役声明：原prepare仅冻结文本与diagnostics，不启动manager |
 | `monitors.yaml` | embedding application 调度器 |
 | `themes/*.json` | embedding application GUI/TUI 主题目录 |
 | `output-styles/*.md` | embedding application system context 投影 |
 
 `scripts/` 和 `README.md` 是插件资源，不会自动执行；Skill 或 Hook 可以显式引用脚本。
 
-## 冻结的构建能力诊断
+## 冻结旧声明的退役诊断
 
-当前 build 未启用 `lsp` 时，成功冻结的 `lsp.yaml` 会产生通用 preparation Warning，携带 `component() == "lsp"`、插件身份和来源路径。这只说明构建能力边界，不是应用退役政策，也不证明文本是有效 LSP YAML；变量替换、冻结文本和原有 hash 仍由 prepare 拥有。
+`lsp` feature与LSP运行组件已经具名退出。原registry／prepare在cold generation识别旧
+`lsp.yaml`：合法UTF-8文本保完整冻结文档与原hash，并产生含component/path/plugin身份的
+退役Warning；非法UTF-8、读取失败、metadata错误、非普通文件及坏链接保原Error。
+真实缺席仍是optional，不打开FIFO／设备。没有LSP parser／manager／进程启动，也不假报加载成功。
 
-Invalid UTF-8 与读失败保留 Error。错误文件种类、metadata 失败、失效/循环链接也产生带 LSP 组件与路径的结构化诊断；真实缺失仍是合法 optional 状态。非普通文件只分类、不读取，避免将 FIFO 作为文本打开。组件 Error 不丢弃健康 Skill/Hook/MCP，也不使整代准备结果失效。
+完整旧文本以原`PreparedPluginDocument`保留在同generation私有通用容器，应用读取完整
+`PreparedPluginSet::diagnostics()`；不恢复`lsp_document()`或`lsp_discovered`专属出口。
+cache hit返回同一Arc，不重读或重复追加；源改／删／换链接不改旧集合，invalidate后才重建。
+`wire_prepared`／rollback不重读包文件，健康Skill／Hook／MCP／Subagent和原cleanup receipt保留。
 
-应用须读取完整 `PreparedPluginSet::diagnostics()`，不能只消费 apply receipt 的 Warning 投影。诊断随同一 identity/generation 冻结；cache hit 返回同一 Arc，不重新探测或追加重复项，文件变化只在 invalidate 后重捕获。wire/rollback 仍不读取包文件。
-
-启用 `lsp` 时保持原行为。此中间桥接不新增 public API、不物理删除框架 LSP，也不改 SDK accepted/pin。应用可将通用组件诊断映射为自己的产品说明，无需调用 LSP 专属文档 accessor 或重新读取文件。见 [ADR 0090](../adr/0090-a2a-lsp-retirement-contract.md)。
+SDK接入此删后源时应只原样投影Framework通用diagnostics，不从路径重新推断或补造来源。这里的源码合同
+与删后构建、正式SDK pin、native及发布资格分别验收。见[ADR0090](../adr/0090-a2a-lsp-retirement-contract.md)。
 
 ## 框架与应用分层
 
-通用框架负责清单解析、Skills、MCP、作用域与生命周期、Hooks、Subagent 定义和 LSP 适配输出。embedding application 只发现并转换产品专属的 `monitors.yaml`、`themes/` 和 `output-styles/`；应用 integration 不重复拥有依赖排序、组件所有权或重载语义。
+通用框架负责清单解析、Skills、MCP、作用域与生命周期、Hooks、Subagent 定义及旧声明冻结诊断。embedding application 只发现并转换产品专属的 `monitors.yaml`、`themes/` 和 `output-styles/`；应用 integration 不重复拥有依赖排序、组件所有权或重载语义。
 
 ## 发现与生命周期
 
@@ -151,10 +156,10 @@ Invalid UTF-8 与读失败保留 Error。错误文件种类、metadata 失败、
 
 应用可以覆盖插件数据根目录，embedding application 会将其设为 `<application-data>`。
 
-插件按依赖顺序加载。清单致命错误会跳过整个包；framework解析的Skill、Hook、MCP错误按组件边界隔离并记录error diagnostic，无法读取的冻结Subagent/LSP文档也按相同方式排除。二者的产品级语法由embedding application的第二阶段prepare校验。同一插件中健康的兄弟组件仍保留在prepared plugin中。运行时记录每个插件的组件所有权，因此disable、uninstall和reload能精确卸载对应组件。
+插件按依赖顺序加载。清单致命错误会跳过整个包；framework解析的Skill、Hook、MCP错误按组件边界隔离并记录error diagnostic，无法读取的冻结Subagent文档及旧声明也按相同方式排除。保留Subagent的产品级语法由embedding application的第二阶段prepare校验；旧LSP声明不再作为可执行组件校验。同一插件中健康的兄弟组件仍保留在prepared plugin中。运行时记录每个插件的组件所有权，因此disable、uninstall和reload能精确卸载对应组件。
 
 `PluginIntegrator::prepare` 捕获唯一不可变的 `PreparedPluginSet`，包括单调 generation、确定性
-内容 identity、结构化诊断、已解析的 Skills/Hooks/MCP，以及保留 owner 的 Subagent/LSP 文档。
+内容 identity、结构化诊断、已解析的 Skills/Hooks/MCP，以及保留 owner 的 Subagent文档及私有旧声明。
 `wire_prepared` 与 rollback 不读取组件文件；磁盘变化只在 registry mutation 或显式 invalidation
 后可见。见 [ADR 0012](../adr/0012-immutable-plugin-preparation.md)。
 generation 序号在同一进程的所有 Integrator 间统一分配，因此两个独立 Integrator 为同一 Agent

@@ -514,6 +514,17 @@ impl Tool for ToolSearchTool {
                         .is_none_or(|visibility| visibility.is_eligible(&definition.function.name))
                 })
                 .filter_map(|definition| {
+                    let definition = if ctx.tool_access == Some(ToolAccess::ReadOnly) {
+                        // 名称上界不代表同名新实现仍只读。能力与描述取同一实际工具，
+                        // 避免本地热替换后把写工具误报为可激活。
+                        let tool = manager.get_tool(&definition.function.name)?;
+                        if !tool.capabilities().is_read_only() {
+                            return None;
+                        }
+                        ToolDefinition::from_tool(tool.as_ref())
+                    } else {
+                        definition
+                    };
                     let name_lower = definition.function.name.to_lowercase();
                     let description_lower = definition.function.description.to_lowercase();
                     let score = if name_lower == query_lower {

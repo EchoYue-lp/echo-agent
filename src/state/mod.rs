@@ -92,6 +92,9 @@ pub mod delivery {
 
 // ── AgentCheckpoint ────────────────────────────────────────────────────
 
+pub(crate) mod legacy_control_history;
+pub use legacy_control_history::pending_recovery::PreparedPendingControlRecovery;
+
 /// A full checkpoint of agent runtime state, suitable for serialization
 /// and later restoration (hydration).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -303,8 +306,25 @@ impl AgentCheckpoint {
     pub fn restore_managed_runtime_payload(
         &self,
     ) -> crate::error::Result<ManagedAgentCheckpointPayload> {
+        self.restore_managed_payload_for_read(false)
+    }
+
+    /// 原恢复owner的只读检查；仅推迟工具配对语义，格式/身份/cursor/debt照常核验。
+    /// 返回值不是可执行或已hydrated许可，普通restore/save/CAS仍用严格入口。
+    pub(crate) fn inspect_payload_for_recovery(
+        &self,
+    ) -> crate::error::Result<ManagedAgentCheckpointPayload> {
+        self.restore_managed_payload_for_read(true)
+    }
+
+    fn restore_managed_payload_for_read(
+        &self,
+        defer_tool_pairing: bool,
+    ) -> crate::error::Result<ManagedAgentCheckpointPayload> {
         let payload = self.restore_payload()?;
-        validate_tool_message_pairing(&payload.messages)?;
+        if !defer_tool_pairing {
+            validate_tool_message_pairing(&payload.messages)?;
+        }
         self.validate_transcript_projection(payload.transcript_projection.as_ref())?;
         self.validate_pending_transcript_projection(
             payload.pending_transcript_projection.as_ref(),
@@ -693,6 +713,15 @@ pub struct RuntimeCheckpointCasRequest {
     pub checkpoint: AgentCheckpoint,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub managed_import: Option<ManagedImportEpochTransition>,
+}
+
+/// 原恢复owner提交派生context的输入；沿同一个CAS版本，不另建恢复状态机。
+/// source保原checkpoint/版本，origins只承载已核运行期注册来源。
+#[derive(Clone)]
+pub struct RuntimeCheckpointRecoveryRequest {
+    pub original: ManagedRuntimeStateSnapshot,
+    pub checkpoint: AgentCheckpoint,
+    pub origins: Vec<crate::compression::RecoveredToolOrigin>,
 }
 
 /// Proof that one managed transcript import advanced the epoch being bound.
@@ -1361,6 +1390,39 @@ pub trait RuntimeStateStore: Send + Sync {
     ) -> futures::future::BoxFuture<'a, crate::error::Result<Option<ManagedRuntimeStateSnapshot>>>
     {
         self.load_runtime_state(scope_id, runtime_state_id)
+    }
+
+    /// 只读检查原恢复记录，不修复/写回/归一化owner或索引。
+    /// 未显式实现纯读检查时默认Unsupported；normal load可能执行reconcile写入，不能代用。
+    /// 原checkpoint和scope/version必须原样返回，不签发执行或新副作用许可。
+    fn inspect_runtime_state_for_recovery_with_context<'a>(
+        &'a self,
+        _context: crate::memory::PersistenceCallContext,
+        _scope_id: &'a str,
+        _runtime_state_id: &'a str,
+    ) -> futures::future::BoxFuture<'a, crate::error::Result<Option<ManagedRuntimeStateSnapshot>>>
+    {
+        Box::pin(async {
+            Err(echo_core::error::RuntimeStateError::Unsupported(
+                "explicit readonly runtime recovery inspection".to_string(),
+            )
+            .into())
+        })
+    }
+
+    /// 保存不可变旧来源后，复用原CAS提交已知控制历史派生版本。
+    /// 默认不支持，不能默默降级为无版本写入或改原digest来放行。
+    fn commit_checkpoint_recovery_with_context<'a>(
+        &'a self,
+        _context: crate::memory::PersistenceCallContext,
+        _request: RuntimeCheckpointRecoveryRequest,
+    ) -> futures::future::BoxFuture<'a, crate::error::Result<RuntimeCheckpointCasReceipt>> {
+        Box::pin(async {
+            Err(echo_core::error::RuntimeStateError::Unsupported(
+                "checkpoint recovery CAS commit".to_string(),
+            )
+            .into())
+        })
     }
 
     /// Load the stable scope authority used to fence admission and deletion.
@@ -3035,6 +3097,7 @@ mod checkpoint_tests {
 
     fn tool_call(id: &str, name: &str) -> ToolCall {
         ToolCall {
+            provider_source: None,
             id: id.to_string(),
             call_type: "function".to_string(),
             function: FunctionCall {

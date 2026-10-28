@@ -88,23 +88,11 @@ async fn main() -> Result<()> {
 
 ---
 
-## Streaming + CoT
+## 原生块与执行终态
 
-When `enable_cot=true` (default), the framework appends a guidance instruction to the system prompt, asking the LLM to output reasoning text in the `content` field before each tool call. This text streams out as `Token` events in real time:
+新执行仅以 `AssistantMessage` 的明确 phase/身份/增量区分 reasoning、普通进度与正文，不再双发 Token/ThinkStart/ThinkEnd 副本。块 complete 只结束块；最终候选经 Guard/Critic/Stop、持久化、原 EOF 和 owner Join 后才发布，最后单次 `ExecutionStatus(Settled)` 才提供运行时完成事实。旧变体保留给历史读取与合理公开 custom Agent。
 
-```
-User: "Calculate 42 * 7"
-
-Event stream:
-  Token("Let me analyze this calculation...")       ← CoT reasoning (real-time)
-  Token("42 times 7 — I should use the multiply tool")
-  ToolCall { name: "multiply", args: {"a": 42, "b": 7} }
-  ToolResult { name: "multiply", output: "294" }
-  Token("The calculation is done. The result is 294.") ← final answer (real-time)
-  FinalAnswer("42 × 7 = 294")
-```
-
----
+详细字段、恢复呈现资格与 TaskRun 边界见[原生消息合同](../zh/43-native-message-execution.md)。
 
 ## Blocking vs Streaming
 

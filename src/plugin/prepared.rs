@@ -108,7 +108,9 @@ pub struct PreparedPlugin {
     #[cfg(feature = "mcp")]
     mcp: Option<crate::mcp::McpConfigFile>,
     subagent_documents: Vec<PreparedPluginDocument>,
-    lsp_document: Option<PreparedPluginDocument>,
+    // 已退役声明仍属于此原prepare generation的冻结输入，不参与wire或执行。
+    // 复用同一document/hash，不恢复具名公开getter或另建来源reader。
+    _retired_documents: Vec<PreparedPluginDocument>,
 }
 
 impl PreparedPlugin {
@@ -146,10 +148,6 @@ impl PreparedPlugin {
 
     pub fn subagent_documents(&self) -> &[PreparedPluginDocument] {
         &self.subagent_documents
-    }
-
-    pub fn lsp_document(&self) -> Option<&PreparedPluginDocument> {
-        self.lsp_document.as_ref()
     }
 }
 
@@ -261,7 +259,6 @@ pub struct PluginWiringResult {
     #[cfg(feature = "mcp")]
     pub mcp_connected_ids: Vec<crate::mcp::McpServerId>,
     pub agents_discovered: Vec<String>,
-    pub lsp_discovered: Vec<String>,
     pub warnings: Vec<String>,
     pub components_by_plugin: HashMap<String, WiredPluginComponents>,
 }
@@ -290,7 +287,6 @@ impl PartialEq for PluginWiringResult {
                 }
             }
             && self.agents_discovered == other.agents_discovered
-            && self.lsp_discovered == other.lsp_discovered
             && self.warnings == other.warnings
             && self.components_by_plugin == other.components_by_plugin
     }
@@ -775,6 +771,9 @@ impl PluginIntegrator {
                 ));
                 continue;
             }
+            let retired_lsp_path =
+                inspect_lsp_source(&plugin_id, None, &variables.plugin_root, &mut diagnostics)
+                    .await;
             let resolved = match registry.resolve_components_async(&plugin_id).await {
                 Ok(resolved) => resolved,
                 Err(message) => {
@@ -789,9 +788,16 @@ impl PluginIntegrator {
                 }
             };
             diagnostics.extend(
-                resolved.diagnostics.iter().cloned().map(|message| {
-                    warning_diagnostic(Some(&plugin_id), "components", None, message)
-                }),
+                // 原prepare在下面给同一旧源结构化诊断；原resolver的直接SDK消费者
+                // 仍得到通用diagnostics，此处避免重复同一退役Warning。
+                resolved
+                    .diagnostics
+                    .iter()
+                    .filter(|message| !message.starts_with("LSP component is retired:"))
+                    .cloned()
+                    .map(|message| {
+                        warning_diagnostic(Some(&plugin_id), "components", None, message)
+                    }),
             );
 
             let mut skills = Vec::new();
@@ -971,16 +977,7 @@ impl PluginIntegrator {
                     subagent_documents.push(document);
                 }
             }
-            #[cfg(not(feature = "lsp"))]
-            let lsp_path = inspect_lsp_source(
-                &plugin_id,
-                resolved.lsp_config_file,
-                &variables.plugin_root,
-                &mut diagnostics,
-            )
-            .await;
-            #[cfg(feature = "lsp")]
-            let lsp_path = resolved.lsp_config_file;
+            let lsp_path = retired_lsp_path;
             let lsp_document = match lsp_path {
                 Some(path) => {
                     freeze_document(&plugin_id, path, &variables, "lsp", &mut diagnostics).await
@@ -995,12 +992,11 @@ impl PluginIntegrator {
                     document.source_path(),
                     document.contents().as_bytes(),
                 );
-                #[cfg(not(feature = "lsp"))]
                 diagnostics.push(warning_diagnostic(
                     Some(&plugin_id),
                     "lsp",
                     Some(document.source_path().to_path_buf()),
-                    "LSP component is frozen but cannot be applied without the 'lsp' feature"
+                    "LSP component is retired; its original declaration remains preserved"
                         .to_string(),
                 ));
             }
@@ -1022,7 +1018,7 @@ impl PluginIntegrator {
                 #[cfg(feature = "mcp")]
                 mcp,
                 subagent_documents,
-                lsp_document,
+                _retired_documents: lsp_document.into_iter().collect(),
             });
         }
 
@@ -1222,13 +1218,6 @@ impl PluginIntegrator {
                         document.source_path().display()
                     )
                 }));
-            if let Some(document) = plugin.lsp_document() {
-                receipt.lsp_discovered.push(format!(
-                    "{}:{}",
-                    document.plugin_id(),
-                    document.source_path().display()
-                ));
-            }
             if receipt
                 .components_by_plugin
                 .get(plugin.id())
@@ -1443,7 +1432,6 @@ fn hash_document(
 /// Inspect only on a cold preparation. A missing optional declaration is silent,
 /// but dangling links and non-regular files must retain structured diagnostics.
 /// In particular, never open a FIFO/device while collecting frozen text.
-#[cfg(not(feature = "lsp"))]
 async fn inspect_lsp_source(
     plugin_id: &str,
     resolved_path: Option<PathBuf>,
@@ -1691,34 +1679,25 @@ mod tests {
             let document = prepared
                 .plugins()
                 .first()
-                .and_then(PreparedPlugin::lsp_document)
-                .ok_or_else(|| missing("frozen LSP text missing"))?;
+                .and_then(|plugin| plugin._retired_documents.first())
+                .ok_or_else(|| missing("frozen retired source text missing"))?;
             assert_eq!(document.contents(), contents);
             let diagnostics: Vec<_> = prepared
                 .diagnostics()
                 .iter()
                 .filter(|d| d.component() == "lsp")
                 .collect();
-            if cfg!(feature = "lsp") {
-                assert!(diagnostics.is_empty(), "enabled LSP behavior changed");
-            } else {
-                assert_eq!(
-                    diagnostics.len(),
-                    1,
-                    "unsupported LSP declaration was silent"
-                );
-                let diagnostic = diagnostics
-                    .first()
-                    .ok_or_else(|| missing("diagnostic missing"))?;
-                assert_eq!(diagnostic.plugin_id(), Some(id.as_str()));
-                assert_eq!(diagnostic.path(), Some(path.as_path()));
-                assert_eq!(diagnostic.severity(), PluginDiagnosticSeverity::Warning);
-            }
+            assert_eq!(diagnostics.len(), 1, "retired LSP declaration was silent");
+            let diagnostic = diagnostics
+                .first()
+                .ok_or_else(|| missing("diagnostic missing"))?;
+            assert_eq!(diagnostic.plugin_id(), Some(id.as_str()));
+            assert_eq!(diagnostic.path(), Some(path.as_path()));
+            assert_eq!(diagnostic.severity(), PluginDiagnosticSeverity::Warning);
         }
         Ok(())
     }
 
-    #[cfg(not(feature = "lsp"))]
     #[tokio::test]
     async fn lsp_frozen_wrong_kind_and_utf8_errors_keep_healthy_components()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -1749,7 +1728,7 @@ mod tests {
                 .plugins()
                 .first()
                 .ok_or_else(|| missing("plugin missing"))?;
-            assert!(plugin.lsp_document().is_none());
+            assert!(plugin._retired_documents.is_empty());
             assert_eq!(plugin.skills().len(), 1);
             assert!(plugin.hooks().is_some());
             assert_eq!(plugin.subagent_documents().len(), 1);
@@ -1781,7 +1760,6 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(not(feature = "lsp"))]
     #[tokio::test]
     async fn lsp_frozen_diagnostics_are_cached_until_invalidation()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -1804,6 +1782,13 @@ mod tests {
                 .count(),
             1
         );
+        let original_text = first
+            .plugins()
+            .first()
+            .and_then(|plugin| plugin._retired_documents.first())
+            .ok_or_else(|| missing("original retired document absent"))?
+            .contents()
+            .to_string();
         std::fs::write(&path, [0xff])?;
         for _ in 0..2 {
             let cached = integrator.prepare(&mut registry).await;
@@ -1811,7 +1796,27 @@ mod tests {
             assert_eq!(cached.identity(), first.identity());
             assert_eq!(cached.generation(), first.generation());
             assert_eq!(cached.diagnostics(), first.diagnostics());
+            assert_eq!(
+                cached
+                    .plugins()
+                    .first()
+                    .and_then(|plugin| plugin._retired_documents.first())
+                    .map(|document| document.contents()),
+                Some(original_text.as_str())
+            );
         }
+        std::fs::remove_file(&path)?;
+        let deleted_source_cached = integrator.prepare(&mut registry).await;
+        assert!(Arc::ptr_eq(&first, &deleted_source_cached));
+        assert_eq!(
+            deleted_source_cached
+                .plugins()
+                .first()
+                .and_then(|plugin| plugin._retired_documents.first())
+                .map(|document| document.contents()),
+            Some(original_text.as_str())
+        );
+        std::fs::write(&path, [0xff])?;
         integrator.invalidate(&registry);
         let changed = integrator.prepare(&mut registry).await;
         assert!(changed.generation() > first.generation());
@@ -1824,7 +1829,6 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(not(feature = "lsp"))]
     #[tokio::test]
     async fn lsp_frozen_true_absence_stays_optional() -> Result<(), Box<dyn std::error::Error>> {
         let temporary = tempfile::tempdir()?;
@@ -1855,10 +1859,12 @@ mod tests {
         let source = create_plugin(temporary.path(), "lsp.read", serde_json::json!([]))?;
         let mut registry = registry(temporary.path());
         let id = registry.install(&InstallSource::Local(source), PluginScope::Local)?;
-        let resolved = registry.resolve_components_async(&id).await?;
-        let path = resolved
-            .lsp_config_file
-            .ok_or_else(|| missing("resolved path missing"))?;
+        registry.resolve_components_async(&id).await?;
+        let path = registry
+            .get(&id)
+            .ok_or_else(|| missing("plugin missing"))?
+            .root
+            .join("lsp.yaml");
         let variables = registry.variables_for(&id)?;
         std::fs::remove_file(&path)?;
         let mut diagnostics = Vec::new();
@@ -1877,7 +1883,7 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(all(unix, not(feature = "lsp")))]
+    #[cfg(unix)]
     #[tokio::test]
     async fn lsp_frozen_fifo_is_rejected_before_text_read() -> Result<(), Box<dyn std::error::Error>>
     {
@@ -1902,7 +1908,6 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(not(feature = "lsp"))]
     #[tokio::test]
     async fn lsp_frozen_resolved_source_disappearance_is_an_error()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -1929,7 +1934,7 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(all(unix, not(feature = "lsp")))]
+    #[cfg(unix)]
     #[tokio::test]
     async fn lsp_frozen_broken_looping_and_valid_links_are_distinguished()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -1954,7 +1959,8 @@ mod tests {
                 std::fs::write(&target, "languages: {}\n")?;
             }
             std::os::unix::fs::symlink(&target, &path)?;
-            let prepared = PluginIntegrator::new().prepare(&mut registry).await;
+            let integrator = PluginIntegrator::new();
+            let prepared = integrator.prepare(&mut registry).await;
             let diagnostics: Vec<_> = prepared
                 .diagnostics()
                 .iter()
@@ -1978,6 +1984,42 @@ mod tests {
                     PluginDiagnosticSeverity::Error
                 }
             );
+            if kind == "valid" {
+                let original = prepared
+                    .plugins()
+                    .first()
+                    .and_then(|plugin| plugin._retired_documents.first())
+                    .ok_or_else(|| missing("frozen valid link text absent"))?
+                    .contents()
+                    .to_string();
+                let second = root.join("second.yaml");
+                let changed = "languages: {}\nsource: changed\n";
+                std::fs::write(&second, changed)?;
+                std::fs::remove_file(&path)?;
+                std::os::unix::fs::symlink(&second, &path)?;
+                let cached = integrator.prepare(&mut registry).await;
+                assert!(Arc::ptr_eq(&prepared, &cached));
+                assert_eq!(
+                    cached
+                        .plugins()
+                        .first()
+                        .and_then(|plugin| plugin._retired_documents.first())
+                        .map(|document| document.contents()),
+                    Some(original.as_str())
+                );
+                assert_eq!(cached.identity(), prepared.identity());
+                integrator.invalidate(&registry);
+                let refreshed = integrator.prepare(&mut registry).await;
+                assert_eq!(
+                    refreshed
+                        .plugins()
+                        .first()
+                        .and_then(|plugin| plugin._retired_documents.first())
+                        .map(|document| document.contents()),
+                    Some(changed)
+                );
+                assert_ne!(refreshed.identity(), prepared.identity());
+            }
         }
         Ok(())
     }
@@ -2491,7 +2533,14 @@ mod tests {
         assert_eq!(plugin.skills().len(), 1);
         assert!(plugin.hooks().is_none());
         assert_eq!(plugin.subagent_documents().len(), 1);
-        assert!(plugin.lsp_document().is_some());
+        assert_eq!(plugin._retired_documents.len(), 1);
+        assert!(
+            prepared
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.component() == "lsp"
+                    && diagnostic.severity() == PluginDiagnosticSeverity::Warning)
+        );
         assert!(prepared.diagnostics().iter().any(|diagnostic| {
             diagnostic.plugin_id() == Some("invalid.test")
                 && diagnostic.component() == "hooks"
@@ -2551,7 +2600,13 @@ mod tests {
         );
         assert!(plugin.hooks().is_some());
         assert_eq!(plugin.subagent_documents().len(), 1);
-        assert!(plugin.lsp_document().is_some());
+        assert!(
+            prepared
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.component() == "lsp"
+                    && diagnostic.severity() == PluginDiagnosticSeverity::Warning)
+        );
         assert!(prepared.diagnostics().iter().any(|diagnostic| {
             diagnostic.plugin_id() == Some("skills.test")
                 && diagnostic.component() == "skill"

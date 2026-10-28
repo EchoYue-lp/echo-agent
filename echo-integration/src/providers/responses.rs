@@ -5,6 +5,7 @@
 //! therefore remains file/local-history authoritative and does not depend on
 //! `previous_response_id`, hosted conversations, or server-side storage.
 
+use echo_core::agent::{AssistantMessageBlock, AssistantPhase};
 use echo_core::error::{LlmError, Result};
 use echo_core::llm::capabilities::{
     ModelFactInputs, ModelProfileResolution, ModelProfileResolver, ProviderCapabilityOverride,
@@ -22,15 +23,17 @@ use reqwest::Client;
 use reqwest::header::HeaderMap;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, info_span};
 
 use super::client::{JsonSseEvent, ensure_request_not_cancelled, post_json, stream_json_sse};
 use super::config::LlmConfig;
+use super::native_message::output_source;
 use super::openai::assemble_req_header;
 use super::thinking_translate::translate_thinking_openai_compat;
+use echo_core::llm::LlmApiProtocol;
 
 /// Client for the OpenAI Responses API.
 pub struct ResponsesClient {
@@ -123,7 +126,7 @@ impl ResponsesClient {
         Client::new()
     }
 
-    fn request_body(&self, request: &ChatRequest, stream: bool) -> Value {
+    fn request_body(&self, request: &ChatRequest, stream: bool) -> Result<Value> {
         let thinking = translate_thinking_openai_compat(
             &self.config.model,
             self.config.api_protocol,
@@ -132,13 +135,13 @@ impl ResponsesClient {
         );
         let mut body = json!({
             "model": self.config.model,
-            "input": messages_to_input(&request.messages),
+            "input": messages_to_input(&request.messages)?,
             "store": false,
             "stream": stream,
             "include": ["reasoning.encrypted_content"],
         });
         let Some(object) = body.as_object_mut() else {
-            return body;
+            return Ok(body);
         };
 
         insert_option(object, "max_output_tokens", request.max_tokens);
@@ -163,7 +166,7 @@ impl ResponsesClient {
         if let Some(cache_key) = request.user_id.as_ref() {
             object.insert("prompt_cache_key".to_string(), json!(cache_key));
         }
-        body
+        Ok(body)
     }
 }
 
@@ -174,7 +177,7 @@ impl LlmClient for ResponsesClient {
             async move {
                 self.config.validate_input_modalities(&request.messages)?;
                 let timeouts = request.timeouts.unwrap_or(self.config.timeouts);
-                let body = self.request_body(&request, false);
+                let body = self.request_body(&request, false)?;
                 let raw = post_json(
                     self.client.clone(),
                     body,
@@ -202,7 +205,7 @@ impl LlmClient for ResponsesClient {
                 self.config.validate_input_modalities(&request.messages)?;
                 let timeouts = request.timeouts.unwrap_or(self.config.timeouts);
                 let cancel_token = request.cancel_token.clone();
-                let body = self.request_body(&request, true);
+                let body = self.request_body(&request, true)?;
                 let request = self
                     .client
                     .post(&self.config.base_url)
@@ -282,10 +285,14 @@ fn insert_option<T: serde::Serialize>(
     }
 }
 
-fn messages_to_input(messages: &[Message]) -> Value {
+fn messages_to_input(messages: &[Message]) -> Result<Value> {
     let mut input = Vec::new();
     for message in messages {
         if matches!(message.role, Role::Assistant) {
+            if let Some(native) = native_history_to_responses(message)? {
+                input.extend(native);
+                continue;
+            }
             append_opaque_reasoning(&mut input, message.reasoning_blocks.as_deref());
         }
 
@@ -317,7 +324,189 @@ fn messages_to_input(messages: &[Message]) -> Value {
             }));
         }
     }
-    Value::Array(input)
+    Ok(Value::Array(input))
+}
+
+/// Rebuild native Responses items from the existing canonical message/tool
+/// provenance. Runtime approvals have no provider source and are not wire data.
+fn native_history_to_responses(message: &Message) -> Result<Option<Vec<Value>>> {
+    let blocks = message.assistant_blocks.as_deref().unwrap_or_default();
+    let tools = message.tool_calls.as_deref().unwrap_or_default();
+    let native = blocks.iter().any(|block| {
+        block
+            .provider_source
+            .as_ref()
+            .is_some_and(|source| source.protocol == LlmApiProtocol::Responses)
+    }) || tools.iter().any(|tool| {
+        tool.provider_source
+            .as_ref()
+            .is_some_and(|source| source.protocol == LlmApiProtocol::Responses)
+    });
+    if !native {
+        return Ok(None);
+    }
+    let mut merged: Vec<AssistantMessageBlock> = Vec::new();
+    for block in blocks.iter().filter(|block| {
+        block
+            .provider_source
+            .as_ref()
+            .is_some_and(|source| source.protocol == LlmApiProtocol::Responses)
+    }) {
+        if let Some(previous) = merged.iter_mut().find(|previous| {
+            previous.block_id == block.block_id && previous.request_id == block.request_id
+        }) {
+            if previous.provider_source != block.provider_source {
+                let mut before = previous
+                    .provider_source
+                    .clone()
+                    .ok_or_else(|| invalid_response("Responses previous source missing"))?;
+                let mut after = block
+                    .provider_source
+                    .clone()
+                    .ok_or_else(|| invalid_response("Responses next source missing"))?;
+                let before_phase = before.phase.take();
+                let after_phase = after.phase.take();
+                if before != after
+                    || before_phase
+                        .as_ref()
+                        .zip(after_phase.as_ref())
+                        .is_some_and(|(a, b)| a != b)
+                {
+                    return Err(invalid_response(
+                        "Responses canonical source changed during replay",
+                    ));
+                }
+                if before_phase.is_none() && after_phase.is_some() {
+                    previous.provider_source = block.provider_source.clone();
+                }
+            }
+            if block.phase != AssistantPhase::Unknown {
+                previous.phase = block.phase;
+            }
+            previous.delta.push_str(&block.delta);
+            previous.complete |= block.complete;
+            if block.reasoning.is_some() {
+                previous.reasoning = block.reasoning.clone();
+            }
+        } else {
+            merged.push(block.clone());
+        }
+    }
+    let mut items: std::collections::BTreeMap<u32, Value> = std::collections::BTreeMap::new();
+    let mut parts: std::collections::BTreeMap<(u32, u32), Value> =
+        std::collections::BTreeMap::new();
+    let mut owner = None::<String>;
+    for block in merged {
+        let source = block
+            .provider_source
+            .as_ref()
+            .ok_or_else(|| invalid_response("native block source missing"))?;
+        if owner
+            .as_ref()
+            .is_some_and(|owner| owner != &source.request_id)
+        {
+            return Err(invalid_response("Responses replay mixes request owners"));
+        }
+        owner.get_or_insert_with(|| source.request_id.clone());
+        if source.item_id.is_empty() || source.request_id.is_empty() {
+            return Err(invalid_response("Responses replay source identity missing"));
+        }
+        if let Some(ReasoningBlock::Opaque {
+            provider,
+            id,
+            data,
+            summary,
+        }) = block.reasoning
+        {
+            if provider != "openai_responses" || id != source.item_id {
+                return Err(invalid_response(
+                    "Responses replay reasoning source mismatched",
+                ));
+            }
+            let item = json!({"type":"reasoning","id":id,"encrypted_content":data,"summary":summary.iter().map(|text|json!({"type":"summary_text","text":text})).collect::<Vec<_>>()});
+            if items.insert(source.output_index, item).is_some() {
+                return Err(invalid_response(
+                    "Responses replay has duplicate output index",
+                ));
+            }
+            continue;
+        }
+        if block.phase == AssistantPhase::Reasoning {
+            continue;
+        }
+        let content_index = source
+            .content_index
+            .ok_or_else(|| invalid_response("Responses replay message content index missing"))?;
+        let kind = source
+            .content_kind
+            .as_deref()
+            .ok_or_else(|| invalid_response("Responses replay content kind missing"))?;
+        let part = match kind {
+            "output_text" => json!({"type":"output_text","text":block.delta,"annotations":[]}),
+            "refusal" => json!({"type":"refusal","refusal":block.delta}),
+            _ => {
+                return Err(invalid_response(
+                    "Responses replay unsupported message kind",
+                ));
+            }
+        };
+        if parts
+            .insert((source.output_index, content_index), part)
+            .is_some()
+        {
+            return Err(invalid_response(
+                "Responses replay duplicated content index",
+            ));
+        }
+        let item = items.entry(source.output_index).or_insert_with(|| {
+            let mut value =
+                json!({"type":"message","id":source.item_id,"role":"assistant","content":[]});
+            if let (Some(phase), Some(object)) = (&source.phase, value.as_object_mut()) {
+                object.insert("phase".into(), json!(phase));
+            }
+            value
+        });
+        if item.get("type").and_then(Value::as_str) != Some("message")
+            || item.get("id").and_then(Value::as_str) != Some(source.item_id.as_str())
+            || item.get("phase").and_then(Value::as_str) != source.phase.as_deref()
+        {
+            return Err(invalid_response("Responses replay item metadata conflicts"));
+        }
+    }
+    for ((output_index, _), part) in parts {
+        let content = items
+            .get_mut(&output_index)
+            .and_then(|item| item.get_mut("content"))
+            .and_then(Value::as_array_mut)
+            .ok_or_else(|| invalid_response("Responses replay message item missing"))?;
+        content.push(part);
+    }
+    for tool in tools {
+        let source = tool
+            .provider_source
+            .as_ref()
+            .filter(|source| source.protocol == LlmApiProtocol::Responses)
+            .ok_or_else(|| invalid_response("Responses replay tool source missing"))?;
+        if owner
+            .as_ref()
+            .is_some_and(|owner| owner != &source.request_id)
+        {
+            return Err(invalid_response(
+                "Responses replay tool belongs to another response",
+            ));
+        }
+        owner.get_or_insert_with(|| source.request_id.clone());
+        if source.item_id.is_empty() || source.content_kind.as_deref() != Some("function_call") {
+            return Err(invalid_response("Responses replay invalid tool source"));
+        }
+        let item = json!({"type":"function_call","id":source.item_id,"call_id":tool.id,"name":tool.function.name,"arguments":tool.function.arguments});
+        if items.insert(source.output_index, item).is_some() {
+            return Err(invalid_response(
+                "Responses replay tool index conflicts with native item",
+            ));
+        }
+    }
+    Ok(Some(items.into_values().collect()))
 }
 
 fn append_opaque_reasoning(target: &mut Vec<Value>, blocks: Option<&[ReasoningBlock]>) {
@@ -466,6 +655,8 @@ enum ResponsesOutputItem {
         content: Vec<ResponsesContent>,
     },
     FunctionCall {
+        #[serde(default)]
+        id: String,
         call_id: String,
         name: String,
         arguments: String,
@@ -562,19 +753,195 @@ fn ensure_completed_response(response: &ResponsesResponse, context: &str) -> Res
     Ok(())
 }
 
+/// Convert assistant-bearing Responses items to the Framework canonical block
+/// shape. Tool calls remain in `ChatResponse.message.tool_calls`; this helper
+/// only carries assistant text/reasoning identity, order and phase.
+fn native_assistant_blocks(raw: &Value, response_id: &str) -> Result<Vec<AssistantMessageBlock>> {
+    let output = raw
+        .get("output")
+        .and_then(Value::as_array)
+        .ok_or_else(|| invalid_response("Responses response omitted output array"))?;
+    let mut blocks = Vec::new();
+    let mut sequence = 0_u64;
+    let response_completed = raw.get("status").and_then(Value::as_str) == Some("completed");
+    for (output_index, item) in output.iter().enumerate() {
+        let item_type = required_non_empty_string(item, "type", "Responses output item")?;
+        if item
+            .get("status")
+            .and_then(Value::as_str)
+            .is_some_and(|status| status != "completed")
+        {
+            return Err(invalid_response(
+                "Responses completed response contains unfinished item",
+            ));
+        }
+        let output_index = u32::try_from(output_index)
+            .map_err(|_| invalid_response("Responses output index exceeded u32"))?;
+        match item_type {
+            "message" => {
+                let item_id = item
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .filter(|id| !id.is_empty())
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| format!("{response_id}:message:{output_index}"));
+                let phase = assistant_phase(item.get("phase"));
+                let complete = item
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .map_or(response_completed, |status| status == "completed");
+                let content = required_array(item, "content", "Responses message item")?;
+                for (content_index, part) in content.iter().enumerate() {
+                    let content_index = u32::try_from(content_index)
+                        .map_err(|_| invalid_response("Responses content index exceeded u32"))?;
+                    let part_type =
+                        required_non_empty_string(part, "type", "Responses message content part")?;
+                    let field = match part_type {
+                        "output_text" => "text",
+                        "refusal" => "refusal",
+                        _ => continue,
+                    };
+                    let delta = required_string(part, field, "Responses message content part")?;
+                    blocks.push(AssistantMessageBlock {
+                        provider_source: Some(output_source(
+                            LlmApiProtocol::Responses,
+                            response_id,
+                            &item_id,
+                            output_index,
+                            Some(content_index),
+                            part_type,
+                            item.get("phase").and_then(Value::as_str),
+                        )),
+                        block_id: format!("{item_id}:content:{content_index}"),
+                        request_id: response_id.to_string(),
+                        sequence,
+                        phase,
+                        delta: delta.to_string(),
+                        complete,
+                        provider: Some("openai_responses".to_string()),
+                        reasoning: None,
+                    });
+                    sequence = sequence.saturating_add(1);
+                }
+            }
+            "reasoning" => {
+                let id = required_non_empty_string(item, "id", "Responses reasoning item")?;
+                let data = required_non_empty_string(
+                    item,
+                    "encrypted_content",
+                    "Responses reasoning item",
+                )?;
+                let summary = item
+                    .get("summary")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|part| event_string(part, "text"))
+                    .collect::<Vec<_>>();
+                for (field, part_name) in [("summary", "summary"), ("content", "content")] {
+                    for (index, part) in item
+                        .get(field)
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .enumerate()
+                    {
+                        if let Some(text) = part.get("text").and_then(Value::as_str) {
+                            let content_index = u32::try_from(index).map_err(|_| {
+                                invalid_response("Responses reasoning content index exceeds u32")
+                            })?;
+                            let kind = part.get("type").and_then(Value::as_str).unwrap_or(
+                                if field == "summary" {
+                                    "summary_text"
+                                } else {
+                                    "reasoning_text"
+                                },
+                            );
+                            blocks.push(AssistantMessageBlock {
+                                provider_source: Some(output_source(
+                                    LlmApiProtocol::Responses,
+                                    response_id,
+                                    id,
+                                    output_index,
+                                    Some(content_index),
+                                    kind,
+                                    None,
+                                )),
+                                block_id: format!("{id}:{part_name}:{index}"),
+                                request_id: response_id.to_string(),
+                                sequence,
+                                phase: AssistantPhase::Reasoning,
+                                delta: text.to_string(),
+                                complete: true,
+                                provider: Some("openai_responses".into()),
+                                reasoning: None,
+                            });
+                            sequence = sequence.saturating_add(1);
+                        }
+                    }
+                }
+                blocks.push(AssistantMessageBlock {
+                    provider_source: Some(output_source(
+                        LlmApiProtocol::Responses,
+                        response_id,
+                        id,
+                        output_index,
+                        None,
+                        "reasoning",
+                        None,
+                    )),
+                    block_id: id.to_string(),
+                    request_id: response_id.to_string(),
+                    sequence,
+                    phase: AssistantPhase::Reasoning,
+                    delta: String::new(),
+                    complete: true,
+                    provider: Some("openai_responses".to_string()),
+                    reasoning: Some(ReasoningBlock::Opaque {
+                        provider: "openai_responses".to_string(),
+                        id: id.to_string(),
+                        data: data.to_string(),
+                        summary,
+                    }),
+                });
+                sequence = sequence.saturating_add(1);
+            }
+            _ => {}
+        }
+    }
+    Ok(blocks)
+}
+
+fn assistant_phase(value: Option<&Value>) -> AssistantPhase {
+    match value.and_then(Value::as_str) {
+        Some("commentary") => AssistantPhase::Commentary,
+        Some("partial_answer") => AssistantPhase::PartialAnswer,
+        Some("final_answer") => AssistantPhase::FinalAnswer,
+        _ => AssistantPhase::Unknown,
+    }
+}
+
 fn response_to_chat(raw: Value) -> Result<ChatResponse> {
     let response: ResponsesResponse = serde_json::from_value(raw.clone()).map_err(|error| {
         LlmError::InvalidResponse(format!("invalid Responses response: {error}"))
     })?;
     ensure_completed_response(&response, "Responses response")?;
+    if response.output.is_empty() {
+        return Err(invalid_response(
+            "Responses response completed with empty output",
+        ));
+    }
+    let native_blocks = native_assistant_blocks(&raw, &response.id)?;
 
     let mut text = String::new();
     let mut tool_calls = Vec::new();
     let mut reasoning_text = Vec::new();
     let mut reasoning_blocks = Vec::new();
-    for item in response.output {
+    for (output_index, item) in response.output.into_iter().enumerate() {
+        let output_index = u32::try_from(output_index)
+            .map_err(|_| invalid_response("Responses output index exceeds u32"))?;
         match item {
-            ResponsesOutputItem::Message { content } => {
+            ResponsesOutputItem::Message { content, .. } => {
                 for part in content {
                     match part {
                         ResponsesContent::OutputText { text: value } => text.push_str(&value),
@@ -584,14 +951,26 @@ fn response_to_chat(raw: Value) -> Result<ChatResponse> {
                 }
             }
             ResponsesOutputItem::FunctionCall {
+                id,
                 call_id,
                 name,
                 arguments,
+                ..
             } => {
                 require_non_empty(&call_id, "function_call.call_id")?;
                 require_non_empty(&name, "function_call.name")?;
                 require_non_empty(&arguments, "function_call.arguments")?;
+                require_non_empty(&id, "function_call.id")?;
                 tool_calls.push(ToolCall {
+                    provider_source: Some(output_source(
+                        LlmApiProtocol::Responses,
+                        &response.id,
+                        &id,
+                        output_index,
+                        None,
+                        "function_call",
+                        None,
+                    )),
                     id: call_id,
                     call_type: "function".to_string(),
                     function: FunctionCall { name, arguments },
@@ -607,7 +986,15 @@ fn response_to_chat(raw: Value) -> Result<ChatResponse> {
                     .into_iter()
                     .map(|part| part.text)
                     .collect::<Vec<_>>();
-                reasoning_text.extend(content.into_iter().map(|part| part.text));
+                let contents = content
+                    .into_iter()
+                    .map(|part| part.text)
+                    .collect::<Vec<_>>();
+                reasoning_text.extend(if contents.is_empty() {
+                    summaries.clone()
+                } else {
+                    contents
+                });
                 require_non_empty(&id, "reasoning.id")?;
                 require_non_empty(&encrypted_content, "reasoning.encrypted_content")?;
                 reasoning_blocks.push(ReasoningBlock::Opaque {
@@ -616,9 +1003,6 @@ fn response_to_chat(raw: Value) -> Result<ChatResponse> {
                     data: encrypted_content,
                     summary: summaries.clone(),
                 });
-                if reasoning_text.is_empty() {
-                    reasoning_text.extend(summaries);
-                }
             }
             ResponsesOutputItem::Other => {}
         }
@@ -635,10 +1019,12 @@ fn response_to_chat(raw: Value) -> Result<ChatResponse> {
         tool_calls: has_tool_calls.then_some(tool_calls),
         reasoning_content: (!reasoning_text.is_empty()).then(|| reasoning_text.join("")),
         reasoning_blocks: (!reasoning_blocks.is_empty()).then_some(reasoning_blocks),
+        assistant_blocks: (!native_blocks.is_empty()).then_some(native_blocks.clone()),
         ..Default::default()
     };
     let usage = response.usage.map(Usage::from);
     let finish_reason = finish_reason(has_tool_calls);
+    super::native_message::validate_completion(&message, finish_reason.as_deref())?;
     let compat_raw = ChatCompletionResponse {
         id: response.id,
         choices: vec![Choice {
@@ -705,10 +1091,449 @@ struct ResponsesStreamAdapter {
     function_calls: HashMap<u32, StreamFunctionCall>,
     text: HashMap<StreamTextKey, String>,
     completed: bool,
+    request_id: String,
+    phases: HashMap<String, AssistantPhase>,
+    raw_phases: HashMap<String, String>,
+    emitted_text: HashMap<String, String>,
+    closed_blocks: HashSet<String>,
+    metadata_completed: HashSet<String>,
+    sequence: u64,
+    observed_items: HashMap<u32, (String, String)>,
+    closed_arguments: HashSet<u32>,
 }
 
 impl ResponsesStreamAdapter {
     fn map_event(&mut self, event: Value) -> Result<Option<ChatChunk>> {
+        let event_type =
+            required_non_empty_string(&event, "type", "Responses stream event")?.to_string();
+        if event_type.ends_with(".delta")
+            && event_type != "response.function_call_arguments.delta"
+            && let (Some(id), Some(index)) = (
+                event.get("item_id").and_then(Value::as_str),
+                event
+                    .get(if event_type.contains("summary") {
+                        "summary_index"
+                    } else {
+                        "content_index"
+                    })
+                    .and_then(Value::as_u64),
+            )
+        {
+            let part = if event_type.contains("summary") {
+                "summary"
+            } else {
+                "content"
+            };
+            if self.closed_blocks.contains(&format!("{id}:{part}:{index}")) {
+                return Err(invalid_response(
+                    "Responses emitted delta after block completion",
+                ));
+            }
+        }
+        if event_type.starts_with("response.function_call_arguments.") {
+            let index = required_u32(&event, "output_index", "Responses tool arguments")?;
+            if event_type.ends_with(".delta") && self.closed_arguments.contains(&index) {
+                return Err(invalid_response(
+                    "Responses emitted arguments after arguments.done",
+                ));
+            }
+            if event_type.ends_with(".done") {
+                self.closed_arguments.insert(index);
+            }
+        }
+        if let Some(index) = event
+            .get("output_index")
+            .and_then(Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+        {
+            let (id, kind) = if let Some(item) = event.get("item") {
+                (
+                    item.get("id").and_then(Value::as_str),
+                    item.get("type").and_then(Value::as_str),
+                )
+            } else {
+                (
+                    event.get("item_id").and_then(Value::as_str),
+                    Some(if event_type.contains("function_call") {
+                        "function_call"
+                    } else if event_type.contains("reasoning") {
+                        "reasoning"
+                    } else {
+                        "message"
+                    }),
+                )
+            };
+            if let (Some(id), Some(kind)) = (id, kind) {
+                if let Some(previous) = self.observed_items.get(&index)
+                    && (previous.0 != id || previous.1 != kind)
+                {
+                    return Err(invalid_response("Responses output item identity changed"));
+                }
+                if self
+                    .observed_items
+                    .iter()
+                    .any(|(other, item)| *other != index && item.0 == id)
+                {
+                    return Err(invalid_response(
+                        "Responses reused item id at different output index",
+                    ));
+                }
+                self.observed_items
+                    .insert(index, (id.to_string(), kind.to_string()));
+            }
+        }
+        if self.request_id.is_empty() {
+            self.request_id = event
+                .get("response")
+                .and_then(|response| response.get("id"))
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty())
+                .map(ToString::to_string)
+                .unwrap_or_else(|| super::native_message::fallback_request_id("responses"));
+        }
+        if (event_type == "response.created" || event_type == "response.in_progress")
+            && let Some(id) = event
+                .get("response")
+                .and_then(|response| response.get("id"))
+                .and_then(Value::as_str)
+        {
+            if self.sequence > 0 && self.request_id != id {
+                return Err(invalid_response(
+                    "Responses response identity changed after output",
+                ));
+            }
+            self.request_id = id.to_string();
+        }
+        let mut discovered_phase = false;
+        if let Some(item) = event.get("item")
+            && item.get("type").and_then(Value::as_str) == Some("message")
+            && let Some(id) = item.get("id").and_then(Value::as_str)
+        {
+            if let Some(raw_phase) = item.get("phase").and_then(Value::as_str) {
+                discovered_phase = !self.raw_phases.contains_key(id);
+                if self
+                    .raw_phases
+                    .get(id)
+                    .is_some_and(|previous| previous != raw_phase)
+                {
+                    return Err(invalid_response("Responses raw phase changed"));
+                }
+                self.raw_phases
+                    .insert(id.to_string(), raw_phase.to_string());
+            }
+            let phase = assistant_phase(item.get("phase"));
+            if let Some(previous) = self.phases.get(id)
+                && *previous != AssistantPhase::Unknown
+                && phase != AssistantPhase::Unknown
+                && *previous != phase
+            {
+                return Err(invalid_response("Responses known message phase changed"));
+            }
+            if phase != AssistantPhase::Unknown || !self.phases.contains_key(id) {
+                self.phases.insert(id.to_string(), phase);
+            }
+        }
+        if event_type == "response.completed" {
+            let response = required_object(&event, "response", "Responses completed event")?;
+            let output = required_array(response, "output", "Responses response")?;
+            for (index, (id, kind)) in &self.observed_items {
+                let item = usize::try_from(*index)
+                    .ok()
+                    .and_then(|index| output.get(index))
+                    .ok_or_else(|| {
+                        invalid_response("Responses completed output omitted observed item")
+                    })?;
+                if item.get("id").and_then(Value::as_str) != Some(id.as_str())
+                    || item.get("type").and_then(Value::as_str) != Some(kind.as_str())
+                {
+                    return Err(invalid_response(
+                        "Responses completed output changed observed item",
+                    ));
+                }
+                if let Some(previous) = self.phases.get(id) {
+                    let current = assistant_phase(item.get("phase"));
+                    if *previous != AssistantPhase::Unknown && current != *previous {
+                        return Err(invalid_response("Responses completed output changed phase"));
+                    }
+                }
+            }
+            // Validate the same full response as the non-streaming adapter.
+            let full = response_to_chat(response.clone())?;
+            let mut terminal = self
+                .map_legacy_event(event.clone())?
+                .ok_or_else(|| invalid_response("terminal chunk was omitted"))?;
+            let mut native = Vec::new();
+            for block in native_assistant_blocks(response, &self.request_id)? {
+                if self.metadata_completed.contains(&block.block_id) {
+                    let previous = self
+                        .emitted_text
+                        .get(&block.block_id)
+                        .map(String::as_str)
+                        .unwrap_or_default();
+                    if previous != block.delta {
+                        return Err(invalid_response(
+                            "Responses completed output disagreed with closed block",
+                        ));
+                    }
+                    continue;
+                }
+                let accumulated = self.emitted_text.entry(block.block_id.clone()).or_default();
+                let suffix = reconcile_terminal_text(accumulated, &block.delta, "canonical block")?
+                    .unwrap_or_default();
+                let mut completed = block;
+                completed.delta = suffix;
+                completed.sequence = self.sequence;
+                self.sequence = self.sequence.saturating_add(1);
+                self.closed_blocks.insert(completed.block_id.clone());
+                self.metadata_completed.insert(completed.block_id.clone());
+                if completed.phase != AssistantPhase::Reasoning && !completed.delta.is_empty() {
+                    terminal
+                        .delta
+                        .content
+                        .get_or_insert_with(String::new)
+                        .push_str(&completed.delta);
+                }
+                if let Some(reasoning) = completed.reasoning.clone() {
+                    terminal
+                        .delta
+                        .reasoning_blocks
+                        .get_or_insert_with(Vec::new)
+                        .push(reasoning);
+                }
+                native.push(completed);
+            }
+            for (index, item) in required_array(response, "output", "Responses response")?
+                .iter()
+                .enumerate()
+            {
+                if item.get("type").and_then(Value::as_str) == Some("function_call") {
+                    let index = u32::try_from(index)
+                        .map_err(|_| invalid_response("Responses output index exceeds u32"))?;
+                    if let Some(chunk) = self.function_call_item_done(
+                        index,
+                        required_non_empty_string(item, "id", "Responses tool item")?,
+                        item,
+                    )? {
+                        terminal
+                            .delta
+                            .tool_calls
+                            .get_or_insert_with(Vec::new)
+                            .extend(chunk.delta.tool_calls.unwrap_or_default());
+                    }
+                }
+            }
+            if !native.is_empty() {
+                terminal.delta.assistant_blocks = Some(native);
+            }
+            self.attach_tool_sources(&mut terminal);
+            let _ = full;
+            return Ok(Some(terminal));
+        }
+        let mut chunk = self.map_legacy_event(event.clone())?;
+        if let Some(chunk) = chunk.as_mut() {
+            self.attach_tool_sources(chunk);
+        }
+        let mut native = Vec::new();
+        if matches!(
+            event_type.as_str(),
+            "response.output_text.delta"
+                | "response.refusal.delta"
+                | "response.reasoning_text.delta"
+                | "response.reasoning_summary_text.delta"
+                | "response.output_text.done"
+                | "response.refusal.done"
+                | "response.reasoning_text.done"
+                | "response.reasoning_summary_text.done"
+        ) {
+            let item_id = required_non_empty_string(&event, "item_id", "Responses text event")?;
+            let reasoning = event_type.contains("reasoning");
+            let index_field = if event_type.contains("summary") {
+                "summary_index"
+            } else {
+                "content_index"
+            };
+            let index = required_u32(&event, index_field, "Responses text event")?;
+            let part = if event_type.contains("summary") {
+                "summary"
+            } else {
+                "content"
+            };
+            let block_id = format!("{item_id}:{part}:{index}");
+            let text_done = event_type.ends_with(".done");
+            let text = chunk
+                .as_ref()
+                .and_then(|value| {
+                    if reasoning {
+                        value.delta.reasoning_content.clone()
+                    } else {
+                        value.delta.content.clone()
+                    }
+                })
+                .unwrap_or_default();
+            let phase = if reasoning {
+                AssistantPhase::Reasoning
+            } else {
+                self.phases
+                    .get(item_id)
+                    .copied()
+                    .unwrap_or(AssistantPhase::Unknown)
+            };
+            if !self.closed_blocks.contains(&block_id) {
+                self.emitted_text
+                    .entry(block_id.clone())
+                    .or_default()
+                    .push_str(&text);
+                if text_done {
+                    self.closed_blocks.insert(block_id.clone());
+                }
+                let native_kind = if event_type.contains("refusal") {
+                    "refusal"
+                } else if event_type.contains("summary") {
+                    "summary_text"
+                } else if reasoning {
+                    "reasoning_text"
+                } else {
+                    "output_text"
+                };
+                native.push(AssistantMessageBlock {
+                    provider_source: Some(output_source(
+                        LlmApiProtocol::Responses,
+                        &self.request_id,
+                        item_id,
+                        required_u32(&event, "output_index", "Responses text event")?,
+                        Some(index),
+                        native_kind,
+                        self.raw_phases.get(item_id).map(String::as_str),
+                    )),
+                    block_id,
+                    request_id: self.request_id.clone(),
+                    sequence: self.sequence,
+                    phase,
+                    delta: text,
+                    complete: false,
+                    provider: Some("openai_responses".into()),
+                    reasoning: None,
+                });
+            }
+        } else if event_type == "response.output_item.done" {
+            let item = required_object(&event, "item", "Responses item done")?;
+            let item_id = required_non_empty_string(item, "id", "Responses item")?;
+            match item.get("type").and_then(Value::as_str) {
+                Some("message") => {
+                    let phase = assistant_phase(item.get("phase"));
+                    for (index, part) in required_array(item, "content", "Responses item")?
+                        .iter()
+                        .enumerate()
+                    {
+                        let field = match part.get("type").and_then(Value::as_str) {
+                            Some("output_text") => "text",
+                            Some("refusal") => "refusal",
+                            _ => continue,
+                        };
+                        let block_id = format!("{item_id}:content:{index}");
+                        let already_closed = !self.closed_blocks.insert(block_id.clone());
+                        // Native item content is closed, but optional message
+                        // metadata can still arrive on the complete response.
+                        if self.metadata_completed.contains(&block_id) {
+                            continue;
+                        }
+                        let text = required_string(part, field, "Responses content")?;
+                        let accumulated = self.emitted_text.entry(block_id.clone()).or_default();
+                        let suffix =
+                            reconcile_terminal_text(accumulated, text, field)?.unwrap_or_default();
+                        // 相同item.done重入没有新正文/阶段时保持幂等；晚到的首次
+                        // provider阶段仍必须运输，空content槽首次出现也不能丢失。
+                        if already_closed && suffix.is_empty() && !discovered_phase {
+                            continue;
+                        }
+                        native.push(AssistantMessageBlock {
+                            provider_source: Some(output_source(
+                                LlmApiProtocol::Responses,
+                                &self.request_id,
+                                item_id,
+                                required_u32(&event, "output_index", "Responses message done")?,
+                                Some(u32::try_from(index).map_err(|_| {
+                                    invalid_response("Responses content index exceeds u32")
+                                })?),
+                                if field == "text" {
+                                    "output_text"
+                                } else {
+                                    "refusal"
+                                },
+                                item.get("phase").and_then(Value::as_str),
+                            )),
+                            block_id,
+                            request_id: self.request_id.clone(),
+                            sequence: self.sequence,
+                            phase,
+                            delta: suffix,
+                            complete: false,
+                            provider: Some("openai_responses".into()),
+                            reasoning: None,
+                        });
+                    }
+                }
+                Some("reasoning") if self.metadata_completed.insert(item_id.to_string()) => {
+                    let reasoning = chunk
+                        .as_ref()
+                        .and_then(|chunk| chunk.delta.reasoning_blocks.as_ref())
+                        .and_then(|blocks| blocks.first())
+                        .cloned();
+                    native.push(AssistantMessageBlock {
+                        provider_source: Some(output_source(
+                            LlmApiProtocol::Responses,
+                            &self.request_id,
+                            item_id,
+                            required_u32(&event, "output_index", "Responses reasoning done")?,
+                            None,
+                            "reasoning",
+                            None,
+                        )),
+                        block_id: item_id.to_string(),
+                        request_id: self.request_id.clone(),
+                        sequence: self.sequence,
+                        phase: AssistantPhase::Reasoning,
+                        delta: String::new(),
+                        complete: true,
+                        provider: Some("openai_responses".into()),
+                        reasoning,
+                    });
+                }
+                _ => {}
+            }
+        }
+        if !native.is_empty() {
+            for block in &mut native {
+                block.sequence = self.sequence;
+                self.sequence = self.sequence.saturating_add(1);
+            }
+            let value = chunk.get_or_insert_with(|| ChatChunk {
+                delta: DeltaMessage::default(),
+                finish_reason: None,
+                usage: None,
+            });
+            value.delta.assistant_blocks = Some(native);
+        }
+        Ok(chunk)
+    }
+
+    fn attach_tool_sources(&self, chunk: &mut ChatChunk) {
+        for tool in chunk.delta.tool_calls.as_mut().into_iter().flatten() {
+            if let Some(state) = self.function_calls.get(&tool.index) {
+                tool.provider_source = Some(output_source(
+                    LlmApiProtocol::Responses,
+                    &self.request_id,
+                    &state.item_id,
+                    tool.index,
+                    None,
+                    "function_call",
+                    None,
+                ));
+            }
+        }
+    }
+
+    fn map_legacy_event(&mut self, event: Value) -> Result<Option<ChatChunk>> {
         let event_type = required_non_empty_string(&event, "type", "Responses stream event")?;
         if self.completed {
             return Err(invalid_response(format!(
@@ -1005,6 +1830,7 @@ fn tool_chunk(
     ChatChunk {
         delta: DeltaMessage {
             tool_calls: Some(vec![DeltaToolCall {
+                provider_source: None,
                 index,
                 id,
                 call_type: Some("function".to_string()),
@@ -1053,6 +1879,11 @@ fn terminal_chunk(event: &Value) -> Result<Option<ChatChunk>> {
         LlmError::InvalidResponse(format!("invalid terminal Responses event: {error}"))
     })?;
     ensure_completed_response(&parsed, "Responses terminal event")?;
+    if parsed.output.is_empty() {
+        return Err(invalid_response(
+            "Responses terminal event completed with empty output",
+        ));
+    }
     let has_tool_calls = parsed
         .output
         .iter()
@@ -1210,6 +2041,7 @@ mod tests {
         let client = ResponsesClient::new(test_config())?;
         let mut assistant = Message::assistant("checking".to_string());
         assistant.tool_calls = Some(vec![ToolCall {
+            provider_source: None,
             id: "call_1".to_string(),
             call_type: "function".to_string(),
             function: FunctionCall {
@@ -1250,7 +2082,7 @@ mod tests {
             user_id: Some("cache-key".to_string()),
             ..Default::default()
         };
-        let body = client.request_body(&request, false);
+        let body = client.request_body(&request, false)?;
         assert_eq!(body.get("store").and_then(Value::as_bool), Some(false));
         assert_eq!(
             body.get("prompt_cache_key").and_then(Value::as_str),
@@ -1307,7 +2139,7 @@ mod tests {
             "output": [
                 {"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"summary"}],"encrypted_content":"encrypted"},
                 {"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"hello","annotations":[]}]},
-                {"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{}","status":"completed"}
+                {"type":"function_call","id":"fc_1","call_id":"call_1","name":"lookup","arguments":"{}","status":"completed"}
             ],
             "usage": {"input_tokens":10,"output_tokens":4,"total_tokens":14,"input_tokens_details":{"cached_tokens":6,"cache_write_tokens":2},"output_tokens_details":{"reasoning_tokens":2}}
         });
@@ -1336,6 +2168,136 @@ mod tests {
         assert!(response.message.reasoning_blocks.as_ref().is_some_and(|blocks| {
             matches!(blocks.first(), Some(ReasoningBlock::Opaque { id, .. }) if id == "rs_1")
         }));
+        Ok(())
+    }
+
+    #[test]
+    fn nonstream_preserves_multiple_output_identity_order_and_phase() -> Result<()> {
+        let raw: Value = serde_json::from_str(include_str!(
+            "../../fixtures/providers/responses/multi-output.json"
+        ))
+        .map_err(|error| invalid_response(format!("fixture JSON was invalid: {error}")))?;
+        let response = response_to_chat(raw)?;
+        assert_eq!(
+            response.content().as_deref(),
+            Some("先检查工具。工具结果已读取。")
+        );
+        assert_eq!(response.finish_reason.as_deref(), Some("tool_calls"));
+        assert_eq!(
+            response.message.reasoning_content.as_deref(),
+            Some("provider summary")
+        );
+        assert!(
+            !response
+                .message
+                .reasoning_content
+                .as_deref()
+                .is_some_and(|reasoning| reasoning.contains("先检查工具"))
+        );
+
+        let blocks = response
+            .message
+            .assistant_blocks
+            .as_ref()
+            .ok_or_else(|| invalid_response("canonical assistant blocks were omitted"))?;
+        let blocks = blocks
+            .iter()
+            .map(serde_json::to_value)
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|error| invalid_response(error.to_string()))?;
+        assert_eq!(blocks.len(), 4);
+        assert_eq!(
+            blocks
+                .first()
+                .and_then(|block| block.get("block_id"))
+                .and_then(Value::as_str),
+            Some("msg_commentary:content:0")
+        );
+        assert_eq!(
+            blocks
+                .first()
+                .and_then(|block| block.get("phase"))
+                .and_then(Value::as_str),
+            Some("commentary")
+        );
+        assert_eq!(
+            blocks
+                .get(1)
+                .and_then(|block| block.get("phase"))
+                .and_then(Value::as_str),
+            Some("unknown")
+        );
+        assert_eq!(
+            blocks
+                .get(2)
+                .and_then(|block| block.get("phase"))
+                .and_then(Value::as_str),
+            Some("reasoning")
+        );
+        assert_eq!(
+            blocks
+                .get(2)
+                .and_then(|block| block.get("complete"))
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn nonstream_empty_completed_output_is_not_success() {
+        let result = response_to_chat(json!({
+            "id": "resp_empty",
+            "status": "completed",
+            "output": []
+        }));
+        assert!(is_invalid_response(&result));
+    }
+
+    #[test]
+    fn stream_mixed_output_keeps_text_tool_and_reasoning_channels_distinct() -> Result<()> {
+        let mut adapter = ResponsesStreamAdapter::default();
+        let text = required_chunk(
+            adapter.map_event(json!({
+                "type":"response.output_text.delta",
+                "item_id":"msg_1",
+                "output_index":0,
+                "content_index":0,
+                "delta":"progress"
+            })),
+            "mixed text delta",
+        )?;
+        assert_eq!(text.delta.content.as_deref(), Some("progress"));
+        assert!(text.delta.reasoning_content.is_none());
+
+        let tool = required_chunk(
+            adapter.map_event(json!({
+                "type":"response.output_item.added",
+                "output_index":1,
+                "item":{"id":"fc_1","type":"function_call","call_id":"call_1","name":"lookup","arguments":""}
+            })),
+            "mixed tool item",
+        )?;
+        assert!(tool.delta.content.is_none());
+        assert!(tool.delta.reasoning_content.is_none());
+        assert_eq!(first_tool_delta(&tool)?.id.as_deref(), Some("call_1"));
+
+        let reasoning = required_chunk(
+            adapter.map_event(json!({
+                "type":"response.reasoning_text.delta",
+                "item_id":"rs_1",
+                "output_index":2,
+                "content_index":0,
+                "delta":"private"
+            })),
+            "mixed reasoning delta",
+        )?;
+        assert_eq!(
+            reasoning.delta.reasoning_content.as_deref(),
+            Some("private")
+        );
+        assert!(reasoning.delta.content.is_none());
+        assert!(reasoning.delta.tool_calls.is_none());
         Ok(())
     }
 
@@ -1670,7 +2632,7 @@ mod tests {
         let terminal = required_chunk(
             adapter.map_event(json!({
                 "type":"response.completed",
-                "response":{"id":"resp_1","status":"completed","output":[],"usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5,"input_tokens_details":{"cached_tokens":0,"cache_write_tokens":0},"output_tokens_details":{"reasoning_tokens":0}}}
+                "response":{"id":"resp_1","status":"completed","output":[{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"done"}]}],"usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5,"input_tokens_details":{"cached_tokens":0,"cache_write_tokens":0},"output_tokens_details":{"reasoning_tokens":0}}}
             })),
             "completed terminal event",
         )?;
@@ -1731,7 +2693,7 @@ mod tests {
         let raw_stream = futures::stream::iter(vec![
             Ok(JsonSseEvent::Data(json!({
                 "type":"response.completed",
-                "response":{"id":"resp_1","status":"completed","output":[]}
+                "response":{"id":"resp_1","status":"completed","output":[{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"done"}]}]}
             }))),
             Ok(JsonSseEvent::Done),
         ]);
@@ -1750,7 +2712,7 @@ mod tests {
     fn completed_rejects_following_semantic_or_duplicate_terminal_event() -> Result<()> {
         let completed = json!({
             "type":"response.completed",
-            "response":{"id":"resp_1","status":"completed","output":[]}
+            "response":{"id":"resp_1","status":"completed","output":[{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"done"}]}]}
         });
         let mut semantic_adapter = ResponsesStreamAdapter::default();
         let _terminal = semantic_adapter.map_event(completed.clone())?;
@@ -1767,6 +2729,77 @@ mod tests {
         let _terminal = duplicate_adapter.map_event(completed.clone())?;
         let duplicate = duplicate_adapter.map_event(completed);
         assert!(is_invalid_response(&duplicate));
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod native_boundary_tests {
+    use super::*;
+
+    #[test]
+    fn provider_native_responses_replay_groups_content_under_original_message_id() -> Result<()> {
+        let response = response_to_chat(
+            json!({"id":"resp_multi_part","status":"completed","output":[{"type":"message","id":"msg_parts","phase":"commentary","content":[{"type":"output_text","text":"一"},{"type":"output_text","text":"二"}]}]}),
+        )?;
+        let input = messages_to_input(&[response.message])?;
+        let items = input
+            .as_array()
+            .ok_or_else(|| invalid_response("input array missing"))?;
+        assert_eq!(items.len(), 1);
+        assert_eq!(
+            items
+                .first()
+                .and_then(|i| i.get("id"))
+                .and_then(Value::as_str),
+            Some("msg_parts")
+        );
+        assert_eq!(
+            items
+                .first()
+                .and_then(|i| i.get("content"))
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(2)
+        );
+        assert_eq!(
+            items
+                .first()
+                .and_then(|i| i.get("phase"))
+                .and_then(Value::as_str),
+            Some("commentary")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn provider_native_responses_rejects_delta_after_block_done() -> Result<()> {
+        let mut adapter = ResponsesStreamAdapter::default();
+        adapter.map_event(json!({"type":"response.output_text.delta","item_id":"msg_1","output_index":0,"content_index":0,"delta":"hello"}))?;
+        adapter.map_event(json!({"type":"response.output_text.done","item_id":"msg_1","output_index":0,"content_index":0,"text":"hello"}))?;
+        assert!(adapter.map_event(json!({"type":"response.output_text.delta","item_id":"msg_1","output_index":0,"content_index":0,"delta":"late"})).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn provider_native_responses_rejects_full_response_omitting_observed_tool() -> Result<()> {
+        let mut adapter = ResponsesStreamAdapter::default();
+        adapter.map_event(json!({"type":"response.output_item.added","output_index":1,"item":{"id":"fc_1","type":"function_call","call_id":"call_1","name":"lookup","arguments":"{}"}}))?;
+        let terminal = json!({"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[{"type":"message","id":"msg_1","content":[{"type":"output_text","text":"done"}]}]}});
+        assert!(adapter.map_event(terminal).is_err());
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod native_phase_tests {
+    use super::*;
+    #[test]
+    fn provider_native_responses_rejects_known_phase_change() -> Result<()> {
+        let mut adapter = ResponsesStreamAdapter::default();
+        adapter.map_event(json!({"type":"response.output_item.added","output_index":0,"item":{"id":"msg_1","type":"message","phase":"commentary","content":[]}}))?;
+        let changed=adapter.map_event(json!({"type":"response.output_item.done","output_index":0,"item":{"id":"msg_1","type":"message","phase":"final_answer","content":[{"type":"output_text","text":"done"}]}}));
+        assert!(changed.is_err());
         Ok(())
     }
 }

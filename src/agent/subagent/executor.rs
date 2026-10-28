@@ -117,6 +117,7 @@ fn apply_subagent_invocation_scope(
     invocation: &mut AgentInvocationContext,
     agent: &dyn Agent,
     allowed_tools: Option<&[String]>,
+    tool_access: Option<echo_core::tools::ToolAccess>,
     target_policy: NestedDelegationPolicy,
 ) {
     // The request already names this exact actor. Advancing child_policy here
@@ -129,6 +130,13 @@ fn apply_subagent_invocation_scope(
     // Keep the positive bound until the original Agent takes its snapshot
     // after acquiring the execution lock. A deny complement of today's names
     // cannot exclude tools registered while this invocation waits in the queue.
+    invocation.tool_access = match (invocation.tool_access, tool_access) {
+        (Some(echo_core::tools::ToolAccess::ReadOnly), _)
+        | (_, Some(echo_core::tools::ToolAccess::ReadOnly)) => {
+            Some(echo_core::tools::ToolAccess::ReadOnly)
+        }
+        (current, inherited) => inherited.or(current),
+    };
     invocation.allowed_tools = allowed_tools
         .filter(|tools| !tools.is_empty())
         .map(|tools| tools.iter().cloned().collect());
@@ -1719,7 +1727,10 @@ impl SubagentExecutor {
                 };
                 let registered = selected.registration;
                 if !selected.admitted
-                    && let Err(error) = self.registry.admit_registration(&registered, &req).await
+                    && let Err(error) = self
+                        .registry
+                        .admit_registration(&registered, &mut req)
+                        .await
                 {
                     Self::emit_pre_execution_failure(&event_publisher, &req, &error)?;
                     return Err(error);
@@ -2223,7 +2234,7 @@ impl SubagentExecutor {
         req.background = true;
         self.enrich_dispatch_context(&mut req);
         self.registry
-            .admit_registration(&registration, &req)
+            .admit_registration(&registration, &mut req)
             .await?;
         let observation_run_id = req
             .runtime_context
@@ -2276,7 +2287,11 @@ impl SubagentExecutor {
         let (mut req, admission) = self.admit_attempt(req, identity)?;
         req.background = true;
         self.enrich_dispatch_context(&mut req);
-        if let Err(error) = self.registry.admit_registration(&registration, &req).await {
+        if let Err(error) = self
+            .registry
+            .admit_registration(&registration, &mut req)
+            .await
+        {
             // No child was constructed: settle the original exact-attempt
             // reservation instead of leaving a refused background claim live.
             admission.settle(subagent_status_from_error(&error)?);
@@ -2347,7 +2362,7 @@ impl SubagentExecutor {
                     ReactError::Other(format!("Subagent '{}' not found", req.agent_name))
                 })?;
             self.registry
-                .admit_registration(&registration, &req)
+                .admit_registration(&registration, &mut req)
                 .await?;
             // This public handle entry bypasses dispatch_inner's borrowed-
             // resource bundle. Reuse that same keyed retainer, then move it
@@ -2430,6 +2445,9 @@ impl SubagentExecutor {
             req.parent_context
                 .as_ref()
                 .and_then(|context| context.allowed_tools.as_deref()),
+            req.parent_context
+                .as_ref()
+                .and_then(|context| context.tool_access),
             req.delegation_policy,
         );
 
@@ -3303,6 +3321,9 @@ impl SubagentExecutor {
             req.parent_context
                 .as_ref()
                 .and_then(|context| context.allowed_tools.as_deref()),
+            req.parent_context
+                .as_ref()
+                .and_then(|context| context.tool_access),
             req.delegation_policy,
         );
 
@@ -3475,6 +3496,10 @@ impl SubagentExecutor {
             .as_ref()
             .and_then(|context| context.allowed_tools.clone())
             .filter(|allowed| !allowed.is_empty());
+        let invocation_tool_access = req
+            .parent_context
+            .as_ref()
+            .and_then(|context| context.tool_access);
         let invocation_target_policy = req.delegation_policy;
 
         let observation_run_id = req
@@ -3579,6 +3604,7 @@ impl SubagentExecutor {
                 cancel: None,
                 disabled_tools: None,
                 allowed_tools: None,
+                tool_access: None,
                 visible_tools: None,
                 run_budget: None,
                 history: None,
@@ -3589,6 +3615,7 @@ impl SubagentExecutor {
                 &mut invocation,
                 agent_arc.as_ref(),
                 invocation_allowed_tools.as_deref(),
+                invocation_tool_access,
                 invocation_target_policy,
             );
             event_publisher.emit(SubagentEvent::DispatchIsolationObserved {
@@ -4037,6 +4064,325 @@ mod tests {
         }
     }
 
+    fn readonly_test_request(target: &str, mode: ExecutionMode) -> DispatchRequest {
+        DispatchRequest {
+            agent_name: target.to_string(),
+            task: "只读调用传递".to_string(),
+            mode_override: Some(mode),
+            cancel: CancellationToken::new(),
+            parent_agent: "primary".to_string(),
+            parent_context: Some(SubagentContext {
+                tool_access: Some(echo_core::tools::ToolAccess::ReadOnly),
+                ..SubagentContext::empty()
+            }),
+            delegation_policy: DispatchRequest::policy_from_depth(0),
+            runtime_context: None,
+            message: None,
+            prompt_payload: None,
+            prompt_context: None,
+            constraints: Vec::new(),
+            background: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn readonly_access_only_survives_sync_fork_teammate_and_background() -> Result<()> {
+        for mode in [
+            ExecutionMode::Sync,
+            ExecutionMode::Fork,
+            ExecutionMode::Teammate,
+        ] {
+            for (background, inherited) in
+                [(false, false), (false, true), (true, false), (true, true)]
+            {
+                let registry = Arc::new(SubagentRegistry::new());
+                let agent = MockAgent::new("reader").with_response("## Summary\n只读完成");
+                let mut definition = SubagentDefinition::new("reader", "只读角色");
+                definition.access_mode = super::super::types::SubagentAccessMode::ReadOnly;
+                registry.register(definition, Box::new(agent.clone())).await;
+                let executor = SubagentExecutor::new(registry, SubagentExecutorConfig::default());
+                let mut request = readonly_test_request("reader", mode.clone());
+                if !inherited {
+                    request.parent_context = None;
+                }
+                if background {
+                    executor.dispatch_background(request).await?.join().await?;
+                } else {
+                    executor.dispatch(request).await?;
+                }
+                let calls = agent.invocation_contexts();
+                assert_eq!(calls.len(), 1, "{mode:?}/{background}");
+                let context = calls
+                    .first()
+                    .ok_or_else(|| ReactError::Other("readonly invocation missing".into()))?;
+                assert_eq!(
+                    context.tool_access,
+                    Some(echo_core::tools::ToolAccess::ReadOnly)
+                );
+                assert!(context.allowed_tools.is_none());
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn readonly_writer_registration_is_rejected_before_factory_in_every_entry() -> Result<()>
+    {
+        for mode in [
+            ExecutionMode::Sync,
+            ExecutionMode::Fork,
+            ExecutionMode::Teammate,
+        ] {
+            for background in [false, true] {
+                let registry = Arc::new(SubagentRegistry::new());
+                let calls = Arc::new(AtomicUsize::new(0));
+                let observed = Arc::clone(&calls);
+                registry
+                    .register_factory(
+                        SubagentDefinition::new("writer", "写角色"),
+                        Arc::new(super::super::registry::FnAgentFactory::new(move || {
+                            let observed = Arc::clone(&observed);
+                            Box::pin(async move {
+                                observed.fetch_add(1, Ordering::SeqCst);
+                                Ok(Box::new(MockAgent::new("writer")) as Box<dyn Agent>)
+                            })
+                        })),
+                    )
+                    .await;
+                let executor = SubagentExecutor::new(registry, SubagentExecutorConfig::default());
+                let request = readonly_test_request("writer", mode.clone());
+                let error = if background {
+                    match executor.dispatch_background(request).await {
+                        Err(error) => error,
+                        Ok(handle) => {
+                            let _settled = handle.join().await;
+                            return Err(ReactError::Other(
+                                "readonly writer background was admitted".into(),
+                            ));
+                        }
+                    }
+                } else {
+                    match executor.dispatch(request).await {
+                        Err(error) => error,
+                        Ok(_) => {
+                            return Err(ReactError::Other("readonly writer was admitted".into()));
+                        }
+                    }
+                };
+                assert!(error.to_string().contains("Read-only"));
+                assert_eq!(calls.load(Ordering::SeqCst), 0, "{mode:?}/{background}");
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn readonly_team_carries_access_and_checks_each_actual_member() -> Result<()> {
+        for member_is_readonly in [true, false] {
+            let registry = Arc::new(SubagentRegistry::new());
+            let member = MockAgent::new("member").with_response("## Summary\n成员完成");
+            let mut definition = SubagentDefinition::new("member", "实际成员");
+            if member_is_readonly {
+                definition.access_mode = super::super::types::SubagentAccessMode::ReadOnly;
+            }
+            registry
+                .register(definition, Box::new(member.clone()))
+                .await;
+            let team = super::super::builder::SubagentBuilder::new("readonly-team")
+                .read_only()
+                .team(super::super::team::TeamSpec {
+                    strategy: super::super::team::TeamStrategy::Pipeline(vec!["member".into()]),
+                    manager: String::new(),
+                    subagents: Vec::new(),
+                    config: super::super::team::TeamConfig::default(),
+                })
+                .build();
+            registry
+                .register(team, Box::new(MockAgent::new("readonly-team")))
+                .await;
+            let executor = SubagentExecutor::new(registry, SubagentExecutorConfig::default());
+            let mut request = readonly_test_request("readonly-team", ExecutionMode::Team);
+            // 普通父的 None 不抵消 Team 自己的 ReadOnly 声明。
+            request.parent_context = None;
+            let result = executor.dispatch(request).await;
+            if member_is_readonly {
+                let result = result?;
+                assert_eq!(result.outcome.status, SubagentStatus::Completed);
+                let calls = member.invocation_contexts();
+                let invocation = calls
+                    .first()
+                    .ok_or_else(|| ReactError::Other("Team dropped access-only context".into()))?;
+                assert_eq!(
+                    invocation.tool_access,
+                    Some(echo_core::tools::ToolAccess::ReadOnly)
+                );
+            } else {
+                let failure = match result {
+                    Err(error) => error.to_string(),
+                    Ok(result) => {
+                        assert_ne!(result.outcome.status, SubagentStatus::Completed);
+                        serde_json::to_string(&result.outcome)?
+                    }
+                };
+                assert!(
+                    failure.to_ascii_lowercase().contains("read-only"),
+                    "{failure}"
+                );
+                assert!(member.invocation_contexts().is_empty());
+            }
+        }
+        Ok(())
+    }
+
+    struct LegacyAccessAgent {
+        calls: Arc<AtomicUsize>,
+    }
+    impl Agent for LegacyAccessAgent {
+        fn name(&self) -> &str {
+            "legacy-access"
+        }
+        fn model_name(&self) -> &str {
+            "test"
+        }
+        fn system_prompt(&self) -> &str {
+            ""
+        }
+        fn execute<'a>(&'a self, _: &'a str) -> futures::future::BoxFuture<'a, Result<String>> {
+            Box::pin(async move {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Ok("legacy".to_string())
+            })
+        }
+        fn execute_stream<'a>(
+            &'a self,
+            _: &'a str,
+        ) -> futures::future::BoxFuture<
+            'a,
+            Result<futures::stream::BoxStream<'a, Result<AgentEvent>>>,
+        > {
+            Box::pin(async move {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Ok(
+                    futures::stream::iter([Ok::<AgentEvent, ReactError>(AgentEvent::FinalAnswer(
+                        "## Summary\nlegacy".to_string(),
+                    ))])
+                    .boxed(),
+                )
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn readonly_target_with_legacy_agent_rejects_before_old_execute_while_writer_none_remains()
+    -> Result<()> {
+        for readonly in [false, true] {
+            let registry = Arc::new(SubagentRegistry::new());
+            let calls = Arc::new(AtomicUsize::new(0));
+            let mut definition = SubagentDefinition::new("legacy-access", "legacy agent");
+            if readonly {
+                definition.access_mode = super::super::types::SubagentAccessMode::ReadOnly;
+            }
+            registry
+                .register(
+                    definition,
+                    Box::new(LegacyAccessAgent {
+                        calls: Arc::clone(&calls),
+                    }),
+                )
+                .await;
+            let executor = SubagentExecutor::new(registry, SubagentExecutorConfig::default());
+            let mut request = readonly_test_request("legacy-access", ExecutionMode::Sync);
+            request.parent_context = None;
+            let result = executor.dispatch(request).await;
+            if readonly {
+                assert!(
+                    matches!(result,Err(error) if error.to_string().contains("read-only invocation constraints"))
+                );
+                assert_eq!(calls.load(Ordering::SeqCst), 0);
+            } else {
+                assert!(result.is_ok());
+                assert_eq!(calls.load(Ordering::SeqCst), 1);
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn readonly_target_bound_survives_retry_target_change_without_resetting_depth_or_scope()
+    -> Result<()> {
+        let registry = Arc::new(SubagentRegistry::new());
+        let mut reader = SubagentDefinition::new("reader", "readonly target");
+        reader.access_mode = super::super::types::SubagentAccessMode::ReadOnly;
+        registry
+            .register(reader, Box::new(MockAgent::new("reader")))
+            .await;
+        registry
+            .register(
+                SubagentDefinition::new("writer", "write target"),
+                Box::new(MockAgent::new("writer")),
+            )
+            .await;
+        let mut request = readonly_test_request("reader", ExecutionMode::Sync);
+        request.parent_context = Some(SubagentContext {
+            tool_access: Some(echo_core::tools::ToolAccess::Mutating),
+            allowed_tools: Some(vec!["read_file".to_string()]),
+            ..SubagentContext::empty()
+        });
+        let policy = NestedDelegationPolicy {
+            can_spawn_subagents: true,
+            delegate_depth: 2,
+            max_delegate_depth: 4,
+        };
+        request.delegation_policy = policy;
+        let reader = registry
+            .resolve_registration("reader")
+            .await
+            .ok_or_else(|| ReactError::Other("reader registration missing".to_string()))?;
+        registry.admit_registration(&reader, &mut request).await?;
+        assert_eq!(request.delegation_policy, policy);
+        let inherited = request
+            .parent_context
+            .as_ref()
+            .ok_or_else(|| ReactError::Other("readonly target bound missing".to_string()))?;
+        assert_eq!(
+            inherited.tool_access,
+            Some(echo_core::tools::ToolAccess::ReadOnly)
+        );
+        assert_eq!(inherited.allowed_tools, Some(vec!["read_file".to_string()]));
+        request.agent_name = "writer".to_string();
+        let writer = registry
+            .resolve_registration("writer")
+            .await
+            .ok_or_else(|| ReactError::Other("writer registration missing".to_string()))?;
+        assert!(
+            matches!(registry.admit_registration(&writer,&mut request).await,Err(error) if error.to_string().contains("Read-only"))
+        );
+        assert_eq!(request.delegation_policy, policy);
+        Ok(())
+    }
+
+    #[test]
+    fn inherited_readonly_cannot_be_promoted_by_mutating_or_absent_child_values() {
+        let agent = MockAgent::new("reader");
+        let mut invocation = AgentInvocationContext {
+            tool_access: Some(echo_core::tools::ToolAccess::ReadOnly),
+            ..Default::default()
+        };
+        for inherited in [None, Some(echo_core::tools::ToolAccess::Mutating)] {
+            apply_subagent_invocation_scope(
+                &mut invocation,
+                &agent,
+                None,
+                inherited,
+                DispatchRequest::policy_from_depth(0),
+            );
+            assert_eq!(
+                invocation.tool_access,
+                Some(echo_core::tools::ToolAccess::ReadOnly)
+            );
+        }
+    }
+
     #[test]
     fn invocation_allowlist_hides_every_unlisted_tool() {
         let agent = MockAgent::new("no-registered-tools");
@@ -4046,6 +4392,7 @@ mod tests {
             &mut invocation,
             &agent,
             Some(&allowed),
+            None,
             DispatchRequest::policy_from_depth(0),
         );
         assert_eq!(
@@ -4057,6 +4404,7 @@ mod tests {
             &mut invocation,
             &agent,
             None,
+            None,
             DispatchRequest::policy_from_depth(0),
         );
         assert!(invocation.allowed_tools.is_none());
@@ -4065,6 +4413,7 @@ mod tests {
             &mut invocation,
             &agent,
             Some(&[]),
+            None,
             DispatchRequest::policy_from_depth(0),
         );
         assert!(invocation.allowed_tools.is_none());

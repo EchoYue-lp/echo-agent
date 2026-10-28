@@ -188,3 +188,34 @@ main七CI或SDK消费者通过。正式采用、实际扫描及后继main资格�
 
 公共API、示例和网站行为均不变；仅执行边界的文本渲染输入规范化，现有严格parser
 与依赖风险合同继续持有权威，因此不新增示例/ADR/Rule或第二个状态权威。
+
+
+## 2026-10-28 已批准退役后的精确锁绑定维护
+
+Root明确仅授权本次c48→1442机械绑定维护：当前676包锁
+`1442bf309239cca9354070fee0d6278bb53cb8aeee0cafa436e97c64a93324af`，
+较c48仅删除已批准A2A专属的jsonwebtoken9.3.1、pem3.0.6、simple_asn1 0.6.4；
+其它共存package身份、版本、来源、checksum不变。原人类接受的49组/107身份
+逐项完全相同，policy d284、cargo-deny0.20.2、原命令/scope/authorization保持。
+仅baseline的lock_sha256及追加current_lock_validation改变；不新增ignore/allow，
+不扩SDK/CLI，不将本次协调者实施授权解释成新的人类风险接受或未来通行证。
+
+原四类官方scanner自然0，完整742126字节raw SHA256
+`1f9ed6ab1a0846514fa2027ba1695b802b0390455cc061180c1b277345c3a9bc`；
+正式旧锁caller自然1和HTTPS取源网络1原件保留。原actual及五vendor registry-origin
+标准audit均自然0，676包/1380公告，官方RustSec revision99670cfc；fetch/yanked
+未禁用，进程级同官方仓库SSH传输恢复，global Git/SSH/known_hosts逐SHA不变。
+此说明写入时尚未重验绑定后caller，不能预填其0；下一步使用原未改checker、同一
+保存raw/inner receipt、不重新capture，实际重验及原policy regression。
+
+本次仅验证metadata/说明维护，无运行时、API、示例或网站产品行为变更，不新增ADR
+或示例；原examples/文档与工程票保原快照，经非编译增量映射关联后继。完整30退役
+的官网镜像仍由所属owner另行同步，不能以此说明替代。Source#10/旧402、newGitPin、
+SDK/其它消费者、native及MainCI保持各自验收；当前workingtree未提交。
+原件位于主工作区.echo-semantic/local/parallel-executors-20261027/framework/下的
+retirement-full30-validation-20261028与dependency-binding-retirement1442-20261028。
+
+随后实际重验：2026-10-28T06:26:43.666Z，原未改checker不带--capture，
+使用上述同一官方raw/原inner receipt真实自然0，matches_exact_baseline=true/49组；
+原policy regression实际14项自然0/OK。此前pending描述保其写入时点；本结果不是
+新scanner，不冲销原caller1/网络1，不重标工程票，末次相关变更后另存实际验证。

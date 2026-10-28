@@ -150,7 +150,7 @@ async fn main() -> echo_agent::error::Result<()> {
             ),
             PermissionRule::allow(
                 RuleMatcher::Pattern {
-                    pattern: "final_answer".to_string(),
+                    pattern: "task_list".to_string(),
                 },
                 RuleSource::Session,
             ),

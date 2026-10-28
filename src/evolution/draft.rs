@@ -55,7 +55,7 @@ pub struct SkillDraftPreview {
 ///
 /// The generator writes template-based SKILL.md files to the `_drafts`
 /// directory and promotes the candidate to `Draft` lifecycle state via
-/// the [`Curator`].
+/// the [`Curator`](crate::evolution::Curator).
 pub struct SkillDraftGenerator {
     /// Consumer-supplied evolution storage root.
     storage_root: PathBuf,

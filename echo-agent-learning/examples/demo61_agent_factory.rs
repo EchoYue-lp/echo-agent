@@ -72,16 +72,8 @@ async fn main() -> Result<()> {
     let mock_client = Arc::new(
         MockLlmClient::new()
             .with_model_name("mock-factory")
-            .then_tool_call(
-                "call_1",
-                "final_answer",
-                r#"{"answer":"Factory-created agent is working!"}"#,
-            )
-            .then_tool_call(
-                "call_scoped",
-                "final_answer",
-                r#"{"answer":"Invocation uses its original hard tool scope."}"#,
-            ),
+            .with_response(r###"Factory-created agent is working!"###)
+            .with_response(r###"Invocation uses its original hard tool scope."###),
     );
 
     let manual_agent = ReactAgentBuilder::new()
@@ -103,9 +95,9 @@ async fn main() -> Result<()> {
             "Only report the scoped result.",
             CancellationToken::new(),
             AgentInvocationContext {
-                allowed_tools: Some(std::collections::HashSet::from(
-                    ["final_answer".to_string()],
-                )),
+                // 同一调用同时声明只读与工具集合上界，不修改共享 Agent 的配置。
+                tool_access: Some(echo_agent::tools::ToolAccess::ReadOnly),
+                allowed_tools: Some(std::collections::HashSet::from(["task_list".to_string()])),
                 ..Default::default()
             },
         )
