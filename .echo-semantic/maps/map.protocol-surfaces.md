@@ -92,8 +92,7 @@ scenarios:
   a2a-task-and-stream:
     status: needs_review
     source_refs:
-    - src/a2a/server.rs
-    - src/a2a/types.rs
+    - docs/adr/0090-a2a-lsp-retirement-contract.md
     finding_refs:
     - finding.a2a-terminal-authority
     - finding.a2a-stream-cleanup
@@ -186,6 +185,20 @@ scenarios:
 
 
 # ACP、A2A、Channels、Headless 与 SDK Surfaces
+## 当前 Task 的微信业务回执依据
+
+`echo-integration/docs/weixin-business-acceptance.md` 承接当前
+`echo-integration/src/channels/channels/weixin/wire.rs`／`api.rs`／`channel.rs` 的业务接受
+边界及真实验证限制。getupdates 在无拒绝码、无 null 业务码时，使用明确 ret／errcode
+业务0或当前 typed msgs／cursor 建立接受；非零／-14、raw null 与坏类型保持各自结果。
+HTTP 成功本身不是业务证据。当前来源独立记录于 `map.canonical-output-consumers`。
+sendmessage 新增的缺 ret ACK 还要求原 typed 非空 ID 且无错误码／null 码；原明确 ret=0
+及 String/u64 decoder 保留。Unknown 不回填、不授权自动重发，Accepted 不等于手机 Received。
+
+此依据复用原请求、发送回执、cursor／ACK 与 Stop owner；一次有界脱敏诊断不输出
+正文、token、cursor 或未知键名。本文仅补当前项目关联，不改历史 `observed_at`、
+原场景状态／unknown、旧观察与资格；不引入 getConfig／typing、第二 poller 或新执行器。
+
 
 ## 能力范围
 
@@ -246,3 +259,18 @@ Historical Clippy-only source increment: `source:bf1789e2c47fc26e7e331858887f567
 Historical documentation-only observation: `source:a40fa344d8df5fcccba273828d7f086dd1100f182e875cdae3a9a6bd04506557`; all Rust inputs remain identical to executed v4 `source:bf1789e2c47fc26e7e331858887f567067068e077aae6feb3c1a7ca24eda074b`. Actual focused batch selected135 channel tests (including NoStream10), root12 and doc2compile with0failed/0ignored, example/scoped lints/featureless/fmt0 and exactclean0(targetabsent). Original02warning/07lint101/sourceSemantic1 remain retained. Source reviews8cf8+777eac and batch `df4e7cf05d1ea805c37bcdcdbd157a6c5667c6d65588513b495928f972c8c2d5` / cleanup `49d90a0f95c77725411a5df48d63273eeef0443000faeebaa769f88fba3ef4d1` are local authoring-worktree evidence under `.echo-semantic/local/weixin-no-stream-build/focused-actual/`, not distributed assets or a new scan. No historical object status or full/global/native/consumer/main claim is changed.
 
 Durable-reset current observation: `source:3fc37deb9da5313ffb1d3e80bc29162f1969b12d88d7bf35a2d1e74706b635fc`. The exact existing Session→inner reply regression genuinely selected1 and failed None versusSome(reset-1), then passed after only durable outbound `.with_reply_to(original message_id)`; original scalar/stream/owner/API/lock unchanged. Current Rust inputs match executed green v7 `source:c3fbb9242dcf81f0e05e6ce9e074c1396707d343447db08350e42ce62cfbc032`; exactgreen1, all135 channels (including NoStream10), scoped warnings/strictpanic and fmt/check0, exactclean0 targetabsent. Batch `59070d12b5afec08224894070f20f2d31d4aa07d7d2c3fdff0706397412ba6af` and cleanup `4f69bd9889e90f8612696fdd9863e2ded7ef8d55acbde42767e46e58da9ebecb` are preserved local evidence under `.echo-semantic/local/weixin-no-stream-build/reset-reply-actual/`. Prior root12/doc2/demo/features retain their actual oldepoch and unchanged-API/legacy branch applicability, not a new run. Scenario status/oldFindings stay unchanged; App/A2/native/platform/fullmain remain separate.
+
+
+## 2026-10-28 已批准专用协议退出后的引用定位
+
+本对象原observed_at、原scenario status、unknown、next_step与全部Finding/Evidence
+身份保留其历史范围；不关闭旧行为问题，不冒当前运行时通过。具名A2A/LSP专用实现
+已在当前WIP删除，故这项场景的当前可读sourceRefs指向所属ADR0090的退役合同。
+原source:3fc37deb9da5313ffb1d3e80bc29162f1969b12d88d7bf35a2d1e74706b635fc
+下的旧路径为：
+- `src/a2a/server.rs`：历史实现；可恢复Git0e404185c8f252da3e335c35547e52249c74dc65，精确Blob/SHA见新增历史asset。
+- `src/a2a/types.rs`：历史实现；可恢复Git0e404185c8f252da3e335c35547e52249c74dc65，精确Blob/SHA见新增历史asset。
+
+这不是从闭包排除未知义务：其它动态/needs_review以及90个原loaded关联保原，
+也不重新注册旧协议或引入兼容shim。原native执行/ACP/MCP/channel/Subagent/Store
+与runtimeFinal通知另按各自当前合同维护。

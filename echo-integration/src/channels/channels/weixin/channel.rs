@@ -1060,10 +1060,17 @@ mod tests {
     #[derive(Clone, Copy)]
     enum PollCase {
         FortyThenControl,
+        FortyThenControlWithoutRet,
         ManyPagesThenControl,
         Unacknowledged,
         Unknown,
+        Unrelated,
+        NullRet,
+        NullErrcode,
         Rejected,
+        RejectedErrcode,
+        RejectedWithNullRet,
+        RejectedWithNullErrcode,
     }
 
     #[derive(Clone, Default)]
@@ -1158,7 +1165,7 @@ mod tests {
         }
         let cursor = cursor.unwrap_or_default();
         let valid_cursor = match state.case {
-            PollCase::FortyThenControl => {
+            PollCase::FortyThenControl | PollCase::FortyThenControlWithoutRet => {
                 matches!(cursor, "" | "first-page-accepted" | "control-page-accepted")
             }
             PollCase::ManyPagesThenControl => {
@@ -1179,17 +1186,25 @@ mod tests {
         });
         // Keep empty-page heartbeats bounded while retaining a real TCP/HTTP request.
         tokio::time::sleep(Duration::from_millis(10)).await;
-        let response = match state.case {
-            PollCase::FortyThenControl if cursor.is_empty() => {
+        let mut response = match state.case {
+            PollCase::FortyThenControl | PollCase::FortyThenControlWithoutRet
+                if cursor.is_empty() =>
+            {
                 serde_json::json!({"ret": 0, "msgs": (0..40).map(|index| poll_message(&format!("normal-{index}"), "wait for the original HITL reply")).collect::<Vec<_>>(), "get_updates_buf": "first-page-accepted"})
             }
-            PollCase::FortyThenControl if cursor == "first-page-accepted" => {
+            PollCase::FortyThenControl | PollCase::FortyThenControlWithoutRet
+                if cursor == "first-page-accepted" =>
+            {
                 serde_json::json!({"ret": 0, "msgs": [poll_message("original-control", "/reply original-request yes")], "get_updates_buf": "control-page-accepted"})
             }
-            PollCase::FortyThenControl if cursor == "control-page-accepted" => {
+            PollCase::FortyThenControl | PollCase::FortyThenControlWithoutRet
+                if cursor == "control-page-accepted" =>
+            {
                 serde_json::json!({"ret": 0, "msgs": [], "get_updates_buf": "control-page-accepted"})
             }
-            PollCase::FortyThenControl => serde_json::json!({"ret": 422}),
+            PollCase::FortyThenControl | PollCase::FortyThenControlWithoutRet => {
+                serde_json::json!({"ret": 422})
+            }
             PollCase::ManyPagesThenControl => {
                 let page = if cursor.is_empty() {
                     Some(0)
@@ -1213,13 +1228,33 @@ mod tests {
             PollCase::Unacknowledged => {
                 serde_json::json!({"ret": 0, "msgs": [poll_message("no-ack", "must retain the original cursor")], "get_updates_buf": "must-not-commit"})
             }
-            PollCase::Unknown => {
-                serde_json::json!({"msgs": [poll_message("unknown-business", "must not enter the handler")], "get_updates_buf": "must-not-commit"})
+            // 缺ret但含合法msgs/cursor已移入正控；Unknown仍表示业务接受证据不足。
+            PollCase::Unknown => serde_json::json!({}),
+            PollCase::Unrelated => serde_json::json!({"diagnostic_only": true}),
+            PollCase::NullRet => {
+                serde_json::json!({"ret": null, "msgs": [poll_message("null-ret", "must not enter the handler")], "get_updates_buf": "must-not-commit"})
+            }
+            PollCase::NullErrcode => {
+                serde_json::json!({"errcode": null, "msgs": [poll_message("null-errcode", "must not enter the handler")], "get_updates_buf": "must-not-commit"})
             }
             PollCase::Rejected => {
                 serde_json::json!({"ret": 17, "msgs": [poll_message("rejected-business", "must not enter the handler")], "get_updates_buf": "must-not-commit"})
             }
+            PollCase::RejectedErrcode => {
+                serde_json::json!({"ret": 0, "errcode": 17, "msgs": [poll_message("rejected-errcode", "must not enter the handler")], "get_updates_buf": "must-not-commit"})
+            }
+            PollCase::RejectedWithNullRet => {
+                serde_json::json!({"ret": null, "errcode": 17, "msgs": [poll_message("nonzero-before-null-ret", "must not enter the handler")], "get_updates_buf": "must-not-commit"})
+            }
+            PollCase::RejectedWithNullErrcode => {
+                serde_json::json!({"ret": 17, "errcode": null, "msgs": [poll_message("nonzero-before-null-errcode", "must not enter the handler")], "get_updates_buf": "must-not-commit"})
+            }
         };
+        if matches!(state.case, PollCase::FortyThenControlWithoutRet)
+            && let Some(object) = response.as_object_mut()
+        {
+            object.remove("ret");
+        }
         (axum::http::StatusCode::OK, axum::Json(response))
     }
 
@@ -1579,6 +1614,15 @@ mod tests {
         durable_poll_case(PollCase::FortyThenControl, 40, true).await
     }
 
+    /// 同一个生产poller/SessionHandler/file-backed ACK与cursor原语；只改变外部响应ret的presence。
+    #[tokio::test]
+    async fn actual_poll_optional_ret_keeps_original_data_hitl_and_stop_owner() -> Result<()> {
+        for early_ack in [false, true] {
+            durable_poll_case(PollCase::FortyThenControlWithoutRet, 40, early_ack).await?;
+        }
+        Ok(())
+    }
+
     struct NoAcknowledgmentHandler(tokio::sync::watch::Sender<usize>);
 
     #[async_trait]
@@ -1609,7 +1653,13 @@ mod tests {
         for case in [
             PollCase::Unacknowledged,
             PollCase::Unknown,
+            PollCase::Unrelated,
+            PollCase::NullRet,
+            PollCase::NullErrcode,
             PollCase::Rejected,
+            PollCase::RejectedErrcode,
+            PollCase::RejectedWithNullRet,
+            PollCase::RejectedWithNullErrcode,
         ] {
             let mut fixture = PollFixture::start(case).await?;
             let (calls, called) = tokio::sync::watch::channel(0_usize);
@@ -1625,6 +1675,7 @@ mod tests {
             let repeated =
                 wait_observation(&mut fixture.observation, |state| state.requests >= 2).await;
             let cursor = channel.state.cursor().await;
+            let transport_before_stop = channel.transport.subscribe().borrow().clone();
             let stopped = channel.stop().await;
             let calls = *called.borrow();
             let server_stopped = fixture.shutdown().await;
@@ -1633,10 +1684,41 @@ mod tests {
             server_stopped?;
             assert_eq!(cursor?, "");
             assert!(!observed.unexpected_cursor);
+            assert_eq!(observed.send_requests, 0);
+            // Snapshot comes from the original poller before Stop; HTTP200 alone is not Ready.
             match case {
-                PollCase::Unacknowledged => assert!(calls >= 1),
-                PollCase::Unknown | PollCase::Rejected => assert_eq!(calls, 0),
-                PollCase::FortyThenControl | PollCase::ManyPagesThenControl => {
+                PollCase::Unacknowledged => {
+                    assert!(calls >= 1);
+                    assert_eq!(transport_before_stop.phase, ChannelTransportPhase::Ready);
+                }
+                PollCase::Unknown
+                | PollCase::Unrelated
+                | PollCase::NullRet
+                | PollCase::NullErrcode => {
+                    assert_eq!(calls, 0);
+                    assert_eq!(transport_before_stop.phase, ChannelTransportPhase::Unknown);
+                    assert!(transport_before_stop.evidence.is_none());
+                }
+                PollCase::Rejected
+                | PollCase::RejectedErrcode
+                | PollCase::RejectedWithNullRet
+                | PollCase::RejectedWithNullErrcode => {
+                    assert_eq!(calls, 0);
+                    assert_eq!(
+                        transport_before_stop.phase,
+                        ChannelTransportPhase::Disconnected
+                    );
+                    assert!(transport_before_stop.evidence.is_none());
+                    assert!(
+                        transport_before_stop
+                            .last_error
+                            .as_deref()
+                            .is_some_and(|value| value.contains("rejected (17)"))
+                    );
+                }
+                PollCase::FortyThenControl
+                | PollCase::FortyThenControlWithoutRet
+                | PollCase::ManyPagesThenControl => {
                     return Err(error("unexpected test case"));
                 }
             }

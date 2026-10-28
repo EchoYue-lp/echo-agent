@@ -6,6 +6,7 @@ mod critic;
 mod event_envelope;
 pub mod factory;
 pub mod intervention;
+mod output_projection;
 pub mod prompt_template;
 mod types;
 
@@ -23,6 +24,7 @@ pub use event_envelope::{
     MessageId, RunId, StreamId, TurnId, envelope_event_stream, envelope_event_stream_after,
     validate_envelope_trajectory, validate_event_trajectory,
 };
+pub use output_projection::{AgentOutputProjection, AssistantTextDelta};
 pub use types::{Critique, CritiqueOutput, critique_output_schema};
 
 use crate::error::{ReactError, Result};

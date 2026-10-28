@@ -198,7 +198,7 @@ impl Node {
                         ..Default::default()
                     };
                     let raw = if *use_execute {
-                        agent.execute_stream_with_invocation_context(&input, cancel.clone(), invocation).await
+                        agent.execute_stream_message_with_invocation_context(echo_core::llm::types::Message::user(input), cancel.clone(), invocation).await
                     } else {
                         agent.chat_stream_message_with_invocation_context(echo_core::llm::types::Message::user(input), cancel.clone(), invocation).await
                     };
@@ -207,7 +207,7 @@ impl Node {
                         Err(error @ ReactError::ExecutionNotSettled { .. }) => { Err(error)?; return; }
                         Err(error) => { control.record_error(Some(node_name), error); return; }
                     };
-                    let mut final_answer = None;
+                    let mut output = echo_core::agent::AgentOutputProjection::default();
                     let mut observation = None;
                     while let Some(event) = events.next().await {
                         match event {
@@ -219,14 +219,39 @@ impl Node {
                             }
                             Err(error) => control.record_error(Some(node_name), error),
                             Ok(event) => {
-                                if event.is_terminal() && observation.as_ref().is_some_and(|error| matches!(error, ReactError::ExecutionNotSettled { run_id: observed_run, execution_id: Some(observed_execution) } if observed_run == &run_id && observed_execution == execution_id)) {
-                                    observation = None;
-                                }
                                 match event {
-                                    AgentEvent::Token(token) if !control.has_error() => yield token,
-                                    AgentEvent::FinalAnswer(answer) => if final_answer.is_none() { final_answer = Some(answer); },
+                                    AgentEvent::AssistantMessage { block } if !control.has_error() => {
+                                        match output.observe_block(&block) {
+                                            Ok(Some(delta)) if delta.block.phase != echo_core::agent::AssistantPhase::Reasoning && !delta.text.is_empty() => yield delta.text,
+                                            Ok(_) => {},
+                                            Err(error) => control.record_error(Some(node_name), error),
+                                        }
+                                    },
+                                    AgentEvent::ExecutionStatus(status) => {
+                                        // 先核原native身份/序号，再解除匹配unknown；被拒的合成/foreign终态无权释放owner。
+                                        match output.observe_status(&status) {
+                                            Ok(true) if matches!(status.status, echo_core::agent::ExecutionStatusKind::Settled | echo_core::agent::ExecutionStatusKind::Failed | echo_core::agent::ExecutionStatusKind::Cancelled) => {
+                                                if observation.as_ref().is_some_and(|error| matches!(error,
+                                                    ReactError::ExecutionNotSettled { run_id: observed_run, execution_id: Some(observed_execution) }
+                                                        if observed_run == &run_id && observed_execution == &status.execution_id)) { observation = None; }
+                                                // 原生取消/失败先入既有首因，尾部cleanup不能改写；原流仍读至EOF。
+                                                if let Some(error) = output.terminal_failure() { control.record_error(Some(node_name), error); }
+                                            },
+                                            Ok(_) => {},
+                                            Err(error) => control.record_error(Some(node_name), error),
+                                        }
+                                    },
+                                    AgentEvent::FinalAnswer(answer) if !control.has_error() => {
+                                        if let Err(error)=output.confirm_answer(&answer) {control.record_error(Some(node_name),error);}
+                                    },
+                                    AgentEvent::Token(_) | AgentEvent::ThinkStart | AgentEvent::ThinkEnd { .. } => control.record_error(Some(node_name), ReactError::Other("Workflow source emitted a retired assistant projection".into())),
                                     AgentEvent::Cancelled => control.record_error(Some(node_name), ReactError::Agent(Box::new(AgentError::Cancelled(format!("Workflow Agent node '{}' cancelled", agent.name()))))),
-                                    AgentEvent::Error { message, .. } => control.record_error(Some(node_name), ReactError::Other(message)),
+                                    AgentEvent::Error { message,failure,.. } => control.record_error(Some(node_name),match failure.terminal_kind {
+                                        echo_core::error::AgentTerminalKind::Cancelled=>AgentError::Cancelled(message).into(),
+                                        echo_core::error::AgentTerminalKind::TimedOut=>AgentError::Timeout(message).into(),
+                                        echo_core::error::AgentTerminalKind::PermissionDenied=>AgentError::PermissionDenied(message).into(),
+                                        echo_core::error::AgentTerminalKind::Failed=>ReactError::Other(message),
+                                    }),
                                     _ => {}
                                 }
                             }
@@ -234,9 +259,17 @@ impl Node {
                     }
                     if let Some(error) = observation { Err(error)?; }
                     if !control.has_error() {
-                        match final_answer {
-                            Some(output) => if let Err(error) = Self::commit_agent_output(state, output_key, output) { control.record_error(Some(node_name), error); },
-                            None => control.record_error(Some(node_name), ReactError::Agent(Box::new(AgentError::NoResponse { model: agent.model_name().to_string(), agent: agent.name().to_string() }))),
+                        // 必须等原stream物理EOF；block complete/最终确认均不提前提交state。
+                        match output.finish() {
+                            Ok(answer) => {
+                                match output.take_final_presentation() {
+                                    Ok(Some(safe_final)) => yield safe_final,
+                                    Ok(None) => {},
+                                    Err(error) => {control.record_error(Some(node_name),error);return;},
+                                }
+                                if let Err(error)=Self::commit_agent_output(state,output_key,answer) {control.record_error(Some(node_name),error);}
+                            },
+                            Err(error) => control.record_error(Some(node_name),error),
                         }
                     }
                 }
@@ -310,6 +343,286 @@ mod tests {
         state.set("x", 1)?;
         drain_node(&node, &state).await?;
         assert_eq!(state.get::<i64>("x"), Some(1)); // unchanged
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod canonical_consumer_tests {
+    use super::*;
+    use echo_core::agent::{
+        AgentInvocationContext, AgentPhase, AssistantMessageBlock, AssistantPhase, ExecutionStatus,
+        ExecutionStatusKind,
+    };
+    use echo_core::llm::types::Message;
+
+    struct NativeNodeAgent {
+        text_calls: Arc<std::sync::atomic::AtomicUsize>,
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+        tail_error: bool,
+        foreign_terminal: bool,
+        safe_final_only: bool,
+        unsettled: Option<&'static str>,
+    }
+    impl Agent for NativeNodeAgent {
+        fn name(&self) -> &str {
+            "native-node"
+        }
+        fn model_name(&self) -> &str {
+            "fixture"
+        }
+        fn system_prompt(&self) -> &str {
+            ""
+        }
+        fn execute<'a>(&'a self, _input: &'a str) -> BoxFuture<'a, Result<String>> {
+            Box::pin(async { Err(ReactError::Other("no text fallback".into())) })
+        }
+        fn execute_stream<'a>(
+            &'a self,
+            _input: &'a str,
+        ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+            self.text_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async { Err(ReactError::Other("no text fallback".into())) })
+        }
+        fn execute_stream_message_with_invocation_context<'a>(
+            &'a self,
+            message: Message,
+            _cancel: CancellationToken,
+            invocation: AgentInvocationContext,
+        ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+            Box::pin(async move {
+                assert_eq!(message.role, echo_core::llm::types::Role::User);
+                assert_eq!(message.content.as_text().as_deref(), Some("原输入"));
+                let runtime = invocation
+                    .runtime
+                    .ok_or_else(|| ReactError::Other("runtime missing".into()))?;
+                let execution = runtime
+                    .execution_id
+                    .ok_or_else(|| ReactError::Other("execution missing".into()))?;
+                assert!(runtime.run_id.is_some() && runtime.turn_id.is_some());
+                let status = move |kind, sequence| {
+                    AgentEvent::ExecutionStatus(ExecutionStatus {
+                        adapter_generated: false,
+                        execution_id: execution.clone(),
+                        request_id: Some("request".into()),
+                        sequence,
+                        phase: AgentPhase::Thinking,
+                        status: kind,
+                        reason: None,
+                    })
+                };
+                let entered = self.entered.clone();
+                let release = self.release.clone();
+                let tail_error = self.tail_error;
+                let foreign = self.foreign_terminal;
+                let safe_final_only = self.safe_final_only;
+                let unsettled = self.unsettled;
+                let stream = async_stream::stream! {
+                    yield Ok(status(ExecutionStatusKind::Started,0));
+                    if matches!(unsettled,Some("cancelled"|"failed")) {
+                        let mut terminal=status(if unsettled==Some("cancelled") {ExecutionStatusKind::Cancelled} else {ExecutionStatusKind::Failed},1);
+                        if let AgentEvent::ExecutionStatus(status)=&mut terminal {status.reason=Some("native-terminal-reason".into());}
+                        yield Ok(terminal);entered.notify_one();release.notified().await;
+                        if tail_error {yield Err(ReactError::Other("native cleanup failed".into()));}
+                        return;
+                    }
+                    let block=|phase,text:&str|AgentEvent::AssistantMessage {block:AssistantMessageBlock {provider_source:None,block_id:format!("{phase:?}"),request_id:"request".into(),sequence:0,phase,delta:text.into(),complete:true,provider:None,reasoning:None}};
+                    yield Ok(block(AssistantPhase::Reasoning,"不作普通输出的推理"));
+                    let delta=block(AssistantPhase::Unknown,"进度");yield Ok(delta.clone());yield Ok(delta);
+                    if !safe_final_only {yield Ok(block(AssistantPhase::FinalAnswer,"答案"));}
+                    if let Some(kind)=unsettled.filter(|kind|*kind!="duplicate") {yield Err(ReactError::ExecutionNotSettled {run_id:"run".into(),execution_id:Some(if kind=="foreign" {"foreign"} else {"execution"}.into())});}
+                    yield Ok(AgentEvent::FinalAnswer(if safe_final_only {"Guard安全答案"} else {"答案"}.into()));
+                    if foreign {
+                        yield Ok(AgentEvent::ExecutionStatus(ExecutionStatus {adapter_generated:false,execution_id:"foreign".into(),request_id:None,sequence:1,phase:AgentPhase::Terminal,status:ExecutionStatusKind::Settled,reason:None}));
+                    } else {
+                        let mut terminal=status(ExecutionStatusKind::Settled,1);
+                        if let AgentEvent::ExecutionStatus(status)=&mut terminal {
+                            if unsettled==Some("synthetic") {status.adapter_generated=true;}
+                            if unsettled==Some("foreign") {status.execution_id="foreign".into();}
+                        }
+                        yield Ok(terminal.clone());
+                        if unsettled==Some("duplicate") {
+                            yield Err(ReactError::ExecutionNotSettled {run_id:"run".into(),execution_id:Some("execution".into())});
+                            yield Ok(terminal);
+                        }
+                    }
+                    entered.notify_one();release.notified().await;
+                    if tail_error {yield Err(ReactError::Other("native cleanup failed".into()));}
+                };
+                Ok(Box::pin(stream) as BoxStream<'a, Result<AgentEvent>>)
+            })
+        }
+        fn chat_stream_message_with_invocation_context<'a>(
+            &'a self,
+            message: Message,
+            cancel: CancellationToken,
+            invocation: AgentInvocationContext,
+        ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+            self.execute_stream_message_with_invocation_context(message, cancel, invocation)
+        }
+    }
+    #[tokio::test]
+    async fn canonical_workflow_preserves_native_first_cause_through_cleanup() -> Result<()> {
+        for unsettled in [Some("cancelled"), Some("failed"), None] {
+            let entered = Arc::new(tokio::sync::Notify::new());
+            let release = Arc::new(tokio::sync::Notify::new());
+            let graph = super::super::GraphBuilder::new("native-first-cause")
+                .add_agent_node(
+                    "node",
+                    NativeNodeAgent {
+                        text_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                        entered: entered.clone(),
+                        release: release.clone(),
+                        tail_error: true,
+                        foreign_terminal: false,
+                        safe_final_only: false,
+                        unsettled,
+                    },
+                    "input",
+                    "output",
+                )
+                .set_entry("node")
+                .set_finish("node")
+                .build()?;
+            let state = SharedState::new();
+            state.set("input", "原输入".to_string())?;
+            let inspect = state.clone();
+            let mut running = tokio::spawn(async move { graph.run(state).await });
+            tokio::select! {
+                arrived = tokio::time::timeout(std::time::Duration::from_secs(2), entered.notified()) => {
+                    arrived.map_err(|_| ReactError::Other("native first-cause EOF gate not reached".into()))?;
+                },
+                early = &mut running => {
+                    return match early.map_err(|error| ReactError::Other(error.to_string()))? {
+                        Err(error) => Err(error),
+                        Ok(_) => Err(ReactError::Other("Graph returned before source EOF".into())),
+                    };
+                },
+            }
+            assert!(!running.is_finished());
+            assert!(inspect.get::<String>("output").is_none());
+            release.notify_one();
+            let result = running
+                .await
+                .map_err(|error| ReactError::Other(error.to_string()))?;
+            match unsettled {
+                Some("cancelled") => assert!(matches!(result, Err(ReactError::Agent(error))
+                    if matches!(error.as_ref(), AgentError::Cancelled(reason) if reason == "native-terminal-reason"))),
+                Some("failed") => assert!(matches!(result, Err(ReactError::Other(reason))
+                    if reason == "native-terminal-reason")),
+                _ => assert!(matches!(result, Err(ReactError::Other(reason))
+                    if reason == "native cleanup failed")),
+            }
+            assert!(inspect.get::<String>("output").is_none());
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn canonical_workflow_node_merges_deltas_and_commits_only_after_physical_eof()
+    -> Result<()> {
+        for (tail_error, foreign_terminal, use_execute, safe_final_only, unsettled) in [
+            (false, false, true, false, None),
+            (false, false, false, false, None),
+            (true, false, true, false, None),
+            (false, true, true, false, None),
+            (false, false, true, true, None),
+            (false, false, true, false, Some("synthetic")),
+            (false, false, true, false, Some("foreign")),
+            (false, false, true, false, Some("valid")),
+            (false, false, true, false, Some("duplicate")),
+            (false, false, true, false, Some("cancelled")),
+            (false, false, true, false, Some("failed")),
+        ] {
+            let text_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let entered = Arc::new(tokio::sync::Notify::new());
+            let release = Arc::new(tokio::sync::Notify::new());
+            let node = Node::agent_with_mode(
+                "node",
+                NativeNodeAgent {
+                    text_calls: text_calls.clone(),
+                    entered: entered.clone(),
+                    release: release.clone(),
+                    tail_error,
+                    foreign_terminal,
+                    safe_final_only,
+                    unsettled,
+                },
+                "input",
+                "output",
+                use_execute,
+            );
+            let state = SharedState::new();
+            state.set("input", "原输入".to_string())?;
+            let inspect = state.clone();
+            let control = super::super::graph::GraphExecutionControl::new(Some("run".into()));
+            let observer = control.clone();
+            let mut running = tokio::spawn(async move {
+                node.execute_stream(
+                    &state,
+                    CancellationToken::new(),
+                    control,
+                    "node",
+                    "execution",
+                )
+                .collect::<Vec<_>>()
+                .await
+            });
+            tokio::select! {
+                arrived=tokio::time::timeout(std::time::Duration::from_secs(2),entered.notified())=>{
+                    arrived.map_err(|_|ReactError::Other("native source EOF gate not reached".into()))?;
+                },
+                early=&mut running=>{
+                    let items=early.map_err(|error|ReactError::Other(error.to_string()))?;
+                    if text_calls.load(std::sync::atomic::Ordering::SeqCst)>0 {
+                        return Err(ReactError::Other("canonical Workflow input selected retired text fallback".into()));
+                    }
+                    items.into_iter().collect::<Result<Vec<_>>>()?;
+                    return Err(ReactError::Other("Workflow source returned before EOF gate".into()));
+                },
+            }
+            assert!(!running.is_finished());
+            assert!(inspect.get::<String>("output").is_none());
+            release.notify_one();
+            let raw = running
+                .await
+                .map_err(|error| ReactError::Other(error.to_string()))?;
+            if matches!(unsettled, Some("synthetic" | "foreign" | "duplicate")) {
+                assert!(raw.iter().any(|item|matches!(item,Err(ReactError::ExecutionNotSettled {run_id,..}) if run_id=="run")));
+                assert!(inspect.get::<String>("output").is_none());
+                continue;
+            }
+            let tokens = raw.into_iter().collect::<Result<Vec<_>>>()?;
+            assert_eq!(
+                tokens.concat(),
+                if matches!(unsettled, Some("cancelled" | "failed")) {
+                    ""
+                } else if safe_final_only {
+                    "进度Guard安全答案"
+                } else {
+                    "进度答案"
+                }
+            );
+            if tail_error || foreign_terminal || matches!(unsettled, Some("cancelled" | "failed")) {
+                assert!(observer.has_error());
+                assert!(inspect.get::<String>("output").is_none());
+            } else {
+                assert!(!observer.has_error());
+                assert_eq!(
+                    inspect.get::<String>("output"),
+                    Some(
+                        if safe_final_only {
+                            "Guard安全答案"
+                        } else {
+                            "答案"
+                        }
+                        .into()
+                    )
+                );
+            }
+        }
         Ok(())
     }
 }

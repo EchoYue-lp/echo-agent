@@ -2862,57 +2862,40 @@ impl SubagentExecutor {
             .map(|value| value.as_str())
             .unwrap_or(event_identity.turn_id.as_str())
             .to_string();
+        let terminal_run = source_run.clone();
         let source_execution = event_identity
             .execution_id
             .as_ref()
             .map(|value| value.as_str().to_string());
-        // Route by content: text-only invocations use the text streaming path
-        // (agents that implement only `execute_stream` stay dispatch-
-        // compatible); genuinely multimodal input requires the message
-        // override. This mirrors the documented `DispatchRequest.message`
-        // contract instead of assuming every agent implements both paths.
-        let mut raw_stream = match current_message.content.as_text_ref() {
-            Some(task) => {
-                agent
-                    .execute_stream_with_invocation_context(task, cancel.clone(), invocation)
-                    .await?
-            }
-            None => {
-                agent
-                    .execute_stream_message_with_invocation_context(
-                        current_message,
-                        cancel.clone(),
-                        invocation,
-                    )
-                    .await?
-            }
-        }
-        .inspect(move |item| {
-            let mut pending = source_progress.lock().unwrap_or_else(|p| p.into_inner());
-            let matches_owner = |error: &ReactError| {
-                matches!(error,
+        // 当前typed消息与invocation始终完整值传递，不把Text内容当作旧入口选择依据。
+        let mut raw_stream = agent
+            .execute_stream_message_with_invocation_context(
+                current_message,
+                cancel.clone(),
+                invocation,
+            )
+            .await?
+            .inspect(move |item| {
+                let mut pending = source_progress.lock().unwrap_or_else(|p| p.into_inner());
+                let matches_owner = |error: &ReactError| {
+                    matches!(error,
                 ReactError::ExecutionNotSettled { run_id, execution_id }
                     if run_id == &source_run && execution_id == &source_execution)
-            };
-            match item {
-                Err(ReactError::ExecutionNotSettled {
+                };
+                if let Err(ReactError::ExecutionNotSettled {
                     run_id,
                     execution_id,
-                }) => {
-                    if pending.as_ref().is_none_or(matches_owner) {
-                        *pending = Some(ReactError::ExecutionNotSettled {
-                            run_id: run_id.clone(),
-                            execution_id: execution_id.clone(),
-                        });
-                    }
+                }) = item
+                    && pending.as_ref().is_none_or(matches_owner)
+                {
+                    *pending = Some(ReactError::ExecutionNotSettled {
+                        run_id: run_id.clone(),
+                        execution_id: execution_id.clone(),
+                    });
                 }
-                Ok(event) if event.is_terminal() && pending.as_ref().is_some_and(matches_owner) => {
-                    *pending = None;
-                }
-                _ => {}
-            }
-        })
-        .fuse();
+            })
+            .fuse();
+        let mut output = echo_core::agent::AgentOutputProjection::default();
         let _steering_lease = if let Some(binding) = control {
             let attachment = control_turn_id
                 .ok_or_else(|| ReactError::Other("Subagent control turn id missing".to_string()))
@@ -2926,7 +2909,14 @@ impl SubagentExecutor {
                 Err(error) => {
                     Self::record_first_cause(&first_cause, error);
                     cancel.cancel();
-                    Self::drain_source_stream(&mut raw_stream, &first_cause).await;
+                    Self::drain_source_stream(
+                        &mut raw_stream,
+                        &first_cause,
+                        &mut output,
+                        &source_observation,
+                        &terminal_run,
+                    )
+                    .await;
                     if let Some(error) = source_observation
                         .lock()
                         .unwrap_or_else(|p| p.into_inner())
@@ -2942,12 +2932,8 @@ impl SubagentExecutor {
         } else {
             None
         };
-        // The envelope normalizer ends at its first terminal event. Borrow the
-        // original source so that its EOF/cleanup can still be awaited below.
-        let mut stream =
-            echo_core::agent::envelope_event_stream(raw_stream.by_ref().boxed(), event_identity);
-        let mut output = String::new();
-        let mut in_thinking = false;
+        // 同一原source读到物理EOF；不经旧terminal包装器截断/改判身份。
+        let stream = raw_stream.by_ref();
         let mut prompt_tokens: usize = 0;
         let mut completion_tokens: usize = 0;
         let mut usage_stats = super::usage::LlmUsageStats::default();
@@ -2956,6 +2942,17 @@ impl SubagentExecutor {
         let mut observed_artifacts = Vec::new();
 
         while let Some(event_result) = stream.next().await {
+            if let Ok(AgentEvent::ExecutionStatus(status)) = &event_result {
+                if let Err(error) = Self::observe_stream_runtime_status(
+                    &mut output,
+                    &source_observation,
+                    &terminal_run,
+                    status,
+                ) {
+                    Self::record_first_cause(&first_cause, error);
+                }
+                continue;
+            }
             let event_result = match event_result {
                 Err(ReactError::ExecutionNotSettled { .. }) => continue,
                 other => other,
@@ -2970,7 +2967,7 @@ impl SubagentExecutor {
                 continue;
             }
             let event = match event_result {
-                Ok(event) => event.payload,
+                Ok(event) => event,
                 Err(error) => {
                     Self::record_first_cause(&first_cause, error);
                     continue;
@@ -2978,50 +2975,55 @@ impl SubagentExecutor {
             };
             let processed = (|| -> Result<()> {
                 match event {
-                    AgentEvent::Token(content) => {
-                        if in_thinking {
-                            event_publisher.emit(SubagentEvent::DispatchThinkingDelta {
-                                parent: parent.to_string(),
-                                agent: subagent.to_string(),
-                                content,
-                                execution_id: execution_id.clone(),
-                                run_id: run_id.clone(),
-                            })?;
-                        } else {
-                            output.push_str(&content);
-                            event_publisher.emit(SubagentEvent::DispatchTokenDelta {
-                                parent: parent.to_string(),
-                                agent: subagent.to_string(),
-                                content,
-                                execution_id: execution_id.clone(),
-                                run_id: run_id.clone(),
-                            })?;
+                    AgentEvent::AssistantMessage { block } => {
+                        if let Some(delta) = output.observe_block(&block)? {
+                            if delta.reasoning_started {
+                                event_publisher.emit(SubagentEvent::DispatchThinkingStarted {
+                                    parent: parent.to_string(),
+                                    agent: subagent.to_string(),
+                                    execution_id: execution_id.clone(),
+                                    run_id: run_id.clone(),
+                                })?;
+                            }
+                            if !delta.text.is_empty() {
+                                let event = if delta.block.phase
+                                    == echo_core::agent::AssistantPhase::Reasoning
+                                {
+                                    SubagentEvent::DispatchThinkingDelta {
+                                        parent: parent.to_string(),
+                                        agent: subagent.to_string(),
+                                        content: delta.text,
+                                        execution_id: execution_id.clone(),
+                                        run_id: run_id.clone(),
+                                    }
+                                } else {
+                                    SubagentEvent::DispatchTokenDelta {
+                                        parent: parent.to_string(),
+                                        agent: subagent.to_string(),
+                                        content: delta.text,
+                                        execution_id: execution_id.clone(),
+                                        run_id: run_id.clone(),
+                                    }
+                                };
+                                event_publisher.emit(event)?;
+                            }
+                            if delta.reasoning_finished {
+                                // 用量只来自每请求LlmUsage；结束块不是第二份token统计。
+                                event_publisher.emit(SubagentEvent::DispatchThinkingEnded {
+                                    parent: parent.to_string(),
+                                    agent: subagent.to_string(),
+                                    prompt_tokens: 0,
+                                    completion_tokens: 0,
+                                    execution_id: execution_id.clone(),
+                                    run_id: run_id.clone(),
+                                })?;
+                            }
                         }
                     }
-                    AgentEvent::ThinkStart => {
-                        in_thinking = true;
-                        event_publisher.emit(SubagentEvent::DispatchThinkingStarted {
-                            parent: parent.to_string(),
-                            agent: subagent.to_string(),
-                            execution_id: execution_id.clone(),
-                            run_id: run_id.clone(),
-                        })?;
-                    }
-                    AgentEvent::ThinkEnd {
-                        prompt_tokens: pt,
-                        completion_tokens: ct,
-                    } => {
-                        in_thinking = false;
-                        prompt_tokens = prompt_tokens.saturating_add(pt);
-                        completion_tokens = completion_tokens.saturating_add(ct);
-                        event_publisher.emit(SubagentEvent::DispatchThinkingEnded {
-                            parent: parent.to_string(),
-                            agent: subagent.to_string(),
-                            prompt_tokens: pt,
-                            completion_tokens: ct,
-                            execution_id: execution_id.clone(),
-                            run_id: run_id.clone(),
-                        })?;
+                    AgentEvent::Token(_) | AgentEvent::ThinkStart | AgentEvent::ThinkEnd { .. } => {
+                        return Err(ReactError::Other(
+                            "Subagent source emitted a retired assistant projection".into(),
+                        ));
                     }
                     AgentEvent::LlmUsage {
                         model,
@@ -3032,6 +3034,8 @@ impl SubagentExecutor {
                         cache_creation_prompt_tokens: ccpt,
                         usage_reported,
                     } => {
+                        prompt_tokens = prompt_tokens.saturating_add(pt);
+                        completion_tokens = completion_tokens.saturating_add(ct);
                         usage_stats.record(&model, pt, ct, tt, cpt, ccpt, usage_reported);
                         event_publisher.emit(SubagentEvent::DispatchLlmUsage {
                             parent: parent.to_string(),
@@ -3109,10 +3113,7 @@ impl SubagentExecutor {
                             run_id: run_id.clone(),
                         })?;
                     }
-                    AgentEvent::FinalAnswer(answer) if !answer.is_empty() => {
-                        output = answer;
-                    }
-                    AgentEvent::FinalAnswer(_) => {}
+                    AgentEvent::FinalAnswer(answer) => output.confirm_answer(&answer)?,
                     AgentEvent::Cancelled => {
                         return Err(ReactError::Agent(Box::new(AgentError::Cancelled(format!(
                             "Subagent '{subagent}' cancelled"
@@ -3146,11 +3147,17 @@ impl SubagentExecutor {
                 Self::record_first_cause(&first_cause, error);
             }
         }
-        drop(stream);
         // Envelope EOF only proves terminal projection. The original stream
         // may still own a producer/finally; consume that source to its real EOF
         // and keep any cleanup failure it reports on the way out.
-        Self::drain_source_stream(&mut raw_stream, &first_cause).await;
+        Self::drain_source_stream(
+            &mut raw_stream,
+            &first_cause,
+            &mut output,
+            &source_observation,
+            &terminal_run,
+        )
+        .await;
         if let Some(error) = source_observation
             .lock()
             .unwrap_or_else(|p| p.into_inner())
@@ -3162,6 +3169,19 @@ impl SubagentExecutor {
             return Err(error);
         }
 
+        // 原source EOF及尾部错误均已检查，才投影当前runtime确认的最终结果。
+        let answer = output.finish()?;
+        let final_delta = output.take_final_presentation()?;
+        let output = answer;
+        if let Some(content) = final_delta {
+            event_publisher.emit(SubagentEvent::DispatchTokenDelta {
+                parent: parent.to_string(),
+                agent: subagent.to_string(),
+                content,
+                execution_id: execution_id.clone(),
+                run_id: run_id.clone(),
+            })?;
+        }
         let tokens_used = Some(prompt_tokens.saturating_add(completion_tokens));
         let usage = if usage_stats.call_count > 0 {
             // Also update tokens_used from real usage stats for consistency.
@@ -3189,6 +3209,36 @@ impl SubagentExecutor {
         .with_structured(execution_id.as_deref(), artifact_base_dir.as_deref());
         merge_observed_evidence(&mut result.outcome, observed_evidence, observed_artifacts);
         Ok(result)
+    }
+
+    // 主读取与attachment失败后的原source drain使用同一纯native事实核验。
+    fn observe_stream_runtime_status(
+        output: &mut echo_core::agent::AgentOutputProjection,
+        observation: &Arc<Mutex<Option<ReactError>>>,
+        run: &str,
+        status: &echo_core::agent::ExecutionStatus,
+    ) -> Result<()> {
+        let new_fact = output.observe_status(status)?;
+        if new_fact
+            && matches!(
+                status.status,
+                echo_core::agent::ExecutionStatusKind::Settled
+                    | echo_core::agent::ExecutionStatusKind::Failed
+                    | echo_core::agent::ExecutionStatusKind::Cancelled
+            )
+        {
+            let mut pending = observation
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if pending.as_ref().is_some_and(|error|matches!(error, ReactError::ExecutionNotSettled {run_id,execution_id:Some(execution)} if run_id==run && execution==&status.execution_id)) {
+                *pending=None;
+            }
+            // 先解除匹配unknown，再把原生失败按观察顺序交给既有首因槽；不提前结算。
+            if let Some(error) = output.terminal_failure() {
+                return Err(error);
+            }
+        }
+        Ok(())
     }
 
     fn record_first_cause(cause: &Arc<Mutex<Option<ReactError>>>, error: ReactError) {
@@ -3219,11 +3269,22 @@ impl SubagentExecutor {
     ///
     /// Both drain sites (attachment failure and post-terminal tail) share this
     /// function so the cleanup-error contract cannot diverge between them.
-    async fn drain_source_stream<S>(source: &mut S, first_cause: &Arc<Mutex<Option<ReactError>>>)
-    where
+    async fn drain_source_stream<S>(
+        source: &mut S,
+        first_cause: &Arc<Mutex<Option<ReactError>>>,
+        output: &mut echo_core::agent::AgentOutputProjection,
+        observation: &Arc<Mutex<Option<ReactError>>>,
+        run: &str,
+    ) where
         S: futures::Stream<Item = Result<AgentEvent>> + Unpin,
     {
         while let Some(item) = source.next().await {
+            if let Ok(AgentEvent::ExecutionStatus(status)) = &item
+                && let Err(error) =
+                    Self::observe_stream_runtime_status(output, observation, run, status)
+            {
+                Self::record_first_cause(first_cause, error);
+            }
             if let Err(error) = item
                 && !matches!(error, ReactError::ExecutionNotSettled { .. })
             {
@@ -9072,6 +9133,369 @@ mod tests {
             assert_eq!(executor.local_fork_admission.active_count(), 0);
             assert_eq!(executions.load(Ordering::SeqCst), 1);
             assert_eq!(tokio::fs::read(&effect).await?, b"same-source-closed");
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod canonical_consumer_tests {
+    use super::*;
+    use crate::agent::subagent::events::SubagentEventBus;
+    use echo_core::agent::{
+        AgentPhase, AssistantMessageBlock, AssistantPhase, ExecutionStatus, ExecutionStatusKind,
+    };
+    use futures::future::BoxFuture;
+    use futures::stream::BoxStream;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct NativeSource {
+        observed: Arc<Mutex<Vec<serde_json::Value>>>,
+        before_eof: Arc<tokio::sync::Notify>,
+        release_eof: Arc<tokio::sync::Notify>,
+        tail_error: bool,
+        safe_final_only: bool,
+        unsettled: Option<&'static str>,
+    }
+    fn status(kind: ExecutionStatusKind, sequence: u64) -> AgentEvent {
+        AgentEvent::ExecutionStatus(ExecutionStatus {
+            adapter_generated: false,
+            execution_id: "native-execution".into(),
+            request_id: Some("native-request".into()),
+            sequence,
+            phase: AgentPhase::Thinking,
+            status: kind,
+            reason: None,
+        })
+    }
+    fn block(phase: AssistantPhase, text: &str) -> AgentEvent {
+        AgentEvent::AssistantMessage {
+            block: AssistantMessageBlock {
+                provider_source: None,
+                block_id: format!("{phase:?}"),
+                request_id: "native-request".into(),
+                sequence: 0,
+                phase,
+                delta: text.into(),
+                complete: true,
+                provider: None,
+                reasoning: None,
+            },
+        }
+    }
+    impl Agent for NativeSource {
+        fn name(&self) -> &str {
+            "native-source"
+        }
+        fn model_name(&self) -> &str {
+            "fixture"
+        }
+        fn system_prompt(&self) -> &str {
+            ""
+        }
+        fn execute<'a>(&'a self, _task: &'a str) -> BoxFuture<'a, Result<String>> {
+            Box::pin(async { Err(ReactError::Other("text result fallback forbidden".into())) })
+        }
+        fn execute_stream<'a>(
+            &'a self,
+            _task: &'a str,
+        ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+            Box::pin(async { Err(ReactError::Other("text stream downgrade forbidden".into())) })
+        }
+        fn execute_stream_with_invocation_context<'a>(
+            &'a self,
+            _task: &'a str,
+            _cancel: CancellationToken,
+            _invocation: AgentInvocationContext,
+        ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+            Box::pin(async { Err(ReactError::Other("rich Text was downgraded".into())) })
+        }
+        fn execute_stream_message_with_invocation_context<'a>(
+            &'a self,
+            message: Message,
+            _cancel: CancellationToken,
+            invocation: AgentInvocationContext,
+        ) -> BoxFuture<'a, Result<BoxStream<'a, Result<AgentEvent>>>> {
+            Box::pin(async move {
+                assert_eq!(
+                    invocation.tool_access,
+                    Some(echo_core::tools::ToolAccess::ReadOnly)
+                );
+                self.observed.lock().map_err(|_| ReactError::Other("observation lock poisoned".into()))?.push(serde_json::json!({
+                    "message":message, "history":invocation.history,
+                    "execution":invocation.runtime.as_ref().and_then(|runtime|runtime.execution_id.clone()),
+                }));
+                let before_eof = self.before_eof.clone();
+                let release_eof = self.release_eof.clone();
+                let tail_error = self.tail_error;
+                let safe_final_only = self.safe_final_only;
+                let unsettled = self.unsettled;
+                let stream = async_stream::stream! {
+                    let _resources = invocation.resource_guards;
+                    yield Ok(status(ExecutionStatusKind::Started, 0));
+                    if matches!(unsettled,Some("cancelled"|"failed")) {
+                        let mut terminal=status(if unsettled==Some("cancelled") {ExecutionStatusKind::Cancelled} else {ExecutionStatusKind::Failed},1);
+                        if let AgentEvent::ExecutionStatus(status)=&mut terminal {status.reason=Some("native-terminal-reason".into());}
+                        yield Ok(terminal);before_eof.notify_one();release_eof.notified().await;
+                        if tail_error { yield Err(ReactError::Other("real native tail cleanup failed".into())); }
+                        return;
+                    }
+                    yield Ok(block(AssistantPhase::Reasoning, "独立推理"));
+                    let progress = block(AssistantPhase::Commentary, "进度");
+                    yield Ok(progress.clone()); yield Ok(progress);
+                    if !safe_final_only { yield Ok(block(AssistantPhase::FinalAnswer, "最终结果")); }
+                    if let Some(kind)=unsettled.filter(|kind|*kind!="duplicate") {
+                        yield Err(ReactError::ExecutionNotSettled {run_id:"native-run".into(),execution_id:Some(if kind=="foreign" {"foreign"} else {"native-execution"}.into())});
+                    }
+                    yield Ok(AgentEvent::LlmUsage { model:"fixture".into(), prompt_tokens:3, completion_tokens:2, total_tokens:5, cached_prompt_tokens:0, cache_creation_prompt_tokens:0, usage_reported:true });
+                    let final_text=if safe_final_only {"Guard确认的安全结果"} else {"最终结果"};
+                    yield Ok(AgentEvent::FinalAnswer(final_text.into()));
+                    let mut terminal=status(ExecutionStatusKind::Settled,1);
+                    if let AgentEvent::ExecutionStatus(status)=&mut terminal {
+                        if unsettled==Some("synthetic") {status.adapter_generated=true;}
+                        if unsettled==Some("foreign") {status.execution_id="foreign".into();}
+                    }
+                    yield Ok(terminal.clone());
+                    if unsettled==Some("duplicate") {
+                        yield Err(ReactError::ExecutionNotSettled {run_id:"native-run".into(),execution_id:Some("native-execution".into())});
+                        yield Ok(terminal);
+                    }
+                    before_eof.notify_one(); release_eof.notified().await;
+                    if tail_error { yield Err(ReactError::Other("real native tail cleanup failed".into())); }
+                };
+                Ok(Box::pin(stream) as BoxStream<'a, Result<AgentEvent>>)
+            })
+        }
+    }
+    struct GuardDrop(Arc<AtomicUsize>);
+    impl Drop for GuardDrop {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn canonical_subagent_keeps_rich_text_and_waits_for_source_eof() -> Result<()> {
+        for (tail_error, safe_final_only, unsettled) in [
+            (false, false, None),
+            (true, false, None),
+            (false, true, None),
+            (false, false, Some("synthetic")),
+            (false, false, Some("foreign")),
+            (false, false, Some("valid")),
+            (false, false, Some("duplicate")),
+            (false, false, Some("cancelled")),
+            (false, false, Some("failed")),
+            (true, false, Some("cancelled")),
+            (true, false, Some("failed")),
+        ] {
+            let observed = Arc::new(Mutex::new(Vec::new()));
+            let before_eof = Arc::new(tokio::sync::Notify::new());
+            let release_eof = Arc::new(tokio::sync::Notify::new());
+            let drops = Arc::new(AtomicUsize::new(0));
+            let source = Arc::new(NativeSource {
+                observed: observed.clone(),
+                before_eof: before_eof.clone(),
+                release_eof: release_eof.clone(),
+                tail_error,
+                safe_final_only,
+                unsettled,
+            });
+            let mut current = Message::user("带元数据的文本 🧭".into());
+            current.name = Some("original-name".into());
+            current.role = echo_core::llm::types::Role::System;
+            let expected = serde_json::to_value(&current)?;
+            let prior = Message::user("原history".into());
+            let expected_history = serde_json::to_value(vec![prior.clone()])?;
+            let invocation = AgentInvocationContext {
+                runtime: Some(echo_core::tools::ExternalRunContext {
+                    run_id: Some("native-run".into()),
+                    turn_id: Some("native-turn".into()),
+                    execution_id: Some("native-execution".into()),
+                    ..Default::default()
+                }),
+                tool_access: Some(echo_core::tools::ToolAccess::ReadOnly),
+                resource_guards: vec![echo_core::tools::InvocationResourceGuard::new(GuardDrop(
+                    drops.clone(),
+                ))],
+                ..Default::default()
+            };
+            let identity = EventIdentity::from_invocation(&invocation)?;
+            let bus = SubagentEventBus::new();
+            let mut events = bus.subscribe();
+            let publisher = bus.publisher(
+                identity.clone(),
+                SubagentInvocationIdentity::from_lineage(
+                    "parent",
+                    "native-source",
+                    &identity,
+                    None,
+                )?,
+            )?;
+            publisher.emit(SubagentEvent::DispatchStarted {
+                parent: "parent".into(),
+                agent: "native-source".into(),
+                mode: ExecutionMode::Sync,
+                task: "typed".into(),
+                execution_id: Some("native-execution".into()),
+                run_id: Some("native-run".into()),
+                conversation_id: None,
+                message_id: None,
+                background: false,
+            })?;
+            let compiled = CompiledSubagentInvocation {
+                messages: vec![prior, current],
+                ..Default::default()
+            };
+            let mut running = tokio::spawn(async move {
+                SubagentExecutor::execute_agent_streaming(
+                    source,
+                    compiled,
+                    CancellationToken::new(),
+                    invocation,
+                    "parent",
+                    "native-source",
+                    ExecutionMode::Sync,
+                    Instant::now(),
+                    Some("native-execution".into()),
+                    Some("native-run".into()),
+                    None,
+                    publisher,
+                    Arc::new(Mutex::new(None)),
+                )
+                .await
+            });
+            tokio::select! {
+                entered = tokio::time::timeout(Duration::from_secs(2), before_eof.notified()) => {
+                    entered.map_err(|_| ReactError::Other("source did not reach EOF gate".into()))?;
+                },
+                early = &mut running => {
+                    let result = early.map_err(|error| ReactError::Other(error.to_string()))?;
+                    return match result {
+                        Err(error) => Err(error),
+                        Ok(_) => Err(ReactError::Other("source returned before original EOF gate".into())),
+                    };
+                },
+            }
+            assert!(
+                !running.is_finished(),
+                "Final确认/Settled不能替代原source物理EOF"
+            );
+            assert_eq!(drops.load(Ordering::SeqCst), 0);
+            release_eof.notify_one();
+            let result = running
+                .await
+                .map_err(|error| ReactError::Other(error.to_string()))?;
+            if unsettled == Some("cancelled") {
+                assert!(
+                    matches!(result,Err(ReactError::Agent(error)) if matches!(error.as_ref(),AgentError::Cancelled(reason) if reason=="native-terminal-reason"))
+                );
+            } else if unsettled == Some("failed") {
+                assert!(
+                    matches!(result,Err(ReactError::Other(reason)) if reason=="native-terminal-reason")
+                );
+            } else if matches!(unsettled, Some("synthetic" | "foreign" | "duplicate")) {
+                assert!(
+                    matches!(result,Err(ReactError::ExecutionNotSettled {run_id,execution_id:Some(execution)}) if run_id=="native-run" && execution==if unsettled==Some("foreign") {"foreign"} else {"native-execution"})
+                );
+            } else if tail_error {
+                assert!(result.is_err());
+            } else {
+                let result = result?;
+                assert_eq!(
+                    result.output,
+                    if safe_final_only {
+                        "Guard确认的安全结果"
+                    } else {
+                        "最终结果"
+                    }
+                );
+                assert_eq!(result.tokens_used, Some(5));
+            }
+            let rows = observed
+                .lock()
+                .map_err(|_| ReactError::Other("observation lock poisoned".into()))?;
+            let row = rows
+                .first()
+                .ok_or_else(|| ReactError::Other("typed request missing".into()))?;
+            assert_eq!(row.get("message"), Some(&expected));
+            assert_eq!(row.get("history"), Some(&expected_history));
+            let mut text = String::new();
+            let mut reasoning = String::new();
+            while let Ok(event) = events.try_recv() {
+                match event.as_ref() {
+                    SubagentEvent::DispatchTokenDelta { content, .. } => text.push_str(content),
+                    SubagentEvent::DispatchThinkingDelta { content, .. } => {
+                        reasoning.push_str(content)
+                    }
+                    _ => {}
+                }
+            }
+            assert_eq!(
+                text,
+                if matches!(unsettled, Some("cancelled" | "failed")) {
+                    ""
+                } else if safe_final_only {
+                    "进度Guard确认的安全结果"
+                } else {
+                    "进度最终结果"
+                },
+                "重复block及Final确认不能双拼，Guard安全最终正文不能漏"
+            );
+            assert_eq!(
+                reasoning,
+                if matches!(unsettled, Some("cancelled" | "failed")) {
+                    ""
+                } else {
+                    "独立推理"
+                }
+            );
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+        }
+        Ok(())
+    }
+    #[tokio::test]
+    async fn attachment_failure_drain_uses_the_same_native_terminal_qualification() -> Result<()> {
+        for mode in ["valid", "synthetic", "foreign"] {
+            let mut output = echo_core::agent::AgentOutputProjection::default();
+            let pending = Arc::new(Mutex::new(Some(ReactError::ExecutionNotSettled {
+                run_id: "native-run".into(),
+                execution_id: Some("native-execution".into()),
+            })));
+            let first = Arc::new(Mutex::new(Some(ReactError::Other(
+                "original attachment failure".into(),
+            ))));
+            let mut terminal = status(ExecutionStatusKind::Settled, 1);
+            if let AgentEvent::ExecutionStatus(status) = &mut terminal {
+                if mode == "synthetic" {
+                    status.adapter_generated = true;
+                }
+                if mode == "foreign" {
+                    status.execution_id = "foreign".into();
+                }
+            }
+            let mut source = futures::stream::iter(vec![
+                Ok(status(ExecutionStatusKind::Started, 0)),
+                Ok(terminal),
+            ]);
+            SubagentExecutor::drain_source_stream(
+                &mut source,
+                &first,
+                &mut output,
+                &pending,
+                "native-run",
+            )
+            .await;
+            assert_eq!(
+                pending
+                    .lock()
+                    .map_err(|_| ReactError::Other("pending lock poisoned".into()))?
+                    .is_none(),
+                mode == "valid"
+            );
+            assert!(
+                matches!(SubagentExecutor::take_first_cause(&first),Some(ReactError::Other(message)) if message=="original attachment failure")
+            );
         }
         Ok(())
     }

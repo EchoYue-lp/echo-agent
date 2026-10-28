@@ -58,6 +58,23 @@ scenarios:
 
 # Agent、Session、Invocation 与 Turn
 
+## 当前 Task 的原生输出消费者依据
+
+本段为当前 Task 增量，不改顶层历史 `observed_at`、原场景状态或开放问题。
+当前来源与导航场景独立记录于 `map.canonical-output-consumers`，不归入旧观察。
+`echo-core/src/agent/output_projection.rs` 的 `AgentOutputProjection`／`AssistantTextDelta`
+是 `src/agent/subagent/executor.rs` 与 `echo-orchestration/src/workflow/node.rs` 共用的纯投影，
+由 `docs/adr/0102-canonical-agent-consumers.md` 记录分层与选择，继续受
+`rule.turn-terminal-authority` 的原执行权威约束。它整理当前原生块、身份与精确去重，
+不拥有执行、取消、Store、重试或物理结算；不是第二个 runtime owner。
+
+完整 Message/history 与调用上下文沿原入口传递；runtime FinalAnswer 通知及回调保留。
+只有已验证的新 native terminal 能清理匹配 unknown，foreign unknown 仍优先；纯只读
+`terminal_failure` 将原取消类型／失败原因交给既有首因槽，尾部 cleanup 不得覆盖，
+原 source 仍须读到物理 EOF 后才能 `finish`。新增 Rust helper 的 SDK inventory／pin
+另验，不在这里声明跨语言 wire 或下游接受。当前 source／final 具名检查与 focused
+工程票各自保存，不使历史场景、旧45／外部#10／旧402成为已关闭。
+
 ## 能力范围
 
 覆盖 Agent 构造/实例、ACP/Channel Session、Conversation/runtime incarnation、Invocation/Turn 与 terminal receipt。
@@ -139,3 +156,30 @@ API/默认工具面等价，也不关闭本图其它 needs_review。正式删除
 普通before Git来源、after原运行观察与限定等价Evidence分开，专项Audit保实际复核范围。
 导航不改变本图原observed_at/needs_review/unknown，不宣称全部API、旧wire或全source等价。
 source:692、发布5908与官方task摘要有各自身份；after绑定和完整来源门禁不能互相代替。
+
+
+## 当前保存切点具名删除的源码准入
+
+本段只补已批准A2A/LSP专用退出路径的事实关联，不更改本地图历史observed_at、
+scenarios、未知/needs_review或其它Finding。18源码before按Git0e4定位，当前不存在；
+原F30/Frame15审批、ADR0090/0101与当前whole workspace/Clippy原件分开保存。
+- `echo-agent-learning/examples/demo23_a2a.rs`：已批准具名专用源退出；保留通用Agent执行、ACP/MCP/channel、Subagent、Store及plugin generation的当前合同，非runtime全等声明。
+- `echo-agent-learning/tests/example_contracts/demo55_lsp_tools.rs`：已批准具名专用源退出；保留通用Agent执行、ACP/MCP/channel、Subagent、Store及plugin generation的当前合同，非runtime全等声明。
+- `echo-core/src/lsp/client.rs`：已批准具名专用源退出；保留通用Agent执行、ACP/MCP/channel、Subagent、Store及plugin generation的当前合同，非runtime全等声明。
+- `echo-core/src/lsp/mod.rs`：已批准具名专用源退出；保留通用Agent执行、ACP/MCP/channel、Subagent、Store及plugin generation的当前合同，非runtime全等声明。
+- `echo-core/src/lsp/types.rs`：已批准具名专用源退出；保留通用Agent执行、ACP/MCP/channel、Subagent、Store及plugin generation的当前合同，非runtime全等声明。
+- `echo-integration/src/lsp/client.rs`：已批准具名专用源退出；保留通用Agent执行、ACP/MCP/channel、Subagent、Store及plugin generation的当前合同，非runtime全等声明。
+- `echo-integration/src/lsp/config.rs`：已批准具名专用源退出；保留通用Agent执行、ACP/MCP/channel、Subagent、Store及plugin generation的当前合同，非runtime全等声明。
+- `echo-integration/src/lsp/jsonrpc.rs`：已批准具名专用源退出；保留通用Agent执行、ACP/MCP/channel、Subagent、Store及plugin generation的当前合同，非runtime全等声明。
+- `echo-integration/src/lsp/manager.rs`：已批准具名专用源退出；保留通用Agent执行、ACP/MCP/channel、Subagent、Store及plugin generation的当前合同，非runtime全等声明。
+- `echo-integration/src/lsp/mod.rs`：已批准具名专用源退出；保留通用Agent执行、ACP/MCP/channel、Subagent、Store及plugin generation的当前合同，非runtime全等声明。
+- `src/a2a/auth.rs`：已批准具名专用源退出；保留通用Agent执行、ACP/MCP/channel、Subagent、Store及plugin generation的当前合同，非runtime全等声明。
+- `src/a2a/client.rs`：已批准具名专用源退出；保留通用Agent执行、ACP/MCP/channel、Subagent、Store及plugin generation的当前合同，非runtime全等声明。
+- `src/a2a/mod.rs`：已批准具名专用源退出；保留通用Agent执行、ACP/MCP/channel、Subagent、Store及plugin generation的当前合同，非runtime全等声明。
+- `src/a2a/serve.rs`：已批准具名专用源退出；保留通用Agent执行、ACP/MCP/channel、Subagent、Store及plugin generation的当前合同，非runtime全等声明。
+- `src/a2a/server.rs`：已批准具名专用源退出；保留通用Agent执行、ACP/MCP/channel、Subagent、Store及plugin generation的当前合同，非runtime全等声明。
+- `src/a2a/types.rs`：已批准具名专用源退出；保留通用Agent执行、ACP/MCP/channel、Subagent、Store及plugin generation的当前合同，非runtime全等声明。
+- `src/lsp.rs`：已批准具名专用源退出；保留通用Agent执行、ACP/MCP/channel、Subagent、Store及plugin generation的当前合同，非runtime全等声明。
+- `src/tools/builtin/answer.rs`：已批准具名专用源退出；保留通用Agent执行、ACP/MCP/channel、Subagent、Store及plugin generation的当前合同，非runtime全等声明。
+- `src/tools/builtin/think.rs`：已批准具名专用源退出；保留通用Agent执行、ACP/MCP/channel、Subagent、Store及plugin generation的当前合同，非runtime全等声明。
+- `src/tools/lsp.rs`：已批准具名专用源退出；保留通用Agent执行、ACP/MCP/channel、Subagent、Store及plugin generation的当前合同，非runtime全等声明。

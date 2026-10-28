@@ -25,6 +25,8 @@ pub struct WeixinApi {
     client: reqwest::Client,
     bot_agent: String,
     route_tag: Option<HeaderValue>,
+    // 同原client/clone至多一份脱敏轮廓，不增加poller或改变接受判定。
+    poll_observation_recorded: std::sync::Arc<std::sync::atomic::AtomicBool>,
     #[cfg(any(test, feature = "channel-test-support"))]
     fixture_origin: Option<url::Url>,
 }
@@ -43,6 +45,9 @@ impl WeixinApi {
             client,
             bot_agent: format!("echo-agent/{}", env!("CARGO_PKG_VERSION")),
             route_tag: None,
+            poll_observation_recorded: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+                false,
+            )),
             #[cfg(any(test, feature = "channel-test-support"))]
             fixture_origin: None,
         })
@@ -65,6 +70,9 @@ impl WeixinApi {
             client,
             bot_agent: "test/poll-loop".into(),
             route_tag: None,
+            poll_observation_recorded: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+                false,
+            )),
             fixture_origin: Some(
                 url::Url::parse(&format!("http://{address}/"))
                     .map_err(|_| protocol_error("Weixin fixture origin is invalid"))?,
@@ -320,12 +328,18 @@ impl WeixinApi {
     }
 
     async fn execute_json<T: DeserializeOwned>(&self, request: reqwest::Request) -> Result<T> {
+        let observe_poll = request.method() == reqwest::Method::POST
+            && request.url().path() == "/ilink/bot/getupdates";
         let mut response = self
             .client
             .execute(request)
             .await
             .map_err(|error| request_error(error, "Weixin HTTPS request failed"))?;
+        let http_status = response.status().as_u16();
         if !response.status().is_success() {
+            if observe_poll {
+                self.record_poll_observation(http_status, None);
+            }
             return Err(protocol_error(
                 "Weixin HTTPS response has a non-success status",
             ));
@@ -343,8 +357,19 @@ impl WeixinApi {
             }
             bytes.extend_from_slice(&chunk);
         }
+        if observe_poll {
+            self.record_poll_observation(http_status, Some(&bytes));
+        }
         serde_json::from_slice(&bytes)
             .map_err(|_| protocol_error("Weixin HTTPS response has an invalid protocol payload"))
+    }
+    fn record_poll_observation(&self, http_status: u16, bytes: Option<&[u8]>) {
+        if !self
+            .poll_observation_recorded
+            .swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            tracing::info!(target:"echo::weixin_poll_observation",diagnostic=%poll_observation(http_status,bytes),"Weixin poll protocol shape");
+        }
     }
 }
 
@@ -437,6 +462,9 @@ mod tests {
                 client,
                 bot_agent: "test/1".to_owned(),
                 route_tag: None,
+                poll_observation_recorded: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+                    false,
+                )),
                 fixture_origin: None,
             },
             request,
@@ -469,6 +497,85 @@ mod tests {
             let debug = format!("{outcome:?}");
             assert!(!debug.contains("payload-secret"));
             assert!(!debug.contains("query-secret"));
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn current_send_ack_http_keeps_business_receipt_and_transport_unknown_distinct()
+    -> Result<()> {
+        for (status, body, expected) in [
+            (
+                "200 OK",
+                r#"{"message_id":"18446744073709551615"}"#,
+                "accepted-id",
+            ),
+            (
+                "200 OK",
+                r#"{"message_id":18446744073709551615}"#,
+                "accepted-id",
+            ),
+            ("200 OK", r#"{"ret":0}"#, "accepted-empty-id"),
+            ("200 OK", r#"{}"#, "unknown"),
+            ("200 OK", r#"{"unrelated":true}"#, "unknown"),
+            (
+                "200 OK",
+                r#"{"ret":null,"message_id":"18446744073709551615"}"#,
+                "unknown",
+            ),
+            (
+                "200 OK",
+                r#"{"errcode":null,"message_id":"18446744073709551615"}"#,
+                "unknown",
+            ),
+            (
+                "200 OK",
+                r#"{"ret":17,"message_id":"18446744073709551615"}"#,
+                "rejected",
+            ),
+            (
+                "200 OK",
+                r#"{"ret":0,"errcode":17,"message_id":"18446744073709551615"}"#,
+                "rejected",
+            ),
+            (
+                "503 Unavailable",
+                r#"{"ret":0,"message_id":"18446744073709551615"}"#,
+                "unknown",
+            ),
+            ("200 OK", r#"[0,null,"18446744073709551615"]"#, "unknown"),
+            ("200 OK", r#"{"message_id":true}"#, "unknown"),
+            ("200 OK", r#"{"message_id":"#, "unknown"),
+        ] {
+            let HttpFixture {
+                api,
+                request,
+                server,
+            } = local_response(status, body).await?;
+            let outcome = api.execute_send(request, "original-client").await;
+            server
+                .await
+                .map_err(|_| protocol_error("send HTTP fixture join failed"))??;
+            match expected {
+                "accepted-id" => assert_eq!(
+                    outcome,
+                    WeixinSendOutcome::Accepted {
+                        client_id: "original-client".into(),
+                        message_id: Some("18446744073709551615".into()),
+                    }
+                ),
+                "accepted-empty-id" => assert_eq!(
+                    outcome,
+                    WeixinSendOutcome::Accepted {
+                        client_id: "original-client".into(),
+                        message_id: None,
+                    }
+                ),
+                "rejected" => assert_eq!(outcome, WeixinSendOutcome::Rejected { code: 17 }),
+                _ => assert!(
+                    matches!(outcome, WeixinSendOutcome::Unknown { client_id, .. } if client_id == "original-client")
+                ),
+            }
         }
         Ok(())
     }
@@ -611,5 +718,137 @@ mod tests {
         );
         let no_context = text_payload("peer", None, "stable-id", "hello", json!({}));
         assert!(no_context.pointer("/msg/context_token").is_none());
+    }
+}
+
+// 原client的一次响应轮廓：不检查Ready、不遍历msgs、不输出未知键名或任何值正文。
+fn poll_observation(http_status: u16, bytes: Option<&[u8]>) -> Value {
+    use sha2::{Digest, Sha256};
+    let mut observation = json!({"endpoint_kind":"weixin_getupdates","path":"/ilink/bot/getupdates","http_status":http_status,"body_captured":bytes.is_some(),"no_business_acceptance_decision":true});
+    let Some(bytes) = bytes else {
+        return observation;
+    };
+    observation["response_bytes"] = json!(bytes.len());
+    observation["response_sha256"] = json!(format!("{:x}", Sha256::digest(bytes)));
+    let Ok(value) = serde_json::from_slice::<Value>(bytes) else {
+        observation["root_type"] = json!("invalid_json");
+        return observation;
+    };
+    observation["root_type"] = json!(json_kind(&value));
+    let Some(object) = value.as_object() else {
+        return observation;
+    };
+    let allowed = [
+        "ret",
+        "errcode",
+        "errmsg",
+        "msgs",
+        "get_updates_buf",
+        "longpolling_timeout_ms",
+    ];
+    let mut fields = serde_json::Map::new();
+    for name in allowed {
+        let field = match object.get(name) {
+            None => json!({"presence":"absent"}),
+            Some(value) => {
+                let mut field = json!({"presence":"present","type":json_kind(value)});
+                if matches!(name, "ret" | "errcode") {
+                    if let Some(code) = value.as_i64() {
+                        field["code"] = json!(code);
+                    }
+                } else if name == "msgs"
+                    && let Some(messages) = value.as_array()
+                {
+                    field["count"] = json!(messages.len());
+                }
+                field
+            }
+        };
+        fields.insert(name.to_string(), field);
+    }
+    observation["fields"] = Value::Object(fields);
+    observation["unrecognized_top_level_key_count"] = json!(
+        object
+            .keys()
+            .filter(|key| !allowed.contains(&key.as_str()))
+            .count()
+    );
+    observation
+}
+fn json_kind(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(number) if number.is_i64() || number.is_u64() => "integer",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
+#[cfg(test)]
+mod bounded_poll_diagnostic_tests {
+    use super::*;
+    #[test]
+    fn diagnostic_has_only_allowlisted_shape_and_no_secrets() {
+        let body=br#"{"ret":null,"errcode":0,"errmsg":"secret-message","get_updates_buf":"secret-cursor","msgs":[{"token":"secret-token","text":"secret-body"}],"secret-dynamic-key":"secret-unknown-value"}"#;
+        let observed = poll_observation(200, Some(body));
+        let text = observed.to_string();
+        for secret in [
+            "secret-message",
+            "secret-cursor",
+            "secret-token",
+            "secret-body",
+            "secret-dynamic-key",
+            "secret-unknown-value",
+        ] {
+            assert!(!text.contains(secret));
+        }
+        assert_eq!(observed.pointer("/fields/ret/type"), Some(&json!("null")));
+        assert_eq!(observed.pointer("/fields/errcode/code"), Some(&json!(0)));
+        assert_eq!(observed.pointer("/fields/msgs/count"), Some(&json!(1)));
+        assert_eq!(
+            observed.get("unrecognized_top_level_key_count"),
+            Some(&json!(1))
+        );
+    }
+    #[test]
+    fn diagnostic_does_not_normalize_absent_null_or_wrong_code_types() {
+        for (body, expected) in [
+            (b"{}".as_slice(), "absent"),
+            (br#"{"ret":null}"#.as_slice(), "null"),
+            (br#"{"ret":"secret"}"#.as_slice(), "string"),
+            (br#"{"ret":true}"#.as_slice(), "boolean"),
+        ] {
+            let observed = poll_observation(200, Some(body));
+            let actual = observed
+                .pointer("/fields/ret/type")
+                .or_else(|| observed.pointer("/fields/ret/presence"));
+            assert_eq!(actual, Some(&json!(expected)));
+            assert!(observed.pointer("/fields/ret/code").is_none());
+        }
+    }
+    #[test]
+    fn non_success_without_captured_body_never_fakes_an_empty_payload() {
+        let observed = poll_observation(503, None);
+        assert_eq!(observed.get("http_status"), Some(&json!(503)));
+        assert_eq!(observed.get("body_captured"), Some(&json!(false)));
+        assert!(observed.get("response_sha256").is_none());
+    }
+    #[test]
+    fn first_poll_diagnostic_budget_is_shared_by_client_clones() -> Result<()> {
+        let api = WeixinApi::new()?;
+        let cloned = api.clone();
+        assert!(
+            !api.poll_observation_recorded
+                .swap(true, std::sync::atomic::Ordering::Relaxed)
+        );
+        assert!(
+            cloned
+                .poll_observation_recorded
+                .swap(true, std::sync::atomic::Ordering::Relaxed)
+        );
+        Ok(())
     }
 }

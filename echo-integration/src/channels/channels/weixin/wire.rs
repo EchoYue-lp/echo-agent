@@ -78,14 +78,95 @@ pub enum WeixinSendOutcome {
     },
 }
 
+// 只表示当前腾讯字段的原始presence；Missing与显式null不是同一业务事实。
+#[derive(Default)]
+enum PollField<T> {
+    #[default]
+    Missing,
+    Null,
+    Value(T),
+}
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for PollField<T> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        Ok(match Option::<T>::deserialize(deserializer)? {
+            Some(value) => Self::Value(value),
+            None => Self::Null,
+        })
+    }
+}
 #[derive(Deserialize)]
+struct UpdatesFields {
+    #[serde(default)]
+    ret: PollField<i64>,
+    #[serde(default)]
+    errcode: PollField<i64>,
+    #[serde(default)]
+    msgs: PollField<Vec<RawMessage>>,
+    #[serde(default)]
+    get_updates_buf: PollField<String>,
+    longpolling_timeout_ms: Option<u64>,
+}
+
 pub(crate) struct UpdatesResponse {
     ret: Option<i64>,
     errcode: Option<i64>,
-    #[serde(default)]
     msgs: Vec<RawMessage>,
     get_updates_buf: Option<String>,
     longpolling_timeout_ms: Option<u64>,
+    null_code: bool,
+    typed_payload_present: bool,
+}
+impl<'de> Deserialize<'de> for UpdatesResponse {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        struct ObjectOnly;
+        impl<'de> serde::de::Visitor<'de> for ObjectOnly {
+            type Value = UpdatesResponse;
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("current Weixin getupdates JSON object")
+            }
+            fn visit_map<M: serde::de::MapAccess<'de>>(
+                self,
+                map: M,
+            ) -> std::result::Result<Self::Value, M::Error> {
+                // MapAccess复用typed字段解码和duplicate-field拒绝，不将array/空序列当object。
+                let fields =
+                    UpdatesFields::deserialize(serde::de::value::MapAccessDeserializer::new(map))?;
+                let null_code = matches!(&fields.ret, PollField::Null)
+                    || matches!(&fields.errcode, PollField::Null);
+                let ret = match fields.ret {
+                    PollField::Value(value) => Some(value),
+                    _ => None,
+                };
+                let errcode = match fields.errcode {
+                    PollField::Value(value) => Some(value),
+                    _ => None,
+                };
+                let has_msgs = matches!(&fields.msgs, PollField::Value(_));
+                let msgs = match fields.msgs {
+                    PollField::Value(value) => value,
+                    PollField::Missing => Vec::new(),
+                    PollField::Null => {
+                        return Err(serde::de::Error::custom("Weixin msgs must be an array"));
+                    }
+                };
+                let has_cursor = matches!(&fields.get_updates_buf, PollField::Value(_));
+                let get_updates_buf = match fields.get_updates_buf {
+                    PollField::Value(value) => Some(value),
+                    _ => None,
+                };
+                Ok(UpdatesResponse {
+                    ret,
+                    errcode,
+                    msgs,
+                    get_updates_buf,
+                    longpolling_timeout_ms: fields.longpolling_timeout_ms,
+                    null_code,
+                    typed_payload_present: has_msgs || has_cursor,
+                })
+            }
+        }
+        deserializer.deserialize_map(ObjectOnly)
+    }
 }
 
 impl UpdatesResponse {
@@ -94,7 +175,10 @@ impl UpdatesResponse {
             WeixinPollStatus::SessionExpired
         } else if let Some(code) = nonzero_code(self.ret, self.errcode) {
             WeixinPollStatus::Rejected { code }
-        } else if self.ret == Some(0) {
+        } else if !self.null_code
+            && (self.ret == Some(0) || self.errcode == Some(0) || self.typed_payload_present)
+        {
+            // 当前官方ret可选；只认可明确业务0或当前typed msgs/cursor，绝非HTTP200/空object。
             WeixinPollStatus::Accepted
         } else {
             WeixinPollStatus::Unknown
@@ -134,21 +218,61 @@ fn nonzero_code(ret: Option<i64>, errcode: Option<i64>) -> Option<i64> {
 }
 
 #[derive(Deserialize)]
-pub(crate) struct SendResponse {
-    ret: Option<i64>,
-    errcode: Option<i64>,
+struct SendFields {
+    #[serde(default)]
+    ret: PollField<i64>,
+    #[serde(default)]
+    errcode: PollField<i64>,
     #[serde(default, deserialize_with = "deserialize_message_id")]
     message_id: Option<String>,
 }
 
+pub(crate) struct SendResponse(SendFields);
+
+impl<'de> Deserialize<'de> for SendResponse {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        struct ObjectOnly;
+        impl<'de> serde::de::Visitor<'de> for ObjectOnly {
+            type Value = SendResponse;
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("current Weixin sendmessage JSON object")
+            }
+            fn visit_map<M: serde::de::MapAccess<'de>>(
+                self,
+                map: M,
+            ) -> std::result::Result<Self::Value, M::Error> {
+                // Reuse typed/presence decoding and duplicate-key rejection, as in poll.
+                SendFields::deserialize(serde::de::value::MapAccessDeserializer::new(map))
+                    .map(SendResponse)
+            }
+        }
+        deserializer.deserialize_map(ObjectOnly)
+    }
+}
+
 impl SendResponse {
     pub(crate) fn into_outcome(self, client_id: &str) -> WeixinSendOutcome {
-        if let Some(code) = nonzero_code(self.ret, self.errcode) {
+        let fields = self.0;
+        let code = |field: &PollField<i64>| match field {
+            PollField::Value(value) => Some(*value),
+            _ => None,
+        };
+        if let Some(code) = nonzero_code(code(&fields.ret), code(&fields.errcode)) {
             WeixinSendOutcome::Rejected { code }
-        } else if self.ret == Some(0) {
+        } else if matches!(&fields.ret, PollField::Value(0))
+            || (matches!(&fields.ret, PollField::Missing)
+                && !matches!(&fields.errcode, PollField::Null)
+                && fields
+                    .message_id
+                    .as_ref()
+                    .is_some_and(|id| !id.trim().is_empty()))
+        {
+            // Tencent ret is optional. Only a typed nonempty server ID adds an ACK;
+            // HTTP200/missing fields alone never do. Existing explicit ret=0 stays intact.
+            // Keep the original lossless string/u64 decoder; do not reinterpret string IDs.
             WeixinSendOutcome::Accepted {
                 client_id: client_id.to_owned(),
-                message_id: self.message_id,
+                message_id: fields.message_id,
             }
         } else {
             WeixinSendOutcome::Unknown {
@@ -261,7 +385,6 @@ mod tests {
                 r#"{"ret":7,"get_updates_buf":"secret"}"#,
                 WeixinPollStatus::Rejected { code: 7 },
             ),
-            (r#"{"get_updates_buf":"secret"}"#, WeixinPollStatus::Unknown),
         ] {
             let response: UpdatesResponse =
                 serde_json::from_str(json).map_err(|_| protocol_error("fixture decode failed"))?;
@@ -321,5 +444,277 @@ mod tests {
             .map_err(|_| protocol_error("fixture decode failed"))?;
         assert!(response.into_updates().is_err());
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tencent_current_poll_contract {
+    use super::*;
+
+    // Tencent 2.4.10 GetUpdatesResp的ret可选；monitor只拒存在的非零ret/errcode。
+    // 这是当前provider合同，不是本系统旧schema兼容；不把HTTP200本身当成功。
+    #[test]
+    fn current_provider_poll_without_ret_preserves_typed_payload() -> Result<()> {
+        for (body, expected_messages, expected_cursor) in [
+            (
+                r#"{"get_updates_buf":"opaque-next"}"#,
+                0,
+                Some("opaque-next"),
+            ),
+            (
+                r#"{"errcode":0,"msgs":[],"get_updates_buf":"opaque-next"}"#,
+                0,
+                Some("opaque-next"),
+            ),
+            (
+                r#"{"msgs":[{"message_id":"current-1","message_type":1,"from_user_id":"test-peer","item_list":[{"type":1,"text_item":{"text":"受控测试正文"}}]}],"get_updates_buf":"opaque-next"}"#,
+                1,
+                Some("opaque-next"),
+            ),
+        ] {
+            let response: UpdatesResponse = serde_json::from_str(body)
+                .map_err(|_| protocol_error("current provider fixture could not decode"))?;
+            let updates = response.into_updates()?;
+            assert_eq!(updates.status, WeixinPollStatus::Accepted);
+            assert_eq!(updates.messages.len(), expected_messages);
+            assert_eq!(updates.cursor.as_deref(), expected_cursor);
+            if expected_messages == 1 {
+                let message = updates
+                    .messages
+                    .first()
+                    .ok_or_else(|| protocol_error("current provider message missing"))?;
+                assert_eq!(message.message_id, "current-1");
+                assert_eq!(message.peer, "test-peer");
+                assert_eq!(message.text, "受控测试正文");
+                assert!(!message.unsupported_media);
+                assert!(message.group_id.is_none());
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn current_provider_explicit_error_codes_still_block_messages_and_cursor() -> Result<()> {
+        for (codes, expected) in [
+            (
+                serde_json::json!({"errcode":-14}),
+                WeixinPollStatus::SessionExpired,
+            ),
+            (
+                serde_json::json!({"ret":0,"errcode":-14}),
+                WeixinPollStatus::SessionExpired,
+            ),
+            (
+                serde_json::json!({"errcode":9}),
+                WeixinPollStatus::Rejected { code: 9 },
+            ),
+            (
+                serde_json::json!({"ret":7,"errcode":0}),
+                WeixinPollStatus::Rejected { code: 7 },
+            ),
+        ] {
+            let mut value = codes;
+            let map = value
+                .as_object_mut()
+                .ok_or_else(|| protocol_error("fixture code map missing"))?;
+            map.insert("msgs".into(), serde_json::json!([{"message_id":"must-not-admit","message_type":1,"from_user_id":"test-peer","item_list":[{"type":1,"text_item":{"text":"must-not-execute"}}]}]));
+            map.insert(
+                "get_updates_buf".into(),
+                serde_json::json!("must-not-commit"),
+            );
+            let response: UpdatesResponse = serde_json::from_value(value)
+                .map_err(|_| protocol_error("current provider fixture could not decode"))?;
+            let updates = response.into_updates()?;
+            assert_eq!(updates.status, expected);
+            assert!(updates.messages.is_empty());
+            assert!(updates.cursor.is_none());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn empty_or_unrelated_object_never_becomes_authenticated_poll_ready() -> Result<()> {
+        for body in [
+            "{}",
+            r#"{"unrelated":true}"#,
+            r#"{"longpolling_timeout_ms":35000}"#,
+        ] {
+            let response: UpdatesResponse = serde_json::from_str(body)
+                .map_err(|_| protocol_error("unknown-shape fixture could not decode"))?;
+            let updates = response.into_updates()?;
+            assert_eq!(updates.status, WeixinPollStatus::Unknown);
+            assert!(updates.messages.is_empty());
+            assert!(updates.cursor.is_none());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn null_codes_and_non_object_envelopes_never_establish_poll_ready() -> Result<()> {
+        for body in [
+            r#"{"ret":null,"msgs":[],"get_updates_buf":"must-not-accept"}"#,
+            r#"{"errcode":null,"msgs":[],"get_updates_buf":"must-not-accept"}"#,
+            r#"[0,null,[],"must-not-accept",35000]"#,
+        ] {
+            if let Ok(response) = serde_json::from_str::<UpdatesResponse>(body) {
+                let updates = response.into_updates()?;
+                assert_ne!(
+                    updates.status,
+                    WeixinPollStatus::Accepted,
+                    "字段缺失与null、object与数组不能被归一化后一起当当前协议成功"
+                );
+                assert!(updates.messages.is_empty());
+                assert!(updates.cursor.is_none());
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn malformed_current_poll_values_are_not_business_acceptance() {
+        for body in [
+            r#"{"ret":"0"}"#,
+            r#"{"errcode":[]}"#,
+            r#"{"msgs":{}}"#,
+            r#"{"get_updates_buf":[]}"#,
+            "null",
+            "not JSON",
+        ] {
+            assert!(serde_json::from_str::<UpdatesResponse>(body).is_err());
+        }
+    }
+}
+
+#[cfg(test)]
+mod tencent_current_send_contract {
+    use super::*;
+
+    #[test]
+    fn missing_ret_typed_server_message_id_is_a_lossless_ack() -> Result<()> {
+        for (body, expected_id) in [
+            (
+                r#"{"message_id":"18446744073709551615"}"#,
+                "18446744073709551615",
+            ),
+            (
+                r#"{"message_id":18446744073709551615}"#,
+                "18446744073709551615",
+            ),
+            (r#"{"message_id":"9007199254740993"}"#, "9007199254740993"),
+            (
+                r#"{"errcode":0,"message_id":"18446744073709551615"}"#,
+                "18446744073709551615",
+            ),
+        ] {
+            let response: SendResponse = serde_json::from_str(body)
+                .map_err(|_| protocol_error("send contract fixture decode failed"))?;
+            assert_eq!(
+                response.into_outcome("original-client"),
+                WeixinSendOutcome::Accepted {
+                    client_id: "original-client".to_owned(),
+                    message_id: Some(expected_id.to_owned()),
+                }
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn missing_ret_without_an_unambiguous_typed_id_is_unknown() -> Result<()> {
+        for body in [
+            r#"{}"#,
+            r#"{"unrelated":true}"#,
+            r#"{"errmsg":"not a receipt"}"#,
+            r#"{"errcode":0}"#,
+            r#"{"message_id":null}"#,
+            r#"{"message_id":""}"#,
+            r#"{"message_id":"  "}"#,
+            r#"{"ret":null,"message_id":"18446744073709551615"}"#,
+            r#"{"errcode":null,"message_id":"18446744073709551615"}"#,
+        ] {
+            let response: SendResponse = serde_json::from_str(body)
+                .map_err(|_| protocol_error("send negative fixture decode failed"))?;
+            assert!(matches!(response.into_outcome("original-client"),
+                WeixinSendOutcome::Unknown { client_id, .. } if client_id == "original-client"));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn nonzero_send_code_precedes_valid_id_and_null_other_code() -> Result<()> {
+        for (body, expected_code) in [
+            (r#"{"ret":17,"message_id":"18446744073709551615"}"#, 17),
+            (r#"{"errcode":17,"message_id":"18446744073709551615"}"#, 17),
+            (
+                r#"{"ret":0,"errcode":17,"message_id":"18446744073709551615"}"#,
+                17,
+            ),
+            (
+                r#"{"ret":null,"errcode":17,"message_id":"18446744073709551615"}"#,
+                17,
+            ),
+            (
+                r#"{"ret":17,"errcode":null,"message_id":"18446744073709551615"}"#,
+                17,
+            ),
+            (r#"{"ret":-14,"message_id":"18446744073709551615"}"#, -14),
+        ] {
+            let response: SendResponse = serde_json::from_str(body)
+                .map_err(|_| protocol_error("send rejection fixture decode failed"))?;
+            assert_eq!(
+                response.into_outcome("original-client"),
+                WeixinSendOutcome::Rejected {
+                    code: expected_code
+                }
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn explicit_zero_keeps_the_existing_send_receipt_contract() -> Result<()> {
+        for (body, expected_id) in [
+            (r#"{"ret":0}"#, None),
+            (r#"{"ret":0,"message_id":null}"#, None),
+            (r#"{"ret":0,"errcode":null}"#, None),
+            (
+                r#"{"ret":0,"message_id":"18446744073709551615"}"#,
+                Some("18446744073709551615"),
+            ),
+        ] {
+            let response: SendResponse = serde_json::from_str(body)
+                .map_err(|_| protocol_error("existing send fixture decode failed"))?;
+            assert_eq!(
+                response.into_outcome("original-client"),
+                WeixinSendOutcome::Accepted {
+                    client_id: "original-client".to_owned(),
+                    message_id: expected_id.map(str::to_owned),
+                }
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn non_object_or_bad_types_never_establish_send_acceptance() {
+        for body in [
+            "null",
+            "[]",
+            r#"[0,null,"18446744073709551615"]"#,
+            r#"{"message_id":true}"#,
+            r#"{"message_id":1.5}"#,
+            r#"{"message_id":-1}"#,
+            r#"{"message_id":[]}"#,
+            r#"{"ret":"0","message_id":"18446744073709551615"}"#,
+            r#"{"errcode":false,"message_id":"18446744073709551615"}"#,
+            r#"{"ret":0,"ret":17,"message_id":"18446744073709551615"}"#,
+        ] {
+            if let Ok(response) = serde_json::from_str::<SendResponse>(body) {
+                assert!(matches!(
+                    response.into_outcome("original-client"),
+                    WeixinSendOutcome::Unknown { .. }
+                ));
+            }
+        }
     }
 }

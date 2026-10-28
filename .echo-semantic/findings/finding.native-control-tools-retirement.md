@@ -33,12 +33,31 @@ discovered_at: 0e404185c8f252da3e335c35547e52249c74dc65
 candidate_asset_refs:
 - asset.legacy-native-control-tools
 - asset.agent-execution-contract
+- asset.approved-a2a-lsp-source-retirement
 canonical_asset_ref: asset.agent-execution-contract
 replacement_refs:
 - asset.agent-execution-contract
 delete_paths:
-- src/tools/builtin/think.rs
+- echo-agent-learning/examples/demo23_a2a.rs
+- echo-agent-learning/tests/example_contracts/demo55_lsp_tools.rs
+- echo-core/src/lsp/client.rs
+- echo-core/src/lsp/mod.rs
+- echo-core/src/lsp/types.rs
+- echo-integration/src/lsp/client.rs
+- echo-integration/src/lsp/config.rs
+- echo-integration/src/lsp/jsonrpc.rs
+- echo-integration/src/lsp/manager.rs
+- echo-integration/src/lsp/mod.rs
+- src/a2a/auth.rs
+- src/a2a/client.rs
+- src/a2a/mod.rs
+- src/a2a/serve.rs
+- src/a2a/server.rs
+- src/a2a/types.rs
+- src/lsp.rs
 - src/tools/builtin/answer.rs
+- src/tools/builtin/think.rs
+- src/tools/lsp.rs
 rollback_ref: 0e404185c8f252da3e335c35547e52249c74dc65
 decision: retire
 ---
@@ -71,3 +90,20 @@ asset.agent-execution-contract，不新建执行权威。六对象按A/B正常re
 owner/task/base/refs/evidence/保护与99+4路径保留。原open/null阶段保真归档；本轮已用实际官方task值绑定，并取得六合同与正式正文
 专项独审C0/I0/M0，仅本Finding在Root准入内resolved并走同一完整任务normal repair-ref。
 第10项外部聚合限制和旧402不在此关闭，不改其它Asset状态、unknown或风险。
+
+
+## 2026-10-28 当前保存切点的源码删除准入补充
+
+本Finding在当前task-scope校验中只承接既有审批的20个具名源码删除准入：原2控制工具
+与已正式采用的A2A/LSP专用18源。decision仍为retire，不把A2A/LSP视作与ReAct功能
+等价，不扩删其它框架API。新增历史asset逐路径绑定0e4 Git blob/SHA；原2工具asset、
+canonical执行合同与其它unknown/needs_review状态保持。
+
+Root既有完整30源码采用/Frame15文档准入、ADR0090及ADR0101提供审批来源；原
+whole-source当前测试/Clippy、受控metadata1442、保留feature与退役feature拒绝原件
+均按各自真实输入留存。verification Evidence仍只核六个共同保留不变量，不把20项
+退出面或新NoCompat取消的旧兼容义务写为matched。
+
+扩展delete_paths与candidate_asset_refs只是修复本task在多个具名删除面合流后的
+源码准入映射；不授权未完成的SDK pin/native/MainCI，不宣runtime全等或Source通过。
+人类维护优先级暂停产品迭代，旧compat-only后继实际删除仍未实施。

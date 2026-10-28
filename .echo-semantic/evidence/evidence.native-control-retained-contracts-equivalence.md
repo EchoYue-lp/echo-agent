@@ -26,7 +26,7 @@ limitations:
 - 原null草案阶段不能提交；本轮已用实际官方validate_task report.sourceSnapshot绑定，仍不授予全source或Gitpin资格。
 - epoch08实际test unoptimized；当前默认7实际test optimized；保持原输入与profile边界，不宣称新profile全跑。
 before_revision: 0e404185c8f252da3e335c35547e52249c74dc65
-after_revision: task:355a8528f1bcecb7b72f14646f487bdbfb6f53d0e8eb86926b65c7962d9c66ff
+after_revision: task:99e4f0c8c8bef3b3fbb171f3cb4b645e39ac1f3f98d67b715963c4ead0ff3905
 scenario_results:
   string-return-form:
     status: matched
@@ -170,6 +170,13 @@ command_results:
   log_sha256: c2840a12a3c2829ffd46f67a1d04164a8b9c4a1d4cddff4b11d7894a29974b72
   profile:
   - '    Finished `test` profile [unoptimized] target(s) in 9.77s'
+- command: cargo test --workspace --all-targets --all-features --locked
+  exit_code: 0
+  source_input_sha256: 0e598041ce1434429ebdfe37b8cfcdb5f4e39d3f6365cf5e86e9e5428b3b48e5
+  log_sha256: f0b828c53088ba39299567a5c62d76a54abe2b22c0596f12a1e319a7af35a84a
+  receipt_scope: actual current all-workspace/all-target/all-feature execution;3957
+    top-level pass+2 preexisting child controls,0fail,4existing ignored; no whole
+    runtime equivalence claimed
 coverage:
 - 公开execute/chat的String返回形式保留；不主张before已有新增model_streaming开关
 - Signed/Redacted reasoning在Message JSON中表示且由Anthropic provider保签名回放；不主张旧ConversationStore持久化签名
@@ -178,8 +185,26 @@ coverage:
 - 既有File Store按scope/runtime加锁，expected revision/epoch冲突拒绝覆盖，replay复用原CAS
 - 普通工具仍经同一pipeline以call_id/name/结果成对写入历史并发送ToolResult
 deleted_paths:
-- src/tools/builtin/think.rs
+- echo-agent-learning/examples/demo23_a2a.rs
+- echo-agent-learning/tests/example_contracts/demo55_lsp_tools.rs
+- echo-core/src/lsp/client.rs
+- echo-core/src/lsp/mod.rs
+- echo-core/src/lsp/types.rs
+- echo-integration/src/lsp/client.rs
+- echo-integration/src/lsp/config.rs
+- echo-integration/src/lsp/jsonrpc.rs
+- echo-integration/src/lsp/manager.rs
+- echo-integration/src/lsp/mod.rs
+- src/a2a/auth.rs
+- src/a2a/client.rs
+- src/a2a/mod.rs
+- src/a2a/serve.rs
+- src/a2a/server.rs
+- src/a2a/types.rs
+- src/lsp.rs
 - src/tools/builtin/answer.rs
+- src/tools/builtin/think.rs
+- src/tools/lsp.rs
 ---
 
 # 六个限定保留合同的来源与实际观察
@@ -204,3 +229,36 @@ after_revision取自本轮未改官方validate_task的实际完整闭包report.s
 原null阶段失败与schema补齐原件保留，本轮绑定不使用source692或发布索引SHA5908。原before
 运行并未执行；如需要双版本运行，该事实不能由源码trace替代。本Evidence不消除原#10
 全部loaded needs_review聚合，也不授予全source/Gitpin/旧402通过资格。
+
+
+## 当前维护切点的绑定与限定边界
+
+原observed_at、六个scenario_results、原command_results与原sourceRefs保留历史观察，
+不是把旧来源改称当前重跑。现追加的是实际0e598稳定输入的whole workspace test
+原票（3957顶层+2既有子控制、0fail/4原ignored）；六个具名共同不变量的实际case
+都在该原log中找到通过行。String、provider签名回传、验证拒绝、首次Stop、通用CAS
+fence及普通工具结果配对继续是限定matched对象；A2A/LSP退出面、旧控制工具退出、
+NoCompat取消的旧兼容义务或未完成新功能均不写matched。
+
+deleted_paths更新只覆盖原审批20路径的source准入，不增加scenario等价声明。
+after_revision提案值由原未改validate_task失败report的真实sourceSnapshot算法复现，
+再仅加入新历史asset对18具名退出源的0e4 Git引用得到；没有checker overlay或排除。
+Root正式metadata采用后必须用原validate_task实际确认该值，任何不同仍自然失败并诊断。
+
+本提案不将旧10、402或本轮45项失败改成0，90个loaded未知refs不在此关闭；
+SDK newPin、native/MainCI/Goal仍另验。before源码不冒before执行；after绑定更新不
+意味着所有新旧runtime行为相同。
+
+
+## 恢复后的实际当前增量绑定
+
+当前HEAD e0cda8f95e6695a99c04ded2285057b5fa68d9f3仅保存原WIP，原迁移before仍为0e4，
+本Evidence before_revision与原observed_at不改。原未改validate_task在当前HEAD正常
+预检后实际返回当前metadata增量sourceSnapshot `task:99e4f0c8c8bef3b3fbb171f3cb4b645e39ac1f3f98d67b715963c4ead0ff3905`，该值用作
+当前after绑定；不是沿用旧base下035d提案值。当前task无新增产品删除，不能把这个
+增量结果解释成原完整删除45→0、外部#10/旧402或runtime全等通过。
+
+0.5.0原preflight.py记录强取gitHEAD，preflight_contract.py要求baseRevision==currentHEAD；
+锁内record-preflight再次核验。因此HEAD已保存后，正常预检无法同时把原Outcome
+0e4当currentbase。本轮如实记录该外部base/HEAD绑定限制，不改工具、不换HEAD、
+不造源码副本、不清unknown；完整历史删除与保留面资格继续保原失败/已验证边界。
